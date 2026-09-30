@@ -7,80 +7,90 @@ import numpy as np
 import onnx_ir as ir
 
 
-def _emit(model, name, op_type, inputs, dtype, shape, **attributes):
-    output = f"{name}/output_0"
-    model.make_node(op_type, inputs, [output], name=name, **attributes)
-    model.make_value(output, dtype, shape)
-    return output
-
-
-def _constant(model, name, value, dtype=np.int64):
-    # Shape inference needs these small constants in the graph, not in external weight files.
-    tensor = ir.tensor(np.asarray(value, dtype=dtype), name=name)
-    model.make_node("Constant", [], [name], name=f"{name}/Constant", value=tensor)
-    model.make_value(name, tensor.dtype, tensor.shape)
-    return name
-
-
 class TRT_RTX:
     """
     TRT-RTX specific subgraph expansions
     """
 
+    def make_expansion_constant(self, name, value, dtype=np.int64):
+        # Shape inference needs these small constants in the graph, not in external weight files.
+        tensor = ir.tensor(np.asarray(value, dtype=dtype), name=name)
+        self.make_node("Constant", [], [name], name=f"{name}/Constant", value=tensor)
+        self.make_value(name, tensor.dtype, tensor.shape)
+        return name
+
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):
+        # scaled_input * gate -> Add(root_input)
         mul_name = f"{name}/Mul"
         self.make_mul(mul_name, [scaled_input, gate], self.io_dtype, shape=shape)
         self.make_add(name, [root_input, f"{mul_name}/output_0"], self.io_dtype, shape=shape)
 
     def make_linear_attention_gate(self, name, a, dt_bias, decay_scale, b, shape):
-        # Preserve the legacy float32 decay calculation before casting for LinearAttention.
-        a_fp32 = _emit(self, f"{name}/a/Cast", "Cast", [a], ir.DataType.FLOAT, shape, to=ir.DataType.FLOAT)
-        biased = _emit(self, f"{name}/Add", "Add", [a_fp32, dt_bias], ir.DataType.FLOAT, shape)
-        softplus = _emit(self, f"{name}/Softplus", "Softplus", [biased], ir.DataType.FLOAT, shape)
-        decay = _emit(self, f"{name}/Mul", "Mul", [softplus, decay_scale], ir.DataType.FLOAT, shape)
-        self.make_node("Cast", [decay], [f"{name}/output_0"], name=name, to=self.io_dtype)
+        # a -> Cast(FP32) -> Add(dt_bias) -> Softplus -> Mul(decay_scale) -> Cast
+        # b -> Sigmoid
+        self.make_cast(f"{name}/a/Cast", a, ir.DataType.FLOAT, shape)
+        self.make_add(f"{name}/Add", [f"{name}/a/Cast/output_0", dt_bias], ir.DataType.FLOAT, shape)
+        self.make_softplus(f"{name}/Softplus", f"{name}/Add/output_0", ir.DataType.FLOAT, shape)
+        self.make_mul(f"{name}/Mul", [f"{name}/Softplus/output_0", decay_scale], ir.DataType.FLOAT, shape)
+        self.make_cast(name, f"{name}/Mul/output_0", self.io_dtype, shape)
         self.make_node("Sigmoid", [b], [f"{name}/output_1"], name=f"{name}/Sigmoid")
-        self.make_value(f"{name}/output_0", self.io_dtype, shape)
         self.make_value(f"{name}/output_1", self.io_dtype, shape)
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
-        # Normalize each head independently, then apply the gate in float32 as in the legacy path.
+        # root_input -> Reshape(heads) -> RMSNorm -> Flatten -> Cast(FP32) --+
+        # gate -> Cast(FP32) -> SiLU ------------------------------------+-> Mul -> Cast
         head_size = int(self.values[scale].shape[0])
         grouped_shape = [*shape[:-1], shape[-1] // head_size, head_size]
-        reshape = _constant(self, f"{name}/group_shape", [*([0] * (len(shape) - 1)), -1, head_size])
-        grouped = _emit(self, f"{name}/Reshape", "Reshape", [root_input, reshape], self.io_dtype, grouped_shape)
-        normalized = _emit(
-            self,
-            f"{name}/SimplifiedLayerNormalization",
+        reshape = self.make_expansion_constant(
+            name=f"{name}/group_shape", value=[*([0] * (len(shape) - 1)), -1, head_size]
+        )
+        self.make_reshape(f"{name}/Reshape", [root_input, reshape], self.io_dtype, grouped_shape)
+        normalized = f"{name}/SimplifiedLayerNormalization/output_0"
+        self.make_node(
             "SimplifiedLayerNormalization",
-            [grouped, scale],
-            self.io_dtype,
-            grouped_shape,
+            [f"{name}/Reshape/output_0", scale],
+            [normalized],
+            name=f"{name}/SimplifiedLayerNormalization",
             axis=-1,
             epsilon=epsilon,
             stash_type=1,
         )
-        restore = _constant(self, f"{name}/flat_shape", [*([0] * (len(shape) - 1)), shape[-1]])
-        normalized = _emit(self, f"{name}/Flatten", "Reshape", [normalized, restore], self.io_dtype, shape)
-        normalized = _emit(
-            self, f"{name}/norm/Cast", "Cast", [normalized], ir.DataType.FLOAT, shape, to=ir.DataType.FLOAT
-        )
-        gate = _emit(self, f"{name}/gate/Cast", "Cast", [gate], ir.DataType.FLOAT, shape, to=ir.DataType.FLOAT)
-        sigmoid = _emit(self, f"{name}/Sigmoid", "Sigmoid", [gate], ir.DataType.FLOAT, shape)
-        silu = _emit(self, f"{name}/SiLU", "Mul", [gate, sigmoid], ir.DataType.FLOAT, shape)
-        gated = _emit(self, f"{name}/Mul", "Mul", [normalized, silu], ir.DataType.FLOAT, shape)
-        self.make_node("Cast", [gated], [f"{name}/output_0"], name=name, to=self.io_dtype)
-        self.make_value(f"{name}/output_0", self.io_dtype, shape)
+        self.make_value(normalized, self.io_dtype, grouped_shape)
+        restore = self.make_expansion_constant(f"{name}/flat_shape", [*([0] * (len(shape) - 1)), shape[-1]])
+        self.make_reshape(f"{name}/Flatten", [normalized, restore], self.io_dtype, shape)
+        self.make_cast(f"{name}/norm/Cast", f"{name}/Flatten/output_0", ir.DataType.FLOAT, shape)
+        self.make_cast(f"{name}/gate/Cast", gate, ir.DataType.FLOAT, shape)
+        gate = f"{name}/gate/Cast/output_0"
+        self.make_sigmoid(f"{name}/Sigmoid", gate, ir.DataType.FLOAT, shape)
+        self.make_mul(f"{name}/SiLU", [gate, f"{name}/Sigmoid/output_0"], ir.DataType.FLOAT, shape)
+        self.make_mul(f"{name}/Mul", [f"{name}/norm/Cast/output_0", f"{name}/SiLU/output_0"], ir.DataType.FLOAT, shape)
+        self.make_cast(name, f"{name}/Mul/output_0", self.io_dtype, shape)
 
     def make_mrotary_embedding(self, name, root_input, output, **kwargs):
-        # Select T/H/W cache columns explicitly, then apply the legacy rotary arithmetic.
-        # Keep the rank-3 position-ID ABI; selecting only T would lose multimodal positions.
+        # position_ids -> Gather(T/H/W) -> select cos/sin cache columns --+
+        # root_input -> Reshape(heads) -> rotate pairs <-----------------+
+        #                            +-> unrotated tail -> Concat -> Flatten
         if self.use_paged_attention:
             raise ValueError("TRT-RTX MRoPE expansion requires non-paged attention")
         dtype = kwargs["dtype"]
         num_heads = kwargs["num_heads"]
-        head_size = self.head_size
-        rotary_dim = self.rope_attrs["rotary_embedding_dim"] or head_size
+        rotary_dim = self.rope_attrs["rotary_embedding_dim"] or self.head_size
+        owners = self.get_mrope_owners(rotary_dim)
+        leading = list(self.values[root_input].shape)[:-1]
+        positions = self.make_mrope_positions(name, kwargs["position_ids"], leading)
+        axes = self.make_expansion_constant(f"{name}/head_axis", [2])
+        cos, sin = [
+            self.make_mrope_cache(name, kind, kwargs[f"{kind}_cache_name"], positions, owners, axes, dtype, leading)
+            for kind in ("cos", "sin")
+        ]
+        reshape = self.make_expansion_constant(f"{name}/head_shape", [0, 0, num_heads, self.head_size])
+        self.make_reshape(f"{name}/Reshape", [root_input, reshape], dtype, [*leading, num_heads, self.head_size])
+        heads = f"{name}/Reshape/output_0"
+        rotated = self.make_mrope_rotation(name, heads, cos, sin, dtype, [*leading, num_heads, rotary_dim])
+        self.make_mrope_output(name, heads, rotated, output, dtype, [*leading, num_heads, rotary_dim])
+
+    def get_mrope_owners(self, rotary_dim):
+        """Map each rotary cache column to its temporal, height, or width position stream."""
         half = rotary_dim // 2
         sections = self.rope_attrs["mrope_section"]
         layout = self.rope_attrs["mrope_layout"]
@@ -88,99 +98,88 @@ class TRT_RTX:
             raise ValueError(
                 "TRT-RTX MRoPE requires sectioned/interleaved layout and sections summing to half the rotary dimension"
             )
-        owners = np.zeros(half, dtype=np.int64)
         if layout == 0:
-            owners = np.repeat(np.arange(3), sections)
-        else:
-            for dim in (1, 2):
-                owners[dim : min(3 * sections[dim], half) : 3] = dim
+            return np.repeat(np.arange(3), sections)
+        owners = np.zeros(half, dtype=np.int64)
+        for dim in (1, 2):
+            owners[dim : min(3 * sections[dim], half) : 3] = dim
+        return owners
 
-        leading = list(self.values[root_input].shape)[:-1]
-        cache_shape = [*leading, half]
-        position_streams = []
+    def make_mrope_positions(self, name, position_ids, shape):
+        # position_ids[3, B, S] -> Gather(0), Gather(1), Gather(2)
+        positions = []
         for dim in range(3):
-            index = _constant(self, f"{name}/position_index_{dim}", dim)
-            position_streams.append(
-                _emit(
-                    self,
-                    f"{name}/positions_{dim}",
-                    "Gather",
-                    [kwargs["position_ids"], index],
-                    ir.DataType.INT64,
-                    leading,
-                    axis=0,
-                )
-            )
-        axes = _constant(self, f"{name}/head_axis", [2])
-        caches = []
-        for kind in ("cos", "sin"):
-            streams = [
-                _emit(
-                    self,
-                    f"{name}/{kind}_{dim}",
-                    "Gather",
-                    [kwargs[f"{kind}_cache_name"], positions],
-                    dtype,
-                    cache_shape,
-                    axis=0,
-                )
-                for dim, positions in enumerate(position_streams)
-            ]
-            selected = streams[0]
-            for dim in (1, 2):
-                mask = _constant(self, f"{name}/{kind}_mask_{dim}", owners == dim, np.bool_)
-                selected = _emit(
-                    self, f"{name}/{kind}_select_{dim}", "Where", [mask, streams[dim], selected], dtype, cache_shape
-                )
-            caches.append(
-                _emit(self, f"{name}/{kind}/Unsqueeze", "Unsqueeze", [selected, axes], dtype, [*leading, 1, half])
-            )
+            index = self.make_expansion_constant(f"{name}/position_index_{dim}", dim)
+            self.make_gather(f"{name}/positions_{dim}", [position_ids, index], ir.DataType.INT64, shape, axis=0)
+            positions.append(f"{name}/positions_{dim}/output_0")
+        return positions
 
-        reshape = _constant(self, f"{name}/head_shape", [0, 0, num_heads, head_size])
-        heads = _emit(
-            self, f"{name}/Reshape", "Reshape", [root_input, reshape], dtype, [*leading, num_heads, head_size]
-        )
+    def make_mrope_cache(self, name, kind, cache, positions, owners, axes, dtype, leading):
+        # cache -> Gather(T/H/W positions) -> Where(H) -> Where(W) -> Unsqueeze(head axis)
+        cache_shape = [*leading, len(owners)]
+        streams = []
+        for dim, position in enumerate(positions):
+            self.make_gather(f"{name}/{kind}_{dim}", [cache, position], dtype, cache_shape, axis=0)
+            streams.append(f"{name}/{kind}_{dim}/output_0")
+        selected = streams[0]
+        for dim in (1, 2):
+            mask = self.make_expansion_constant(f"{name}/{kind}_mask_{dim}", owners == dim, np.bool_)
+            self.make_where(f"{name}/{kind}_select_{dim}", [mask, streams[dim], selected], dtype, cache_shape)
+            selected = f"{name}/{kind}_select_{dim}/output_0"
+        self.make_unsqueeze(f"{name}/{kind}/Unsqueeze", [selected, axes], dtype, [*leading, 1, len(owners)])
+        return f"{name}/{kind}/Unsqueeze/output_0"
+
+    def make_mrope_rotation(self, name, heads, cos, sin, dtype, shape):
+        # heads -> Gather(x1/x2) -> [x1*cos - x2*sin, x2*cos + x1*sin] -> Concat
+        #                                                              -> optional pair interleaving
+        rotary_dim = shape[-1]
+        half = rotary_dim // 2
+        pair_shape = [*shape[:-1], half]
         interleaved = self.rope_attrs["interleaved"]
         first = np.arange(0, rotary_dim, 2) if interleaved else np.arange(half)
         second = first + 1 if interleaved else first + half
         parts = []
         for label, indices in (("first", first), ("second", second)):
-            index = _constant(self, f"{name}/{label}_indices", indices)
-            parts.append(
-                _emit(self, f"{name}/{label}", "Gather", [heads, index], dtype, [*leading, num_heads, half], axis=-1)
-            )
+            index = self.make_expansion_constant(f"{name}/{label}_indices", indices)
+            self.make_gather(f"{name}/{label}", [heads, index], dtype, pair_shape, axis=-1)
+            parts.append(f"{name}/{label}/output_0")
         x1, x2 = parts
-        cos, sin = caches
         rotated = []
-        for label, left, right, op in (("first", x1, x2, "Sub"), ("second", x2, x1, "Add")):
-            a = _emit(self, f"{name}/{label}/cos", "Mul", [left, cos], dtype, [*leading, num_heads, half])
-            b = _emit(self, f"{name}/{label}/sin", "Mul", [right, sin], dtype, [*leading, num_heads, half])
-            rotated.append(_emit(self, f"{name}/{label}/rotate", op, [a, b], dtype, [*leading, num_heads, half]))
-        merged = _emit(self, f"{name}/Concat", "Concat", rotated, dtype, [*leading, num_heads, rotary_dim], axis=-1)
-        if interleaved:
-            order = _constant(
-                self, f"{name}/interleave_indices", np.stack([np.arange(half), np.arange(half) + half], axis=1).ravel()
-            )
-            merged = _emit(
-                self, f"{name}/Interleave", "Gather", [merged, order], dtype, [*leading, num_heads, rotary_dim], axis=-1
-            )
-        if rotary_dim < head_size:
-            tail_index = _constant(self, f"{name}/tail_indices", np.arange(rotary_dim, head_size))
-            tail = _emit(
-                self,
-                f"{name}/Tail",
-                "Gather",
-                [heads, tail_index],
+        for label, left, right, make_op in (("first", x1, x2, self.make_sub), ("second", x2, x1, self.make_add)):
+            self.make_mul(f"{name}/{label}/cos", [left, cos], dtype, pair_shape)
+            self.make_mul(f"{name}/{label}/sin", [right, sin], dtype, pair_shape)
+            make_op(
+                f"{name}/{label}/rotate",
+                [f"{name}/{label}/cos/output_0", f"{name}/{label}/sin/output_0"],
                 dtype,
-                [*leading, num_heads, head_size - rotary_dim],
-                axis=-1,
+                pair_shape,
             )
-            merged = _emit(
-                self, f"{name}/ConcatTail", "Concat", [merged, tail], dtype, [*leading, num_heads, head_size], axis=-1
+            rotated.append(f"{name}/{label}/rotate/output_0")
+        self.make_concat(f"{name}/Concat", rotated, dtype, shape, axis=-1)
+        merged = f"{name}/Concat/output_0"
+        if interleaved:
+            order = self.make_expansion_constant(
+                f"{name}/interleave_indices", np.stack([np.arange(half), np.arange(half) + half], axis=1).ravel()
             )
-        flat_shape = _constant(self, f"{name}/flat_shape", [0, 0, num_heads * head_size])
-        self.make_node("Reshape", [merged, flat_shape], [output], name=name)
-        self.make_value(output, dtype, [*leading, num_heads * head_size])
+            self.make_gather(f"{name}/Interleave", [merged, order], dtype, shape, axis=-1)
+            merged = f"{name}/Interleave/output_0"
+        return merged
+
+    def make_mrope_output(self, name, heads, rotated, output, dtype, shape):
+        # rotated + Gather(unrotated tail) -> Concat -> Reshape[B, S, N*H]
+        rotary_dim = shape[-1]
+        if rotary_dim < self.head_size:
+            tail_index = self.make_expansion_constant(f"{name}/tail_indices", np.arange(rotary_dim, self.head_size))
+            self.make_gather(
+                f"{name}/Tail", [heads, tail_index], dtype, [*shape[:-1], self.head_size - rotary_dim], axis=-1
+            )
+            self.make_concat(
+                f"{name}/ConcatTail", [rotated, f"{name}/Tail/output_0"], dtype, [*shape[:-1], self.head_size], axis=-1
+            )
+            rotated = f"{name}/ConcatTail/output_0"
+        flat_shape = self.make_expansion_constant(f"{name}/flat_shape", [0, 0, shape[-2] * self.head_size])
+        self.make_node("Reshape", [rotated, flat_shape], [output], name=name)
+        self.make_value(output, dtype, [*shape[:-2], shape[-2] * self.head_size])
 
     def make_layernorm_subgraph(self, name, **kwargs):
         # This method can be used to create multiple LayerNorm operations

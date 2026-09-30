@@ -529,6 +529,12 @@ class Model:
             self.make_linear_attention_gate = TRT_RTX.make_linear_attention_gate.__get__(self, self.__class__)
             self.make_gated_rms_norm = TRT_RTX.make_gated_rms_norm.__get__(self, self.__class__)
             self.make_mrotary_embedding = TRT_RTX.make_mrotary_embedding.__get__(self, self.__class__)
+            self.make_expansion_constant = TRT_RTX.make_expansion_constant.__get__(self, self.__class__)
+            self.get_mrope_owners = TRT_RTX.get_mrope_owners.__get__(self, self.__class__)
+            self.make_mrope_positions = TRT_RTX.make_mrope_positions.__get__(self, self.__class__)
+            self.make_mrope_cache = TRT_RTX.make_mrope_cache.__get__(self, self.__class__)
+            self.make_mrope_rotation = TRT_RTX.make_mrope_rotation.__get__(self, self.__class__)
+            self.make_mrope_output = TRT_RTX.make_mrope_output.__get__(self, self.__class__)
 
         elif self.ep == "dml":
             from .expansions import DML
