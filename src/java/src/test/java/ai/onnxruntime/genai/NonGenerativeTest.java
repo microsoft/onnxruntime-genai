@@ -99,8 +99,7 @@ public class NonGenerativeTest {
         manyCandidates.put("candidate-" + i, candidate);
         finalCandidate = candidate;
       }
-      FreeFormRankRequest invalidRank =
-          new FreeFormRankRequest(state, "Choose", manyCandidates);
+      FreeFormRankRequest invalidRank = new FreeFormRankRequest(state, "Choose", manyCandidates);
       finalCandidate.add(new BigInteger("1"));
       assertThrows(GenAIException.class, () -> session.rank(invalidRank));
 
@@ -187,8 +186,7 @@ public class NonGenerativeTest {
         manyQuestions.put("q-" + i, new StructuredQuestion("noul", instructions));
         finalInstructions = instructions;
       }
-      StructuredRequest invalidDecision =
-          new StructuredRequest("rain", manyQuestions);
+      StructuredRequest invalidDecision = new StructuredRequest("rain", manyQuestions);
       finalInstructions.put("unsupported", new BigInteger("1"));
       assertThrows(GenAIException.class, () -> session.decide(invalidDecision));
     }

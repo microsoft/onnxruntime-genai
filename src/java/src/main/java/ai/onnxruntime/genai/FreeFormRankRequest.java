@@ -27,8 +27,7 @@ public final class FreeFormRankRequest {
     this.temperature = temperature;
   }
 
-  public FreeFormRankRequest(
-      Object state, Object instructions, Map<String, Object> candidates) {
+  public FreeFormRankRequest(Object state, Object instructions, Map<String, Object> candidates) {
     this(state, instructions, candidates, null);
   }
 }

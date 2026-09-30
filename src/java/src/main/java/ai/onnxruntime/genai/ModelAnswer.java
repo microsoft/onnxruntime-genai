@@ -30,7 +30,6 @@ public final class ModelAnswer {
         Collections.unmodifiableMap(
             new LinkedHashMap<>((Map<String, Double>) value.get("probabilities")));
     legend =
-        Collections.unmodifiableMap(
-            new LinkedHashMap<>((Map<String, String>) value.get("legend")));
+        Collections.unmodifiableMap(new LinkedHashMap<>((Map<String, String>) value.get("legend")));
   }
 }
