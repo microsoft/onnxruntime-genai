@@ -611,7 +611,8 @@ OgaAnswer Answer(const OgaQuestion& question, const Candidates& candidates,
     double score = 0;
     const auto& criteria = *Get<OgaStructuredValue::Array>(question.criteria);
     for (size_t i = 0; i < probabilities.size(); ++i) {
-      score += i * probabilities[i];
+      score += static_cast<double>(i) *
+               static_cast<double>(probabilities[i]);
       result.legend.emplace_back(std::to_string(i),
                                  kev ? RenderKev(criteria[i]) : RenderClm(criteria[i]));
     }
@@ -710,7 +711,8 @@ std::pair<std::vector<float>, size_t> EncodeAndPool(
       throw std::runtime_error("encoder pooled-token index exceeds hidden-state data");
     double norm = 0;
     for (size_t i = 0; i < hidden_size; ++i)
-      norm += hidden[source + i] * hidden[source + i];
+      norm += static_cast<double>(hidden[source + i]) *
+              static_cast<double>(hidden[source + i]);
     norm = std::max(std::sqrt(norm), 1e-12);
     for (size_t i = 0; i < hidden_size; ++i)
       pooled[row * hidden_size + i] =
@@ -845,8 +847,10 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     for (size_t i = 0; i < candidate_count; ++i) {
       double dot = 0;
       for (size_t j = 0; j < projection_size; ++j)
-        dot += state_projection[owners[i] * projection_size + j] *
-               action_projection[i * projection_size + j];
+        dot +=
+            static_cast<double>(
+                state_projection[owners[i] * projection_size + j]) *
+            static_cast<double>(action_projection[i * projection_size + j]);
       logits[i] = static_cast<float>(scale.at(0) * dot / request.temperature);
     }
     probabilities.resize(candidate_count);

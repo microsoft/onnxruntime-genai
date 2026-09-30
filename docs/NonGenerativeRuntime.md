@@ -101,10 +101,14 @@ and JavaScript wrappers are intentionally delivered by the dependent managed
 bindings change rather than this native-runtime change.
 
 CLM caches only projected action embeddings, after the encoder and action head.
-The key includes canonical package identity and component/tokenizer
-fingerprints, provider selection, rendered input plus token ids, and head
-layout/dtype. State embeddings are never cached. The default is 256 entries and
-64 MiB. KEV caches escaped/rendered tokenized state prefixes and question branches
+The action key includes the canonical package identity, combined/split head
+layout, `float32` projection dtype, and a length-prefixed rendered action
+string. Package identity includes the canonical package path, provider list,
+and size/mtime fingerprints for the fixed known manifest, tokenizer, backbone,
+head, scorer, and external-data filenames supported by the runtime; arbitrary
+manifest-declared filenames are not fingerprinted. State embeddings are never
+cached. The default is 256 entries and 64 MiB. KEV caches
+escaped/rendered tokenized state prefixes and question branches
 (including branch-local option readout indices), not probabilities. Its token
 cache default is 512 entries and 16 MiB. Compatible stateful backbones also use
 a separate 32-entry, 512 MiB byte-bounded prefix-state LRU. Both caches use thread-safe LRU
