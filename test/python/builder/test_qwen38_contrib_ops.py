@@ -3,12 +3,16 @@
 
 from types import MethodType, SimpleNamespace
 
+import onnx
 import onnx_ir as ir
+import pytest
 import torch
 
+from models.builders.base import Model
 from models.builders.qwen import (
     Qwen35MoETextModel,
     Qwen4ExpEngramModel,
+    Qwen4ExpModel,
     Qwen4ExpMTPTextModel,
     Qwen4ExpTextModel,
 )
@@ -164,6 +168,7 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
         self.io_dtype = io_dtype
         self.ep = ep
         self.use_paged_attention = True
+        self.hidden_rows_dim = "num_tokens"
         self.context_length = 128
         self.hidden_size = 16
         self.layer_types = ["qwen_sparse_attention"]
@@ -209,12 +214,21 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
     assert "qwen4_exp.selected_index_names" not in model.model.metadata_props
     assert "qwen4_exp.selected_count_names" not in model.model.metadata_props
 
+    config.ple_layer_ids = [2]
+    external_model = Qwen4ExpTextModel(
+        config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None,
+        {"external_engram": True, "state_update_capacity": 7},
+    )
+    assert "state_update.ple_tokens" not in external_model.output_names
+    assert external_model.output_names["state_update.ple_conv_value"] == {1: "state_update.1.ple_conv_value"}
+
 
 def test_qwen38_ple_conv_state_layout_tracks_packed_execution(monkeypatch):
     def initialize_parent(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.io_dtype = io_dtype
         self.ep = ep
         self.use_paged_attention = extra_options["use_paged_attention"]
+        self.hidden_rows_dim = "num_tokens"
         self.context_length = 128
         self.hidden_size = 16
         self.layer_types = ["linear_attention"]
@@ -1127,7 +1141,7 @@ def test_dense_ple_emits_verified_contrib_schemas():
     model.make_ple(1, ple, "hidden_states")
 
     assert model.external_data_files == {
-        "model.ple.ngram_embedding.weight": "engram.data"
+        "model.ple.ngram_embedding.weight": "engram.onnx.data"
     }
 
     nodes = emitted_nodes(model)
@@ -1203,7 +1217,7 @@ def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
     ]
     assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
     assert model.external_data_files == {
-        "model.ple.ngram_embedding.weight": "engram.data"
+        "model.ple.ngram_embedding.weight": "engram.onnx.data"
     }
     conv = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenCausalConvWithState")
     assert conv["inputs"] == [
@@ -1332,7 +1346,73 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path):
         "Identity",
     ]
     assert (tmp_path / "engram.onnx").exists()
-    assert (tmp_path / "engram.data").exists()
+    assert (tmp_path / "engram.onnx.data").exists()
+    exported = onnx.load(tmp_path / "engram.onnx", load_external_data=False)
+    table = next(initializer for initializer in exported.graph.initializer
+                 if initializer.name == "model.ple.ngram_embedding.weight")
+    assert next(entry.value for entry in table.external_data if entry.key == "location") == "engram.onnx.data"
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only):
+    embedding = SimpleNamespace(
+        layer_multipliers=torch.tensor([0, 1, 2], dtype=torch.int64),
+        ngram_heads_vocab_sizes=torch.tensor([7, 7, 7, 7], dtype=torch.int64),
+        ngram_heads_offsets=torch.tensor([0, 7, 14, 21], dtype=torch.int64),
+        eos_token_id=0,
+        ngram_embedding=torch.nn.Embedding(28, 8),
+    )
+    ple = SimpleNamespace(ple_embedding=embedding)
+    text_config = SimpleNamespace(ngram_size=3, heads_per_ngram=2, ple_embed_dim=8)
+    table_name = "model.ple.ngram_embedding.weight"
+    table = Qwen4ExpEngramModel(ple, text_config, ir.DataType.FLOAT16).graph.initializers[table_name].const_value
+
+    def component(filename):
+        builder = Model.__new__(Model)
+        builder.model = ir.Model(ir.Graph(
+            inputs=(), outputs=(), nodes=(),
+            initializers=[ir.Value(name=table_name, const_value=table)],
+            opset_imports={"": 22},
+        ), ir_version=10, producer_name="onnxruntime-genai")
+        builder.filename = filename
+        builder.cache_dir = str(tmp_path / "cache")
+        builder.quant_type = None
+        builder.onnx_dtype = ir.DataType.FLOAT16
+        builder.external_data_files = {table_name: "engram.onnx.data"}
+        return builder
+
+    wrapper = object.__new__(Qwen4ExpModel)
+    wrapper.text_only = text_only
+    wrapper.input_path = "unused"
+    wrapper.config = SimpleNamespace(text_config=text_config, vision_config=SimpleNamespace(out_hidden_size=8))
+    wrapper.decoder = component("model.onnx")
+    wrapper.decoder.io_dtype = ir.DataType.FLOAT16
+    wrapper.decoder.ple_layer_ids = {1}
+    wrapper.decoder.hidden_size = 8
+    language_model = SimpleNamespace(
+        layers=[None, SimpleNamespace(ple=ple)],
+        embed_tokens=SimpleNamespace(weight=torch.zeros((2, 8))),
+    )
+    wrapper.decoder.load_weights = lambda _: SimpleNamespace(model=SimpleNamespace(language_model=language_model, visual=None))
+    wrapper.mtp = component("mtp.onnx")
+    wrapper.mtp_attrs = {}
+    wrapper.share_initializers = lambda *args: []
+    monkeypatch.setattr("models.builders.qwen.Qwen4ExpEmbeddingModel", lambda *args: SimpleNamespace(save_model=lambda _: None))
+    monkeypatch.setattr("models.builders.qwen.Qwen4ExpVisionModel", lambda *args: SimpleNamespace(save_model=lambda _: None))
+
+    wrapper.save_model(tmp_path)
+
+    filenames = ("engram.onnx", "model.onnx", "mtp.onnx")
+    exported = [onnx.load(tmp_path / filename, load_external_data=False) for filename in filenames]
+    tables = [next(value for value in model.graph.initializer if value.name == table_name) for model in exported]
+    offsets = [next(entry.value for entry in value.external_data if entry.key == "offset") for value in tables]
+    assert offsets == [offsets[0]] * len(tables)
+    assert all(next(entry.value for entry in value.external_data if entry.key == "location") == "engram.onnx.data"
+               for value in tables)
+    loaded = [onnx.load(tmp_path / filename, load_external_data=True) for filename in filenames]
+    table_values = [onnx.numpy_helper.to_array(next(value for value in model.graph.initializer
+                                                    if value.name == table_name)) for model in loaded]
+    assert all((value == table_values[0]).all() for value in table_values[1:])
 
 
 def test_qwen38_config_assigns_embedding_annotation_to_cpu():

@@ -318,7 +318,7 @@ void ValidateStateUpdateSession(std::string_view group_label,
             std::string{group_label} + " state_update value output '" + value.name +
             "' has incompatible batch, capacity, or channel dimensions");
       }
-      if (update_kind == StateUpdateKind::Ple) {
+      if (update_kind == StateUpdateKind::Ple && !outputs.state_update_ple_token_names.empty()) {
         const auto tokens = get_output("tokens", outputs.state_update_ple_token_names, layer_id);
         ValidateRank(group_label, "state_update tokens output", tokens, 3);
         if (state.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
@@ -543,8 +543,10 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
       } else if (group.kind == StateGroupKind::FixedRecurrent) {
         output_templates = {&decoder.outputs.state_update_recurrent_capsule_names};
       } else if (group.kind == StateGroupKind::FixedPle) {
-        output_templates = {&decoder.outputs.state_update_ple_token_names,
-                            &decoder.outputs.state_update_ple_conv_value_names};
+        output_templates = {&decoder.outputs.state_update_ple_conv_value_names};
+        if (!decoder.outputs.state_update_ple_token_names.empty()) {
+          output_templates.push_back(&decoder.outputs.state_update_ple_token_names);
+        }
       } else {
         output_templates = {&decoder.outputs.state_update_indexer_names};
       }

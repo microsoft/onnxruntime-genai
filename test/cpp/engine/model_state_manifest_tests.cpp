@@ -227,10 +227,11 @@ TEST(ModelStateManifestTest, RejectsMissingPackedIndexerComponent) {
   EXPECT_NE(message.find("past.0.ple_tokens"), std::string::npos) << message;
 }
 
-TEST(ModelStateManifestTest, RejectsMissingPleStateUpdateOutput) {
+TEST(ModelStateManifestTest, AllowsExternalEngramWithoutPleTokenSnapshot) {
   auto decoder = MakePleAndIndexerDecoder();
   decoder.outputs.state_update_ple_token_names.clear();
-  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
+  const ModelStateManifest manifest{decoder};
+  EXPECT_NO_THROW(manifest.ValidateSession(MakePleAndIndexerMetadata()));
 }
 
 TEST(ModelStateManifestTest, RejectsMissingIndexerReplayMetadata) {

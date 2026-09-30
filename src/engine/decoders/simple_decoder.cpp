@@ -12,6 +12,9 @@ namespace Generators {
 SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
                              std::shared_ptr<CacheManager> cache_manager)
     : model_{model}, cache_manager_{cache_manager} {
+  if (model_->session_engram_ && !cache_manager_->SupportsDynamicBatching()) {
+    throw std::runtime_error("Engine Engram requires dynamic batching for packed decoder inputs.");
+  }
   const ModelStateManifest manifest{model_->config_->model.decoder};
   has_fixed_state_groups_ = manifest.HasFixedStateGroups();
   const bool has_position_ids = model_->session_info_.HasInput(

@@ -1,11 +1,20 @@
 #include "generator/generators.h"
 #include "decoder_only.h"
+#include "engram.h"
 
 namespace Generators {
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_decoder_);
+  if (!config_->model.engram.filename.empty()) {
+    engram_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(
+        config_->model.engram.session_options.value_or(config_->model.decoder.session_options),
+        *engram_session_options_, true, /*disable_graph_capture=*/true);
+    session_engram_ = CreateSession(ort_env, config_->model.engram.filename, engram_session_options_.get());
+    session_info_.Add(*session_engram_);
+  }
   if (!config_->model.embedding.filename.empty()) {
     if (!config_->engine.dynamic_batching) {
       throw std::runtime_error("Decoder-only CPU embedding requires the dynamic-batching Engine.");
@@ -41,6 +50,13 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     ple_state_->Add();
   if (indexer_cache_)
     indexer_cache_->Add();
+  if (model_.session_engram_) {
+    engram_state_ = std::make_unique<EngramState>(model_, *model_.session_engram_, params);
+    const auto& name = model_.config_->model.decoder.inputs.engram_embeddings;
+    engram_input_index_ = inputs_.size();
+    inputs_.push_back(nullptr);
+    input_names_.push_back(name.c_str());
+  }
   // Models with a hidden_states input (e.g. the MTP self-speculative head) feed the main
   // model's last hidden state. Only created when the config declares the input.
   if (!model_.config_->model.decoder.inputs.hidden_states.empty()) {
@@ -54,6 +70,8 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     hidden_states_output_->Add();
   }
 }
+
+DecoderOnly_State::~DecoderOnly_State() = default;
 
 void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   extra_inputs_.Add(extra_inputs, model_.session_decoder_->GetInputNames());
@@ -73,6 +91,20 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   }
 
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
+  if (engram_state_) {
+    engram_state_->UpdateInputsOutputs(next_tokens);
+    engram_state_->Run(total_length, next_tokens, next_indices);
+    auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.engram_embeddings);
+    if (shape.size() == 2) shape[0] = static_cast<int64_t>(num_tokens);
+    else if (shape.size() == 3) {
+      shape[0] = params_->BatchBeamSize();
+      shape[1] = static_cast<int64_t>(num_tokens / params_->BatchBeamSize());
+    } else throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
+    engram_embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape,
+        model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
+    inputs_[engram_input_index_] = engram_embeddings_.get();
+    engram_state_->CopyEmbeddingsTo(*engram_embeddings_);
+  }
   if (model_.config_->model.decoder.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.decoder.run_options.value());
   }
@@ -126,6 +158,20 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
 
     // Process this chunk - fills KV cache progressively
     UpdateInputsOutputs(chunk_tokens, next_indices, length);
+    if (engram_state_) {
+      engram_state_->UpdateInputsOutputs(chunk_tokens);
+      engram_state_->Run(length, chunk_tokens, next_indices);
+      auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.engram_embeddings);
+      if (shape.size() == 2) shape[0] = static_cast<int64_t>(current_chunk_size);
+      else if (shape.size() == 3) {
+        shape[0] = params_->BatchBeamSize();
+        shape[1] = static_cast<int64_t>(current_chunk_size / params_->BatchBeamSize());
+      } else throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
+      engram_embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape,
+          model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
+      inputs_[engram_input_index_] = engram_embeddings_.get();
+      engram_state_->CopyEmbeddingsTo(*engram_embeddings_);
+    }
 
     // Graph capture is typically disabled during context phase chunking
     bool graph_capture_this_run = false;  // Disable graph capture during chunking
@@ -139,6 +185,7 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
 }
 
 void DecoderOnly_State::RewindTo(size_t index) {
+  if (engram_state_) engram_state_->RewindTo(index);
   position_inputs_->RewindTo(index);
   if (kv_cache_)
     kv_cache_->RewindTo(index);
@@ -151,6 +198,7 @@ void DecoderOnly_State::RewindTo(size_t index) {
 }
 
 void DecoderOnly_State::SnapshotState(size_t position) {
+  if (engram_state_) engram_state_->SnapshotState(position);
   if (recurrent_state_)
     recurrent_state_->Snapshot(position);
   if (ple_state_)
@@ -160,7 +208,7 @@ void DecoderOnly_State::SnapshotState(size_t position) {
 }
 
 bool DecoderOnly_State::HasCroppableRecurrentState() const {
-  return recurrent_state_ && recurrent_state_->IsWindowed() && !ple_state_ &&
+  return recurrent_state_ && recurrent_state_->IsWindowed() && !ple_state_ && !engram_state_ &&
          (!indexer_cache_ || indexer_cache_->HasStateUpdates());
 }
 

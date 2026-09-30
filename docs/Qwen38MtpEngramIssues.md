@@ -85,7 +85,7 @@ The inspected export uses:
 - An INT4 LM head (`lm_head.MatMul.weight_Q4`), not INT8.
 - FP16 model inputs, outputs, K/V cache, hidden states, and indexer state.
 - A separate `mtp.onnx` model.
-- A 48 GB `engram.data` external initializer.
+- A 48 GB `engram.onnx.data` external initializer.
 - No persisted `search.chunk_size`; benchmarks set `chunk_size=1024` at runtime.
 
 ## Issues
@@ -325,7 +325,7 @@ Contents:
 - `NGramHashMapping`,
 - `GatherBlockQuantized`,
 - n-gram constants,
-- `engram.data`,
+- `engram.onnx.data`,
 - Engram quantization scale.
 
 ### Revised `text.onnx`

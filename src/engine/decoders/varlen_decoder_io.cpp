@@ -56,6 +56,86 @@ void ValidatePackedHiddenStatesInputShape(
 
 namespace {
 
+struct CpuEngram {
+  explicit CpuEngram(const DecoderOnly_Model& model)
+      : config{model.config_->model.engram}, session{*model.session_engram_},
+        pad_id{model.config_->model.decoder.ple_token_pad_id} {
+    const auto history_shape = model.session_info_.GetInputShape(config.inputs.past_tokens);
+    const auto output_shape = model.session_info_.GetOutputShape(config.outputs.embeddings);
+    const auto& decoder_input = model.config_->model.decoder.inputs.engram_embeddings;
+    const auto decoder_shape = model.session_info_.GetInputShape(decoder_input);
+    type = model.session_info_.GetOutputDataType(config.outputs.embeddings);
+    if (model.session_info_.GetInputDataType(config.inputs.input_ids) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+        model.session_info_.GetInputDataType(config.inputs.past_tokens) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+        history_shape.size() != 2 || history_shape[1] <= 0 ||
+        output_shape.size() != 3 || output_shape[2] <= 0 ||
+        decoder_shape.size() != 2 || decoder_shape[1] != output_shape[2] ||
+        model.session_info_.GetInputDataType(decoder_input) != type) {
+      throw std::runtime_error("Engine Engram output must match the packed decoder Engram input.");
+    }
+    history_length = history_shape[1];
+    width = output_shape[2];
+    run_options = OrtRunOptions::Create();
+    if (config.run_options) {
+      for (const auto& [key, value] : *config.run_options) {
+        run_options->AddConfigEntry(key.c_str(), value.c_str());
+      }
+    }
+  }
+
+  void Run(std::span<const std::shared_ptr<Request>> requests, Tensor& output,
+           CpuEmbedding::Workspace& workspace) const {
+    auto bytes = workspace.Prepare(output);
+    auto host = bytes.CpuSpan();
+    const size_t row_bytes = static_cast<size_t>(width) * Ort::SizeOf(type);
+    const auto& cpu_memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
+    auto output_memory = output.p_device_->GetType() == DeviceType::CUDA
+                             ? OrtMemoryInfo::Create("CudaPinned", OrtDeviceAllocator,
+                                                     output.p_device_->GetMemoryInfo()->GetDeviceId(), OrtMemTypeCPUOutput)
+                             : OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    size_t offset = 0;
+    for (const auto& request : requests) {
+      const auto tokens = request->UnprocessedTokensCpu();
+      const auto history = request->TokensCpu();
+      const auto processed = static_cast<size_t>(request->ProcessedSequenceLength());
+      if (processed > history.size() || (offset + tokens.size()) * row_bytes > host.size_bytes()) {
+        throw std::runtime_error("Engine Engram tokens do not match the packed decoder rows.");
+      }
+      std::vector<int64_t> ids(tokens.begin(), tokens.end());
+      std::vector<int64_t> past(static_cast<size_t>(history_length), pad_id);
+      const size_t count = std::min(past.size(), processed);
+      std::transform(history.begin() + processed - count, history.begin() + processed,
+                     past.end() - count, [](int32_t token) { return static_cast<int64_t>(token); });
+      const std::array<int64_t, 2> ids_shape{1, static_cast<int64_t>(ids.size())};
+      const std::array<int64_t, 2> past_shape{1, history_length};
+      const std::array<int64_t, 3> embeddings_shape{1, static_cast<int64_t>(ids.size()), width};
+      auto ids_tensor = OrtValue::CreateTensor(cpu_memory, ids.data(), ids.size() * sizeof(int64_t),
+                                               ids_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      auto past_tensor = OrtValue::CreateTensor(cpu_memory, past.data(), past.size() * sizeof(int64_t),
+                                                past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      auto embeddings = OrtValue::CreateTensor(*output_memory, host.data() + offset * row_bytes,
+                                                ids.size() * row_bytes, embeddings_shape, type);
+      auto present = OrtValue::CreateTensor(GetDeviceInterface(DeviceType::CPU)->GetAllocator(),
+                                            past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      const char* input_names[]{config.inputs.input_ids.c_str(), config.inputs.past_tokens.c_str()};
+      OrtValue* input_values[]{ids_tensor.get(), past_tensor.get()};
+      const char* output_names[]{config.outputs.embeddings.c_str(), config.outputs.present_tokens.c_str()};
+      OrtValue* output_values[]{embeddings.get(), present.get()};
+      session.Run(run_options.get(), input_names, input_values, 2, output_names, output_values, 2);
+      offset += ids.size();
+    }
+    workspace.Upload();
+  }
+
+  const Config::Model::Engram& config;
+  OrtSession& session;
+  std::unique_ptr<OrtRunOptions> run_options;
+  ONNXTensorElementDataType type{};
+  int64_t width{};
+  int64_t history_length{};
+  int64_t pad_id{};
+};
+
 int32_t CheckedMetadataLength(size_t value, const char* name) {
   if (value > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
     throw std::runtime_error(std::string{name} + " exceeds the int32 attention metadata range.");
@@ -275,10 +355,15 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
   const int64_t hidden_size = model.config_->model.decoder.hidden_size;
 
   plan.buffers[GraphBufferPlan::kInputIds] = {Ort::TypeToTensorType<int64_t>, {rows}};
-  if (!model.config_->model.embedding.filename.empty()) {
-    const auto& name = model.config_->model.decoder.inputs.embeddings;
+  if (!model.config_->model.embedding.filename.empty() ||
+      !model.config_->model.engram.filename.empty()) {
+    const auto& name = !model.config_->model.engram.filename.empty()
+                           ? model.config_->model.decoder.inputs.engram_embeddings
+                           : model.config_->model.decoder.inputs.embeddings;
     plan.buffers[GraphBufferPlan::kEmbeddings] = {
-        model.session_info_.GetInputDataType(name), {rows, hidden_size}};
+        model.session_info_.GetInputDataType(name),
+        {rows, model.config_->model.engram.filename.empty()
+                   ? hidden_size : model.session_info_.GetInputShape(name).back()}};
   }
   plan.buffers[GraphBufferPlan::kCumulativeSequenceLengths] = {Ort::TypeToTensorType<int32_t>,
                                                                {batch + 1}};
@@ -571,16 +656,25 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   cumulative_sequence_lengths_span.CopyCpuToDevice();
   sequence_lengths_span.CopyCpuToDevice();
 
-  if (model->cpu_embedding_) {
+  if (model->cpu_embedding_ || model->session_engram_) {
     if (!device_input_ids.empty()) {
       device_span.CopyDeviceToCpu();
     }
+    std::optional<CpuEngram> engram;
+    if (model->session_engram_) engram.emplace(*model);
     std::unique_ptr<Tensor> owned_embeddings;
     auto* embeddings = reshape(owned_embeddings, graph_buffers_ ? graph_buffers_->embeddings.get() : nullptr,
-                               model->cpu_embedding_->type_,
-                               {static_cast<int64_t>(num_tokens), model->cpu_embedding_->hidden_size_});
-    model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
-    input_names_.push_back(model->config_->model.decoder.inputs.embeddings.c_str());
+                               engram ? engram->type : model->cpu_embedding_->type_,
+                               {static_cast<int64_t>(num_tokens),
+                                engram ? engram->width : model->cpu_embedding_->hidden_size_});
+    if (engram) {
+      engram->Run(scheduled_requests.Requests(), *embeddings, *embedding_workspace_);
+    } else {
+      model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
+    }
+    input_names_.push_back(engram
+                               ? model->config_->model.decoder.inputs.engram_embeddings.c_str()
+                               : model->config_->model.decoder.inputs.embeddings.c_str());
     inputs_.push_back(embeddings->GetOrtTensor());
     if (owned_embeddings) owned_inputs_.push_back(std::move(owned_embeddings));
   }

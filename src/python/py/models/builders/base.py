@@ -2041,9 +2041,13 @@ class Model:
         out_path = os.path.join(out_dir, self.filename)
         data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
         separate_external_data = getattr(self, "external_data_files", {})
+        external_data_tensors = getattr(self, "external_data_tensors", {})
+        if external_data_tensors.keys() - separate_external_data.keys():
+            raise ValueError("External data tensors must have a configured external data file")
         external_data_paths = {
             os.path.join(out_dir, relative_path)
-            for relative_path in separate_external_data.values()
+            for initializer_name, relative_path in separate_external_data.items()
+            if initializer_name not in external_data_tensors
         }
         if os.path.exists(out_path):
             print(f"Overwriting {out_path}")
@@ -2092,6 +2096,12 @@ class Model:
                 try:
                     grouped_initializers = {}
                     for initializer_name, relative_path in separate_external_data.items():
+                        if initializer_name in external_data_tensors:
+                            external_tensor = external_data_tensors[initializer_name]
+                            if external_tensor.location != relative_path:
+                                raise ValueError(f"External data location mismatch for {initializer_name}")
+                            initializers_by_name[initializer_name].const_value = external_tensor
+                            continue
                         grouped_initializers.setdefault(relative_path, []).append(initializers_by_name[initializer_name])
 
                     separately_saved_names = set(separate_external_data)

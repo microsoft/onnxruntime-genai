@@ -961,7 +961,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.output_gate_type = config.output_gate_type or config.hidden_act
         self.tile_first_hidden_state = True
         self.emit_pre_final_hidden_states = False
-        self.external_engram = extra_options.get("external_engram", False)
+        self.external_engram = extra_options.get("external_engram", True)
         if getattr(self, "external_engram", False):
             self.input_names["engram_embeddings"] = "engram_embeddings"
             self.input_types["engram_embeddings"] = self.io_dtype
@@ -1068,15 +1068,16 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             self.input_names["state_update.active"] = "state_update_active"
             self.input_types["state_update.active"] = ir.DataType.INT32
             self.input_shapes["state_update.active"] = [1]
-            self.output_names["state_update.ple_tokens"] = {
-                layer_id: f"state_update.{layer_id}.ple_tokens" for layer_id in self.ple_layer_ids
-            }
-            self.output_types["state_update.ple_tokens"] = ir.DataType.INT64
-            self.output_shapes["state_update.ple_tokens"] = [
-                "batch_size",
-                state_update_capacity,
-                self.ngram_size - 1,
-            ]
+            if not self.external_engram:
+                self.output_names["state_update.ple_tokens"] = {
+                    layer_id: f"state_update.{layer_id}.ple_tokens" for layer_id in self.ple_layer_ids
+                }
+                self.output_types["state_update.ple_tokens"] = ir.DataType.INT64
+                self.output_shapes["state_update.ple_tokens"] = [
+                    "batch_size",
+                    state_update_capacity,
+                    self.ngram_size - 1,
+                ]
             self.output_names["state_update.ple_conv_value"] = {
                 layer_id: f"state_update.{layer_id}.ple_conv_value" for layer_id in self.ple_layer_ids
             }
@@ -1441,7 +1442,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 )
             if not hasattr(self, "external_data_files"):
                 self.external_data_files = {}
-            self.external_data_files[table_name] = "engram.data"
+            self.external_data_files[table_name] = "engram.onnx.data"
             gather_name = f"{basename}/ngram_embedding/GatherBlockQuantized"
             head_dim = self.ple_embed_dim // ngram_heads
             gather_shape = (
@@ -2167,7 +2168,7 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
         ir.save(
             self.model,
             os.path.join(output_dir, self.filename),
-            external_data="engram.data",
+            external_data="engram.onnx.data",
             size_threshold_bytes=0,
         )
 
@@ -2927,7 +2928,7 @@ class Qwen4ExpModel(MTPModel):
         mtp_options["filename"] = "mtp.onnx"
         mtp_options.pop("include_hidden_states", None)
         mtp_options.pop("exclude_lm_head", None)
-        mtp_options.pop("external_engram", None)
+        mtp_options["external_engram"] = False
         self.mtp = Qwen4ExpMTPTextModel(
             copy.deepcopy(config),
             self.mtp_attrs["io_dtype"],
@@ -2945,22 +2946,11 @@ class Qwen4ExpModel(MTPModel):
             self.mtp.make_model(input_path)
 
     def save_model(self, output_dir):
-        self.decoder.save_model(output_dir)
-        if self.mtp is not None:
-            self.mtp.save_model(output_dir)
-            self.mtp_attrs["shared_initializers"] = self.share_initializers(
-                output_dir, self.decoder.filename, self.mtp.filename
-            )
-        if self.text_only:
-            return
+        table_name = "model.ple.ngram_embedding.weight"
         if self.input_path is None:
             raise RuntimeError("make_model must be called before save_model.")
         weights = self.decoder.load_weights(self.input_path)
         language_model = weights.model.language_model
-        embedding_model = Qwen4ExpEmbeddingModel(
-            self.config, language_model.embed_tokens.weight.detach().cpu(), self.decoder.io_dtype
-        )
-        embedding_model.save_model(output_dir)
         if len(self.decoder.ple_layer_ids) != 1:
             raise ValueError(
                 f"Qwen4-Exp Engram export requires exactly one PLE layer, got {sorted(self.decoder.ple_layer_ids)}."
@@ -2972,6 +2962,23 @@ class Qwen4ExpModel(MTPModel):
             self.decoder.io_dtype,
         )
         engram_model.save_model(output_dir)
+        table = ir.load(os.path.join(output_dir, engram_model.filename)).graph.initializers[table_name].const_value
+        for component in (self.decoder, self.mtp):
+            if component is not None and table_name in getattr(component, "external_data_files", {}):
+                component.external_data_tensors = {table_name: table}
+
+        self.decoder.save_model(output_dir)
+        if self.mtp is not None:
+            self.mtp.save_model(output_dir)
+            self.mtp_attrs["shared_initializers"] = self.share_initializers(
+                output_dir, self.decoder.filename, self.mtp.filename
+            )
+        if self.text_only:
+            return
+        embedding_model = Qwen4ExpEmbeddingModel(
+            self.config, language_model.embed_tokens.weight.detach().cpu(), self.decoder.io_dtype
+        )
+        embedding_model.save_model(output_dir)
         vision_config = self.config.vision_config
         if vision_config.out_hidden_size != self.decoder.hidden_size:
             raise ValueError(
@@ -2984,33 +2991,11 @@ class Qwen4ExpModel(MTPModel):
 
     def make_genai_config(self, config, extra_kwargs, out_dir):
         self.decoder.make_genai_config(config.text_config, extra_kwargs, out_dir)
-        if self.text_only:
-            if self.mtp is not None:
-                self.add_mtp_to_genai_config(out_dir)
-            return
         config_path = os.path.join(out_dir, "genai_config.json")
         with open(config_path) as config_file:
             genai_config = json.load(config_file)
-
         model_config = genai_config["model"]
-        model_config["type"] = "qwen3_5"
-        model_config["image_token_id"] = config.image_token_id
-        model_config["vision_start_token_id"] = config.vision_start_token_id
-        decoder_inputs = model_config["decoder"]["inputs"]
-        decoder_inputs["inputs_embeds"] = "inputs_embeds"
-        decoder_inputs["input_ids"] = "input_ids"
-        decoder_inputs["engram_embeddings"] = "engram_embeddings"
-        model_config["embedding"] = {
-            "filename": "embedding.onnx",
-            "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
-            "outputs": {"inputs_embeds": "inputs_embeds"},
-        }
-        model_config["vision"] = {
-            "filename": "vision.onnx",
-            "spatial_merge_size": config.vision_config.spatial_merge_size,
-            "inputs": {"pixel_values": "pixel_values", "image_grid_thw": "image_grid_thw"},
-            "outputs": {"image_features": "image_features"},
-        }
+        model_config["decoder"]["inputs"]["engram_embeddings"] = "engram_embeddings"
         model_config["engram"] = {
             "filename": "engram.onnx",
             "cache_capacity": 4096,
@@ -3026,6 +3011,29 @@ class Qwen4ExpModel(MTPModel):
                 "embeddings": "engram_embeddings",
                 "present_tokens": "present_ple_tokens",
             },
+        }
+        if self.text_only:
+            with open(config_path, "w") as config_file:
+                json.dump(genai_config, config_file, indent=4)
+            if self.mtp is not None:
+                self.add_mtp_to_genai_config(out_dir)
+            return
+        model_config["type"] = "qwen3_5"
+        model_config["image_token_id"] = config.image_token_id
+        model_config["vision_start_token_id"] = config.vision_start_token_id
+        decoder_inputs = model_config["decoder"]["inputs"]
+        decoder_inputs["inputs_embeds"] = "inputs_embeds"
+        decoder_inputs["input_ids"] = "input_ids"
+        model_config["embedding"] = {
+            "filename": "embedding.onnx",
+            "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
+            "outputs": {"inputs_embeds": "inputs_embeds"},
+        }
+        model_config["vision"] = {
+            "filename": "vision.onnx",
+            "spatial_merge_size": config.vision_config.spatial_merge_size,
+            "inputs": {"pixel_values": "pixel_values", "image_grid_thw": "image_grid_thw"},
+            "outputs": {"image_features": "image_features"},
         }
         with open(config_path, "w") as config_file:
             json.dump(genai_config, config_file, indent=4)

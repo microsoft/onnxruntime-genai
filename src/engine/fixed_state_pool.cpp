@@ -1718,6 +1718,15 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
           continue;
         }
 
+        if (spec.kind == StateGroupKind::FixedPle && spec.component_index == 0 &&
+            spec.state_update_value.name.empty()) {
+          if (!storage.uses_direct_bindings) {
+            impl_->StageRowIntoInactiveBank(
+                spec, storage.handles[row].slot, inactive_bank, row, staged);
+          }
+          continue;
+        }
+
         const auto& updates = storage.state_update_tensors[tensor_index];
         const auto row_pointer = [&](const std::unique_ptr<OrtValue>& tensor,
                                      size_t row_bytes) -> const uint8_t* {
