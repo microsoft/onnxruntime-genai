@@ -306,7 +306,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   bool dflash2_prefix_checkpoints_enabled_{};
   std::vector<Dflash2Drafter::Feed> dflash2_feeds_;
   std::vector<std::vector<int32_t>> dflash2_drafts_;
-  std::vector<std::vector<TargetTokenSelection>> dflash2_draft_distributions_;
+  std::vector<TargetTokenSelection> dflash2_draft_distributions_;  // Scratch for one lattice walk.
   std::vector<Dflash2Lattice> dflash2_lattices_;
   std::vector<size_t> dflash2_draft_widths_;
   std::vector<std::pair<Request*, std::mt19937>> dflash2_rng_checkpoints_;

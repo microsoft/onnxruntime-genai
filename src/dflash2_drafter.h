@@ -51,10 +51,6 @@ Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device
 // Without a matching ring checkpoint, a new request can join only at position zero.
 bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept;
 
-TargetTokenSelection Dflash2IndependentDraftDistribution(
-    const int32_t* candidate_ids, const float* logits, size_t top_k,
-    float temperature, float top_p, float min_p);
-
 // One request's drafted lattice: `top_k` candidates per step and, per step, a [top_k, top_k] edge
 // matrix whose row i scores this step's candidates given the previous step's candidate i.
 struct Dflash2Lattice {
@@ -129,7 +125,6 @@ struct Dflash2Drafter {
     int32_t anchor_token{};
     bool draft_eligible{};
     bool wants_drafts{};
-    bool wants_independent_sampling{};
     bool wants_lattice{};
   };
 
@@ -190,7 +185,6 @@ struct Dflash2Drafter {
   // `lattices` instead of a greedy path, so the caller can sample it with the request's RNG.
   bool Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                std::vector<std::vector<int32_t>>& drafts,
-               std::vector<std::vector<TargetTokenSelection>>* draft_distributions = nullptr,
                std::vector<Dflash2Lattice>* lattices = nullptr);
 
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.

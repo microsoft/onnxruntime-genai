@@ -570,20 +570,6 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   draft_token_distributions_.clear();
 }
 
-void Request::SetDraftTokenDistributions(
-    std::span<const TargetTokenSelection> distributions) {
-  std::vector<int32_t> tokens;
-  tokens.reserve(distributions.size());
-  for (const auto& distribution : distributions) {
-    if (distribution.indices.empty() || distribution.indices.size() != distribution.probs.size()) {
-      throw std::runtime_error("Each independent draft distribution must be non-empty and aligned.");
-    }
-    tokens.push_back(SampleSparseToken(distribution.indices, distribution.probs, draft_rng_));
-  }
-  SetDraftTokens(tokens);
-  draft_token_distributions_.assign(distributions.begin(), distributions.end());
-}
-
 void Request::SetSampledDraftTokens(std::span<const int32_t> tokens,
                                     std::span<const TargetTokenSelection> distributions) {
   if (tokens.size() != distributions.size()) {

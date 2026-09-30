@@ -1798,12 +1798,11 @@ in how many drafts the target accepts.
 |---|---|---|
 | `lattice` (default) | A path sampled through the lattice: each slot draws from the edge-score row its predecessor's draw selects, tempered and truncated with the turn's own temperature, top-k and top-p. | $\min(1, p(x) / q(x))$, residual on rejection. |
 | `greedy_path` | The same greedy lattice path a greedy turn drafts. | Sample the target row and accept while it matches the draft. |
-| `independent` | Each slot samples independently from its own sparse top-k distribution. | $\min(1, p(x) / q(x))$, residual on rejection. |
 | `none` | Sampled turns do not draft. | - |
 
 On Qwen3.8-27B with temperature 1.0, top-k 20 and top-p 0.95 (MMLU-Pro, 800 prompts, batch 1),
-`lattice` averaged 5.01 tokens per target step against 4.78 for `greedy_path` and 4.66 for
-`independent`, and decoded 3.1x faster than `none`.
+`lattice` averaged 5.01 tokens per target step against 4.78 for `greedy_path`, and decoded 3.1x
+faster than `none`.
 
 With `none`, a request joins on its position-zero step only when the current turn is greedy; with
 any other mode, a sampled turn also joins, provided its top-k is positive (draft validation rejects
@@ -1813,14 +1812,10 @@ later sampled turns continue feeding their committed context into its cache with
 drafts, so a subsequent greedy turn can resume drafting without a cache hole. These ingest-only
 steps still execute the drafter session to preserve that continuity.
 
-`independent_sampling: true` is the older spelling of `sampled_proposal: "independent"`. A
-section that sets both keys must agree (`independent_sampling` is true exactly when
-`sampled_proposal` is `"independent"`); otherwise the config is rejected, whatever the key order.
-That mode's proposal defaults to temperature `0.1`, top-p `0.95`, and min-p `0.3`; override them with
-`sampling_temperature`, `sampling_top_p`, and `sampling_min_p` in the same section. Min-p
-truncates only the proposal distribution; verification continues to use the target model's
-canonical distribution for the current turn. `lattice` ignores these three settings and uses the
-turn's policy, so $q$ approximates $p$ wherever the drafter is calibrated.
+An earlier `independent` proposal sampled each slot from its own sparse top-k distribution. It
+trailed `lattice` at every batch size measured and has been removed. Its keys
+(`independent_sampling`, `sampling_temperature`, `sampling_top_p`, `sampling_min_p`) are still
+accepted so older configs load, but they are ignored with a warning.
 
 A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
 pool is sized for `max_batch_size` rings and its footprint is independent of context length. With

@@ -221,7 +221,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     dflash2_feeds_.reserve(max_batch_size);
     dflash2_draft_widths_.reserve(max_batch_size);
     dflash2_drafts_.reserve(max_batch_size);
-    dflash2_draft_distributions_.reserve(max_batch_size);
+    dflash2_draft_distributions_.reserve(dflash2_drafter_->NumDraftTokens());
     dflash2_lattices_.reserve(max_batch_size);
     dflash2_rng_checkpoints_.reserve(max_batch_size);
   }
@@ -480,7 +480,6 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     using Proposal = Config::Model::Dflash2::SampledProposal;
     const Proposal sampled_proposal =
         greedy ? Proposal::None : model_->config_->model.dflash2.sampled_proposal;
-    const bool independent_sampling = sampled_proposal == Proposal::Independent;
     // A sampled turn without a positive top_k fails draft validation, so it should not take a slot.
     const bool drafts_enabled =
         greedy || (sampled_proposal != Proposal::None && entry.request->TurnPolicy().top_k > 0);
@@ -505,7 +504,6 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     feed.aux_row_count = valid_rows;
     feed.first_position = first_position;
     feed.draft_eligible = drafts_enabled;
-    feed.wants_independent_sampling = independent_sampling;
     feed.wants_lattice = sampled_proposal == Proposal::Lattice;
 
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
@@ -540,7 +538,7 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
   }
 
   if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_,
-                                &dflash2_draft_distributions_, &dflash2_lattices_)) {
+                                &dflash2_lattices_)) {
     ++speculative_stats_.draft_forward_passes;
   }
   ReleaseConsumedDflash2Checkpoints();
@@ -583,11 +581,10 @@ void Engine::PublishDflash2DraftResults() {
   try {
     for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
       auto& drafts = dflash2_drafts_[i];
-      auto& distributions = dflash2_draft_distributions_[i];
       const Dflash2Lattice* lattice =
           i < dflash2_lattices_.size() && dflash2_lattices_[i].top_k != 0 ? &dflash2_lattices_[i]
                                                                           : nullptr;
-      if (drafts.empty() && distributions.empty() && !lattice) {
+      if (drafts.empty() && !lattice) {
         continue;
       }
       Request& request = *dflash2_feeds_[i].request;
@@ -596,22 +593,14 @@ void Engine::PublishDflash2DraftResults() {
         const auto& policy = request.TurnPolicy();
         Dflash2SampleLatticePath(*lattice, dflash2_draft_widths_[i], policy.temperature,
                                  policy.top_k, policy.top_p, request.draft_rng_, drafts,
-                                 distributions);
-        request.SetSampledDraftTokens(drafts, distributions);
+                                 dflash2_draft_distributions_);
+        request.SetSampledDraftTokens(drafts, dflash2_draft_distributions_);
         continue;
       }
       // The drafter always emits its full block; a request with a narrower budget takes the prefix
       // of the same greedy path.
-      if (!distributions.empty()) {
-        dflash2_rng_checkpoints_.emplace_back(dflash2_feeds_[i].request,
-                                              dflash2_feeds_[i].request->draft_rng_);
-        distributions.resize(std::min(distributions.size(), dflash2_draft_widths_[i]));
-        dflash2_feeds_[i].request->SetDraftTokenDistributions(
-            distributions);
-      } else {
-        drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
-        dflash2_feeds_[i].request->SetDraftTokens(drafts);
-      }
+      drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
+      request.SetDraftTokens(drafts);
     }
   } catch (...) {
     for (const auto& [request, rng] : dflash2_rng_checkpoints_)

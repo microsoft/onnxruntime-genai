@@ -15,6 +15,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -38,12 +39,11 @@ namespace Generators {
 namespace test {
 
 struct EngineRunTestAccess {
-  static void PublishDraftResults(
-      Engine& engine, std::span<Request* const> requests,
-      const std::vector<std::vector<TargetTokenSelection>>& distributions) {
+  static void PublishLattices(Engine& engine, std::span<Request* const> requests,
+                              const std::vector<Dflash2Lattice>& lattices) {
     engine.dflash2_feeds_.clear();
     engine.dflash2_drafts_.assign(requests.size(), {});
-    engine.dflash2_draft_distributions_ = distributions;
+    engine.dflash2_lattices_ = lattices;
     engine.dflash2_draft_widths_.assign(requests.size(), 1);
     for (Request* request : requests)
       engine.dflash2_feeds_.push_back({.request = request});
@@ -54,7 +54,6 @@ struct EngineRunTestAccess {
                              size_t width) {
     engine.dflash2_feeds_.assign(1, {.request = &request});
     engine.dflash2_drafts_.assign(1, {});
-    engine.dflash2_draft_distributions_.assign(1, {});
     engine.dflash2_lattices_.assign(1, std::move(lattice));
     engine.dflash2_draft_widths_.assign(1, width);
     engine.PublishDflash2DraftResults();
@@ -205,7 +204,7 @@ std::vector<int32_t> RunSeededRatioProposal(
   TargetTokenSelection draft_distribution;
   draft_distribution.indices = {11, 12};
   draft_distribution.probs = {0.5f, 0.5f};
-  request->SetDraftTokenDistributions(std::array{draft_distribution});
+  request->SetSampledDraftTokens(std::array{11}, std::array{draft_distribution});
   engine.executor->SetVerifyRowTokens({11, 25});
 
   if (retry_before_verify) {
@@ -2498,7 +2497,7 @@ TEST_F(EngineRunTest, SampledRatioSpeculativeRunAcceptsDraftsAndEmitsBonus) {
 
   const std::array distributions{
       SingletonDraftDistribution(11), SingletonDraftDistribution(12)};
-  request->SetDraftTokenDistributions(distributions);
+  request->SetSampledDraftTokens(std::array{11, 12}, distributions);
   engine.executor->SetVerifyRowTokens({11, 12, 25});
 
   std::array<EngineEvent, 3> events;
@@ -2552,7 +2551,7 @@ TEST_F(EngineRunTest, SampledRatioSpeculativeRunUsesCanonicalTargetForCorrection
   ASSERT_EQ(RunOne(*engine.engine).request, request);
 
   const std::array distributions{SingletonDraftDistribution(12)};
-  request->SetDraftTokenDistributions(distributions);
+  request->SetSampledDraftTokens(std::array{12}, distributions);
   const auto target_logits = ThreeWayTargetLogits(
       static_cast<size_t>(model_->config_->model.vocab_size));
   engine.executor->SetVerifyRowLogits({target_logits, target_logits});
@@ -2574,15 +2573,18 @@ TEST_F(EngineRunTest, FailedDflashPublicationRestoresEarlierRequestDraftRng) {
   const int32_t eos = EosToken(*model_);
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, eos == 5 ? 6 : 5);
   engine.cache->SetMaxDraftTokensPerStep(1);
-  TargetTokenSelection distribution;
-  distribution.indices = {11, 12};
-  distribution.probs = {0.5f, 0.5f};
+  // One step whose two candidates tie, so each walk is a fair coin on the request's draft RNG.
+  Dflash2Lattice lattice;
+  lattice.top_k = 2;
+  lattice.candidate_ids = {11, 12};
+  lattice.scores = {0.0f, 0.0f, 0.0f, 0.0f};
   uint32_t seed = 0;
   for (; seed < 1000; ++seed) {
     std::seed_seq seed_sequence{seed, 0u, 0x44464c53u};
     std::mt19937 draft_rng{seed_sequence};
-    const auto first_draw = SampleSparseToken(distribution.indices, distribution.probs, draft_rng);
-    if (first_draw != SampleSparseToken(distribution.indices, distribution.probs, draft_rng))
+    std::discrete_distribution<size_t> coin{0.5, 0.5};
+    const auto first_draw = coin(draft_rng);
+    if (first_draw != coin(draft_rng))
       break;
   }
   ASSERT_LT(seed, 1000u);
@@ -2592,23 +2594,23 @@ TEST_F(EngineRunTest, FailedDflashPublicationRestoresEarlierRequestDraftRng) {
   std::array<EngineEvent, 3> prefill_events;
   ASSERT_EQ(engine.engine->Run(prefill_events), 3u);
 
-  const std::array valid_distribution{distribution};
-  reference->SetDraftTokenDistributions(valid_distribution);
+  const std::array<Request*, 1> reference_only{reference.get()};
+  EngineRunTestAccess::PublishLattices(*engine.engine, reference_only, {lattice});
   const int32_t expected = EngineRunTestAccess::DraftToken(*reference);
   reference->SetDraftTokens({});
-  reference->SetDraftTokenDistributions(valid_distribution);
+  EngineRunTestAccess::PublishLattices(*engine.engine, reference_only, {lattice});
   ASSERT_NE(EngineRunTestAccess::DraftToken(*reference), expected);
 
-  TargetTokenSelection invalid_distribution;
-  invalid_distribution.indices = {11};
+  Dflash2Lattice non_finite = lattice;
+  non_finite.scores[0] = std::numeric_limits<float>::quiet_NaN();
   const std::array<Request*, 2> requests{first.get(), second.get()};
-  std::vector<std::vector<TargetTokenSelection>> distributions{{distribution}, {invalid_distribution}};
-  EXPECT_THROW(EngineRunTestAccess::PublishDraftResults(*engine.engine, requests, distributions),
+  std::vector<Dflash2Lattice> lattices{lattice, non_finite};
+  EXPECT_THROW(EngineRunTestAccess::PublishLattices(*engine.engine, requests, lattices),
                std::runtime_error);
   ASSERT_EQ(first->PendingDraftTokenCount(), 1u);
   first->SetDraftTokens({});
-  distributions[1] = {distribution};
-  EXPECT_NO_THROW(EngineRunTestAccess::PublishDraftResults(*engine.engine, requests, distributions));
+  lattices[1] = lattice;
+  EXPECT_NO_THROW(EngineRunTestAccess::PublishLattices(*engine.engine, requests, lattices));
   ASSERT_EQ(first->PendingDraftTokenCount(), 1u);
   EXPECT_EQ(EngineRunTestAccess::DraftToken(*first), expected);
 }

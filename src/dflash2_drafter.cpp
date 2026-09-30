@@ -59,48 +59,6 @@ int32_t CheckedMetadataValue(size_t value, std::string_view description) {
   return static_cast<int32_t>(value);
 }
 
-TargetTokenSelection BuildIndependentDraftDistribution(
-    const int32_t* candidate_ids, const float* logits, size_t top_k,
-    float temperature, float top_p, float min_p) {
-  TargetTokenSelection distribution;
-  if (top_k == 0) {
-    return distribution;
-  }
-  std::vector<size_t> sorted_indices(top_k);
-  std::iota(sorted_indices.begin(), sorted_indices.end(), 0);
-  std::stable_sort(sorted_indices.begin(), sorted_indices.end(),
-                   [logits](size_t left, size_t right) {
-                     return logits[left] > logits[right];
-                   });
-  const float max_logit = logits[sorted_indices.front()];
-  std::vector<float> probabilities(top_k);
-  float sum = 0.0f;
-  for (size_t i = 0; i < top_k; ++i) {
-    const float probability =
-        std::exp((logits[sorted_indices[i]] - max_logit) / temperature);
-    probabilities[i] = probability;
-    sum += probability;
-  }
-
-  float cumulative = 0.0f;
-  for (size_t i = 0; i < top_k; ++i) {
-    const float probability = probabilities[i] / sum;
-    const bool keep_min_p = probabilities[i] >= min_p * probabilities[0];
-    const bool keep_top_p = cumulative < top_p;
-    cumulative += probability;
-    if (keep_min_p && keep_top_p) {
-      distribution.indices.push_back(candidate_ids[sorted_indices[i]]);
-      distribution.probs.push_back(probabilities[i]);
-    }
-  }
-  const float kept_sum = std::accumulate(
-      distribution.probs.begin(), distribution.probs.end(), 0.0f);
-  for (float& probability : distribution.probs) {
-    probability /= kept_sum;
-  }
-  return distribution;
-}
-
 void InheritProviderOptions(const Config::SessionOptions& parent,
                             Config::SessionOptions& child) {
   if (child.providers.empty()) {
@@ -149,13 +107,6 @@ void RequireTensor(const ModelStateMetadata& metadata, const std::string& name,
 }
 
 }  // namespace
-
-TargetTokenSelection Dflash2IndependentDraftDistribution(
-    const int32_t* candidate_ids, const float* logits, size_t top_k,
-    float temperature, float top_p, float min_p) {
-  return BuildIndependentDraftDistribution(
-      candidate_ids, logits, top_k, temperature, top_p, min_p);
-}
 
 void Dflash2SampleLatticePath(const Dflash2Lattice& lattice, size_t steps, float temperature,
                               int top_k, float top_p, std::mt19937& rng,
@@ -915,12 +866,8 @@ void Dflash2Drafter::ReleaseAll() {
 
 bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                              std::vector<std::vector<int32_t>>& drafts,
-                             std::vector<std::vector<TargetTokenSelection>>* draft_distributions,
                              std::vector<Dflash2Lattice>* lattices) {
   drafts.assign(feeds.size(), {});
-  if (draft_distributions) {
-    draft_distributions->assign(feeds.size(), {});
-  }
   if (lattices) {
     lattices->resize(feeds.size());
     for (auto& lattice : *lattices) {
@@ -1281,20 +1228,6 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   auto scores_cpu = scores_span.CopyDeviceToCpu();
   for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
     const size_t feed_index = block_feed_indices[slot];
-    if (feeds[feed_index].wants_independent_sampling && draft_distributions) {
-      auto& out = (*draft_distributions)[feed_index];
-      out.reserve(num_spec);
-      for (size_t step = 0; step < num_spec; ++step) {
-        const size_t candidate_offset = (slot * num_spec + step) * top_k;
-        const size_t score_offset = candidate_offset * top_k;
-        out.push_back(BuildIndependentDraftDistribution(
-            candidate_cpu.data() + candidate_offset,
-            scores_cpu.data() + score_offset,
-            top_k, config_.sampling_temperature,
-            config_.sampling_top_p, config_.sampling_min_p));
-      }
-      continue;
-    }
     if (feeds[feed_index].wants_lattice && lattices) {
       auto& lattice = (*lattices)[feed_index];
       const size_t candidate_offset = slot * num_spec * top_k;

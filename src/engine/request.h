@@ -316,11 +316,6 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   void SetDraftTokens(std::span<const int32_t> tokens);
 
-  // Samples one token from each independent draft distribution and retains the sparse q(x)
-  // distributions for probability-ratio verification. Learned-lattice DFlash2 continues to call
-  // SetDraftTokens.
-  void SetDraftTokenDistributions(std::span<const TargetTokenSelection> distributions);
-
   // Stages drafts the caller already drew, with the distribution each was drawn from, for
   // probability-ratio verification.
   void SetSampledDraftTokens(std::span<const int32_t> tokens,
