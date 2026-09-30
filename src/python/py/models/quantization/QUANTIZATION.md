@@ -14,6 +14,25 @@ block size 32, set with `block_size`) into a `MatMulNBits` contrib op. They are
 all *round-to-nearest* (RTN) — none of them use calibration data or error feedback
 (unlike GPTQ/AWQ/HQQ).
 
+## Structured Configuration Status
+
+The experimental builder envelope uses `target_options.quant_config` and
+`drafter_options.quant_config`. Numeric policy remains in `weights` and `moe`;
+QDQ and packing belong to `format` because they change the exported graph or
+stored bytes. `runtime` remains the compatibility key emitted by
+`QuantConfig.to_dict()`; the builder envelope translates it to canonical
+`format` without changing the public serializer.
+
+Target options reject an explicit checkpoint policy because target loaders do
+not implement both paths. Qwen MTP supports `preserve` and `requantize` when
+loading its tensors.
+
+Typed overrides support preset or exact-name selection, and exclusions require
+exact names. Typed and exclusion rules share ordered first-match resolution;
+exact names are checked against the emitted graph after fusion. INT8 embedding
+overrides are rejected because INT8 MatMul support does not supply an INT8
+Gather export path.
+
 ## Design: method vs. mixed precision
 
 A quantization configuration has two independent parts:
@@ -126,8 +145,10 @@ A node is prepacked only when the fpA_intB kernel supports it: symmetric weights
 in {4, 8}, `block_size` supported by the target layout (SM80 → {32, 64, 128}, SM90 →
 {64, 128}), `K % block_size == 0`, and `N` aligned to the kernel tile (`N % 32` for
 int8, `N % 64` for int4). Ineligible nodes (e.g. an `N = 32` MoE router) keep the raw
-blockwise layout. An offline-prepacked model must be run with `ORT_FPA_INTB_GEMM`
-enabling the relevant nbits (use `ORT_FPA_INTB_GEMM=1` for int4 and int8).
+blockwise layout. Eligible prepacked nodes select the fpA-intB path automatically.
+`ORT_FPA_INTB_GEMM=1` or the equivalent `ep.cuda.fpa_intb_gemm=1` session option is
+only needed to select that kernel family for nodes left in raw layout; the builder
+emits the session option automatically for prepacked exports.
 
 ## QMoE expert-weight quantization
 
@@ -170,6 +191,7 @@ Combinable with any base method.
 Promotes the most quantization-sensitive MatMuls, following llama.cpp's mixed
 strategy: for the first and last eighth of layers, plus every third layer, the
 `attn/qkv_proj`, `attn/v_proj`, and `mlp/down_proj` MatMuls are upgraded.
+Qwen3.5/3.8 keeps Q/K/V separate in those layers so only `v_proj` is upgraded.
 
 ### `linear_attn` (legacy `k_quant_linear`)
 For hybrid attention models (e.g. Qwen3.5), promotes the linear-attention projections

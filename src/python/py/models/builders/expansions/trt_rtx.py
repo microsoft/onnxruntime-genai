@@ -478,6 +478,7 @@ class TRT_RTX:
             name=f"{name}/output/Reshape",
         )
         self.make_value(output, dtype, shape=output_shape)
+
     def make_linear_attention(self, name, **kwargs):
         inputs = [
             kwargs["q_path"],

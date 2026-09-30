@@ -34,6 +34,7 @@ def test_linear_attention_fp8_is_weight_only():
     module = _make_model(tensors).make_linear_module(LINEAR)
 
     assert module.quant_type == "fp8"
+    assert not module.can_reuse_as_embedding
     assert module.weight.dtype == torch.float8_e4m3fn
     assert module.weight_scale.item() == 0.125
     assert module.input_scale is None
@@ -81,6 +82,7 @@ def test_compressed_tensors_nvfp4_normalizes_packed_weight_and_global_scale():
     module = _make_model(tensors, quant_type="compressed-tensors").make_linear_module(ATTENTION)
 
     assert module.quant_type == "nvfp4"
+    assert not module.can_reuse_as_embedding
     assert module.weight is tensors[f"{ATTENTION}.weight_packed"]
     assert module.weight_scale_2.item() == 0.5
 
@@ -113,6 +115,21 @@ def test_bf16_linear_attention_projection_stays_unquantized():
 
     assert module.quant_type == "none"
     assert module.weight is weight
+    assert module.weight_scale is None
+
+
+def test_prequantized_linear_attention_gate_is_dequantized():
+    base = "model.language_model.layers.3.linear_attn.in_proj_a"
+    tensors = {
+        f"{base}.weight": torch.ones((4, 4), dtype=torch.float8_e4m3fn),
+        f"{base}.weight_scale": torch.tensor(0.125),
+    }
+
+    module = _make_model(tensors).make_dense_linear_module(base)
+
+    assert module.quant_type == "none"
+    assert module.weight.dtype == torch.bfloat16
+    torch.testing.assert_close(module.weight, torch.full((4, 4), 0.125, dtype=torch.bfloat16))
     assert module.weight_scale is None
 
 

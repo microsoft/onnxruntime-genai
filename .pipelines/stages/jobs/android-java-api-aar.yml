@@ -31,6 +31,7 @@ jobs:
   - template: steps/utils/set-cmake-build-type.yml
     parameters:
       build_config: ${{parameters.build_config}}
+  - template: steps/utils/authenticate-maven.yml
 
   # --- Feed isolation: download ORT (Android AAR) from the Lotus feed ---------
   - bash: |

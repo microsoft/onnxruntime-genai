@@ -10,11 +10,14 @@ import logging
 from pathlib import Path
 
 import numpy as np
+import onnx
 import onnxruntime_genai as og
 import pytest
-from _test_utils import register_plugin_providers
+from _test_utils import register_plugin_providers, register_webgpu_plugin
 
-register_plugin_providers(logging.getLogger(__name__))
+_LOG = logging.getLogger(__name__)
+register_plugin_providers(_LOG)
+_WEBGPU_AVAILABLE = register_webgpu_plugin(_LOG)
 
 _MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-composite"
 _DEVICES = ["cpu"] + (["cuda"] if og.is_cuda_available() else [])
@@ -31,6 +34,34 @@ def model(request):
     config.clear_providers()
     if request.param != "cpu":
         config.append_provider(request.param)
+    return og.Model(config)
+
+
+@pytest.fixture
+def webgpu_model(tmp_path):
+    if not _WEBGPU_AVAILABLE:
+        pytest.skip("WebGPU execution provider plug-in is not installed.")
+
+    model_dir = tmp_path / "synthetic-composite-no-state-updates"
+    model_dir.mkdir()
+    config_data = json.loads((_MODEL_DIR / "genai_config.json").read_text())
+    for group in config_data["model"]["decoder"]["state_groups"]:
+        group.pop("state_update", None)
+    (model_dir / "genai_config.json").write_text(json.dumps(config_data))
+
+    decoder = onnx.load(_MODEL_DIR / "decoder.onnx")
+    inputs = [
+        value
+        for value in decoder.graph.input
+        if value.name != "state_update_capture_count"
+    ]
+    decoder.graph.ClearField("input")
+    decoder.graph.input.extend(inputs)
+    onnx.save(decoder, model_dir / "decoder.onnx")
+
+    config = og.Config(str(model_dir))
+    config.clear_providers()
+    config.append_provider("webgpu")
     return og.Model(config)
 
 
@@ -86,3 +117,15 @@ def test_mixed_unequal_requests_match_isolated_execution(model):
     requests = [_request(engine, prompt, max_new_tokens, sinks) for prompt in prompts]
     _run(engine, sinks)
     assert [sink.tokens for _, sink in requests] == expected
+
+
+def test_webgpu_fixed_state_staging_persists_across_steps(webgpu_model):
+    engine = og.Engine(webgpu_model)
+    sinks = {}
+    _, sink = _request(engine, [2, 3, 4], 2, sinks)
+
+    _run(engine, sinks)
+
+    # The first fixed-convolution output commits six 1s. Gathering that state on the
+    # second step changes the second token from the stateless value 15 to 21.
+    assert sink.tokens == [9, 21]

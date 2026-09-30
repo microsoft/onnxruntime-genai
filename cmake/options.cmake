@@ -7,6 +7,7 @@ option(USE_DML "Build with DML support" OFF)
 option(USE_WINML "Build with WinML support" OFF)
 option(USE_GUIDANCE "Build with guidance support" OFF)
 set(NUGET_PACKAGE_SOURCE "" CACHE STRING "Override the NuGet package source used by the build")
+set(NUGET_CONFIG_FILE "" CACHE FILEPATH "Use a custom NuGet configuration file")
 
 # bindings
 option(ENABLE_JAVA "Build the Java API." OFF)

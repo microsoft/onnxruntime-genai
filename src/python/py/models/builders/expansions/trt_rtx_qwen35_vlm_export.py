@@ -24,6 +24,7 @@ import onnx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.onnx import export as export_onnx_program
 from safetensors.torch import load_file
 
 
@@ -456,19 +457,20 @@ def _export_onnx(model, args, out_path: str, input_names, output_names, dynamic_
         os.remove(data_path)
 
     with contextlib.redirect_stdout(io.StringIO()):
-        torch.onnx.export(
-            model,
-            args,
-            out_path,
+        exported_program = torch.export.export(model, args=args, dynamic_shapes=dynamic_shapes, strict=False)
+        onnx_program = export_onnx_program(
+            exported_program,
+            args=(),
+            f=None,
             input_names=input_names,
             output_names=output_names,
             opset_version=20,
             dynamo=True,
             external_data=True,
-            dynamic_shapes=dynamic_shapes,
             optimize=True,
             verbose=False,
         )
+    onnx_program.save(out_path, external_data=True)
 
 
 def _validate_no_ops(model_path: str, blocked_ops: set[str]):

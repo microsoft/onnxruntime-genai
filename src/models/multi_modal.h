@@ -19,6 +19,7 @@
 #include "models/io/position_inputs.h"
 #include "model_type.h"
 #include "models/io/recurrent_state.h"
+#include "models/lfm2_audio_output.h"
 
 namespace Generators {
 
@@ -37,6 +38,19 @@ struct MultiModalLanguageModel : Model {
   std::unique_ptr<OrtSessionOptions> vision_session_options_;
   std::unique_ptr<OrtSessionOptions> speech_session_options_;
   std::unique_ptr<OrtSessionOptions> embedding_session_options_;
+
+  // LFM2-Audio speech output, present when model.audio_output names the two graphs.
+  std::unique_ptr<OrtSession> depthformer_session_;      // hidden_states -> one audio code per run, a frame in num_codebooks runs
+  std::unique_ptr<OrtSession> audio_embedding_session_;  // audio_codes -> audio_embeds, summed into the decoder's next input
+  std::unique_ptr<OrtSessionOptions> depthformer_session_options_;
+  std::unique_ptr<OrtSessionOptions> audio_embedding_session_options_;
+
+  // The device each sub-model session actually runs on. A sub-model whose config block carries
+  // its own `session_options` does not inherit the decoder's providers, so it can land on the CPU
+  // EP while the decoder is on a GPU one. The states below allocate against these, not p_device_.
+  DeviceInterface* vision_device_{};
+  DeviceInterface* speech_device_{};
+  DeviceInterface* embedding_device_{};
 };
 
 // Base VisionState: runs vision.onnx with a single State::Run() call.
@@ -59,72 +73,6 @@ struct VisionState : State {
   std::unique_ptr<MultiModalFeatures> image_features_;
 };
 
-// QwenVisionState: per-image slicing loop for Qwen2.5-VL / Qwen3-VL.
-//
-// vision.onnx is exported for exactly one image (Dynamo unrolls Python
-// for-loops at trace time, so an N-image dummy produces a graph that only
-// works for that exact N).  This subclass iterates over images in C++,
-// creating zero-copy sub-tensor views of pixel_values / image_grid_thw and
-// writing each result into the correct offset of the pre-allocated
-// image_features output buffer.
-struct QwenVisionState : VisionState {
-  using VisionState::VisionState;  // inherit constructor
-
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
-};
-
-// PixtralVisionState: per-image vision loop for Pixtral / Mistral3.
-//
-// Each image is independently smart_resize'd to a different resolution.
-// The preprocessor zero-pads all images to max(H) × max(W) and provides
-// image_sizes[N, 2] with per-image (H, W).  This subclass slices
-// pixel_values[i, :, :H_i, :W_i] for each image, runs vision.onnx with
-// [1, C, H_i, W_i], and concatenates the resulting features.
-struct PixtralVisionState : VisionState {
-  using VisionState::VisionState;  // inherit constructor
-
-  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens) override;
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
-
- private:
-  std::vector<int64_t> image_heights_;
-  std::vector<int64_t> image_widths_;
-};
-
-inline void ValidateImageGridThwLayoutAndCount(const std::vector<int64_t>& shape,
-                                               size_t elem_count,
-                                               int64_t num_images,
-                                               const char* tensor_name) {
-  if (num_images < 0) {
-    throw std::runtime_error(std::string(tensor_name) + " num_images must be non-negative");
-  }
-
-  if (shape.size() != 2) {
-    throw std::runtime_error(std::string(tensor_name) + " must have rank 2 [num_images, 3]");
-  }
-
-  if (shape[0] < 0 || shape[1] < 0) {
-    throw std::runtime_error(std::string(tensor_name) + " dimensions must be non-negative");
-  }
-
-  if (shape[1] != 3) {
-    throw std::runtime_error(std::string(tensor_name) + " second dimension must be 3");
-  }
-
-  const size_t shape_image_count = static_cast<size_t>(shape[0]);
-  const size_t expected_image_count = static_cast<size_t>(num_images);
-  if (shape_image_count < expected_image_count) {
-    throw std::runtime_error(std::string(tensor_name) + " shape[0] (" + std::to_string(shape_image_count) +
-                             ") is less than required image count (" + std::to_string(expected_image_count) + ")");
-  }
-
-  if (elem_count % 3 != 0 || elem_count / 3 < expected_image_count) {
-    throw std::runtime_error(std::string(tensor_name) + " element count (" + std::to_string(elem_count) +
-                             ") is less than required for " + std::to_string(num_images) +
-                             " images (need at least 3 values per image)");
-  }
-}
-
 // Factory: pick the right VisionState subclass based on model type.
 std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 
@@ -133,10 +81,10 @@ struct SpeechState : State {
   SpeechState(const SpeechState&) = delete;
   SpeechState& operator=(const SpeechState&) = delete;
 
-  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens);
+  virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 
- private:
+ protected:
   friend struct MultiModalPipelineState;
 
   const MultiModalLanguageModel& model_;
@@ -144,6 +92,49 @@ struct SpeechState : State {
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> audio_features_;
 };
+
+// Lfm2AudioSpeechState: per-clip encoder loop for LFM2-Audio.
+//
+// The processor stacks the clips of one prompt into a zero-padded [N, T_max, num_mels] mel tensor
+// with their real frame counts alongside. The published encoder export is traced for a single clip
+// (its subsampling mask cannot broadcast over a batch), so with several clips this subclass slices
+// each clip's own frames out of that tensor, runs the encoder on [1, T_i, num_mels], and writes the
+// results one after another into the contiguous [1, total_tokens, hidden] feature buffer the
+// embedding model expects, in clip order.
+struct Lfm2AudioSpeechState : SpeechState {
+  using SpeechState::SpeechState;  // inherit constructor
+
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
+
+ private:
+  // Where the processor's staged mel tensor and the encoder's feature buffer are bound.
+  struct SpeechBindings {
+    size_t mel_index{};       // the [num_clips, longest, num_mels] staging tensor
+    size_t lengths_index{};   // its per-clip frame counts
+    size_t features_index{};  // the [1, total_tokens, hidden] buffer the embedding model reads
+    int64_t num_clips{};
+    int64_t longest_clip{};
+    int64_t num_mels{};
+    int64_t hidden_size{};
+    ONNXTensorElementDataType mel_type{};
+    ONNXTensorElementDataType features_type{};
+  };
+
+  // Reads the bound shapes and checks them against the per-clip token counts.
+  SpeechBindings ResolveBindings() const;
+
+  // Runs the encoder on clip `index`'s own frames and returns its features.
+  std::unique_ptr<OrtValue> RunClip(const SpeechBindings& bindings, int64_t index, int64_t num_frames);
+
+  size_t FindInput(const std::string& name) const;
+  size_t FindOutput(const std::string& name) const;
+
+  std::vector<int64_t> tokens_per_clip_;
+};
+
+// Factory: pick the right SpeechState subclass based on model type.
+std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 
 struct EmbeddingState : State {
   EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params);
@@ -221,6 +212,8 @@ struct MultiModalPipelineState : State {
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int current_length);
+  // The decoder's logits while the answer is text, or the next audio frame's placeholder while it is speech.
+  DeviceSpan<float> SampleAudioOrText(DeviceSpan<float> logits);
 
   const MultiModalLanguageModel& model_;
   int64_t num_image_tokens_{};
@@ -230,6 +223,7 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<SpeechState> speech_state_;
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<DecoderState> decoder_state_;
+  std::unique_ptr<Lfm2AudioOutput> audio_output_;  // LFM2-Audio speech output, when the model has it
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
 

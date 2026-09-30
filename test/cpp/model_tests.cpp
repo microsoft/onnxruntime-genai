@@ -1,25 +1,59 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
 #include <cstring>  // for memcmp
+#include <filesystem>
 #include <iostream>
 #include <random>
-#include <filesystem>
 #include <string>
+
 #include <gtest/gtest.h>
 
 #include "span.h"
 #define OGA_USE_SPAN 1
 #include <ort_genai.h>
-#include <gtest/gtest.h>
 
 #include "models/model.h"
+#include "models/qwen_vl_model.h"
 #include "models/qwen_vl_vision.h"
 
 #include "test_utils.h"
 
 // External global variable from main.cpp for custom model path
 extern std::string g_custom_model_path;
+
+TEST(ModelTests, QwenVisionEmbeddingShapeValidation) {
+  EXPECT_NO_THROW(Generators::ValidateVisionEmbeddingShapes(
+      std::array<int64_t, 3>{1, 1437, 4096}, 1437 * 4096,
+      std::array<int64_t, 2>{1426, 4096}, 1437));
+  EXPECT_NO_THROW(Generators::ValidateVisionEmbeddingShapes(
+      std::array<int64_t, 2>{1437, 4096}, 1437 * 4096,
+      std::array<int64_t, 2>{1426, 4096}, 1437));
+
+  try {
+    Generators::ValidateVisionEmbeddingShapes(
+        std::array<int64_t, 3>{1, 1, 4096}, 4096,
+        std::array<int64_t, 2>{1426, 4096}, 1437);
+    FAIL() << "Expected insufficient embedding capacity to be rejected";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(),
+                 "Vision embedding injection: embeddings output cannot hold all input tokens "
+                 "(input_token_count=1437, capacity=1)");
+  }
+  EXPECT_THROW(Generators::ValidateVisionEmbeddingShapes(
+                   std::array<int64_t, 1>{4096}, 4096,
+                   std::array<int64_t, 2>{1, 4096}, 1),
+               std::runtime_error);
+  EXPECT_THROW(Generators::ValidateVisionEmbeddingShapes(
+                   std::array<int64_t, 2>{1, 4096}, 4096,
+                   std::array<int64_t, 1>{4096}, 1),
+               std::runtime_error);
+  EXPECT_THROW(Generators::ValidateVisionEmbeddingShapes(
+                   std::array<int64_t, 2>{1, 0}, 0,
+                   std::array<int64_t, 2>{1, 0}, 1),
+               std::runtime_error);
+}
 
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20

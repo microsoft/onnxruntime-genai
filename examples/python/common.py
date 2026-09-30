@@ -24,7 +24,7 @@ def set_logger(inputs: bool = True, outputs: bool = True) -> None:
     og.set_log_options(enabled=True, model_input_values=inputs, model_output_values=outputs)
 
 
-def _get_model_session_options_overlay(
+def get_model_session_options_overlay(
     path: str, ep: str, ep_options: dict[str, str]
 ) -> dict[str, Any]:
     config_path = os.path.join(path, "genai_config.json")
@@ -134,7 +134,7 @@ def get_config(
     config = og.Config(path)
     if not ep_path and ep != "follow_config":
         config.clear_providers()
-        model_provider_overlay = _get_model_session_options_overlay(
+        model_provider_overlay = get_model_session_options_overlay(
             path, ep, ep_options
         )
         if ep != "cpu":
@@ -354,6 +354,16 @@ def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: 
         # Qwen-2.5 VL, Qwen-3 VL, Qwen-3.5, Fara
         image_tags = "".join(["<|vision_start|><|image_pad|><|vision_end|>" for _ in range(num_images)])
         content = image_tags + prompt
+    elif model_type == "lfm2_vl":
+        # LFM2-VL: the C++ image processor expands each <image> into <|image_start|>, one <image>
+        # per projected vision feature, and <|image_end|>, based on the resized image's patch grid.
+        image_tags = "".join(["<image>" for _ in range(num_images)])
+        content = image_tags + prompt
+    elif model_type == "lfm2_audio":
+        # LFM2-Audio: the C++ audio processor replaces each <|audio|> with one placeholder per
+        # encoder frame (one per 80 ms of audio) and splices the encoder output in at those positions.
+        audio_tags = "".join(["<|audio|>" for _ in range(num_audios)])
+        content = audio_tags + prompt
     elif model_type == "mistral3":
         # Pixtral / Ministral-3 VLM: the C++ image processor expands each
         # [IMG] into the full token sequence based on image resolution.

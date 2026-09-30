@@ -17,13 +17,17 @@ The dynamic path manages paged KV decoder state together with per-request search
 > synchronous progress and writes zero or more typed `EngineEvent` records into caller-provided
 > storage; capacity one preserves one-event pacing. Token and completion payloads are selected by
 > event flags.
-> `CancelTurn(turn_id)` stops only the named Turn, and `Close()` releases Engine resources.
+> `CancelTurn(turn_id)` stops only the named Turn.
+> `RewindToStartOfTurn(turn_id)` retains the prefix before a named Turn after the current completed
+> attempt's events are drained. The next Turn replays that prefix with its new input.
+> The operation is `OgaRequestRewindToStartOfTurn` in C and `rewind_to_start_of_turn` in Python.
+> `Close()` releases Engine resources.
 > `OgaCreateEngine` retains shared ownership of the underlying Model, so the caller may release its
 > `OgaModel` handle after successful Engine creation. The Model remains alive until Engine teardown
 > and the release of any other retaining objects.
 >
 > **Single-owner requirement:** One host-owned thread must perform all Engine and Request operations,
-> including request creation, `BeginTurn()`, `Run()`, `CancelTurn()`,
+> including request creation, `BeginTurn()`, `Run()`, `CancelTurn()`, `RewindToStartOfTurn()`,
 > and `Close()`. Other host threads marshal commands and copied inputs to that owner. The
 > Engine enforces its owner thread and has no worker thread. Final
 > Request-handle release may occur on another thread because it only publishes abandonment work.
@@ -52,6 +56,11 @@ The main implementation is under `src/engine/`:
 Continuous batching allows requests to enter and leave the active batch independently. The engine does not create one fixed batch and run it until every sequence is finished. Instead, every engine step builds a new batch from the requests that can make progress at that moment.
 
 Each request keeps its own sequence, search options, random state, completion state, and sequence-length counters. The engine combines only the work needed for the current model invocation.
+
+For rewind, the Request records one compact boundary for each successful `BeginTurn()`. Each
+boundary stores the Turn ID and the token-prefix length that existed before that Turn. Rewind does
+not record per-token random-stream checkpoints and does not restore sampling state. Stochastic
+sampling continues from the Request's current CPU or device stream.
 
 The paged KV cache makes this practical. A request does not need one large contiguous cache allocation sized for its maximum sequence length. It owns a block table that points to smaller physical KV-cache blocks. Blocks are added as the sequence grows and returned to the pool when the request leaves the engine.
 
@@ -106,6 +115,75 @@ Dynamic batching limits scheduled rows with `max_batch_size` and limits the tota
 query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
 to 2048. Both limits are positive and independent.
 
+### Prefix caching
+
+Dynamic batching reuses complete prompt blocks from earlier requests by default.
+Set `engine.dynamic_batching.prefix_caching` to `false` to disable it. A lookup
+compares both the token contents and the complete parent-block identity; hash
+equality alone is never accepted as a match. The final prompt token always runs
+through the model, and partial blocks are never shared.
+
+The cache retains indexed blocks after their producing request releases them.
+Every matching full block may be adopted. Retained blocks use the same paged KV
+pool as active requests and are reclaimed in least-recently-used order under
+admission pressure; prefix retention never reserves a separate share of the
+pool. Blocks being adopted by an in-flight reservation are protected by
+reservation-owned references.
+
+Rewinding a completed request releases its reference to every paged block,
+including blocks shared with other requests. Full indexed blocks keep the
+prefix cache's reference and become reclaimable once no request holds them;
+unindexed tail blocks return to the pool immediately. A later turn replaying
+the retained prefix can adopt matching cached blocks on admission.
+
+Prefix adoption participates in the normal Engine transaction. Planning stages
+the request's processed-token cursor at the matched block boundary, reservation
+takes references to the shared blocks, rollback restores the cursor and releases
+those references, and commit transfers them to the request's block table. Newly
+completed full blocks are indexed only after the cache and request transaction
+commits.
+
+For a hybrid target with `fixed_conv` or `fixed_recurrent` groups, a paged-block
+match is usable only when the same prefix identity owns an immutable checkpoint
+of every fixed-state tensor. The fixed-state pool preallocates
+`max_batch_size` checkpoint rows before the paged cache is sized. A successful
+prefill step whose committed boundary is block-aligned copies the request's
+published fixed state into one of those rows. Checkpoint payloads have their own
+bounded LRU lifetime: dropping one leaves the paged blocks indexed, but a hybrid
+lookup skips paged-only descendants and adopts the deepest boundary where both
+components remain available. Hybrid targets index only blocks completed during
+prefill; decode and reasoning steps do not publish paged identities without matching
+fixed-state checkpoints.
+
+Hybrid prefix caching does not reduce the configured prefill chunk size. A
+checkpoint is attached only when a successful step's committed endpoint is
+block-aligned; paged-only descendants remain indexed but are not adoptable by a
+hybrid request. After adoption, prefill resumes at that checkpoint and may
+process the full configured chunk, so later checkpoint positions can shift
+relative to the original request's chunk boundaries. A match pins both its
+paged blocks and fixed checkpoint through reservation. The fixed reservation
+gathers the checkpoint into the newly admitted row instead of gathering zero,
+and its baseline committed-token count is the same as the paged match. Existing
+prepare/publish ordering then advances both components atomically; rollback
+discards the provisional fixed row, releases adopted paged references, and
+restores the request cursor.
+
+The implementation applies only to newly admitted requests and does not splice
+a prefix into resident continuation turns. It still rejects target
+sliding-window KV rings and auxiliary caches that mirror every target block when
+`prefix_caching` is explicitly set to `true`. Existing configurations that omit
+the setting keep loading with caching disabled for those layouts, and builders
+emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
+can coexist with target prefix caching. For a windowed DFlash 2 drafter, one
+optional ring checkpoint can be attached to the exact indexed target boundary
+after its fixed-state checkpoint and the complete drafter proposal succeed.
+The ring is restored into newly allocated drafter blocks before a cached
+request joins at a nonzero position. An unleased older ring checkpoint may be
+replaced at a later boundary without evicting target blocks or fixed state.
+If the matching draft checkpoint is absent, the request retains the full
+target hit and runs target-only. Full-attention DSpark remains target-only
+after a nonzero-position prefix hit.
+
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
 ## Decoder state manifest
@@ -121,7 +199,7 @@ Configuration loading rejects unknown kinds, malformed decoder templates, duplic
 
 When an explicit manifest is present, model loading resolves each group's decoder templates, expands every name, and verifies that its decoder input and output exist with compatible dtype and shape. Paged tensors must also have compatible rank-four geometry throughout their group.
 
-The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
+The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. The cache element type is resolved by requiring every key/value binding of every participating layer — past input and present output alike — to report the same type; a disagreement is rejected at construction. This is checked in the cache itself rather than delegated to manifest validation, because byte accounting reads the type per layer while allocation commits to one type for the whole pool, and a mismatch would silently size the pool for one element width and allocate another. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
 
 `fixed_conv` and `fixed_recurrent` groups may accompany the required `paged_kv` group. `ValidateDynamicEngineCompatibility` accepts them (it still rejects any configuration without exactly one `paged_kv` group), and `PagedCacheManager` constructs a `FixedStatePool` with `max_batch_size` slots when at least one fixed group is present. The composite manager reserves and commits fixed slots together with the paged blocks (see "Fixed request-state pools" below), while `HybridDecoderIO` binds either direct bank views or gathered/staged fallback tensors alongside the packed variable-length inputs. Expanded fixed bindings must resolve to real session inputs and outputs; the pool rejects absent or incompatible bindings.
 
@@ -186,7 +264,9 @@ generated token below the Request's `max_session_tokens`.
 `max_session_tokens` is the cumulative total
 sequence limit for the entire Request: the initial
 prompt, generated output, and every continuation input all count against the same limit. It defaults
-to the model-configured `search.max_length`, cannot exceed it, and is not reset by `BeginTurn()`.
+to the model-configured `search.max_length` capped by a nonzero Engine `max_request_length`. An
+explicit value may exceed `search.max_length` but cannot exceed a nonzero `max_request_length`. When
+the capability is zero, `search.max_length` remains the ceiling. The limit is not reset by `BeginTurn()`.
 It is the Request's one session limit: Search completion, static cache sizing, speculative bounds,
 and the `MaxSessionTokens` finish reason all read the same value.
 
@@ -198,10 +278,11 @@ do not count. A later turn may begin whenever its input still leaves room for at
 token under the cumulative limit, and it may choose a different per-Turn limit.
 
 `OgaRequestOptions` is an opaque, reusable handle carrying resident-session policy only. Null
-options and zero `max_session_tokens` use the model-configured `search.max_length`, which normally
-defaults from the model context length. Request creation takes no generation parameters at all: the
-Engine builds each Request's private, Model-derived search configuration itself, forcing one
-sequence and one beam.
+options and zero `max_session_tokens` use the model-configured `search.max_length` capped by the
+Engine's `max_request_length` when that capability is nonzero. A zero capability preserves
+`search.max_length` as both the default and ceiling. Request creation takes no generation parameters
+at all: the Engine builds each Request's private, Model-derived search configuration itself, forcing
+one sequence and one beam.
 
 `OgaTurnOptions` is opaque and reusable and carries the whole generation policy of one turn;
 `BeginTurn()` snapshots it. See "Per-turn generation policy" below.
@@ -221,7 +302,7 @@ the Model:
   contract and its next tokens would never be copied back. Forcing it to one would decode something
   the caller never asked for, so it is rejected instead:
   `config.overlay('{"search": {"num_beams": 1}}')`, and batch across Requests.
-- A `search.max_length` of zero or less, since it is the Request's session ceiling.
+- A `search.max_length` of zero or less, since it supplies the default Request length.
 - A nonzero `search.chunk_size` when static batching is selected. Chunking is an Engine/model
   scheduler policy, so this is rejected at Engine creation; disable it with
   `config.overlay('{"search": {"chunk_size": 0}}')`.
@@ -230,10 +311,11 @@ the Model:
 wider configured batch simply means "configured for the classic Generator"; the Request derives its
 own single-row search and decodes exactly one sequence either way.
 
-The same overlay route raises the session ceiling where that is what the caller wants: because
-`max_session_tokens` cannot exceed the model-configured `search.max_length`, a model whose
-`search.max_length` is lower than the context length its cache can serve is raised with
-`config.overlay('{"search": {"max_length": <tokens>}}')` before the Model is created.
+`search.max_length` supplies the default Request length. A caller may set a larger
+`max_session_tokens` explicitly when a nonzero `EngineCapabilities.max_request_length` permits it.
+The capability is derived from the resolved target cache and model context after Engine
+construction. Zero means that cache-backed ceiling is unavailable, so `search.max_length` remains
+the ceiling.
 
 ### `Active`
 
@@ -264,14 +346,37 @@ while any event for the Request is pending fails without mutation. Turn-scoped
 generated count and limit reset only after all validation, input allocation, Search append, and
 scheduler preparation succeeds.
 
-Request Rewind has not yet been implemented. Cancellation does not rewind the Search sequence or
-committed cache, so accepted continuation input and generated output remain part of the logical
-request. A canceled resident request can begin a later turn after its terminal notification is
-drained. A first turn canceled before admission has no cache state, but it can likewise begin a
-later turn: the retained initial input and new continuation input are prefetched together. If
-retained model state has otherwise ceased to be resident, continuation still fails. Until Request
-Rewind is implemented, callers that need to discard canceled input or release capacity must
-`Close()` and create a new Request.
+`RewindToStartOfTurn(turn_id)` is valid only in `TurnComplete`, after every event for that Request
+has been drained. The current Turn must not have failed. The named Turn must have been successfully
+begun and must remain in the active branch. The operation also rejects queued or active Turns,
+closed Requests, and model state that is unexpectedly nonresident. A first Turn canceled before
+admission is supported while it still has scheduler ownership and has processed no model tokens.
+A Request already rewound but not yet restarted is also eligible for another rewind to an earlier
+Turn remaining in its active branch, even though it is no longer resident. The discarded Turn ID
+cannot be rewound again. Rewind does not cancel or replace an active Turn and emits no event.
+
+The operation retains the token prefix that existed immediately before the named Turn's
+`BeginTurn()`, then discards that Turn and all later Turn boundaries. It preserves Request identity
+and leaves the current completed attempt's historical Turn ID and finish reason observable until
+the next `BeginTurn()`. Turn IDs are never reused, so that call receives the monotonic next ID.
+Rewind clears speculative drafts and resets the guidance cursor for the next Turn.
+
+Unlike rollback of an in-flight Engine transaction, completed-turn rewind does not restore
+sampling state. CPU and device stochastic sampling continue from their current random streams
+rather than returning to the retained token boundary.
+
+Rewind deliberately releases all resident physical model state instead of cropping it in place.
+Dynamic Requests return their complete paged KV block table, paired fixed-state slot, and auxiliary
+MTP or DFlash/DSpark state, if present. A later `BeginTurn()` re-admits the same Request and prefills the retained
+prefix together with new input, rebuilding paged KV, sliding-window rings, fixed convolution state,
+and fixed recurrent state from the token sequence. The MTP shadow state is recreated when drafting
+resumes. The request's physical state is released without persistent rewind checkpoints; indexed
+prefix blocks may stay cached until reused or reclaimed under pressure. Static
+Requests use the same strategy only when they are the sole resident row; multi-row static rewind
+fails before mutation because a row cannot be removed from the shared contiguous cache allocation.
+
+Cancellation itself still does not rewind Search or cache state. A canceled Request can either
+continue from retained state after draining its terminal event or explicitly rewind first.
 
 Every completed Turn publishes exactly one terminal event. A final visible token and completion may
 be combined in one event. An unserviceable Request receives `TurnFinished | Failed`; fatal Engine
@@ -290,6 +395,8 @@ Planning skips turn-complete residents and does not release their cache. Retaine
 consume paged-cache blocks and a batch slot, so applications must call `Close()` when they no
 longer need continuation. Dynamic resources are reclaimed immediately; static resources remain
 until the shared batch is recycled.
+Call `RewindToStartOfTurn()` instead when retaining the prefix before an active-branch Turn while
+releasing capacity for replay.
 
 ### `Close()`
 
@@ -500,8 +607,11 @@ can never be verified under a later turn that resolved a different policy.
 
 ### Engine-hosted MTP head: operational contract
 
-`model.mtp` turns the head on automatically for every request the dynamic Engine decodes. Server
-authors should size capacity and handle failures against the following behaviors.
+`model.mtp` turns the head on automatically for every request the dynamic Engine decodes when
+`enabled` is `true` or omitted. Setting `model.mtp.enabled` to `false` prevents the Engine from
+loading or running that head. The flag does not affect an `MtpGenerator` constructed explicitly by
+the application. Server authors should size capacity and handle failures against the following
+behaviors.
 
 **Auxiliary memory accounting.** The head is a second paged pool that always holds the same block
 count as the target pool, so both are sized from one budget. With
@@ -521,8 +631,10 @@ head failure therefore degrades to ordinary decoding without repeatedly running 
 
 **Shadow lifecycle.** The head's shadow Request mirrors only the suffix the target committed during
 the current turn. Beginning a continuation and canceling a turn both drop the shadow and release its
-auxiliary blocks, so the next drafted step rebuilds it from the new turn's suffix. Closing the
-request releases it as well.
+auxiliary blocks, so the next drafted step rebuilds it from the new turn's suffix. Rewinding also
+drops the shadow before releasing the target's model state because neither the shadow sequence nor
+its auxiliary cache remains authoritative for the retained prefix. Closing the request releases it
+as well.
 
 **Mixed prefill batches.** Drafts are proposed only for requests that committed a decode token in
 the step. A request that was prefilling, finished its turn, or has a proposal the Engine cannot
@@ -639,7 +751,7 @@ Only the logits for the last input token of each request are used to sample its 
 the request's remaining tokens, then binds those counts before decoder input or
 chunk-completion logic reads the request.
 
-The scheduler also marks whether the step is eligible for CUDA graph capture. A capturable step must be a pure decode step where every request contributes exactly one token. Prefill and mixed prefill/decode steps have variable token counts and run eagerly.
+The scheduler also marks whether the step is eligible for CUDA graph capture. A capturable step must be past prefill and must give every request the same number of tokens. Prefill, chunked prefill, mixed prefill/decode, and steps whose requests carry different draft widths all run eagerly.
 
 ### 5. Reserve the complete cache transaction
 
@@ -674,7 +786,8 @@ request checkpointing, model execution, or cache commit.
 
 ### 6. Checkpoint request and sampler state
 
-Before model execution, `ScheduledRequests::BeginTransaction()` checkpoints every selected request's search state.
+Before model execution, `ScheduledRequests::BeginTransaction()` checkpoints every selected
+request's Search state, processed cursor, host-token length, guidance state, and host RNG.
 
 If the device supports transactional batched sampling, the scheduler-owned sampler state is checkpointed as well. Each request keeps its own persistent sampler state, including its random stream, even though sampling work can be batched.
 
@@ -710,17 +823,6 @@ or Qwen MRoPE `[3, num_tokens]` geometry; the latter repeats each text position 
 MRoPE axes for the text-only decoder path. Multimodal per-axis coordinates are outside the Engine
 contract. The StepPlan row, token count, and packed offset are validated before this optional
 tensor is copied to the model-input device.
-Packed models with this input execute eagerly because the current persistent CUDA graph buffers
-do not own stable position-ID storage.
-
-Using the previous example:
-
-```text
-input_ids = [A0 A1 A2 B0 C0 C1]
-cumulative_sequence_lengths = [0, 3, 4, 6]
-past_sequence_lengths = [A_past, B_past, C_past]
-```
-
 This representation allows one model invocation to mix requests with different sequence lengths and different amounts of pending work. A step can contain a long prefill for one request and single-token decoding for other requests without padding every request to the same query length.
 
 The decoder also prepares a CPU `int32[3]` attention metadata input:
@@ -744,7 +846,7 @@ batch-invariant.
 
 The outputs include one logits row for every flattened input token. The decoder state is attached to `ScheduledRequests` so post-processing can select the rows that belong to each request.
 
-For eligible pure decode shapes, the decoder may capture or replay a CUDA graph. Prefill and other variable shapes run eagerly. Eager steps report exact bounds, so the KV upper and lower values are equal. A captured CPU input is read only while the graph is captured, so captured steps instead report bounds valid for every replay in the graph's block-table bucket. Capturable decode steps reserve exactly `ceil(current_kv_length / block_size)` blocks, allowing the Engine to report query upper bound `1`, KV upper bound `block_table_columns * block_size`, and KV lower bound `1` for the minimum or a capacity-clamped sub-minimum bucket, or `(preceding_power_of_two_columns * block_size) + 1` for larger and truncated final buckets. If a future reservation policy allocates ahead of the live KV length, the Engine conservatively reports a lower bound of `1`.
+For eligible decode shapes, the decoder may capture or replay a CUDA graph. Prefill and other variable shapes run eagerly. Eager steps report exact bounds, so the KV upper and lower values are equal. A captured CPU input is read only while the graph is captured, so captured steps instead report bounds valid for every replay in the graph's block-table bucket. Capturable decode steps reserve exactly `ceil(current_kv_length / block_size)` blocks, allowing the Engine to report KV upper bound `block_table_columns * block_size`, and KV lower bound `1` for the minimum or a capacity-clamped sub-minimum bucket, or `(preceding_power_of_two_columns * block_size) + 1` for larger and truncated final buckets. The query upper bound is the step's own per-request token count, which is `1` for plain decode and `1 + drafts` for a verify step; every step sharing the graph carries that same count because uniformity is what made the step eligible. If a future reservation policy allocates ahead of the live KV length, the Engine conservatively reports a lower bound of `1`.
 
 ### 10. Select logits and stage next tokens
 
@@ -753,7 +855,7 @@ For eligible pure decode shapes, the decoder may capture or replay a CUDA graph.
 `ScheduledRequests::GenerateNextTokensForTransaction()` then:
 
 1. Applies each request's logits processors to its own logits row.
-2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path.
+2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path. A greedy request that verified drafts this step skips sampling: drafted requests run without logits processors, so the argmax that verification already computed for the row after the accepted prefix is committed directly.
 3. Runs the per-request sequence and EOS handling.
 4. Produces a `RequestStepResult` for each request.
 
@@ -1182,6 +1284,11 @@ before the step began. `Run()` translates `RetryableBatchAbort` into a `Retryabl
 `Run()` again with unchanged memory availability and workload composition may produce the same
 failure.
 
+Restoring a Request truncates `tokens_host_` to the saved transaction boundary while restoring the
+processed cursor, Search, guidance, host RNG, and transactional sampler state together. New-Turn
+admission uses the same additive checkpoint, so a failed continuation cannot leave the host
+sequence, guidance cursor, or either random stream at a newer transaction boundary.
+
 Planning allocation failures occur before reservation or request mutation. They propagate to the
 caller without marking the Engine unhealthy, so a later `Run()` may retry. A
 `StepPlanningConsistencyError`, by contrast, proves that committed paged and fixed ownership
@@ -1287,6 +1394,74 @@ generations reject overlapping reservations that allocate, free, or advance bloc
 and reservation mutation paths can advance occupancy, and each records the change in the pool
 generation.
 
+## Per-token quantized scale caches
+
+A model whose paged KV cache is quantized per token stores one scale per (block, slot, KV head) alongside the packed key and value payload. The Engine owns these scale buffers exactly as it owns the key and value caches.
+
+### Configuration surface
+
+Four decoder templates declare them, each containing exactly one `%d` for the logical layer ID:
+
+- `model.decoder.inputs.past_key_scale_names`, `model.decoder.outputs.present_key_scale_names`
+- `model.decoder.inputs.past_value_scale_names`, `model.decoder.outputs.present_value_scale_names`
+
+The past and present template of a side are required as a pair: declare both or neither. A side with only one of the two is rejected at construction. Binding only the past name would let ORT allocate a separate buffer for the graph's present output, so the scales a step produced would be discarded and the next step would dequantize the block it had just written against stale data. The two sides are independent — a model may bind key scales and leave value scales unbound.
+
+Each scale template must also expand to names distinct from every key, value, and other scale name bound for the group; a collision is rejected.
+
+An Engine-hosted MTP head does not support per-token quantized caches. The head is always an unquantized full-attention layer, there is no `model.mtp` scale-name configuration surface, and a config that tries to declare one is rejected as an unknown key. Because `CreateMtpDecoderConfig()` projects a copy of the target configuration, it clears all four scale templates on the projected decoder; otherwise a quantized target would make the head's sizing and binding look up scale tensor names that exist only in the target session. A block drafter is likewise unsupported: `ValidateDflash2ModelCompatibility()` rejects a non-empty `model.dflash2` scale template, because `Dflash2Drafter::AllocateCache()` builds only key and value buffers from the drafter's logical head size and would leave a declared scale input unbound.
+
+### Shape, addressing, and type
+
+A scale tensor has rank three, `[num_blocks, block_size, num_kv_heads]` — the key/value shape with the trailing head-width dimension dropped. Block and slot addressing is therefore identical, and the block table the model already receives indexes the payload and its scales the same way. The scale tensors are additional model inputs and outputs, but they require no additional indexing input.
+
+Validation of each declared scale binding checks, with a distinct message per failure:
+
+- Rank three.
+- Dimension 1 equal to `engine.dynamic_batching.block_size` and dimension 2 equal to `model.decoder.num_key_value_heads`, when the graph resolves them. A negative dimension is symbolic and is accepted; allocation resolves it from the configured geometry. The model builder emits `["num_blocks", "block_size", num_kv_heads]`, so the leading two dimensions are normally symbolic.
+- Element type `float16` or `float32`.
+- The present output exists, has the same element type as the past input, and has a wildcard-compatible shape. Shape comparison uses `StateShapesCompatible()`, the same rule every other shared model-state binding uses: a symbolic dimension on either side matches a resolved one.
+- Dimension 0, when resolved, equal to the block count actually allocated for that layer.
+
+The scale type is resolved per layer and per side and may differ from the key/value type — a `uint8` packed cache with `float16` scales is the expected combination. The key/value type must be uniform across the whole group; scale types need not be.
+
+Scale bindings are validated by the paged cache, not by `ModelStateManifest`. `StateBindingsFor(PagedKeyValue)` still returns only the key and value templates, so scale tensors do not participate in manifest rank and geometry validation.
+
+### Ownership, aliasing, and initialization
+
+The Engine allocates one buffer per (layer, declared side) from the KV-cache allocator, wraps it in an `OrtValue`, and holds it for the lifetime of the cache. Every step binds that one `OrtValue` as both the past input and the present output, exactly as it does for key and value caches, so the model updates scales in place. The buffer is never reallocated between steps and its device pointer is stable for the life of the cache.
+
+Each buffer is zeroed once at allocation. Blocks are not re-zeroed when they are freed and handed to another request: a slot's scale is only read after the model has written that slot, which is the same rule the key and value payload already follows.
+
+Binding layout, in `BindCache()`:
+
+| Range | Contents |
+| --- | --- |
+| `[0, 2L)` | Key and value caches, key before value, in layer order, for `L` participating layers |
+| `[2L, 2L + S)` | Scale caches, key before value, in layer order, skipping undeclared sides, for `S` scale buffers |
+| `[2L + S, ...)` | Block table, then the windowed block table when the model has one |
+
+Model inputs and outputs share the first two ranges; only the block tables are input-only. The block table index is therefore `cache_.size() * 2 + scale_cache_.size()`.
+
+### Sizing
+
+`PagedKeyValueCacheBytesPerBlock()` returns what one block costs across every full-attention layer of the paged group. Per layer:
+
+```
+block_size * num_kv_heads * (key_head_width + value_head_width) * sizeof(kv_type)
+  + block_size * num_kv_heads * sizeof(scale_type)   for each declared scale side
+```
+
+`key_head_width` and `value_head_width` are the trailing dimensions the graph declares, not `model.decoder.head_size`. A 4-bit cache packs two elements per byte, so its physical width is half the logical head size, and reading the graph is what keeps sizing correct for both packed and unpacked caches. Every multiplication is overflow-checked.
+
+The resulting per-block cost feeds `ComputePagedBlockCapacityFromBytes()`, which divides the memory budget after the fragmentation allowance, the utilization factor, reserved fixed-state bytes, and any auxiliary per-block cost from an MTP head or block drafter. Scales therefore reduce the block count directly: with `block_size 4`, one KV head, unpacked `float32` key and value of width 1, and two `float16` scale sides, a layer costs 32 bytes per block without scales and 48 with them, so the same budget holds two-thirds as many blocks.
+
+### Sliding-window layers
+
+Scale caches follow their layer's mapping. A windowed layer's scale tensor is allocated with `num_window_blocks` leading entries and a full-attention layer's with `num_blocks`, matching that layer's key and value tensors, and each is indexed by the block table that layer already uses — the windowed block table for ring layers, the primary block table for the rest.
+
+The two budgets stay separate in the same way. `PagedKeyValueCacheBytesPerBlock()` skips windowed layers entirely, and the windowed reservation is computed as `num_window_blocks * BytesPerBlock(layer)` per windowed layer, which includes that layer's scale bytes. Windowed storage is taken off the top before the full-attention block count is derived, so a quantized windowed layer shrinks the ring's budget rather than the full-attention pool's per-block cost.
+
 ## Sliding-window paged layers
 
 The runtime can store selected sliding-window layers in a fixed ring instead of growing their KV
@@ -1376,11 +1551,16 @@ and then publish them at a single infallible boundary:
   cannot overflow a generation, and that no row regresses below its slot's
   `committed_tokens`.
 - **`PrepareCommit()`** is the fallible device-completion phase: it re-validates,
-  copies fallback outputs into the **inactive** bank, or replays a partially accepted
-  compact update over a direct output, and synchronizes. A fully accepted direct
+  copies fallback outputs into the **inactive** bank, and synchronizes. A partially
+  accepted compact update over a direct output is replayed into the inactive bank by
+  the pool's next operation (`Reserve()`, `CapturePrefixCheckpoint()`, or the next
+  `PrepareCommit()`), which enqueues it ahead of every later reader of the banks on
+  the same stream, so the device runs the replay while the host prepares the next
+  step; discarding the prepared reservation drops it. A fully accepted direct
   output needs no state copy. The active (visible) bank is never touched, so a
   failure leaves committed state exactly as it was; it drains the device and marks
-  the pool unhealthy because the inactive banks may be left partially written. The
+  the pool unhealthy because the inactive banks may be left partially written. A
+  deferred replay that fails to launch also marks the pool unhealthy. The
   reservation becomes `Prepared`.
 - **`PublishCommit()`** is `noexcept` and performs no fallible or device work: it
   flips each slot to its freshly written bank, advances `state_generation`, sets
@@ -1425,8 +1605,9 @@ reserves both, `PrepareCommit()`/`Commit()` stage and publish both, and
 removal and abandoned-request reclamation release a request's fixed slot together with its paged
 blocks; a completed turn remains resident until one of those lifecycle events. `HybridDecoderIO` composes the packed
 `VarlenDecoderIO` inputs and logits handling with the reservation's fixed input and
-output bindings. Fixed-state models execute eagerly because packed position and
-transaction-scoped state bindings are not yet part of the CUDA graph compatibility contract.
+output bindings. Fixed-state models are capturable: packed position ids live in a persistent buffer
+and the reservation's binding layout is part of the graph key, so a graph is only replayed against
+the bank and binding set it was recorded with.
 
 The pool allocates capacity-sized gather and output staging buffers at construction, before paged
 KV auto-sizing queries available memory. Fallback reservations create exact-row tensor views over
@@ -1467,7 +1648,7 @@ An active request normally contributes one token: the token sampled by its previ
 
 The scheduler can place prefill and decode requests in the same model invocation if cache and batch capacity allow it. `VarlenDecoderIO` packs their different query lengths without padding.
 
-Mixed batches are not eligible for the pure-decode CUDA graph path, but they remain valid eager executions.
+Mixed batches are not eligible for the CUDA graph path, which requires every request in the step to contribute the same token count, but they remain valid eager executions.
 
 ## Batched sampling
 
@@ -1486,6 +1667,11 @@ If batched sampling or transactional sampler checkpoints are unsupported on the 
 
 Logits processing remains per request. Minimum length, repetition penalty, no-repeat n-gram processing, EOS handling, maximum length, and sequence ownership continue to use each request's own state.
 
+Sampled deterministic-draft verification is sequential and therefore consumes the Request's host
+RNG once per evaluated target row. On CUDA, the already selected tokens can still use Search's
+externally bound token slot for batched commit, but that staging operation does not consume or
+advance the scheduler-owned batched-sampler state.
+
 ## CUDA graph capture
 
 CUDA graph capture is an optimization for stable decode shapes.
@@ -1493,13 +1679,72 @@ CUDA graph capture is an optimization for stable decode shapes.
 A dynamic step is graph-capture eligible only when every selected request:
 
 - Is past prefill.
-- Contributes exactly one token.
+- Contributes the same number of tokens as every other request in the step.
 
-The cache planner buckets block-table columns to powers of two, with a minimum bucket width of eight columns. The graph identity combines batch size with that block-table width bucket, because both values affect the captured input shape and launch configuration.
+That second condition is what a single captured graph can describe: one token per request for plain
+decode, or `1 + drafts` for a speculative verify step whose requests all carry the same draft width.
+A step that mixes widths runs eagerly.
 
-Graph buffers are allocated once at configured limits and reshaped as static views. Stable device addresses allow ONNX Runtime to replay the captured graph.
+### Graph identity
 
-Prefill and mixed-token steps use graph id `-1`, which tells the CUDA execution provider to run eagerly.
+Each distinct decode shape gets its own annotation id, keyed on:
+
+| Key component | Why a captured graph depends on it |
+|---|---|
+| Batch size | Packed tensor shapes and per-row launch dimensions |
+| Tokens per request | Packed row count, and the query bound reported through `attention_metadata` |
+| Block-table width bucket | Block-table tensor shape and the attention launch configuration |
+| Fixed-state binding layout | The device addresses HybridDecoderIO binds for fixed decoder state |
+
+The cache planner buckets block-table columns to powers of two, with a minimum bucket width of eight
+columns, so a run producing steadily longer sequences settles on a handful of widths instead of a
+new one per appended block. A cache can only ever offer `{8, 16, 32, ...}` below its configured
+maximum plus that maximum, which is what makes the bucket exponent an injective name for a width.
+
+`FixedStateReservation::BindingLayoutKey()` supplies the last component. A contiguous all-resident
+cohort binds a persistent bank directly at a slot offset, and the active bank flips on every commit,
+so the bound device pointer alternates between two addresses; the key reports which one, together
+with whether the compact `state_update` outputs are part of the binding set. Staged bindings always
+view pool-lifetime buffers and share one key, and a model with no fixed state reports zero.
+
+Ids come from a process-wide counter and are never recycled. ORT stores captured graphs on the
+session, and the public API allows two Engines over one Model, so an id space that restarted per
+decoder would let the second Engine replay the first Engine's graph against its own buffers.
+`SimpleDecoder`'s destructor releases every id it was handed before its persistent buffers are
+freed, so a destroyed Engine leaves no graph pointing at released memory.
+
+### Budget and fallback
+
+At most 64 shapes are captured per decoder. A shape past that budget runs eagerly rather than
+growing capture memory without bound. A step also runs eagerly when it does not fit the persistent
+buffers, which are sized for the configured maximum batch and for one token plus the largest draft
+width the cache can roll back. Prefill and mixed-token steps use graph id `-1`, which tells the CUDA
+execution provider to run eagerly.
+
+Because these buffers are allocated after the cache has chosen its block count, the Engine subtracts
+their bytes from the automatic free-memory budget before the paged cache is sized. An explicit
+`engine.dynamic_batching.num_blocks` is left alone: pinning the pool means owning that budget.
+
+### Buffers and lifetime
+
+Graph buffers are allocated once at configured limits and reshaped as static views, so their device
+addresses stay fixed while their shapes track the current step. That covers `input_ids`,
+`cumulative_sequence_lengths`, `past_sequence_lengths`, packed `position_ids` in either geometry,
+`logits`, and the optional hidden-state and auxiliary hidden-state tensors. Stable device addresses
+are what allow ONNX Runtime to replay the captured graph.
+
+### Cost
+
+The first sighting of a shape runs eagerly and the second captures, so a new shape pays a one-time
+capture stall before it starts replaying. A workload that keeps producing new shapes therefore pays
+that stall repeatedly, and the persistent buffers are a fixed memory cost whether or not any step is
+ever captured.
+
+### Diagnostics
+
+`SetLogBool("graph_capture", true)` reports each newly assigned annotation id and each change of
+eager-fallback reason, including budget exhaustion and steps that exceed the persistent buffers.
+Steady state repeats neither, so a healthy run goes quiet after warmup.
 
 An Engine-hosted DFlash 2 or DSpark block drafter consumes the packed auxiliary hidden-state tensor
 named by `model.dflash2.main_aux_hidden_states` or `model.dspark.main_aux_hidden_states`.
@@ -1507,47 +1752,91 @@ named by `model.dflash2.main_aux_hidden_states` or `model.dspark.main_aux_hidden
 appear in one configuration. DFlash 2 uses `block_size - 1` draft rows because its first row is an
 anchor; DSpark predicts from all `block_size` rows.
 
-Single-token target decode steps bind that auxiliary output through persistent graph buffers and
-remain eligible for CUDA graph capture; prefill and draft-verification steps remain eager. Engine
+Target decode steps bind that auxiliary output through persistent graph buffers and remain eligible
+for CUDA graph capture, including the uniform-width verify steps a block drafter produces; only
+prefill stays eager. Engine
 construction validates the output's rank, element type, and static width against the drafter input.
 It also validates the drafter's lattice outputs and every paged-cache input/output, including the
 page size, before allocating cache resources. The drafter run is synchronous because its packed
 inputs and outputs are owned by one proposal call, so its run options cannot disable
 execution-provider synchronization.
 
-The direct drafter session also uses graph id `-1`: it reuses proposal tensor allocations but
-reshapes them for each step, so they cannot be captured safely. If this optional post-commit drafter
-run fails, the Engine discards any partial proposal and still publishes the already committed target
-events. A recoverable failure also makes the drafter forget every request it is currently tracking,
+The direct drafter session captures uniform shapes with stable proposal buffers, including
+batches containing a request restored from a DFlash2 prefix checkpoint. Graph replay requires
+a CUDA plugin EP version `v0.2.0` or later, which includes the per-session device-arena fix in
+[microsoft/onnxruntime#32807](https://github.com/microsoft/onnxruntime/pull/32807).
+Older plugin EPs share an arena across target and drafter sessions, allowing
+one session to overwrite memory retained by another's captured graph. GenAI cannot detect
+this at runtime: bad or missing drafts, reduced target accuracy, or a hang can result.
+No graphs are discarded on cached admission.
+On ORT builds without per-graph release, graph captures retired by buffer growth still live
+until their session is destroyed.
+The opt-in `Dflash2GraphRestoreTest.ExtendedCachedPrefixReplaysWithoutStaleGraphOrLostDrafts`
+exercises the real Engine with CUDA graph capture: set `D_FLASH2_GRAPH_TEST_MODEL` to a
+graph-enabled Qwen package with 256-token blocks and 512-token prefill, then run
+`engine_unit_tests` with `--ep_dir` pointing at a CUDA plugin with session-scoped device arenas
+and the test's `--gtest_filter`. The test enables prefix caching with a 512-token prefill chunk
+through a configuration overlay. With the reference tokenizer, it checks the 534-to-1146-token
+extension, two longer cached replays, draft acceptance, and output parity; a tokenizer whose
+prompt lengths fall outside the required cache-boundary ranges skips the test. Ordinary CPU CI
+skips this model-dependent test.
+
+If this optional post-commit drafter run fails, the Engine discards any partial proposal
+and still publishes the already committed target events.
+A recoverable failure also makes the drafter forget every request it is currently tracking,
 because the step whose rows it failed to ingest leaves its cached context no longer contiguous with
 the target. Those in-flight requests finish without block drafts while requests admitted afterwards
 still get them, and the retry budget is therefore spent on real drafter failures: three consecutive
 failures disable the drafter for the Engine, and a proposal contract violation disables it at once.
 `dflash2_failures` and `dflash2_disables` report those events.
 
-Automatic block drafting is greedy-only. A request joins on its position-zero step only when the
-current turn is greedy. If a sampled first turn executes that step, eligibility is not reconsidered
-and the request decodes without block drafts for the rest of its life. Once a request has joined,
-later sampled turns continue feeding their committed context into its cache without requesting
-drafts, so a subsequent greedy turn can resume drafting without a cache hole. These ingest-only
-steps still execute the drafter session to preserve that continuity.
+Automatic block drafting is greedy-only by default. A request joins on its position-zero step only
+when the current turn is greedy. If a sampled first turn executes that step, eligibility is not
+reconsidered during the same residency and the request decodes without block drafts until rewind
+or close. Once a request
+has joined, later sampled turns continue feeding their committed context into its cache without
+requesting drafts, so a subsequent greedy turn can resume drafting without a cache hole. These
+ingest-only steps still execute the drafter session to preserve that continuity.
+
+Set `model.dflash2.independent_sampling` to opt sampled turns into the reference DFlash proposal
+contract. Each draft position then samples independently from the drafter's sparse top-k
+distribution, and target verification uses the probability ratio $\min(1, p(x) / q(x))$ with the
+residual distribution after rejection. The drafter distribution defaults to temperature `0.1`,
+top-p `0.95`, and min-p `0.3`; override them with `sampling_temperature`, `sampling_top_p`, and
+`sampling_min_p` in the same section. Min-p truncates only the proposal distribution; verification
+continues to use the target model's canonical distribution for the current turn. The learned-lattice
+greedy path remains unchanged when this option is absent or false.
 
 A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
-pool is sized for `max_batch_size` rings and is allocated before the target pool measures free
-memory; its footprint is independent of context length. A full-attention block drafter (DSpark)
-instead mirrors the target pool: its bytes per target block and its fixed query-spill bytes are
-charged against free memory before target capacity is selected, using the cache element type
-reported by the graph. That trade is explicit -- a DSpark drafter with the same layer geometry as
-the target roughly halves the target's paged-cache capacity for the same GPU memory budget, and it
-attends the whole resident sequence on every step rather than a window.
+pool is sized for `max_batch_size` rings and its footprint is independent of context length. With
+automatic sizing, that pool is allocated before the target measures free memory. When `num_blocks`
+is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
+by that baseline target block count before either cache pool is allocated.
+A windowed DFlash 2 model with hybrid target prefix caching reserves one
+additional ring's bytes for its optional checkpoint, independent of context
+length. Readers lease the immutable snapshot through admission; replacing it
+cannot overwrite an in-flight adopter. If the budget cannot leave at least one
+target paged block after the auxiliary pool and snapshot reservation, the
+optional checkpoint is disabled and the existing target-only prefix behavior
+is retained. A full-attention block
+drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
+query-spill bytes are charged against the same budget before target capacity is selected, using the
+cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same
+layer geometry as the target roughly halves the target's paged-cache capacity for the same GPU
+memory budget, and it attends the whole resident sequence on every step rather than a window.
 
 Both pools are only sufficient while at most `max_batch_size` requests are tracked. A request denied
-cache blocks at its join point is skipped for the rest of its life and decodes without block drafts;
+cache blocks at its join point is skipped until rewind or close and decodes without block drafts;
 the drafter keeps serving requests that already hold blocks. This makes `max_batch_size` the
 drafter's service-capacity limit across both active and idle long-lived requests, not merely the
 per-step scheduler limit. `dflash2_admission_misses` reports requests denied cache blocks because
 that capacity was occupied. A tracked request remains part of this capacity while a sampled turn is
 ingest-only, because retaining its cache is what lets a later greedy turn resume drafting.
+Rewind releases any tracked DFlash/DSpark state, including its cache blocks. On replay, a request
+that was previously sampled or admission-denied can try to join again if its new position-zero
+step is draft-eligible and capacity is available. A nonzero-position hit also joins a windowed
+DFlash 2 drafter when its exact target boundary still has a draft checkpoint and a free ring.
+Otherwise it remains target-only; rewind does not guarantee renewed drafting.
 
 ## Backpressure and fairness
 
@@ -1586,6 +1875,13 @@ single-request batch remains resident. The per-turn generated-token budget and t
 turn policy both apply on this path, although static execution does not use the dynamic
 reservation/checkpoint transaction. Because it cannot stage, roll back, or replay, static admission
 rejects stop strings and a per-turn seed before mutating the Request.
+
+`RewindToStartOfTurn()` is supported for a sole resident static Request. It destroys that one-row
+contiguous cache allocation, retains the prefix before the named Turn, and lets the next
+`BeginTurn()` allocate a fresh static batch and replay that prefix with the new input. Rewind is
+rejected when two or more rows remain resident because releasing the shared allocation would also
+destroy peers' continuation state. A logically closed peer remains resident until the static batch
+recycles and therefore can temporarily keep another completed Request from rewinding.
 
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
 A closed Request that is already resident in a static batch nevertheless remains part of that
@@ -1671,6 +1967,7 @@ The document needs review when a change affects any of the following:
 - Admission order, fairness, preemption, or prefill chunking.
 - Batch planning or packed token layout.
 - Cache block accounting, reservation, commit, release, or eviction.
+- Paged cache buffer ownership, per-block byte accounting, or input/output aliasing, including the per-token quantized scale caches.
 - Model inputs required by paged attention.
 - Sampling, logits processing, or random-state ownership.
 - Transaction checkpoints, rollback, failure classification, or commit ordering.
@@ -1679,4 +1976,4 @@ The document needs review when a change affects any of the following:
 
 Prefer describing current behavior directly. If a design is proposed but not implemented, label it clearly as future work or keep it in a separate design document. Remove or revise statements that stop matching the code.
 
-Tests under `test/cpp/engine/` provide focused coverage for scheduler planning, paged-cache resources, request and cache invariants, transaction rollback, fatal failures, and Engine-event draining. When behavior changes, update both the tests and this document so they continue to describe the same contract.
+Tests under `test/cpp/engine/` provide focused coverage for scheduler planning, paged-cache resources, per-token scale-cache validation, sizing, and input/output aliasing, request and cache invariants, transaction rollback, fatal failures, and Engine-event draining. When behavior changes, update both the tests and this document so they continue to describe the same contract.
