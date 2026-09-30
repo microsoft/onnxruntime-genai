@@ -171,15 +171,14 @@ bool BuildValueImpl(
         *out = nullptr;
         return true;
       }
-      CString ckey{env, static_cast<jstring>(key)};
-      if (ThrowIfError(env, OgaStructuredValueObjectAppend(*out, ckey, child.value))) {
-        OgaDestroyStructuredValue(*out);
-        *out = nullptr;
-        return true;
+      {
+        CString ckey{env, static_cast<jstring>(key)};
+        if (ThrowIfError(env, OgaStructuredValueObjectAppend(*out, ckey, child.value))) {
+          OgaDestroyStructuredValue(*out);
+          *out = nullptr;
+          return true;
+        }
       }
-      env->DeleteLocalRef(entry);
-      env->DeleteLocalRef(key);
-      env->DeleteLocalRef(value);
     }
     return false;
   }
@@ -290,8 +289,10 @@ std::vector<std::string> Providers(JNIEnv* env, jobjectArray providers) {
       ThrowException(env, "providers cannot contain null");
       return {};
     }
-    CString text{env, item};
-    result.emplace_back(text.cstr);
+    {
+      CString text{env, item};
+      result.emplace_back(text.cstr);
+    }
     env->DeleteLocalRef(item);
   }
   return result;

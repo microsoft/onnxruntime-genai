@@ -47,7 +47,9 @@ Cycles are rejected and nesting is limited to 128 containers; repeated
 references in separate non-cyclic branches remain valid.
 
 ```js
-const { RankingSession } = require('onnxruntime-genai-non-generative');
+const packageName =
+  `onnxruntime-genai-non-generative-${process.platform}-${process.arch}`;
+const { RankingSession } = require(packageName);
 const usingSession = new RankingSession('/models/clm', ['cpu']);
 const result = usingSession.run({
   state: { weather: 'rain' },

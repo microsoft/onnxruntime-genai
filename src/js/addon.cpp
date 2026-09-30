@@ -7,8 +7,10 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -18,6 +20,84 @@ namespace {
 
 constexpr int64_t kMaxSafeInteger = 9007199254740991LL;
 constexpr size_t kMaxStructuredDepth = 128;
+
+class NativeWrapper;
+
+struct EnvironmentState {
+  explicit EnvironmentState(napi_env value) : env(value) {}
+  napi_env env;
+  std::mutex mutex;
+  std::vector<NativeWrapper*> wrappers;
+  bool closing{};
+};
+
+struct ProcessState {
+  std::mutex mutex;
+  std::unordered_map<napi_env, std::unique_ptr<EnvironmentState>> environments;
+};
+
+ProcessState& GetProcessState() {
+  static auto* state = new ProcessState();
+  return *state;
+}
+
+class NativeWrapper {
+ public:
+  virtual ~NativeWrapper() = default;
+
+ protected:
+  void Register(Napi::Env env) {
+    auto& process = GetProcessState();
+    std::lock_guard process_lock(process.mutex);
+    const auto found = process.environments.find(env);
+    if (found == process.environments.end()) {
+      throw Napi::Error::New(env, "Node addon environment is shutting down");
+    }
+    state_ = found->second.get();
+    std::lock_guard environment_lock(state_->mutex);
+    if (state_->closing) {
+      state_ = nullptr;
+      throw Napi::Error::New(env, "Node addon environment is shutting down");
+    }
+    state_->wrappers.push_back(this);
+  }
+
+  void Unregister() noexcept {
+    if (!state_) return;
+    std::lock_guard lock(state_->mutex);
+    const auto found =
+        std::find(state_->wrappers.begin(), state_->wrappers.end(), this);
+    if (found != state_->wrappers.end()) state_->wrappers.erase(found);
+    state_ = nullptr;
+  }
+
+ private:
+  friend void CleanupEnvironment(void* data);
+  virtual void CloseNative() noexcept = 0;
+
+  void CleanupForEnvironment() noexcept {
+    state_ = nullptr;
+    CloseNative();
+  }
+
+  EnvironmentState* state_{};
+};
+
+void CleanupEnvironment(void* data) {
+  auto* environment = static_cast<EnvironmentState*>(data);
+  std::vector<NativeWrapper*> wrappers;
+  {
+    std::lock_guard lock(environment->mutex);
+    environment->closing = true;
+    wrappers.swap(environment->wrappers);
+  }
+  for (auto* wrapper : wrappers) wrapper->CleanupForEnvironment();
+
+  auto& process = GetProcessState();
+  std::lock_guard lock(process.mutex);
+  process.environments.erase(environment->env);
+  if (process.environments.empty()) OgaShutdown();
+}
 
 void Check(Napi::Env env, OgaResult* result) {
   if (!result) return;
@@ -506,7 +586,8 @@ Napi::Object ReadRankingResult(Napi::Env env, const OgaRankingResultHandle* resu
   return output;
 }
 
-class DirectoryTokenizer : public Napi::ObjectWrap<DirectoryTokenizer> {
+class DirectoryTokenizer : public Napi::ObjectWrap<DirectoryTokenizer>,
+                           public NativeWrapper {
  public:
   static Napi::Function Define(Napi::Env env) {
     return DefineClass(env, "DirectoryTokenizer", {
@@ -524,14 +605,25 @@ class DirectoryTokenizer : public Napi::ObjectWrap<DirectoryTokenizer> {
     }
     const std::string path = StringArgument(env, info[0], "packagePath");
     Check(env, OgaCreateDirectoryTokenizer(path.c_str(), &handle_));
+    try {
+      Register(env);
+    } catch (...) {
+      OgaDestroyDirectoryTokenizer(std::exchange(handle_, nullptr));
+      throw;
+    }
   }
 
   ~DirectoryTokenizer() override {
+    CloseNative();
+    Unregister();
+  }
+
+ private:
+  void CloseNative() noexcept override {
     std::lock_guard<std::mutex> lock(mutex_);
     OgaDestroyDirectoryTokenizer(std::exchange(handle_, nullptr));
   }
 
- private:
   OgaDirectoryTokenizer* RequireOpen(Napi::Env env) {
     if (!handle_) throw Napi::Error::New(env, "DirectoryTokenizer is closed");
     return handle_;
@@ -567,15 +659,15 @@ class DirectoryTokenizer : public Napi::ObjectWrap<DirectoryTokenizer> {
   }
 
   void Close(const Napi::CallbackInfo&) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    OgaDestroyDirectoryTokenizer(std::exchange(handle_, nullptr));
+    CloseNative();
   }
 
   std::mutex mutex_;
   OgaDirectoryTokenizer* handle_{};
 };
 
-class RankingSession : public Napi::ObjectWrap<RankingSession> {
+class RankingSession : public Napi::ObjectWrap<RankingSession>,
+                       public NativeWrapper {
  public:
   static Napi::Function Define(Napi::Env env) {
     return DefineClass(env, "RankingSession", {
@@ -599,14 +691,25 @@ class RankingSession : public Napi::ObjectWrap<RankingSession> {
     const auto pointers = ProviderPointers(providers);
     Check(env, OgaCreateRankingSession(
                    path.c_str(), pointers.data(), pointers.size(), &handle_));
+    try {
+      Register(env);
+    } catch (...) {
+      OgaDestroyRankingSession(std::exchange(handle_, nullptr));
+      throw;
+    }
   }
 
   ~RankingSession() override {
+    CloseNative();
+    Unregister();
+  }
+
+ private:
+  void CloseNative() noexcept override {
     std::lock_guard<std::mutex> lock(mutex_);
     OgaDestroyRankingSession(std::exchange(handle_, nullptr));
   }
 
- private:
   OgaRankingSessionHandle* RequireOpen(Napi::Env env) {
     if (!handle_) throw Napi::Error::New(env, "RankingSession is closed");
     return handle_;
@@ -661,15 +764,15 @@ class RankingSession : public Napi::ObjectWrap<RankingSession> {
   }
 
   void Close(const Napi::CallbackInfo&) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    OgaDestroyRankingSession(std::exchange(handle_, nullptr));
+    CloseNative();
   }
 
   std::mutex mutex_;
   OgaRankingSessionHandle* handle_{};
 };
 
-class DecisionSession : public Napi::ObjectWrap<DecisionSession> {
+class DecisionSession : public Napi::ObjectWrap<DecisionSession>,
+                        public NativeWrapper {
  public:
   static Napi::Function Define(Napi::Env env) {
     return DefineClass(env, "DecisionSession", {
@@ -698,14 +801,25 @@ class DecisionSession : public Napi::ObjectWrap<DecisionSession> {
     const auto pointers = ProviderPointers(providers);
     Check(env, OgaCreateDecisionSession(
                    path.c_str(), pointers.data(), pointers.size(), &handle_));
+    try {
+      Register(env);
+    } catch (...) {
+      OgaDestroyDecisionSession(std::exchange(handle_, nullptr));
+      throw;
+    }
   }
 
   ~DecisionSession() override {
+    CloseNative();
+    Unregister();
+  }
+
+ private:
+  void CloseNative() noexcept override {
     std::lock_guard<std::mutex> lock(mutex_);
     OgaDestroyDecisionSession(std::exchange(handle_, nullptr));
   }
 
- private:
   OgaDecisionSessionHandle* RequireOpen(Napi::Env env) {
     if (!handle_) throw Napi::Error::New(env, "DecisionSession is closed");
     return handle_;
@@ -814,10 +928,7 @@ class DecisionSession : public Napi::ObjectWrap<DecisionSession> {
     return output;
   }
 
-  void Close(const Napi::CallbackInfo&) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    OgaDestroyDecisionSession(std::exchange(handle_, nullptr));
-  }
+  void Close(const Napi::CallbackInfo&) { CloseNative(); }
 
   std::mutex mutex_;
   OgaDecisionSessionHandle* handle_{};
@@ -831,6 +942,20 @@ Napi::Value TestRoundTrip(const Napi::CallbackInfo& info) {
 }
 
 Napi::Object Initialize(Napi::Env env, Napi::Object exports) {
+  auto state = std::make_unique<EnvironmentState>(env);
+  auto* state_pointer = state.get();
+  {
+    auto& process = GetProcessState();
+    std::lock_guard lock(process.mutex);
+    process.environments.emplace(env, std::move(state));
+  }
+  if (napi_add_env_cleanup_hook(env, CleanupEnvironment, state_pointer) !=
+      napi_ok) {
+    auto& process = GetProcessState();
+    std::lock_guard lock(process.mutex);
+    process.environments.erase(env);
+    throw Napi::Error::New(env, "Failed to register Node addon cleanup");
+  }
   exports.Set("DirectoryTokenizer", DirectoryTokenizer::Define(env));
   exports.Set("RankingSession", RankingSession::Define(env));
   exports.Set("DecisionSession", DecisionSession::Define(env));

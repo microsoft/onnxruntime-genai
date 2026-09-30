@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
+const { Worker } = require('node:worker_threads');
 const {
   DirectoryTokenizer,
   RankingSession,
@@ -145,7 +146,7 @@ test(
 test(
   'opt-in KEV lifecycle, prefix reuse and tokenizer',
   { skip: !process.env.ORTGENAI_TEST_KEV_PACKAGE },
-  () => {
+  async () => {
   const packagePath = process.env.ORTGENAI_TEST_KEV_PACKAGE;
   const tokenizer = new DirectoryTokenizer(packagePath);
   assert.ok(tokenizer.encode('rain') instanceof Int32Array);
@@ -161,6 +162,34 @@ test(
   session.setPrefixCacheCapacity(2, 1024 * 1024);
   assert.equal(session.prefixCacheStats.entryCapacity, 2);
   assert.equal(typeof session.prefixReuseStats.prefixRuns, 'bigint');
+  const modulePath = path.resolve(__dirname, '..');
+  await new Promise((resolve, reject) => {
+    let ready = false;
+    const worker = new Worker(
+      `
+        const { parentPort, workerData } = require('node:worker_threads');
+        const { DecisionSession } = require(workerData.modulePath);
+        new DecisionSession(workerData.packagePath, ['cpu']);
+        parentPort.postMessage('ready');
+      `,
+      {
+        eval: true,
+        workerData: { modulePath, packagePath },
+      },
+    );
+    worker.on('message', (message) => {
+      ready = message === 'ready';
+    });
+    worker.on('error', reject);
+    worker.on('exit', (code) => {
+      if (code !== 0 || !ready) {
+        reject(new Error(`worker cleanup failed: code=${code}, ready=${ready}`));
+      } else {
+        resolve();
+      }
+    });
+  });
+  assert.ok(tokenizer.encode('after worker cleanup') instanceof Int32Array);
   session.close();
   tokenizer.close();
   assert.throws(() => tokenizer.encode('rain'), /closed/);
