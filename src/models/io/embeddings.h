@@ -27,6 +27,10 @@ struct Embeddings {
   // when the consuming session runs on a device this session cannot write to. No-op otherwise.
   void CopyToConsumer();
 
+  // Output mode only. Waits for the last CopyToConsumer upload, which may still be reading the host
+  // mirror. Call it before this session runs, since the run rewrites the mirror.
+  void WaitForUpload();
+
   // Prefill chunking support (input mode only): temporarily replaces the input embeddings
   // tensor with a non-owning view of the [offset, offset + length) slice along the sequence
   // dimension, so a long prompt can be fed to the decoder in several smaller runs.
@@ -58,7 +62,7 @@ struct Embeddings {
   DeviceInterface* consumer_device_{};
   DeviceSpan<uint8_t> consumer_bytes_;
   std::unique_ptr<OrtValue> host_view_;
-  bool upload_pending_{};  // The last upload may still be reading the mirror
+  DeviceInterface* upload_device_{};  // Set while the last upload may still be reading the mirror
 
   size_t index_{};
 };

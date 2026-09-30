@@ -99,13 +99,6 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
   OrtValue* consumer = other.state_.inputs_[other.index_];
   auto& consumer_device = *other.state_.p_session_device_inputs_;
 
-  // This session is about to rewrite the mirror that the last upload reads from. The wait is here
-  // rather than after the upload, so that it does not hold back the consumer's run.
-  if (upload_pending_) {
-    consumer_device_->Synchronize();
-    upload_pending_ = false;
-  }
-
   if (SessionCanAccess(*state_.p_session_device_, consumer_device)) {
     // Share the input embeddings OrtValue* from other with the output embedding for this.
     consumer_ = nullptr;
@@ -138,10 +131,18 @@ void Embeddings::CopyToConsumer() {
   if (!consumer_ || consumer_bytes_.empty())
     return;
 
-  // Queued on the consumer device's stream ahead of the consumer's run. ReuseEmbeddingsBuffer waits
-  // for it before the mirror is written again.
+  // Queued on the consumer device's stream ahead of the consumer's run. Nothing waits for it here,
+  // so that it does not hold back that run; WaitForUpload waits before the mirror is written again.
   consumer_bytes_.CopyCpuToDevice();
-  upload_pending_ = true;
+  upload_device_ = consumer_device_;
+}
+
+void Embeddings::WaitForUpload() {
+  if (!upload_device_)
+    return;
+
+  upload_device_->Synchronize();
+  upload_device_ = nullptr;
 }
 
 }  // namespace Generators
