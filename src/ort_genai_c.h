@@ -93,8 +93,8 @@ typedef struct OgaTokenMetadataCoreConfig OgaTokenMetadataCoreConfig;
 
 /** Half-open [start, stop) interval in absolute acoustic frames. */
 typedef struct OgaTokenMetadataAcousticFrameInterval {
-    int64_t start;
-    int64_t stop;
+  int64_t start;
+  int64_t stop;
 } OgaTokenMetadataAcousticFrameInterval;
 
 /** One emitted token with an optional acoustic interval stored by value.
@@ -102,26 +102,26 @@ typedef struct OgaTokenMetadataAcousticFrameInterval {
  * A zero presence field means timing is unavailable or disabled.
  */
 typedef struct OgaTokenMetadataInput {
-    int32_t token_id;
-    int32_t has_token_acoustic_frame_interval;
-    OgaTokenMetadataAcousticFrameInterval token_acoustic_frame_interval;
+  int32_t token_id;
+  int32_t has_token_acoustic_frame_interval;
+  OgaTokenMetadataAcousticFrameInterval token_acoustic_frame_interval;
 } OgaTokenMetadataInput;
 
 /** Completed word or segment with its text, frame bounds, and times in seconds. */
 typedef struct OgaTokenMetadataTimestampRecord {
-    const char* text;
-    int64_t start_frame;
-    int64_t stop_frame;
-    double start_time;
-    double stop_time;
+  const char* text;
+  int64_t start_frame;
+  int64_t stop_frame;
+  double start_time;
+  double stop_time;
 } OgaTokenMetadataTimestampRecord;
 
 /** Word and segment events completed by the current decode/finalize call, not cumulative history. */
 typedef struct OgaTokenMetadataTimestamp {
-    const OgaTokenMetadataTimestampRecord* words;
-    size_t word_count;
-    const OgaTokenMetadataTimestampRecord* segments;
-    size_t segment_count;
+  const OgaTokenMetadataTimestampRecord* words;
+  size_t word_count;
+  const OgaTokenMetadataTimestampRecord* segments;
+  size_t segment_count;
 } OgaTokenMetadataTimestamp;
 
 /** Decoded text and optional timestamp events from one decode/finalize operation.
@@ -129,8 +129,8 @@ typedef struct OgaTokenMetadataTimestamp {
  * Feature data is NULL when disabled. Read fields directly; do not free these pointers.
  */
 typedef struct OgaTokenMetadataOutput {
-    const char* text;
-    const OgaTokenMetadataTimestamp* timestampMetadata;
+  const char* text;
+  const OgaTokenMetadataTimestamp* timestampMetadata;
 } OgaTokenMetadataOutput;
 
 /**

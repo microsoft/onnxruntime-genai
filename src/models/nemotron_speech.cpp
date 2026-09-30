@@ -676,10 +676,10 @@ void NemotronSpeechState::StepToken() {
     prediction_state_->outputs_[2] = nullptr;
 
     const int64_t token_frame = timestamps_enabled_
-                    ? GetNemotronGlobalFrame(chunk_start_sample_, time_step_,
-                                  nemotron_config_.hop_length,
-                                  nemotron_config_.subsampling_factor)
-                    : 0;
+                                    ? GetNemotronGlobalFrame(chunk_start_sample_, time_step_,
+                                                             nemotron_config_.hop_length,
+                                                             nemotron_config_.subsampling_factor)
+                                    : 0;
 
     symbol_step_++;
     if (symbol_step_ >= nemotron_config_.max_symbols_per_step) {

@@ -602,11 +602,16 @@ struct TimestampMetadataConfig_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "level") {
       const auto level = JSON::Get<std::string_view>(value);
-      if (level == "off") config_.level = Config::TimestampLevel::Off;
-      else if (level == "word") config_.level = Config::TimestampLevel::Word;
-      else if (level == "segment") config_.level = Config::TimestampLevel::Segment;
-      else if (level == "all") config_.level = Config::TimestampLevel::All;
-      else throw std::runtime_error("Timestamp level must be one of: off, word, segment, all");
+      if (level == "off")
+        config_.level = Config::TimestampLevel::Off;
+      else if (level == "word")
+        config_.level = Config::TimestampLevel::Word;
+      else if (level == "segment")
+        config_.level = Config::TimestampLevel::Segment;
+      else if (level == "all")
+        config_.level = Config::TimestampLevel::All;
+      else
+        throw std::runtime_error("Timestamp level must be one of: off, word, segment, all");
     } else if (name == "segment_gap_threshold_seconds") {
       if (std::holds_alternative<std::nullptr_t>(value)) {
         config_.segment_gap_threshold_seconds.reset();

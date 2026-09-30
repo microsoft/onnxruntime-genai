@@ -527,7 +527,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            pybind11::arg("enable_ff_tokens") = false)
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
-    pybind11::class_<OgaTokenMetadataCoreConfig>(m, "TokenMetadataCoreConfig", "Metadata options copied when a tokenizer stream creates its state.")
+  pybind11::class_<OgaTokenMetadataCoreConfig>(m, "TokenMetadataCoreConfig", "Metadata options copied when a tokenizer stream creates its state.")
       .def(pybind11::init([]() { return OgaTokenMetadataCoreConfig::Create(); }))
       .def("overlay", &OgaTokenMetadataCoreConfig::Overlay);
 
@@ -542,12 +542,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("create_metadata_core_state_using_tokenizer_config", &OgaTokenizerStream::CreateMetadataCoreStateUsingTokenizerConfig)
       .def("create_metadata_core_state", &OgaTokenizerStream::CreateMetadataCoreState, pybind11::arg("config"))
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); })
-      .def("decode_with_metadata", [](OgaTokenizerStream& stream, const OgaTokenMetadataInput& token) {
-        return ToMetadata(stream.DecodeWithMetadata(token));
-      }, pybind11::arg("token"))
-      .def("finalize_metadata", [](OgaTokenizerStream& stream) {
-        return ToMetadata(stream.FinalizeMetadata());
-      })
+      .def("decode_with_metadata", [](OgaTokenizerStream& stream, const OgaTokenMetadataInput& token) { return ToMetadata(stream.DecodeWithMetadata(token)); }, pybind11::arg("token"))
+      .def("finalize_metadata", [](OgaTokenizerStream& stream) { return ToMetadata(stream.FinalizeMetadata()); })
       .def("reset", &OgaTokenizerStream::Reset);
 
   pybind11::class_<OgaNamedTensors>(m, "NamedTensors")

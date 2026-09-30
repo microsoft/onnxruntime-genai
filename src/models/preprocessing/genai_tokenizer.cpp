@@ -145,11 +145,11 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 3));
 
   metadata_config_.timestamps = TimestampTokenizerConfig{timestamps_enabled ? config.model.timestamp_level : Config::TimestampLevel::Off,
-                                                config.model.segment_separators,
-                                                config.model.segment_gap_threshold_seconds,
-                                                config.model.sample_rate,
-                                                config.model.hop_length,
-                                                config.model.subsampling_factor};
+                                                         config.model.segment_separators,
+                                                         config.model.segment_gap_threshold_seconds,
+                                                         config.model.sample_rate,
+                                                         config.model.hop_length,
+                                                         config.model.subsampling_factor};
 
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback.
