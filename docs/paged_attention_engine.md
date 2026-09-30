@@ -855,7 +855,7 @@ For eligible decode shapes, the decoder may capture or replay a CUDA graph. Pref
 `ScheduledRequests::GenerateNextTokensForTransaction()` then:
 
 1. Applies each request's logits processors to its own logits row.
-2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path.
+2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path. A greedy request that verified drafts this step skips sampling: drafted requests run without logits processors, so the argmax that verification already computed for the row after the accepted prefix is committed directly.
 3. Runs the per-request sequence and EOS handling.
 4. Produces a `RequestStepResult` for each request.
 
@@ -1551,11 +1551,16 @@ and then publish them at a single infallible boundary:
   cannot overflow a generation, and that no row regresses below its slot's
   `committed_tokens`.
 - **`PrepareCommit()`** is the fallible device-completion phase: it re-validates,
-  copies fallback outputs into the **inactive** bank, or replays a partially accepted
-  compact update over a direct output, and synchronizes. A fully accepted direct
+  copies fallback outputs into the **inactive** bank, and synchronizes. A partially
+  accepted compact update over a direct output is replayed into the inactive bank by
+  the pool's next operation (`Reserve()`, `CapturePrefixCheckpoint()`, or the next
+  `PrepareCommit()`), which enqueues it ahead of every later reader of the banks on
+  the same stream, so the device runs the replay while the host prepares the next
+  step; discarding the prepared reservation drops it. A fully accepted direct
   output needs no state copy. The active (visible) bank is never touched, so a
   failure leaves committed state exactly as it was; it drains the device and marks
-  the pool unhealthy because the inactive banks may be left partially written. The
+  the pool unhealthy because the inactive banks may be left partially written. A
+  deferred replay that fails to launch also marks the pool unhealthy. The
   reservation becomes `Prepared`.
 - **`PublishCommit()`** is `noexcept` and performs no fallible or device work: it
   flips each slot to its freshly written bank, advances `state_generation`, sets
