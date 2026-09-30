@@ -855,6 +855,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
             gate=shared_gate,
             shape=["batch_size", "sequence_length", self.hidden_size],
         )
+        self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
         return f"{combine_name}/output_0"
 
     def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):

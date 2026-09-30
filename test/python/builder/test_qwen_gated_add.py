@@ -1,11 +1,10 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 import onnx_ir as ir
 import pytest
-
 from models.builders.qwen import Qwen35MoETextModel
 
 
@@ -45,8 +44,9 @@ def test_moe_model_emits_one_gated_add(ep):
     assert kwargs["domain"] == "com.microsoft"
 
 
-def test_moe_model_emits_portable_gated_add_for_dml():
-    model = _make_model("dml")
+@pytest.mark.parametrize("ep", ["dml", "trt-rtx"])
+def test_moe_model_emits_portable_gated_add(ep):
+    model = _make_model(ep)
     name = "/model/layers.3/moe/GatedAdd"
     shape = ["batch_size", "sequence_length", model.hidden_size]
 
@@ -60,3 +60,22 @@ def test_moe_model_emits_portable_gated_add_for_dml():
     _, args, kwargs = model.calls[1]
     assert args == (name, ["routed", f"{name}/Mul/output_0"], model.io_dtype)
     assert kwargs["shape"] == shape
+
+
+@pytest.mark.parametrize("ep", ["cuda", "trt-rtx"])
+def test_moe_updates_decoder_residual(ep):
+    model = _make_model(ep)
+    model.make_ep_expansions_init()
+    model.moe_attrs = {"op_type": "QMoE"}
+    model.layernorm_attrs = {"skip_input": "attention_output"}
+    model.make_moe_preprocessing = lambda *args: None
+    model.make_moe_router = lambda *args: None
+    model.make_moe_op = lambda *args, **kwargs: None
+    model.make_shared_expert = lambda *args: ("shared", "gate")
+    moe = SimpleNamespace(shared_expert=object(), shared_expert_gate=object())
+
+    # make_moe ignores the subgraph's return value. The next decoder layer reads
+    # skip_input, which must include the routed and gated shared experts.
+    model.make_moe(3, moe, "normalized_hidden_states")
+
+    assert model.layernorm_attrs["skip_input"] == "/model/layers.3/moe/GatedAdd/output_0"
