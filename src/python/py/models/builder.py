@@ -166,6 +166,7 @@ def check_extra_options(
         "use_cuda_bf16",
         "shared_embeddings",
         "hf_remote",
+        "fuse_qkv",
         "disable_qkv_fusion",
         "fuse_qk_norm_gqa",
         "prune_lm_head",
@@ -187,6 +188,11 @@ def check_extra_options(
                 extra_options[key] = True
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
+
+    if "disable_qkv_fusion" in extra_options:
+        print("WARNING: 'disable_qkv_fusion' is deprecated. Use 'fuse_qkv=false' instead.")
+        if "fuse_qkv" not in extra_options:
+            extra_options["fuse_qkv"] = not extra_options["disable_qkv_fusion"]
 
     if "state_window" in extra_options:
         try:
@@ -1166,8 +1172,11 @@ def get_args():
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
                     An optional "qmax" records the divisor the file was calibrated with (128 for int8, 8 for int4, 448 for fp8);
                     the builder then rescales to the requested scheme, so one file can serve several bit widths.
-                disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
-                    If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
+                fuse_qkv = Fuse the model's Q, K, and V projections. Default is true.
+                    Set to false to keep separate projections. Fusion is automatically disabled for unsupported EPs
+                    and incompatible projection or quantization configurations.
+                disable_qkv_fusion = [DEPRECATED] Use 'fuse_qkv=false' instead.
+                    This inverse alias remains supported for compatibility. Default is false.
                 fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.
                     Set to false to keep explicit Q/K normalization nodes instead of passing Q/K norm weights into GroupQueryAttention.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
