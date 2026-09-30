@@ -77,11 +77,13 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   target_link_libraries(cuda_batched_sampler_tests PRIVATE
     onnxruntime-genai-obj
     GTest::gtest
+    cudart
   )
   add_dependencies(cuda_batched_sampler_tests onnxruntime-genai)
   set_target_properties(cuda_batched_sampler_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
     FOLDER "Tests"
+    LINKER_LANGUAGE CUDA
   )
   if(NOT MSVC)
     target_compile_options(cuda_batched_sampler_tests PRIVATE "-fvisibility=hidden")

@@ -31,10 +31,14 @@ after capture. Eager prefill owns its temporary output. DFlash uses its existing
 lookup and host-to-device copies happen before `OrtSession::Run`, outside capture.
 Consequently replay reads updated values at the same device address on every step.
 
-Each target decoder and DFlash workspace retains a pinned host staging allocation,
-reusing it across destination and shape changes until more capacity is needed.
-The workspace synchronizes an outstanding upload before rewriting or releasing
-that memory. This currently uses the device stream synchronization API, not a
+Each target decoder and DFlash workspace stages the lookup in pinned host memory.
+When the device recycles host mirrors only after their upload completes
+(`DeviceInterface::RecyclesHostMirrorsAfterUpload`; CUDA does for mirrors up to
+1 MiB, which covers decode steps), every lookup takes a fresh pooled mirror and
+drops the previous one without waiting for the device. Otherwise the workspace
+retains one allocation, reusing it across destination and shape changes until more
+capacity is needed, and synchronizes an outstanding upload before rewriting or
+releasing that memory. That path uses the device stream synchronization API, not a
 CUDA event; its latency cost must be included in performance measurements.
 DFlash reserves three times the maximum logical embedding-buffer size before
 cache sizing, covering an old buffer and its doubled replacement during growth.
