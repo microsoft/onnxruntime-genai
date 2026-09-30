@@ -992,7 +992,7 @@ void Generator::RewindToLength(size_t new_length) {
   if (!state_->CanRewindTo(new_length))
     throw std::runtime_error(
         "Cannot rewind to " + std::to_string(new_length) +
-        ": this model's KV cache or position inputs do not support rewinding to that length ");
+        ": this model's decoder state does not support rewinding to that length");
   const int64_t rewound_token_count =
       static_cast<int64_t>(current_length - new_length) *
       static_cast<int64_t>(search_->params_->BatchBeamSize());
