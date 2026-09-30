@@ -259,6 +259,91 @@ PrefixCacheRegistration PrefixCache::Register(
   return {PrefixCacheRegistrationStatus::Indexed, std::move(identity)};
 }
 
+PrefixCacheRegistrationStatus PrefixCache::CheckCheckpointedPrefix(
+    std::span<const std::shared_ptr<Block>> blocks,
+    std::span<const int32_t> tokens,
+    const std::shared_ptr<const BlockIdentity>& parent) {
+  const size_t block_size = block_pool_.BlockSize();
+  if (blocks.empty() || tokens.size() / block_size != blocks.size() ||
+      tokens.size() % block_size != 0) {
+    throw std::invalid_argument("A hybrid prefix publication requires complete blocks.");
+  }
+  uint64_t hash = parent ? parent->hash : RootHash();
+  for (size_t index = 0; index < blocks.size(); ++index) {
+    const auto& block = blocks[index];
+    if (!block || block->HasIdentity() || !block->IsFull() ||
+        block->Capacity() != block_size || !block_pool_.Owns(block)) {
+      throw std::logic_error("A hybrid prefix suffix must contain only private blocks.");
+    }
+    const auto chunk = tokens.subspan(index * block_size, block_size);
+    hash = Hash(hash, chunk);
+    const auto existing = entries_.find(hash);
+    if (existing == entries_.end()) {
+      continue;
+    }
+    const auto& identity = *existing->second.identity;
+    // Beyond the first new block, the parent identity does not exist yet, so any indexed
+    // entry at that hash necessarily belongs to a different physical history.
+    if (index == 0 && identity.parent == parent &&
+        identity.tokens.size() == chunk.size() &&
+        std::equal(identity.tokens.begin(), identity.tokens.end(), chunk.begin())) {
+      ++metrics_.duplicate_registrations;
+      return PrefixCacheRegistrationStatus::Duplicate;
+    }
+    ++metrics_.hash_collisions;
+    return PrefixCacheRegistrationStatus::HashCollision;
+  }
+  return PrefixCacheRegistrationStatus::Indexed;
+}
+
+PrefixCacheRegistration PrefixCache::RegisterCheckpointedPrefix(
+    std::span<const std::shared_ptr<Block>> blocks,
+    std::span<const int32_t> tokens,
+    const std::shared_ptr<const BlockIdentity>& parent,
+    std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint) {
+  if (!checkpoint) {
+    throw std::invalid_argument("A hybrid prefix publication requires a checkpoint.");
+  }
+  const auto status = CheckCheckpointedPrefix(blocks, tokens, parent);
+  if (status != PrefixCacheRegistrationStatus::Indexed) {
+    return {status, nullptr};
+  }
+  const size_t block_size = block_pool_.BlockSize();
+  size_t registered = 0;
+  auto rollback = [&]() noexcept {
+    while (registered != 0) {
+      const auto& block = blocks[--registered];
+      const auto entry = entries_.find(block->IdentityPtr()->hash);
+      if (entry == entries_.end() || entry->second.block != block) {
+        std::terminate();
+      }
+      Evict(entry);
+      --metrics_.registered_blocks;
+    }
+  };
+  auto identity = parent;
+  try {
+    for (size_t index = 0; index < blocks.size(); ++index) {
+      auto result = Register(
+          blocks[index], tokens.subspan(index * block_size, block_size), identity);
+      if (!result.identity) {
+        rollback();
+        return result;
+      }
+      ++registered;
+      identity = std::move(result.identity);
+    }
+    if (!AttachCheckpoint(identity, std::move(checkpoint))) {
+      rollback();
+      return {PrefixCacheRegistrationStatus::CapacityRefused, nullptr};
+    }
+  } catch (...) {
+    rollback();
+    throw;
+  }
+  return {PrefixCacheRegistrationStatus::Indexed, std::move(identity)};
+}
+
 void PrefixCache::RecordAdoption(
     std::span<const std::shared_ptr<Block>> blocks) noexcept {
   if (blocks.empty()) {

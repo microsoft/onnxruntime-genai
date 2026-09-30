@@ -157,8 +157,11 @@ fixed-state checkpoints.
 
 Hybrid prefix caching does not reduce the configured prefill chunk size. A
 checkpoint is attached only when a successful step's committed endpoint is
-block-aligned; paged-only descendants remain indexed but are not adoptable by a
-hybrid request. After adoption, prefill resumes at that checkpoint and may
+block-aligned and a checkpoint row is available. Newly completed blocks remain
+private until that checkpoint can be published with the entire new suffix;
+partial chunks and exhausted checkpoint capacity do not index orphan blocks.
+Failed suffix publication rolls back its new identities without changing the
+request's committed state. After adoption, prefill resumes at that checkpoint and may
 process the full configured chunk, so later checkpoint positions can shift
 relative to the original request's chunk boundaries. A match pins both its
 paged blocks and fixed checkpoint through reservation. The fixed reservation

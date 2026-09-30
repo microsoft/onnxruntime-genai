@@ -3878,6 +3878,126 @@ TEST_F(EngineRunTest, HybridBlockAlignedPromptRetainsLastAdoptableCheckpoint) {
   EXPECT_EQ(warm->ProcessedSequenceLength(), 12);
 }
 
+TEST_F(EngineRunTest, HybridShortPrefixDoesNotStrandLongerCheckpoint) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/8);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 1;
+  batching.num_blocks = 32;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 23> prompt{
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+      14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24};
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    const auto& entry = context.plan->requests.front();
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, static_cast<float>(entry.target_cache_slots - entry.unprocessed_token_count));
+      FillFixedOutputRow(binding, 0, static_cast<float>(entry.target_cache_slots));
+    }
+  });
+  const auto finish = [&](const std::shared_ptr<Request>& request) {
+    EngineEvent event;
+    for (size_t step = 0; step < 8 && !request->IsTurnComplete(); ++step) {
+      event = RunOne(*engine.engine);
+    }
+    EXPECT_TRUE(request->IsTurnComplete());
+    EXPECT_EQ(event.request, request);
+    EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+    return event;
+  };
+
+  auto short_request = CreateRequestWithPrompt(
+      engine.engine, std::span<const int32_t>{prompt}.first(15));
+  EXPECT_EQ(finish(short_request).usage.cached_prompt_tokens, 0u);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 2u);
+  short_request->Close();
+
+  auto long_request = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(finish(long_request).usage.cached_prompt_tokens, 8u);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 4u);
+  long_request->Close();
+
+  auto repeat = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(finish(repeat).usage.cached_prompt_tokens, 16u);
+  const auto metrics = engine.engine->PrefixCacheStats();
+  ASSERT_TRUE(metrics.has_value());
+  EXPECT_EQ(metrics->duplicate_registrations, 0u);
+  EXPECT_EQ(metrics->hash_collisions, 0u);
+  EXPECT_EQ(metrics->retention_refusals, 0u);
+}
+
+TEST_F(EngineRunTest, HybridPartialChunksStayPrivateUntilCheckpointBoundary) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/6);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 1;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 19> prompt{
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+      14, 15, 16, 17, 18, 19, 20};
+  auto source = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(source->ProcessedSequenceLength(), 6);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 0u);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(source->ProcessedSequenceLength(), 12);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 3u);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(source->ProcessedSequenceLength(), 18);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 3u);
+  ASSERT_EQ(RunOne(*engine.engine).request, source);
+  source->Close();
+
+  auto repeat = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  const auto event = RunOne(*engine.engine);
+  EXPECT_EQ(event.request, repeat);
+  EXPECT_EQ(event.usage.cached_prompt_tokens, 12u);
+  EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+}
+
+TEST_F(EngineRunTest, ConcurrentHybridShortAndLongRequestsAllowLaterExtension) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/8);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 2;
+  batching.num_blocks = 32;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 23> prompt{
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+      14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24};
+  auto short_request = CreateRequestWithPrompt(
+      engine.engine, std::span<const int32_t>{prompt}.first(15));
+  auto long_request = CreateRequestWithPrompt(engine.engine, prompt);
+  std::array<EngineEvent, 8> events;
+  for (size_t step = 0; step < 8 && engine.engine->HasPendingRequests(); ++step) {
+    engine.engine->Run(events);
+  }
+  ASSERT_TRUE(short_request->IsTurnComplete());
+  ASSERT_TRUE(long_request->IsTurnComplete());
+  ASSERT_EQ(engine.engine->PrefixCacheStats()->duplicate_registrations, 1u);
+  short_request->Close();
+  long_request->Close();
+
+  for (const size_t expected_cached : {8u, 16u}) {
+    auto repeat = CreateRequestWithPrompt(engine.engine, prompt);
+    EngineEvent event;
+    for (size_t step = 0; step < 8 && !repeat->IsTurnComplete(); ++step) {
+      event = RunOne(*engine.engine);
+    }
+    ASSERT_TRUE(repeat->IsTurnComplete());
+    EXPECT_EQ(event.request, repeat);
+    EXPECT_EQ(event.usage.cached_prompt_tokens, expected_cached);
+    EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+    repeat->Close();
+  }
+}
+
 TEST_F(EngineRunTest, HybridPrefixCacheResumesPartwayThroughConfiguredChunk) {
   model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/8);
   auto& batching = *model_->config_->engine.dynamic_batching;
