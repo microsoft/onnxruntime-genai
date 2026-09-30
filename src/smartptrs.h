@@ -365,8 +365,9 @@ struct DeviceInterface {
   // after an upload never waits for the device, so a caller can take a fresh mirror per upload
   // instead of synchronizing before it reuses one. Keep last for vtable ABI stability.
   virtual bool RecyclesHostMirrorsAfterUpload(size_t /*bytes*/) const { return false; }
-  // True when this interface allocates memory the CPU reads and writes through the tensor's own
-  // pointer, so a CPU session may be handed it directly (see SessionCanAccess).
+  // True when a CPU session may be handed this interface's tensors directly (see SessionCanAccess):
+  // the CPU reads and writes them through their own pointer, and their OrtMemoryInfo names a CPU
+  // device. AMDGPU's pinned inputs fail the second test, since ORT tags them with the GPU.
   // Keep last for vtable ABI stability.
   virtual bool IsHostAccessible() const { return false; }
 };
