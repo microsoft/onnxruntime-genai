@@ -1244,6 +1244,28 @@ struct Dflash2_Element : JSON::Element {
       v_.sliding_window = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "independent_sampling") {
       v_.independent_sampling = JSON::Get<bool>(value);
+      using Proposal = Config::Model::Dflash2::SampledProposal;
+      if (v_.independent_sampling) {
+        v_.sampled_proposal = Proposal::Independent;
+      } else if (v_.sampled_proposal == Proposal::Independent) {
+        v_.sampled_proposal = Proposal::Lattice;
+      }
+    } else if (name == "sampled_proposal") {
+      using Proposal = Config::Model::Dflash2::SampledProposal;
+      const auto proposal = JSON::Get<std::string_view>(value);
+      if (proposal == "none") {
+        v_.sampled_proposal = Proposal::None;
+      } else if (proposal == "greedy_path") {
+        v_.sampled_proposal = Proposal::GreedyPath;
+      } else if (proposal == "independent") {
+        v_.sampled_proposal = Proposal::Independent;
+      } else if (proposal == "lattice") {
+        v_.sampled_proposal = Proposal::Lattice;
+      } else {
+        throw std::out_of_range(
+            "sampled_proposal must be one of none, greedy_path, independent, lattice");
+      }
+      v_.independent_sampling = v_.sampled_proposal == Proposal::Independent;
     } else if (name == "sampling_temperature") {
       const double sampling_temperature = JSON::Get<double>(value);
       if (!std::isfinite(sampling_temperature) || sampling_temperature <= 0.0 ||

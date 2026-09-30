@@ -307,6 +307,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::vector<Dflash2Drafter::Feed> dflash2_feeds_;
   std::vector<std::vector<int32_t>> dflash2_drafts_;
   std::vector<std::vector<TargetTokenSelection>> dflash2_draft_distributions_;
+  std::vector<Dflash2Lattice> dflash2_lattices_;
   std::vector<size_t> dflash2_draft_widths_;
   std::vector<std::pair<Request*, std::mt19937>> dflash2_rng_checkpoints_;
   size_t dflash2_consecutive_failures_{};

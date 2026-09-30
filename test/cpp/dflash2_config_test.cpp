@@ -4,8 +4,10 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <random>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -239,6 +241,95 @@ TEST(Dflash2ConfigTest, ParsesIndependentSamplingOptions) {
   EXPECT_FLOAT_EQ(config.model.dflash2.sampling_temperature, 0.1f);
   EXPECT_FLOAT_EQ(config.model.dflash2.sampling_top_p, 0.95f);
   EXPECT_FLOAT_EQ(config.model.dflash2.sampling_min_p, 0.3f);
+}
+
+TEST(Dflash2ConfigTest, ParsesSampledProposal) {
+  using Proposal = Config::Model::Dflash2::SampledProposal;
+  auto parse = [](std::string_view name, std::string_view options) {
+    const auto root = fs_std::temp_directory_path() / std::string{name};
+    std::error_code error;
+    fs_std::remove_all(root, error);
+    fs_std::create_directories(root);
+    std::ofstream out(root / "genai_config.json", std::ios::binary);
+    out << R"({"model":{"type":"tiny-test-model","vocab_size":128,"context_length":32,)"
+           R"("decoder":{"filename":"model.onnx"},"dflash2":{"filename":"dflash2.onnx",)"
+           R"("num_hidden_layers":1,"num_key_value_heads":2,"head_size":8,"block_size":4,)"
+           R"("num_draft_tokens":3,"selector_top_k":4,"mask_token_id":31,"sliding_window":17)"
+        << options << R"(}},"search":{}})";
+    out.close();
+    return Config(fs::path{root.string()}, "");
+  };
+
+  EXPECT_EQ(parse("ortgenai_dflash_proposal_default", "").model.dflash2.sampled_proposal,
+            Proposal::Lattice);
+  EXPECT_EQ(parse("ortgenai_dflash_proposal_none", R"(,"sampled_proposal":"none")")
+                .model.dflash2.sampled_proposal,
+            Proposal::None);
+  const auto lattice = parse("ortgenai_dflash_proposal_lattice", R"(,"sampled_proposal":"lattice")");
+  EXPECT_EQ(lattice.model.dflash2.sampled_proposal, Proposal::Lattice);
+  EXPECT_FALSE(lattice.model.dflash2.independent_sampling);
+  EXPECT_EQ(parse("ortgenai_dflash_proposal_greedy", R"(,"sampled_proposal":"greedy_path")")
+                .model.dflash2.sampled_proposal,
+            Proposal::GreedyPath);
+  EXPECT_EQ(parse("ortgenai_dflash_proposal_alias", R"(,"independent_sampling":true)")
+                .model.dflash2.sampled_proposal,
+            Proposal::Independent);
+  EXPECT_THROW(parse("ortgenai_dflash_proposal_bad", R"(,"sampled_proposal":"beam")"),
+               std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, LatticeWalkConditionsOnTheSampledPredecessor) {
+  // Step 0 always draws candidate 1. Step 1's row 0 would pick candidate 0 and row 1 candidate 1,
+  // so only a walk that follows the draw lands on 21.
+  Dflash2Lattice lattice;
+  lattice.top_k = 2;
+  lattice.candidate_ids = {10, 11, 20, 21};
+  lattice.scores = {-100.0f, 0.0f, -100.0f, 0.0f,
+                    0.0f, -100.0f, -100.0f, 0.0f};
+  std::mt19937 rng{7};
+  std::vector<int32_t> tokens;
+  std::vector<TargetTokenSelection> distributions;
+  Dflash2SampleLatticePath(lattice, 2, /*temperature=*/1.0f, /*top_k=*/20, /*top_p=*/1.0f, rng,
+                           tokens, distributions);
+  EXPECT_EQ(tokens, (std::vector<int32_t>{11, 21}));
+  ASSERT_EQ(distributions.size(), 2u);
+  EXPECT_EQ(distributions[1].indices.front(), 21);
+  EXPECT_NEAR(distributions[1].probs.front(), 1.0f, 1e-6f);
+
+  Dflash2SampleLatticePath(lattice, 1, 1.0f, 20, 1.0f, rng, tokens, distributions);
+  EXPECT_EQ(tokens, (std::vector<int32_t>{11}));
+}
+
+TEST(Dflash2ConfigTest, LatticeWalkTruncatesLikeTheTarget) {
+  Dflash2Lattice lattice;
+  lattice.top_k = 4;
+  lattice.candidate_ids = {10, 11, 12, 13};
+  lattice.scores.assign(16, 0.0f);
+  const std::array<float, 4> row{2.0f, 4.0f, 1.0f, 3.0f};
+  std::copy(row.begin(), row.end(), lattice.scores.begin());
+  std::mt19937 rng{3};
+  std::vector<int32_t> tokens;
+  std::vector<TargetTokenSelection> distributions;
+
+  // Top-k 3, then top-p 0.7 keeps the two leading candidates, renormalised at temperature 1.
+  Dflash2SampleLatticePath(lattice, 1, 1.0f, 3, 0.7f, rng, tokens, distributions);
+  ASSERT_EQ(distributions.size(), 1u);
+  EXPECT_EQ(distributions[0].indices, (std::vector<int32_t>{11, 13}));
+  EXPECT_NEAR(distributions[0].probs[0], 0.7310586f, 1e-6f);
+  EXPECT_NEAR(distributions[0].probs[1], 0.2689414f, 1e-6f);
+
+  // Temperature 2 on the full row, with the sample frequencies matching the recorded q.
+  std::array<int, 4> counts{};
+  constexpr int kDraws = 20000;
+  for (int i = 0; i < kDraws; ++i) {
+    Dflash2SampleLatticePath(lattice, 1, 2.0f, 0, 1.0f, rng, tokens, distributions);
+    ++counts[static_cast<size_t>(tokens[0] - 10)];
+  }
+  ASSERT_EQ(distributions[0].indices, (std::vector<int32_t>{11, 13, 10, 12}));
+  for (size_t i = 0; i < distributions[0].indices.size(); ++i) {
+    const auto token = static_cast<size_t>(distributions[0].indices[i] - 10);
+    EXPECT_NEAR(static_cast<double>(counts[token]) / kDraws, distributions[0].probs[i], 0.015);
+  }
 }
 
 TEST(Dflash2ConfigTest, RejectsSamplingTemperatureOutsideFloatRange) {

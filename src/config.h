@@ -701,6 +701,14 @@ struct Config {
       int selector_top_k{};
       int mask_token_id{};
       int sliding_window{-1};
+      // How a sampled (non-greedy) turn drafts. Greedy turns always walk the lattice greedily.
+      enum class SampledProposal {
+        None,         // Sampled turns decode without block drafts.
+        GreedyPath,   // Greedy lattice path, verified by sampling the target and matching.
+        Independent,  // Each slot sampled from its own proposal; ratio-verified.
+        Lattice,      // Path sampled through the lattice at the turn's policy; ratio-verified.
+      };
+      SampledProposal sampled_proposal{SampledProposal::Lattice};
       bool independent_sampling{};
       float sampling_temperature{0.1f};
       float sampling_top_p{0.95f};

@@ -1790,22 +1790,34 @@ still get them, and the retry budget is therefore spent on real drafter failures
 failures disable the drafter for the Engine, and a proposal contract violation disables it at once.
 `dflash2_failures` and `dflash2_disables` report those events.
 
-Automatic block drafting is greedy-only by default. A request joins on its position-zero step only
-when the current turn is greedy. If a sampled first turn executes that step, eligibility is not
-reconsidered during the same residency and the request decodes without block drafts until rewind
-or close. Once a request
-has joined, later sampled turns continue feeding their committed context into its cache without
-requesting drafts, so a subsequent greedy turn can resume drafting without a cache hole. These
-ingest-only steps still execute the drafter session to preserve that continuity.
+Greedy turns draft the greedy lattice path. How sampled turns draft is set by
+`model.dflash2.sampled_proposal`; every mode preserves the target distribution and they differ only
+in how many drafts the target accepts.
 
-Set `model.dflash2.independent_sampling` to opt sampled turns into the reference DFlash proposal
-contract. Each draft position then samples independently from the drafter's sparse top-k
-distribution, and target verification uses the probability ratio $\min(1, p(x) / q(x))$ with the
-residual distribution after rejection. The drafter distribution defaults to temperature `0.1`,
-top-p `0.95`, and min-p `0.3`; override them with `sampling_temperature`, `sampling_top_p`, and
-`sampling_min_p` in the same section. Min-p truncates only the proposal distribution; verification
-continues to use the target model's canonical distribution for the current turn. The learned-lattice
-greedy path remains unchanged when this option is absent or false.
+| Value | Proposal | Verification |
+|---|---|---|
+| `lattice` (default) | A path sampled through the lattice: each slot draws from the edge-score row its predecessor's draw selects, tempered and truncated with the turn's own temperature, top-k and top-p. | $\min(1, p(x) / q(x))$, residual on rejection. |
+| `greedy_path` | The same greedy lattice path a greedy turn drafts. | Sample the target row and accept while it matches the draft. |
+| `independent` | Each slot samples independently from its own sparse top-k distribution. | $\min(1, p(x) / q(x))$, residual on rejection. |
+| `none` | Sampled turns do not draft. | - |
+
+On Qwen3.8-27B with temperature 1.0, top-k 20 and top-p 0.95 (MMLU-Pro, 800 prompts, batch 1),
+`lattice` averaged 5.01 tokens per target step against 4.78 for `greedy_path` and 4.66 for
+`independent`, and decoded 3.1x faster than `none`.
+
+With `none`, a request joins on its position-zero step only when the current turn is greedy. If a
+sampled first turn executes that step, eligibility is not reconsidered during the same residency
+and the request decodes without block drafts until rewind or close. Once a request has joined,
+later sampled turns continue feeding their committed context into its cache without requesting
+drafts, so a subsequent greedy turn can resume drafting without a cache hole. These ingest-only
+steps still execute the drafter session to preserve that continuity.
+
+`independent_sampling: true` is the older spelling of `sampled_proposal: "independent"`. That
+mode's proposal defaults to temperature `0.1`, top-p `0.95`, and min-p `0.3`; override them with
+`sampling_temperature`, `sampling_top_p`, and `sampling_min_p` in the same section. Min-p
+truncates only the proposal distribution; verification continues to use the target model's
+canonical distribution for the current turn. `lattice` ignores these three settings and uses the
+turn's policy, so $q$ approximates $p$ wherever the drafter is calibrated.
 
 A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
 pool is sized for `max_batch_size` rings and its footprint is independent of context length. With
