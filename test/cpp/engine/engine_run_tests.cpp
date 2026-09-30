@@ -50,6 +50,24 @@ struct EngineRunTestAccess {
     engine.PublishDflash2DraftResults();
   }
 
+  static void PublishLattice(Engine& engine, Request& request, Dflash2Lattice lattice,
+                             size_t width) {
+    engine.dflash2_feeds_.assign(1, {.request = &request});
+    engine.dflash2_drafts_.assign(1, {});
+    engine.dflash2_draft_distributions_.assign(1, {});
+    engine.dflash2_lattices_.assign(1, std::move(lattice));
+    engine.dflash2_draft_widths_.assign(1, width);
+    engine.PublishDflash2DraftResults();
+  }
+
+  static std::vector<int32_t> StagedDrafts(const Request& request) {
+    return request.draft_tokens_;
+  }
+
+  static size_t DraftDistributionCount(const Request& request) {
+    return request.draft_token_distributions_.size();
+  }
+
   static int32_t DraftToken(const Request& request) {
     return request.draft_tokens_.front();
   }
@@ -2487,6 +2505,37 @@ TEST_F(EngineRunTest, SampledRatioSpeculativeRunAcceptsDraftsAndEmitsBonus) {
   ASSERT_EQ(engine.engine->Run(events), 3u);
   EXPECT_EQ(events[0].token, 11);
   EXPECT_EQ(events[1].token, 12);
+  EXPECT_EQ(events[2].token, 25);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().draft_tokens_accepted, 2u);
+}
+
+TEST_F(EngineRunTest, SampledLatticeProposalFollowsItsDrawsAndIsRatioVerified) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto options = SampledTurnOptions();
+  options.temperature = 1.0f;
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10), options);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+
+  // Three steps; the last is cut by the width. Step 1's row 1 is the one a walk that drew 12
+  // reads, and it points at 14 rather than row 0's 13.
+  Dflash2Lattice lattice;
+  lattice.top_k = 2;
+  lattice.candidate_ids = {11, 12, 13, 14, 15, 16};
+  lattice.scores = {-100.0f, 0.0f, -100.0f, 0.0f,
+                    0.0f, -100.0f, -100.0f, 0.0f,
+                    0.0f, -100.0f, 0.0f, -100.0f};
+  EngineRunTestAccess::PublishLattice(*engine.engine, *request, std::move(lattice), 2);
+  EXPECT_EQ(EngineRunTestAccess::StagedDrafts(*request), (std::vector<int32_t>{12, 14}));
+  EXPECT_EQ(EngineRunTestAccess::DraftDistributionCount(*request), 2u);
+
+  engine.executor->SetVerifyRowTokens({12, 14, 25});
+  std::array<EngineEvent, 3> events;
+  ASSERT_EQ(engine.engine->Run(events), 3u);
+  EXPECT_EQ(events[0].token, 12);
+  EXPECT_EQ(events[1].token, 14);
   EXPECT_EQ(events[2].token, 25);
   EXPECT_EQ(engine.engine->GetSpeculativeStats().draft_tokens_accepted, 2u);
 }
