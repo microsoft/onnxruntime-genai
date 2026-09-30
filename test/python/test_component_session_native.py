@@ -281,7 +281,7 @@ def _stateful_kev_package(root: Path) -> Path:
     inputs = [
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
         helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch", "total_sequence"]),
-        helper.make_tensor_value_info("position_ids", TensorProto.INT64, ["batch", "sequence"]),
+        helper.make_tensor_value_info("position_ids", TensorProto.INT64, [3, "batch", "sequence"]),
         helper.make_tensor_value_info("past_key_values.0.key", TensorProto.FLOAT, ["batch", 1, "past_sequence", 1]),
         helper.make_tensor_value_info("past_key_values.0.value", TensorProto.FLOAT, ["batch", 1, "past_sequence", 1]),
         helper.make_tensor_value_info("past_key_values.1.conv_state", TensorProto.FLOAT, ["batch", 1, 1]),
@@ -327,7 +327,7 @@ def _stateful_kev_package(root: Path) -> Path:
     onnx.save(backbone, root / "backbone.onnx")
 
     head_inputs = [
-        helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, [None, 4]),
+        helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, [None, None, 4]),
         helper.make_tensor_value_info("decide_indices", TensorProto.INT64, [None]),
         helper.make_tensor_value_info("option_indices", TensorProto.INT64, [None, None]),
         helper.make_tensor_value_info("option_mask", TensorProto.BOOL, [None, None]),
@@ -335,16 +335,25 @@ def _stateful_kev_package(root: Path) -> Path:
     head = helper.make_model(
         helper.make_graph(
             [
-                helper.make_node("Gather", ["hidden_states", "option_indices"], ["selected"], axis=0),
+                helper.make_node("Unsqueeze", ["option_indices", "axis2"], ["grouped_indices"]),
+                helper.make_node("Shape", ["option_indices"], ["option_shape"]),
+                helper.make_node("Concat", ["option_shape", "hidden_width"], ["gather_shape"], axis=0),
+                helper.make_node("Expand", ["grouped_indices", "gather_shape"], ["expanded_indices"]),
+                helper.make_node("GatherElements", ["hidden_states", "expanded_indices"], ["selected"], axis=1),
                 helper.make_node("ReduceMean", ["selected", "axis2"], ["scores"], keepdims=0),
-                helper.make_node("Softmax", ["scores"], ["probabilities"], axis=1),
+                helper.make_node("Where", ["option_mask", "scores", "masked_score"], ["masked_scores"]),
+                helper.make_node("Softmax", ["masked_scores"], ["probabilities"], axis=1),
             ],
             "stateful_head",
             head_inputs,
             [
                 helper.make_tensor_value_info("probabilities", TensorProto.FLOAT, [None, None]),
             ],
-            [helper.make_tensor("axis2", TensorProto.INT64, [1], [2])],
+            [
+                helper.make_tensor("axis2", TensorProto.INT64, [1], [2]),
+                helper.make_tensor("hidden_width", TensorProto.INT64, [1], [4]),
+                helper.make_tensor("masked_score", TensorProto.FLOAT, [], [-1.0e9]),
+            ],
         ),
         opset_imports=[helper.make_opsetid("", 18)],
     )
