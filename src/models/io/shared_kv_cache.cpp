@@ -15,4 +15,8 @@ void SharedKeyValueCache::RewindTo(size_t index) {
   CheckWindowedKvCacheRewind(windowed_cache_size_, current_length_, index);
 }
 
+bool SharedKeyValueCache::CanRewindTo(size_t index) const {
+  return CanRewindWindowedKvCache(windowed_cache_size_, current_length_, index);
+}
+
 }  // namespace Generators

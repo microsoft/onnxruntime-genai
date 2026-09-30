@@ -992,8 +992,7 @@ void Generator::RewindToLength(size_t new_length) {
   if (!state_->CanRewindTo(new_length))
     throw std::runtime_error(
         "Cannot rewind to " + std::to_string(new_length) +
-        ": no recurrent-state snapshot was captured at that length. Call SnapshotState() at the "
-        "target length first, or rewind to 0.");
+        ": this model's KV cache or position inputs do not support rewinding to that length ");
   const int64_t rewound_token_count =
       static_cast<int64_t>(current_length - new_length) *
       static_cast<int64_t>(search_->params_->BatchBeamSize());

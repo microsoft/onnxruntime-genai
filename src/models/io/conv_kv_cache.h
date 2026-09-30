@@ -16,6 +16,7 @@ struct ConvKeyValueCache : KeyValueCache {
   void Add() override;
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
+  bool CanRewindTo(size_t index) const override { (void)index; return false; }
 
  private:
   template <typename ScoreType>

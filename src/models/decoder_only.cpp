@@ -132,7 +132,9 @@ void DecoderOnly_State::RewindTo(size_t index) {
 }
 
 bool DecoderOnly_State::CanRewindTo(size_t index) const {
-  return !recurrent_state_ || recurrent_state_->CanRewindTo(index);
+  return position_inputs_->CanRewindTo(index) &&
+         (!kv_cache_ || kv_cache_->CanRewindTo(index)) &&
+         (!recurrent_state_ || recurrent_state_->CanRewindTo(index));
 }
 
 void DecoderOnly_State::SnapshotState(size_t position) {
