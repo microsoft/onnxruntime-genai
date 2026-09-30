@@ -5,6 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -97,6 +100,57 @@ TEST(NonGenerativeCApiTest, ComponentInputsOwnSuppliedStorage) {
 TEST(NonGenerativeCApiTest, PrefixStatusCopyValidatesOutputsFirst) {
   ExpectOutError(OgaDecisionSessionCopyPrefixReuseStatus(
       nullptr, nullptr, 0, nullptr));
+}
+
+TEST(NonGenerativeCApiTest, FreeFormRankingAndAccessorsRunWhenConfigured) {
+  const char* root_value = std::getenv("ORT_GENAI_NON_GENERATIVE_TEST_ROOT");
+  if (!root_value || !*root_value)
+    GTEST_SKIP() << "set ORT_GENAI_NON_GENERATIVE_TEST_ROOT";
+  const auto package =
+      std::filesystem::path(root_value) / "clm-v0.1-8b-fp32";
+
+  OgaRankingSessionHandle* session{};
+  OgaFreeFormRankRequestHandle* request{};
+  OgaStructuredValueHandle *state{}, *instructions{}, *candidate{};
+  OgaRankingResultHandle* result{};
+  Check(OgaCreateRankingSession(package.string().c_str(), nullptr, 0, &session));
+  Check(OgaCreateFreeFormRankRequest(&request));
+  Check(OgaCreateStructuredValueNull(&state));
+  Check(OgaCreateStructuredValueString("Choose", &instructions));
+  Check(OgaCreateStructuredValueString("same", &candidate));
+  Check(OgaFreeFormRankRequestSetState(request, state));
+  Check(OgaFreeFormRankRequestSetInstructions(request, instructions));
+  Check(OgaFreeFormRankRequestAddCandidate(request, "first", candidate));
+  Check(OgaFreeFormRankRequestAddCandidate(request, "second", candidate));
+  Check(OgaRankingSessionRank(session, request, &result));
+
+  size_t count{}, rank{};
+  const char* key{};
+  double probability{};
+  const OgaStructuredValueHandle* value{};
+  Check(OgaRankingResultGetCount(result, &count));
+  ASSERT_EQ(count, 2u);
+  Check(OgaRankingResultGetRank(result, 0, &rank));
+  EXPECT_EQ(rank, 1u);
+  Check(OgaRankingResultGetKey(result, 0, &key));
+  EXPECT_STREQ(key, "first");
+  Check(OgaRankingResultGetValue(result, 0, &value));
+  const char* text{};
+  Check(OgaStructuredValueGetString(value, &text));
+  EXPECT_STREQ(text, "same");
+  Check(OgaRankingResultGetProbability(result, 0, &probability));
+  EXPECT_NEAR(probability, 0.5, 1e-6);
+  Check(OgaRankingResultGetKey(result, 1, &key));
+  EXPECT_STREQ(key, "second");
+  Check(OgaRankingResultGetProbability(result, 1, &probability));
+  EXPECT_NEAR(probability, 0.5, 1e-6);
+
+  OgaDestroyRankingResult(result);
+  OgaDestroyStructuredValue(candidate);
+  OgaDestroyStructuredValue(instructions);
+  OgaDestroyStructuredValue(state);
+  OgaDestroyFreeFormRankRequest(request);
+  OgaDestroyRankingSession(session);
 }
 
 TEST(NonGenerativeCApiTest, ErrorsUseOgaResultConvention) {
