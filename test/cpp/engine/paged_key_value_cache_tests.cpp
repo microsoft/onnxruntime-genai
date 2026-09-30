@@ -131,6 +131,22 @@ TEST_F(PagedKeyValueCacheTest, ReportsCommittedBoundaryForResident) {
   EXPECT_THROW(cache_->CommittedSlots(this), StepPlanningConsistencyError);
 }
 
+TEST_F(PagedKeyValueCacheTest, ExposesOnlySealedCommittedPrefixIdentities) {
+  model_->config_->engine.dynamic_batching->prefix_caching = true;
+  cache_ = MakePagedCache(model_);
+  auto request = AddCommittedRequest({2, 3, 4, 5});
+
+  EXPECT_EQ(cache_->SealedPrefixIdentity(request.get(), 4), nullptr);
+  cache_->SealCommittedBlocks(request.get(), request->TokensCpu());
+  auto identity = cache_->SealedPrefixIdentity(request.get(), 4);
+  ASSERT_NE(identity, nullptr);
+  EXPECT_EQ(cache_->SealedPrefixIdentity(request.get(), 3), nullptr);
+  EXPECT_EQ(cache_->SealedPrefixIdentity(request.get(), 8), nullptr);
+  EXPECT_EQ(cache_->SealedPrefixIdentity(this, 4), nullptr);
+  cache_->Remove(request);
+  EXPECT_EQ(cache_->SealedPrefixIdentity(request.get(), 4), nullptr);
+}
+
 TEST_F(PagedKeyValueCacheTest, ValidatedRemovalReleasesAndReindexesCommittedTables) {
   auto first = AddCommittedRequest({2, 3, 4, 5});
   auto second = AddCommittedRequest({6, 7, 8, 9});

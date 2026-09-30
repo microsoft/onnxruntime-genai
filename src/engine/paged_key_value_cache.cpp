@@ -849,6 +849,24 @@ void PagedKeyValueCache::SealCommittedBlocks(
   }
 }
 
+std::shared_ptr<const BlockIdentity> PagedKeyValueCache::SealedPrefixIdentity(
+    const void* request_id, size_t token_count) const {
+  if (!prefix_cache_->Enabled() || token_count == 0) {
+    return nullptr;
+  }
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return nullptr;
+  }
+  const auto& table = block_tables_[*table_index];
+  const size_t block_size = block_pool_->BlockSize();
+  return token_count == table.committed_slots_ &&
+                 token_count % block_size == 0 &&
+                 table.sealed_blocks_ == token_count / block_size
+             ? table.sealed_identity_
+             : nullptr;
+}
+
 bool PagedKeyValueCache::CanAttachPrefixCheckpoint(
     const void* request_id, size_t token_count) const {
   const auto table_index = block_table_index_->Find(request_id);

@@ -17,6 +17,7 @@
 namespace Generators {
 
 struct Request;
+struct BlockIdentity;
 
 size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
@@ -99,6 +100,9 @@ struct Dflash2Drafter {
     bool draft_eligible{};
     bool wants_drafts{};
     bool wants_independent_sampling{};
+    bool is_prefill{};
+    std::shared_ptr<const BlockIdentity> adopted_prefix_identity;
+    std::shared_ptr<const BlockIdentity> sealed_prefix_identity;
   };
 
   /**
@@ -108,7 +112,7 @@ struct Dflash2Drafter {
    *        request, so both are only sufficient while at most that many requests are tracked.
    */
   Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size, size_t num_blocks,
-                 size_t max_requests);
+                 size_t max_requests, size_t prefix_checkpoint_slots = 0);
   ~Dflash2Drafter();
 
   // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
@@ -117,7 +121,8 @@ struct Dflash2Drafter {
 
   // Blocks needed for `max_batch_size` requests, or 0 when a full-attention drafter must instead
   // be sized against the target pool. A windowed drafter only needs a fixed ring per request.
-  static size_t PoolBlocks(const Config& config, size_t paged_block_size, size_t max_batch_size);
+  static size_t PoolBlocks(const Config& config, size_t paged_block_size, size_t max_batch_size,
+                           size_t prefix_checkpoint_slots = 0);
 
   // Total K/V bytes occupied by a pool of `pool_blocks`.
   static size_t PoolBytes(const Config& config, size_t paged_block_size, size_t pool_blocks,
@@ -172,6 +177,8 @@ struct Dflash2Drafter {
   // Grows a request's block list so positions [0, positions) are addressable. A windowed drafter
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);
+  void CopyBlocks(std::span<const int32_t> source, std::span<const int32_t> destination);
+  void SavePrefixCheckpoint(const Feed& feed, const RequestState& state);
   void AllocateCache();
   Tensor& StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
                      ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
@@ -221,6 +228,14 @@ struct Dflash2Drafter {
   // old addresses, so anything captured before a move must never be replayed after it.
   size_t buffer_generation_{};
   std::vector<int32_t> free_blocks_;
+  struct PrefixCheckpoint {
+    std::shared_ptr<const BlockIdentity> identity;
+    std::vector<int32_t> blocks;
+    size_t position{};
+    size_t last_used{};
+  };
+  std::vector<PrefixCheckpoint> prefix_checkpoints_;
+  size_t checkpoint_clock_{};
   std::unordered_map<const Request*, RequestState> requests_;
   size_t admission_misses_{};
 

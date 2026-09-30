@@ -328,6 +328,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   size_t dflash2_reserved_memory_bytes = 0;
   size_t dflash2_max_batch_size = 0;
   size_t dflash2_pool_blocks = 0;
+  size_t dflash2_prefix_checkpoint_slots = 0;
   if (!model->config_->model.dflash2.filename.empty()) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
@@ -357,8 +358,13 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     const auto dflash2_cache_type = ValidateDflash2ModelCompatibility(
         *model->config_, model->session_info_, dflash2_model->session_info_, paged_block_size);
     model->config_->engine.aux_hidden_states_output_required = true;
+    if (dflash2.sliding_window > 0 &&
+        ResolvePrefixCachingEnabled(model, mtp_bytes_per_block)) {
+      dflash2_prefix_checkpoint_slots = std::min(dflash2_max_batch_size, size_t{4});
+    }
     dflash2_pool_blocks = Dflash2Drafter::PoolBlocks(
-        *model->config_, paged_block_size, dflash2_max_batch_size);
+        *model->config_, paged_block_size, dflash2_max_batch_size,
+        dflash2_prefix_checkpoint_slots);
     if (dflash2_pool_blocks != 0) {
       if (batching.num_blocks.has_value()) {
         // Explicit num_blocks bypasses the free-memory probe. CacheManager validates and deducts
@@ -368,7 +374,8 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       } else {
         // Automatic sizing measures free memory after allocating the fixed drafter pool.
         dflash2_drafter = std::make_unique<Dflash2Drafter>(
-            dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
+            dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size,
+            dflash2_prefix_checkpoint_slots);
       }
     } else {
       // A full-attention drafter mirrors the target pool, so it is billed per target block instead
@@ -423,7 +430,8 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
         static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
     if (dflash2_pool_blocks != 0) {
       dflash2_drafter = std::make_unique<Dflash2Drafter>(
-          dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
+          dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size,
+          dflash2_prefix_checkpoint_slots);
     } else {
       const auto& dflash2 = model->config_->model.dflash2;
       dflash2_drafter = std::make_unique<Dflash2Drafter>(
@@ -486,6 +494,12 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     feed.first_position = first_position;
     feed.draft_eligible = greedy || independent_sampling;
     feed.wants_independent_sampling = independent_sampling;
+    feed.is_prefill = entry.is_prefill;
+    if (entry.prefix_match &&
+        entry.prefix_match->token_count == first_position) {
+      feed.adopted_prefix_identity =
+          entry.prefix_match->blocks.back()->IdentityPtr();
+    }
 
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
@@ -516,6 +530,12 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
   Tensor* aux_hidden_states = scheduled_requests.AuxHiddenStates();
   if (!aux_hidden_states) {
     throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
+  }
+  for (auto& feed : dflash2_feeds_) {
+    if (feed.is_prefill) {
+      feed.sealed_prefix_identity = cache_manager_->SealedPrefixIdentity(
+          feed.request, feed.first_position + feed.aux_row_count);
+    }
   }
 
   if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_,

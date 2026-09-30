@@ -128,6 +128,13 @@ those references, and commit transfers them to the request's block table. Newly
 completed full blocks are indexed only after the cache and request transaction
 commits.
 
+For a paged-only target, this also covers speculative verification: only the
+accepted draft prefix and the preceding unprocessed token advance committed KV
+slots, so full blocks completed by those tokens are indexed like ordinary
+decode blocks. Rejected proposals have no committed target KV to share. A later
+request whose prompt repeats the verified tokens can adopt those blocks, while
+still executing its final prompt token. This is target-prefix reuse, not reuse of unverified draft proposals.
+
 For a hybrid target with `fixed_conv` or `fixed_recurrent` groups, a paged-block
 match is usable only when the same prefix identity owns an immutable checkpoint
 of every fixed-state tensor. The fixed-state pool preallocates
@@ -160,9 +167,23 @@ sliding-window KV rings and auxiliary caches that mirror every target block when
 the setting keep loading with caching disabled for those layouts, and builders
 emit an explicit `false` opt-out. A
 fixed-size Engine-hosted auxiliary pool can coexist with target prefix caching.
-In particular, a DFlash 2 drafter that did not process the skipped prefix cannot
-join at a nonzero position, so that request keeps the valid target hit and runs
-target-only rather than shortening the target boundary.
+A windowed DFlash 2 drafter can restore a matching checkpoint of its own KV
+ring at an indexed, block-aligned target prefix. It preallocates up to four
+additional rings for these checkpoints; each checkpoint copies the full ring
+after a prefill step reaches a sealed target boundary. Only a matching target
+prefix identity and position permit restoration. If no checkpoint remains,
+the request keeps its target hit and runs target-only rather than shortening
+the target boundary. Full-attention drafters and unverified proposals do not
+use this checkpoint cache. Engine-hosted DSpark still rejects explicit prefix
+caching until its separate compatibility guard is lifted.
+
+The target KV pool is allocated independently of whether prefix caching is
+enabled; retained prefix blocks share that pool with active requests and are
+reclaimed when needed. To reduce allocated GPU memory, lower
+`engine.dynamic_batching.gpu_utilization_factor` or set `num_blocks`, at the
+cost of capacity for concurrent sequences. Windowed DFlash checkpoints are
+separate, fixed GPU allocations proportional to their ring count, number of
+layers, and KV width.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 

@@ -193,6 +193,9 @@ TEST(PrefixCacheBenchmark, DISABLED_LargePopulatedCacheLookup) {
       };
 
   run_scenario("cold-miss", cold_miss, 0);
+  run_scenario("short-hit",
+               std::span<const int32_t>{full_hit}.first(2 * kBenchmarkBlockSize + 1),
+               2);
   run_scenario("partial-hit", partial_hit, partial_blocks);
   run_scenario("full-hit", full_hit, kBlocksPerPrefix);
   EXPECT_GT(observed_tokens, 0u);

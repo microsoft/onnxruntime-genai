@@ -66,10 +66,47 @@ build/Linux/Release/engine_unit_tests \
 ```
 
 `PrefixCacheBenchmark` fills a 16,384-block cache with 128 independent 4,096-token prefixes before
-timing cold misses, partial hits, and full hits. `SchedulerBenchmark` reports the CPU time spent
+timing cold misses, short two-block hits, partial hits, and full hits. The short hit measures the
+same content-addressed lookup used when verified draft tokens complete a reusable target block;
+this model-free benchmark measures CPU lookup overhead, not end-to-end target/drafter speedup.
+`SchedulerBenchmark` reports the CPU time spent
 planning steady-state decode steps at batch sizes 1, 8, and 32. That planning time is one component
 of inter-token latency; use the model-backed `decode_baseline` scenario for end-to-end inter-token
 latency, which also includes model execution, sampling, synchronization, and event delivery.
+
+For model-backed DFlash prefix reuse, run `draft-prefix-benchmark.py` with two
+model directories containing the same model: one with
+`engine.dynamic_batching.prefix_caching` enabled and one with it disabled.
+The script runs distinct prompts sharing a prefix, verifies the same prompt
+produces identical greedy output with caching on and off, and reports cached
+prompt tokens, draft forwards, TTFT, and total time. To isolate
+the benefit of drafter checkpoints from target-prefix reuse, compare two
+otherwise identical builds with and without checkpoint allocation; merely
+disabling prefix caching removes both optimizations.
+
+The benchmark defaults to two distinct prompts with exactly 40,000 shared
+leading token IDs and different short suffixes. It checks output parity for
+each prompt separately and requires the warm prompt to reuse at least the
+full blocks within the shared prefix:
+
+```bash
+python benchmark/engine/draft-prefix-benchmark.py \
+  --enabled-model <prefix-enabled-model> --disabled-model <prefix-disabled-model> \
+  --shared-prefix-tokens 40000 --generated-tokens 16 --repetitions 2
+```
+
+On one A100-SXM4-80GB GPU with a Qwen3.8 27B DFlash 2 model, each prompt
+had 40,012 tokens; the second reused 39,936 tokens (156 full 256-token
+blocks). Its total time was about 20.6 s with prefix caching disabled,
+420 ms with target-only reuse (no drafting after the hit), and 307 ms
+with target and drafter checkpoints (7 draft forwards). TTFT was 110 ms
+target-only versus 117 ms with checkpoints. Four FP16 drafter checkpoint
+rings at this model's geometry cost about 200 MiB of extra GPU allocation.
+These are single-GPU measurements of one pair of synthetic, repetitive
+prompts, not a throughput or concurrency result. One three-prompt run failed
+the greedy-output parity check; subsequent three- and four-prompt runs passed.
+The intermittent difference needs investigation before treating checkpoint
+restoration as production-ready.
 
 ## Run
 

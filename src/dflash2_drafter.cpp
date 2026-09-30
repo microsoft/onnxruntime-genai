@@ -432,7 +432,7 @@ size_t Dflash2Drafter::BytesPerBlock(const Config& config, size_t paged_block_si
 }
 
 size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
-                                  size_t max_batch_size) {
+                                  size_t max_batch_size, size_t prefix_checkpoint_slots) {
   const auto& dflash2 = config.model.dflash2;
   if (dflash2.filename.empty() || dflash2.sliding_window <= 0) {
     // Full attention is sized against the target's block count through BytesPerBlock().
@@ -451,7 +451,9 @@ size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
   const size_t rounded_blocks = positions / paged_block_size +
                                 static_cast<size_t>(positions % paged_block_size != 0);
   const size_t ring = CheckedAdd(rounded_blocks, size_t{1}, "DFlash 2 cache ring blocks");
-  return CheckedMultiply(std::max(max_batch_size, size_t{1}), ring,
+  return CheckedMultiply(CheckedAdd(std::max(max_batch_size, size_t{1}),
+                                    prefix_checkpoint_slots, "DFlash 2 cache ring count"),
+                         ring,
                          "DFlash 2 cache block count");
 }
 
@@ -493,7 +495,8 @@ size_t Dflash2Drafter::EmbeddingReservedBytes(size_t max_batch_size, size_t quer
 }
 
 Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size,
-                               size_t num_blocks, size_t max_requests)
+                               size_t num_blocks, size_t max_requests,
+                               size_t prefix_checkpoint_slots)
     : model_{std::move(model)},
       config_{model_->config_->model.dflash2},
       paged_block_size_{paged_block_size},
@@ -525,6 +528,13 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
             paged_block_size_ +
         1;
   }
+  if (prefix_checkpoint_slots != 0 &&
+      (ring_blocks_ == 0 ||
+       num_blocks_ < CheckedMultiply(
+                         CheckedAdd(max_requests_, prefix_checkpoint_slots, "DFlash 2 cache ring count"),
+                         ring_blocks_, "DFlash 2 cache block count"))) {
+    throw std::runtime_error("DFlash 2 prefix checkpoints require a sized windowed ring pool.");
+  }
 
   const auto& inputs = config_.inputs;
   aux_type_ = model_->session_info_.GetInputDataType(inputs.aux_hidden_states);
@@ -538,6 +548,14 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
 
   free_blocks_.resize(num_blocks_);
   std::iota(free_blocks_.rbegin(), free_blocks_.rend(), int32_t{0});
+  prefix_checkpoints_.resize(prefix_checkpoint_slots);
+  for (auto& checkpoint : prefix_checkpoints_) {
+    checkpoint.blocks.reserve(ring_blocks_);
+    for (size_t i = 0; i < ring_blocks_; ++i) {
+      checkpoint.blocks.push_back(free_blocks_.back());
+      free_blocks_.pop_back();
+    }
+  }
 
   run_options_ = OrtRunOptions::Create();
   if (model_->config_->model.decoder.run_options) {
@@ -650,7 +668,15 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   if (requests_.find(feed.request) != requests_.end()) {
     return true;
   }
-  if (!Dflash2CanJoin(feed.draft_eligible, feed.first_position)) {
+  const auto checkpoint = std::find_if(
+      prefix_checkpoints_.begin(), prefix_checkpoints_.end(),
+      [&](const PrefixCheckpoint& candidate) {
+        return candidate.identity &&
+               candidate.identity == feed.adopted_prefix_identity &&
+               candidate.position == feed.first_position;
+      });
+  const bool restore = feed.draft_eligible && checkpoint != prefix_checkpoints_.end();
+  if (!restore && !Dflash2CanJoin(feed.draft_eligible, feed.first_position)) {
     return false;
   }
   // Requests that arrive when the ring pool is full decode without DFlash 2 drafts instead of
@@ -661,7 +687,13 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
       return false;
     }
     // Claim the whole ring now so a second new request in the same step sees the smaller pool.
-    EnsureBlocks(requests_[feed.request], 0);
+    auto& state = requests_[feed.request];
+    EnsureBlocks(state, 0);
+    if (restore) {
+      CopyBlocks(checkpoint->blocks, state.blocks);
+      state.cached_positions = feed.first_position;
+      checkpoint->last_used = ++checkpoint_clock_;
+    }
     return true;
   }
   // A full-attention pool only mirrors the target's blocks plus one query-block spill per sized
@@ -674,6 +706,42 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   }
   requests_.emplace(feed.request, RequestState{});
   return true;
+}
+
+void Dflash2Drafter::CopyBlocks(std::span<const int32_t> source,
+                                std::span<const int32_t> destination) {
+  if (source.size() != ring_blocks_ || destination.size() != ring_blocks_) {
+    throw std::logic_error("DFlash 2 prefix checkpoint has an invalid ring size.");
+  }
+  for (const auto& cache : caches_) {
+    auto bytes = cache->GetByteSpan();
+    const size_t block_bytes = bytes.size() / num_blocks_;
+    for (size_t i = 0; i < ring_blocks_; ++i) {
+      bytes.subspan(static_cast<size_t>(destination[i]) * block_bytes, block_bytes)
+          .CopyFrom(bytes.subspan(static_cast<size_t>(source[i]) * block_bytes, block_bytes));
+    }
+  }
+}
+
+void Dflash2Drafter::SavePrefixCheckpoint(const Feed& feed, const RequestState& state) {
+  if (!feed.is_prefill || !feed.sealed_prefix_identity || prefix_checkpoints_.empty()) {
+    return;
+  }
+  const size_t position = CheckedAdd(
+      feed.first_position, feed.aux_row_count, "DFlash 2 checkpoint position");
+  if (state.cached_positions != position || state.blocks.size() != ring_blocks_) {
+    throw std::logic_error("DFlash 2 prefix checkpoint is not at the committed boundary.");
+  }
+  const auto checkpoint = std::min_element(
+      prefix_checkpoints_.begin(), prefix_checkpoints_.end(),
+      [](const PrefixCheckpoint& left, const PrefixCheckpoint& right) {
+        return left.last_used < right.last_used;
+      });
+  checkpoint->identity.reset();
+  CopyBlocks(state.blocks, checkpoint->blocks);
+  checkpoint->position = position;
+  checkpoint->last_used = ++checkpoint_clock_;
+  checkpoint->identity = feed.sealed_prefix_identity;
 }
 
 void Dflash2Drafter::EnsureBlocks(RequestState& state, size_t positions) {
@@ -1036,8 +1104,10 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   for (const size_t i : served) {
     const auto& feed = feeds[i];
-    requests_[feed.request].cached_positions = CheckedAdd(
+    auto& state = requests_[feed.request];
+    state.cached_positions = CheckedAdd(
         feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
+    SavePrefixCheckpoint(feed, state);
   }
 
   if (!drafts_wanted) {

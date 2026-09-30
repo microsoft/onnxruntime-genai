@@ -110,6 +110,8 @@ struct PagedKeyValueCache {
   void RecordPrefixPublicationRefusal() noexcept;
   void SealCommittedBlocks(const void* request_id,
                            std::span<const int32_t> tokens);
+  std::shared_ptr<const BlockIdentity> SealedPrefixIdentity(
+      const void* request_id, size_t token_count) const;
   bool CanAttachPrefixCheckpoint(const void* request_id,
                                  size_t token_count) const;
   bool AttachPrefixCheckpoint(
