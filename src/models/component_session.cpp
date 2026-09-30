@@ -108,7 +108,17 @@ std::unordered_map<std::string, fs::path> LoadComponents(fs::path root) {
       {"encoder", "encoder/model.onnx"}, {"state_head", "state_head/model.onnx"}, {"action_head", "action_head/model.onnx"}, {"scorer", "scorer/model.onnx"}, {"backbone", "backbone/model.onnx"}, {"pointer_head", "pointer_head/model.onnx"}};
   for (const auto& [name, relative] : known) {
     fs::path candidate = root / relative;
-    if (std::filesystem::is_regular_file(candidate.c_str())) result.emplace(name, std::move(candidate));
+    if (!std::filesystem::is_regular_file(candidate.c_str())) continue;
+    const auto canonical_candidate =
+        std::filesystem::weakly_canonical(candidate.c_str());
+    const auto relative_to_root =
+        canonical_candidate.lexically_relative(canonical_root);
+    if (relative_to_root.empty() || relative_to_root.is_absolute() ||
+        *relative_to_root.begin() == "..")
+      throw std::runtime_error(
+          "legacy component \"" + std::string(name) +
+          "\" resolves outside the package");
+    result.emplace(name, std::move(candidate));
   }
   const std::set<std::string> names = [&] {
     std::set<std::string> values;

@@ -69,6 +69,25 @@ def test_legacy_partial_component_layout_is_rejected(tmp_path):
         og.ComponentSession(str(tmp_path), "encoder", ["cpu"])
 
 
+def test_legacy_component_symlink_escape_is_rejected(tmp_path):
+    outside = tmp_path.parent / "outside.onnx"
+    outside.write_bytes(b"fixture")
+    for relative in (
+        "encoder/model.onnx",
+        "state_head/model.onnx",
+        "action_head/model.onnx",
+        "scorer/model.onnx",
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if relative == "encoder/model.onnx":
+            path.symlink_to(outside)
+        else:
+            path.write_bytes(b"synthetic")
+    with pytest.raises(RuntimeError, match="resolves outside the package"):
+        og.ComponentSession(str(tmp_path), "encoder", ["cpu"])
+
+
 def test_manifest_traversal_is_rejected(tmp_path):
     tmp_path.mkdir(exist_ok=True)
     (tmp_path / "component_manifest.json").write_text(
