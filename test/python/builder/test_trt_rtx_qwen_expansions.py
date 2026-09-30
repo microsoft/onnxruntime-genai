@@ -90,9 +90,21 @@ def test_trt_rtx_gates_match_fused_reference(dtype, op, tmp_path):
 
 @pytest.mark.parametrize("layout", [0, 1])
 @pytest.mark.parametrize("interleaved", [0, 1])
-@pytest.mark.parametrize("rotary_dim", [8, 12])
+@pytest.mark.parametrize(
+    "rotary_dim, sections",
+    [
+        (8, [2, 1, 1]),
+        (12, [4, 1, 1]),
+        (8, [1, 1, 2]),
+        (8, [1, 2, 1]),
+        (8, [0, 2, 2]),
+        (8, [2, 0, 2]),
+        (8, [2, 2, 0]),
+        (8, [0, 0, 4]),
+    ],
+)
 @pytest.mark.parametrize("sequence_length", [1, 3])
-def test_trt_rtx_mrope_matches_fused_reference(layout, interleaved, rotary_dim, sequence_length, tmp_path):
+def test_trt_rtx_mrope_matches_fused_reference(layout, interleaved, rotary_dim, sections, sequence_length, tmp_path):
     rng = np.random.default_rng(52)
     half = rotary_dim // 2
     angles = rng.normal(size=(16, half)).astype(np.float32)
@@ -109,7 +121,7 @@ def test_trt_rtx_mrope_matches_fused_reference(layout, interleaved, rotary_dim, 
         model.rope_attrs = {
             "interleaved": interleaved,
             "rotary_embedding_dim": rotary_dim,
-            "mrope_section": [half - 2, 1, 1],
+            "mrope_section": sections,
             "mrope_layout": layout,
         }
         _input(model, "x", ir.DataType.FLOAT, ["batch_size", "sequence_length", 24])
@@ -130,3 +142,45 @@ def test_trt_rtx_mrope_matches_fused_reference(layout, interleaved, rotary_dim, 
         assert ("MRotaryEmbedding" in ops) == (ep == "cuda")
         results.append(_run(model, ["output"], feeds, tmp_path / f"{ep}.onnx"))
     np.testing.assert_allclose(results[1][0], results[0][0], rtol=2e-5, atol=2e-6)
+
+
+@pytest.mark.parametrize("shape", [(0, 3, 24), (2, 0, 24)])
+def test_trt_rtx_gated_rms_norm_empty_dimensions(shape, tmp_path):
+    model = _model("trt-rtx", ir.DataType.FLOAT)
+    symbolic_shape = ["batch_size", "sequence_length", 24]
+    _input(model, "x", ir.DataType.FLOAT, symbolic_shape)
+    _input(model, "gate", ir.DataType.FLOAT, symbolic_shape)
+    _input(model, "scale", ir.DataType.FLOAT, [6])
+    model.make_gated_rms_norm("result", "x", "scale", "gate", symbolic_shape)
+
+    (result,) = _run(
+        model,
+        ["result/output_0"],
+        {"x": np.empty(shape, np.float32), "gate": np.empty(shape, np.float32), "scale": np.ones(6, np.float32)},
+        tmp_path / "empty.onnx",
+    )
+
+    assert result.shape == shape
+
+
+@pytest.mark.parametrize(
+    "rotary_dim, sections, layout",
+    [
+        (8, [-1, 2, 3], 0),
+        (8, [-1, 2, 3], 1),
+        (8, [2, -1, 3], 1),
+        (8, [2, 3, -1], 1),
+        (7, [1, 1, 1], 1),
+        (14, [3, 2, 2], 1),
+        (-2, [0, 0, -1], 1),
+        (8, [1, 1], 1),
+        (8, [1, 1, 1], 1),
+        (8, [2, 1, 1], 2),
+    ],
+)
+def test_trt_rtx_mrope_rejects_invalid_attributes(rotary_dim, sections, layout):
+    model = _model("trt-rtx", ir.DataType.FLOAT)
+    model.rope_attrs = {"rotary_embedding_dim": rotary_dim, "mrope_section": sections, "mrope_layout": layout}
+
+    with pytest.raises(ValueError, match="TRT-RTX MRoPE"):
+        model.get_mrope_owners(rotary_dim)

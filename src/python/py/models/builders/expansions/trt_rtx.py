@@ -41,8 +41,9 @@ class TRT_RTX:
         # gate -> Cast(FP32) -> SiLU ------------------------------------+-> Mul -> Cast
         head_size = int(self.values[scale].shape[0])
         grouped_shape = [*shape[:-1], shape[-1] // head_size, head_size]
+        # An inferred -1 is ambiguous when batch or sequence length is zero.
         reshape = self.make_expansion_constant(
-            name=f"{name}/group_shape", value=[*([0] * (len(shape) - 1)), -1, head_size]
+            name=f"{name}/group_shape", value=[*([0] * (len(shape) - 1)), *grouped_shape[-2:]]
         )
         self.make_reshape(f"{name}/Reshape", [root_input, reshape], self.io_dtype, grouped_shape)
         normalized = f"{name}/SimplifiedLayerNormalization/output_0"
@@ -91,15 +92,26 @@ class TRT_RTX:
 
     def get_mrope_owners(self, rotary_dim):
         """Map each rotary cache column to its temporal, height, or width position stream."""
+        if rotary_dim <= 0 or rotary_dim % 2 != 0 or rotary_dim > self.head_size:
+            raise ValueError("TRT-RTX MRoPE requires a positive, even rotary dimension no greater than the head size")
         half = rotary_dim // 2
         sections = self.rope_attrs["mrope_section"]
         layout = self.rope_attrs["mrope_layout"]
-        if layout not in (0, 1) or len(sections) != 3 or sum(sections) != half:
+        if (
+            layout not in (0, 1)
+            or len(sections) != 3
+            or any(section < 0 for section in sections)
+            or sum(sections) != half
+        ):
             raise ValueError(
-                "TRT-RTX MRoPE requires sectioned/interleaved layout and sections summing to half the rotary dimension"
+                "TRT-RTX MRoPE requires sectioned/interleaved layout and three non-negative sections "
+                "summing to half the rotary dimension"
             )
         if layout == 0:
             return np.repeat(np.arange(3), sections)
+        # Match ORT MRotaryEmbedding / Qwen apply_interleaved_mrope: T is the
+        # default; H/W replace every third slot up to their section bounds.
+        # This is not round-robin exhaustion: [1, 1, 2] maps to [T, H, W, T].
         owners = np.zeros(half, dtype=np.int64)
         for dim in (1, 2):
             owners[dim : min(3 * sections[dim], half) : 3] = dim
