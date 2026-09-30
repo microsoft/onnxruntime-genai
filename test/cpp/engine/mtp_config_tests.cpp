@@ -106,6 +106,8 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   decoder.inputs.cumulative_sequence_lengths = "cumulative_sequence_lengths";
   decoder.inputs.past_sequence_lengths = "past_sequence_lengths";
   decoder.inputs.attention_metadata = "attention_metadata";
+  decoder.inputs.engram_embeddings = "engram_embeddings";
+  config.model.engram.filename = "engram.onnx";
   decoder.session_options.providers = {"cuda"};
   decoder.session_options.intra_op_num_threads = 2;
   decoder.session_options.use_deterministic_compute = true;
@@ -181,6 +183,8 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_FALSE(head.state_groups.has_value());
   EXPECT_TRUE(head.pipeline.empty());
   EXPECT_TRUE(projected->model.mtp.filename.empty());
+  EXPECT_TRUE(projected->model.engram.filename.empty());
+  EXPECT_EQ(config.model.engram.filename, "engram.onnx");
   // The projection clears model.mtp, so the head's own demand for hidden states must be recorded
   // explicitly. Without it a chained draft cannot feed the next stage.
   EXPECT_TRUE(projected->engine.hidden_states_output_required);
