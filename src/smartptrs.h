@@ -217,7 +217,7 @@ static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 7;
+inline constexpr uint32_t kDeviceInterfaceVersion = 8;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -238,10 +238,6 @@ struct DeviceInterface {
   // Inputs-only interface backed by that allocator, so the decode inputs are updated in place.
   // Null default -> callers keep the current device-memory path.
   virtual DeviceInterface* GetHostAccessibleDevice() { return nullptr; }
-
-  // True when this interface allocates memory the CPU reads and writes through the tensor's own
-  // pointer, so a CPU session may be handed it directly (see SessionCanAccess).
-  virtual bool IsHostAccessible() const { return false; }
 
   // Called once after the device allocator is created, so a device that offers additional
   // allocators (e.g. host-accessible memory) can set them up. The default sets up nothing.
@@ -369,6 +365,10 @@ struct DeviceInterface {
   // after an upload never waits for the device, so a caller can take a fresh mirror per upload
   // instead of synchronizing before it reuses one. Keep last for vtable ABI stability.
   virtual bool RecyclesHostMirrorsAfterUpload(size_t /*bytes*/) const { return false; }
+  // True when this interface allocates memory the CPU reads and writes through the tensor's own
+  // pointer, so a CPU session may be handed it directly (see SessionCanAccess).
+  // Keep last for vtable ABI stability.
+  virtual bool IsHostAccessible() const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
