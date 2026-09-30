@@ -1805,8 +1805,9 @@ On Qwen3.8-27B with temperature 1.0, top-k 20 and top-p 0.95 (MMLU-Pro, 800 prom
 `lattice` averaged 5.01 tokens per target step against 4.78 for `greedy_path` and 4.66 for
 `independent`, and decoded 3.1x faster than `none`.
 
-With `none`, a request joins on its position-zero step only when the current turn is greedy. If a
-sampled first turn executes that step, eligibility is not reconsidered during the same residency
+With `none`, a request joins on its position-zero step only when the current turn is greedy; with
+any other mode, a sampled turn also joins, provided its top-k is positive (draft validation rejects
+top-p-only sampled turns). If an ineligible first turn executes that step, eligibility is not reconsidered during the same residency
 and the request decodes without block drafts until rewind or close. Once a request has joined,
 later sampled turns continue feeding their committed context into its cache without requesting
 drafts, so a subsequent greedy turn can resume drafting without a cache hole. These ingest-only
