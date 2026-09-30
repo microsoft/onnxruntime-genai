@@ -41,7 +41,9 @@ class MetadataCoreState {
   void SetFinalized(const OrtxMetadata& metadata);
   void Invalidate();
 
-  enum class Step { Empty, Token, Finalized };
+  enum class Step { Empty,
+                    Token,
+                    Finalized };
   const MetadataCoreConfig config_;
   bool valid_{true};
   Step step_{Step::Empty};

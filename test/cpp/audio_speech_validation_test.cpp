@@ -180,7 +180,7 @@ TEST(AudioSpeechValidationTests, TimestampAccumulatorAttachesPunctuationAndCompl
 
 TEST(AudioSpeechValidationTests, TimestampAccumulatorCompletesSegmentAtFrameGap) {
   Generators::TimestampTokenizerConfig config{
-  Generators::Config::TimestampLevel::Segment, {}, 0.3, 100, 10, 1};
+      Generators::Config::TimestampLevel::Segment, {}, 0.3, 100, 10, 1};
   Generators::TimestampDecodeState state{config};
 
   state.Consume({1, 0, 1}, {nullptr, 0, 0});
@@ -240,8 +240,8 @@ TEST(AudioSpeechValidationTests, TimestampAccumulatorCopiesBorrowedText) {
 class MetadataCoreStateTests : public testing::Test {
  protected:
   struct TestTransducerState : Generators::TransducerState {
-    using TransducerState::TransducerState;
     using TransducerState::last_token_timings_;
+    using TransducerState::TransducerState;
     void SetTimestampsEnabled(bool enabled) { timestamps_enabled_ = enabled; }
     Generators::DeviceSpan<float> Run(int, Generators::DeviceSpan<int32_t>&, Generators::DeviceSpan<int32_t>) override {
       throw std::runtime_error("Synthetic metadata test does not run inference");
@@ -443,14 +443,15 @@ TEST_F(MetadataCoreStateTests, ExplicitGapSecondsRoundUsingModelTiming) {
   stream->DecodeWithMetadata({tokens[0], 1, interval});
   EXPECT_EQ(state->Metadata().timestampMetadata->word_count, 0U);
   EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(config.timestamps.segment_gap_threshold_seconds,
-                                                      100, 10, 1), 3);
+                                                     100, 10, 1),
+            3);
 }
 
 TEST_F(MetadataCoreStateTests, MissingModelTimingRejectsExplicitMetadata) {
   Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
   config.model.type = "nemotron_speech";
   config.model.timestamp_level = Generators::Config::TimestampLevel::All;
-  EXPECT_THROW(std::make_shared<Generators::Tokenizer>(config), std::runtime_error);
+  EXPECT_THROW({ Generators::Tokenizer invalid_tokenizer{config}; }, std::runtime_error);
   config.model.timestamp_level = Generators::Config::TimestampLevel::Off;
   auto missing_timing_tokenizer = std::make_shared<Generators::Tokenizer>(config);
   auto stream = missing_timing_tokenizer->CreateStream();

@@ -28,8 +28,8 @@ TimestampDecodeState::TimestampDecodeState(const TimestampTokenizerConfig& confi
     : level_{config.level},
       segment_separators_{config.segment_separators},
       segment_gap_threshold_frames_{GetSegmentGapThresholdFrames(config.segment_gap_threshold_seconds,
-                                                                  config.sample_rate, config.hop_length,
-                                                                  config.subsampling_factor)} {
+                                                                 config.sample_rate, config.hop_length,
+                                                                 config.subsampling_factor)} {
   if (config.sample_rate <= 0 || config.hop_length <= 0 || config.subsampling_factor <= 0) {
     throw std::runtime_error("Timestamp decoding requires positive sample_rate, hop_length, and subsampling_factor");
   }

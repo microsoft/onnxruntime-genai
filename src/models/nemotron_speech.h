@@ -18,7 +18,7 @@ namespace Generators {
 // Internal metadata carrying a chunk's absolute input-sample origin so timestamp calculations
 // preserve elapsed silence when VAD discards complete chunks before model inference.
 inline constexpr std::string_view AbsoluteTimestampChunkStartSampleName =
-  "_genai_absolute_timestamp_chunk_start_sample";
+    "_genai_absolute_timestamp_chunk_start_sample";
 
 inline int64_t GetNemotronGlobalFrame(int64_t chunk_start_sample, int64_t local_frame,
                                       int hop_length, int subsampling_factor) {
