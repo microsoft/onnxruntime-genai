@@ -3,10 +3,18 @@
 const path = require('node:path');
 const fs = require('node:fs');
 
-const candidates = [
-  path.join(__dirname, 'build', 'Release', 'onnxruntime_genai_node.node'),
-  path.join(__dirname, 'build', 'onnxruntime_genai_node.node'),
-];
+const configurations = [
+  process.env.ORTGENAI_NODE_CONFIG,
+  'Release',
+  'RelWithDebInfo',
+  'Debug',
+  'MinSizeRel',
+].filter((value, index, values) => value && values.indexOf(value) === index);
+const candidates = configurations
+  .map((configuration) =>
+    path.join(__dirname, 'build', configuration, 'onnxruntime_genai_node.node'),
+  )
+  .concat(path.join(__dirname, 'build', 'onnxruntime_genai_node.node'));
 
 let binding;
 let lastError;

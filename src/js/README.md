@@ -26,6 +26,12 @@ dependencies.
 Windows builds also require the Node import library; pass
 `-DNODE_LIBRARY=C:\path\to\node.lib` if CMake cannot find it beside Node.
 
+`npm pack` generates a platform package named
+`onnxruntime-genai-non-generative-<os>-<arch>` with matching npm `os` and `cpu`
+restrictions. Publish each supported build separately; native artifacts are not
+cross-platform. The loader searches Release, RelWithDebInfo, Debug, and
+MinSizeRel outputs. Set `ORTGENAI_NODE_CONFIG` to select a configuration first.
+
 ## API and ownership
 
 `DirectoryTokenizer`, `RankingSession`, and `DecisionSession` own their native

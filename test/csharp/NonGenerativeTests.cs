@@ -124,6 +124,21 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             {
                 Assert.True(session.PrefixReuseEnabled);
                 Assert.False(string.IsNullOrEmpty(session.PrefixReuseStatus));
+                Task statusReads = Task.Run(() =>
+                {
+                    for (int i = 0; i < 100; ++i)
+                    {
+                        Assert.False(string.IsNullOrEmpty(session.PrefixReuseStatus));
+                    }
+                });
+                Task statusChanges = Task.Run(() =>
+                {
+                    for (int i = 0; i < 100; ++i)
+                    {
+                        session.PrefixReuseEnabled = (i % 2) == 0;
+                    }
+                });
+                Task.WaitAll(statusReads, statusChanges);
                 session.PrefixReuseEnabled = false;
                 Assert.False(session.PrefixReuseEnabled);
                 session.PrefixReuseEnabled = true;

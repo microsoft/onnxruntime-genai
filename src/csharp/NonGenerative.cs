@@ -533,6 +533,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     public sealed class DecisionSession : IDisposable
     {
         private readonly DecisionSessionHandle _handle = new DecisionSessionHandle();
+        private readonly object _prefixReuseLock = new object();
         public DecisionSession(string packagePath, IEnumerable<string> providers = null)
         {
             if (packagePath == null) throw new ArgumentNullException(nameof(packagePath));
@@ -564,28 +565,31 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public NonGenerativeCacheStats CacheStats { get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetCacheStats(native, out NativeMethods.NonGenerativeCacheStats s)); return RankingSession.ConvertStats(s); }); } }
         public bool PrefixReuseEnabled
         {
-            get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetPrefixReuseEnabled(native, out bool enabled)); return enabled; }); }
-            set { SafeHandleAccess.Use(_handle, native => Result.VerifySuccess(NativeMethods.OgaDecisionSessionSetPrefixReuseEnabled(native, value))); }
+            get { lock (_prefixReuseLock) { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetPrefixReuseEnabled(native, out bool enabled)); return enabled; }); } }
+            set { lock (_prefixReuseLock) { SafeHandleAccess.Use(_handle, native => Result.VerifySuccess(NativeMethods.OgaDecisionSessionSetPrefixReuseEnabled(native, value))); } }
         }
         public string PrefixReuseStatus
         {
             get
             {
-                return SafeHandleAccess.Use(_handle, native =>
+                lock (_prefixReuseLock)
                 {
-                    Result.VerifySuccess(NativeMethods.OgaDecisionSessionCopyPrefixReuseStatus(
-                        native, IntPtr.Zero, UIntPtr.Zero, out UIntPtr required));
-                    int size = checked((int)required.ToUInt64());
-                    IntPtr buffer = Marshal.AllocHGlobal(size);
-                    try
+                    return SafeHandleAccess.Use(_handle, native =>
                     {
                         Result.VerifySuccess(NativeMethods.OgaDecisionSessionCopyPrefixReuseStatus(
-                            native, buffer, required, out UIntPtr copied));
-                        if (copied != required) throw new OnnxRuntimeGenAIException("Prefix reuse status size changed during copy.");
-                        return StringUtils.FromUtf8(buffer);
-                    }
-                    finally { Marshal.FreeHGlobal(buffer); }
-                });
+                            native, IntPtr.Zero, UIntPtr.Zero, out UIntPtr required));
+                        int size = checked((int)required.ToUInt64());
+                        IntPtr buffer = Marshal.AllocHGlobal(size);
+                        try
+                        {
+                            Result.VerifySuccess(NativeMethods.OgaDecisionSessionCopyPrefixReuseStatus(
+                                native, buffer, required, out UIntPtr copied));
+                            if (copied != required) throw new OnnxRuntimeGenAIException("Prefix reuse status size changed during copy.");
+                            return StringUtils.FromUtf8(buffer);
+                        }
+                        finally { Marshal.FreeHGlobal(buffer); }
+                    });
+                }
             }
         }
         public void SetPrefixCacheCapacity(ulong entries, ulong bytes) { SafeHandleAccess.Use(_handle, native => Result.VerifySuccess(NativeMethods.OgaDecisionSessionSetPrefixCacheCapacity(native, (UIntPtr)entries, (UIntPtr)bytes))); }

@@ -8,15 +8,18 @@
     "index.js",
     "index.d.ts",
     "README.md",
-    "build/Release/onnxruntime_genai_node.node",
-    "build/Release/*.dll",
-    "build/Release/*.dylib",
-    "build/Release/*.so",
-    "build/Release/*.so.*"
+    "scripts/prepare-package.js",
+    "build/*/onnxruntime_genai_node.node",
+    "build/*/*.dll",
+    "build/*/*.dylib",
+    "build/*/*.so",
+    "build/*/*.so.*"
   ],
   "scripts": {
     "configure": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release",
     "build": "cmake --build build --config Release",
+    "prepack": "node scripts/prepare-package.js prepare",
+    "postpack": "node scripts/prepare-package.js restore",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {

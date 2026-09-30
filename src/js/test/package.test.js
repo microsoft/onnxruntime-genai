@@ -27,26 +27,42 @@ test('packed package bundles and resolves native runtime libraries', () => {
       cwd: packageRoot,
     }).stdout,
   )[0];
+  const sourceManifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json')));
+  assert.equal(sourceManifest.name, 'onnxruntime-genai-non-generative');
+  assert.equal(sourceManifest.os, undefined);
+  assert.equal(sourceManifest.cpu, undefined);
   const paths = packed.files.map((file) => file.path);
-  assert.ok(paths.includes('build/Release/onnxruntime_genai_node.node'));
+  const addonPaths = paths.filter((file) =>
+    /^build\/[^/]+\/onnxruntime_genai_node\.node$/.test(file),
+  );
+  assert.equal(addonPaths.length, 1);
+  const nativeDirectory = path.posix.dirname(addonPaths[0]);
 
   const expected = {
-    linux: ['build/Release/libonnxruntime-genai.so', 'build/Release/libonnxruntime.so'],
+    linux: ['libonnxruntime-genai.so', 'libonnxruntime.so'],
     darwin: [
-      'build/Release/libonnxruntime-genai.dylib',
-      'build/Release/libonnxruntime.dylib',
+      'libonnxruntime-genai.dylib',
+      'libonnxruntime.dylib',
     ],
-    win32: ['build/Release/onnxruntime-genai.dll', 'build/Release/onnxruntime.dll'],
+    win32: ['onnxruntime-genai.dll', 'onnxruntime.dll'],
   }[process.platform];
   assert.ok(expected, `unsupported packaging test platform: ${process.platform}`);
   for (const required of expected) {
-    assert.ok(paths.includes(required), `npm package is missing ${required}`);
+    const packagedPath = path.posix.join(nativeDirectory, required);
+    assert.ok(paths.includes(packagedPath), `npm package is missing ${packagedPath}`);
   }
 
   const extract = path.join(work, 'extracted');
   fs.mkdirSync(extract);
   run('tar', ['-xzf', path.join(work, packed.filename), '-C', extract]);
   const installedPackage = path.join(extract, 'package');
+  const manifest = JSON.parse(fs.readFileSync(path.join(installedPackage, 'package.json')));
+  assert.equal(
+    manifest.name,
+    `onnxruntime-genai-non-generative-${process.platform}-${process.arch}`,
+  );
+  assert.deepEqual(manifest.os, [process.platform]);
+  assert.deepEqual(manifest.cpu, [process.arch]);
   const env = { ...process.env };
   delete env.LD_LIBRARY_PATH;
   delete env.DYLD_LIBRARY_PATH;
