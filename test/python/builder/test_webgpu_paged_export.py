@@ -271,11 +271,6 @@ def test_webgpu_paged_export_runs_prefill_and_decode(webgpu_paged_models):
     assert paged_attention_events, "PagedAttention was not assigned to WebGPUExecutionProvider"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="WebGPU currently produces incorrect logits for simultaneous unequal packed prefills",
-)
 def test_webgpu_paged_simultaneous_unequal_prefills(webgpu_paged_models):
     output_dir, _, config, webgpu_provider, reference_model, _ = webgpu_paged_models
     webgpu_session = _create_webgpu_session(output_dir, config, webgpu_provider)
