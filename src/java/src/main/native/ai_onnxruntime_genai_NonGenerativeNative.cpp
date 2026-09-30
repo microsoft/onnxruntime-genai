@@ -150,8 +150,9 @@ bool BuildValueImpl(
     while (env->CallBooleanMethod(iterator, has_next)) {
       LocalFrame frame(env, 32);
       if (!frame) {
-        OgaDestroyStructuredRequest(request);
-        return nullptr;
+        OgaDestroyStructuredValue(*out);
+        *out = nullptr;
+        return true;
       }
       jobject entry = env->CallObjectMethod(iterator, next);
       jobject key = env->CallObjectMethod(

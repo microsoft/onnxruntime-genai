@@ -134,6 +134,17 @@ class ActiveValue {
   BuildContext& context_;
 };
 
+Napi::Array OwnEnumerablePropertyNames(Napi::Env env, const Napi::Object& object) {
+  napi_value keys{};
+  const napi_status status = napi_get_all_property_names(
+      env, object, napi_key_own_only, napi_key_enumerable,
+      napi_key_numbers_to_strings, &keys);
+  if (status != napi_ok) {
+    throw Napi::Error::New(env, "Failed to enumerate structured object keys");
+  }
+  return Napi::Value(env, keys).As<Napi::Array>();
+}
+
 OgaStructuredValueHandle* BuildValue(
     Napi::Env env, const Napi::Value& input, BuildContext& context) {
   StructuredOwner output;
@@ -179,7 +190,7 @@ OgaStructuredValueHandle* BuildValue(
     ActiveValue active{env, context, input};
     Check(env, OgaCreateStructuredValueObject(&output.value));
     const Napi::Object object = input.As<Napi::Object>();
-    const Napi::Array keys = object.GetPropertyNames();
+    const Napi::Array keys = OwnEnumerablePropertyNames(env, object);
     for (uint32_t i = 0; i < keys.Length(); ++i) {
       const Napi::Value key_value = keys.Get(i);
       if (!key_value.IsString()) {
@@ -316,7 +327,7 @@ OgaStructuredRequestHandle* BuildRequest(Napi::Env env, const Napi::Value& input
   Check(env, OgaStructuredRequestSetState(request.value, state.value));
 
   const Napi::Object questions = object.Get("questions").As<Napi::Object>();
-  const Napi::Array ids = questions.GetPropertyNames();
+  const Napi::Array ids = OwnEnumerablePropertyNames(env, questions);
   for (uint32_t i = 0; i < ids.Length(); ++i) {
     const Napi::Value id_value = ids.Get(i);
     const std::string id = StringArgument(env, id_value, "question id");
@@ -376,7 +387,7 @@ OgaFreeFormRankRequestHandle* BuildFreeFormRequest(
   Check(env, OgaFreeFormRankRequestSetInstructions(request.value, instructions.value));
 
   const Napi::Object candidates = object.Get("candidates").As<Napi::Object>();
-  const Napi::Array keys = candidates.GetPropertyNames();
+  const Napi::Array keys = OwnEnumerablePropertyNames(env, candidates);
   for (uint32_t i = 0; i < keys.Length(); ++i) {
     const Napi::Value key_value = keys.Get(i);
     const std::string key = StringArgument(env, key_value, "candidate key");

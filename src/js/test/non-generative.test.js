@@ -85,6 +85,13 @@ test('dangerous structured keys remain own data properties', () => {
   assert.equal({}.polluted, undefined);
 });
 
+test('structured conversion ignores inherited enumerable properties', () => {
+  const prototype = { inherited: 'exclude-me' };
+  const input = Object.create(prototype);
+  input.own = 'include-me';
+  assert.deepEqual(__testRoundTrip(input), { own: 'include-me' });
+});
+
 test('constructors reject invalid input', () => {
   assert.throws(() => new DirectoryTokenizer(), /string/);
   assert.throws(() => new RankingSession('', ['cpu', 3]), /provider/i);
