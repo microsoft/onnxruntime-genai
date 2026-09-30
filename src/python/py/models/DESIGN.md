@@ -43,6 +43,12 @@ Model architectures are defined in classes. By defining model architectures in t
 
 The models produced by the model builder should directly work in ONNX Runtime GenAI and other solutions that use ONNX Runtime such as Hugging Face's Optimum. There should be no additional model modifications needed.
 
+Optional telemetry loading, timing, sanitization, and event assembly are isolated
+in `model_builder_telemetry.py`. This helper uses only the Python standard library
+at import time, so standalone exports do not require the native GenAI package or
+working telemetry dependencies. `builder.py` only initializes the helper, reports
+completed exports, and performs bounded CLI shutdown.
+
 ## Implementation Details
 
 ### `Model`

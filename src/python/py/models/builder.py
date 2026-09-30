@@ -13,10 +13,7 @@ Run the model builder to create the desired ONNX model.
 import argparse
 import json
 import os
-import sys
 import textwrap
-import time
-from contextlib import suppress
 from typing import Any
 
 import onnx_ir as ir
@@ -32,8 +29,8 @@ from builders import (
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
-    Gemma4Model,
     Gemma4MoEModel,
+    Gemma4Model,
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
@@ -66,39 +63,9 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35Model, Qwen35MoEModel
+from model_builder_telemetry import ModelBuilderTelemetry
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
-
-try:
-    from ..telemetry.path_utils import (
-        normalize_execution_provider,
-        sanitize_model_identifier,
-        scrub_value_for_telemetry,
-    )
-except Exception:
-    telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    path_added = telemetry_root not in sys.path
-    if path_added:
-        sys.path.insert(0, telemetry_root)
-    try:
-        try:
-            from telemetry.path_utils import (
-                normalize_execution_provider,
-                sanitize_model_identifier,
-                scrub_value_for_telemetry,
-            )
-        except Exception:
-            def normalize_execution_provider(value):
-                return "trt-rtx" if value == "NvTensorRtRtx" else value
-
-            def sanitize_model_identifier(value):
-                return value if value in (None, "") else "[path]"
-
-            def scrub_value_for_telemetry(value):
-                return value if value is None or isinstance(value, (bool, int, float)) else "[redacted]"
-    finally:
-        if path_added and telemetry_root in sys.path:
-            sys.path.remove(telemetry_root)
 
 
 def add_special_token_ids(config, tokenizer):
@@ -155,7 +122,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
-        from peft import PeftConfig  # noqa: PLC0415
+        from peft import PeftConfig
 
         peft_config = PeftConfig.from_pretrained(
             extra_options["adapter_path"],
@@ -575,127 +542,6 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
-def _normalize_execution_provider_name(execution_provider):
-    return normalize_execution_provider(execution_provider)
-
-
-def _sanitize_path_value(value):
-    return sanitize_model_identifier(value)
-
-
-def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, Any]:
-    """Exclude authentication/internal Hugging Face state and scrub user-facing options."""
-    return {
-        key: scrub_value_for_telemetry(value)
-        for key, value in extra_options.items()
-        if key not in {"hf_token", "hf_details"}
-    }
-
-
-def _get_model_builder_telemetry():
-    """Return telemetry without making it a model-builder dependency."""
-    try:
-        try:
-            from onnxruntime_genai.telemetry import GenAITelemetry  # noqa: PLC0415
-        except Exception:
-            telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-            path_added = telemetry_root not in sys.path
-            if path_added:
-                sys.path.insert(0, telemetry_root)
-            try:
-                from telemetry import GenAITelemetry  # noqa: PLC0415
-            finally:
-                if path_added and telemetry_root in sys.path:
-                    sys.path.remove(telemetry_root)
-        return GenAITelemetry()
-    except Exception:
-        return None
-
-
-def _shutdown_model_builder_telemetry(max_seconds: float = 1.0) -> None:
-    """Best-effort bounded delivery for the model-builder CLI."""
-    telemetry = _get_model_builder_telemetry()
-    if telemetry is not None:
-        telemetry.shutdown(max_seconds)
-
-
-def _emit_model_build_telemetry(
-    duration_ms: float,
-    config,
-    onnx_model,
-    precision: str,
-    execution_provider: str,
-    output_dir: str,
-    extra_options: dict[str, Any],
-    input_path: str,
-    model_name: str,
-) -> None:
-    try:
-        telemetry = _get_model_builder_telemetry()
-        if telemetry is None or not telemetry.accepts_detailed_events:
-            return
-
-        model_type = getattr(onnx_model, "model_type", getattr(config, "model_type", ""))
-        hidden_size = getattr(config, "hidden_size", 0)
-        num_layers = getattr(config, "num_hidden_layers", 0)
-        num_attn_heads = getattr(config, "num_attention_heads", 0)
-        num_kv_heads = getattr(config, "num_key_value_heads", num_attn_heads)
-        vocab_size = getattr(config, "vocab_size", 0)
-        context_length = getattr(config, "max_position_embeddings", 0)
-
-        output_model_size = 0
-        if os.path.isdir(output_dir):
-            for filename in os.listdir(output_dir):
-                file_path = os.path.join(output_dir, filename)
-                if os.path.isfile(file_path) and filename.endswith((".onnx", ".onnx_data", ".onnx.data")):
-                    output_model_size += os.path.getsize(file_path)
-
-        num_ops = 0
-        op_types = ""
-        has_custom_ops = False
-        # Saving can quantize a copy, so these in-memory counts may differ from the exported graph.
-        if hasattr(onnx_model, "model") and onnx_model.model is not None:
-            with suppress(Exception):
-                graph = onnx_model.model.graph
-                if graph is not None:
-                    op_type_set = set()
-                    for node in graph:
-                        num_ops += 1
-                        op_type_set.add(node.op_type)
-                        if node.domain and not node.domain.startswith("ai.onnx"):
-                            has_custom_ops = True
-                    op_types = ",".join(sorted(op_type_set))
-
-        io_dtype = str(getattr(onnx_model, "io_dtype", "")).replace("DataType.", "")
-        quant_type = str(getattr(onnx_model, "onnx_dtype", precision)).replace("DataType.", "")
-
-        telemetry.log_model_build(
-            action="create_model",
-            duration_ms=duration_ms,
-            success=True,
-            model_name=_sanitize_path_value(getattr(config, "_name_or_path", "") or model_name),
-            model_type=str(model_type),
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            num_attn_heads=num_attn_heads,
-            num_kv_heads=num_kv_heads,
-            vocab_size=vocab_size,
-            context_length=context_length,
-            io_dtype=io_dtype,
-            quant_type=quant_type,
-            execution_provider=_normalize_execution_provider_name(execution_provider),
-            output_model_size_bytes=output_model_size,
-            num_onnx_operators=num_ops,
-            operator_types=op_types,
-            has_custom_ops=has_custom_ops,
-            source_format="gguf" if input_path and input_path.lower().endswith(".gguf") else "huggingface",
-            has_adapter="adapter_path" in extra_options,
-            extra_options=_sanitize_extra_options(extra_options),
-        )
-    except Exception:
-        return
-
-
 def checkpoint_weight_formats(quantization_config) -> set[tuple[int, str]]:
     """Return the weight formats a prequantized checkpoint declares, as ``{(bits, kind)}``.
 
@@ -769,8 +615,7 @@ def create_model(
     must supply the positional precision argument (None is allowed for an
     explicit target weight type), even when the CLI permits omitting it.
     """
-    start = time.perf_counter()
-    _get_model_builder_telemetry()
+    telemetry = ModelBuilderTelemetry()
     input_path = os.fsdecode(input_path) if input_path else input_path
     effective_config = extra_options.pop("_effective_builder_config", None)
     structured = {
@@ -796,9 +641,9 @@ def create_model(
     if effective_config is not None:
         precision = effective_config.precision
 
-    normalized_execution_provider = _normalize_execution_provider_name(execution_provider)
-    if normalized_execution_provider != execution_provider:
-        execution_provider = normalized_execution_provider
+    # Update name alias for TRT-RTX
+    if execution_provider == "NvTensorRtRtx":
+        execution_provider = "trt-rtx"
         extra_options["use_qdq"] = True
 
     # Create cache and output directories
@@ -809,9 +654,7 @@ def create_model(
     try:
         hf_details = extra_options.pop("hf_details")
     except KeyError:
-        raise Exception(
-            "Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`."
-        ) from None
+        raise Exception("Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`.")
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
@@ -965,12 +808,18 @@ def create_model(
     warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
 
     if not config_only:
+        # Make ONNX model
         onnx_model.make_model(input_path)
+
+        # Save ONNX model
         onnx_model.save_model(output_dir)
 
+    # Make GenAI config
     onnx_model.make_genai_config(config, extra_kwargs, output_dir)
+
     # Composite exporters append MTP/block-drafter sections after the decoder.
-    # Apply the profile after generation so component names are preserved.
+    # Applying a profile earlier would reject valid component names or lose it
+    # when a component rewrites the generated configuration.
     runtime_config = effective_config.runtime_config if effective_config is not None else extra_options.get("_runtime_config", {})
     if runtime_config:
         config_path = os.path.join(output_dir, "genai_config.json")
@@ -980,9 +829,9 @@ def create_model(
         with open(config_path, "w", encoding="utf-8") as config_file:
             json.dump(genai_config, config_file, indent=4)
 
+    # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
-    _emit_model_build_telemetry(
-        duration_ms=(time.perf_counter() - start) * 1000,
+    telemetry.emit(
         config=config,
         onnx_model=onnx_model,
         precision=precision,
@@ -1407,4 +1256,4 @@ if __name__ == "__main__":
             **extra_options,
         )
     finally:
-        _shutdown_model_builder_telemetry()
+        ModelBuilderTelemetry().shutdown()
