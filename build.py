@@ -881,7 +881,7 @@ def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
 
     if args.sdk == "javascript":
         npm = str(_resolve_executable_path("npm"))
-        util.run([npm, "ci"], env=env, cwd=sdk_src)
+        util.run([npm, "install", "--no-package-lock"], env=env, cwd=sdk_src)
 
     command = [str(args.cmake_path), "-G", args.cmake_generator]
     command += [

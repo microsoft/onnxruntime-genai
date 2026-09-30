@@ -10,7 +10,7 @@ Install the JavaScript build dependency, then build either in the main CMake
 tree with `-DENABLE_JAVASCRIPT=ON`, or against an installed core:
 
 ```sh
-npm install --prefix src/js
+npm install --no-package-lock --prefix src/js
 cmake -S src/js -B src/js/build \
   -Donnxruntime-genai_DIR=/path/to/genai/lib/cmake/onnxruntime-genai \
   -DORT_HOME=/path/to/onnxruntime
