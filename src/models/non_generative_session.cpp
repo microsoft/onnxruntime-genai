@@ -434,6 +434,52 @@ struct TokenBatch {
   size_t rows{}, width{};
 };
 
+void AddPositionIds(FeedStorage& feeds, const NamedComponentSession& session,
+                    const std::vector<int64_t>& positions, size_t rows,
+                    size_t width) {
+  const auto found = std::find_if(
+      session.Inputs().begin(), session.Inputs().end(),
+      [](const OgaComponentInfo& info) { return info.name == "position_ids"; });
+  if (found == session.Inputs().end()) return;
+  if (found->type != OgaElementType_int64)
+    throw std::runtime_error("position_ids must use int64 elements");
+  if (positions.size() != rows * width)
+    throw std::runtime_error("position_ids data size does not match the token batch");
+
+  const auto require_dimension = [&](size_t index, size_t value) {
+    if (found->shape[index] >= 0 &&
+        found->shape[index] != static_cast<int64_t>(value))
+      throw std::runtime_error("position_ids input shape does not match the token batch");
+  };
+  if (found->shape.size() == 2) {
+    require_dimension(0, rows);
+    require_dimension(1, width);
+    feeds.Add("position_ids", positions,
+              {static_cast<int64_t>(rows), static_cast<int64_t>(width)},
+              OgaElementType_int64);
+    return;
+  }
+  if (found->shape.size() == 3 && found->shape[0] > 0) {
+    const auto axes = static_cast<size_t>(found->shape[0]);
+    require_dimension(1, rows);
+    require_dimension(2, width);
+    if (positions.size() > std::numeric_limits<size_t>::max() / axes)
+      throw std::runtime_error("position_ids element count overflows size_t");
+    std::vector<int64_t> expanded;
+    expanded.reserve(positions.size() * axes);
+    for (size_t axis = 0; axis < axes; ++axis)
+      expanded.insert(expanded.end(), positions.begin(), positions.end());
+    feeds.Add("position_ids", expanded,
+              {static_cast<int64_t>(axes), static_cast<int64_t>(rows),
+               static_cast<int64_t>(width)},
+              OgaElementType_int64);
+    return;
+  }
+  throw std::runtime_error(
+      "position_ids must have shape [batch, sequence] or "
+      "[axes, batch, sequence] with a fixed axis count");
+}
+
 TokenBatch Tokenize(DirectoryTokenizer& tokenizer, const std::vector<std::string>& texts) {
   if (texts.empty()) throw std::invalid_argument("questions must be non-empty");
   std::vector<std::vector<int32_t>> rows;
@@ -476,7 +522,7 @@ FeedStorage BackboneFeeds(const NamedComponentSession& session, const TokenBatch
         positions[index] = batch.mask[index] ? position++ : 0;
       }
     }
-    feeds.Add("position_ids", positions, shape, OgaElementType_int64);
+    AddPositionIds(feeds, session, positions, batch.rows, batch.width);
   }
   for (const auto& info : session.Inputs()) {
     if (info.name.rfind("past_key_values.", 0) != 0) continue;
@@ -1322,7 +1368,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
         {static_cast<int64_t>(batch.rows),
          static_cast<int64_t>(prefix.length + batch.width)},
         OgaElementType_int64);
-    branch_feeds.Add("position_ids", positions, token_shape, OgaElementType_int64);
+    AddPositionIds(branch_feeds, backbone, positions, batch.rows, batch.width);
     for (size_t i = 0; i < state_bindings.size(); ++i)
       AddRepeatedState(branch_feeds, state_bindings[i], prefix.states[i], batch.rows);
     hidden_tensor =
@@ -1359,11 +1405,20 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
   head.inputs.reserve(5);
   std::vector<float> probabilities;
   if (flat) {
+    const auto hidden_input = std::find_if(
+        pointer->Inputs().begin(), pointer->Inputs().end(),
+        [](const OgaComponentInfo& info) { return info.name == "hidden_states"; });
+    if (hidden_input == pointer->Inputs().end() ||
+        (hidden_input->shape.size() != 2 && hidden_input->shape.size() != 3))
+      throw std::runtime_error(
+          "kev_head hidden_states must have rank 2 or rank 3");
+    const bool flattened_hidden = hidden_input->shape.size() == 2;
     std::vector<int64_t> decide_indices;
     size_t max_options = 0;
     for (size_t i = 0; i < rows.size(); ++i) {
+      const auto row_offset = flattened_hidden ? i * batch.width : 0;
       decide_indices.push_back(
-          static_cast<int64_t>(i * batch.width + rows[i].size() - 1));
+          static_cast<int64_t>(row_offset + rows[i].size() - 1));
       max_options = std::max(max_options, option_indices[i].size());
     }
     if (!max_options)
@@ -1372,12 +1427,17 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     std::vector<uint8_t> mask(rows.size() * max_options);
     for (size_t i = 0; i < rows.size(); ++i)
       for (size_t j = 0; j < option_indices[i].size(); ++j) {
+        const auto row_offset = flattened_hidden ? i * batch.width : 0;
         padded[i * max_options + j] =
-            option_indices[i][j] + static_cast<int64_t>(i * batch.width);
+            option_indices[i][j] + static_cast<int64_t>(row_offset);
         mask[i * max_options + j] = 1;
       }
-    head.Add("hidden_states", hidden,
-             {static_cast<int64_t>(batch.rows * batch.width), static_cast<int64_t>(hidden_size)},
+    auto hidden_shape = flattened_hidden
+                            ? std::vector<int64_t>{
+                                  static_cast<int64_t>(batch.rows * batch.width),
+                                  static_cast<int64_t>(hidden_size)}
+                            : std::vector<int64_t>{static_cast<int64_t>(batch.rows), static_cast<int64_t>(batch.width), static_cast<int64_t>(hidden_size)};
+    head.Add("hidden_states", hidden, std::move(hidden_shape),
              OgaElementType_float32);
     head.Add("decide_indices", decide_indices, {static_cast<int64_t>(rows.size())},
              OgaElementType_int64);
