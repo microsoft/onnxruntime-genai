@@ -62,9 +62,19 @@ def test_moe_model_emits_portable_gated_add(ep):
     assert kwargs["shape"] == shape
 
 
-@pytest.mark.parametrize("ep", ["cuda", "trt-rtx"])
-def test_moe_updates_decoder_residual(ep):
+@pytest.mark.parametrize(
+    "ep, use_paged_attention, hidden_rows_dim, expected_shape",
+    [
+        ("cuda", False, "num_tokens", ["batch_size", "sequence_length", 2048]),
+        ("trt-rtx", False, "num_tokens", ["batch_size", "sequence_length", 2048]),
+        ("cuda", True, "num_tokens", ["num_tokens", 2048]),
+        ("cuda", True, "num_logits", ["num_logits", 2048]),
+    ],
+)
+def test_moe_updates_decoder_residual(ep, use_paged_attention, hidden_rows_dim, expected_shape):
     model = _make_model(ep)
+    model.use_paged_attention = use_paged_attention
+    model.hidden_rows_dim = hidden_rows_dim
     model.make_ep_expansions_init()
     model.moe_attrs = {"op_type": "QMoE"}
     model.layernorm_attrs = {"skip_input": "attention_output"}
@@ -79,3 +89,32 @@ def test_moe_updates_decoder_residual(ep):
     model.make_moe(3, moe, "normalized_hidden_states")
 
     assert model.layernorm_attrs["skip_input"] == "/model/layers.3/moe/GatedAdd/output_0"
+    # The residual consumer must see the same rank and active row dimension as
+    # the expert inputs, including rows selected for last-layer logit pruning.
+    assert model.calls[-1][2]["shape"] == expected_shape
+
+
+@pytest.mark.parametrize(
+    "use_paged_attention, hidden_rows_dim, expected_shape",
+    [
+        (False, "num_tokens", ["batch_size", "sequence_length", 1]),
+        (True, "num_tokens", ["num_tokens", 1]),
+        (True, "num_logits", ["num_logits", 1]),
+    ],
+)
+def test_shared_expert_gate_preserves_hidden_layout(use_paged_attention, hidden_rows_dim, expected_shape):
+    model = _make_model("cuda")
+    model.use_paged_attention = use_paged_attention
+    model.hidden_rows_dim = hidden_rows_dim
+    model.intermediate_size = 16
+    model.shared_expert_intermediate_size = 8
+    model.mlp_attrs = {"output_0": "shared"}
+    model.make_mlp_proj = lambda *args: None
+    model.make_matmul = lambda projection, name, root_input: name
+
+    shared, gate = model.make_shared_expert(3, object(), object(), "normalized_hidden_states")
+
+    assert shared == "shared"
+    _, args, kwargs = model.calls[-1]
+    assert args[0] == gate
+    assert kwargs["shape"] == expected_shape
