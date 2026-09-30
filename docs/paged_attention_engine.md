@@ -1812,8 +1812,10 @@ later sampled turns continue feeding their committed context into its cache with
 drafts, so a subsequent greedy turn can resume drafting without a cache hole. These ingest-only
 steps still execute the drafter session to preserve that continuity.
 
-`independent_sampling: true` is the older spelling of `sampled_proposal: "independent"`. That
-mode's proposal defaults to temperature `0.1`, top-p `0.95`, and min-p `0.3`; override them with
+`independent_sampling: true` is the older spelling of `sampled_proposal: "independent"`. A
+section that sets both keys must agree (`independent_sampling` is true exactly when
+`sampled_proposal` is `"independent"`); otherwise the config is rejected, whatever the key order.
+That mode's proposal defaults to temperature `0.1`, top-p `0.95`, and min-p `0.3`; override them with
 `sampling_temperature`, `sampling_top_p`, and `sampling_min_p` in the same section. Min-p
 truncates only the proposal distribution; verification continues to use the target model's
 canonical distribution for the current turn. `lattice` ignores these three settings and uses the

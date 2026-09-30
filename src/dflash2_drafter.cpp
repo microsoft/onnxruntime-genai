@@ -187,11 +187,15 @@ void Dflash2SampleLatticePath(const Dflash2Lattice& lattice, size_t steps, float
                      [row](size_t left, size_t right) { return row[left] > row[right]; });
     const float max_score = row[order.front()];
     float sum = 0.0f;
-    for (size_t i = 0; i < width; ++i) {
+    for (size_t i = 0; i < keep_limit; ++i) {
       probabilities[i] = std::exp((row[order[i]] - max_score) / temperature);
       sum += probabilities[i];
     }
-    // Same retention rule as the target selection, so q is nonzero only where p can be.
+    if (!(sum > 0.0f) || !std::isfinite(sum)) {
+      throw std::runtime_error("A DFlash 2 lattice row has non-finite scores.");
+    }
+    // Same retention rule as the target selection (normalize over top-k, then top-p), so q is
+    // nonzero only where p can be.
     weights.clear();
     float cumulative = 0.0f;
     for (size_t i = 0; i < keep_limit; ++i) {

@@ -276,6 +276,31 @@ TEST(Dflash2ConfigTest, ParsesSampledProposal) {
             Proposal::Independent);
   EXPECT_THROW(parse("ortgenai_dflash_proposal_bad", R"(,"sampled_proposal":"beam")"),
                std::runtime_error);
+
+  // Both spellings resolve the same way in either key order, and a contradiction is rejected.
+  for (const bool proposal_first : {true, false}) {
+    auto both = [&](std::string_view name, std::string_view proposal, bool independent) {
+      const std::string proposal_key = R"(,"sampled_proposal":")" + std::string{proposal} + "\"";
+      const std::string independent_key =
+          std::string{R"(,"independent_sampling":)"} + (independent ? "true" : "false");
+      return parse(std::string{name} + (proposal_first ? "_pf" : "_if"),
+                   proposal_first ? proposal_key + independent_key
+                                  : independent_key + proposal_key);
+    };
+    SCOPED_TRACE(proposal_first ? "sampled_proposal first" : "independent_sampling first");
+    EXPECT_EQ(both("ortgenai_dflash_proposal_none_false", "none", false)
+                  .model.dflash2.sampled_proposal,
+              Proposal::None);
+    const auto independent = both("ortgenai_dflash_proposal_indep_true", "independent", true);
+    EXPECT_EQ(independent.model.dflash2.sampled_proposal, Proposal::Independent);
+    EXPECT_TRUE(independent.model.dflash2.independent_sampling);
+    EXPECT_THROW(both("ortgenai_dflash_proposal_none_true", "none", true), std::runtime_error);
+    EXPECT_THROW(both("ortgenai_dflash_proposal_indep_false", "independent", false),
+                 std::runtime_error);
+  }
+  EXPECT_EQ(parse("ortgenai_dflash_proposal_legacy_false", R"(,"independent_sampling":false)")
+                .model.dflash2.sampled_proposal,
+            Proposal::Lattice);
 }
 
 TEST(Dflash2ConfigTest, LatticeWalkConditionsOnTheSampledPredecessor) {
@@ -317,6 +342,17 @@ TEST(Dflash2ConfigTest, LatticeWalkTruncatesLikeTheTarget) {
   EXPECT_EQ(distributions[0].indices, (std::vector<int32_t>{11, 13}));
   EXPECT_NEAR(distributions[0].probs[0], 0.7310586f, 1e-6f);
   EXPECT_NEAR(distributions[0].probs[1], 0.2689414f, 1e-6f);
+
+  // Top-p applies to the top-k renormalized mass: 0.731 of the top two already covers 0.7, while
+  // the full row would give the leader only 0.644 and keep a second candidate.
+  Dflash2SampleLatticePath(lattice, 1, 1.0f, 2, 0.7f, rng, tokens, distributions);
+  EXPECT_EQ(distributions[0].indices, (std::vector<int32_t>{11}));
+  EXPECT_EQ(tokens, (std::vector<int32_t>{11}));
+
+  Dflash2Lattice non_finite = lattice;
+  non_finite.scores[1] = std::numeric_limits<float>::infinity();
+  EXPECT_THROW(Dflash2SampleLatticePath(non_finite, 1, 1.0f, 0, 1.0f, rng, tokens, distributions),
+               std::runtime_error);
 
   // Temperature 2 on the full row, with the sample frequencies matching the recorded q.
   std::array<int, 4> counts{};

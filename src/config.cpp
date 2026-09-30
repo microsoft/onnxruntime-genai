@@ -1243,29 +1243,22 @@ struct Dflash2_Element : JSON::Element {
     } else if (name == "sliding_window") {
       v_.sliding_window = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "independent_sampling") {
-      v_.independent_sampling = JSON::Get<bool>(value);
-      using Proposal = Config::Model::Dflash2::SampledProposal;
-      if (v_.independent_sampling) {
-        v_.sampled_proposal = Proposal::Independent;
-      } else if (v_.sampled_proposal == Proposal::Independent) {
-        v_.sampled_proposal = Proposal::Lattice;
-      }
+      independent_sampling_ = JSON::Get<bool>(value);
     } else if (name == "sampled_proposal") {
       using Proposal = Config::Model::Dflash2::SampledProposal;
       const auto proposal = JSON::Get<std::string_view>(value);
       if (proposal == "none") {
-        v_.sampled_proposal = Proposal::None;
+        sampled_proposal_ = Proposal::None;
       } else if (proposal == "greedy_path") {
-        v_.sampled_proposal = Proposal::GreedyPath;
+        sampled_proposal_ = Proposal::GreedyPath;
       } else if (proposal == "independent") {
-        v_.sampled_proposal = Proposal::Independent;
+        sampled_proposal_ = Proposal::Independent;
       } else if (proposal == "lattice") {
-        v_.sampled_proposal = Proposal::Lattice;
+        sampled_proposal_ = Proposal::Lattice;
       } else {
         throw std::out_of_range(
             "sampled_proposal must be one of none, greedy_path, independent, lattice");
       }
-      v_.independent_sampling = v_.sampled_proposal == Proposal::Independent;
     } else if (name == "sampling_temperature") {
       const double sampling_temperature = JSON::Get<double>(value);
       if (!std::isfinite(sampling_temperature) || sampling_temperature <= 0.0 ||
@@ -1323,8 +1316,32 @@ struct Dflash2_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  // Resolved once the section is complete so the result does not depend on key order.
+  void OnComplete(bool /*empty*/) override {
+    using Proposal = Config::Model::Dflash2::SampledProposal;
+    const auto sampled_proposal = std::exchange(sampled_proposal_, std::nullopt);
+    const auto independent_sampling = std::exchange(independent_sampling_, std::nullopt);
+    if (sampled_proposal) {
+      if (independent_sampling &&
+          *independent_sampling != (*sampled_proposal == Proposal::Independent)) {
+        throw std::out_of_range(
+            "independent_sampling conflicts with sampled_proposal; set only sampled_proposal");
+      }
+      v_.sampled_proposal = *sampled_proposal;
+    } else if (independent_sampling) {
+      if (*independent_sampling) {
+        v_.sampled_proposal = Proposal::Independent;
+      } else if (v_.sampled_proposal == Proposal::Independent) {
+        v_.sampled_proposal = Proposal::Lattice;
+      }
+    }
+    v_.independent_sampling = v_.sampled_proposal == Proposal::Independent;
+  }
+
  private:
   Config::Model::Dflash2& v_;
+  std::optional<Config::Model::Dflash2::SampledProposal> sampled_proposal_;
+  std::optional<bool> independent_sampling_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
   Dflash2Inputs_Element inputs_{v_.inputs};
