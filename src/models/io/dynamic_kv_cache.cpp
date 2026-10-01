@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "dynamic_kv_cache.h"
+#include "windowed_kv_cache.h"
 
 #include <algorithm>
 #include <cassert>
@@ -45,11 +46,19 @@ void DynamicKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
   is_first_update_ = false;
 }
 
+bool DynamicKeyValueCache::CanRewindTo(size_t index) const {
+  // shape_[2] is not maintained when per-layer shapes are in use, so bound by the last Update() length.
+  return index == 0 || (static_cast<int64_t>(index) < current_length_ &&
+                        CanRewindWindowedKvCache(windowed_cache_size_, current_length_, index));
+}
+
 void DynamicKeyValueCache::RewindTo(size_t index) {
-  if (shape_[2] <= static_cast<int>(index)) {
-    throw std::runtime_error("Requested length of rewind is greater than the current length.");
+  if (!CanRewindTo(index)) {
+    throw std::runtime_error("Cannot rewind the KV cache to " + std::to_string(index) +
+                             " from a current length of " + std::to_string(current_length_) + ".");
   }
 
+  current_length_ = static_cast<int>(index);
   is_first_update_ = true;
   if (index == 0) {
     for (int i = 0; i < layer_count_ * 2; i++) {
@@ -76,24 +85,16 @@ void DefaultKeyValueCacheBase::RewindPastTensorsTo(size_t index) {
   assert(index > 0 && !past_present_share_buffer_);
 
   if (!layer_shapes_.empty()) {
-    const int max_length = static_cast<int>(shape_[2]);
-    if (static_cast<int>(index) > max_length) {
-      throw std::runtime_error("Requested rewind length exceeds max_length.");
-    }
-
     for (int i = 0; i < layer_count_ * 2; i++) {
       const int layer_idx = i / 2;
-      const std::array<int64_t, 4> layer_shape = layer_shapes_[layer_idx];
-      const int layer_max_cache = static_cast<int>(layer_shape[2]);
-      const int actual_rewind_length = std::min(static_cast<int>(index), layer_max_cache);
-
-      std::array<int64_t, 4> new_shape = layer_shape;
-      new_shape[2] = actual_rewind_length;
-      const auto batch_x_num_heads = new_shape[0] * new_shape[1];
-      const auto new_length_x_head_size = new_shape[2] * new_shape[3];
-
       OrtValue& present = *presents_[i];
       const auto present_shape = present.GetTensorTypeAndShapeInfo()->GetShape();
+
+      // layer_shapes_[..][2] is 0 for unbounded layers, so bound by what the present actually holds.
+      std::array<int64_t, 4> new_shape = layer_shapes_[layer_idx];
+      new_shape[2] = std::min<int64_t>(static_cast<int64_t>(index), present_shape[2]);
+      const auto batch_x_num_heads = new_shape[0] * new_shape[1];
+      const auto new_length_x_head_size = new_shape[2] * new_shape[3];
       const auto old_length_x_head_size = present_shape[2] * new_shape[3];
 
       std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), new_shape, type_);
