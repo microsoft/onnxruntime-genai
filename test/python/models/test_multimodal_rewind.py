@@ -63,7 +63,7 @@ def _run(generator):
     image_features is read first: the prompt step is the only point at which the
     embedding model holds it, since the next step shrinks it to zero tokens.
     """
-    features = generator.get_input("image_features")
+    features = generator.get_input("image_features").copy()
     logits = [float(generator.get_logits().reshape(-1)[0])]
     for _ in range(STEPS):
         generator.generate_next_token()
@@ -166,12 +166,14 @@ def test_snapshot_state_enables_rewind_into_generated_continuation(test_data_pat
     snapshot_length = len(QWEN_PROMPT) + 1
     generator.generate_next_token()  # sequence length == snapshot_length
     assert generator.get_sequence(0).shape[0] == snapshot_length
+    
+    generator.get_logits()
     generator.snapshot_state()
 
     generator.generate_next_token()  # sequence length == snapshot_length + 1
-    expected_logits = generator.get_logits().copy()  # matches the replay's Run() count below
     generator.generate_next_token()  # sequence length == snapshot_length + 2
     expected_sequence = generator.get_sequence(0).copy()
+    expected_logits = generator.get_logits().copy()
 
     for _ in range(REPLAYS):
         generator.rewind_to(snapshot_length)
