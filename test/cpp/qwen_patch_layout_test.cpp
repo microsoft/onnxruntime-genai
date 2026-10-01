@@ -8,6 +8,7 @@
 
 #include "generator/generators.h"
 #include "models/qwen_vl_state.h"
+#include "telemetry_test_environment.h"
 
 namespace {
 
