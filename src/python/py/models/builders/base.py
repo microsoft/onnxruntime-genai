@@ -1190,6 +1190,8 @@ class Model:
         else:
             self.tied_quantized_embeddings = False
             self.tied_unquantized_embeddings = False
+        # Set by make_embedding_lookup once the lookup is wired to the quantized LM head weight.
+        self.embedding_reads_quantized_lm_head = False
 
     def is_lm_head_quantized(self):
         return (
@@ -3024,6 +3026,7 @@ class Model:
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and the export model
         # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
         if self.tied_quantized_embeddings and can_reuse_lm_head:
+            self.embedding_reads_quantized_lm_head = True
             bits, block_size, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = (
                 self.make_tied_quantized_embedding_input_names(lm_head)
             )

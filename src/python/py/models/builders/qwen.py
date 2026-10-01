@@ -1173,6 +1173,9 @@ class Qwen35MoEModel(MTPModel):
             )
             return None
         prepack = int(decoder.matmul_attrs["weights_prepacked"]) if decoder.ep == "cuda" else 0
+        if decoder.embedding_reads_quantized_lm_head:
+            # The prepack pass leaves a weight the tied embedding also reads in the raw layout.
+            prepack = 0
         adopt_target = not (prepack and decoder.io_dtype != ir.DataType.FLOAT16)
         if not adopt_target:
             print(

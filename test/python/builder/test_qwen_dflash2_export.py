@@ -68,6 +68,7 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
         onnx_dtype=ir.DataType.FLOAT16,
         quantization_algo="default",
         tied_quantized_embeddings=False,
+        embedding_reads_quantized_lm_head=False,
         quant_attrs={
             "op_types_to_quantize": ("MatMul",),
             "nodes_to_exclude": [],
@@ -924,6 +925,20 @@ def test_prepacked_bf16_target_keeps_a_private_raw_quantized_drafter_head():
     }
 
 
+@pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_tied_prepacked_target_shares_its_raw_lm_head_with_the_drafter(io_dtype):
+    # The prepack pass leaves an LM head the tied embedding also reads raw, so any drafter can adopt it.
+    model = _quant_composite(io_dtype=io_dtype)
+    model.decoder.embedding_reads_quantized_lm_head = True
+
+    assert model.block_drafter_lm_head_quant() == {
+        "bits": 4,
+        "block_size": 32,
+        "prepack": 0,
+        "adopt_target": True,
+    }
+
+
 def test_non_cuda_target_ignores_requested_prepack_for_shared_drafter_head():
     model = _quant_composite(ep="webgpu")
 
@@ -1425,11 +1440,11 @@ def test_qkv_fusion_matches_unfused_projections(tmp_path, bits):
         np.testing.assert_allclose(packed[:, q_dim + kv_dim :], v, rtol=1e-5, atol=1e-5)
 
 
-def _quantized_head_builder(tmp_path, bits=4, block_size=8):
+def _quantized_head_builder(tmp_path, bits=4, block_size=8, io_dtype=ir.DataType.FLOAT16):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
-        ir.DataType.FLOAT16,
+        io_dtype,
         paged_block_size=256,
         max_position_embeddings=128,
         quant={
@@ -1516,6 +1531,19 @@ def test_quantized_lm_head_adopts_the_targets_bytes_and_attributes(tmp_path):
     assert node.attributes["K"].value == builder.hidden_size
     assert node.attributes["N"].value == builder.vocab_size
     assert builder.lm_head_adoption is None
+
+
+def test_bf16_drafter_adopts_an_unpacked_target_lm_head(tmp_path):
+    builder = _quantized_head_builder(tmp_path, io_dtype=ir.DataType.BFLOAT16)
+    builder.make_lm_head("hidden_states", "num_sample")
+    target_path, qweight, _ = _save_quantized_target(tmp_path, builder, weight_prepacked=None)
+
+    builder.adopt_target_tensors(target_path)
+
+    adopted = builder.graph.initializers["lm_head.MatMul.weight_Q4"].const_value.numpy()
+    np.testing.assert_array_equal(adopted, qweight)
+    node = next(node for node in builder.graph if node.name == "/lm_head/MatMul")
+    assert "weight_prepacked" not in node.attributes
 
 
 def test_adopted_lm_head_survives_a_round_trip_to_disk(tmp_path):

@@ -591,6 +591,8 @@ def test_cuda_prepacking_keeps_the_tied_lm_head_weight_raw(tmp_path, extra_optio
 
     lm_head = next(node for node in quantized.graph if node.op_type == "MatMulNBits")
     assert "weight_prepacked" not in lm_head.attributes
+    # Block drafters read this to know the LM head stays raw.
+    assert model.embedding_reads_quantized_lm_head is True
     _assert_embeddings_are_lm_head_rows(quantized, tmp_path, vocab_size=vocab_size, hidden_size=hidden_size)
 
 
@@ -726,6 +728,7 @@ def test_make_embedding_incompatible_lm_head_keeps_checkpoint_embedding(tied_qua
     assert len(gather_calls) == 1
     assert gather_calls[0][1]["inputs"] == ["model.embed_tokens.weight", "input_ids"]
     assert model._transpose_calls == []
+    assert not getattr(model, "embedding_reads_quantized_lm_head", False)
 
 
 def _make_minimal_model_for_int4_matmul():
