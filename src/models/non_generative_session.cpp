@@ -27,6 +27,13 @@ constexpr size_t kDefaultKevCacheEntries = 512;
 constexpr size_t kDefaultKevCacheBytes = 16 * 1024 * 1024;
 constexpr size_t kDefaultKevPrefixCacheEntries = 32;
 constexpr size_t kDefaultKevPrefixCacheBytes = 512 * 1024 * 1024;
+constexpr size_t kMinCudaKevPrefixTokens = 128;
+
+bool UsesCuda(const std::vector<std::string>& providers) {
+  return std::find(providers.begin(), providers.end(), "cuda") != providers.end() ||
+         std::find(providers.begin(), providers.end(), "CUDAExecutionProvider") !=
+             providers.end();
+}
 
 std::string PackageIdentity(const std::string& package_path,
                             const std::vector<std::string>& providers) {
@@ -1282,7 +1289,12 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     rows.push_back(std::move(row));
     option_indices.push_back(std::move(indices));
   }
-  const bool use_prefix_reuse = prefix_reuse_enabled && !state_bindings.empty();
+  // Component outputs are currently host-owned, so copying and repeating CUDA
+  // state tensors costs more than recomputing a short prefix.
+  const bool use_prefix_reuse =
+      prefix_reuse_enabled && !state_bindings.empty() &&
+      (!UsesCuda(providers) ||
+       state_value.tokens.size() >= kMinCudaKevPrefixTokens);
   if (!use_prefix_reuse) {
     ++fallback_runs;
     for (size_t i = 0; i < rows.size(); ++i) {
