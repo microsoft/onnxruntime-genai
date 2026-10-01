@@ -173,11 +173,16 @@ a prefix into resident continuation turns. It still rejects target
 sliding-window KV rings and auxiliary caches that mirror every target block when
 `prefix_caching` is explicitly set to `true`. Existing configurations that omit
 the setting keep loading with caching disabled for those layouts, and builders
-emit an explicit `false` opt-out. A
-fixed-size Engine-hosted auxiliary pool can coexist with target prefix caching.
-In particular, a DFlash 2 drafter that did not process the skipped prefix cannot
-join at a nonzero position, so that request keeps the valid target hit and runs
-target-only rather than shortening the target boundary.
+emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
+can coexist with target prefix caching. For a windowed DFlash 2 drafter, one
+optional ring checkpoint can be attached to the exact indexed target boundary
+after its fixed-state checkpoint and the complete drafter proposal succeed.
+The ring is restored into newly allocated drafter blocks before a cached
+request joins at a nonzero position. An unleased older ring checkpoint may be
+replaced at a later boundary without evicting target blocks or fixed state.
+If the matching draft checkpoint is absent, the request retains the full
+target hit and runs target-only. Full-attention DSpark remains target-only
+after a nonzero-position prefix hit.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
@@ -850,7 +855,7 @@ For eligible decode shapes, the decoder may capture or replay a CUDA graph. Pref
 `ScheduledRequests::GenerateNextTokensForTransaction()` then:
 
 1. Applies each request's logits processors to its own logits row.
-2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path.
+2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path. A greedy request that verified drafts this step skips sampling: drafted requests run without logits processors, so the argmax that verification already computed for the row after the accepted prefix is committed directly.
 3. Runs the per-request sequence and EOS handling.
 4. Produces a `RequestStepResult` for each request.
 
@@ -1546,11 +1551,16 @@ and then publish them at a single infallible boundary:
   cannot overflow a generation, and that no row regresses below its slot's
   `committed_tokens`.
 - **`PrepareCommit()`** is the fallible device-completion phase: it re-validates,
-  copies fallback outputs into the **inactive** bank, or replays a partially accepted
-  compact update over a direct output, and synchronizes. A fully accepted direct
+  copies fallback outputs into the **inactive** bank, and synchronizes. A partially
+  accepted compact update over a direct output is replayed into the inactive bank by
+  the pool's next operation (`Reserve()`, `CapturePrefixCheckpoint()`, or the next
+  `PrepareCommit()`), which enqueues it ahead of every later reader of the banks on
+  the same stream, so the device runs the replay while the host prepares the next
+  step; discarding the prepared reservation drops it. A fully accepted direct
   output needs no state copy. The active (visible) bank is never touched, so a
   failure leaves committed state exactly as it was; it drains the device and marks
-  the pool unhealthy because the inactive banks may be left partially written. The
+  the pool unhealthy because the inactive banks may be left partially written. A
+  deferred replay that fails to launch also marks the pool unhealthy. The
   reservation becomes `Prepared`.
 - **`PublishCommit()`** is `noexcept` and performs no fallible or device work: it
   flips each slot to its freshly written bank, advances `state_generation`, sets
@@ -1751,38 +1761,79 @@ page size, before allocating cache resources. The drafter run is synchronous bec
 inputs and outputs are owned by one proposal call, so its run options cannot disable
 execution-provider synchronization.
 
-The direct drafter session also uses graph id `-1`: it reuses proposal tensor allocations but
-reshapes them for each step, so they cannot be captured safely. If this optional post-commit drafter
-run fails, the Engine discards any partial proposal and still publishes the already committed target
-events. A recoverable failure also makes the drafter forget every request it is currently tracking,
+The direct drafter session captures uniform shapes with stable proposal buffers, including
+batches containing a request restored from a DFlash2 prefix checkpoint. Graph replay requires
+a CUDA plugin EP version `v0.2.0` or later, which includes the per-session device-arena fix in
+[microsoft/onnxruntime#32807](https://github.com/microsoft/onnxruntime/pull/32807).
+Older plugin EPs share an arena across target and drafter sessions, allowing
+one session to overwrite memory retained by another's captured graph. GenAI cannot detect
+this at runtime: bad or missing drafts, reduced target accuracy, or a hang can result.
+No graphs are discarded on cached admission.
+On ORT builds without per-graph release, graph captures retired by buffer growth still live
+until their session is destroyed.
+The opt-in `Dflash2GraphRestoreTest.ExtendedCachedPrefixReplaysWithoutStaleGraphOrLostDrafts`
+exercises the real Engine with CUDA graph capture: set `D_FLASH2_GRAPH_TEST_MODEL` to a
+graph-enabled Qwen package with 256-token blocks and 512-token prefill, then run
+`engine_unit_tests` with `--ep_dir` pointing at a CUDA plugin with session-scoped device arenas
+and the test's `--gtest_filter`. The test enables prefix caching with a 512-token prefill chunk
+through a configuration overlay. With the reference tokenizer, it checks the 534-to-1146-token
+extension, two longer cached replays, draft acceptance, and output parity; a tokenizer whose
+prompt lengths fall outside the required cache-boundary ranges skips the test. Ordinary CPU CI
+skips this model-dependent test.
+
+If this optional post-commit drafter run fails, the Engine discards any partial proposal
+and still publishes the already committed target events.
+A recoverable failure also makes the drafter forget every request it is currently tracking,
 because the step whose rows it failed to ingest leaves its cached context no longer contiguous with
 the target. Those in-flight requests finish without block drafts while requests admitted afterwards
 still get them, and the retry budget is therefore spent on real drafter failures: three consecutive
 failures disable the drafter for the Engine, and a proposal contract violation disables it at once.
 `dflash2_failures` and `dflash2_disables` report those events.
 
-Automatic block drafting is greedy-only by default. A request joins on its position-zero step only
-when the current turn is greedy. If a sampled first turn executes that step, eligibility is not
-reconsidered during the same residency and the request decodes without block drafts until rewind
-or close. Once a request
-has joined, later sampled turns continue feeding their committed context into its cache without
-requesting drafts, so a subsequent greedy turn can resume drafting without a cache hole. These
-ingest-only steps still execute the drafter session to preserve that continuity.
+Greedy turns draft the greedy lattice path. How sampled turns draft is set by
+`model.dflash2.sampled_proposal`; every mode preserves the target distribution and they differ only
+in how many drafts the target accepts.
 
-Set `model.dflash2.independent_sampling` to opt sampled turns into the reference DFlash proposal
-contract. Each draft position then samples independently from the drafter's sparse top-k
-distribution, and target verification uses the probability ratio $\min(1, p(x) / q(x))$ with the
-residual distribution after rejection. The drafter distribution defaults to temperature `0.1`,
-top-p `0.95`, and min-p `0.3`; override them with `sampling_temperature`, `sampling_top_p`, and
-`sampling_min_p` in the same section. Min-p truncates only the proposal distribution; verification
-continues to use the target model's canonical distribution for the current turn. The learned-lattice
-greedy path remains unchanged when this option is absent or false.
+| Value | Proposal | Verification |
+|---|---|---|
+| `lattice` (default) | A path sampled through the lattice: each slot draws from the edge-score row its predecessor's draw selects, tempered and truncated with the turn's own temperature, top-k and top-p. | $\min(1, p(x) / q(x))$, residual on rejection. |
+| `greedy_path` | The same greedy lattice path a greedy turn drafts. | Sample the target row and accept while it matches the draft. |
+| `independent` | Each slot samples independently from its own sparse top-k distribution. | $\min(1, p(x) / q(x))$, residual on rejection. |
+| `none` | Sampled turns do not draft. | - |
+
+On Qwen3.8-27B with temperature 1.0, top-k 20 and top-p 0.95 (MMLU-Pro, 800 prompts, batch 1),
+`lattice` averaged 5.01 tokens per target step against 4.78 for `greedy_path` and 4.66 for
+`independent`, and decoded 3.1x faster than `none`.
+
+With `none`, a request joins on its position-zero step only when the current turn is greedy; with
+any other mode, a sampled turn also joins, provided its top-k is positive (draft validation rejects
+top-p-only sampled turns). If an ineligible first turn executes that step, eligibility is not reconsidered during the same residency
+and the request decodes without block drafts until rewind or close. Once a request has joined,
+later sampled turns continue feeding their committed context into its cache without requesting
+drafts, so a subsequent greedy turn can resume drafting without a cache hole. These ingest-only
+steps still execute the drafter session to preserve that continuity.
+
+`independent_sampling: true` is the older spelling of `sampled_proposal: "independent"`. A
+section that sets both keys must agree (`independent_sampling` is true exactly when
+`sampled_proposal` is `"independent"`); otherwise the config is rejected, whatever the key order.
+That mode's proposal defaults to temperature `0.1`, top-p `0.95`, and min-p `0.3`; override them with
+`sampling_temperature`, `sampling_top_p`, and `sampling_min_p` in the same section. Min-p
+truncates only the proposal distribution; verification continues to use the target model's
+canonical distribution for the current turn. `lattice` ignores these three settings and uses the
+turn's policy, so $q$ approximates $p$ wherever the drafter is calibrated.
 
 A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
 pool is sized for `max_batch_size` rings and its footprint is independent of context length. With
 automatic sizing, that pool is allocated before the target measures free memory. When `num_blocks`
 is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
-by that baseline target block count before either cache pool is allocated. A full-attention block
+by that baseline target block count before either cache pool is allocated.
+A windowed DFlash 2 model with hybrid target prefix caching reserves one
+additional ring's bytes for its optional checkpoint, independent of context
+length. Readers lease the immutable snapshot through admission; replacing it
+cannot overwrite an in-flight adopter. If the budget cannot leave at least one
+target paged block after the auxiliary pool and snapshot reservation, the
+optional checkpoint is disabled and the existing target-only prefix behavior
+is retained. A full-attention block
 drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
 query-spill bytes are charged against the same budget before target capacity is selected, using the
 cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same
@@ -1798,8 +1849,9 @@ that capacity was occupied. A tracked request remains part of this capacity whil
 ingest-only, because retaining its cache is what lets a later greedy turn resume drafting.
 Rewind releases any tracked DFlash/DSpark state, including its cache blocks. On replay, a request
 that was previously sampled or admission-denied can try to join again if its new position-zero
-step is draft-eligible and capacity is available. A prefix-cache hit that skips position zero
-still prevents drafter admission, so rewind does not guarantee renewed drafting.
+step is draft-eligible and capacity is available. A nonzero-position hit also joins a windowed
+DFlash 2 drafter when its exact target boundary still has a draft checkpoint and a free ring.
+Otherwise it remains target-only; rewind does not guarantee renewed drafting.
 
 ## Backpressure and fairness
 

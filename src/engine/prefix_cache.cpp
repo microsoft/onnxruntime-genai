@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "fixed_state_pool.h"
+#include "dflash2_drafter.h"
 
 namespace Generators {
 
@@ -93,6 +94,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   std::vector<std::unordered_map<uint64_t, Entry>::iterator> hits;
   size_t safe_hit_count = 0;
   std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint;
+  std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint;
   for (size_t offset = 0; offset + block_size <= adoptable; offset += block_size) {
     const auto chunk = tokens.subspan(offset, block_size);
     const uint64_t hash = Hash(parent_hash, chunk);
@@ -121,6 +123,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
         it->second.checkpoint->TokenCount() == offset + block_size) {
       safe_hit_count = hits.size();
       checkpoint = it->second.checkpoint;
+      draft_checkpoint = it->second.draft_checkpoint;
     }
     parent = it->second.identity;
     parent_hash = hash;
@@ -139,6 +142,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   }
   match.token_count = hits.size() * block_size;
   match.fixed_state_checkpoint = std::move(checkpoint);
+  match.draft_checkpoint = std::move(draft_checkpoint);
   ++metrics_.matches;
 
   return match;
@@ -203,8 +207,10 @@ PrefixCacheRegistration PrefixCache::Register(
   const auto parent_entry = parent ? entries_.find(parent->hash) : entries_.end();
   Entry* const parent_entry_ptr =
       parent_entry == entries_.end() ? nullptr : &parent_entry->second;
+  const auto parent_block_id =
+      parent_entry_ptr ? std::optional<size_t>{parent_entry_ptr->block->Id()} : std::nullopt;
   auto [entry_it, inserted] = entries_.try_emplace(
-      hash, Entry{block, identity, nullptr, {}, {}, !parent_entry_ptr ? std::optional<size_t>{} : std::optional<size_t>{parent_entry_ptr->block->Id()}});
+      hash, Entry{block, identity, nullptr, nullptr, {}, {}, parent_block_id});
   if (!inserted) {
     throw std::logic_error("Prefix cache identity became occupied during registration.");
   }
@@ -324,6 +330,48 @@ bool PrefixCache::AttachCheckpoint(
   return true;
 }
 
+bool PrefixCache::CanAttachDraftCheckpoint(
+    const std::shared_ptr<const BlockIdentity>& identity, size_t token_count) const {
+  if (!Enabled() || !identity) {
+    return false;
+  }
+  const auto it = entries_.find(identity->hash);
+  return it != entries_.end() && it->second.identity == identity &&
+         it->second.checkpoint && it->second.checkpoint->TokenCount() == token_count &&
+         !it->second.draft_checkpoint;
+}
+
+std::shared_ptr<const FixedStatePrefixCheckpoint> PrefixCache::DraftBoundary(
+    const std::shared_ptr<const BlockIdentity>& identity, size_t token_count) const {
+  return CanAttachDraftCheckpoint(identity, token_count)
+             ? entries_.at(identity->hash).checkpoint
+             : nullptr;
+}
+
+bool PrefixCache::AttachDraftCheckpoint(
+    const std::shared_ptr<const BlockIdentity>& identity,
+    const std::shared_ptr<const FixedStatePrefixCheckpoint>& fixed_checkpoint,
+    std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint) {
+  if (!draft_checkpoint || !fixed_checkpoint ||
+      !CanAttachDraftCheckpoint(identity, draft_checkpoint->token_count)) {
+    return false;
+  }
+  auto& entry = entries_.at(identity->hash);
+  if (entry.checkpoint != fixed_checkpoint) {
+    return false;
+  }
+  entry.draft_checkpoint = std::move(draft_checkpoint);
+  return true;
+}
+
+void PrefixCache::DropUnleasedDraftCheckpoints() {
+  for (auto& [hash, entry] : entries_) {
+    if (entry.draft_checkpoint && entry.draft_checkpoint.use_count() == 1) {
+      entry.draft_checkpoint.reset();
+    }
+  }
+}
+
 size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {
   size_t reclaimed = 0;
   for (auto recency = recency_.begin();
@@ -333,6 +381,7 @@ size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {
     if (entry.checkpoint &&
         entry.checkpoint.use_count() == 1) {
       entry.checkpoint.reset();
+      entry.draft_checkpoint.reset();
       --checkpoint_count_;
       ++reclaimed;
     }

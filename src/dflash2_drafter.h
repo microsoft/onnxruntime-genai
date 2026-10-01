@@ -18,12 +18,27 @@ namespace Generators {
 
 struct Request;
 
+struct Dflash2PrefixCheckpoint {
+  size_t token_count{};
+  size_t ring_blocks{};
+  std::vector<std::unique_ptr<Tensor>> caches;
+};
+
+void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destination_blocks,
+                           Tensor& source, std::span<const int32_t> source_blocks);
+
+bool CanReserveDflash2PrefixCheckpoint(size_t target_budget_bytes, size_t reserved_bytes,
+                                       size_t snapshot_bytes, size_t target_block_bytes);
+
 size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
                          size_t remaining_turn_tokens_after_step);
 
 size_t Dflash2GraphBlockTableColumnLimit(size_t context_length, size_t paged_block_size,
                                          size_t query_block_size);
+
+bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest,
+                                size_t max_blocks, size_t max_columns) noexcept;
 
 // Reshapes a proposal tensor the drafter reuses between steps, replacing its buffer only when a
 // step needs more room than the one it kept. `reallocated` is set when the buffer moved, which
@@ -33,14 +48,29 @@ Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device
                           bool* reallocated = nullptr,
                           std::unique_ptr<Tensor>* displaced = nullptr);
 
-// The drafter cannot backfill K/V for context whose auxiliary hidden states were already consumed,
-// so an untracked request can join only at position zero while its current turn is eligible to
-// draft. Tracked requests bypass this rule so every later turn keeps their cached context contiguous.
+// Without a matching ring checkpoint, a new request can join only at position zero.
 bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept;
 
 TargetTokenSelection Dflash2IndependentDraftDistribution(
     const int32_t* candidate_ids, const float* logits, size_t top_k,
     float temperature, float top_p, float min_p);
+
+// One request's drafted lattice: `top_k` candidates per step and, per step, a [top_k, top_k] edge
+// matrix whose row i scores this step's candidates given the previous step's candidate i.
+struct Dflash2Lattice {
+  size_t top_k{};
+  std::vector<int32_t> candidate_ids;  // [steps, top_k]
+  std::vector<float> scores;           // [steps, top_k, top_k]
+
+  size_t Steps() const noexcept { return top_k == 0 ? 0 : candidate_ids.size() / top_k; }
+};
+
+// Samples a path of up to `steps` tokens: each step draws from the row its predecessor's draw
+// selects, tempered and truncated like the target, and records the distribution it drew from.
+void Dflash2SampleLatticePath(const Dflash2Lattice& lattice, size_t steps, float temperature,
+                              int top_k, float top_p, std::mt19937& rng,
+                              std::vector<int32_t>& tokens,
+                              std::vector<TargetTokenSelection>& distributions);
 
 /**
  * @brief Hosts a DFlash 2 or DSpark block-drafter session.
@@ -92,6 +122,7 @@ struct Dflash2Drafter {
    */
   struct Feed {
     Request* request{};
+    std::shared_ptr<const Dflash2PrefixCheckpoint> prefix_checkpoint;
     size_t aux_row_begin{};
     size_t aux_row_count{};
     size_t first_position{};
@@ -99,6 +130,7 @@ struct Dflash2Drafter {
     bool draft_eligible{};
     bool wants_drafts{};
     bool wants_independent_sampling{};
+    bool wants_lattice{};
   };
 
   /**
@@ -137,20 +169,29 @@ struct Dflash2Drafter {
   size_t NumDraftTokens() const { return static_cast<size_t>(config_.num_draft_tokens); }
   size_t AdmissionMisses() const { return admission_misses_; }
 
+  // A windowed drafter retains only a bounded ring, independently of the target context length.
+  static size_t PrefixCheckpointBytes(const Config& config, size_t paged_block_size,
+                                      ONNXTensorElementDataType cache_type);
+  bool CanCapturePrefix(const Request* request, size_t token_count) const;
+  std::shared_ptr<const Dflash2PrefixCheckpoint> CapturePrefix(const Request* request,
+                                                               size_t token_count);
+
   /**
    * @brief Ingests every served feed's context and drafts for the ones that asked.
    * @param aux_hidden_states The target's packed [token_count, aux_hidden_size] output.
    * @param drafts Resized to feeds.size(); entry i is empty unless feeds[i] was served and asked.
    *
-   * A request joins the drafter on its first draft-eligible feed, which must start at position zero,
+   * A request joins at position zero or with a restored windowed checkpoint,
    * and keeps its cache blocks until Release. Requests that arrive once the pool is fully subscribed
    * are skipped for good rather than failing the step, so they decode without block drafts. A tracked
    * request continues feeding context during sampled turns so a later greedy turn can resume drafting.
    */
-  // Returns true only when the drafter session executed.
+  // Returns true only when the drafter session executed. A feed that wants its lattice gets it in
+  // `lattices` instead of a greedy path, so the caller can sample it with the request's RNG.
   bool Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                std::vector<std::vector<int32_t>>& drafts,
-               std::vector<std::vector<TargetTokenSelection>>* draft_distributions = nullptr);
+               std::vector<std::vector<TargetTokenSelection>>* draft_distributions = nullptr,
+               std::vector<Dflash2Lattice>* lattices = nullptr);
 
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
   void Release(const Request* request);
@@ -164,11 +205,13 @@ struct Dflash2Drafter {
  private:
   struct RequestState {
     std::vector<int32_t> blocks;
-    size_t cached_positions{};  // Positions [0, cached_positions) hold committed context K/V.
+    size_t cached_positions{};  // Logical committed cursor; a windowed ring retains only its live tail.
   };
 
   // Whether the drafter can carry this feed's request, admitting it to the pool when it can.
   bool Admit(const Feed& feed);
+  bool RestorePrefix(const Feed& feed);
+  std::weak_ptr<const Dflash2PrefixCheckpoint> prefix_checkpoint_;
   // Grows a request's block list so positions [0, positions) are addressable. A windowed drafter
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);
@@ -184,6 +227,7 @@ struct Dflash2Drafter {
   // Context positions the drafter must keep behind the query block. Zero when it is not windowed,
   // in which case the whole sequence stays resident.
   size_t context_window_{};
+  bool has_q_row_map_{true};
   size_t ring_blocks_{};
   // Concurrent requests the pool was sized for, and the blocks a full-attention request's query
   // rows can need beyond the committed context the target pool already accounts for.

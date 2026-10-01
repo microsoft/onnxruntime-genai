@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <numeric>
 #include <string>
 #include <string_view>
@@ -156,6 +157,70 @@ TargetTokenSelection Dflash2IndependentDraftDistribution(
       candidate_ids, logits, top_k, temperature, top_p, min_p);
 }
 
+void Dflash2SampleLatticePath(const Dflash2Lattice& lattice, size_t steps, float temperature,
+                              int top_k, float top_p, std::mt19937& rng,
+                              std::vector<int32_t>& tokens,
+                              std::vector<TargetTokenSelection>& distributions) {
+  const size_t width = lattice.top_k;
+  if (width == 0 || lattice.scores.size() != lattice.candidate_ids.size() * width ||
+      !(temperature > 0.0f)) {
+    throw std::invalid_argument("A DFlash 2 lattice walk needs a well-formed lattice and temperature.");
+  }
+  steps = std::min(steps, lattice.Steps());
+  const size_t keep_limit =
+      top_k > 0 ? std::min(width, static_cast<size_t>(top_k)) : width;
+  const bool truncate_top_p = top_p > 0.0f && top_p < 1.0f;
+  tokens.clear();
+  distributions.clear();
+  tokens.reserve(steps);
+  distributions.reserve(steps);
+  std::vector<size_t> order(width);
+  std::vector<float> probabilities(width);
+  std::vector<float> weights;
+  weights.reserve(width);
+  size_t previous = 0;
+  for (size_t step = 0; step < steps; ++step) {
+    const float* row = lattice.scores.data() + (step * width + previous) * width;
+    const int32_t* candidates = lattice.candidate_ids.data() + step * width;
+    std::iota(order.begin(), order.end(), size_t{0});
+    std::stable_sort(order.begin(), order.end(),
+                     [row](size_t left, size_t right) { return row[left] > row[right]; });
+    const float max_score = row[order.front()];
+    float sum = 0.0f;
+    for (size_t i = 0; i < keep_limit; ++i) {
+      probabilities[i] = std::exp((row[order[i]] - max_score) / temperature);
+      sum += probabilities[i];
+    }
+    if (!(sum > 0.0f) || !std::isfinite(sum)) {
+      throw std::runtime_error("A DFlash 2 lattice row has non-finite scores.");
+    }
+    // Same retention rule as the target selection (normalize over top-k, then top-p), so q is
+    // nonzero only where p can be.
+    weights.clear();
+    float cumulative = 0.0f;
+    for (size_t i = 0; i < keep_limit; ++i) {
+      if (truncate_top_p && !(cumulative < top_p)) break;
+      const float probability = probabilities[i] / sum;
+      cumulative += probability;
+      weights.push_back(probability);
+    }
+    const float kept = std::accumulate(weights.begin(), weights.end(), 0.0f);
+    std::discrete_distribution<size_t> draw(weights.begin(), weights.end());
+    const size_t chosen = draw(rng);
+
+    TargetTokenSelection distribution;
+    distribution.indices.reserve(weights.size());
+    distribution.probs.reserve(weights.size());
+    for (size_t i = 0; i < weights.size(); ++i) {
+      distribution.indices.push_back(candidates[order[i]]);
+      distribution.probs.push_back(weights[i] / kept);
+    }
+    tokens.push_back(candidates[order[chosen]]);
+    distributions.push_back(std::move(distribution));
+    previous = order[chosen];
+  }
+}
+
 size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
                          size_t remaining_turn_tokens_after_step) {
@@ -296,6 +361,8 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
   for (const auto* name : {&inputs.q_row_map, &inputs.qkv_row_map,
                            &inputs.block_row_index, &inputs.cumulative_sequence_lengths,
                            &inputs.past_sequence_lengths}) {
+    // A drafter that projects Q from the same packed rows as K/V has no use for `q_row_map`.
+    if (name == &inputs.q_row_map && !drafter_metadata.HasInput(*name)) continue;
     RequireTensor(drafter_metadata, *name, true, Ort::TypeToTensorType<int32_t>, 1);
     if (drafter_metadata.GetInputShape(*name)[0] >= 0 || !input_names.insert(*name).second) {
       throw std::runtime_error(
@@ -461,6 +528,51 @@ size_t Dflash2Drafter::PoolBytes(const Config& config, size_t paged_block_size,
                          "Block-drafter cache bytes");
 }
 
+size_t Dflash2Drafter::PrefixCheckpointBytes(const Config& config, size_t paged_block_size,
+                                             ONNXTensorElementDataType cache_type) {
+  return PoolBytes(config, paged_block_size, PoolBlocks(config, paged_block_size, 1), cache_type);
+}
+
+bool CanReserveDflash2PrefixCheckpoint(size_t target_budget_bytes, size_t reserved_bytes,
+                                       size_t snapshot_bytes, size_t target_block_bytes) {
+  return target_budget_bytes > reserved_bytes &&
+         snapshot_bytes < target_budget_bytes - reserved_bytes &&
+         target_block_bytes <= target_budget_bytes - reserved_bytes - snapshot_bytes;
+}
+
+void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destination_blocks,
+                           Tensor& source, std::span<const int32_t> source_blocks) {
+  const auto source_shape = source.GetShape();
+  const auto destination_shape = destination.GetShape();
+  if (source_shape.empty() || destination_shape.size() != source_shape.size() ||
+      !std::equal(source_shape.begin() + 1, source_shape.end(), destination_shape.begin() + 1)) {
+    throw std::logic_error("DFlash 2 ring checkpoint has incompatible cache shape.");
+  }
+  auto source_bytes = source.GetByteSpan();
+  auto destination_bytes = destination.GetByteSpan();
+  const size_t source_pool_blocks = static_cast<size_t>(source_shape.front());
+  const size_t destination_pool_blocks = static_cast<size_t>(destination_shape.front());
+  if (source_blocks.size() != destination_blocks.size() ||
+      source_pool_blocks == 0 || destination_pool_blocks == 0 ||
+      source_bytes.size() % source_pool_blocks != 0 ||
+      destination_bytes.size() % destination_pool_blocks != 0 ||
+      source.GetType() != destination.GetType() ||
+      destination_bytes.size() / destination_pool_blocks != source_bytes.size() / source_pool_blocks ||
+      std::any_of(source_blocks.begin(), source_blocks.end(), [source_pool_blocks](int32_t id) {
+        return id < 0 || static_cast<size_t>(id) >= source_pool_blocks;
+      }) ||
+      std::any_of(destination_blocks.begin(), destination_blocks.end(), [destination_pool_blocks](int32_t id) {
+        return id < 0 || static_cast<size_t>(id) >= destination_pool_blocks;
+      })) {
+    throw std::logic_error("DFlash 2 ring checkpoint has incompatible cache blocks.");
+  }
+  const size_t block_bytes = source_bytes.size() / source_pool_blocks;
+  for (size_t i = 0; i < source_blocks.size(); ++i) {
+    destination_bytes.subspan(static_cast<size_t>(destination_blocks[i]) * block_bytes, block_bytes)
+        .CopyFrom(source_bytes.subspan(static_cast<size_t>(source_blocks[i]) * block_bytes, block_bytes));
+  }
+}
+
 size_t Dflash2Drafter::FullAttentionPoolBlocks(size_t target_blocks, size_t paged_block_size,
                                                size_t query_block_size,
                                                size_t max_batch_size) {
@@ -527,6 +639,7 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
   }
 
   const auto& inputs = config_.inputs;
+  has_q_row_map_ = model_->session_info_.HasInput(inputs.q_row_map);
   aux_type_ = model_->session_info_.GetInputDataType(inputs.aux_hidden_states);
   const auto aux_shape = model_->session_info_.GetInputShape(inputs.aux_hidden_states);
   if (aux_shape.size() != 2 || aux_shape[1] <= 0) {
@@ -625,6 +738,11 @@ bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept {
   return draft_eligible && first_position == 0;
 }
 
+bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest,
+                                size_t max_blocks, size_t max_columns) noexcept {
+  return enabled && uniform_ingest && max_blocks <= max_columns;
+}
+
 void Dflash2Drafter::AllocateCache() {
   const size_t layers = static_cast<size_t>(config_.num_hidden_layers);
   const std::vector<int64_t> shape{static_cast<int64_t>(num_blocks_),
@@ -648,6 +766,9 @@ void Dflash2Drafter::AllocateCache() {
 
 bool Dflash2Drafter::Admit(const Feed& feed) {
   if (requests_.find(feed.request) != requests_.end()) {
+    return true;
+  }
+  if (feed.draft_eligible && feed.first_position != 0 && RestorePrefix(feed)) {
     return true;
   }
   if (!Dflash2CanJoin(feed.draft_eligible, feed.first_position)) {
@@ -674,6 +795,94 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   }
   requests_.emplace(feed.request, RequestState{});
   return true;
+}
+
+bool Dflash2Drafter::CanCapturePrefix(const Request* request, size_t token_count) const {
+  const auto it = requests_.find(request);
+  return ring_blocks_ != 0 && it != requests_.end() &&
+         it->second.cached_positions == token_count &&
+         it->second.blocks.size() == ring_blocks_;
+}
+
+std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
+    const Request* request, size_t token_count) {
+  if (!CanCapturePrefix(request, token_count) || !prefix_checkpoint_.expired()) {
+    return nullptr;
+  }
+  const auto it = requests_.find(request);
+  auto checkpoint = std::make_shared<Dflash2PrefixCheckpoint>();
+  checkpoint->token_count = token_count;
+  checkpoint->ring_blocks = ring_blocks_;
+  checkpoint->caches.reserve(caches_.size());
+  std::vector<int32_t> contiguous(ring_blocks_);
+  std::iota(contiguous.begin(), contiguous.end(), 0);
+  for (const auto& cache : caches_) {
+    auto copy = std::make_unique<Tensor>(model_->p_device_kvcache_, cache_type_);
+    auto shape = cache->GetShape();
+    shape.front() = static_cast<int64_t>(ring_blocks_);
+    try {
+      copy->CreateTensor(shape);
+    } catch (const Ort::Exception& error) {
+      // ORT reports allocator failures through its status API, not std::bad_alloc.
+      if (error.GetOrtErrorCode() != ORT_FAIL &&
+          error.GetOrtErrorCode() != ORT_RUNTIME_EXCEPTION) {
+        throw;
+      }
+      throw std::bad_alloc{};
+    }
+    checkpoint->caches.push_back(std::move(copy));
+  }
+  try {
+    for (size_t layer = 0; layer < caches_.size(); ++layer) {
+      CopyDflash2RingBlocks(*checkpoint->caches[layer], contiguous,
+                            *caches_[layer], it->second.blocks);
+    }
+  } catch (...) {
+    model_->p_device_kvcache_->Synchronize();
+    throw;
+  }
+  model_->p_device_kvcache_->Synchronize();
+  prefix_checkpoint_ = checkpoint;
+  return checkpoint;
+}
+
+bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
+  const auto& checkpoint = feed.prefix_checkpoint;
+  if (!checkpoint || checkpoint->token_count != feed.first_position ||
+      checkpoint->ring_blocks != ring_blocks_ || checkpoint->caches.size() != caches_.size() ||
+      free_blocks_.size() < ring_blocks_) {
+    if (checkpoint && free_blocks_.size() < ring_blocks_) {
+      ++admission_misses_;
+    }
+    return false;
+  }
+  for (size_t layer = 0; layer < caches_.size(); ++layer) {
+    if (!checkpoint->caches[layer] ||
+        checkpoint->caches[layer]->GetShape().empty()) {
+      throw std::logic_error("DFlash 2 prefix checkpoint has an invalid cache tensor.");
+    }
+  }
+  try {
+    RequestState state;
+    state.blocks.reserve(ring_blocks_);
+    for (size_t i = 0; i < ring_blocks_; ++i) {
+      state.blocks.push_back(free_blocks_[free_blocks_.size() - ring_blocks_ + i]);
+    }
+    std::vector<int32_t> contiguous(ring_blocks_);
+    std::iota(contiguous.begin(), contiguous.end(), 0);
+    for (size_t layer = 0; layer < caches_.size(); ++layer) {
+      CopyDflash2RingBlocks(*caches_[layer], state.blocks, *checkpoint->caches[layer], contiguous);
+    }
+    model_->p_device_kvcache_->Synchronize();
+    state.cached_positions = feed.first_position;
+    requests_.emplace(feed.request, std::move(state));
+    free_blocks_.resize(free_blocks_.size() - ring_blocks_);
+    return true;
+  } catch (const std::bad_alloc&) {
+    model_->p_device_kvcache_->Synchronize();
+    ++admission_misses_;
+    return false;
+  }
 }
 
 void Dflash2Drafter::EnsureBlocks(RequestState& state, size_t positions) {
@@ -706,10 +915,19 @@ void Dflash2Drafter::ReleaseAll() {
 
 bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                              std::vector<std::vector<int32_t>>& drafts,
-                             std::vector<std::vector<TargetTokenSelection>>* draft_distributions) {
+                             std::vector<std::vector<TargetTokenSelection>>* draft_distributions,
+                             std::vector<Dflash2Lattice>* lattices) {
   drafts.assign(feeds.size(), {});
   if (draft_distributions) {
     draft_distributions->assign(feeds.size(), {});
+  }
+  if (lattices) {
+    lattices->resize(feeds.size());
+    for (auto& lattice : *lattices) {
+      lattice.top_k = 0;
+      lattice.candidate_ids.clear();
+      lattice.scores.clear();
+    }
   }
   if (feeds.empty()) {
     return false;
@@ -868,8 +1086,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   // Bucketing the width lets a growing context keep replaying one captured graph instead of
   // retiring one at every block boundary; columns past the live KV length are never read. Steps
   // that cannot be captured keep the exact width so their bound inputs are unchanged.
-  const bool graph_eligible = graph_capture_enabled_ && uniform_ingest &&
-                              max_blocks <= max_block_table_columns_;
+  const bool graph_eligible = Dflash2GraphCaptureAllowed(
+      graph_capture_enabled_, uniform_ingest, max_blocks, max_block_table_columns_);
   const size_t block_table_columns =
       graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
                      : max_blocks;
@@ -919,9 +1137,12 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
-  auto& q_row_map = StepTensor(step_tensors_.q_row_map, device, int32_type,
-                               {static_cast<int64_t>(num_tokens)});
-  fill_int32(q_row_map, layout.q_row_map);
+  Tensor* q_row_map = nullptr;
+  if (has_q_row_map_) {
+    q_row_map = &StepTensor(step_tensors_.q_row_map, device, int32_type,
+                            {static_cast<int64_t>(num_tokens)});
+    fill_int32(*q_row_map, layout.q_row_map);
+  }
   auto& qkv_row_map = StepTensor(step_tensors_.qkv_row_map, device, int32_type,
                                  {static_cast<int64_t>(num_tokens)});
   fill_int32(qkv_row_map, layout.qkv_row_map);
@@ -986,6 +1207,11 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
   if (graph_capture_enabled_) {
     run_options_->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
+    // A replayed step that proposes drafts reads its outputs back below with a synchronizing copy,
+    // so the run itself need not wait for the device; the copy also drains the uploads from the
+    // step tensors' host mirrors before the next step rewrites them.
+    const bool async_run = capture && drafts_wanted && device->GetType() == DeviceType::CUDA;
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", async_run ? "1" : "0");
   }
 
   {
@@ -1008,15 +1234,19 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   std::vector<const char*> input_names{
       config_.inputs.aux_hidden_states.c_str(), config_.inputs.input_ids.c_str(),
-      config_.inputs.q_row_map.c_str(), config_.inputs.qkv_row_map.c_str(),
+      config_.inputs.qkv_row_map.c_str(),
       config_.inputs.block_row_index.c_str(), config_.inputs.cumulative_sequence_lengths.c_str(),
       config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str(),
       config_.inputs.attention_metadata.c_str()};
   std::vector<OrtValue*> inputs{packed_aux.GetOrtTensor(), input_ids.GetOrtTensor(),
-                                q_row_map.GetOrtTensor(), qkv_row_map.GetOrtTensor(),
+                                qkv_row_map.GetOrtTensor(),
                                 block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
                                 past_lengths.GetOrtTensor(), block_table.GetOrtTensor(),
                                 metadata.GetOrtTensor()};
+  if (q_row_map) {
+    input_names.push_back(config_.inputs.q_row_map.c_str());
+    inputs.push_back(q_row_map->GetOrtTensor());
+  }
   if (embeddings) {
     input_names.push_back(config_.inputs.embeddings.c_str());
     inputs.push_back(embeddings->GetOrtTensor());
@@ -1063,6 +1293,16 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
             top_k, config_.sampling_temperature,
             config_.sampling_top_p, config_.sampling_min_p));
       }
+      continue;
+    }
+    if (feeds[feed_index].wants_lattice && lattices) {
+      auto& lattice = (*lattices)[feed_index];
+      const size_t candidate_offset = slot * num_spec * top_k;
+      lattice.top_k = top_k;
+      lattice.candidate_ids.assign(candidate_cpu.begin() + candidate_offset,
+                                   candidate_cpu.begin() + candidate_offset + num_spec * top_k);
+      lattice.scores.assign(scores_cpu.begin() + candidate_offset * top_k,
+                            scores_cpu.begin() + (candidate_offset + num_spec * top_k) * top_k);
       continue;
     }
     // Greedy walk of the lattice: slot l's chosen candidate index selects the row of slot l+1's

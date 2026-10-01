@@ -114,6 +114,45 @@ def test_explicit_target_checkpoint_policy_is_rejected():
         )
 
 
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "int2"}},
+        {"moe": {"type": "int2"}},
+        {
+            "weights": {
+                "type": "int4",
+                "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int2"}],
+            }
+        },
+    ],
+)
+def test_target_int2_policy_is_rejected(quant_config):
+    with pytest.raises(ValueError, match="target_options.quant_config does not support int2"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"quant_config": quant_config},
+        )
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "int2"}},
+        {"moe": {"type": "int2"}},
+        {"weights": {"type": "int4", "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int2"}]}},
+    ],
+)
+def test_structured_mtp_rejects_int2(quant_config):
+    with pytest.raises(ValueError, match="MTP quant_config does not support int2"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            drafter_options={"drafter_type": "mtp", "quant_config": quant_config},
+        )
+
+
 def test_dense_target_rejects_weight_overrides():
     with pytest.raises(ValueError, match="weight overrides are not supported when weights.type=none"):
         normalize_builder_config(
@@ -140,6 +179,30 @@ def test_structured_target_overrides_legacy_alias():
             target_options={"quant_config": {"weights": {"block_size": 128}}},
         )
     assert effective.target_options["quant_config"]["weights"]["block_size"] == 128
+
+
+@pytest.mark.parametrize("fuse_qkv", [False, True])
+def test_target_qkv_fusion_maps_to_legacy_option(fuse_qkv):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"optimizations": {"fuse_qkv": fuse_qkv}},
+    )
+
+    assert effective.extra_options["fuse_qkv"] is fuse_qkv
+
+
+@pytest.mark.parametrize("legacy_option", ["fuse_qkv", "disable_qkv_fusion"])
+def test_structured_target_qkv_fusion_overrides_legacy_option(legacy_option):
+    with pytest.warns(UserWarning, match=f"fuse_qkv overrides legacy extra_options.{legacy_option}"):
+        effective = normalize_builder_config(
+            "int4",
+            "cuda",
+            {legacy_option: True},
+            target_options={"optimizations": {"fuse_qkv": False}},
+        )
+
+    assert effective.extra_options["fuse_qkv"] is False
 
 
 @pytest.mark.parametrize(
@@ -222,8 +285,52 @@ def test_dflash2_policy_is_independent_from_target(tmp_path):
     assert effective.extra_options["aux_hidden_state_layers"] == "2,4"
 
 
-def test_dflash2_rejects_unsupported_body_dtype(tmp_path):
-    with pytest.raises(ValueError, match="body io_dtype must be bf16"):
+@pytest.mark.parametrize("fuse_qkv", [False, True])
+def test_dflash2_qkv_fusion_maps_to_legacy_option(tmp_path, fuse_qkv):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "optimizations": {"fuse_qkv": fuse_qkv},
+        },
+    )
+    assert effective.extra_options["dflash2_fuse_qkv"] is fuse_qkv
+
+
+@pytest.mark.parametrize("fuse_qkv", [False, True])
+def test_qkv_fusion_is_rejected_for_other_drafters(tmp_path, fuse_qkv):
+    with pytest.raises(ValueError, match="fuse_qkv is not supported for drafter_type=dspark"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dspark",
+                "path": make_drafter_checkpoint(tmp_path),
+                "optimizations": {"fuse_qkv": fuse_qkv},
+            },
+        )
+
+
+def test_dflash2_accepts_fp16_body_dtype(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {"io_dtype": "fp16"},
+        },
+    )
+    assert effective.drafter_options["quant_config"]["io_dtype"] == "fp16"
+
+
+def test_dflash2_rejects_fp32_body_dtype(tmp_path):
+    with pytest.raises(ValueError, match="DFlash2 body io_dtype must be fp16 or bf16"):
         normalize_builder_config(
             "int4",
             "cuda",
@@ -231,7 +338,7 @@ def test_dflash2_rejects_unsupported_body_dtype(tmp_path):
             drafter_options={
                 "drafter_type": "dflash2",
                 "path": make_drafter_checkpoint(tmp_path),
-                "quant_config": {"io_dtype": "fp16"},
+                "quant_config": {"io_dtype": "fp32"},
             },
         )
 
@@ -261,6 +368,41 @@ def test_dflash2_rejects_unsupported_body_block_size(tmp_path, block_size):
                 "drafter_type": "dflash2",
                 "path": make_drafter_checkpoint(tmp_path),
                 "quant_config": {"weights": {"type": "int4", "block_size": block_size}},
+            },
+        )
+
+
+def test_dflash2_accepts_prepacked_body_weights_on_cuda(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {
+                "weights": {"type": "int4", "block_size": 32},
+                "format": {"matmulnbits_weights_prepacked": 1},
+            },
+        },
+    )
+
+    assert effective.drafter_options["quant_config"]["format"]["matmulnbits_weights_prepacked"] == 1
+
+
+def test_dflash2_rejects_prepacked_body_weights_off_cuda(tmp_path):
+    with pytest.raises(ValueError, match="prepacked MatMulNBits weights are supported only on CUDA"):
+        normalize_builder_config(
+            "int4",
+            "cpu",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {
+                    "weights": {"type": "int4", "block_size": 32},
+                    "format": {"matmulnbits_weights_prepacked": 1},
+                },
             },
         )
 
@@ -305,6 +447,97 @@ def test_dflash2_rejects_unconsumed_weight_policy(tmp_path, field):
                 "path": make_drafter_checkpoint(tmp_path),
                 "quant_config": {"weights": {field: values[field]}},
             },
+        )
+
+
+def test_dflash2_int2_fpa_uses_structured_quant_config(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {
+                "weights": {"type": "int2", "block_size": 64},
+            },
+        },
+        runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+    )
+
+    quant = effective.extra_options["_drafter_quant_config"]
+    assert quant.weights.type == "int2"
+    assert quant.weights.block_size == 64
+    assert quant.format.matmulnbits_weights_prepacked == 0
+    assert effective.extra_options["dflash2_precision"] == "int2"
+    assert effective.runtime_config["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "1"
+
+
+def test_dflash2_int2_offline_prepack_uses_sm80_layout(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {
+                "weights": {"type": "int2", "block_size": 64},
+                "format": {"matmulnbits_weights_prepacked": 1},
+            },
+        },
+        runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}}}},
+    )
+
+    quant = effective.extra_options["_drafter_quant_config"]
+    assert quant.format.matmulnbits_weights_prepacked == 1
+    assert effective.runtime_config["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "0"
+
+
+@pytest.mark.parametrize("block_size", [16, 32, 256])
+def test_dflash2_int2_fpa_rejects_unsupported_block_size(tmp_path, block_size):
+    with pytest.raises(ValueError, match="INT2 fpA_intB requires weights.block_size=64 or 128"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {
+                    "weights": {"type": "int2", "block_size": block_size},
+                },
+            },
+            runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+        )
+
+
+def test_dflash2_fpa_runtime_requires_integer_weights(tmp_path):
+    with pytest.raises(ValueError, match="requires integer weights"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+            },
+            runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+        )
+
+
+def test_fpa_runtime_requires_cuda(tmp_path):
+    with pytest.raises(ValueError, match="supported only on CUDA"):
+        normalize_builder_config(
+            "int4",
+            "cpu",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"weights": {"type": "int4", "block_size": 32}},
+            },
+            runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
         )
 
 
@@ -576,6 +809,116 @@ def test_runtime_merge_replaces_arrays_and_fixed_allocation():
     assert generated == original
 
 
+def test_runtime_adds_config_only_profile():
+    generated = {
+        "model": {
+            "context_length": 262144,
+            "decoder": {"filename": "model.onnx"},
+            "dflash2": {"num_draft_tokens": 7},
+        },
+        "engine": {"dynamic_batching": {"num_blocks": 800, "max_batch_size": 1}},
+        "search": {"max_length": 200001, "chunk_size": 512},
+        "speculative": {"max_draft_tokens": 7},
+    }
+    profile = {
+        "id": "32gib",
+        "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
+        "overlay": {
+            "engine": {"dynamic_batching": {"num_blocks": 928, "max_batch_size": 8}},
+            "search": {"chunk_size": 256},
+            "speculative": {"max_draft_tokens": 6},
+        },
+    }
+
+    updated = apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+    assert updated["runtime_profiles"] == [profile]
+    assert updated["model"]["decoder"]["filename"] == "model.onnx"
+    assert updated["engine"]["dynamic_batching"]["num_blocks"] == 800
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "engine,field,value,error",
+    [
+        ({"static_batching": {}}, "num_blocks", 16, "absent dynamic_batching"),
+        ({"dynamic_batching": {}}, "num_blocks", 2**31, "at most 2147483647"),
+        ({"dynamic_batching": {}}, "max_scheduled_tokens", 2**31, "at most 2147483647"),
+        ({"dynamic_batching": {}}, "max_batch_size", 257, "at most 256"),
+        ({"dynamic_batching": {}}, "num_blocks", True, "positive integer"),
+    ],
+)
+def test_runtime_batching_validation_is_shared_with_profiles(in_profile, engine, field, value, error):
+    generated = {"model": {"decoder": {}}, "engine": engine}
+    runtime = {"engine": {"dynamic_batching": {field: value}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "gpu", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": runtime}
+            ]
+        }
+
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "model,max_draft_tokens,error",
+    [
+        ({"decoder": {}}, 4, "absent speculative configuration"),
+        ({"decoder": {}, "dflash2": {"num_draft_tokens": 4}}, 5, "exported drafter/state capacity"),
+        (
+            {"decoder": {"state_update_capacity": 3}, "dspark": {"num_draft_tokens": 7}},
+            4,
+            "exported drafter/state capacity",
+        ),
+        ({"decoder": {}, "dflash2": {"num_draft_tokens": 4}}, 4, None),
+        ({"decoder": {"state_update_capacity": 3}, "dspark": {"num_draft_tokens": 7}}, 3, None),
+        ({"decoder": {}, "mtp": {}}, 16, None),
+    ],
+)
+def test_runtime_draft_capacity_validation_is_shared_with_profiles(in_profile, model, max_draft_tokens, error):
+    generated = {"model": model}
+    runtime = {"speculative": {"max_draft_tokens": max_draft_tokens}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "gpu", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": runtime}
+            ]
+        }
+
+    if error:
+        with pytest.raises(ValueError, match=error):
+            apply_runtime_config(generated, runtime)
+    else:
+        updated = apply_runtime_config(generated, runtime)
+        for key, value in runtime.items():
+            assert updated[key] == value
+
+
+@pytest.mark.parametrize(
+    "overlay",
+    [{}, {"model": {}}, {"model": {"decoder": {}}}, {"engine": {"dynamic_batching": {}}}, {"search": {}}],
+)
+def test_runtime_rejects_profile_without_overlay_fields(overlay):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {}}, "search": {}}
+    profile = {"id": "empty", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": overlay}
+    with pytest.raises(ValueError, match="must contain at least one overlay field"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+def test_runtime_rejects_profile_max_length():
+    generated = {"model": {"context_length": 4096}, "search": {"max_length": 4096}}
+    profile = {
+        "id": "request-limit",
+        "eligibility": {"minimum_total_device_memory_bytes": 1},
+        "overlay": {"search": {"max_length": 2048}},
+    }
+    with pytest.raises(ValueError, match="unknown runtime_config.runtime_profiles\\[0\\].overlay.search"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
 def test_runtime_rejects_protected_and_absent_components():
     generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"block_size": 256}}}
     with pytest.raises(ValueError, match="unknown runtime_config.engine.dynamic_batching"):
@@ -629,7 +972,7 @@ def test_runtime_rejects_invalid_dynamic_batching_values(field, value):
         apply_runtime_config(generated, {"engine": {"dynamic_batching": {field: value}}})
 
 
-def test_runtime_rejects_overwriting_required_session_option():
+def test_runtime_allows_overwriting_fpa_intb_session_option():
     generated = {
         "model": {
             "dflash2": {
@@ -638,10 +981,30 @@ def test_runtime_rejects_overwriting_required_session_option():
             }
         }
     }
+    updated = apply_runtime_config(
+        generated,
+        {"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+    )
+
+    assert updated["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "1"
+
+
+@pytest.mark.parametrize("value", [True, 1, "true", "2"])
+def test_runtime_rejects_invalid_fpa_intb_session_option(value):
+    generated = {"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}}}}
+    with pytest.raises(ValueError, match="must be '0' or '1'"):
+        apply_runtime_config(
+            generated,
+            {"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": value}}}},
+        )
+
+
+def test_runtime_rejects_overwriting_required_session_option():
+    generated = {"model": {"decoder": {"session_options": {"required": "original"}}}}
     with pytest.raises(ValueError, match="required session option"):
         apply_runtime_config(
             generated,
-            {"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+            {"model": {"decoder": {"session_options": {"required": "replacement"}}}},
         )
 
 
