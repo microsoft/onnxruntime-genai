@@ -10,7 +10,7 @@ from safetensors.torch import save_file
 
 
 def _projection_tensors(layer_id=0):
-    prefix = f"model.layers.{layer_id}.moe.experts"
+    prefix = f"model.layers.{layer_id}.mlp.experts"
     gate_up_blocks = torch.arange(2 * 4 * 2 * 16, dtype=torch.uint8).reshape(2, 4, 2, 16)
     down_blocks = torch.arange(2 * 6 * 2 * 16, dtype=torch.uint8).reshape(2, 6, 2, 16)
     return {
@@ -22,7 +22,7 @@ def _projection_tensors(layer_id=0):
 
 
 def test_pack_blocks_for_qmoe_preserves_fp4_codes():
-    blocks = _projection_tensors()["model.layers.0.moe.experts.gate_up_proj_blocks"]
+    blocks = _projection_tensors()["model.layers.0.mlp.experts.gate_up_proj_blocks"]
     packed = GptOssMXFP4Loader("").pack_blocks_for_qmoe(blocks)
 
     codes = torch.empty(2, 4, 2, 32, dtype=torch.uint8)
@@ -33,6 +33,25 @@ def test_pack_blocks_for_qmoe_preserves_fp4_codes():
 
     assert packed.shape == (2, 64, 2)
     assert torch.equal(packed, expected)
+
+
+def test_prepare_experts_decodes_e2m1_values_and_e8m0_scales(tmp_path):
+    codes = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], dtype=torch.uint8)
+    packed = codes[0::2] | (codes[1::2] << 4)
+    blocks = packed.repeat(2).reshape(1, 1, 1, 16)
+    scales = torch.tensor([[[128]]], dtype=torch.uint8)
+    tensors = _projection_tensors()
+    tensors["model.layers.0.mlp.experts.gate_up_proj_blocks"] = blocks
+    tensors["model.layers.0.mlp.experts.gate_up_proj_scales"] = scales
+    save_file(tensors, tmp_path / "model.safetensors")
+
+    decoded, _ = GptOssMXFP4Loader(tmp_path).prepare_experts(0, decode=True)
+
+    expected = torch.tensor(
+        [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0, -8.0, -12.0]
+    ).repeat(2)
+    assert decoded.shape == (1, 1, 32)
+    assert torch.equal(decoded[0, 0], expected)
 
 
 def test_prepare_experts_preserves_mxfp4_scale_bytes(tmp_path):
@@ -47,7 +66,7 @@ def test_prepare_experts_preserves_mxfp4_scale_bytes(tmp_path):
     assert experts.scales_raw
     assert torch.equal(
         experts.gate_up_scales,
-        tensors["model.layers.0.moe.experts.gate_up_proj_scales"],
+        tensors["model.layers.0.mlp.experts.gate_up_proj_scales"],
     )
     assert torch.equal(experts.gate_up_global_scales, torch.ones(2))
     assert experts.gate_up_qweight.shape == (2, 64, 2)

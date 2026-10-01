@@ -63,7 +63,15 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
 
   std::mt19937 prompt_random(kRandomSeed);
   auto prompt_tokens = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
-  const size_t prompt_token_count = prompt_tokens->SequenceCount(0);
+  const size_t requested_prompt_token_count = prompt_tokens->SequenceCount(0);
+  const size_t prompt_token_count = FitPromptToSessionLimit(
+      requested_prompt_token_count, static_cast<size_t>(config.generation_tokens),
+      engineResources.model_max_session_tokens);
+  if (prompt_token_count != requested_prompt_token_count) {
+    std::cout << tag << "Prompt truncated from " << requested_prompt_token_count
+              << " to " << prompt_token_count
+              << " tokens to fit the model session limit" << std::endl;
+  }
 
   ScenarioExecutionOutput output;
   std::vector<double> ttft_values;
@@ -74,13 +82,18 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
 
   for (int run = 0; run < total_runs; ++run) {
     const bool is_warmup = run < config.warmup_runs;
-    auto params = OgaGeneratorParams::Create(*engineResources.model);
-    params->SetSearchOption("max_length", static_cast<double>(prompt_token_count + static_cast<size_t>(config.generation_tokens)));
-    params->SetSearchOption("random_seed", kRandomSeed);
+    auto request_options = OgaRequestOptions::Create();
+    request_options->SetMaxSessionTokens(
+        prompt_token_count + static_cast<size_t>(config.generation_tokens));
 
-    auto request = engineResources.engine->CreateRequest(*params);
+    auto request = engineResources.engine->CreateRequest(request_options.get());
+    auto turn_options = request->CreateTurnOptions();
+    if (engineResources.uses_dynamic_batching) {
+      turn_options->SetSeed(kRandomSeed);
+    }
     request->BeginTurn(
-        prompt_tokens->SequenceData(0), prompt_token_count);
+        prompt_tokens->SequenceData(0), prompt_token_count,
+        turn_options.get());
 
     const auto start = std::chrono::steady_clock::now();
     auto event_buffer = engineResources.engine->CreateEventBuffer(1);
@@ -133,7 +146,9 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
   output.scenario_metrics = {
       {"prefill_ms", std::move(prefill_ms_values)},
       {"prompt_processing_tps", std::move(prompt_processing_tps_values)},
+      {"requested_prompt_tokens", requested_prompt_token_count},
       {"prompt_tokens", prompt_token_count},
+      {"prompt_truncated", prompt_token_count != requested_prompt_token_count},
       {"peak_host_memory_mb", BytesToMb(memory.PeakHostBytes())},
   };
 

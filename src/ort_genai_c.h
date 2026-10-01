@@ -79,6 +79,7 @@ typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
+typedef struct OgaEngineCapabilities OgaEngineCapabilities;
 typedef struct OgaEngineEvent OgaEngineEvent;
 typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
 typedef struct OgaRequest OgaRequest;
@@ -93,7 +94,7 @@ typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 typedef uint32_t OgaFinishReason;
 #define OgaFinishReason_None ((OgaFinishReason)0)
 #define OgaFinishReason_Eos ((OgaFinishReason)1)
-#define OgaFinishReason_StopSequence ((OgaFinishReason)2)
+#define OgaFinishReason_StopString ((OgaFinishReason)2)
 #define OgaFinishReason_MaxGeneratedTokens ((OgaFinishReason)3)
 #define OgaFinishReason_MaxSessionTokens ((OgaFinishReason)4)
 #define OgaFinishReason_Cancelled ((OgaFinishReason)5)
@@ -1235,6 +1236,41 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** out);
 
 /**
+ * \brief Returns a caller-owned snapshot of the Engine's configured runtime capabilities.
+ * This call must run on the Engine's owner thread.
+ * \param[in] engine The Engine to inspect.
+ * \param[out] out The capability snapshot. Destroy it with OgaDestroyEngineCapabilities.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetCapabilities(
+    const OgaEngine* engine, OgaEngineCapabilities** out);
+
+/**
+ * \brief Returns the configured maximum batch size.
+ * Static Engines without an explicit setting report the configured default of four. This value
+ * does not account for lower operational limits imposed by a scheduler implementation.
+ */
+OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetConfiguredMaxBatchSize(
+    const OgaEngineCapabilities* capabilities);
+
+/** \brief Returns the dynamic scheduler's configured token budget, or zero for static batching. */
+OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetMaxScheduledTokens(
+    const OgaEngineCapabilities* capabilities);
+
+/**
+ * \brief Returns the maximum logical token length of one Request, or zero when unavailable.
+ *
+ * The value reflects the resolved target cache after runtime-profile selection and auxiliary
+ * drafter allocations. It is an exclusive-use structural limit, not current free capacity. Zero
+ * means the cache-backed ceiling is unsupported or unavailable, including for non-paged Engines.
+ */
+OGA_EXPORT uint64_t OGA_API_CALL OgaEngineCapabilitiesGetMaxRequestLength(
+    const OgaEngineCapabilities* capabilities);
+
+/** \brief Destroys an Engine capability snapshot. */
+OGA_EXPORT void OGA_API_CALL OgaDestroyEngineCapabilities(
+    OgaEngineCapabilities* capabilities);
+
+/**
  * \brief Destroys the given engine.
  *
  * Destroying an engine closes every request bound to it. Surviving request handles remain valid
@@ -1316,6 +1352,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetToken(
     const OgaEngineEvent* event, int32_t* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetFinishReason(
     const OgaEngineEvent* event, OgaFinishReason* out);
+/**
+ * \brief Reads the caller-facing index into the turn's stop-string list that completed a match.
+ *
+ * Writes -1 for every event whose finish reason is not OgaFinishReason_StopString, including
+ * token-only, capacity, cancellation, failure, EOS, and length-limit terminal events.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetMatchedStopStringIndex(
+    const OgaEngineEvent* event, int32_t* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetErrorCode(
     const OgaEngineEvent* event, OgaErrorCode* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetUsage(
@@ -1346,21 +1390,19 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
 /**
  * \brief Creates a Request permanently bound to an Engine.
  *
- * Generation parameters are snapshotted and remain fixed for every turn. The parameters must have
- * been created from the same OgaModel instance used to create the Engine. Creation does not queue
- * work; call OgaRequestBeginTurn.
+ * A Request owns resident-session policy only. Generation policy belongs to each Turn, so nothing
+ * about sampling, guidance, or stop strings is fixed here. Creation does not queue work; call
+ * OgaRequestBeginTurn.
  *
  * \param[in] engine The owning Engine.
- * \param[in] params The fixed request-level generation parameters.
- * \param[in] options Nullable request-scoped options. Null options or zero max_session_tokens use
- * the Request's snapshotted params.search.max_length. search.max_length normally defaults from the
- * model context length but may have been set lower by the caller.
+ * \param[in] options Nullable request-scoped options. Null options, or zero max_session_tokens, use
+ * model-configured search.max_length capped by the Engine's max_request_length when that capability
+ * is nonzero. A zero capability means the ceiling is unavailable and preserves search.max_length.
  * \param[out] out The caller-owned Request handle.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineCreateRequest(
-    OgaEngine* engine, const OgaGeneratorParams* params,
-    const OgaRequestOptions* options, OgaRequest** out);
+    OgaEngine* engine, const OgaRequestOptions* options, OgaRequest** out);
 
 /**
  * \brief Creates reusable Request options.
@@ -1369,49 +1411,131 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequestOptions(
     OgaRequestOptions** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyRequestOptions(
     OgaRequestOptions* options);
+/**
+ * \brief Sets the total tokens (prompt plus generated, across every Turn) the Request may reach.
+ *
+ * Zero restores the default, which is model-configured search.max_length capped by the Engine's
+ * max_request_length when that capability is nonzero. A nonzero value may not exceed the capability
+ * when available; otherwise it may not exceed search.max_length. This is the Request's one session
+ * limit: Search completion, cache sizing, speculative bounds, and the MaxSessionTokens finish reason
+ * all use it.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestOptionsSetMaxSessionTokens(
     OgaRequestOptions* options, uint64_t max_session_tokens);
 
 /**
  * \brief Creates reusable Turn options bound to one Request.
+ *
+ * Every option below is unset by default, and an unset option means "use the model-configured
+ * default for this Turn" -- never "keep what the previous Turn used". Seed is the one exception:
+ * an unset seed continues the Request's existing random streams. A reused options object reapplies
+ * its configured fields to every Turn it is passed to; OgaTurnOptionsReset removes them all.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCreateTurnOptions(
     OgaRequest* request, OgaTurnOptions** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTurnOptions(OgaTurnOptions* options);
+/** \brief Caps the tokens this Turn generates. Zero unsets the cap. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetMaxGeneratedTokens(
     OgaTurnOptions* options, uint64_t max_generated_tokens);
-/** \brief Reserved for future use; currently returns a not-implemented result. */
+/**
+ * \brief Masks the end-of-sequence token until this Turn has generated this many tokens.
+ *
+ * Zero unsets the minimum. It does not prevent stop strings, Turn or session limits, cancellation,
+ * failure, or guidance termination. If guidance permits EOS and no continuation token, its
+ * termination takes precedence rather than leaving the Turn with no legal token. Admission rejects
+ * a minimum that exceeds the Turn's maximum or does not fit inside the Request's session limit.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetMinGeneratedTokens(
+    OgaTurnOptions* options, uint64_t min_generated_tokens);
+/** \brief Selects random sampling (true) or the top logit (false) for this Turn. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetDoSample(
+    OgaTurnOptions* options, bool do_sample);
+/**
+ * \brief Sets this Turn's sampling temperature.
+ *
+ * Zero requests top-logit selection. Admission rejects an explicitly set temperature that the
+ * resolved policy would ignore because the Turn selects the top logit for another reason.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTemperature(
     OgaTurnOptions* options, float temperature);
-/** \brief Reserved for future use; currently returns a not-implemented result. */
+/**
+ * \brief Sets this Turn's nucleus (top-p) bound, between 0.0 and 1.0.
+ *
+ * Admission rejects an explicitly set top_p that the resolved policy would ignore.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTopP(
     OgaTurnOptions* options, float top_p);
-/** \brief Reserved for future use; currently returns a not-implemented result. */
+/**
+ * \brief Sets this Turn's top-k bound. One requests top-logit selection; zero disables top-k.
+ *
+ * Admission rejects an explicitly set top_k that the resolved policy would ignore, and a sampled
+ * Turn rejects a top_k greater than the model vocabulary size.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTopK(
     OgaTurnOptions* options, int32_t top_k);
-/** \brief Reserved for future use; currently returns a not-implemented result. */
+/** \brief Sets this Turn's repetition penalty. Must be finite and greater than zero. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetRepetitionPenalty(
+    OgaTurnOptions* options, float repetition_penalty);
+/**
+ * \brief Forbids repeating any n-gram of this size in the generated sequence. Zero disables it.
+ *
+ * Admission rejects a nonzero size on a scoring device whose search cannot apply it, rather than
+ * failing after the model has already run.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetNoRepeatNgramSize(
+    OgaTurnOptions* options, int32_t no_repeat_ngram_size);
+/**
+ * \brief Reseeds the Request's random streams at the start of this Turn.
+ *
+ * Zero is a valid deterministic seed, so use OgaTurnOptionsClearSeed to remove a pending reseed.
+ * Reusing a seeded options object deliberately reseeds identically at the start of every Turn it is
+ * passed to. The seed takes effect only when the Turn's first sampling step commits, so a rolled
+ * back step reseeds the retry identically. Requires an Engine configured for dynamic batching and,
+ * when a device batched sampler is present, support for checkpointing its RNG state.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetSeed(
     OgaTurnOptions* options, uint64_t seed);
 /**
- * \brief Sets token-ID stop sequences for a Turn.
+ * \brief Removes a pending reseed, continuing the Request's existing random streams.
  *
- * This operation is currently not implemented. stop_token_ids is not dereferenced or retained
- * before the not-implemented result is returned.
+ * This is not "randomize again": the streams simply carry on from where the previous Turn left off.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopTokenIds(
-    OgaTurnOptions* options, const OgaSequences* stop_token_ids);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsClearSeed(
+    OgaTurnOptions* options);
 /**
- * \brief Sets UTF-8 stop strings for a Turn.
+ * \brief Sets decoded UTF-8 stop strings for a Turn, copying them immediately.
  *
- * This operation is currently not implemented. stop_strings is not dereferenced or retained
- * before the not-implemented result is returned.
+ * Reusing or destroying stop_strings after this call cannot affect the options. An empty
+ * stop_strings array (zero entries) clears/disables stop strings on this options object. This is
+ * distinct from a nonempty array containing an empty string member: every entry in a nonempty array
+ * must itself be a nonempty, valid UTF-8 string, or this call fails and the prior configuration is
+ * left unchanged. The configuration as a whole may contain at most 16 entries totaling at most 16
+ * KiB. Duplicate entries are preserved as distinct, independently indexed entries. Matching is exact:
+ * no normalization, trimming, or case folding, and only text this Engine Request generates during
+ * the turn (never prompt or earlier-turn tokens) is considered.
+ *
+ * A subsequent OgaRequestBeginTurn snapshots these options, so reusing or mutating this
+ * OgaTurnOptions afterward cannot alter an already-active turn.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
     OgaTurnOptions* options, const OgaStringArray* stop_strings);
-/** \brief Reserved for future use; currently returns a not-implemented result. */
+/**
+ * \brief Constrains this Turn's output to a grammar, copying both strings immediately.
+ *
+ * guidance_type is one of "json_schema", "regex", or "lark_grammar". The grammar is compiled and
+ * validated before the Turn mutates the Request, so an invalid grammar leaves the Request exactly
+ * as it was. Guidance is strictly Turn-scoped: a following Turn that sets none is unguided. A
+ * guided Turn does not accept speculative drafts; the next unguided Turn does again.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options, const char* guidance_type,
     const char* guidance_data);
+/** \brief Removes the configured grammar, so the Turn is unguided. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsClearGuidance(
+    OgaTurnOptions* options);
+/** \brief Restores every Turn option to its unset state. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsReset(
+    OgaTurnOptions* options);
 
 /** \brief Begins a Turn, copying input and supported options before return. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
@@ -1428,6 +1552,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCancelTurn(
     OgaRequest* request, uint64_t turn_id, bool* out_cancelled);
+
+/**
+ * \brief Rewinds a completed Request to the sequence boundary before a Turn began.
+ *
+ * Rewind is synchronous and owner-thread-only. The current Turn must be complete, its events must
+ * have been drained, and its finish reason must not be Failed. turn_id must identify a Turn
+ * previously begun by this Request and still present in its active history. The named Turn and all
+ * later Turns are discarded. Turn IDs are never reused, and sampling continues from its current
+ * random stream rather than restoring a previous sampling state. The operation releases the
+ * Request's model-state ownership, including auxiliary MTP or DFlash/DSpark state; indexed prefix
+ * blocks may remain cached. Another rewind to an earlier retained Turn is allowed before the next
+ * OgaRequestBeginTurn even though the Request is no longer resident. That call creates a new Turn
+ * and replays the retained prefix together with its new input before generation, possibly adopting
+ * matching cached blocks.
+ *
+ * Dynamic paged Requests release their paged blocks and any fixed recurrent/convolution slot
+ * atomically. Static Requests are rewindable only when they are the sole resident row, because one
+ * row cannot be removed from a shared contiguous allocation. No event is emitted by rewind.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestRewindToStartOfTurn(
+    OgaRequest* request, uint64_t turn_id);
 
 /**
  * \brief Permanently closes a Request and releases its Engine resources.
@@ -1449,6 +1594,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
  * the proposal. Random target sampling is supported for deterministic draft proposals when top_k
  * is positive. Requires an engine whose cache can roll a rejected draft back (see
  * OgaEngineMaxDraftTokensPerProposal).
+ * Seeded sampled output is reproducible only when both the proposal and scheduling path are the
+ * same, because draft admission changes which random stream performs target sampling.
  *
  * \param[in] request The request to propose drafts for.
  * \param[in] tokens One sequence holding the draft continuation, in order.

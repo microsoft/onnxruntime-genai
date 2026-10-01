@@ -1,0 +1,78 @@
+{
+  "processor": {
+    "name": "lfm2_vl_image_processor",
+    "transforms": [
+      {
+        "operation": {
+          "name": "decode_image",
+          "type": "DecodeImage",
+          "attrs": {
+            "color_space": "RGB"
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "resize",
+          "type": "Resize",
+          "attrs": {
+            "height": 512,
+            "width": 512,
+            "interpolation": "LINEAR",
+            "smart_resize": 1,
+            "min_pixels": 65536,
+            "max_pixels": 262144,
+            "patch_size": 16,
+            "merge_size": 2
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "rescale",
+          "type": "Rescale",
+          "attrs": {
+            "rescale_factor": 0.00392156862745098
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "normalize",
+          "type": "Normalize",
+          "attrs": {
+            "mean": [
+              0.5,
+              0.5,
+              0.5
+            ],
+            "std": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "to_channel_first",
+          "type": "Permute3D",
+          "attrs": {
+            "dims": [
+              2,
+              0,
+              1
+            ]
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "image_sizes",
+          "type": "PixtralImageSizes"
+        }
+      }
+    ]
+  }
+}

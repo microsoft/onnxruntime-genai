@@ -16,6 +16,8 @@
 
 namespace Generators {
 
+inline constexpr size_t kDefaultStaticBatchSize = 4;
+
 struct Scheduler {
   /**
    * @brief Constructs a Scheduler instance with the specified model and cache manager.
@@ -71,6 +73,10 @@ struct Scheduler {
   }
 
   ScheduledRequests CreateScheduledRequests(const StepPlan& plan);
+
+  bool SupportsTransactionalSamplerState() const {
+    return !batched_sampler_ || batched_sampler_->SupportsTransactions();
+  }
 
   /**
    * @brief Checks if the Scheduler has any pending requests.

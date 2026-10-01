@@ -7,8 +7,6 @@
 
 namespace Generators {
 
-// Qwen vision graphs exported with a single-image dummy input require one run
-// per image. This state slices flattened pixel values and concatenates outputs.
 struct QwenVisionState : VisionState {
   using VisionState::VisionState;
 
@@ -48,10 +46,10 @@ inline QwenPatchLayout ResolveQwenPatchLayout(int64_t total_patches,
                              candidate_stride == max_grid_tokens;
 
   if (stride_padded) {
-    return QwenPatchLayout{candidate_stride, 0};
+    return {.padded_image_stride = candidate_stride};
   }
   if (temporal_padded) {
-    return QwenPatchLayout{0, total_patches / total_hw};
+    return {.temporal_multiplier = total_patches / total_hw};
   }
 
   throw std::runtime_error("pixel_values patch count (" + std::to_string(total_patches) +

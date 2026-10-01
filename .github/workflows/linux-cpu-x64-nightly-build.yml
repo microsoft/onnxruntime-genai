@@ -118,7 +118,7 @@ jobs:
         run: |
           set -e -x
           cmake -S examples/c -B examples/c/build \
-            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DMODEL_ASR=ON \
             -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/ort-build/include \
             -DORT_LIB_DIR=$GITHUB_WORKSPACE/ort-build/lib \
             -DOGA_INCLUDE_DIR=$GITHUB_WORKSPACE/src \

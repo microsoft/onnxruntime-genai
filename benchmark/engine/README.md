@@ -53,6 +53,24 @@ Delete the `dependencies/` folder to force a re-download after changing the pinn
 `patchelf` must be on `PATH` (`pip install patchelf`) so the staged GenAI libraries load the pinned
 ONNX Runtime rather than the one baked into their build-time RPATH.
 
+### Prefix-cache and scheduler microbenchmark
+
+The model-free prefix-cache benchmark and CPU scheduler benchmark are built into
+`engine_unit_tests` and disabled during normal test runs. Build the tests in `Release` or
+`RelWithDebInfo`, then run:
+
+```bash
+build/Linux/Release/engine_unit_tests \
+  --gtest_also_run_disabled_tests \
+  --gtest_filter='PrefixCacheBenchmark.*:SchedulerBenchmark.*'
+```
+
+`PrefixCacheBenchmark` fills a 16,384-block cache with 128 independent 4,096-token prefixes before
+timing cold misses, partial hits, and full hits. `SchedulerBenchmark` reports the CPU time spent
+planning steady-state decode steps at batch sizes 1, 8, and 32. That planning time is one component
+of inter-token latency; use the model-backed `decode_baseline` scenario for end-to-end inter-token
+latency, which also includes model execution, sampling, synchronization, and event delivery.
+
 ## Run
 
 ```bash
@@ -125,12 +143,17 @@ Each config is a list of scenario entries:
 | `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
 | `generation_tokens` | Tokens generated per request. |
 
+`long_prefill` and `mixed_workload` truncate a RULER prompt that would leave no room for generation
+within the model-configured session limit, reporting both requested and actual token counts.
+`capacity_pressure` does not truncate; over-ceiling prompts are reported as rejected admissions.
+
 `mixed_workload` runs one long-prefill request alongside active decode requests. The full and
-focused matrices use a hardcoded 128K prefill at concurrency 4 and 8; the smoke test uses the
-smallest 0.5B, concurrency-4 entry. In this scenario, the long-prefill request is intentionally
-capped to one generated token while decode requests keep `generation_tokens`; this keeps the
-prefill request from pushing max-length/context usage into unstable CUDA/KV-pressure territory
-while still measuring prefill-vs-decode interference.
+focused matrices request a 128K prefill at concurrency 4 and 8; the prompt is capped to leave room
+for generation within the model's configured session limit. The smoke test uses the smallest 0.5B,
+concurrency-4 entry. In this scenario, the long-prefill request is intentionally capped to one
+generated token while decode requests keep `generation_tokens`; this keeps the prefill request from
+pushing max-length/context usage into unstable CUDA/KV-pressure territory while still measuring
+prefill-vs-decode interference.
 
 `continuation` runs three appended turns for each logical request. Each turn submits the previous
 turn's generated tokens as part of the next prompt, so the benchmark measures session-cache reuse

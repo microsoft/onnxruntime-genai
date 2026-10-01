@@ -342,6 +342,10 @@ if(USE_DML)
   if(NUGET_PACKAGE_SOURCE)
     list(APPEND NUGET_RESTORE_COMMAND -Source "${NUGET_PACKAGE_SOURCE}")
   endif()
+  if(NUGET_CONFIG_FILE)
+    list(APPEND NUGET_RESTORE_COMMAND -ConfigFile "${NUGET_CONFIG_FILE}")
+  endif()
+  list(APPEND NUGET_RESTORE_COMMAND -NonInteractive)
 
   add_custom_command(
     OUTPUT

@@ -9,6 +9,7 @@ from .awq import AWQModel
 from .gptq import GPTQModel
 from .modelopt import ModeloptModel
 from .olive import OliveModel
+from .quant_auto import QuantAutoModel
 from .quark import QuarkModel
 
 
@@ -30,6 +31,8 @@ class QuantModel:
             model = QuarkModel(quant_type, **kwargs)
         elif quant_type in {"modelopt", "compressed-tensors"}:
             model = ModeloptModel(quant_type, **kwargs)
+        elif quant_type == "quant_auto":
+            model = QuantAutoModel(quant_type, **kwargs)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
 

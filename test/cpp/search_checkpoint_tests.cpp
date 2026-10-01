@@ -253,6 +253,43 @@ TEST_F(CudaSearchCheckpointTest, BatchedSamplerRollbackRestoresRequestRandomStat
             std::vector<int32_t>(first.begin(), first.end()));
 }
 
+// A per-turn reseed restarts an existing state's stream in place. The pooled index is not publicly
+// observable, so the contract is checked the way callers experience it: reseeding with the original
+// seed reproduces the original draw on the very same state object.
+TEST_F(CudaSearchCheckpointTest, ReseedStateRestartsTheStreamInPlace) {
+  auto sampler = model->p_device_scoring_->CreateBatchedSampler(
+      1, params->config.model.vocab_size);
+  ASSERT_NE(sampler, nullptr);
+
+  // A seed with a nonzero high half is accepted too; the classic int seed could never express one.
+  constexpr uint64_t seed = 0x1234'5678'9abc'def0ull;
+  auto state = sampler->CreateState(seed);
+  std::array<BatchedSamplerState*, 1> states{state.get()};
+  std::array<BatchedSamplingParams, 1> sampling_params{
+      BatchedSamplingParams{3, 1.0f, 1.0f}};
+
+  auto scores = params->p_device->Allocate<float>(4);
+  const std::array<float, 4> score_values{1.0f, 1.0f, 1.0f, -100.0f};
+  const auto sample_once = [&] {
+    std::copy(score_values.begin(), score_values.end(), scores.CpuSpan().begin());
+    scores.CopyCpuToDevice();
+    std::array<DeviceSpan<float>, 1> rows{scores.subspan(0, 4)};
+    auto tokens = sampler->Sample(
+        rows, sampling_params, states, params->config.model.vocab_size);
+    const auto host = tokens.CopyDeviceToCpu();
+    return std::vector<int32_t>(host.begin(), host.end());
+  };
+
+  const auto first = sample_once();
+  const auto advanced = sample_once();
+
+  sampler->ReseedState(*state, seed);
+  EXPECT_EQ(sample_once(), first);
+
+  // The same state object is still usable and still advances afterwards.
+  EXPECT_EQ(sample_once(), advanced);
+}
+
 TEST_F(CudaSearchCheckpointTest, ExternalSamplingRollbackRestoresSearchTailState) {
   auto external_params = CreateGeneratorParams(*model);
   external_params->search.batch_size = 1;
@@ -333,6 +370,30 @@ TEST_F(CudaSearchCheckpointTest, CommitTokenStopsAtMiddleEosWithoutAppendingIt) 
 
   EXPECT_TRUE(single_search->IsDone());
   EXPECT_EQ(single_search->GetSequenceLength(), 2);
+}
+
+TEST_F(CudaSearchCheckpointTest, CommitTokenAppendsNonEosTokensUntilMaxLength) {
+  auto single_params = CreateGeneratorParams(*model);
+  single_params->search.batch_size = 1;
+  single_params->search.max_length = 4;
+  auto single_search = CreateSearch(*single_params);
+  auto input = single_params->p_device->Allocate<int32_t>(1);
+  input.CpuSpan()[0] = 1;
+  input.CopyCpuToDevice();
+  single_search->AppendTokens(input);
+
+  single_search->CommitToken(2);
+  EXPECT_EQ(single_search->GetNextTokens().CpuSpan()[0], 2);
+  single_search->CommitToken(0);
+  ASSERT_FALSE(single_search->IsDone());
+  single_search->CommitToken(1);
+
+  EXPECT_TRUE(single_search->IsDone());
+  EXPECT_EQ(single_search->GetSequenceLength(), 4);
+  EXPECT_EQ(single_search->GetNextTokens().CopyDeviceToCpu()[0], 1);
+  const auto sequence = single_search->GetSequence(0).CopyDeviceToCpu();
+  EXPECT_EQ(std::vector<int32_t>(sequence.begin(), sequence.begin() + 4),
+            std::vector<int32_t>({1, 2, 0, 1}));
 }
 
 TEST_F(CudaSearchCheckpointTest, RollbackRestoresDoneEosAndLengthState) {

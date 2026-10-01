@@ -13,7 +13,7 @@ parameters:
   type: string
 
 steps:
-- task: SFP.build-tasks.custom-build-task-1.EsrpCodeSigning@5
+- task: EsrpCodeSigning@6
   displayName: ${{ parameters.DisplayName }}
   condition: and(succeeded(), eq('${{ parameters.DoEsrp }}', true))
   continueOnError: true
@@ -61,7 +61,7 @@ steps:
           "toolName": "signtool.exe",
           "toolVersion": "6.2.9304.0"
         }
-      ]    
+      ]
 
 - task: PowerShell@2
   displayName: 'Signature validation for signed file(s)'

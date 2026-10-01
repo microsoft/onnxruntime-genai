@@ -632,6 +632,58 @@ std::span<const uint32_t> GuidanceLogitsProcessor::GetReadyMask() {
   return masks_;
 }
 
+bool GuidanceLogitsProcessor::AllowsOnlyTokens(
+    size_t index, std::span<const int> tokens) {
+  EnsureMaskScheduled();
+  EnsureMaskReady();
+  if (index >= llg_constraints_.size()) {
+    throw std::out_of_range("Guidance row index is out of range.");
+  }
+  if (mask_words_per_row_ == 0 ||
+      masks_.size() / mask_words_per_row_ != llg_constraints_.size() ||
+      masks_.size() % mask_words_per_row_ != 0) {
+    throw std::runtime_error("Guidance mask dimensions do not match its constraint rows.");
+  }
+
+  const auto row = std::span<const uint32_t>{masks_}.subspan(
+      index * mask_words_per_row_, mask_words_per_row_);
+  return MaskAllowsOnlyTokens(
+      row, static_cast<size_t>(params_->config.model.vocab_size), tokens);
+}
+
+bool GuidanceLogitsProcessor::MaskAllowsOnlyTokens(
+    std::span<const uint32_t> mask, size_t vocab_size,
+    std::span<const int> tokens) {
+  if (mask.size() != (vocab_size + 31) / 32) {
+    throw std::runtime_error("Guidance mask size does not match the model vocabulary.");
+  }
+
+  bool permits_supplied_token = false;
+  for (size_t word = 0; word < mask.size(); ++word) {
+    uint32_t supplied_bits = 0;
+    for (int token : tokens) {
+      if (token >= 0 && static_cast<size_t>(token) < vocab_size &&
+          static_cast<size_t>(token) / 32 == word) {
+        supplied_bits |= uint32_t{1} << (static_cast<size_t>(token) % 32);
+      }
+    }
+
+    uint32_t valid_bits = std::numeric_limits<uint32_t>::max();
+    if (word + 1 == mask.size() && vocab_size % 32 != 0) {
+      valid_bits = (uint32_t{1} << (vocab_size % 32)) - 1;
+    }
+    const uint32_t allowed = mask[word] & valid_bits;
+    permits_supplied_token |= (allowed & supplied_bits) != 0;
+    if ((allowed & ~supplied_bits) != 0) {
+      return false;
+    }
+  }
+  if (!permits_supplied_token) {
+    return false;
+  }
+  return true;
+}
+
 // Reset the LLGuidance constraints and then recompute the mask
 void GuidanceLogitsProcessor::Reset() {
   pending_masks_ = {};
@@ -655,16 +707,6 @@ std::unique_ptr<ConstrainedLogitsProcessor> GuidanceLogitsProcessor::Clone() con
   clone->mask_dirty_ = mask_dirty_ || pending_masks_.valid();
   clone->ff_tokens_batch_ = ff_tokens_batch_;
   clone->llg_constraints_ = llg_constraints_;
-  return clone;
-}
-
-std::unique_ptr<ConstrainedLogitsProcessor> GuidanceLogitsProcessor::CloneForNewTurn() const {
-  auto clone = std::unique_ptr<GuidanceLogitsProcessor>(new GuidanceLogitsProcessor());
-  clone->params_ = params_;
-  clone->eos_token_ = eos_token_;
-  clone->grammar_asset_ = grammar_asset_;
-  clone->InitializeLlgConstraints();
-  clone->ComputeMask();
   return clone;
 }
 
@@ -804,9 +846,8 @@ std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
 #endif
 }
 
-// Engine-facing overload: a Request exists (and must validate its guidance request) before it is
-// necessarily associated with a model, so this checks the request's shape and this build's
-// support for it first - neither of which needs a model - and only then requires one.
+// Engine-facing overload: a turn's guidance request is checked for shape and for this build's
+// support first - neither of which needs a model - and only then requires one.
 std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
     std::shared_ptr<const GeneratorParams> params) {
   if (!ValidateGuidanceRequest(params->guidance_type, params->guidance_data)) {

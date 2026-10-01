@@ -191,6 +191,17 @@ TEST(QwenVisionMultiImageTest, UsesPaddedStrideForDifferentImageGridSizes) {
   EXPECT_EQ(layout.padded_image_stride, 6880);
   EXPECT_EQ(layout.temporal_multiplier, 0);
   EXPECT_EQ(layout.ImagePatchOffset(2, 5624 + 6880), 13760);
+TEST(QwenVisionMultiImageTest, UsesPaddedStrideForDifferentImageGridSizes) {
+  const auto layout = Generators::ResolveQwenPatchLayout(
+      /*total_patches=*/27520,
+      /*total_grid_tokens=*/20004,
+      /*total_hw=*/20004,
+      /*max_grid_tokens=*/6880,
+      /*num_images=*/4);
+
+  EXPECT_EQ(layout.padded_image_stride, 6880);
+  EXPECT_EQ(layout.temporal_multiplier, 0);
+  EXPECT_EQ(layout.ImagePatchOffset(2, 12504), 13760);
   EXPECT_EQ(layout.ImagePatchCount(1900, 38, 50), 1900);
 }
 

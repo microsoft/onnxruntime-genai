@@ -497,6 +497,45 @@ TEST(InvariantValidatorTest, CanceledTurnMayRetainUnprocessedInput) {
   EXPECT_TRUE(ValidateRequestInvariants(request).empty());
 }
 
+TEST(InvariantValidatorTest, StopStringFinishReasonWithNonnegativeIndexIsValid) {
+  auto request =
+      MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10);
+  request.finish_reason = GenerationFinishReason::StopString;
+  request.matched_stop_string_index = 0;
+  EXPECT_TRUE(ValidateRequestInvariants(request).empty());
+}
+
+TEST(InvariantValidatorTest, StopStringFinishReasonWithoutAMatchedIndexIsRejected) {
+  auto request =
+      MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10);
+  request.finish_reason = GenerationFinishReason::StopString;
+  request.matched_stop_string_index = -1;
+  EXPECT_FALSE(ValidateRequestInvariants(request).empty());
+}
+
+TEST(InvariantValidatorTest, NonStopStringFinishReasonWithAMatchedIndexIsRejected) {
+  auto request =
+      MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10);
+  request.finish_reason = GenerationFinishReason::ContextLimit;
+  request.matched_stop_string_index = 0;
+  EXPECT_FALSE(ValidateRequestInvariants(request).empty());
+}
+
+TEST(InvariantValidatorTest, EveryNonStopStringFinishReasonRequiresNoMatchedIndex) {
+  for (const auto finish_reason :
+       {GenerationFinishReason::None, GenerationFinishReason::EosToken,
+        GenerationFinishReason::TurnLimit, GenerationFinishReason::ContextLimit,
+        GenerationFinishReason::Canceled, GenerationFinishReason::Failed}) {
+    auto request =
+        MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10);
+    request.finish_reason = finish_reason;
+    request.matched_stop_string_index = 3;
+    EXPECT_FALSE(ValidateRequestInvariants(request).empty())
+        << "finish_reason " << static_cast<uint32_t>(finish_reason)
+        << " incorrectly accepted a matched stop-string index.";
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Combined / cross-cutting invariants
 // ---------------------------------------------------------------------------------------------

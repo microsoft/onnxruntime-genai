@@ -137,28 +137,59 @@ jobs:
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
+      # The NuGet SDK resolver runs while evaluating the project, before
+      # dotnet restore applies --source or --configfile. Put an isolated config
+      # beside the project so MSBuild.Sdk.Extras is also resolved from Lotus.
+      $nugetConfig = Join-Path $PWD 'NuGet.config'
+      $lotusFeed = [System.Security.SecurityElement]::Escape('$(lotusNuGetFeed)')
+      @"
+      <?xml version="1.0" encoding="utf-8"?>
+      <configuration>
+        <packageSources>
+          <clear />
+          <add key="Lotus" value="$lotusFeed" />
+        </packageSources>
+      </configuration>
+      "@ | Set-Content -Path $nugetConfig -Encoding UTF8
+    displayName: Create Lotus Config
+    workingDirectory: '$(Build.Repository.LocalPath)/src/csharp'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
       dotnet --info
       # Feed isolation: install the mobile workload packs from the Lotus feed
       # (which upstreams nuget.org). --skip-manifest-update uses the manifests
       # baked into the SDK so no public SDK feed is contacted.
+
+      $nugetConfig = Join-Path $PWD 'NuGet.config'
+
       dotnet workload install android ios maccatalyst macos `
         --skip-manifest-update `
-        --source "$(lotusNuGetFeed)"
+        --configfile $nugetConfig
       if ($LASTEXITCODE -ne 0) { Write-Error "dotnet workload install failed"; exit $LASTEXITCODE }
     displayName: 'Install .NET mobile workloads'
     workingDirectory: '$(Build.Repository.LocalPath)/src/csharp'
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
-      # Pass Lotus explicitly, then build without an implicit restore so no
-      # machine- or repository-level NuGet configuration can add another feed.
-      dotnet restore Microsoft.ML.OnnxRuntimeGenAI.csproj `
-        --source "$(lotusNuGetFeed)" `
-        -p:IncludeMobileTargets=true
-      if ($LASTEXITCODE -ne 0) { Write-Error "dotnet restore failed"; exit $LASTEXITCODE }
-      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj --no-restore `
-        -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
-      if ($LASTEXITCODE -ne 0) { Write-Error "dotnet build failed"; exit $LASTEXITCODE }
+      # The NuGet SDK resolver runs while evaluating the project, before
+      # dotnet restore applies --source or --configfile. Put an isolated config
+      # beside the project so MSBuild.Sdk.Extras is also resolved from Lotus.
+      $nugetConfig = Join-Path $PWD 'NuGet.config'
+
+      try {
+        dotnet restore Microsoft.ML.OnnxRuntimeGenAI.csproj `
+          --configfile $nugetConfig `
+          -p:IncludeMobileTargets=true
+        if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed with exit code $LASTEXITCODE" }
+
+        dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj --no-restore `
+          -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
+        if ($LASTEXITCODE -ne 0) { throw "dotnet build failed with exit code $LASTEXITCODE" }
+      }
+      finally {
+        Remove-Item $nugetConfig -Force -ErrorAction SilentlyContinue
+      }
     displayName: 'Build C# managed assembly'
     workingDirectory: '$(Build.Repository.LocalPath)/src/csharp'
 

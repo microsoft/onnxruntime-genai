@@ -135,7 +135,10 @@ struct BatchedSamplingParams {
 struct BatchedSampler {
   virtual ~BatchedSampler() = default;
 
-  virtual std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) = 0;
+  virtual std::unique_ptr<BatchedSamplerState> CreateState(uint64_t random_seed) = 0;
+  // Restarts an existing state's stream from `random_seed` without releasing or reacquiring any
+  // pooled resource the state holds, so a per-turn reseed neither leaks nor churns sampler slots.
+  virtual void ReseedState(BatchedSamplerState& state, uint64_t random_seed) = 0;
   virtual bool OwnsState(const BatchedSamplerState& state) const = 0;
   virtual bool SupportsTransactions() const { return false; }
   virtual void SaveStateForTransaction(std::span<BatchedSamplerState* const> /*states*/) {
@@ -209,9 +212,12 @@ struct StateUpdateReplayDesc {
 
 static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 
-// Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
-// report this exact version before the host can safely call through the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 4;
+// Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
+// layout, or the virtual or data layout of any type constructed by, passed to, or returned across
+// that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
+// Dynamically loaded add-ons must report this exact version before the host can safely call through
+// the C++ interface.
+inline constexpr uint32_t kDeviceInterfaceVersion = 7;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -342,9 +348,23 @@ struct DeviceInterface {
     return CreateStandardPositionInputs(state, sequence_lengths, attention_mask_name);
   }
 #endif
+  // Enqueues the compact fixed-state replay. It must be ordered before any later device work that
+  // reads the destination states, and `descs` may be released as soon as the call returns.
   virtual void ReplayStateUpdates(const StateUpdateReplayDesc* /*descs*/, size_t /*count*/) {
     throw std::logic_error("Device does not support compact fixed-state replay.");
   }
+  // True for EPs where an OrtValue can bind a tensor view formed by adding a byte offset to the base
+  // address returned for persistent device storage. Keep last for vtable ABI stability.
+  virtual bool SupportsOffsetTensorViews() const { return false; }
+  // True when allocation, zeroing, ranged copies, tensor binding, and synchronization are qualified
+  // to complete fixed-state device work before FixedStatePool publishes a bank flip.
+  // Keep last for vtable ABI stability.
+  virtual bool SupportsTransactionalFixedState() const { return false; }
+  // True when a `bytes`-sized host mirror of this device's buffers returns to a pool that hands it
+  // out again only after its pending host-to-device copy completes. Dropping such a mirror right
+  // after an upload never waits for the device, so a caller can take a fresh mirror per upload
+  // instead of synchronizing before it reuses one. Keep last for vtable ABI stability.
+  virtual bool RecyclesHostMirrorsAfterUpload(size_t /*bytes*/) const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
@@ -396,7 +416,7 @@ struct ExternalRefCounted {
  private:
   void LockExternalReferences() const noexcept {
     while (external_reference_lock_.test_and_set(std::memory_order_acquire)) {
-#if defined(USE_CXX17)
+#if defined(USE_CXX17) || defined(__APPLE__)
       std::this_thread::yield();
 #else
       external_reference_lock_.wait(true, std::memory_order_relaxed);
@@ -406,7 +426,7 @@ struct ExternalRefCounted {
 
   void UnlockExternalReferences() const noexcept {
     external_reference_lock_.clear(std::memory_order_release);
-#if !defined(USE_CXX17)
+#if !defined(USE_CXX17) && !defined(__APPLE__)
     external_reference_lock_.notify_one();
 #endif
   }
