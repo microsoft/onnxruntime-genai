@@ -53,15 +53,17 @@ struct Embeddings {
   std::unique_ptr<OrtValue> chunk_view_;  // Non-owning view into embeddings_ used during prefill chunking
 
   // Output mode, cross-device pipelines only: the consumer's buffer and device, wrapped once per
-  // buffer so that its host mirror (pinned memory on CUDA) lasts across decode steps. This session
-  // writes the mirror through host_view_ and CopyToConsumer uploads it. All null when the
-  // consumer's buffer is bound directly (the same-device case). consumer_ is only compared, never
-  // dereferenced: it dangles after the consumer's next UpdateSequenceLength, which creates the new
-  // tensor before freeing the old, so a new buffer always has a new address.
+  // buffer so that its host mirror (pinned memory on CUDA) lasts across decode steps, or once per
+  // step when the device recycles mirrors (recycle_mirror_). This session writes the mirror through
+  // host_view_ and CopyToConsumer uploads it. All null when the consumer's buffer is bound directly
+  // (the same-device case). consumer_ is only compared, never dereferenced: it dangles after the
+  // consumer's next UpdateSequenceLength, which creates the new tensor before freeing the old, so a
+  // new buffer always has a new address.
   OrtValue* consumer_{};
   DeviceInterface* consumer_device_{};
   DeviceSpan<uint8_t> consumer_bytes_;
   std::unique_ptr<OrtValue> host_view_;
+  bool recycle_mirror_{};             // The next step takes a fresh mirror instead of reusing this one
   DeviceInterface* upload_device_{};  // Set while the last upload may still be reading the mirror
 
   size_t index_{};

@@ -112,9 +112,12 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
   // The consumer allocated its input on a device this session has no EP for. Binding it as an
   // output would have ORT write host bytes over that device pointer, so this session writes the
   // buffer's host mirror instead, and CopyToConsumer() uploads it once the session has run.
-  if (consumer != consumer_) {
-    // The decoder reallocated for a new sequence length: wrap the new buffer once here, so decode
-    // steps reuse the wrapper and its mirror instead of allocating a mirror per step.
+  if (consumer != consumer_ || recycle_mirror_) {
+    // Wrapped once per decoder buffer, so that decode steps reuse the wrapper and its mirror, unless
+    // the device recycles mirrors. Then every step takes a fresh one: replacing the wrapper hands the
+    // previous mirror back to a pool that reuses it only once its upload has completed, so nothing
+    // has to wait for that upload, whereas reusing a mirror drains the whole stream, including the
+    // decoder's input updates queued since (see CpuEmbedding::Workspace::Prepare).
     auto info = consumer->GetTensorTypeAndShapeInfo();
     auto shape = info->GetShape();
     consumer_bytes_ = ByteWrapTensor(consumer_device, *consumer);
@@ -123,6 +126,7 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
                                         mirror.data(), mirror.size_bytes(), shape, info->GetElementType());
     consumer_ = consumer;
     consumer_device_ = &consumer_device;
+    recycle_mirror_ = consumer_device.RecyclesHostMirrorsAfterUpload(mirror.size_bytes());
   }
   state_.outputs_[index_] = host_view_.get();
 }
@@ -132,9 +136,11 @@ void Embeddings::CopyToConsumer() {
     return;
 
   // Queued on the consumer device's stream ahead of the consumer's run. Nothing waits for it here,
-  // so that it does not hold back that run; WaitForUpload waits before the mirror is written again.
+  // so that it does not hold back that run. A recycled mirror is never written again; any other is,
+  // so WaitForUpload waits for this upload first.
   consumer_bytes_.CopyCpuToDevice();
-  upload_device_ = consumer_device_;
+  if (!recycle_mirror_)
+    upload_device_ = consumer_device_;
 }
 
 void Embeddings::WaitForUpload() {
