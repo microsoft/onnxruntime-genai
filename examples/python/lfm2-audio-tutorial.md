@@ -552,10 +552,10 @@ past the buffer it was given, which is every step of the depthformer's loop. Sep
 `onnxruntime-ep-webgpu` 0.3.0 cannot load the encoder at the default optimisation level, as it
 rejects the fused `Conv` activation that a current `onnxruntime` emits; it does load and run it at
 `ORT_ENABLE_BASIC`. [onnxruntime#32716](https://github.com/microsoft/onnxruntime/issues/32716)
-reports both. A CPU export's config keeps all three on CPU. Set up that way, all three modes match the reference
-token for token and frame for frame on Metal. On Linux's software Vulkan driver (lavapipe) ASR and
-typed interleaved match too, spoken interleaved differs by the same two codes as on CUDA, and TTS
-drifts after a few frames, wherever the embedding runs.
+reports both. A CPU export's config keeps all three on CPU. Set up that way, all three modes match
+the reference token for token and frame for frame on Metal. On Linux's software Vulkan driver
+(lavapipe) ASR and typed interleaved match too, spoken interleaved differs by the same two codes as
+on CUDA, and TTS drifts after a few frames, wherever the embedding runs.
 
 **Dither is off, as in the reference's eval mode.** NeMo adds 1e-5 of white noise to the samples
 during training only; the runtime never does.
