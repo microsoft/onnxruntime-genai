@@ -168,11 +168,17 @@ def test_snapshot_state_enables_rewind_into_generated_continuation(test_data_pat
     assert generator.get_sequence(0).shape[0] == snapshot_length
     generator.snapshot_state()
 
-    generator.generate_next_token()
+    generator.generate_next_token()  # sequence length == snapshot_length + 1
+    expected_logits = generator.get_logits().copy()  # matches the replay's Run() count below
     generator.generate_next_token()  # sequence length == snapshot_length + 2
+    expected_sequence = generator.get_sequence(0).copy()
 
-    generator.rewind_to(snapshot_length)  # previously always raised; must succeed now
-    assert generator.get_sequence(0).shape[0] == snapshot_length
+    for _ in range(REPLAYS):
+        generator.rewind_to(snapshot_length)
+        assert generator.get_sequence(0).shape[0] == snapshot_length
+        generator.generate_next_token()
+        np.testing.assert_array_equal(generator.get_sequence(0), expected_sequence)
+        np.testing.assert_array_equal(generator.get_logits(), expected_logits)
 
 
 @pytest.mark.parametrize(
