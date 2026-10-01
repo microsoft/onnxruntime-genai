@@ -25,10 +25,7 @@ bool CanRewindWindowedKvCache(int windowed_cache_size, int current_length, size_
   // [i - min(i, C), i) while the buffer still physically holds [T - min(T, C), T).  Those
   // ranges only coincide when nothing has been evicted; supporting the resident case would
   // require left-shifting every sliding layer's cache, which is not implemented.
-  //
-  // A full rewind (index 0) needs no history: the replay starts from a zero-length past.
-  return index == 0 ||
-         !(windowed_cache_size > 0 && current_length > windowed_cache_size &&
+  return !(windowed_cache_size > 0 && current_length > windowed_cache_size &&
            index < static_cast<size_t>(current_length));
 }
 

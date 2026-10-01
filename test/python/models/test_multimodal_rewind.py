@@ -166,8 +166,6 @@ def test_snapshot_state_enables_rewind_into_generated_continuation(test_data_pat
     snapshot_length = len(QWEN_PROMPT) + 1
     generator.generate_next_token()  # sequence length == snapshot_length
     assert generator.get_sequence(0).shape[0] == snapshot_length
-    
-    generator.get_logits()
     generator.snapshot_state()
 
     generator.generate_next_token()  # sequence length == snapshot_length + 1

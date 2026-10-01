@@ -80,8 +80,6 @@ TEST(RewindTests, RejectsRewindThatSplitsThePrompt) {
 
 TEST(RewindTests, RejectsRewindPastEvictedSlidingWindowPositions) {
   EXPECT_FALSE(Generators::CanRewindWindowedKvCache(64, 100, 10));  // evicted: reject
-  EXPECT_TRUE(Generators::CanRewindWindowedKvCache(64, 100, 0));    // full rewind needs no history: allowed
-  EXPECT_NO_THROW(Generators::CheckWindowedKvCacheRewind(64, 100, 0));
   EXPECT_TRUE(Generators::CanRewindWindowedKvCache(64, 100, 100));  // at current length: allowed
   EXPECT_TRUE(Generators::CanRewindWindowedKvCache(64, 50, 10));    // window never filled: allowed
   EXPECT_TRUE(Generators::CanRewindWindowedKvCache(0, 100, 10));    // no window configured: allowed

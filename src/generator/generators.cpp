@@ -1022,6 +1022,9 @@ DeviceSpan<float> Generator::GetLogits() {
 
 void Generator::SnapshotState() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  // A just-sampled token is in the sequence but not yet in the model state; run it so the snapshot matches its label.
+  if (last_action_ == Action::generated && !computed_logits_)
+    GetLogits();
   state_->SnapshotState(search_->GetSequenceLength());
 }
 

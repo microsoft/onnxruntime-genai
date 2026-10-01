@@ -12,12 +12,14 @@ void SharedKeyValueCache::Update(DeviceSpan<int32_t> /*beam_indices*/, int total
 }
 
 void SharedKeyValueCache::RewindTo(size_t index) {
-  CheckWindowedKvCacheRewind(windowed_cache_size_, current_length_, index);
+  if (!CanRewindTo(index))
+    CheckWindowedKvCacheRewind(windowed_cache_size_, current_length_, index);
   current_length_ = static_cast<int>(index);
 }
 
 bool SharedKeyValueCache::CanRewindTo(size_t index) const {
-  return CanRewindWindowedKvCache(windowed_cache_size_, current_length_, index);
+  // A full rewind needs no evicted history: the replay starts from a zero-length past.
+  return index == 0 || CanRewindWindowedKvCache(windowed_cache_size_, current_length_, index);
 }
 
 }  // namespace Generators
