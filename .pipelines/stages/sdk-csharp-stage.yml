@@ -3,7 +3,7 @@
 #
 # ALL C# NuGet packages are produced by this single stage, one job per EP:
 #   cpu     — Microsoft.ML.OnnxRuntimeGenAI          (win-x64, linux-x64/arm64, osx-arm64, ios, android)
-#   cuda    — Microsoft.ML.OnnxRuntimeGenAI.Cuda     (win-x64, linux-x64)
+#   cuda    — Microsoft.ML.OnnxRuntimeGenAI.Cuda     (win-x64/arm64, linux-x64/arm64)
 #   winml   — Microsoft.ML.OnnxRuntimeGenAI.WinML    (win-x64)
 #   foundry — Microsoft.ML.OnnxRuntimeGenAI.Foundry  (cuda+cpu RID mix; both EPs)
 #
@@ -81,7 +81,7 @@ stages:
         enable_win_x64: true
         enable_win_arm64: true
         enable_linux_x64: true
-        enable_linux_arm64: false
+        enable_linux_arm64: true
 
   # ---- WinML repackage job -------------------------------------------------
   - ${{ if eq(parameters.enable_winml, true) }}:

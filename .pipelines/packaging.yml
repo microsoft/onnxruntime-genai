@@ -7,10 +7,10 @@
 # NuGet. Feed-isolated to the internal Lotus feed; every published binary/package
 # is ESRP-signed where the platform supports it.
 #
-# The matrix is fixed per EP (goal 8); the pipeline inputs only select the EP(s),
+# The matrix is fixed per EP; the pipeline inputs only select the EP(s),
 # the build-time ORT versions, and the CUDA toolkit version:
 #   CPU  : win-x64, win-arm64, macos-arm64, linux-x64, linux-arm64, android, ios
-#   CUDA : win-x64, win-arm64, linux-x64
+#   CUDA : win-x64, win-arm64, linux-x64, linux-arm64
 # =============================================================================
 
 parameters:
@@ -48,7 +48,10 @@ parameters:
   default: '2.1.1'
 
 # ---- CUDA toolkit version --------------------------------------------------
-# Windows ARM64 core builds always use CUDA 13.1 because CUDA 12.8 is unsupported.
+# Windows and Linux ARM64 CUDA builds use CUDA 13.1 regardless of this setting.
+# Linux ARM64 also uses ORT 1.30.0 regardless of ort_build_version or
+# ort_runtime_version: GPU.Linux NuGet releases have no ARM64 binaries, while
+# onnxruntime-gpu 1.30.0 publishes a CUDA 13 manylinux ARM64 runtime.
 - name: cuda_version
   displayName: 'CUDA toolkit version'
   type: string

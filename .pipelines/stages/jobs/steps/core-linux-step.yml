@@ -83,7 +83,7 @@ steps:
     if [ '${{ parameters.ep }}' = 'cuda' ]; then
       if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
         if [ '${{ parameters.arch }}' = 'arm64' ]; then
-          cuda_archs='89-real;90-real;100-real;103-real;120-real;121-real'
+          cuda_archs='89-real;90-real;120-real;121-real'
         else
           cuda_archs='75-real;80-real;86-real;89-real;90-real;120-real'
         fi
@@ -139,9 +139,18 @@ steps:
       'install/include/ort_genai.h'
       'install/lib/libonnxruntime-genai.so'
     )
+    if [ '${{ parameters.ep }}' = 'cuda' ]; then
+      req+=('install/lib/libonnxruntime-genai-cuda.so')
+    fi
     for f in "${req[@]}"; do
       [ -f "$f" ] || { echo "ASSERT FAIL: missing $f"; exit 1; }
     done
+    if [ '${{ parameters.arch }}' = 'arm64' ] && [ '${{ parameters.ep }}' = 'cuda' ]; then
+      for lib in install/lib/libonnxruntime-genai{,-cuda}.so; do
+        readelf -h "$lib" | grep -q 'Machine:.*AArch64' || {
+          echo "ASSERT FAIL: $lib is not AArch64"; exit 1; }
+      done
+    fi
     echo "ASSERT OK: CMake package installed at $(Build.SourcesDirectory)/install"
   displayName: 'Assert: CMake package installed'
   workingDirectory: '$(Build.SourcesDirectory)'
@@ -154,6 +163,10 @@ steps:
     if [ -z "$archive" ]; then
       echo "ASSERT FAIL: no CPack .tar.gz found in $pkg_dir"; exit 1
     fi
+    if [ '${{ parameters.arch }}' = 'arm64' ] && [ '${{ parameters.ep }}' = 'cuda' ]; then
+      [[ "$(basename "$archive")" == *-linux-arm64-cuda.tar.gz ]] || {
+        echo "ASSERT FAIL: ARM64 CUDA archive has the wrong name: $archive"; exit 1; }
+    fi
     echo "CPack archive: $archive"
     listing=$(tar -tzf "$archive")
     # The archive must ship the native library and the public C/C++ headers.
@@ -161,6 +174,10 @@ steps:
       echo "$listing" | grep -Eq "$pat$" || {
         echo "ASSERT FAIL: archive missing /$pat/"; exit 1; }
     done
+    if [ '${{ parameters.ep }}' = 'cuda' ]; then
+      echo "$listing" | grep -Eq 'libonnxruntime-genai-cuda\.so$' || {
+        echo "ASSERT FAIL: archive missing CUDA shim"; exit 1; }
+    fi
     echo "ASSERT OK: archive contains native lib + public headers"
   displayName: 'Assert: CPack archive contents'
   workingDirectory: '$(Build.SourcesDirectory)'
