@@ -820,8 +820,12 @@ void PagedKeyValueCache::SealCommittedBlocks(
   if (!prefix_cache_->Enabled()) {
     return;
   }
-  if (RequiresPrefixCheckpoint() &&
-      (!checkpoint || !CanSealPrefixCheckpoint(request_id, checkpoint->TokenCount(), tokens))) {
+  if (RequiresPrefixCheckpoint()) {
+    if (checkpoint) {
+      const size_t token_count = checkpoint->TokenCount();
+      SealCheckpointedPrefix(
+          request_id, tokens, token_count, [checkpoint = std::move(checkpoint)] { return checkpoint; });
+    }
     return;
   }
   const auto table_index = block_table_index_->Find(request_id);
@@ -842,22 +846,6 @@ void PagedKeyValueCache::SealCommittedBlocks(
         "The request token mirror is shorter than its committed paged cache.");
   }
 
-  if (RequiresPrefixCheckpoint()) {
-    auto registration = prefix_cache_->RegisterCheckpointedPrefix(
-        std::span<const std::shared_ptr<Block>>{table.blocks_}.subspan(
-            table.sealed_blocks_, full_blocks - table.sealed_blocks_),
-        tokens.subspan(table.sealed_blocks_ * block_size,
-                       (full_blocks - table.sealed_blocks_) * block_size),
-        table.sealed_identity_, std::move(checkpoint));
-    if (registration.identity) {
-      table.sealed_blocks_ = full_blocks;
-      table.sealed_identity_ = std::move(registration.identity);
-    } else {
-      table.sealing_stopped_ = registration.StopsSealing();
-    }
-    return;
-  }
-
   auto parent = table.sealed_identity_;
   for (size_t index = table.sealed_blocks_; index < full_blocks; ++index) {
     auto registration = prefix_cache_->Register(
@@ -871,6 +859,30 @@ void PagedKeyValueCache::SealCommittedBlocks(
     parent = std::move(registration.identity);
     table.sealed_blocks_ = index + 1;
     table.sealed_identity_ = parent;
+  }
+}
+
+void PagedKeyValueCache::SealCheckpointedPrefix(
+    const void* request_id, std::span<const int32_t> tokens, size_t token_count,
+    const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint) {
+  if (!prefix_cache_->Enabled() || !RequiresPrefixCheckpoint() ||
+      !CanSealPrefixCheckpoint(request_id, token_count, tokens)) {
+    return;
+  }
+  auto& table = block_tables_[*block_table_index_->Find(request_id)];
+  const size_t block_size = block_pool_->BlockSize();
+  const size_t full_blocks = token_count / block_size;
+  auto registration = prefix_cache_->RegisterCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>>{table.blocks_}.subspan(
+          table.sealed_blocks_, full_blocks - table.sealed_blocks_),
+      tokens.subspan(table.sealed_blocks_ * block_size,
+                     (full_blocks - table.sealed_blocks_) * block_size),
+      table.sealed_identity_, capture_checkpoint);
+  if (registration.identity) {
+    table.sealed_blocks_ = full_blocks;
+    table.sealed_identity_ = std::move(registration.identity);
+  } else {
+    table.sealing_stopped_ = registration.StopsSealing();
   }
 }
 
@@ -969,6 +981,10 @@ size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
 
 size_t PagedKeyValueCache::ReclaimablePrefixCheckpoints() const {
   return prefix_cache_->ReclaimableCheckpoints();
+}
+
+const FixedStatePrefixCheckpoint* PagedKeyValueCache::ReclaimablePrefixCheckpoint() const {
+  return prefix_cache_->ReclaimableCheckpoint();
 }
 
 bool PagedKeyValueCache::RequiresPrefixCheckpoint() const {

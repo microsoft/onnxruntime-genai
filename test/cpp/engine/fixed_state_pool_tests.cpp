@@ -541,6 +541,45 @@ TEST_F(FixedStatePoolTest, CompetingHybridPublicationKeepsCanonicalPhysicalHisto
   blocks.Free(second);
 }
 
+TEST_F(FixedStatePoolTest, FailedCheckpointReplacementKeepsOldRowAndRetries) {
+  BlockPool blocks{4, 2};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 2;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/1};
+  MakeResident(pool, kRequestA, 7.0f, /*target_tokens=*/4);
+  MakeResident(pool, kRequestB, 9.0f, /*target_tokens=*/4);
+  const std::array<int32_t, 4> first_tokens{1, 2, 3, 4};
+  const std::array<int32_t, 4> second_tokens{5, 6, 7, 8};
+  auto first = blocks.AllocateBlocks(4);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     first, first_tokens, {}, pool.CapturePrefixCheckpoint(kRequestA))
+                .identity,
+            nullptr);
+  const auto* replacement = index.ReclaimableCheckpoint();
+  ASSERT_NE(replacement, nullptr);
+  EXPECT_THROW(pool.CapturePrefixCheckpoint(kRequestB, replacement, [] {
+    throw std::bad_alloc{};
+  }),
+               std::bad_alloc);
+  EXPECT_EQ(index.Match(first_tokens, first_tokens.size()).fixed_state_checkpoint.get(), replacement);
+  EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 0u);
+  EXPECT_EQ(index.CheckpointCount(), 1u);
+
+  auto second = blocks.AllocateBlocks(4);
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestB, replacement, [&] {
+    EXPECT_EQ(index.ReclaimCheckpoints(1), 1u);
+  });
+  ASSERT_NE(checkpoint, nullptr);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(second, second_tokens, {}, checkpoint).identity, nullptr);
+  EXPECT_EQ(index.Match(second_tokens, second_tokens.size()).token_count, 4u);
+  blocks.Free(first);
+  blocks.Free(second);
+}
+
 TEST_F(FixedStatePoolTest, PrefixCheckpointMustBelongToTheAdoptingPool) {
   FixedStatePool source_pool{model_, /*capacity=*/1,
                              /*prefix_checkpoint_capacity=*/1};

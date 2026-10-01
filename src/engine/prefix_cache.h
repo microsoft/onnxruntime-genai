@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <optional>
@@ -35,6 +36,10 @@
  */
 
 namespace Generators {
+
+namespace test {
+struct EngineRunTestAccess;
+}
 
 class FixedStatePrefixCheckpoint;
 struct Dflash2PrefixCheckpoint;
@@ -162,6 +167,11 @@ class PrefixCache final : private BlockReferenceObserver {
       std::span<const int32_t> tokens,
       const std::shared_ptr<const BlockIdentity>& parent,
       std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+  PrefixCacheRegistration RegisterCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent,
+      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint);
 
   // Publishes and refreshes a match only after its adopting cache transaction commits.
   void RecordAdoption(
@@ -188,6 +198,7 @@ class PrefixCache final : private BlockReferenceObserver {
   void DropUnleasedDraftCheckpoints();
   size_t ReclaimCheckpoints(size_t checkpoints_needed);
   size_t ReclaimableCheckpoints() const;
+  const FixedStatePrefixCheckpoint* ReclaimableCheckpoint() const;
   size_t CheckpointCount() const { return checkpoint_count_; }
 
   /**
@@ -219,6 +230,8 @@ class PrefixCache final : private BlockReferenceObserver {
   const PrefixCacheMetrics& Metrics() const { return metrics_; }
 
  private:
+  friend struct test::EngineRunTestAccess;
+
   struct Entry {
     std::shared_ptr<Block> block;
     std::shared_ptr<const BlockIdentity> identity;

@@ -466,17 +466,24 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
           static_cast<size_t>(entry.sequence_length_before)) {
         continue;
       }
-      key_value_cache_->ReclaimPrefixCheckpoints(1);
+      if (!key_value_cache_->ReclaimablePrefixCheckpoint()) {
+        continue;
+      }
     }
-    if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
-      continue;
-    }
-    auto checkpoint =
-        fixed_state_pool_->CapturePrefixCheckpoint(entry.request_id);
-    if (checkpoint) {
-      key_value_cache_->SealCommittedBlocks(
-          entry.request_id, entry.request->TokensCpu(), std::move(checkpoint));
-    }
+    key_value_cache_->SealCheckpointedPrefix(
+        entry.request_id, entry.request->TokensCpu(), entry.target_cache_slots,
+        [this, request_id = entry.request_id] {
+          const auto* replacement =
+              fixed_state_pool_->AvailablePrefixCheckpoints() == 0
+                  ? key_value_cache_->ReclaimablePrefixCheckpoint()
+                  : nullptr;
+          return fixed_state_pool_->CapturePrefixCheckpoint(
+              request_id, replacement, [this] {
+                if (key_value_cache_->ReclaimPrefixCheckpoints(1) != 1) {
+                  throw std::logic_error("A selected prefix checkpoint could not be reclaimed.");
+                }
+              });
+        });
   }
 }
 

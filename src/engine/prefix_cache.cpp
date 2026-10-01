@@ -304,6 +304,18 @@ PrefixCacheRegistration PrefixCache::RegisterCheckpointedPrefix(
   if (!checkpoint) {
     throw std::invalid_argument("A hybrid prefix publication requires a checkpoint.");
   }
+  return RegisterCheckpointedPrefix(
+      blocks, tokens, parent, [checkpoint = std::move(checkpoint)] { return checkpoint; });
+}
+
+PrefixCacheRegistration PrefixCache::RegisterCheckpointedPrefix(
+    std::span<const std::shared_ptr<Block>> blocks,
+    std::span<const int32_t> tokens,
+    const std::shared_ptr<const BlockIdentity>& parent,
+    const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint) {
+  if (!capture_checkpoint) {
+    throw std::invalid_argument("A hybrid prefix publication requires a checkpoint capture.");
+  }
   const auto status = CheckCheckpointedPrefix(blocks, tokens, parent);
   if (status != PrefixCacheRegistrationStatus::Indexed) {
     return {status, nullptr};
@@ -333,7 +345,8 @@ PrefixCacheRegistration PrefixCache::RegisterCheckpointedPrefix(
       ++registered;
       identity = std::move(result.identity);
     }
-    if (!AttachCheckpoint(identity, std::move(checkpoint))) {
+    auto checkpoint = capture_checkpoint();
+    if (!checkpoint || !AttachCheckpoint(identity, std::move(checkpoint))) {
       rollback();
       return {PrefixCacheRegistrationStatus::CapacityRefused, nullptr};
     }
@@ -472,6 +485,15 @@ size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {
     }
   }
   return reclaimed;
+}
+
+const FixedStatePrefixCheckpoint* PrefixCache::ReclaimableCheckpoint() const {
+  for (const auto* entry : recency_) {
+    if (entry->checkpoint && entry->checkpoint.use_count() == 1) {
+      return entry->checkpoint.get();
+    }
+  }
+  return nullptr;
 }
 
 size_t PrefixCache::ReclaimableCheckpoints() const {

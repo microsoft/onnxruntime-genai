@@ -82,6 +82,8 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
  * for all requests.
  */
 struct PagedKeyValueCache {
+  friend struct test::EngineRunTestAccess;
+
  public:
   explicit PagedKeyValueCache(std::shared_ptr<Model> model,
                               size_t auxiliary_bytes_per_block = 0,
@@ -114,6 +116,9 @@ struct PagedKeyValueCache {
   void SealCommittedBlocks(const void* request_id,
                            std::span<const int32_t> tokens,
                            std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint = nullptr);
+  void SealCheckpointedPrefix(
+      const void* request_id, std::span<const int32_t> tokens, size_t token_count,
+      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint);
   bool CanSealPrefixCheckpoint(const void* request_id,
                                size_t token_count,
                                std::span<const int32_t> tokens);
@@ -129,6 +134,7 @@ struct PagedKeyValueCache {
   void DropUnleasedDraftCheckpoints();
   size_t ReclaimPrefixCheckpoints(size_t checkpoints_needed);
   size_t ReclaimablePrefixCheckpoints() const;
+  const FixedStatePrefixCheckpoint* ReclaimablePrefixCheckpoint() const;
   bool PrefixCachingEnabled() const;
   bool RequiresPrefixCheckpoint() const;
   size_t BlockSize() const { return block_pool_->BlockSize(); }
