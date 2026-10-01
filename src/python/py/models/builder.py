@@ -29,6 +29,8 @@ from builders import (
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
+    Gemma4MoEModel,
+    Gemma4Model,
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
@@ -164,6 +166,7 @@ def check_extra_options(
         "use_cuda_bf16",
         "shared_embeddings",
         "hf_remote",
+        "fuse_qkv",
         "disable_qkv_fusion",
         "fuse_qk_norm_gqa",
         "prune_lm_head",
@@ -185,6 +188,11 @@ def check_extra_options(
                 extra_options[key] = True
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
+
+    if "disable_qkv_fusion" in extra_options:
+        print("WARNING: 'disable_qkv_fusion' is deprecated. Use 'fuse_qkv=false' instead.")
+        if "fuse_qkv" not in extra_options:
+            extra_options["fuse_qkv"] = not extra_options["disable_qkv_fusion"]
 
     if "state_window" in extra_options:
         try:
@@ -322,7 +330,7 @@ def check_extra_options(
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
-    supported_moe_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
+    supported_moe_quant_types = {"int2", "int4", "int8", "mxfp4", "nvfp4"}
 
     # Backward compatibility: `use_8bits_moe` is deprecated in favor of `moe_quant_type`.
     if "use_8bits_moe" in extra_options:
@@ -348,6 +356,13 @@ def check_extra_options(
                     "int4 build precision is what exports the quantized QMoE op, and the FP4 scheme only sets the "
                     "MoE expert weights to the FP4 encoding."
                 )
+
+    if extra_options.get("moe_quant_type") == "int2":
+        if execution_provider != "cuda":
+            raise ValueError("INT2 QMoE is only supported on the CUDA EP.")
+        qmoe_block_size = int(extra_options.get("qmoe_block_size", 32))
+        if qmoe_block_size not in (64, 128):
+            raise ValueError("INT2 CUDA QMoE requires qmoe_block_size=64 or 128.")
 
     if extra_options.get("exclude_lm_head", False) and extra_options.get("include_hidden_states", False):
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -680,6 +695,16 @@ def create_model(
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "gemma3_vl_text"
+    elif config.architectures[0] == "Gemma4ForConditionalGeneration":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
+    elif config.architectures[0] == "Gemma4UnifiedForConditionalGeneration":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
@@ -985,6 +1010,13 @@ def get_args():
                     weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
+                dflash2_fuse_qkv = Experimental DFlash 2 attention Q/K/V projection fusion.
+                    Accepts true or false (default). Requires dflash2_path. Stacks each layer's
+                    query-block rows over the shared context rows and projects both with one
+                    MatMul or MatMulNBits, feeding PagedAttention a packed QKV stream. Replaces
+                    five projections per layer with one; the Q computed for context rows is dropped.
+                    The fused drafter omits the q_row_map input, so it requires a runtime that
+                    treats q_row_map as optional; older runtimes reject the exported package.
                 fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
                     MatMul or MatMulNBits followed by Split. Default is false. Applies before
                     target weight quantization and requires unpacked, unadapted gate/up
@@ -992,9 +1024,11 @@ def get_args():
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
-                    small dynamic-convolution and candidate-selector projections dense. The BF16
-                    body is emitted in the portable raw blockwise layout, and its session disables
-                    the target decoder's fpA-intB selection for those nodes.
+                    small dynamic-convolution and candidate-selector projections dense. The body
+                    uses the raw blockwise layout by default. On CUDA, a drafter quantization
+                    format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
+                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
+                    projections stay raw, and the drafter session disables fpA-intB selection for them.
                     Body activations and KV caches remain bf16; this option does not quantize the
                     drafter's KV cache. When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
@@ -1098,7 +1132,8 @@ def get_args():
                     are returned to the driver instead of being retained as free arena blocks.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
-                moe_quant_type = int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                moe_quant_type = int2/int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                    int2 = 2-bit integer QMoE weights on CUDA. Requires qmoe_block_size=64 or 128.
                     int4 = 4-bit integer QMoE weights (expert_weight_bits=4, quant_type="int").
                     int8 = 8-bit integer QMoE weights (expert_weight_bits=8, quant_type="int").
                     mxfp4 = MXFP4 QMoE weights on the CUDA EP (quant_type="fp4", expert_weight_bits=4, block_size=32):
@@ -1125,8 +1160,11 @@ def get_args():
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
                     An optional "qmax" records the divisor the file was calibrated with (128 for int8, 8 for int4, 448 for fp8);
                     the builder then rescales to the requested scheme, so one file can serve several bit widths.
-                disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
-                    If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
+                fuse_qkv = Fuse the model's Q, K, and V projections. Default is true.
+                    Set to false to keep separate projections. Fusion is automatically disabled for unsupported EPs
+                    and incompatible projection or quantization configurations.
+                disable_qkv_fusion = [DEPRECATED] Use 'fuse_qkv=false' instead.
+                    This inverse alias remains supported for compatibility. Default is false.
                 fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.
                     Set to false to keep explicit Q/K normalization nodes instead of passing Q/K norm weights into GroupQueryAttention.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.

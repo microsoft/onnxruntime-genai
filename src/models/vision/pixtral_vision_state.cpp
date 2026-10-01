@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/vision/pixtral_vision_state.h"
+
 #include "models/multi_modal.h"
 
 #include <cstring>
@@ -12,8 +13,6 @@ namespace Generators {
 void PixtralVisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs,
                                         const int64_t num_images,
                                         const int64_t num_image_tokens) {
-  // Extract image_sizes[N, 2] before the base class filters extra_inputs
-  // by vision session input names (image_sizes is metadata, not a vision input).
   image_heights_.clear();
   image_widths_.clear();
   for (const auto& input : extra_inputs) {
@@ -43,7 +42,6 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
     State::SetRunOptions(model_.config_->model.vision.run_options.value());
   }
 
-  // Single-image inputs can run vision.onnx directly.
   if (num_images_ <= 1) {
     State::Run(*model_.vision_session_);
     return {};
@@ -64,9 +62,6 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
         "PixtralVisionState: image_widths_ has " + std::to_string(image_widths_.size()) +
         " entries but num_images_ is " + std::to_string(num_images_));
 
-  // Multi-image: pixel_values is [N, C, H_max, W_max] with zero-padding.
-  // image_heights_/image_widths_ hold the actual per-image dimensions.
-  // Run vision.onnx once per image with [1, C, H_i, W_i].
   const std::string& pv_name = model_.config_->model.vision.inputs.pixel_values;
 
   size_t pv_idx = SIZE_MAX;
@@ -86,7 +81,7 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
   OrtValue* feat_full = outputs_[0];
 
   auto pv_info = pv_full->GetTensorTypeAndShapeInfo();
-  auto pv_shape = pv_info->GetShape();  // [N, C, H_max, W_max]
+  auto pv_shape = pv_info->GetShape();
   auto pv_type = pv_info->GetElementType();
 
   if (pv_shape.size() != 4) {
@@ -100,7 +95,7 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
   int64_t w_max = pv_shape[3];
 
   auto feat_info = feat_full->GetTensorTypeAndShapeInfo();
-  auto feat_shape = feat_info->GetShape();  // [total_features, hidden_size]
+  auto feat_shape = feat_info->GetShape();
   auto feat_type = feat_info->GetElementType();
   int64_t hidden_size = feat_shape.back();
 
@@ -109,7 +104,6 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
       case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
         return 4;
       case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-        return 2;
       case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
         return 2;
       default:
@@ -144,8 +138,6 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
           std::to_string(w_i) + " which is out of valid range (0, " +
           std::to_string(w_max) + "]");
 
-    // Create a contiguous [1, C, H_i, W_i] tensor by copying valid rows
-    // from the zero-padded [N, C, H_max, W_max] buffer.
     std::vector<int64_t> sub_pv_shape = {1, channels, h_i, w_i};
     auto sub_pv = OrtValue::CreateTensor(
         Ort::Allocator::GetWithDefaultOptions(), sub_pv_shape, pv_type);
@@ -164,7 +156,6 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
       }
     }
 
-    // Compute expected feature count for this image
     int64_t patch_size = model_.config_->model.vision.patch_size;
     int64_t merge_size = model_.config_->model.vision.spatial_merge_size;
     int64_t num_feats = (h_i / patch_size / merge_size) * (w_i / patch_size / merge_size);
@@ -176,10 +167,9 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
           ") + num_feats (" + std::to_string(num_feats) +
           ") exceeds pre-allocated feature buffer (" + std::to_string(total_feats) + ")");
 
-    // Run into a separate output tensor, then copy into the combined feature buffer.
     std::vector<int64_t> sub_feat_shape = {num_feats, hidden_size};
     auto sub_feat = OrtValue::CreateTensor(
-        model_.p_device_->GetAllocator(), sub_feat_shape, feat_type);
+        p_session_device_->GetAllocator(), sub_feat_shape, feat_type);
 
     inputs_[pv_idx] = sub_pv.get();
     outputs_[0] = sub_feat.get();
@@ -188,14 +178,13 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
 
     size_t feature_offset_bytes = static_cast<size_t>(feat_offset * hidden_size) * feat_elem_size;
     size_t feature_size_bytes = static_cast<size_t>(num_feats * hidden_size) * feat_elem_size;
-    ByteWrapTensor(*model_.p_device_, *feat_full)
+    ByteWrapTensor(*p_session_device_, *feat_full)
         .subspan(feature_offset_bytes, feature_size_bytes)
-        .CopyFrom(ByteWrapTensor(*model_.p_device_, *sub_feat));
+        .CopyFrom(ByteWrapTensor(*p_session_device_, *sub_feat));
 
     feat_offset += num_feats;
   }
 
-  // Restore original pointers
   inputs_[pv_idx] = pv_full;
   outputs_[0] = feat_full;
 

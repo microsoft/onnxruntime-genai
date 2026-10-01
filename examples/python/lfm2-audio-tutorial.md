@@ -534,28 +534,28 @@ implementation. The difference is far below the audio's own quantization noise.
 log-mel frames by up to about 2, enough to flip a token: on the reference's 24 kHz `asr_jp.wav` it
 turned one homophone, and resampled this way the transcript matches token for token.
 
-**CPU is the verified path; a GPU needs every graph on it.** All three modes were checked against
-the reference on CPU, x64 and arm64, and match token for token and frame for frame. On **CUDA** they
-match too, but only once *every* graph runs there: build the model for CUDA, or leave the embedding
-and speech entries without their own `session_options` so they inherit the decoder's provider. A
-mixed configuration — the decoder on the GPU and the embedding or encoder left on CPU, which is what
-a CPU export's `genai_config.json` describes — is refused with an error naming the entry to remove:
-the CPU graph would be handed buffers that live on the decoder's device and write host bytes into
-them ([onnxruntime-genai#2604](https://github.com/microsoft/onnxruntime-genai/issues/2604)). The encoder's convolutions need cuDNN
-on the library path. Expect the audio codes to drift a little against a CPU run: on one of the test
-clips two of 1192 codes differed, both in the last two codebooks, with every text token identical.
+**CPU is the verified path, and a GPU decoder can keep the other graphs on CPU.** All three modes
+were checked against the reference on CPU, x64 and arm64, and match token for token and frame for
+frame. `config.append_provider(...)` moves only the decoder. An entry with `session_options` of its
+own runs on the providers they name, or on CPU when they name none, which is how a CPU export's
+`genai_config.json` has it for the embedding, the encoder and the `audio_output` graphs. That
+configuration runs as it is, with the runtime copying what passes between the devices. To move a
+graph to the GPU as well, remove its `session_options` or build the model for that provider; on
+**CUDA** the encoder's convolutions then need cuDNN on the library path. Expect the audio codes to
+drift a little against a CPU run, wherever the other graphs run: on one of the test clips two of
+1192 codes differed, both in the last two codebooks of one frame, with every text token identical.
+That frame's two most likely codes are 8e-5 apart, closer than any other pick.
 
-**WebGPU runs the text-in modes.** Interleaved and TTS match the reference once the `audio_output`
-graphs keep their own CPU `session_options`: ONNX Runtime's WebGPU `GroupQueryAttention` fails
-whenever the present KV cache has to grow past the buffer it was given, which is every step of the
-depthformer's loop ([onnxruntime#32716](https://github.com/microsoft/onnxruntime/issues/32716)).
-Speech *input* does not work there yet, for a reason of this runtime's own rather than the
-encoder's: the features buffer lands on the wrong device
-([onnxruntime-genai#2604](https://github.com/microsoft/onnxruntime-genai/issues/2604)), so a prompt
-with audio is refused while the encoder or embedding keeps its own CPU `session_options`. Note also
-that the shipped `onnxruntime-ep-webgpu` 0.3.0 cannot load the encoder at the default optimisation
-level — it rejects the fused `Conv` activation that a current `onnxruntime` emits — but does load
-and run it at `ORT_ENABLE_BASIC`.
+**WebGPU needs the `audio_output` graphs on CPU, and the encoder on CPU or at a lower optimisation
+level.** ONNX Runtime's WebGPU `GroupQueryAttention` fails whenever the present KV cache has to grow
+past the buffer it was given, which is every step of the depthformer's loop, and the shipped
+`onnxruntime-ep-webgpu` 0.3.0 cannot load the encoder at the default optimisation level, as it
+rejects the fused `Conv` activation that a current `onnxruntime` emits; it does load and run it at
+`ORT_ENABLE_BASIC` ([onnxruntime#32716](https://github.com/microsoft/onnxruntime/issues/32716)). A
+CPU export's config keeps all three on CPU. Set up that way, all three modes match the reference
+token for token and frame for frame on Metal. On Linux's software Vulkan driver (lavapipe) ASR and
+typed interleaved match too, spoken interleaved differs by the same two codes as on CUDA, and TTS
+drifts after a few frames, wherever the embedding runs.
 
 **Dither is off, as in the reference's eval mode.** NeMo adds 1e-5 of white noise to the samples
 during training only; the runtime never does.

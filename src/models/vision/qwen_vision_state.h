@@ -7,19 +7,53 @@
 
 namespace Generators {
 
-// QwenVisionState: per-image slicing loop for Qwen2.5-VL / Qwen3-VL.
-//
-// vision.onnx is exported for exactly one image (Dynamo unrolls Python
-// for-loops at trace time, so an N-image dummy produces a graph that only
-// works for that exact N).  This subclass iterates over images in C++,
-// creating zero-copy sub-tensor views of pixel_values / image_grid_thw and
-// writing each result into the correct offset of the pre-allocated
-// image_features output buffer.
 struct QwenVisionState : VisionState {
-  using VisionState::VisionState;  // inherit constructor
+  using VisionState::VisionState;
 
   int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) const override;
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices = {}) override;
 };
+
+struct QwenPatchLayout {
+  int64_t padded_image_stride{};
+  int64_t temporal_multiplier{};
+
+  int64_t ImagePatchCount(int64_t grid_tokens, int64_t height, int64_t width) const {
+    return temporal_multiplier > 0 ? temporal_multiplier * height * width : grid_tokens;
+  }
+
+  int64_t ImagePatchOffset(int64_t image_index, int64_t packed_offset) const {
+    return padded_image_stride > 0 ? image_index * padded_image_stride : packed_offset;
+  }
+};
+
+inline QwenPatchLayout ResolveQwenPatchLayout(int64_t total_patches,
+                                              int64_t total_grid_tokens,
+                                              int64_t total_hw,
+                                              int64_t max_grid_tokens,
+                                              int64_t num_images,
+                                              bool all_temporal_dims_one = true) {
+  if (total_patches == total_grid_tokens) {
+    return {};
+  }
+
+  const bool temporal_padded = total_patches > 0 && total_hw > 0 && total_patches % total_hw == 0;
+  const int64_t candidate_stride =
+      num_images > 0 && total_patches % num_images == 0 ? total_patches / num_images : 0;
+  const bool stride_padded = all_temporal_dims_one && candidate_stride > 0 &&
+                             candidate_stride == max_grid_tokens;
+
+  if (stride_padded) {
+    return {.padded_image_stride = candidate_stride};
+  }
+  if (temporal_padded) {
+    return {.temporal_multiplier = total_patches / total_hw};
+  }
+
+  throw std::runtime_error("pixel_values patch count (" + std::to_string(total_patches) +
+                           ") does not match image_grid_thw patch count (" +
+                           std::to_string(total_grid_tokens) + ")");
+}
 
 }  // namespace Generators

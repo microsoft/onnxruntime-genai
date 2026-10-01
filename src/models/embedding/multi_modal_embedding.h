@@ -23,7 +23,8 @@ struct EmbeddingState : State {
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
   virtual void SetExtraInputs(const int64_t num_images_, const int64_t num_image_tokens_, const int64_t num_audio_tokens_);
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {});
+  virtual DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
+                                DeviceSpan<int32_t> next_indices = {});
 
   // Hands the embedding buffers this state produced off to the decoder for the next run, so the
   // decoder can consume them without an extra device copy. Subclasses that carry additional

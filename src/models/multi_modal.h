@@ -46,6 +46,10 @@ struct MultiModalLanguageModel : Model {
   std::unique_ptr<OrtSession> audio_embedding_session_;  // audio_codes -> audio_embeds, summed into the decoder's next input
   std::unique_ptr<OrtSessionOptions> depthformer_session_options_;
   std::unique_ptr<OrtSessionOptions> audio_embedding_session_options_;
+
+  DeviceInterface* vision_device_{};
+  DeviceInterface* speech_device_{};
+  DeviceInterface* embedding_device_{};
 };
 
 struct MultiModalPipelineState : State {

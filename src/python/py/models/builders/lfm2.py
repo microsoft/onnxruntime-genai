@@ -20,6 +20,8 @@ class LFM2Model(Model):
 
         # LFM2-specific attributes
         self.layernorm_attrs["epsilon"] = config.norm_eps
+        # The Q/K norms use the same epsilon, including where GroupQueryAttention fuses them.
+        self.attention_attrs["qk_norm_epsilon"] = config.norm_eps
 
         self.make_intermediate_size_init(config)
 

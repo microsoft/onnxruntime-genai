@@ -14,7 +14,7 @@
 namespace Generators {
 
 VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.vision_device_},
       model_{model} {}
 
 void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens) {

@@ -40,4 +40,11 @@ void Gemma4EmbeddingState::ReuseBuffersInDecoder(DecoderState& decoder) {
   }
 }
 
+DeviceSpan<float> Gemma4EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
+                                            DeviceSpan<int32_t> next_indices) {
+  auto result = EmbeddingState::Run(current_length, next_tokens, next_indices);
+  if (per_layer_inputs_) per_layer_inputs_->CopyToConsumer();
+  return result;
+}
+
 }  // namespace Generators

@@ -13,7 +13,7 @@
 namespace Generators {
 
 SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.speech_device_},
       model_{model} {}
 
 void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {

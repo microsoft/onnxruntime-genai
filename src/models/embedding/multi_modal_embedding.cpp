@@ -10,7 +10,7 @@
 namespace Generators {
 
 EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.embedding_device_},
       model_{model},
       inputs_embeds_{*this, Embeddings::Mode::Output, model.config_->model.embedding.outputs.embeddings} {
   input_ids_.Add();
@@ -46,6 +46,7 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
     State::SetRunOptions(model_.config_->model.embedding.run_options.value());
   }
   State::Run(*model_.embedding_session_);
+  inputs_embeds_.CopyToConsumer();
   return {};
 }
 

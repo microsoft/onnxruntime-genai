@@ -10,9 +10,11 @@ namespace Generators::test {
 namespace {
 
 TEST(TelemetrySamplingTests, HonorsBoundaryRates) {
+  EXPECT_EQ(TelemetryInternal::kCriticalEventSampleRatePercent, 100.0);
   EXPECT_FALSE(TelemetryInternal::ShouldSampleSession("process-guid", 16, 0.0));
   EXPECT_FALSE(TelemetryInternal::ShouldSampleSession("process-guid", 16, -1.0));
-  EXPECT_TRUE(TelemetryInternal::ShouldSampleSession("process-guid", 16, 100.0));
+  EXPECT_TRUE(TelemetryInternal::ShouldSampleSession(
+      "process-guid", 16, TelemetryInternal::kCriticalEventSampleRatePercent));
   EXPECT_TRUE(TelemetryInternal::ShouldSampleSession("process-guid", 16, 101.0));
 }
 
