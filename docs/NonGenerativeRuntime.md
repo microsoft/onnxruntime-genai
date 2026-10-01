@@ -144,6 +144,24 @@ matching C/C++ APIs configure it. Clearing or invalidating a session clears
 both caches. Cached tensors are immutable values and every branch feed owns a
 deep copy, while session execution and cache mutation are serialized.
 
+### Optional KEV CUDA graph capture
+
+Set `ORT_GENAI_KEV_CUDA_GRAPH=1` before constructing a CUDA
+`DecisionSession` to specialize and capture the KEV backbone for the first
+observed input shape. The runtime fixes the backbone's symbolic dimensions,
+which allows ORT to constant-fold host-side shape operations and place every
+remaining backbone node on CUDA. Inputs and outputs use stable device buffers
+and I/O binding, and subsequent requests with the same tensor shape replay the
+captured graph.
+
+Capture is opt-in because specialization adds work to the first result and is
+appropriate only for shape-stable workloads. If a later request has a different
+backbone signature, the captured graph and its buffers are released, the
+generic session is restored, and graph capture stays disabled for that session.
+The pointer head is intentionally excluded because its scalar/index inputs have
+CPU memory requirements that are not safe to capture. The default value is
+`0`; any value other than `0` or `1` is rejected.
+
 Creation, mutation, execution, and accessor functions return `OgaResult*`
 (`nullptr` on success). Destroy functions accept `nullptr`. Strings, tensor
 buffers, and borrowed structured values returned by accessors remain valid

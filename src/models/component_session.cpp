@@ -3,10 +3,13 @@
 #include "component_session.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -15,6 +18,7 @@
 #include "../config.h"
 #include "../json.h"
 #include "../ort_genai_c_internal.h"
+#include "model.h"
 #include "preprocessing/genai_tokenizer.h"
 #include "session_options.h"
 
@@ -133,23 +137,113 @@ std::unordered_map<std::string, fs::path> LoadComponents(fs::path root) {
   return result;
 }
 
+bool IsCudaProvider(std::string_view provider) {
+  return provider == "cuda" || provider == "CUDAExecutionProvider";
+}
+
+bool KevCudaGraphEnabled() {
+  const char* value = std::getenv("ORT_GENAI_KEV_CUDA_GRAPH");
+  if (!value || !*value || std::string_view(value) == "0") return false;
+  if (std::string_view(value) == "1") return true;
+  throw std::invalid_argument(
+      "ORT_GENAI_KEV_CUDA_GRAPH must be 0 or 1");
+}
+
+std::unique_ptr<OrtSession> CreateComponentSession(
+    const fs::path& model_path, const std::vector<std::string>& providers,
+    bool capture,
+    const std::map<std::string, int64_t>& dimension_overrides = {}) {
+  auto options = OrtSessionOptions::Create();
+  Config config;
+  for (const auto& provider : providers) {
+    if (provider.empty())
+      throw std::runtime_error("provider name must not be empty");
+    SetProviderOption(config, provider, {}, {});
+    if (capture && IsCudaProvider(provider))
+      SetProviderOption(config, provider, "enable_cuda_graph", "1");
+  }
+  if (!providers.empty())
+    SetProviderSessionOptions(
+        *options, config.model.decoder.session_options.providers,
+        config.model.decoder.session_options.provider_options, true, config);
+  for (const auto& [name, value] : dimension_overrides)
+    options->AddFreeDimensionOverrideByName(name.c_str(), value);
+  return OrtSession::Create(GetOrtEnv(), model_path.c_str(), options.get());
+}
+
+std::string TensorSignature(const std::vector<OgaComponentInput>& inputs,
+                            const std::vector<std::string>& outputs) {
+  std::ostringstream stream;
+  for (const auto& input : inputs) {
+    stream << input.name.size() << ':' << input.name << ':'
+           << static_cast<int>(input.type) << ':' << input.byte_count << ':';
+    for (const auto dimension : input.shape) stream << dimension << ',';
+    stream << ';';
+  }
+  stream << "->";
+  for (const auto& output : outputs)
+    stream << output.size() << ':' << output << ';';
+  return stream.str();
+}
+
+size_t TensorBytes(const std::vector<int64_t>& shape, OgaElementType type) {
+  size_t count = 1;
+  for (const auto dimension : shape) {
+    if (dimension < 0)
+      throw std::runtime_error(
+          "captured component tensor has a negative dimension");
+    const auto value = static_cast<size_t>(dimension);
+    if (value && count > std::numeric_limits<size_t>::max() / value)
+      throw std::runtime_error(
+          "captured component tensor element count overflows size_t");
+    count *= value;
+  }
+  const auto element_size =
+      Ort::SizeOf(static_cast<ONNXTensorElementDataType>(type));
+  if (element_size && count > std::numeric_limits<size_t>::max() / element_size)
+    throw std::runtime_error(
+        "captured component tensor byte count overflows size_t");
+  return count * element_size;
+}
+
 }  // namespace
+
+struct ComponentCudaGraphState {
+  struct Tensor {
+    std::string name;
+    std::vector<int64_t> shape;
+    OgaElementType type{};
+    size_t byte_count{};
+    DeviceSpan<std::byte> device;
+    std::unique_ptr<OrtValue> value;
+  };
+
+  struct Run {
+    std::string signature;
+    int graph_id{1};
+    bool captured{};
+    std::unique_ptr<OrtRunOptions> options;
+    std::unique_ptr<OrtIoBinding> binding;
+    std::vector<Tensor> inputs;
+    std::vector<Tensor> outputs;
+  };
+
+  fs::path model_path;
+  std::vector<std::string> providers;
+  DeviceInterface* device{};
+  std::unique_ptr<OrtMemoryInfo> device_memory;
+  std::unique_ptr<OrtRunOptions> eager_options;
+  std::unique_ptr<Run> run;
+  bool specialized{};
+  bool disabled{};
+};
 
 ComponentSession::ComponentSession(const fs::path& package_path, std::string component,
                                    const std::vector<std::string>& providers) {
   auto components = LoadComponents(package_path);
   auto found = components.find(component);
   if (found == components.end()) throw std::runtime_error("component not declared: " + component);
-  auto options = OrtSessionOptions::Create();
-  Config config;
-  for (const auto& provider : providers) {
-    if (provider.empty()) throw std::runtime_error("provider name must not be empty");
-    SetProviderOption(config, provider, {}, {});
-  }
-  if (!providers.empty())
-    SetProviderSessionOptions(*options, config.model.decoder.session_options.providers,
-                              config.model.decoder.session_options.provider_options, true, config);
-  session_ = OrtSession::Create(GetOrtEnv(), found->second.c_str(), options.get());
+  session_ = CreateComponentSession(found->second, providers, false);
   input_names_ = session_->GetInputNames();
   output_names_ = session_->GetOutputNames();
   for (size_t i = 0; i < input_names_.size(); ++i) {
@@ -163,12 +257,135 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
       info.symbolic_dimensions.emplace_back(symbol ? symbol : "");
     inputs_.push_back(std::move(info));
   }
+  if (component == "backbone" &&
+      std::any_of(providers.begin(), providers.end(), IsCudaProvider) &&
+      KevCudaGraphEnabled()) {
+    Config config;
+    for (const auto& provider : providers)
+      SetProviderOption(config, provider, {}, {});
+    cuda_graph_ = std::make_unique<ComponentCudaGraphState>();
+    cuda_graph_->model_path = found->second;
+    cuda_graph_->providers = providers;
+    cuda_graph_->device = GetDeviceInterface(DeviceType::CUDA);
+    EnsureDeviceOrtInit(*cuda_graph_->device, config);
+    cuda_graph_->device_memory = cuda_graph_->device->GetMemoryInfo();
+    cuda_graph_->eager_options = OrtRunOptions::Create();
+    cuda_graph_->eager_options->AddConfigEntry("gpu_graph_id", "-1");
+  }
+}
+
+ComponentSession::~ComponentSession() {
+#if ORT_API_VERSION >= 27
+  if (cuda_graph_ && cuda_graph_->run && cuda_graph_->run->captured) {
+    try {
+      session_->ReleaseCapturedGraph(cuda_graph_->run->graph_id);
+    } catch (...) {
+      if (g_log.enabled && g_log.ort_lib)
+        Log("ort_lib") << "ReleaseCapturedGraph(id="
+                       << cuda_graph_->run->graph_id
+                       << ") failed during component-session cleanup"
+                       << std::endl;
+    }
+  }
+#endif
 }
 
 std::vector<OgaComponentTensor> ComponentSession::Run(
     const std::vector<OgaComponentInput>& inputs, const std::vector<std::string>& requested) {
   std::lock_guard lock(mutex_);
-  auto memory = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  const auto& output_names = requested.empty() ? output_names_ : requested;
+  const auto signature = TensorSignature(inputs, output_names);
+
+  // Fixing symbolic dimensions folds host-side shape nodes so the backbone is
+  // fully CUDA-resident and eligible for graph capture.
+  if (cuda_graph_ && !cuda_graph_->specialized && !cuda_graph_->disabled) {
+    std::map<std::string, int64_t> overrides;
+    for (const auto& input : inputs) {
+      const auto found = std::find_if(
+          inputs_.begin(), inputs_.end(),
+          [&](const OgaComponentInfo& value) {
+            return value.name == input.name;
+          });
+      if (found == inputs_.end() ||
+          found->symbolic_dimensions.size() != input.shape.size())
+        throw std::runtime_error(
+            "captured component input metadata does not match: " +
+            input.name);
+      for (size_t i = 0; i < input.shape.size(); ++i) {
+        const auto& symbol = found->symbolic_dimensions[i];
+        if (symbol.empty()) continue;
+        const auto [entry, inserted] =
+            overrides.emplace(symbol, input.shape[i]);
+        if (!inserted && entry->second != input.shape[i])
+          throw std::runtime_error(
+              "captured component symbolic dimension has conflicting values: " +
+              symbol);
+      }
+    }
+    session_.reset();
+    try {
+      session_ = CreateComponentSession(cuda_graph_->model_path,
+                                        cuda_graph_->providers, true, overrides);
+      cuda_graph_->specialized = true;
+    } catch (...) {
+      session_ = CreateComponentSession(cuda_graph_->model_path,
+                                        cuda_graph_->providers, false);
+      cuda_graph_->disabled = true;
+      throw;
+    }
+  }
+
+  if (cuda_graph_ && cuda_graph_->run &&
+      cuda_graph_->run->signature != signature) {
+    // A captured graph owns fixed launch dimensions and buffer addresses.
+    // Restore the generic session rather than recapturing unbounded shapes.
+#if ORT_API_VERSION >= 27
+    if (cuda_graph_->run->captured)
+      session_->ReleaseCapturedGraph(cuda_graph_->run->graph_id);
+#endif
+    cuda_graph_->run.reset();
+    session_.reset();
+    session_ = CreateComponentSession(cuda_graph_->model_path,
+                                      cuda_graph_->providers, false);
+    cuda_graph_->specialized = false;
+    cuda_graph_->disabled = true;
+  }
+
+  if (cuda_graph_ && cuda_graph_->run) {
+    auto& run = *cuda_graph_->run;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      if (!inputs[i].data && inputs[i].byte_count)
+        throw std::runtime_error(
+            "component input data must not be null when byte_count is non-zero");
+      if (inputs[i].byte_count != run.inputs[i].byte_count)
+        throw std::runtime_error(
+            "captured component input byte count changed");
+      if (inputs[i].byte_count)
+        run.inputs[i].device.CopyFromCpu(
+            {static_cast<const std::byte*>(inputs[i].data),
+             inputs[i].byte_count});
+    }
+    cuda_graph_->device->Synchronize();
+    session_->Run(run.options.get(), *run.binding);
+    run.captured = true;
+    std::vector<OgaComponentTensor> result;
+    result.reserve(run.outputs.size());
+    for (auto& output : run.outputs) {
+      OgaComponentTensor tensor;
+      tensor.name = output.name;
+      const auto host = output.device.CopyDeviceToCpu();
+      tensor.data.assign(
+          host.begin(),
+          host.begin() + static_cast<std::ptrdiff_t>(output.byte_count));
+      tensor.shape = output.shape;
+      tensor.type = output.type;
+      result.push_back(std::move(tensor));
+    }
+    return result;
+  }
+
+  auto memory =
+      OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
   std::vector<std::unique_ptr<OrtValue>> values;
   std::vector<const OrtValue*> value_ptrs;
   std::vector<const char*> names;
@@ -182,11 +399,14 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
                                             input.shape, static_cast<ONNXTensorElementDataType>(input.type)));
     value_ptrs.push_back(values.back().get());
   }
-  const auto& output_names = requested.empty() ? output_names_ : requested;
   std::vector<const char*> output_ptrs;
   for (const auto& name : output_names) output_ptrs.push_back(name.c_str());
-  auto ort_outputs = session_->Run(nullptr, names.data(), value_ptrs.data(), value_ptrs.size(),
-                                   output_ptrs.data(), output_ptrs.size());
+  auto ort_outputs = session_->Run(
+      cuda_graph_ && cuda_graph_->specialized
+          ? cuda_graph_->eager_options.get()
+          : nullptr,
+      names.data(), value_ptrs.data(), value_ptrs.size(), output_ptrs.data(),
+      output_ptrs.size());
   std::vector<OgaComponentTensor> result;
   for (size_t i = 0; i < ort_outputs.size(); ++i) {
     auto info = ort_outputs[i]->GetTensorTypeAndShapeInfo();
@@ -198,6 +418,49 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
     if (!tensor.data.empty())
       std::memcpy(tensor.data.data(), ort_outputs[i]->GetTensorRawData(), tensor.data.size());
     result.push_back(std::move(tensor));
+  }
+  if (cuda_graph_ && cuda_graph_->specialized) {
+    auto run = std::make_unique<ComponentCudaGraphState::Run>();
+    run->signature = signature;
+    run->options = OrtRunOptions::Create();
+    run->options->AddConfigEntry("gpu_graph_id",
+                                 std::to_string(run->graph_id).c_str());
+    run->inputs.reserve(inputs.size());
+    for (const auto& input : inputs) {
+      ComponentCudaGraphState::Tensor tensor;
+      tensor.name = input.name;
+      tensor.shape = input.shape;
+      tensor.type = input.type;
+      tensor.byte_count = input.byte_count;
+      tensor.device = cuda_graph_->device->Allocate<std::byte>(
+          std::max<size_t>(input.byte_count, 1));
+      tensor.value = OrtValue::CreateTensor(
+          *cuda_graph_->device_memory, tensor.device.Span().data(),
+          input.byte_count, input.shape,
+          static_cast<ONNXTensorElementDataType>(input.type));
+      run->inputs.push_back(std::move(tensor));
+    }
+    run->outputs.reserve(result.size());
+    for (const auto& output : result) {
+      ComponentCudaGraphState::Tensor tensor;
+      tensor.name = output.name;
+      tensor.shape = output.shape;
+      tensor.type = output.type;
+      tensor.byte_count = TensorBytes(output.shape, output.type);
+      tensor.device = cuda_graph_->device->Allocate<std::byte>(
+          std::max<size_t>(tensor.byte_count, 1));
+      tensor.value = OrtValue::CreateTensor(
+          *cuda_graph_->device_memory, tensor.device.Span().data(),
+          tensor.byte_count, tensor.shape,
+          static_cast<ONNXTensorElementDataType>(tensor.type));
+      run->outputs.push_back(std::move(tensor));
+    }
+    run->binding = OrtIoBinding::Create(*session_);
+    for (auto& input : run->inputs)
+      run->binding->BindInput(input.name.c_str(), *input.value);
+    for (auto& output : run->outputs)
+      run->binding->BindOutput(output.name.c_str(), *output.value);
+    cuda_graph_->run = std::move(run);
   }
   return result;
 }

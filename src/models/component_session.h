@@ -14,9 +14,12 @@
 
 namespace Generators {
 
+struct ComponentCudaGraphState;
+
 struct ComponentSession {
   ComponentSession(const fs::path& package_path, std::string component,
                    const std::vector<std::string>& providers);
+  ~ComponentSession();
   std::vector<OgaComponentTensor> Run(const std::vector<OgaComponentInput>& inputs,
                                       const std::vector<std::string>& outputs);
   const std::vector<std::string>& InputNames() const { return input_names_; }
@@ -25,6 +28,7 @@ struct ComponentSession {
 
  private:
   std::unique_ptr<OrtSession> session_;
+  std::unique_ptr<ComponentCudaGraphState> cuda_graph_;
   std::vector<std::string> input_names_;
   std::vector<std::string> output_names_;
   std::vector<OgaComponentInfo> inputs_;
