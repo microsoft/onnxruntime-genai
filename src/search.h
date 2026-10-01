@@ -43,6 +43,7 @@ struct Search : LeakChecked<Search> {
   virtual void SetLogits(DeviceSpan<float> logits) = 0;
   virtual bool IsDone() const = 0;
   virtual bool IsSequenceDone(size_t /*index*/) const { return false; }
+  virtual const bool* GetSequenceDoneDevice() const { return nullptr; }
 
   // Deferred completion lets a caller that drives many independent searches launch the token
   // selection work for all of them before paying for a single device synchronization. When

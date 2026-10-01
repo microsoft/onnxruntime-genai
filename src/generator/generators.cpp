@@ -715,8 +715,6 @@ void Generator::InitializeWhisperTimestampProcessor(const GeneratorParams& param
   const auto& model = params.config.model;
   if (model.type != "whisper")
     throw std::runtime_error("whisper_timestamps is only supported for Whisper models");
-  if (params.p_device->GetType() != DeviceType::CPU)
-    throw std::runtime_error("whisper_timestamps currently requires CPU scoring");
   if (model.draft || params.speculative.ngram_size > 0)
     throw std::runtime_error("whisper_timestamps is not supported with speculative decoding");
   if (!params.guidance_type.empty() || !params.guidance_data.empty())
@@ -761,6 +759,15 @@ void Generator::ApplyWhisperTimestampRules() {
 
   if (!whisper_sample_begin_)
     whisper_sample_begin_ = static_cast<size_t>(search_->GetSequenceLength());
+  if (!whisper_prompt_validated_) {
+    const size_t batch_beam_size = static_cast<size_t>(search_->params_->BatchBeamSize());
+    const size_t vocab_size = static_cast<size_t>(search_->params_->config.model.vocab_size);
+    for (size_t row = 0; row < batch_beam_size; ++row) {
+      whisper_timestamp_logits_processor_->ValidateTokens(
+          search_->sequences_.GetSequence(row).CopyDeviceToCpu(), *whisper_sample_begin_, vocab_size);
+    }
+    whisper_prompt_validated_ = true;
+  }
   ApplyWhisperTimestampRulesToSearch(
       *search_, *whisper_timestamp_logits_processor_, *whisper_sample_begin_);
 }
@@ -797,6 +804,9 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokens"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (whisper_sample_begin_)
+    throw std::runtime_error(
+        "AppendTokens cannot start another Whisper timestamp window on an existing generator");
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
   if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
@@ -853,6 +863,9 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokensDevice"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (whisper_sample_begin_)
+    throw std::runtime_error(
+        "AppendTokens cannot start another Whisper timestamp window on an existing generator");
   if (input_ids.empty())
     throw std::runtime_error("input_ids is empty");
   if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() >

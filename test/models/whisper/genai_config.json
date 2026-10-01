@@ -47,7 +47,9 @@
             "num_hidden_layers": 1
         },
         "eos_token_id": 50257,
+        "no_timestamps_token_id": 50363,
         "pad_token_id": 50257,
+        "timestamp_begin_token_id": 50364,
         "type": "whisper",
         "vocab_size": 51865
     },

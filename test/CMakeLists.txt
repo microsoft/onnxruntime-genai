@@ -177,6 +177,7 @@ target_include_directories(whisper_timestamp_unit_tests PRIVATE
 )
 target_link_libraries(whisper_timestamp_unit_tests PRIVATE
   onnxruntime-genai-obj
+  onnxruntime_extensions
   GTest::gtest
 )
 add_dependencies(whisper_timestamp_unit_tests onnxruntime-genai)

@@ -336,6 +336,24 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                out int /* const int32_t* */ outEorTokenId);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerHasTimestampTokens(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                                     [MarshalAs(UnmanagedType.I1)] out bool hasTimestamps);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerGetTimestampBeginTokenId(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                                           out int /* int32_t* */ outTimestampBeginTokenId);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerIsTimestampToken(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                                  int /* int32_t */ tokenId,
+                                                                                  [MarshalAs(UnmanagedType.I1)] out bool isTimestamp);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerTimestampToSeconds(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                                    int /* int32_t */ tokenId,
+                                                                                    out double seconds);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaTokenizerEncode(IntPtr /* const OgaTokenizer* */ tokenizer,
                                                                         byte[] /* const char* */ strings,
                                                                         IntPtr /* OgaSequences* */ sequences);

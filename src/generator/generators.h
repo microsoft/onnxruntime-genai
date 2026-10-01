@@ -203,6 +203,7 @@ struct Generator : LeakChecked<Generator> {
   void InitializeWhisperTimestampProcessor(const GeneratorParams& params);
   void ApplyWhisperTimestampRules();
   std::optional<size_t> whisper_sample_begin_;
+  bool whisper_prompt_validated_{};
 
   std::unique_ptr<DecodingStrategy> strategy_;
   friend struct StandardDecodingStrategy;

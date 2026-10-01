@@ -58,22 +58,12 @@ void WhisperTimestampLogitsProcessor::Apply(std::span<float> logits,
     throw std::invalid_argument("Whisper max_initial_timestamp_index exceeds timestamp vocabulary");
   }
 
-  for (int32_t token : tokens) {
-    if (token < 0 || token >= static_cast<int32_t>(logits.size()))
-      throw std::invalid_argument("Whisper timestamp token history contains an invalid token");
-  }
+  ValidateTokens(tokens, sample_begin, logits.size());
 
   if (config_.no_timestamps_token)
     logits[*config_.no_timestamps_token] = kNegativeInfinity;
-
-  if (config_.no_timestamps_token) {
-    for (int32_t token : tokens.subspan(0, sample_begin)) {
-      if (token == *config_.no_timestamps_token) {
-        throw std::runtime_error(
-            "Whisper timestamp decoding cannot be enabled when the prompt contains no_timestamps_token_id");
-      }
-    }
-  }
+  Mask(logits.subspan(static_cast<size_t>(config_.eot_token + 1),
+                      static_cast<size_t>(config_.timestamp_begin - config_.eot_token - 1)));
 
   const auto sampled_tokens = tokens.subspan(sample_begin, tokens.size() - sample_begin);
   const bool last_was_timestamp =
@@ -148,24 +138,64 @@ void WhisperTimestampLogitsProcessor::Apply(std::span<float> logits,
     throw std::runtime_error("Whisper timestamp rules masked every token");
 }
 
+void WhisperTimestampLogitsProcessor::ValidateTokens(std::span<const int32_t> tokens,
+                                                     size_t sample_begin,
+                                                     size_t vocab_size) const {
+  if (sample_begin > tokens.size())
+    throw std::invalid_argument("Whisper timestamp sample_begin exceeds token history");
+  for (int32_t token : tokens) {
+    if (token < 0 || token >= static_cast<int32_t>(vocab_size))
+      throw std::invalid_argument("Whisper timestamp token history contains an invalid token");
+  }
+  if (config_.no_timestamps_token) {
+    for (int32_t token : tokens.subspan(0, sample_begin)) {
+      if (token == *config_.no_timestamps_token) {
+        throw std::runtime_error(
+            "Whisper timestamp decoding cannot be enabled when the prompt contains no_timestamps_token_id");
+      }
+    }
+  }
+}
+
 void ApplyWhisperTimestampRulesToSearch(Search& search,
                                         const WhisperTimestampLogitsProcessor& processor,
                                         size_t sample_begin) {
-  if (search.params_->p_device->GetType() != DeviceType::CPU)
-    throw std::runtime_error("Whisper timestamp decoding currently requires CPU scoring");
-
   const size_t batch_beam_size = static_cast<size_t>(search.params_->BatchBeamSize());
   const size_t vocab_size = static_cast<size_t>(search.params_->config.model.vocab_size);
-  auto logits = search.GetLogits().CpuSpan();
+  auto logits = search.GetLogits();
   if (logits.size() != batch_beam_size * vocab_size) {
     throw std::runtime_error("Whisper timestamp logits size does not match batch_beam_size * vocab_size");
   }
+
+  auto& device = *search.params_->p_device;
+  if (device.GetType() != DeviceType::CPU) {
+    const auto& config = processor.GetConfig();
+    const bool applied = device.ApplyWhisperTimestampRules(
+        logits.Span().data(),
+        search.sequences_.GetSequences().Span().data(),
+        search.GetSequenceDoneDevice(),
+        static_cast<int>(batch_beam_size),
+        static_cast<int>(vocab_size),
+        search.sequences_.max_length_,
+        search.sequences_.GetSequenceLength(),
+        static_cast<int>(sample_begin),
+        config.timestamp_begin,
+        config.eot_token,
+        config.no_timestamps_token.value_or(-1),
+        config.max_initial_timestamp_index.value_or(-1));
+    if (!applied)
+      throw std::runtime_error(
+          "Whisper timestamp decoding is not supported by the selected execution provider");
+    return;
+  }
+
+  auto cpu_logits = logits.CpuSpan();
 
   for (size_t row = 0; row < batch_beam_size; ++row) {
     if (search.IsSequenceDone(row))
       continue;
 
-    auto row_logits = logits.subspan(row * vocab_size, vocab_size);
+    auto row_logits = cpu_logits.subspan(row * vocab_size, vocab_size);
     for (float& value : row_logits) {
       if (std::isnan(value) || value == std::numeric_limits<float>::infinity())
         throw std::runtime_error("Whisper timestamp logits contain NaN or positive infinity");

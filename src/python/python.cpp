@@ -550,6 +550,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("eot_token_id", &OgaTokenizer::GetEotTokenId)
       .def_property_readonly("bor_token_id", &OgaTokenizer::GetBorTokenId)
       .def_property_readonly("eor_token_id", &OgaTokenizer::GetEorTokenId)
+      .def_property_readonly("has_timestamp_tokens", &OgaTokenizer::HasTimestampTokens)
+      .def_property_readonly("timestamp_begin_token_id", &OgaTokenizer::GetTimestampBeginTokenId)
+      .def("is_timestamp_token", &OgaTokenizer::IsTimestampToken)
+      .def("timestamp_to_seconds", &OgaTokenizer::TimestampToSeconds)
       .def("update_options", [](OgaTokenizer& t, pybind11::kwargs kwargs) {
         std::vector<std::string> key_storage;
         std::vector<std::string> value_storage;

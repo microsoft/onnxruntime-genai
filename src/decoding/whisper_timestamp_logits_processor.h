@@ -26,6 +26,8 @@ class WhisperTimestampLogitsProcessor {
   // Applies Whisper's timestamp pairing and probability-mass rules to one logits row.
   // sample_begin identifies the first generated token, excluding the decoder prompt.
   void Apply(std::span<float> logits, std::span<const int32_t> tokens, size_t sample_begin) const;
+  void ValidateTokens(std::span<const int32_t> tokens, size_t sample_begin, size_t vocab_size) const;
+  const WhisperTimestampLogitsConfig& GetConfig() const { return config_; }
 
  private:
   WhisperTimestampLogitsConfig config_;

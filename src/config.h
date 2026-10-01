@@ -778,7 +778,7 @@ struct Config {
     float audio_temperature{1.0f};     // LFM2-Audio: temperature the audio codes are sampled with. 0 takes the most likely code.
     int audio_top_k{4};                // LFM2-Audio: number of most likely audio codes kept when sampling. 1 takes the most likely code.
     bool whisper_timestamps{};         // Apply Whisper timestamp decoding rules before token selection.
-    int whisper_max_initial_timestamp_index{-1};  // -1 allows every timestamp at the first generated step.
+    int whisper_max_initial_timestamp_index{50};  // 50 is Whisper's standard 1-second initial boundary; -1 disables it.
   } search;
 
   struct Speculative {

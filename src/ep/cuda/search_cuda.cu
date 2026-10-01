@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include <algorithm>
+#include <cfloat>
 #include "generator/generators.h"
 #include "cuda_common.h"
 #include "interface.h"
@@ -185,6 +186,140 @@ void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, float* next_toke
   const int gridSize = (total_elements + blockSize - 1) / blockSize;
 
   RepetitionPenaltyProcessor<<<gridSize, blockSize, 0, stream>>>(sequences, next_token_scores, max_sequence_length, vocab_size, total_elements, current_sequence_length, repetition_penalty);
+  CUDA_CHECK_LAUNCH();
+}
+
+constexpr int kWhisperTimestampBlockSize = 256;
+
+__global__ void WhisperTimestampRules(float* logits, const int32_t* sequences,
+                                      const bool* sequence_done,
+                                      int vocab_size, int max_length,
+                                      int current_length, int sample_begin,
+                                      int timestamp_begin, int eot_token,
+                                      int no_timestamps_token,
+                                      int max_initial_timestamp_index,
+                                      int32_t* error_status) {
+  using BlockReduce = cub::BlockReduce<float, kWhisperTimestampBlockSize>;
+  __shared__ typename BlockReduce::TempStorage reduce_storage;
+  __shared__ bool last_was_timestamp;
+  __shared__ bool penultimate_was_timestamp;
+  __shared__ int last_timestamp;
+  __shared__ float row_max;
+  __shared__ float max_text_logit;
+  __shared__ bool force_timestamp;
+
+  const int row = blockIdx.x;
+  if (sequence_done && sequence_done[row])
+    return;
+
+  float* row_logits = logits + row * vocab_size;
+  const int32_t* row_sequence = sequences + row * max_length;
+  const int sampled_count = current_length - sample_begin;
+
+  if (threadIdx.x == 0) {
+    last_was_timestamp =
+        sampled_count >= 1 && row_sequence[current_length - 1] >= timestamp_begin;
+    penultimate_was_timestamp =
+        sampled_count < 2 || row_sequence[current_length - 2] >= timestamp_begin;
+    last_timestamp = -1;
+    for (int index = sample_begin; index < current_length; ++index) {
+      if (row_sequence[index] >= timestamp_begin)
+        last_timestamp = row_sequence[index];
+    }
+  }
+  __syncthreads();
+
+  const int first_allowed_timestamp =
+      last_timestamp < timestamp_begin
+          ? timestamp_begin
+          : (last_was_timestamp && !penultimate_was_timestamp
+                 ? last_timestamp
+                 : last_timestamp + 1);
+  float local_max = -CUDART_INF_F;
+  for (int token = threadIdx.x; token < vocab_size; token += blockDim.x) {
+    float score = row_logits[token];
+    if (isnan(score) || score == CUDART_INF_F)
+      atomicOr(reinterpret_cast<unsigned int*>(error_status), 1u);
+    if (score == -FLT_MAX)
+      score = -CUDART_INF_F;
+
+    bool masked = token == no_timestamps_token ||
+                  (token > eot_token && token < timestamp_begin);
+    if (last_was_timestamp) {
+      masked = masked ||
+               (penultimate_was_timestamp ? token >= timestamp_begin
+                                          : token < eot_token);
+    }
+    if (token >= timestamp_begin && token < first_allowed_timestamp)
+      masked = true;
+    if (sampled_count == 0) {
+      masked = masked || token < timestamp_begin;
+      if (max_initial_timestamp_index >= 0 &&
+          token > timestamp_begin + max_initial_timestamp_index) {
+        masked = true;
+      }
+    }
+
+    if (masked)
+      score = -CUDART_INF_F;
+    row_logits[token] = score;
+    if (isfinite(score))
+      local_max = max(local_max, score);
+  }
+
+  const float block_max = BlockReduce(reduce_storage).Reduce(local_max, cub::Max());
+  if (threadIdx.x == 0)
+    row_max = block_max;
+  __syncthreads();
+
+  float local_max_text = -CUDART_INF_F;
+  for (int token = threadIdx.x; token < timestamp_begin; token += blockDim.x) {
+    const float score = row_logits[token];
+    if (isfinite(score))
+      local_max_text = max(local_max_text, score);
+  }
+  const float block_max_text =
+      BlockReduce(reduce_storage).Reduce(local_max_text, cub::Max());
+  if (threadIdx.x == 0) {
+    max_text_logit = block_max_text;
+    if (!isfinite(row_max)) {
+      atomicOr(reinterpret_cast<unsigned int*>(error_status), 2u);
+      force_timestamp = false;
+    } else {
+      double timestamp_mass = 0.0;
+      for (int token = timestamp_begin; token < vocab_size; ++token) {
+        const float score = row_logits[token];
+        if (isfinite(score))
+          timestamp_mass += exp(static_cast<double>(score) - row_max);
+      }
+      const double max_text_mass =
+          isfinite(max_text_logit)
+              ? exp(static_cast<double>(max_text_logit) - row_max)
+              : 0.0;
+      force_timestamp = timestamp_mass > max_text_mass;
+    }
+  }
+  __syncthreads();
+
+  if (force_timestamp) {
+    for (int token = threadIdx.x; token < timestamp_begin; token += blockDim.x)
+      row_logits[token] = -CUDART_INF_F;
+  }
+}
+
+void LaunchWhisperTimestampRules(float* logits, const int32_t* sequences,
+                                 const bool* sequence_done,
+                                 int batch_beam_size, int vocab_size,
+                                 int max_length, int current_length,
+                                 int sample_begin, int timestamp_begin,
+                                 int eot_token, int no_timestamps_token,
+                                 int max_initial_timestamp_index,
+                                 int32_t* error_status,
+                                 cudaStream_t stream) {
+  WhisperTimestampRules<<<batch_beam_size, kWhisperTimestampBlockSize, 0, stream>>>(
+      logits, sequences, sequence_done, vocab_size, max_length, current_length, sample_begin,
+      timestamp_begin, eot_token, no_timestamps_token,
+      max_initial_timestamp_index, error_status);
   CUDA_CHECK_LAUNCH();
 }
 

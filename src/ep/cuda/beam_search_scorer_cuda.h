@@ -9,7 +9,8 @@ struct BeamSearchScorer_Cuda {
   void Process(Sequences& sequences,
                std::span<const float> next_scores,
                std::span<const int32_t> next_tokens,
-               std::span<const int32_t> next_indices);
+               std::span<const int32_t> next_indices,
+               std::span<bool> sequence_done);
 
   void Finalize(Sequences& sequences,
                 size_t num_return_sequences);

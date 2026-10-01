@@ -184,6 +184,19 @@ TEST(CAPITests, TokenizerCAPI) {
 #endif
 }
 
+TEST(CAPITests, WhisperTimestampTokenizerAPI) {
+  auto tokenizer = OgaTokenizer::Create(MODEL_PATH "whisper");
+
+  EXPECT_TRUE(tokenizer->HasTimestampTokens());
+  EXPECT_EQ(tokenizer->GetTimestampBeginTokenId(), 50364);
+  EXPECT_FALSE(tokenizer->IsTimestampToken(50363));
+  EXPECT_TRUE(tokenizer->IsTimestampToken(50364));
+  EXPECT_TRUE(tokenizer->IsTimestampToken(51864));
+  EXPECT_FALSE(tokenizer->IsTimestampToken(51865));
+  EXPECT_DOUBLE_EQ(tokenizer->TimestampToSeconds(50399), 0.7);
+  EXPECT_THROW(tokenizer->TimestampToSeconds(51865), std::runtime_error);
+}
+
 TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
 #if TEST_PHI2
   const char* input_string = "She sells sea shells by the sea shore.";

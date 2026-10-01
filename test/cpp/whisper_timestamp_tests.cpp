@@ -12,6 +12,7 @@
 #include "decoding/whisper_timestamp_logits_processor.h"
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/preprocessing/genai_tokenizer.h"
 #include "search.h"
 
 int main(int argc, char** argv) {
@@ -85,6 +86,7 @@ std::shared_ptr<TestWhisperModel> CreateTestModel(bool whisper_timestamps = true
   config->search.max_length = 16;
   config->search.batch_size = batch_size;
   config->search.whisper_timestamps = whisper_timestamps;
+  config->search.whisper_max_initial_timestamp_index = 2;
   return std::make_shared<TestWhisperModel>(std::move(config));
 }
 
@@ -116,6 +118,24 @@ TEST(WhisperTimestampConfigTests, ParsesModelMetadataAndSearchOptions) {
   EXPECT_EQ(config.search.whisper_max_initial_timestamp_index, 50);
 }
 
+TEST(WhisperTimestampConfigTests, RejectsFractionalInitialTimestampIndex) {
+  Config config;
+
+  EXPECT_THROW(
+      OverlayConfig(config, R"({
+        "search": {
+          "whisper_max_initial_timestamp_index": 1.5
+        }
+      })"),
+      std::runtime_error);
+}
+
+TEST(WhisperTimestampConfigTests, UsesCanonicalInitialTimestampDefault) {
+  Config config;
+
+  EXPECT_EQ(config.search.whisper_max_initial_timestamp_index, 50);
+}
+
 TEST(WhisperTimestampLogitsTests, RequiresTimestampAtInitialBoundary) {
   auto processor = CreateProcessor(1);
   std::array<float, 8> logits{5.0f, 4.0f, 3.0f, 2.0f, 1.0f, 0.0f, -1.0f, -2.0f};
@@ -138,7 +158,7 @@ TEST(WhisperTimestampLogitsTests, EnforcesTimestampPairsAndMonotonicity) {
   EXPECT_FLOAT_EQ(logits[0], 5.0f);
   EXPECT_FLOAT_EQ(logits[1], 4.0f);
   EXPECT_FLOAT_EQ(logits[2], 3.0f);
-  EXPECT_FLOAT_EQ(logits[3], 2.0f);
+  EXPECT_EQ(logits[3], -std::numeric_limits<float>::infinity());
   EXPECT_EQ(logits[5], -std::numeric_limits<float>::infinity());
   EXPECT_TRUE(std::isinf(logits[6]));
   EXPECT_TRUE(std::isinf(logits[7]));
@@ -151,9 +171,19 @@ TEST(WhisperTimestampLogitsTests, AllowsEotAfterClosingTimestamp) {
   processor.Apply(logits, std::array<int32_t, 4>{0, 5, 0, 6}, 1);
 
   EXPECT_FLOAT_EQ(logits[2], 3.0f);
-  EXPECT_FLOAT_EQ(logits[3], 2.0f);
+  EXPECT_EQ(logits[3], -std::numeric_limits<float>::infinity());
   EXPECT_EQ(logits[5], -std::numeric_limits<float>::infinity());
   EXPECT_FLOAT_EQ(logits[6], -1.0f);
+}
+
+TEST(WhisperTimestampLogitsTests, SuppressesControlTokensBetweenEotAndTimestamps) {
+  auto processor = CreateProcessor();
+  std::array<float, 8> logits{0.0f, -1.0f, -2.0f, 100.0f, 90.0f, -3.0f, -4.0f, -5.0f};
+
+  processor.Apply(logits, std::array<int32_t, 3>{0, 5, 1}, 1);
+
+  EXPECT_EQ(logits[3], -std::numeric_limits<float>::infinity());
+  EXPECT_EQ(logits[4], -std::numeric_limits<float>::infinity());
 }
 
 TEST(WhisperTimestampLogitsTests, RequiresStrictlyIncreasingTimestampAfterText) {
@@ -211,6 +241,15 @@ TEST(WhisperTimestampIntegrationTests, AppliesRulesToInitialSuppliedLogits) {
 
   ASSERT_EQ(generator.TokenCount(), 1u);
   EXPECT_EQ(generator.GetSequence(0).CpuSpan()[0], 5);
+}
+
+TEST(WhisperTimestampIntegrationTests, RejectsUndersizedSuppliedLogits) {
+  auto model = CreateTestModel();
+  auto params = CreateGeneratorParams(*model);
+  Generator generator{*model, *params};
+  auto logits = SetLogits(generator, *params, {1.0f, 2.0f});
+
+  EXPECT_THROW(generator.GenerateNextToken(), std::runtime_error);
 }
 
 TEST(WhisperTimestampIntegrationTests, AppliesRulesToModelProducedLogits) {
@@ -282,6 +321,22 @@ TEST(WhisperTimestampIntegrationTests, KeepsBatchRowsIndependent) {
   EXPECT_EQ(second_sequence[1], 6);
   EXPECT_EQ(second_sequence[2], 0);
   EXPECT_EQ(second_sequence[3], 7);
+}
+
+TEST(WhisperTimestampIntegrationTests, AppliesRulesThroughGeneratorBeamSearch) {
+  auto model = CreateTestModel();
+  model->config_->search.num_beams = 2;
+  auto params = CreateGeneratorParams(*model);
+  Generator generator{*model, *params};
+  const std::array<int32_t, 1> prompt{0};
+  generator.AppendTokens(cpu_span<const int32_t>{prompt});
+  auto logits = SetLogits(
+      generator, *params,
+      {10.0f, 9.0f, 8.0f, 7.0f, 6.0f, 3.0f, 2.0f, 1.0f,
+       10.0f, 9.0f, 8.0f, 7.0f, 6.0f, 1.0f, 3.0f, 2.0f});
+
+  EXPECT_NO_THROW(generator.GenerateNextToken());
+  EXPECT_FALSE(generator.IsDone());
 }
 
 TEST(WhisperTimestampIntegrationTests, UsesReorderedBeamHistories) {
@@ -469,6 +524,23 @@ TEST(WhisperTimestampIntegrationTests, RejectsMissingMetadata) {
   EXPECT_THROW(Generator(*model, *params), std::runtime_error);
 }
 
+TEST(WhisperTimestampIntegrationTests, RejectsInvalidMetadataOrdering) {
+  auto model = CreateTestModel();
+  model->config_->model.no_timestamps_token_id =
+      model->config_->model.timestamp_begin_token_id;
+  auto params = CreateGeneratorParams(*model);
+
+  EXPECT_THROW(Generator(*model, *params), std::runtime_error);
+}
+
+TEST(WhisperTimestampIntegrationTests, RejectsInvalidInitialTimestampIndex) {
+  auto model = CreateTestModel();
+  model->config_->search.whisper_max_initial_timestamp_index = 3;
+  auto params = CreateGeneratorParams(*model);
+
+  EXPECT_THROW(Generator(*model, *params), std::runtime_error);
+}
+
 TEST(WhisperTimestampIntegrationTests, RejectsBypassModelTypes) {
   auto model = CreateTestModel();
   model->config_->model.type = "nemotron_speech";
@@ -486,6 +558,67 @@ TEST(WhisperTimestampIntegrationTests, RejectsPromptWithNoTimestampsToken) {
   auto logits = SetLogits(generator, *params, {10.0f, 9.0f, 8.0f, 7.0f, 6.0f, 1.0f, 0.0f, -1.0f});
 
   EXPECT_THROW(generator.GenerateNextToken(), std::runtime_error);
+}
+
+TEST(WhisperTimestampIntegrationTests, RejectsAnotherWindowOnTheSameGenerator) {
+  auto model = CreateTestModel();
+  auto params = CreateGeneratorParams(*model);
+  Generator generator{*model, *params};
+  const std::array<int32_t, 1> prompt{0};
+  generator.AppendTokens(cpu_span<const int32_t>{prompt});
+  auto logits = SetLogits(generator, *params,
+                          {10.0f, 9.0f, 8.0f, 7.0f, 6.0f, 1.0f, 0.0f, -1.0f});
+  generator.GenerateNextToken();
+
+  EXPECT_THROW(generator.AppendTokens(cpu_span<const int32_t>{prompt}), std::runtime_error);
+}
+
+TEST(WhisperTimestampTokenizerTests, HidesTimestampTokensFromDecodedText) {
+  Config config;
+  config.config_path = fs::path{MODEL_PATH "whisper"};
+  config.model.vocab_size = 51865;
+  config.model.timestamp_begin_token_id = 50364;
+  auto tokenizer = std::make_shared<Tokenizer>(config);
+  auto text_tokens = tokenizer->Encode(" hello");
+  std::vector<int32_t> timestamped_tokens{50364};
+  timestamped_tokens.insert(timestamped_tokens.end(), text_tokens.begin(), text_tokens.end());
+  timestamped_tokens.push_back(50414);
+
+  EXPECT_EQ(tokenizer->Decode(timestamped_tokens), tokenizer->Decode(text_tokens));
+  EXPECT_TRUE(tokenizer->HasTimestampTokens());
+  EXPECT_EQ(tokenizer->GetTimestampBeginTokenId(), 50364);
+  EXPECT_FALSE(tokenizer->IsTimestampToken(50363));
+  EXPECT_TRUE(tokenizer->IsTimestampToken(50364));
+  EXPECT_TRUE(tokenizer->IsTimestampToken(51864));
+  EXPECT_FALSE(tokenizer->IsTimestampToken(51865));
+  EXPECT_DOUBLE_EQ(tokenizer->TimestampToSeconds(50414), 1.0);
+  EXPECT_DOUBLE_EQ(tokenizer->TimestampToSeconds(50399), 0.7);
+  EXPECT_THROW(tokenizer->TimestampToSeconds(50363), std::invalid_argument);
+  EXPECT_THROW(tokenizer->TimestampToSeconds(51865), std::invalid_argument);
+
+  auto stream = tokenizer->CreateStream();
+  EXPECT_TRUE(stream->Decode(50364).empty());
+}
+
+TEST(WhisperTimestampTokenizerTests, RejectsInvalidTimestampMetadata) {
+  Config config;
+  config.config_path = fs::path{MODEL_PATH "whisper"};
+  config.model.vocab_size = 51865;
+  config.model.timestamp_begin_token_id = -1;
+
+  EXPECT_THROW((void)Tokenizer{config}, std::runtime_error);
+}
+
+TEST(WhisperTimestampTokenizerTests, ReportsUnavailableTimestampMetadata) {
+  Config config;
+  config.config_path = fs::path{MODEL_PATH "whisper"};
+  config.model.vocab_size = 51865;
+  auto tokenizer = std::make_shared<Tokenizer>(config);
+
+  EXPECT_FALSE(tokenizer->HasTimestampTokens());
+  EXPECT_FALSE(tokenizer->IsTimestampToken(50364));
+  EXPECT_THROW(tokenizer->GetTimestampBeginTokenId(), std::runtime_error);
+  EXPECT_THROW(tokenizer->TimestampToSeconds(50364), std::invalid_argument);
 }
 
 TEST(WhisperTimestampLogitsTests, DoesNotForceTimestampsOnAnExactTie) {
@@ -517,6 +650,28 @@ TEST(WhisperTimestampLogitsTests, ProbabilityMassComparisonIsShiftInvariant) {
     EXPECT_FLOAT_EQ(logits[5], offset);
     EXPECT_FLOAT_EQ(logits[6], offset);
   }
+}
+
+TEST(WhisperTimestampLogitsTests, UsesDoublePrecisionForNearTieMass) {
+  WhisperTimestampLogitsProcessor processor{
+      {.timestamp_begin = 5, .eot_token = 2, .no_timestamps_token = 4}};
+  std::vector<float> logits(22, -std::numeric_limits<float>::infinity());
+  logits[0] = 0.0f;
+  const float timestamp_logit = static_cast<float>(std::log(1.0 / 17.0));
+  std::fill(logits.begin() + 5, logits.end(), timestamp_logit);
+
+  processor.Apply(logits, std::array<int32_t, 1>{0}, 0);
+
+  EXPECT_EQ(logits[0], -std::numeric_limits<float>::infinity());
+}
+
+TEST(WhisperTimestampLogitsTests, RejectsAnAllMaskedRow) {
+  auto processor = CreateProcessor(0);
+  std::array<float, 8> logits;
+  logits.fill(-std::numeric_limits<float>::infinity());
+
+  EXPECT_THROW(processor.Apply(logits, std::array<int32_t, 1>{0}, 1),
+               std::runtime_error);
 }
 
 }  // namespace
