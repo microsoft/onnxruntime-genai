@@ -199,8 +199,11 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
   config.AddMapping(std::string(Config::Defaults::PixelValuesName), config.model.vision.inputs.pixel_values);
   config.AddMapping(std::string(Config::Defaults::PixelPositionIdsName), config.model.vision.inputs.pixel_position_ids);
 
-  // Initialize speech/audio processor if config is present
-  if (!config.model.speech.config_filename.empty()) {
+  // Initialize speech/audio processor only when both the preprocessing config and
+  // the speech model itself are configured. A config_filename on its own does not
+  // mean audio is available: the model class may create no speech session at all,
+  // in which case session_info has no audio inputs to query below.
+  if (!config.model.speech.config_filename.empty() && !config.model.speech.filename.empty()) {
     auto speech_config_path = config.config_path / fs::path(config.model.speech.config_filename);
     if (fs::exists(speech_config_path)) {
       has_speech_ = true;

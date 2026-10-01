@@ -62,6 +62,9 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
+  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
+
  protected:
   void OnStageComplete(size_t stage_id) override;
 
@@ -71,6 +74,17 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
   // Runs a single-ONNX vision encoder and publishes image_features_value_.
   void RunSingleSessionVision(const std::vector<ExtraInput>& extra_inputs);
 
+  // Runs whichever vision path this model was configured with, at most once.
+  void RunVision(const std::vector<ExtraInput>& extra_inputs);
+
+  // Binds image_features/audio_features for embedding graphs that declare them as real inputs.
+  // Exports that fold the features away are left untouched.
+  void AppendEmbeddingFeatureInputs(std::vector<ExtraInput>& inputs);
+
+  // Text-only prompts never call SetExtraInputs, so the declared feature inputs would
+  // otherwise go unbound. Binds them once, on whichever path reaches the model first.
+  void EnsureFeatureInputsBound();
+
   const Qwen2_5_VL_PipelineModel& vl_model_;
   bool vision_ran_{false};
   std::unique_ptr<OrtValue> image_features_value_;
@@ -78,6 +92,10 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
   std::unique_ptr<OrtValue> vision_output_owner_;  // keeps the encoder's output alive when
                                                    // image_features_value_ is a reshaped view of it
   size_t image_embed_consumed_{0};                 // Track how many vision embeddings we've injected
+  std::vector<ExtraInput> owned_extra_inputs_;     // ExtraInputs::Add borrows the name and tensor pointers,
+                                                   // so the vector it reads from must outlive this state
+  bool embedding_merges_features_{false};          // embedding graph does the merge, so skip injection
+  bool features_bound_{false};                     // guards against binding the same name twice
 };
 
 }  // namespace Generators

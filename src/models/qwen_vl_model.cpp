@@ -118,8 +118,84 @@ Qwen2_5_VL_PipelineState::Qwen2_5_VL_PipelineState(const Qwen2_5_VL_PipelineMode
 }
 
 void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  DecoderOnlyPipelineState::SetExtraInputs(extra_inputs);
+  // Vision must run before binding, because the embedding graph may declare
+  // image_features as a real input and binding happens by name at Add() time.
+  RunVision(extra_inputs);
 
+  if (features_bound_) {
+    // Already bound once. Mutating owned_extra_inputs_ now would move the strings whose
+    // c_str() the state already holds, so forward the caller's vector untouched instead.
+    DecoderOnlyPipelineState::SetExtraInputs(extra_inputs);
+    return;
+  }
+
+  // ExtraInputs::Add stores name.c_str() and the raw tensor pointer, so the vector it reads
+  // from must outlive this state and must not grow afterwards. Build it fully, bind once,
+  // then leave it alone.
+  owned_extra_inputs_ = extra_inputs;
+  AppendEmbeddingFeatureInputs(owned_extra_inputs_);
+  DecoderOnlyPipelineState::SetExtraInputs(owned_extra_inputs_);
+}
+
+DeviceSpan<float> Qwen2_5_VL_PipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
+                                                DeviceSpan<int32_t> next_indices) {
+  EnsureFeatureInputsBound();
+  return DecoderOnlyPipelineState::Run(total_length, next_tokens, next_indices);
+}
+
+// Text only requests never call SetExtraInputs, so bind the empty features here instead.
+void Qwen2_5_VL_PipelineState::EnsureFeatureInputsBound() {
+  if (features_bound_) return;
+
+  AppendEmbeddingFeatureInputs(owned_extra_inputs_);
+  if (!owned_extra_inputs_.empty()) {
+    DecoderOnlyPipelineState::SetExtraInputs(owned_extra_inputs_);
+  }
+}
+
+void Qwen2_5_VL_PipelineState::AppendEmbeddingFeatureInputs(std::vector<ExtraInput>& inputs) {
+  if (features_bound_) return;
+  const auto& image_name = vl_model_.config_->model.embedding.inputs.image_features;
+  const auto& audio_name = vl_model_.config_->model.embedding.inputs.audio_features;
+
+  auto already_bound = [&inputs](const std::string& name) {
+    return std::any_of(inputs.begin(), inputs.end(),
+                       [&name](const ExtraInput& input) { return input.name == name; });
+  };
+
+  auto mem_info = OrtMemoryInfo::Create("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
+
+  auto add = [&](const std::string& name, bool use_vision_output) {
+    if (name.empty() || already_bound(name) || !vl_model_.session_info_.HasInput(name)) return;
+
+    std::unique_ptr<OrtValue> value;
+    if (use_vision_output && image_features_value_) {
+      // Wrap the encoder output in place; the backing storage is owned by this state.
+      const auto info = image_features_value_->GetTensorTypeAndShapeInfo();
+      const auto shape = info->GetShape();
+      std::span<float> data(image_features_value_->GetTensorMutableData<float>(), info->GetElementCount());
+      value = OrtValue::CreateTensor<float>(*mem_info, data, std::span<const int64_t>(shape));
+    } else {
+      // No features for this modality: hand the graph an empty [0, hidden] tensor so the
+      // in-graph merge is a no-op, matching what MultiModalLanguageModel does.
+      auto declared = vl_model_.session_info_.GetInputShape(name);
+      const int64_t hidden = declared.empty() ? 0 : declared.back();
+      const std::vector<int64_t> shape{0, hidden};
+      value = OrtValue::CreateTensor(vl_model_.allocator_cpu_, shape,
+                                     ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    }
+
+    auto tensor = std::make_shared<Tensor>(std::move(value));
+    inputs.push_back(ExtraInput{name, tensor});
+    embedding_merges_features_ = true;
+  };
+
+  add(image_name, /*use_vision_output=*/true);
+  add(audio_name, /*use_vision_output=*/false);
+  features_bound_ = true;
+}
+
+void Qwen2_5_VL_PipelineState::RunVision(const std::vector<ExtraInput>& extra_inputs) {
   if (vision_ran_) return;
 
   if (vl_model_.vision_session_) {
@@ -335,6 +411,10 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
 
 void Qwen2_5_VL_PipelineState::OnStageComplete(size_t stage_id) {
   if (stage_id != 0 || !vision_ran_) return;
+
+  // When the embedding graph takes image_features directly it has already placed the rows,
+  // so injecting them again would be redundant work over identical values.
+  if (embedding_merges_features_) return;
 
   const auto& embeddings_config = vl_model_.config_->model.decoder.pipeline[0];
   if (!embeddings_config.outputs.empty()) {
