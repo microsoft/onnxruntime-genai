@@ -47,7 +47,7 @@ TEST(NonGenerativeSessionTest, RealPackagesRunWhenConfigured) {
   ASSERT_TRUE(kev.answers.front().second.noul.has_value());
   EXPECT_EQ(clm.answers.front().second.noul, repeated_clm.answers.front().second.noul);
   EXPECT_EQ(kev.answers.front().second.noul, repeated_kev.answers.front().second.noul);
-  EXPECT_GT(ranking.CacheStats().hits, 0u);
+  EXPECT_GE(ranking.CacheStats().hits, 3u);
   EXPECT_GT(decision.CacheStats().hits, 0u);
 
   RankingSession isolated((root / "clm-v0.1-8b-fp32").string(), providers);

@@ -806,6 +806,20 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
   if (candidate_count != expected_candidate_count)
     throw std::runtime_error("candidate count does not match rendered actions");
 
+  std::vector<std::string> state_cache_keys(question_count);
+  std::vector<std::vector<float>> cached_states(question_count);
+  bool all_states_cached = !combined;
+  if (!combined) {
+    for (size_t i = 0; i < texts.size(); ++i) {
+      std::ostringstream key;
+      key << identity << "|clm-state|split|float32|" << texts[i].size()
+          << ':' << texts[i];
+      state_cache_keys[i] = key.str();
+      if (!cache.Get(state_cache_keys[i], cached_states[i]))
+        all_states_cached = false;
+    }
+  }
+
   std::vector<std::string> cache_keys(candidate_count);
   std::vector<std::vector<float>> cached(candidate_count);
   std::vector<size_t> projection_source(candidate_count);
@@ -828,16 +842,6 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       }
     }
   }
-  auto [pooled, hidden_size] = EncodeAndPool(tokenizer, encoder, texts);
-  if (!hidden_size || pooled.size() != texts.size() * hidden_size)
-    throw std::runtime_error("CLM pooled encoder output has invalid dimensions");
-  if (!missing_texts.empty()) {
-    auto [missing_pooled, missing_hidden_size] =
-        EncodeAndPool(tokenizer, encoder, missing_texts);
-    if (missing_hidden_size != hidden_size)
-      throw std::runtime_error("CLM state/action encoder layouts do not match");
-    pooled.insert(pooled.end(), missing_pooled.begin(), missing_pooled.end());
-  }
   std::vector<int64_t> owners;
   for (size_t owner = 0; owner < candidates.size(); ++owner)
     owners.insert(owners.end(), candidates[owner].keys.size(), static_cast<int64_t>(owner));
@@ -848,7 +852,74 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       }))
     throw std::runtime_error("candidate owner index is out of range");
   std::vector<float> probabilities;
-  if (combined) {
+  const bool fully_cached =
+      !combined && all_states_cached && missing_indices.empty();
+  std::vector<float> pooled;
+  size_t hidden_size{};
+  if (!fully_cached) {
+    std::tie(pooled, hidden_size) = EncodeAndPool(tokenizer, encoder, texts);
+    if (!hidden_size || pooled.size() != texts.size() * hidden_size)
+      throw std::runtime_error(
+          "CLM pooled encoder output has invalid dimensions");
+    if (!missing_texts.empty()) {
+      auto [missing_pooled, missing_hidden_size] =
+          EncodeAndPool(tokenizer, encoder, missing_texts);
+      if (missing_hidden_size != hidden_size)
+        throw std::runtime_error(
+            "CLM state/action encoder layouts do not match");
+      pooled.insert(pooled.end(), missing_pooled.begin(),
+                    missing_pooled.end());
+    }
+  }
+  if (fully_cached) {
+    const auto projection_size = cached_states.front().size();
+    if (!projection_size)
+      throw std::runtime_error(
+          "cached CLM state projection must not be empty");
+    std::vector<float> state_projection(question_count * projection_size);
+    for (size_t row = 0; row < question_count; ++row) {
+      if (cached_states[row].size() != projection_size)
+        throw std::runtime_error(
+            "cached CLM state projection layout mismatch");
+      std::copy(cached_states[row].begin(), cached_states[row].end(),
+                state_projection.begin() + row * projection_size);
+    }
+    std::vector<float> action_projection(candidate_count * projection_size);
+    for (size_t row = 0; row < candidate_count; ++row) {
+      if (cached[row].size() != projection_size)
+        throw std::runtime_error(
+            "cached CLM action projection layout mismatch");
+      std::copy(cached[row].begin(), cached[row].end(),
+                action_projection.begin() + row * projection_size);
+    }
+    FeedStorage scorer_feeds;
+    scorer_feeds.bytes.reserve(4);
+    scorer_feeds.inputs.reserve(4);
+    scorer_feeds.Add(
+        "state_projections", state_projection,
+        {static_cast<int64_t>(question_count),
+         static_cast<int64_t>(projection_size)},
+        OgaElementType_float32);
+    scorer_feeds.Add(
+        "action_projections", action_projection,
+        {static_cast<int64_t>(candidate_count),
+         static_cast<int64_t>(projection_size)},
+        OgaElementType_float32);
+    scorer_feeds.Add("temperature", std::vector<float>{request.temperature},
+                     {}, OgaElementType_float32);
+    scorer_feeds.Add(
+        "candidate_owners", owners,
+        {static_cast<int64_t>(owners.size())}, OgaElementType_int64);
+    const auto scorer_outputs =
+        scorer->Run(scorer_feeds.inputs, {"probabilities"});
+    const auto& probability_tensor =
+        FindTensor(scorer_outputs, "probabilities");
+    RequireShape(probability_tensor, {candidate_count},
+                 "scorer probabilities");
+    probabilities = FloatTensor(probability_tensor);
+    RequireFloatCount(probability_tensor, probabilities,
+                      "scorer probabilities");
+  } else if (combined) {
     FeedStorage head;
     head.bytes.reserve(2);
     head.inputs.reserve(2);
@@ -939,6 +1010,12 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     auto [state_projection, projection_size] = project(
         *state, {pooled.begin(), pooled.begin() + question_count * hidden_size},
         question_count, hidden_size, "state projections");
+    for (size_t row = 0; row < question_count; ++row) {
+      auto value = std::vector<float>(
+          state_projection.begin() + row * projection_size,
+          state_projection.begin() + (row + 1) * projection_size);
+      cache.Put(state_cache_keys[row], value);
+    }
     if (!missing_indices.empty()) {
       auto [missing_projection, action_projection_size] = project(
           *action, {pooled.begin() + question_count * hidden_size, pooled.end()},
