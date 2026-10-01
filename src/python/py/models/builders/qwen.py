@@ -116,8 +116,8 @@ class VideoChatFlashQwenModel(QwenModel):
 class Qwen35TextModel(Model):
     def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep):
         uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
-        if uses_gated_delta_net and ep != "cuda":
-            raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
+        if uses_gated_delta_net and ep not in ("cuda", "webgpu"):
+            raise ValueError("GatedDeltaNet exports require the CUDA or WebGPU execution provider")
         if uses_gated_delta_net and state_window:
             raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
 
