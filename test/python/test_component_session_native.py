@@ -43,6 +43,63 @@ def _package(root: Path, filename: str = "graphs/arbitrary-name.onnx") -> Path:
     return root
 
 
+def _cuda_graph_package(root: Path) -> Path:
+    weight = helper.make_tensor(
+        "weight",
+        TensorProto.FLOAT,
+        [2, 2],
+        [1.0, 0.5, -0.25, 2.0],
+    )
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["input", "weight"], ["output"])],
+        "captured_component",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, ["batch", 2])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, ["batch", 2])],
+        [weight],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    model.ir_version = 13
+    onnx.save(model, root / "backbone.onnx")
+    (root / "component_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_type": "synthetic-cuda-graph",
+                "components": {
+                    "backbone": {"filename": "backbone.onnx"},
+                },
+            }
+        )
+    )
+    return root
+
+
+def test_cuda_graph_capture_replays_and_falls_back_for_new_shape(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORT_GENAI_KEV_CUDA_GRAPH", "1")
+    try:
+        session = og.ComponentSession(str(_cuda_graph_package(tmp_path)), "backbone", ["cuda"])
+    except RuntimeError as error:
+        if "Cuda interface not available" in str(error):
+            pytest.skip(str(error))
+        raise
+
+    first = np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    second = np.asarray([[5.0, 6.0], [7.0, 8.0]], dtype=np.float32)
+    np.testing.assert_allclose(
+        session.run({"input": first})["output"],
+        first @ np.asarray([[1.0, 0.5], [-0.25, 2.0]], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        session.run({"input": second})["output"],
+        second @ np.asarray([[1.0, 0.5], [-0.25, 2.0]], dtype=np.float32),
+    )
+    changed_shape = second[:1]
+    np.testing.assert_allclose(
+        session.run({"input": changed_shape})["output"],
+        changed_shape @ np.asarray([[1.0, 0.5], [-0.25, 2.0]], dtype=np.float32),
+    )
+
+
 def test_manifest_mapping_arbitrary_filename_and_native_run(tmp_path):
     session = og.ComponentSession(str(_package(tmp_path)), "unusual.component", ["cpu"])
     value = np.asarray([[1.5, -2.0]], dtype=np.float32)
