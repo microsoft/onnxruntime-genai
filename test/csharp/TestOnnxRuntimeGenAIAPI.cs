@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
@@ -537,6 +538,29 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             });
 
             Assert.NotEmpty(completion.Text);
+        }
+
+        [Fact(DisplayName = "TestChatClientWithJsonSchemaResponseFormat")]
+        public async Task TestChatClientWithJsonSchemaResponseFormat()
+        {
+            // The schema only allows "{}". Once guidance has completed it, the last step ends the generation
+            // without appending a token.
+            OnnxRuntimeGenAIChatClientOptions options = new()
+            {
+                PromptFormatter = static (messages, options) => "a",
+            };
+
+            using var client = new OnnxRuntimeGenAIChatClient(_tinyRandomGpt2ModelPath, options);
+
+            using var schema = JsonDocument.Parse("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}");
+            var completion = await client.GetResponseAsync("a", new()
+            {
+                MaxOutputTokens = 10,
+                Temperature = 0f,
+                ResponseFormat = ChatResponseFormat.ForJsonSchema(schema.RootElement),
+            });
+
+            Assert.Equal("{}", completion.Text);
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]

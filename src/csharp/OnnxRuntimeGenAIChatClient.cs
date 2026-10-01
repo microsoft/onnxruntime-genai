@@ -195,7 +195,15 @@ public sealed partial class OnnxRuntimeGenAIChatClient : IChatClient
                 await YieldAwaiter.Instance;
 
                 // Generate the next token.
+                int sequenceLength = generator.Generator.GetSequence(0).Length;
                 generator.Generator.GenerateNextToken();
+
+                // When guidance has completed the output, the generator stops without appending a token.
+                if (generator.Generator.GetSequence(0).Length == sequenceLength)
+                {
+                    break;
+                }
+
                 string next = tokenizerStream.Decode(GetLastToken(generator.Generator.GetSequence(0)));
 
                 // workaround until C# 13 is adopted and ref locals are usable in async methods
