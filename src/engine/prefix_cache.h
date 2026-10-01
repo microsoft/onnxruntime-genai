@@ -37,10 +37,6 @@
 
 namespace Generators {
 
-namespace test {
-struct EngineRunTestAccess;
-}
-
 class FixedStatePrefixCheckpoint;
 struct Dflash2PrefixCheckpoint;
 using DraftPrefixBoundary =
@@ -230,8 +226,6 @@ class PrefixCache final : private BlockReferenceObserver {
   const PrefixCacheMetrics& Metrics() const { return metrics_; }
 
  private:
-  friend struct test::EngineRunTestAccess;
-
   struct Entry {
     std::shared_ptr<Block> block;
     std::shared_ptr<const BlockIdentity> identity;

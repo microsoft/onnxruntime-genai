@@ -15,6 +15,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -38,22 +39,6 @@ namespace Generators {
 namespace test {
 
 struct EngineRunTestAccess {
-  static void FailPrefixRegistrationOnce(PagedCacheManager& cache, int32_t first_token) {
-    prefix_failure_token_ = first_token;
-    prefix_hash_calls_remaining_ = 4;
-    cache.key_value_cache_->prefix_cache_->options_.hash =
-        [](uint64_t parent, std::span<const int32_t> tokens) {
-          if (tokens.front() == prefix_failure_token_ && prefix_hash_calls_remaining_ != 0 &&
-              --prefix_hash_calls_remaining_ == 0) {
-            throw std::bad_alloc{};
-          }
-          return PrefixCache::ChainHash(parent, tokens);
-        };
-  }
-
-  inline static int32_t prefix_failure_token_{};
-  inline static size_t prefix_hash_calls_remaining_{};
-
   static void PublishDraftResults(
       Engine& engine, std::span<Request* const> requests,
       const std::vector<std::vector<TargetTokenSelection>>& distributions) {
@@ -92,6 +77,67 @@ struct EngineRunTestAccess {
 };
 
 namespace {
+
+class ScopedFailingCheckpointDevice final : public DeviceInterface {
+ public:
+  explicit ScopedFailingCheckpointDevice(Model& model)
+      : model_{model}, inner_{*model.p_device_kvcache_} {
+    model_.p_device_kvcache_ = this;
+  }
+  ScopedFailingCheckpointDevice(const ScopedFailingCheckpointDevice&) = delete;
+  ScopedFailingCheckpointDevice& operator=(const ScopedFailingCheckpointDevice&) = delete;
+  ~ScopedFailingCheckpointDevice() { model_.p_device_kvcache_ = &inner_; }
+
+  void FailNextWrapWhen(std::function<bool()> predicate) {
+    failure_predicate_ = std::move(predicate);
+  }
+  size_t FailureCount() const { return failure_count_; }
+
+  DeviceType GetType() const override { return inner_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    if (failure_predicate_ && failure_predicate_()) {
+      failure_predicate_ = {};
+      ++failure_count_;
+      throw std::bad_alloc{};
+    }
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return inner_.CreateGreedy(params);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
+    return inner_.CreateKeyValueCache(state);
+  }
+  void Synchronize() override { inner_.Synchronize(); }
+  bool SupportsOffsetTensorViews() const override {
+    return inner_.SupportsOffsetTensorViews();
+  }
+  bool SupportsTransactionalFixedState() const override {
+    return inner_.SupportsTransactionalFixedState();
+  }
+
+ private:
+  Model& model_;
+  DeviceInterface& inner_;
+  std::function<bool()> failure_predicate_;
+  size_t failure_count_{};
+};
 
 class TestBarrier {
  public:
@@ -3951,6 +3997,7 @@ TEST_F(EngineRunTest, FailedHybridReplacementPreservesOldHitAndAllowsRetry) {
   batching.max_batch_size = 1;
   batching.num_blocks = 16;
   batching.prefix_caching = true;
+  ScopedFailingCheckpointDevice device{*model_};
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
   const std::array<int32_t, 5> first_prompt{2, 3, 4, 5, 6};
   const std::array<int32_t, 5> second_prompt{20, 21, 22, 23, 24};
@@ -3965,7 +4012,10 @@ TEST_F(EngineRunTest, FailedHybridReplacementPreservesOldHitAndAllowsRetry) {
   first->Close();
   ASSERT_EQ(engine.cache->FixedStateSnapshot()->checkpoint_count, 1u);
 
-  EngineRunTestAccess::FailPrefixRegistrationOnce(*engine.cache, second_prompt.front());
+  // Fail checkpoint wrapper allocation after B's provisional KV registration, not step staging.
+  device.FailNextWrapWhen([&] {
+    return engine.cache->PrefixMetrics()->registered_blocks == 2;
+  });
   engine.executor->SetExecutionCallback([](ExecutionContext& context) {
     for (const auto& binding : context.fixed_state_bindings) {
       FillFixedOutputRow(binding, 0, 9.0f);
@@ -3973,7 +4023,7 @@ TEST_F(EngineRunTest, FailedHybridReplacementPreservesOldHitAndAllowsRetry) {
   });
   auto failed = CreateRequestWithPrompt(engine.engine, second_prompt);
   EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
-  EXPECT_EQ(EngineRunTestAccess::prefix_hash_calls_remaining_, 0u);
+  EXPECT_EQ(device.FailureCount(), 1u);
   EXPECT_EQ(failed->ProcessedSequenceLength(), 4);
   EXPECT_EQ(engine.engine->PrefixCacheStats()->publication_refusals, 1u);
   EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 1u);
@@ -4014,6 +4064,7 @@ TEST_F(EngineRunTest, FailedHybridReplacementPreservesOldHitAndAllowsRetry) {
   ASSERT_EQ(second_event.request, second_repeat);
   EXPECT_EQ(second_event.usage.cached_prompt_tokens, 4u);
   EXPECT_EQ(engine.engine->PrefixCacheStats()->publication_refusals, 1u);
+  EXPECT_EQ(device.FailureCount(), 1u);
   EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
 }
 

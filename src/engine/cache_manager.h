@@ -195,7 +195,6 @@ struct StaticCacheManager : CacheManager {
 };
 
 struct PagedCacheManager : CacheManager {
-  friend struct test::EngineRunTestAccess;
   PagedCacheManager(std::shared_ptr<Model> model,
                     size_t auxiliary_bytes_per_block = 0,
                     size_t auxiliary_reserved_memory_bytes = 0,

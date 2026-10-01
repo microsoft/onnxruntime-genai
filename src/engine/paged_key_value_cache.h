@@ -82,8 +82,6 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
  * for all requests.
  */
 struct PagedKeyValueCache {
-  friend struct test::EngineRunTestAccess;
-
  public:
   explicit PagedKeyValueCache(std::shared_ptr<Model> model,
                               size_t auxiliary_bytes_per_block = 0,
