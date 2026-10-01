@@ -3,7 +3,7 @@
 
 """End-to-end RewindTo(0) coverage for multimodal generators.
 
-MultiModalPipelineState::RewindTo() lets a multimodal prompt be replayed
+MultiModalPipelineState::RewindTo() lets a multimodal prompt be replayed.
 Each test runs a prompt, generates, rewinds to zero, replays
 the same prompt, and requires the replay to match both the first run and a
 separately constructed generator.
