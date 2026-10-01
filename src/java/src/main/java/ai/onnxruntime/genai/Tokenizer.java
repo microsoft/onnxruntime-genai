@@ -185,9 +185,7 @@ public class Tokenizer implements AutoCloseable {
     return tokenizerGetEorTokenId(nativeHandle);
   }
 
-  /**
-   * Returns whether Whisper timestamp metadata is available.
-   */
+  /** Returns whether Whisper timestamp metadata is available. */
   public boolean hasTimestampTokens() throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <cuda_runtime.h>
+#include <math_constants.h>
 #include <cub/cub.cuh>
 #include <algorithm>
 #include <cfloat>
