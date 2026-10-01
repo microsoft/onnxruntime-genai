@@ -2255,6 +2255,10 @@ struct Model_Element : JSON::Element {
       v_.bor_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == Config::Defaults::EorTokenIdName) {
       v_.eor_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == Config::Defaults::TimestampBeginTokenIdName) {
+      v_.timestamp_begin_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == Config::Defaults::NoTimestampsTokenIdName) {
+      v_.no_timestamps_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2451,6 +2455,10 @@ struct Search_Element : JSON::Element {
       v_.audio_temperature = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "audio_top_k") {
       v_.audio_top_k = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "whisper_timestamps") {
+      v_.whisper_timestamps = JSON::Get<bool>(value);
+    } else if (name == "whisper_max_initial_timestamp_index") {
+      v_.whisper_max_initial_timestamp_index = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }

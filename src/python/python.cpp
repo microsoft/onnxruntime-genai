@@ -273,6 +273,9 @@ struct PyGeneratorParams {
     d["temperature"] = params_->GetSearchNumber("temperature");
     d["top_k"] = params_->GetSearchNumber("top_k");
     d["top_p"] = params_->GetSearchNumber("top_p");
+    d["whisper_timestamps"] = params_->GetSearchBool("whisper_timestamps");
+    d["whisper_max_initial_timestamp_index"] =
+        params_->GetSearchNumber("whisper_max_initial_timestamp_index");
     return d;
   }
 

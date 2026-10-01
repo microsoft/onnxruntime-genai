@@ -21,6 +21,7 @@
 #include "models/io/position_inputs.h"
 #include "decoding/decoding_strategy.h"
 #include "decoding/n_gram_decoding_strategy.h"
+#include "decoding/whisper_timestamp_logits_processor.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
@@ -516,6 +517,8 @@ double GeneratorParams::GetSearchNumber(std::string_view name) const {
     return static_cast<double>(search.top_k);
   } else if (name == "top_p") {
     return search.top_p;
+  } else if (name == "whisper_max_initial_timestamp_index") {
+    return static_cast<double>(search.whisper_max_initial_timestamp_index);
   } else {
     throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchNumber.");
   }
@@ -528,6 +531,8 @@ bool GeneratorParams::GetSearchBool(std::string_view name) const {
     return search.early_stopping;
   } else if (name == "past_present_share_buffer") {
     return search.past_present_share_buffer;
+  } else if (name == "whisper_timestamps") {
+    return search.whisper_timestamps;
   } else {
     throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchBool.");
   }
@@ -599,6 +604,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
         "n-gram decoding.");
   if (params.speculative.ngram_size > 0)
     ValidateNGramDecoding(model, params);
+
+  InitializeWhisperTimestampProcessor(params);
 
   // RNNT/TDT/streaming-enc-dec-ASR models don't use the traditional
   // search/logits pipeline; skip the standard validations and create the
@@ -699,6 +706,63 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
       sampling_method_ = SamplingMethod::kTopP;
     }
   }
+}
+
+void Generator::InitializeWhisperTimestampProcessor(const GeneratorParams& params) {
+  if (!params.search.whisper_timestamps)
+    return;
+
+  const auto& model = params.config.model;
+  if (model.type != "whisper")
+    throw std::runtime_error("whisper_timestamps is only supported for Whisper models");
+  if (params.p_device->GetType() != DeviceType::CPU)
+    throw std::runtime_error("whisper_timestamps currently requires CPU scoring");
+  if (model.draft || params.speculative.ngram_size > 0)
+    throw std::runtime_error("whisper_timestamps is not supported with speculative decoding");
+  if (!params.guidance_type.empty() || !params.guidance_data.empty())
+    throw std::runtime_error("whisper_timestamps is not supported with guidance");
+  if (!model.timestamp_begin_token_id || !model.no_timestamps_token_id)
+    throw std::runtime_error(
+        "whisper_timestamps requires model.timestamp_begin_token_id and model.no_timestamps_token_id");
+  if (model.eos_token_id.size() != 1)
+    throw std::runtime_error("whisper_timestamps requires exactly one model.eos_token_id");
+
+  const int timestamp_begin = *model.timestamp_begin_token_id;
+  const int no_timestamps = *model.no_timestamps_token_id;
+  const int eot = model.eos_token_id[0];
+  if (timestamp_begin < 0 || timestamp_begin >= model.vocab_size)
+    throw std::runtime_error("model.timestamp_begin_token_id must be within the vocabulary");
+  if (no_timestamps < 0 || no_timestamps >= timestamp_begin)
+    throw std::runtime_error("model.no_timestamps_token_id must precede timestamp tokens");
+  if (eot < 0 || eot >= timestamp_begin)
+    throw std::runtime_error("model.eos_token_id must precede timestamp tokens");
+  if (no_timestamps == eot)
+    throw std::runtime_error("model.no_timestamps_token_id must differ from model.eos_token_id");
+  if (params.search.whisper_max_initial_timestamp_index < -1)
+    throw std::runtime_error("whisper_max_initial_timestamp_index must be -1 or greater");
+  if (params.search.whisper_max_initial_timestamp_index >= 0 &&
+      params.search.whisper_max_initial_timestamp_index > model.vocab_size - 1 - timestamp_begin) {
+    throw std::runtime_error("whisper_max_initial_timestamp_index exceeds the timestamp vocabulary");
+  }
+
+  whisper_timestamp_logits_processor_ = std::make_unique<WhisperTimestampLogitsProcessor>(
+      WhisperTimestampLogitsConfig{
+          timestamp_begin,
+          eot,
+          no_timestamps,
+          params.search.whisper_max_initial_timestamp_index >= 0
+              ? std::optional<int>{params.search.whisper_max_initial_timestamp_index}
+              : std::nullopt});
+}
+
+void Generator::ApplyWhisperTimestampRules() {
+  if (!whisper_timestamp_logits_processor_)
+    return;
+
+  if (!whisper_sample_begin_)
+    whisper_sample_begin_ = static_cast<size_t>(search_->GetSequenceLength());
+  ApplyWhisperTimestampRulesToSearch(
+      *search_, *whisper_timestamp_logits_processor_, *whisper_sample_begin_);
 }
 
 Generator::~Generator() = default;

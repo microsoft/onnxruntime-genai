@@ -50,6 +50,7 @@ struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
 struct GuidanceCacheState;
+class WhisperTimestampLogitsProcessor;
 
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;
@@ -162,6 +163,7 @@ struct Generator : LeakChecked<Generator> {
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
+  std::unique_ptr<WhisperTimestampLogitsProcessor> whisper_timestamp_logits_processor_;
 
   bool computed_logits_{};                       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};                  // Set to false once SetExtraInputs() is called once
@@ -198,6 +200,9 @@ struct Generator : LeakChecked<Generator> {
   std::mt19937 rng_;
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
+  void InitializeWhisperTimestampProcessor(const GeneratorParams& params);
+  void ApplyWhisperTimestampRules();
+  std::optional<size_t> whisper_sample_begin_;
 
   std::unique_ptr<DecodingStrategy> strategy_;
   friend struct StandardDecodingStrategy;
