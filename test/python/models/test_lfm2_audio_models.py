@@ -791,6 +791,20 @@ def test_lfm2_audio_features_follow_the_clip_order(test_data_path, tmp_path):
     assert outputs[0] != outputs[1], "swapping the clips must change what the decoder sees"
 
 
+def test_lfm2_audio_rejects_rewind(test_data_path, tmp_path):
+    """lfm2_audio's decoder uses ConvKeyValueCache. Generator::CanRewindTo must
+    catch this before mutating search_, since ConvKeyValueCache::RewindTo throws
+    unconditionally, for any index including 0."""
+    model_path = _model_path(test_data_path)
+    clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5, seed=50))
+    generator, _ = _generate(model_path, f"<|startoftext|>{AUDIO_MARKER}", og.Audios.open(clip), num_tokens=2)
+    sequence = generator.get_sequence(0).copy()
+
+    with pytest.raises(RuntimeError, match="does not support rewinding to that length"):
+        generator.rewind_to(0)
+    np.testing.assert_array_equal(generator.get_sequence(0), sequence)
+
+
 def _generate_with_eos(model_path, clip, eos, num_tokens):
     """Greedy generation from a copied model directory, stopping on the token ids in `eos`."""
     _edit_json(model_path / "genai_config.json", lambda config: config["model"].update({"eos_token_id": eos}))
