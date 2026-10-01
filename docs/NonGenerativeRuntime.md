@@ -131,7 +131,11 @@ input is also required. Graphs without that complete contract use the original
 full-row path; `prefix_reuse_status` reports the explicit reason and
 `fallback_runs` is incremented. A malformed graph that advertises compatible
 state I/O raises rather than silently falling back. Setting
-`prefix_reuse_enabled=False` selects the full-row parity/debug path.
+`prefix_reuse_enabled=False` selects the full-row parity/debug path. CUDA
+sessions also use that path automatically for state prefixes shorter than 128
+tokens, where recomputation is cheaper than transferring and repeating the
+cached component state. CPU sessions and longer CUDA prefixes continue to use
+prefix reuse.
 
 `cache_stats` describes token/branch caching. `prefix_cache_stats` describes
 model-state hits, misses, eviction/occupancy, prefix executions, batched branch
