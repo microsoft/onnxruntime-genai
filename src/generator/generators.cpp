@@ -974,9 +974,11 @@ void Generator::RewindToLength(size_t new_length) {
   // Fail clearly here before search_ is dereferenced below.
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type))
     throw std::runtime_error("RewindTo is not supported for streaming ASR models (" + model_type + ").");
-  if (model_type == "whisper" || model_type == "decoder-pipeline" ||
-      ModelType::IsLFM2(model_type) || model_type == "lfm2_vl" || model_type == "lfm2_audio")
+  if (model_type == "whisper" || model_type == "decoder-pipeline")
     throw std::runtime_error("RewindTo is currently not supported for " + model_type + ".");
+  // LFM2 conv state cannot be cropped; only a full reset is possible.
+  if ((ModelType::IsLFM2(model_type) || model_type == "lfm2_vl" || model_type == "lfm2_audio") && new_length != 0)
+    throw std::runtime_error("RewindTo is only supported with new_length=0 for " + model_type + ".");
   const size_t current_length = search_->GetSequenceLength();
   if (new_length > current_length)
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");

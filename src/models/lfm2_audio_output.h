@@ -46,6 +46,9 @@ struct Lfm2AudioOutput {
   // Every frame so far, [num_frames, num_codebooks] int64, end-of-audio frames left out.
   OrtValue* GetAudioCodes();
 
+  // Drops every frame and pending input, as for a fresh generator (used by RewindTo(0)).
+  void Reset();
+
  private:
   enum struct Modality { Text,
                          Audio };

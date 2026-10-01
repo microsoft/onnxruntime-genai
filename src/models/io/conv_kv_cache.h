@@ -16,7 +16,8 @@ struct ConvKeyValueCache : KeyValueCache {
   void Add() override;
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
-  bool CanRewindTo(size_t index) const override { (void)index; return false; }
+  // Conv state depends on every prior token, so only a full reset is possible.
+  bool CanRewindTo(size_t index) const override { return index == 0; }
 
  private:
   template <typename ScoreType>

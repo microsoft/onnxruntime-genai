@@ -738,6 +738,7 @@ void MultiModalPipelineState::RewindTo(size_t index) {
     decoder_state_->RewindTo(index);
   if (index == 0) {
     is_prompt_ = true;
+    if (audio_output_) audio_output_->Reset();
     if (!has_rewound_) {
       has_rewound_ = true;
       // Force one real re-run: features may have been released.
