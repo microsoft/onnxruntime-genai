@@ -154,6 +154,8 @@ bool StaticBatchScheduler::HasPendingRequests() const {
 DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {
   if (UsesWebGpu(model_->config_->model.decoder.session_options))
+    // WebGPU has limitations on the number of prefill requests per step.
+    // https://github.com/microsoft/onnxruntime/issues/33049
     max_prefill_requests_per_step_ = 1;
 }
 
