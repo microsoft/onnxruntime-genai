@@ -616,6 +616,10 @@ def _model_on(model_path, provider):
     config = og.Config(os.fspath(model_path))
     config.clear_providers()
     config.append_provider(provider)
+    if provider == "cuda":
+        # The CUDA EP allows TF32 math by default, which on some GPUs moves the encoder's features by
+        # up to about 3e-4 from CPU's. Without it, the comparisons with CPU only see the hand-offs.
+        config.set_provider_option("cuda", "use_tf32", "0")
     return og.Model(config)
 
 
