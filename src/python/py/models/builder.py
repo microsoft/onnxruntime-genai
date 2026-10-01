@@ -1083,9 +1083,10 @@ def get_args():
                     prune_lm_head=true, adds a logits_indices input that selects the packed hidden states consumed
                     by generation or draft verification, so the model outputs [num_logits, vocab_size] logits.
                     By default, the model outputs [num_tokens, vocab_size] logits.
-                    Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
-                    attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs;
-                    for example, Gemma2's non-zero attention softcap is unsupported. Cannot be combined with
+                    Supports CUDA with fp16 or bf16 precision. WebGPU requires fp16 model and KV-cache tensors
+                    and zero attention softcap; for example, Gemma2's non-zero attention softcap is unsupported.
+                    Q/K normalization is exported as separate nodes rather than fused PagedAttention inputs.
+                    Cannot be combined with
                     exclude_embeds or exclude_lm_head.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op

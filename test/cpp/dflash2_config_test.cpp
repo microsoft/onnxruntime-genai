@@ -494,12 +494,18 @@ TEST(Dflash2ConfigTest, AcceptsCompatibleAuxiliaryHiddenStates) {
   EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
 }
 
-TEST(Dflash2ConfigTest, AcceptsOmittedAttentionMetadata) {
+TEST(Dflash2ConfigTest, RejectsEmptyAttentionMetadataBinding) {
   auto config = MakeDflash2Config();
   config.model.dflash2.inputs.attention_metadata.clear();
+  const auto [target, drafter] = MakeCompatibleMetadata();
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RejectsMissingAttentionMetadataInput) {
+  const auto config = MakeDflash2Config();
   auto [target, drafter] = MakeCompatibleMetadata();
   drafter.RemoveInput("attention_metadata");
-  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
 }
 
 // Dflash2Drafter::AllocateCache() allocates only key and value buffers from the logical head size

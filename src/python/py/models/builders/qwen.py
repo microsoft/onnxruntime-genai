@@ -1302,7 +1302,6 @@ class Qwen35MoEModel(MTPModel):
             lm_head_quant=self.block_drafter_lm_head_quant(),
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
-            include_attention_metadata=True,
             compute_dtype=self.dflash2_attrs["compute_dtype"],
             fuse_qkv=self.dflash2_attrs["fuse_qkv"],
         )
@@ -1503,7 +1502,6 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
-            include_attention_metadata=True,
             embed_quant=self.block_drafter_embed_quant(),
             lm_head_quant=self.block_drafter_lm_head_quant(),
         )

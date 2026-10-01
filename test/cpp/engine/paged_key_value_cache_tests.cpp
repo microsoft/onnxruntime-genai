@@ -186,6 +186,32 @@ TEST_F(PagedKeyValueCacheTest, PromptTooLargeForThePoolIsUnserviceableEvenWhenIt
   EXPECT_TRUE(plan.requests.empty());
 }
 
+TEST_F(PagedKeyValueCacheTest, PrefillLimitCountsOnlySelectedRequests) {
+  auto unserviceable = CreateRequestWithPrompt(
+      assign_target_, std::array<int32_t, 1>{10});
+  auto fitting = CreateRequestWithPrompt(
+      assign_target_, std::array<int32_t, 1>{11});
+  auto deferred = CreateRequestWithPrompt(
+      assign_target_, std::array<int32_t, 1>{12});
+
+  StepPlan plan;
+  plan.max_prefill_requests = 1;
+  plan.requests.push_back(PlanEntry(unserviceable, 1, true, 13));
+  plan.requests.back().is_prefill = true;
+  plan.requests.push_back(PlanEntry(fitting, 1, true, 4));
+  plan.requests.back().is_prefill = true;
+  plan.requests.push_back(PlanEntry(deferred, 1, true, 4));
+  plan.requests.back().is_prefill = true;
+
+  const auto result = cache_->PlanStepResources(plan);
+
+  ASSERT_TRUE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  EXPECT_EQ(result.unserviceable_request_id, unserviceable.get());
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].request, fitting);
+}
+
 // Admission also has to wait for enough free blocks to hold the whole prompt, so a request never
 // starts a chunked prefill it cannot finish.
 TEST_F(PagedKeyValueCacheTest, AdmissionWaitsUntilTheWholePromptFits) {

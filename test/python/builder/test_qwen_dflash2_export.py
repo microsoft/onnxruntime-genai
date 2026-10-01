@@ -680,22 +680,6 @@ def test_kv_cache_uses_configured_paged_block_size(tmp_path):
     assert builder.values["past_key_values.0.key"].shape[1] == 512
 
 
-def test_webgpu_drafter_omits_attention_metadata(tmp_path):
-    builder = DFlash2Builder(
-        _draft_checkpoint(tmp_path),
-        str(tmp_path),
-        ir.DataType.FLOAT16,
-        paged_block_size=256,
-        max_position_embeddings=128,
-        include_attention_metadata=False,
-    )
-
-    builder.declare_io()
-
-    assert "attention_metadata" not in builder.values
-    assert builder.genai_config_section()["inputs"]["attention_metadata"] == ""
-
-
 def test_non_fp8_lm_head_preserves_target_layout_and_dtype(tmp_path):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
@@ -1771,7 +1755,6 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
         def __init__(self, _draft_dir, _target_dir, _io_dtype, _paged_block_size, max_position, **_kwargs):
             captured["max_position"] = max_position
             captured["fuse_gate_up"] = _kwargs["fuse_gate_up"]
-            captured["include_attention_metadata"] = _kwargs["include_attention_metadata"]
 
         def make_model(self):
             pass
@@ -1788,7 +1771,6 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
 
     assert captured["max_position"] == model.decoder.context_length
     assert captured["fuse_gate_up"] is (str(fuse_gate_up).lower() == "true")
-    assert captured["include_attention_metadata"] is True
 
 
 def test_drafter_resolves_target_repository_to_local_snapshot(tmp_path, monkeypatch):

@@ -187,6 +187,7 @@ ScheduledRequests DynamicBatchScheduler::Schedule() {
 StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   plan.requests.clear();
   plan.scheduled_request_limit = 0;
+  plan.max_prefill_requests = max_prefill_requests_per_step_;
   plan.token_count = 0;
   plan.proposed_block_table_columns = 0;
   plan.fixed_state = {};
@@ -281,7 +282,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   budget_candidates.reserve(candidates.size());
   for (const auto& candidate : candidates)
     budget_candidates.push_back(candidate.budget);
-  const auto order = DecodeFirstCandidateOrder(budget_candidates, max_prefill_requests_per_step_);
+  const auto order = DecodeFirstCandidateOrder(budget_candidates);
   plan.requests.reserve(candidates.size());
   for (size_t candidate_index : order) {
     auto entry = candidates[candidate_index].entry;

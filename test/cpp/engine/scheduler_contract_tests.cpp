@@ -535,6 +535,30 @@ TEST_F(SchedulerContractTest, BlockedPrefillDoesNotHideLaterFittingRequest) {
   EXPECT_EQ(plan.token_count, 3u);
 }
 
+TEST_F(SchedulerContractTest, WebGpuPrefillLimitCountsOnlySelectedRequests) {
+  model_->config_->model.decoder.session_options.provider_options.push_back(
+      ProviderOptions{"WebGPU"});
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto blocked = Assigned(10);
+  auto fitting = Assigned(20);
+  auto deferred = Assigned(30);
+  scheduler.AddRequest(blocked);
+  scheduler.AddRequest(fitting);
+  scheduler.AddRequest(deferred);
+  cache->SetCapacityDeferredRequest(blocked);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].request, fitting);
+  EXPECT_EQ(plan.max_prefill_requests, 1u);
+  EXPECT_EQ(plan.token_count, 3u);
+}
+
 TEST_F(SchedulerContractTest, DynamicScheduledRequestsRejectInvalidPlanTokenCount) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
   DynamicBatchScheduler scheduler(model_, cache);

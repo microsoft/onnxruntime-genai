@@ -957,6 +957,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   size_t planned_blocks = 0;
   size_t selected_requests = 0;
   size_t selected_new_requests = 0;
+  size_t selected_prefill_requests = 0;
   size_t max_blocks_per_request = 0;
   bool capacity_deferred = false;
   const void* unserviceable_request_id = nullptr;
@@ -1055,6 +1056,12 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
       continue;
     }
 
+    if (candidate.is_prefill && plan.max_prefill_requests &&
+        selected_prefill_requests >= *plan.max_prefill_requests) {
+      capacity_deferred = true;
+      continue;
+    }
+
     if (selected_requests >= scheduled_request_limit ||
         (candidate.newly_admitted &&
          (committed_request_count + selected_new_requests >= max_batch_size_ ||
@@ -1068,9 +1075,13 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
     }
 
     const bool newly_admitted = candidate.newly_admitted;
+    const bool is_prefill = candidate.is_prefill;
     select(i, growth);
     if (newly_admitted) {
       ++selected_new_requests;
+    }
+    if (is_prefill) {
+      ++selected_prefill_requests;
     }
   }
   plan.requests.resize(selected_requests);
