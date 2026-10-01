@@ -51,8 +51,10 @@ TEST(ConfigTest, ParsesAndAppliesOneMatchingRuntimeProfile) {
       "id":"larger-gpu",
       "eligibility":{"minimum_total_device_memory_bytes":34359738368},
       "overlay":{
+        "model":{"decoder":{"filename":"model_32gib.onnx"}},
         "engine":{"dynamic_batching":{"num_blocks":64,"max_batch_size":8}},
-        "search":{"chunk_size":512}
+        "search":{"chunk_size":512},
+        "speculative":{"max_draft_tokens":6}
       }
     }]
   })");
@@ -64,6 +66,8 @@ TEST(ConfigTest, ParsesAndAppliesOneMatchingRuntimeProfile) {
   EXPECT_EQ(config.engine.dynamic_batching->max_batch_size, 8u);
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 1024u);
   EXPECT_EQ(config.search.chunk_size, 512u);
+  EXPECT_EQ(config.model.decoder.filename, "model_32gib.onnx");
+  EXPECT_EQ(config.speculative.max_draft_tokens, 6);
 }
 
 TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
@@ -83,7 +87,7 @@ TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
 }
 
-TEST(ConfigTest, RuntimeProfileUsesSelectedDeviceWithoutResolvingDeviceId) {
+TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
   Config config;
   OverlayConfig(config, R"({
     "engine":{"dynamic_batching":{"num_blocks":32}},
@@ -99,18 +103,49 @@ TEST(ConfigTest, RuntimeProfileUsesSelectedDeviceWithoutResolvingDeviceId) {
   ApplyRuntimeProfileForSelectedDevice(config, device);
 
   EXPECT_EQ(device.state->memory_queries, 1u);
-  EXPECT_EQ(device.state->device_id_queries, 0u);
+  EXPECT_EQ(device.state->device_id_queries, 1u);
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 64u);
   EXPECT_TRUE(config.runtime_profiles.empty());
+}
+
+TEST(ConfigTest, RuntimeProfilesRejectAmbiguousCudaDeviceBeforeMemoryQuery) {
+  for (const auto& selection : {"provider", "filter", "current"}) {
+    SCOPED_TRACE(selection);
+    Config config;
+    OverlayConfig(config, R"({
+      "model":{"decoder":{"session_options":{"provider_options":[{"cuda":{}}]}}},
+      "runtime_profiles":[{
+        "id":"gpu",
+        "eligibility":{"minimum_total_device_memory_bytes":1},
+        "overlay":{"search":{"chunk_size":512}}
+      }]
+    })");
+    CountingCudaDevice device;
+    auto& provider = config.model.decoder.session_options.provider_options.front();
+    if (std::string{selection} == "provider") {
+      provider.options.emplace_back("device_id", "1");
+    } else if (std::string{selection} == "filter") {
+      provider.device_filtering_options.emplace().hardware_device_id = 0;
+    } else {
+      device.state->device_id = 1;
+    }
+
+    EXPECT_THROW(ApplyRuntimeProfileForSelectedDevice(config, device), std::runtime_error);
+    EXPECT_EQ(device.state->memory_queries, 0u);
+    EXPECT_FALSE(config.search.chunk_size.has_value());
+    EXPECT_FALSE(config.runtime_profiles.empty());
+  }
 }
 
 TEST(ConfigTest, NoRuntimeProfilesSkipDeviceMemoryQuery) {
   Config config;
   CountingCudaDevice device;
+  device.state->device_id = 1;
 
   ApplyRuntimeProfileForSelectedDevice(config, device);
 
   EXPECT_EQ(device.state->memory_queries, 0u);
+  EXPECT_EQ(device.state->device_id_queries, 0u);
 }
 
 TEST(ConfigTest, RuntimeProfilePropagatesDeviceMemoryQueryFailure) {
@@ -247,12 +282,45 @@ TEST(ConfigTest, RejectsUnapprovedSearchOverlayField) {
                std::runtime_error);
 }
 
-TEST(ConfigTest, RejectsModelOverlayField) {
+TEST(ConfigTest, RejectsUnapprovedModelOverlayField) {
   Config config;
   EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
-    "id":"filename",
+    "id":"context-length",
     "eligibility":{"minimum_total_device_memory_bytes":1},
-    "overlay":{"model":{"decoder":{"filename":"decoder-large.onnx"}}}
+    "overlay":{"model":{"context_length":8192}}
+  }]})"),
+               std::runtime_error);
+}
+
+TEST(ConfigTest, RejectsEmptyRuntimeProfileDecoderFilename) {
+  Config config;
+  EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"empty-filename",
+    "eligibility":{"minimum_total_device_memory_bytes":1},
+    "overlay":{"model":{"decoder":{"filename":""}}}
+  }]})"),
+               std::runtime_error);
+}
+
+TEST(ConfigTest, RejectsRuntimeProfileDecoderFilenameOutsideModelDirectory) {
+  for (const char* filename : {"../model.onnx", "variants/../../model.onnx", "/tmp/model.onnx"}) {
+    Config config;
+    const std::string overlay = std::string{R"({"runtime_profiles":[{
+      "id":"escape",
+      "eligibility":{"minimum_total_device_memory_bytes":1},
+      "overlay":{"model":{"decoder":{"filename":")"} +
+                                filename + R"("}}}
+    }]})";
+    EXPECT_THROW(OverlayConfig(config, overlay), std::runtime_error) << filename;
+  }
+}
+
+TEST(ConfigTest, RejectsRuntimeProfileMaxDraftTokensAboveSpeculativeLimit) {
+  Config config;
+  EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"too-many-drafts",
+    "eligibility":{"minimum_total_device_memory_bytes":1},
+    "overlay":{"speculative":{"max_draft_tokens":17}}
   }]})"),
                std::runtime_error);
 }

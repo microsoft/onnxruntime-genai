@@ -35,6 +35,9 @@ inline size_t GetGraphBlockTableColumns(size_t max_blocks, size_t max_columns) {
   return columns;
 }
 
+// Shared automatic-sizing budget, including the fragmentation allowance.
+size_t PagedCacheMemoryBudget(size_t available_memory_bytes, float gpu_utilization_factor);
+
 // Blocks the target pool can hold in `available_memory_bytes`, after a fragmentation allowance and
 // the caller's utilization factor. `primary_bytes_per_block` is the target's own cost for one block
 // across all full-attention layers -- use PagedKeyValueCacheBytesPerBlock() to obtain it, so that
@@ -115,6 +118,11 @@ struct PagedKeyValueCache {
   bool AttachPrefixCheckpoint(
       const void* request_id,
       std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+  std::optional<DraftPrefixBoundary> DraftBoundary(const void* request_id,
+                                                   size_t token_count) const;
+  bool AttachDraftCheckpoint(const DraftPrefixBoundary& boundary,
+                             std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint);
+  void DropUnleasedDraftCheckpoints();
   size_t ReclaimPrefixCheckpoints(size_t checkpoints_needed);
   size_t ReclaimablePrefixCheckpoints() const;
   bool PrefixCachingEnabled() const;

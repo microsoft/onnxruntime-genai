@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <span>
@@ -11,6 +12,8 @@
 #include <gtest/gtest.h>
 
 #include "engine/fixed_state_pool.h"
+#include "engine/prefix_cache.h"
+#include "dflash2_drafter.h"
 #include "engine_test_helpers.h"
 #include "models/model_state_manifest.h"
 
@@ -345,6 +348,57 @@ TEST_F(FixedStatePoolTest, PrefixCheckpointLeaseReleasesItsPreallocatedSlot) {
 
   EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 1u);
   EXPECT_EQ(pool.Snapshot().checkpoint_count, 0u);
+}
+
+TEST_F(FixedStatePoolTest, DraftAttachmentRequiresExactFixedBoundaryAndRetainsLeasedReaders) {
+  constexpr size_t block_size = 4;
+  BlockPool blocks{block_size, 2};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 2;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 2;
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/2};
+  PrefixCache index{blocks, options};
+  MakeResident(pool, kRequestA, 7.0f, /*target_tokens=*/block_size);
+  auto fixed = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(fixed, nullptr);
+
+  const std::array<int32_t, 5> tokens{1, 2, 3, 4, 5};
+  auto owned = blocks.AllocateBlocks(block_size);
+  ASSERT_EQ(owned.size(), 1u);
+  auto registration = index.Register(owned.front(), std::span<const int32_t>(tokens).first(block_size), {});
+  ASSERT_NE(registration.identity, nullptr);
+  ASSERT_TRUE(index.AttachCheckpoint(registration.identity, fixed));
+
+  auto draft = std::make_shared<Dflash2PrefixCheckpoint>();
+  draft->token_count = block_size;
+  ASSERT_TRUE(index.CanAttachDraftCheckpoint(registration.identity, block_size));
+  EXPECT_FALSE(index.CanAttachDraftCheckpoint(registration.identity, block_size * 2));
+  auto other = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(other, nullptr);
+  EXPECT_FALSE(index.AttachDraftCheckpoint(registration.identity, other, draft));
+  ASSERT_TRUE(index.AttachDraftCheckpoint(registration.identity, fixed, draft));
+  draft.reset();
+
+  {
+    auto match = index.Match(tokens, tokens.size() - 1);
+    EXPECT_EQ(match.token_count, block_size);
+    ASSERT_NE(match.draft_checkpoint, nullptr);
+    index.DropUnleasedDraftCheckpoints();
+    EXPECT_EQ(index.Match(tokens, tokens.size() - 1).draft_checkpoint, match.draft_checkpoint);
+  }
+  index.DropUnleasedDraftCheckpoints();
+  auto match = index.Match(tokens, tokens.size() - 1);
+  EXPECT_EQ(match.token_count, block_size);
+  EXPECT_EQ(match.draft_checkpoint, nullptr);
+  EXPECT_EQ(match.fixed_state_checkpoint, fixed);
+  match = {};
+  blocks.Free(owned);
+  EXPECT_EQ(index.Reclaim(1), 1u);
+  EXPECT_FALSE(index.CanAttachDraftCheckpoint(registration.identity, block_size));
+  EXPECT_FALSE(index.AttachDraftCheckpoint(registration.identity, fixed,
+                                           std::make_shared<Dflash2PrefixCheckpoint>()));
 }
 
 TEST_F(FixedStatePoolTest, PrefixCheckpointMustBelongToTheAdoptingPool) {
@@ -924,6 +978,75 @@ TEST_F(FixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   ExpectInputRow(reservation.Bindings()[3], 0, expected_gdn);
 }
 
+// The compact replay of a partial commit is launched by the next pool operation, so a checkpoint
+// captured right after the commit must still observe the replayed state.
+TEST_F(FixedStatePoolTest, PrefixCheckpointAfterPartialAcceptanceSeesReplayedState) {
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/1};
+  MakeResident(pool, kRequestA, 4.0f);
+  {
+    auto reservation = pool.Reserve(One(kRequestA, 4, 3));
+    FillStagedRows(reservation, 0, 99.0f);
+    const std::array<float, 6> conv_values{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
+    const std::array<float, 6> decay{0.5f, 0.25f, 1.0f, 0.5f, 1.0f, 1.0f};
+    const std::array<float, 6> key{2.0f, 3.0f, 4.0f, 5.0f, 1.0f, 1.0f};
+    const std::array<float, 12> delta{
+        1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_kind ==
+          Config::Model::Decoder::StateUpdateKind::CausalConv) {
+        FillConvUpdates(binding, 0, conv_values);
+      } else {
+        FillGdnUpdates(binding, 0, decay, key, delta);
+      }
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    reservation.Commit();
+  }
+
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(checkpoint, nullptr);
+  const std::array<FixedStateReservationRequest, 1> requests{
+      FixedStateReservationRequest{
+          kRequestB, /*target_tokens=*/3, /*capture_count=*/0, checkpoint}};
+  auto reservation = pool.Reserve(requests);
+  const std::array<float, 6> expected_conv{4.0f, 10.0f, 20.0f, 4.0f, 11.0f, 21.0f};
+  const std::array<float, 8> expected_gdn{
+      24.0f, 30.0f, 30.0f, 38.0f, 31.5f, 40.0f, 36.5f, 46.5f};
+  ExpectInputRow(reservation.Bindings()[0], 0, expected_conv);
+  ExpectInputRow(reservation.Bindings()[2], 0, expected_gdn);
+}
+
+// Discarding a prepared reservation drops the replay it deferred: the published state is untouched.
+TEST_F(FixedStatePoolTest, DiscardedPartialAcceptanceLeavesStateUnchanged) {
+  auto pool = MakePool(1);
+  MakeResident(*pool, kRequestA, 4.0f);
+  {
+    auto reservation = pool->Reserve(One(kRequestA, 4, 3));
+    FillStagedRows(reservation, 0, 99.0f);
+    const std::array<float, 6> conv_values{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
+    const std::array<float, 6> decay{0.5f, 0.25f, 1.0f, 0.5f, 1.0f, 1.0f};
+    const std::array<float, 6> key{2.0f, 3.0f, 4.0f, 5.0f, 1.0f, 1.0f};
+    const std::array<float, 12> delta{
+        1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_kind ==
+          Config::Model::Decoder::StateUpdateKind::CausalConv) {
+        FillConvUpdates(binding, 0, conv_values);
+      } else {
+        FillGdnUpdates(binding, 0, decay, key, delta);
+      }
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    reservation.PrepareCommit();
+    reservation.Discard();
+  }
+
+  auto reservation = pool->Reserve(One(kRequestA, 2));
+  ExpectInputRows(reservation, 0, 4.0f);
+}
+
 TEST_F(FixedStatePoolTest, DirectBindingsMixPartialAndFullAcceptance) {
   auto pool = MakePool(2);
   MakeResident(*pool, kRequestA, 4.0f);
@@ -1065,6 +1188,96 @@ TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   expect_tensor(*reservation.Bindings()[1].input, expected_conv);
   expect_tensor(*reservation.Bindings()[2].input, expected_gdn);
   expect_tensor(*reservation.Bindings()[3].input, expected_gdn);
+}
+
+// Realistic gated-delta-net geometries take the fast replay kernel, and a key width that is not a
+// multiple of 4 keeps the generic one; both must match the sequential host recurrence exactly.
+TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto& device = *model->p_device_kvcache_;
+
+  struct Geometry {
+    size_t heads, key_heads, value_width, key_width, capacity, kept;
+  };
+  const std::array<Geometry, 2> geometries{
+      Geometry{4, 2, 40, 128, 7, 3},  // fast kernel, with a partial row chunk
+      Geometry{3, 3, 5, 6, 4, 2},     // generic kernel
+  };
+  std::vector<DeviceSpan<float>> keepalive;
+  std::vector<std::vector<float>> expected;
+  std::vector<DeviceSpan<float>> outputs;
+  std::vector<StateUpdateReplayDesc> descriptors;
+  uint32_t seed = 1;
+  const auto next = [&seed] {
+    seed = seed * 1664525u + 1013904223u;
+    return static_cast<float>(seed >> 8) / static_cast<float>(1u << 24) - 0.5f;
+  };
+  for (const auto& g : geometries) {
+    const size_t state_count = g.heads * g.value_width * g.key_width;
+    const size_t capsule_count =
+        g.capacity * (g.heads + g.key_heads * g.key_width + g.heads * g.value_width);
+    std::vector<float> state(state_count), capsule(capsule_count);
+    for (auto& value : state) value = next();
+    for (auto& value : capsule) value = next();
+    const float* decay = capsule.data();
+    const float* key = decay + g.capacity * g.heads;
+    const float* delta = key + g.capacity * g.key_heads * g.key_width;
+
+    std::vector<float> reference = state;
+    for (size_t h = 0; h < g.heads; ++h) {
+      const size_t kh = h * g.key_heads / g.heads;
+      for (size_t v = 0; v < g.value_width; ++v) {
+        for (size_t k = 0; k < g.key_width; ++k) {
+          float s = reference[(h * g.value_width + v) * g.key_width + k];
+          for (size_t t = 0; t < g.kept; ++t) {
+            s = std::fma(key[(t * g.key_heads + kh) * g.key_width + k],
+                         delta[(t * g.heads + h) * g.value_width + v], s * decay[t * g.heads + h]);
+          }
+          reference[(h * g.value_width + v) * g.key_width + k] = s;
+        }
+      }
+    }
+
+    auto source = device.Allocate<float>(state_count);
+    auto destination = device.Allocate<float>(state_count);
+    auto capsule_device = device.Allocate<float>(capsule_count);
+    source.CopyFromCpu(state);
+    capsule_device.CopyFromCpu(capsule);
+    const float* capsule_base = capsule_device.Span().data();
+    descriptors.push_back(StateUpdateReplayDesc{
+        source.Span().data(),
+        destination.Span().data(),
+        nullptr,
+        capsule_base,
+        capsule_base + g.capacity * g.heads,
+        capsule_base + g.capacity * (g.heads + g.key_heads * g.key_width),
+        g.heads,
+        g.value_width,
+        g.key_width,
+        g.key_heads,
+        static_cast<uint32_t>(g.capacity),
+        static_cast<uint32_t>(g.kept),
+        static_cast<uint32_t>(sizeof(float)),
+        StateUpdateReplayKind::GatedDeltaNet,
+    });
+    keepalive.push_back(source);
+    keepalive.push_back(capsule_device);
+    outputs.push_back(destination);
+    expected.push_back(std::move(reference));
+  }
+
+  device.ReplayStateUpdates(descriptors.data(), descriptors.size());
+  device.Synchronize();
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const auto actual = outputs[i].CopyDeviceToCpu();
+    ASSERT_EQ(actual.size(), expected[i].size());
+    for (size_t j = 0; j < actual.size(); ++j) {
+      ASSERT_EQ(actual[j], expected[i][j]) << "descriptor " << i << " element " << j;
+    }
+  }
 }
 #endif
 

@@ -862,6 +862,8 @@ TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowC
   decoder.inputs.block_table_windowed = decoder.inputs.block_table;
   model->config_->search.chunk_size = 4;
 
+  EXPECT_TRUE(model->config_->engine.dynamic_batching->prefix_caching);
+  EXPECT_FALSE(ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0));
   auto cache = MakePagedCache(model);
 
   EXPECT_FALSE(cache->PrefixCachingEnabled());
@@ -923,6 +925,26 @@ TEST(PagedKeyValueCacheManifestTest, PrefixCachingAllocatesFixedStateCheckpoints
   EXPECT_EQ(fixed->checkpoint_capacity,
             model->config_->engine.dynamic_batching->max_batch_size);
   EXPECT_EQ(fixed->checkpoint_count, 0u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, OptionalDraftCheckpointDoesNotExhaustHybridTargetPool) {
+  auto model = LoadSyntheticCompositeModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 1;
+  batching.num_blocks = 4;
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  bool enabled = true;
+  auto manager = CacheManager::Create(model, /*auxiliary_bytes_per_block=*/0,
+                                      /*auxiliary_reserved_memory_bytes=*/0,
+                                      4 * block_bytes, &enabled);
+  EXPECT_FALSE(enabled);
+  EXPECT_EQ(manager->Snapshot().total_blocks, 4u);
+  manager.reset();
+
+  manager = CacheManager::Create(model, 0, 0, 2 * block_bytes, &enabled);
+  EXPECT_TRUE(enabled);
+  EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
 }
 
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {

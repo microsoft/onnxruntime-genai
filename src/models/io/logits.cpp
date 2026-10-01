@@ -45,7 +45,7 @@ DeviceSpan<float> Logits::Get() {
     output_last_tokens_ = OrtValue::CreateTensor(model_.p_device_logits_->GetAllocator(), shape_last, type_);
 
     if (type_ == Ort::TypeToTensorType<Ort::Float16_t> || type_ == Ort::TypeToTensorType<Ort::BFloat16_t>)
-      logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_logits_->GetAllocator(), shape_);
+      logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_logits_->GetAllocator(), shape_last);
 
     logits_of_last_token = output_last_tokens_.get();
 
