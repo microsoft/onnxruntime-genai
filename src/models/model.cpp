@@ -940,8 +940,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   // A multimodal model whose decoder is split into a pipeline (e.g. chunked for an NPU) needs
   // both the encoders and the staged decoder, and no other model class consumes
   // decoder.pipeline. Gate on that capability rather than on a list of model names, so any
-  // such model is routed here. Qwen2_5_VL_PipelineModel's constructor rejects the one
-  // multimodal configuration it cannot serve, a decoder pipeline alongside a speech encoder.
+  // such model is routed here. Qwen2_5_VL_PipelineModel's constructor disables the one
+  // modality it cannot host, a speech encoder declared alongside a decoder pipeline.
   if ((ModelType::IsVLM(config->model.type) || ModelType::IsMMM(config->model.type)) &&
       !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);

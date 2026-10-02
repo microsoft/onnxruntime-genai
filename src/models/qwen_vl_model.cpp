@@ -47,15 +47,23 @@ std::vector<int64_t> SqueezeToRank2(const std::vector<int64_t>& shape) {
 Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : DecoderOnlyPipelineModel(std::move(config), ort_env) {
   // This path runs a vision encoder in front of a pipelined decoder and creates no speech
-  // session. A config that declares one would still load, because AppendEmbeddingFeatureInputs
-  // binds an empty audio tensor for any unfilled modality, and would then answer as if the
-  // audio were silent. Reject it rather than return a confidently wrong result.
+  // session. Exports commonly ship an audio encoder alongside the vision one, so a config
+  // reaching here may well declare a speech model that this path cannot host.
+  //
+  // Binding is not the hazard: AppendEmbeddingFeatureInputs hands any unfilled modality an
+  // empty [0, hidden] tensor, so the in-graph merge is a no-op and the declared-but-unused
+  // audio encoder changes no result. The hazard is the multimodal processor, which enables
+  // audio whenever speech.config_filename and speech.filename are both set, then resolves
+  // speech.inputs.audio_embeds through session_info. No speech session was created, so that
+  // lookup throws.
+  //
+  // Clear the speech config so audio is cleanly unavailable rather than half-configured.
+  // Rejecting the model instead would make the common vision-plus-audio export unusable on
+  // this path for text and image prompts, which are the only things a chunked NPU decoder
+  // serves today.
   if (!config_->model.speech.filename.empty()) {
-    throw std::runtime_error(
-        "A pipelined decoder (decoder.pipeline) combined with a speech encoder "
-        "(speech.filename) is not supported: this path runs vision only. Remove "
-        "speech.filename, or export the decoder as a single graph so the multimodal "
-        "model is used instead.");
+    config_->model.speech.filename.clear();
+    config_->model.speech.config_filename.clear();
   }
 
   if (config_->model.vision.pipeline.empty()) {

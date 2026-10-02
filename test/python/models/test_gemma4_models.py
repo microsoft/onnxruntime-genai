@@ -573,10 +573,15 @@ def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(test_dat
         generator.set_inputs(inputs)
 
 
-def test_gemma4_pipelined_decoder_rejects_speech_encoder(test_data_path, tmp_path):
-    """A pipelined decoder has no speech session, so a config declaring one must be rejected.
+def test_gemma4_pipelined_decoder_disables_declared_speech_encoder(test_data_path, tmp_path):
+    """A pipelined decoder has no speech session, so a declared one is disabled, not rejected.
 
-    Loading it would bind an empty audio tensor and answer as if the audio were silent.
+    Gemma 4 exports ship an audio encoder beside the vision encoder, so this config shape is
+    the normal one. Loading must succeed and serve text and image prompts: the unused audio
+    encoder changes no result, because an unfilled modality is bound an empty [0, hidden]
+    tensor and the in-graph merge is a no-op. Audio itself stays unavailable, since clearing
+    the speech config stops the multimodal processor resolving audio inputs that no session
+    provides.
     """
     onnx = pytest.importorskip("onnx")
     source_model_path = Path(_get_gemma4_model_path(test_data_path))
@@ -584,8 +589,9 @@ def test_gemma4_pipelined_decoder_rejects_speech_encoder(test_data_path, tmp_pat
     speech = {"filename": "dummy_speech.onnx", "config_filename": "audio_feature_extraction.json"}
     _write_pipelined_gemma4(onnx, source_model_path, model_path, speech=speech)
 
-    with pytest.raises(Exception, match="speech"):
-        og.Model(os.fspath(model_path))
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    assert processor is not None
 
 
 # Standalone runner functionality
