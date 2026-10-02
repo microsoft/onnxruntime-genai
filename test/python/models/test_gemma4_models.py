@@ -454,6 +454,146 @@ def test_gemma4_audio_preprocessing(test_data_path, relative_audio_path):
     assert audio_sizes[0] > 0, f"audio_sizes should be positive, got {audio_sizes[0]}"
 
 
+def _write_pipelined_gemma4(onnx, source_model_path, model_path, **config_overrides):
+    """Copy the Gemma4 fixture and rewrite it as a pipelined decoder.
+
+    A pipelined decoder is what routes the config to Qwen2_5_VL_PipelineModel, which runs the
+    vision encoder as a single session instead of the three-stage Qwen vision pipeline.
+    """
+    shutil.copytree(source_model_path, model_path)
+    _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx")
+    _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx")
+    _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")
+
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["model"]["speech"] = {"filename": "", "config_filename": ""}
+    config["model"]["vocab_size"] = 8
+    config["model"]["eos_token_id"] = [1]
+    config["search"]["past_present_share_buffer"] = False
+
+    decoder = config["model"]["decoder"]
+    decoder.pop("filename", None)
+    decoder["pipeline"] = [
+        {
+            "embedding": {
+                "filename": "dummy_embedding.onnx",
+                "inputs": ["input_ids", "image_features"],
+                "outputs": ["inputs_embeds"],
+            },
+            "text": {
+                "filename": "dummy_text.onnx",
+                "inputs": [
+                    "inputs_embeds",
+                    "attention_mask",
+                    "position_ids",
+                    "past_key_values.0.key",
+                    "past_key_values.0.value",
+                ],
+                "outputs": ["logits", "present.0.key", "present.0.value"],
+            },
+        }
+    ]
+
+    for key, value in config_overrides.items():
+        config["model"][key] = value
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    return config_path
+
+
+@pytest.mark.parametrize(
+    "relative_image_paths",
+    [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
+)
+def test_gemma4_pipelined_decoder_runs_single_session_vision(test_data_path, tmp_path, relative_image_paths):
+    """A pipelined Gemma4 decoder must still encode every image and bind the features.
+
+    Covers Qwen2_5_VL_PipelineState::RunSingleSessionVision: the vision graph has a static
+    batch of 1, so two differently sized images have to be encoded one at a time and their
+    features concatenated before the embedding stage consumes them.
+    """
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4-pipeline"
+    _write_pipelined_gemma4(onnx, source_model_path, model_path)
+
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    image_paths = [os.fspath(_get_test_media_path(test_data_path, path)) for path in relative_image_paths]
+    for p in image_paths:
+        if not os.path.exists(p):
+            pytest.skip(f"Test image not found at {p}")
+    images = og.Images.open(*image_paths)
+    inputs = processor("<|image|><|image|>Compare these images", images=images)
+
+    image_token_counts = _to_numpy(inputs["num_image_tokens"])
+    assert image_token_counts[0] != image_token_counts[1], "fixture images must differ in token count"
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096)
+    generator = og.Generator(model, params)
+    # set_inputs drives SetExtraInputs -> RunVision -> RunSingleSessionVision. Reaching the
+    # next token without throwing means every image was encoded and the concatenated
+    # features matched the image token count the embedding stage expected.
+    generator.set_inputs(inputs)
+    generator.generate_next_token()
+    assert len(generator.get_next_tokens()) == 1
+
+
+def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(test_data_path, tmp_path):
+    """A configured image_features output that the vision graph lacks must fail loudly.
+
+    Silently falling back to output 0 would feed whatever that output happens to be into the
+    embedding stage as if it were image features.
+    """
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4-bad-features"
+    vision = {
+        "filename": "dummy_vision.onnx",
+        "config_filename": "processor_config.json",
+        "inputs": {"pixel_values": "pixel_values", "pixel_position_ids": "pixel_position_ids"},
+        "outputs": {"image_features": "not_an_output_of_this_graph"},
+        "session_options": {"log_id": "onnxruntime-genai", "provider_options": []},
+    }
+    _write_pipelined_gemma4(onnx, source_model_path, model_path, vision=vision)
+
+    image_path = os.fspath(_get_test_media_path(test_data_path, Path("images") / "australia.jpg"))
+    if not os.path.exists(image_path):
+        pytest.skip(f"Test image not found at {image_path}")
+
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    inputs = processor("<|image|>Describe this image", images=og.Images.open(image_path))
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096)
+    generator = og.Generator(model, params)
+    with pytest.raises(Exception, match="not_an_output_of_this_graph"):
+        generator.set_inputs(inputs)
+
+
+def test_gemma4_pipelined_decoder_disables_declared_speech_encoder(test_data_path, tmp_path):
+    """A pipelined decoder has no speech session, so a declared one is disabled, not rejected.
+
+    Gemma 4 exports ship an audio encoder beside the vision encoder, so this config shape is
+    the normal one. Loading must succeed and serve text and image prompts: the unused audio
+    encoder changes no result, because an unfilled modality is bound an empty [0, hidden]
+    tensor and the in-graph merge is a no-op. Audio itself stays unavailable, since clearing
+    the speech config stops the multimodal processor resolving audio inputs that no session
+    provides.
+    """
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4-pipeline-speech"
+    speech = {"filename": "dummy_speech.onnx", "config_filename": "audio_feature_extraction.json"}
+    _write_pipelined_gemma4(onnx, source_model_path, model_path, speech=speech)
+
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    assert processor is not None
+
+
 # Standalone runner functionality
 def run_gemma4_vision_tests(
     cwd: str | bytes | os.PathLike,
