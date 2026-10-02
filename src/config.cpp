@@ -3033,6 +3033,14 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         }
         return true;
       } else if (provider_options->name == "AMDGPU") {
+        // Graph capture defaults to ON for the AMDGPU (DirectX) backend but can be
+        // opted out per model via the provider option "enable_graph_capture": "0"
+        // (mirrors the DML branch above).
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_graph_capture" && value.second == "0") {
+            return false;
+          }
+        }
         return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {

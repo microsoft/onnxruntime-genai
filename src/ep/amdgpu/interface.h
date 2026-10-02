@@ -12,9 +12,11 @@ constexpr const char* kAMDGPUExecutionProviderName = "AMDGPUExecutionProvider";
 
 DeviceInterface* GetAMDGPUInterface();
 
-// Null the AMDGPU interface singleton's allocator-derived state (allocator, memory info, pinned
-// allocator, device id) in place, without destroying the singleton. Called per model so the next
-// device init rebinds a fresh allocator.
-void ResetAMDGPUInterfaceAllocatorState();
+// Full per-model teardown (mirrors CloseDmlInterface): destroys the interface singletons and
+// unregisters the umbrella EP library so the plugin releases its process-global device, allocators,
+// and outstanding allocation handles. Called from Model::~Model. The next model re-registers a fresh
+// EP (and fresh device) via EnsureUmbrellaEpRegistered. Required so a GPU hang cannot leave stale
+// device-backed allocation handles alive into the next model (dangling-handle access violation).
+void CloseAMDGPUInterface();
 
 }  // namespace Generators
