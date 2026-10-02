@@ -27,6 +27,15 @@ Models must provide `model.timestamp_begin_token_id` and
 `model.no_timestamps_token_id` in `genai_config.json`. The Whisper model builder emits
 these values when the tokenizer contains the standard contiguous timestamp-token suffix.
 
+Timestamp rule processing runs on the model's scoring device. CPU and CUDA scoring are
+implemented. Providers that use CPU scoring follow the CPU path, but provider-specific
+model execution must still be validated separately. NvTensorRtRtx inherits the CUDA
+timestamp implementation, but provider-specific Whisper timestamp execution has not been
+validated.
+
+Timestamp decoding is not supported with speculative decoding, guidance, multiple EOS
+token IDs, or the continuous batching Engine.
+
 ## Consuming timestamp tokens
 
 Generated sequences retain timestamp token IDs so a transcription component can inspect
