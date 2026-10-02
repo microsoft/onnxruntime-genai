@@ -40,6 +40,7 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
 )
 
+from loaders.llmman import resolve_input
 from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 
 
@@ -6106,6 +6107,9 @@ class Model:
         return layer.moe
 
     def load_weights(self, input_path):
+        # An oci:// source is pulled to a local directory via llmman
+        input_path = resolve_input(input_path)
+
         # Load weights of original model
         if input_path.endswith(".gguf"):
             # Load GGUF model

@@ -26,6 +26,8 @@ for source formats whose packed weights require a format-specific operator.
 ## Loaders
 
 - `gguf.py` maps GGUF tensors and metadata to the common model structure.
+- `llmman.py` pulls `oci://` (CNCF ModelPack) sources through a running
+	`llmman serve` daemon and resolves them to a local Hugging Face directory.
 - `base.py` defines the shared quantized-model IR and base loading,
 	unpacking, and repacking behavior.
 - `awq.py`, `gptq.py`, `quark.py`, `olive.py`, `modelopt.py`, and `quant_auto.py`
