@@ -46,6 +46,18 @@ std::vector<int64_t> SqueezeToRank2(const std::vector<int64_t>& shape) {
 
 Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : DecoderOnlyPipelineModel(std::move(config), ort_env) {
+  // This path runs a vision encoder in front of a pipelined decoder and creates no speech
+  // session. A config that declares one would still load, because AppendEmbeddingFeatureInputs
+  // binds an empty audio tensor for any unfilled modality, and would then answer as if the
+  // audio were silent. Reject it rather than return a confidently wrong result.
+  if (!config_->model.speech.filename.empty()) {
+    throw std::runtime_error(
+        "A pipelined decoder (decoder.pipeline) combined with a speech encoder "
+        "(speech.filename) is not supported: this path runs vision only. Remove "
+        "speech.filename, or export the decoder as a single graph so the multimodal "
+        "model is used instead.");
+  }
+
   if (config_->model.vision.pipeline.empty()) {
     // No three-stage vision pipeline configured. Models such as Gemma-4 export the
     // vision encoder as a single graph, so run it as one session.
@@ -335,13 +347,23 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   if (output_names.empty()) {
     throw std::runtime_error("Vision encoder: model has no outputs");
   }
+  // Fall back to the first output only when the config names no output at all. A name that
+  // is set but absent from the model is a misconfiguration: running output 0 instead would
+  // inject whatever that output happens to be as if it were image features.
   const auto& features_name = vl_model_.config_->model.vision.outputs.image_features;
   size_t output_index = 0;
-  for (size_t i = 0; i < output_names.size(); ++i) {
-    if (output_names[i] == features_name) {
-      output_index = i;
-      break;
+  if (!features_name.empty()) {
+    const auto found = std::find(output_names.begin(), output_names.end(), features_name);
+    if (found == output_names.end()) {
+      std::string available;
+      for (const auto& name : output_names) {
+        available += (available.empty() ? "" : ", ") + name;
+      }
+      throw std::runtime_error("Vision encoder: configured vision.outputs.image_features '" +
+                               features_name + "' is not an output of the vision model. Available outputs: " +
+                               available);
     }
+    output_index = static_cast<size_t>(std::distance(output_names.begin(), found));
   }
   const char* output_name_ptrs[] = {output_names[output_index].c_str()};
 
@@ -437,9 +459,19 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
 
   auto vision_shape = image_features_value_->GetTensorTypeAndShapeInfo()->GetShape();
 
-  const int32_t image_token_id = static_cast<int32_t>(vl_model_.config_->model.image_token_id);
+  // model.image_token_id is the general contract, but no builder emitted it until recently:
+  // only builders/mistral.py assigns it. Configs for the three model types that reached this
+  // code before relied on a hardcoded 151655, so keep that value for exactly those types
+  // rather than fail a config that used to work. Everything else must set the field.
+  int32_t image_token_id = static_cast<int32_t>(vl_model_.config_->model.image_token_id);
   if (image_token_id == 0) {
-    throw std::runtime_error("Vision embedding injection: model.image_token_id is not set in genai_config.json");
+    const auto& model_type = vl_model_.config_->model.type;
+    if (model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_vl") {
+      constexpr int32_t kQwenVLImageTokenId = 151655;
+      image_token_id = kQwenVLImageTokenId;
+    } else {
+      throw std::runtime_error("Vision embedding injection: model.image_token_id is not set in genai_config.json");
+    }
   }
 
   if (!input_ids_ || !input_ids_->Get()) {
