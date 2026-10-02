@@ -185,8 +185,8 @@ void Qwen2_5_VL_PipelineState::AppendEmbeddingFeatureInputs(std::vector<ExtraInp
 
   auto mem_info = OrtMemoryInfo::Create("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
 
-  auto add = [&](const std::string& name, bool use_vision_output) {
-    if (name.empty() || already_bound(name) || !vl_model_.session_info_.HasInput(name)) return;
+  auto add = [&](const std::string& name, bool use_vision_output) -> bool {
+    if (name.empty() || already_bound(name) || !vl_model_.session_info_.HasInput(name)) return false;
 
     std::unique_ptr<OrtValue> value;
     if (use_vision_output && image_features_value_) {
@@ -207,10 +207,13 @@ void Qwen2_5_VL_PipelineState::AppendEmbeddingFeatureInputs(std::vector<ExtraInp
 
     auto tensor = std::make_shared<Tensor>(std::move(value));
     inputs.push_back(ExtraInput{name, tensor});
-    embedding_merges_features_ = true;
+    return true;
   };
 
-  add(image_name, /*use_vision_output=*/true);
+  // Only the image binding may suppress injection. An embedding graph that declares
+  // audio_features but not image_features still needs the vision rows injected, so letting
+  // the audio binding set this would silently drop the image.
+  embedding_merges_features_ = add(image_name, /*use_vision_output=*/true);
   add(audio_name, /*use_vision_output=*/false);
   features_bound_ = true;
 }
@@ -325,8 +328,10 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   const auto input_names = vl_model_.vision_session_->GetInputNames();
   std::vector<const char*> input_name_ptrs;
   std::vector<const OrtValue*> input_values;
+  std::vector<OrtValue*> source_values;
   input_name_ptrs.reserve(input_names.size());
   input_values.reserve(input_names.size());
+  source_values.reserve(input_names.size());
   for (const auto& name : input_names) {
     OrtValue* value = find_extra_input(name);
     if (!value) {
@@ -335,21 +340,32 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
     }
     input_name_ptrs.push_back(name.c_str());
     input_values.push_back(value);
+    source_values.push_back(value);
   }
 
   // Gemma-4's vision graph has a static batch of 1, so several images must be encoded one at a
   // time and their features concatenated. This mirrors Gemma4VisionState on the multi-modal path.
-  const auto& position_name = vl_model_.config_->model.vision.inputs.pixel_position_ids;
   size_t pixel_index = SIZE_MAX;
-  size_t position_index = SIZE_MAX;
   for (size_t i = 0; i < input_names.size(); ++i) {
     if (input_names[i] == pixel_name) pixel_index = i;
-    if (input_names[i] == position_name) position_index = i;
   }
   OrtValue* pixel_values = find_extra_input(pixel_name);
-  OrtValue* position_values = position_index == SIZE_MAX ? nullptr : find_extra_input(position_name);
   const auto pixel_shape = pixel_values->GetTensorTypeAndShapeInfo()->GetShape();
   const int64_t num_images = pixel_shape.size() == 3 ? pixel_shape[0] : 1;
+
+  // Every input the processor produced per image has to be sliced in step with pixel_values,
+  // not just the ones this model family happens to name. Routing here is by capability, so
+  // the session may declare inputs beyond pixel_values and pixel_position_ids, such as an
+  // attention mask or spatial shapes. Leaving those at the full batch while pixel_values is
+  // sliced to one image would feed the encoder mismatched batches. Select by leading
+  // dimension, which is what makes an input per image.
+  std::vector<size_t> batched_indices;
+  if (num_images > 1) {
+    for (size_t i = 0; i < source_values.size(); ++i) {
+      const auto shape = source_values[i]->GetTensorTypeAndShapeInfo()->GetShape();
+      if (shape.size() >= 2 && shape[0] == num_images) batched_indices.push_back(i);
+    }
+  }
 
   const auto output_names = vl_model_.vision_session_->GetOutputNames();
   if (output_names.empty()) {
@@ -397,12 +413,12 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
     image_features_buffer_.clear();
     int64_t hidden_size = 0;
     for (int64_t image = 0; image < num_images; ++image) {
-      auto pixel_slice = SliceLeadingImage(*pixel_values, image);
-      input_values[pixel_index] = pixel_slice.get();
-      std::unique_ptr<OrtValue> position_slice;
-      if (position_values) {
-        position_slice = SliceLeadingImage(*position_values, image);
-        input_values[position_index] = position_slice.get();
+      // Slices must outlive the Run call below, so hold them for the whole iteration.
+      std::vector<std::unique_ptr<OrtValue>> slices;
+      slices.reserve(batched_indices.size());
+      for (size_t index : batched_indices) {
+        slices.push_back(SliceLeadingImage(*source_values[index], image));
+        input_values[index] = slices.back().get();
       }
 
       auto features = run_encoder();
