@@ -68,7 +68,7 @@ void CombinedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_l
 }
 
 bool CombinedKeyValueCache::CanRewindTo(size_t index) const {
-  return index == 0 || static_cast<int64_t>(index) < shape_[3];
+  return static_cast<int64_t>(index) <= shape_[3];
 }
 
 void CombinedKeyValueCache::RewindTo(size_t index) {

@@ -48,8 +48,8 @@ void DynamicKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
 
 bool DynamicKeyValueCache::CanRewindTo(size_t index) const {
   // shape_[2] is not maintained when per-layer shapes are in use, so bound by the last Update() length.
-  return index == 0 || (static_cast<int64_t>(index) < current_length_ &&
-                        CanRewindWindowedKvCache(windowed_cache_size_, current_length_, index));
+  return static_cast<int64_t>(index) <= current_length_ &&
+         (index == 0 || CanRewindWindowedKvCache(windowed_cache_size_, current_length_, index));
 }
 
 void DynamicKeyValueCache::RewindTo(size_t index) {
