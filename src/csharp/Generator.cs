@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -77,6 +78,22 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             {
                 return new ReadOnlySpan<int>(tokenIds.ToPointer(), (int)tokenCount.ToUInt64());
             }
+        }
+
+        public TokenMetadataInput[] GetNextTokensWithMetadata()
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GetNextTokensWithMetadata(
+                _generatorHandle, out IntPtr tokens, out UIntPtr tokenCount));
+            // Copy the borrowed native records before another generator operation replaces them.
+            int count = checked((int)tokenCount.ToUInt64());
+            var result = new TokenMetadataInput[count];
+            int stride = Marshal.SizeOf<NativeTokenMetadataInput>();
+            for (int index = 0; index < count; ++index)
+            {
+                var token = Marshal.PtrToStructure<NativeTokenMetadataInput>(IntPtr.Add(tokens, checked(index * stride)));
+                result[index] = new TokenMetadataInput(token);
+            }
+            return result;
         }
 
         public ReadOnlySpan<int> GetSequence(ulong index)

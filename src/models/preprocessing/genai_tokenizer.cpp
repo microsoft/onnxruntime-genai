@@ -4,6 +4,8 @@
 #include "genai_tokenizer.h"
 
 #include "models/model.h"
+#include "models/model_type.h"
+#include "models/transducer_state.h"
 #include "models/preprocessing/tokenizer_tag_utils.h"
 #include "tensor.h"
 
@@ -45,10 +47,84 @@ TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
 }
 
 const std::string& TokenizerStream::Decode(int32_t token) {
+  if (decode_mode_ == DecodeMode::Metadata) {
+    throw std::runtime_error("Cannot mix text and metadata decoding before Reset");
+  }
+  decode_mode_ = DecodeMode::Text;
   const char* string;
   CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
   chunk_ = string;
   return chunk_;
+}
+
+TokenizerStream::~TokenizerStream() {
+  if (metadata_state_) metadata_state_->Invalidate();
+}
+
+std::shared_ptr<MetadataCoreState> TokenizerStream::CreateMetadataCoreState(const MetadataCoreConfig& config) {
+  if (decode_mode_ != DecodeMode::Unset || metadata_state_) {
+    throw std::runtime_error("Create one metadata state before decoding; Reset to change configuration");
+  }
+  auto resolved = config;
+  const auto& model_timing = tokenizer_->GetMetadataCoreConfig().timestamps;
+  resolved.timestamps.sample_rate = model_timing.sample_rate;
+  resolved.timestamps.hop_length = model_timing.hop_length;
+  resolved.timestamps.subsampling_factor = model_timing.subsampling_factor;
+  if (resolved.timestamps.level != Config::TimestampLevel::Off &&
+      (resolved.timestamps.sample_rate <= 0 || resolved.timestamps.hop_length <= 0 ||
+       resolved.timestamps.subsampling_factor <= 0)) {
+    throw std::runtime_error("Timestamp metadata requires positive sample_rate, hop_length, and subsampling_factor");
+  }
+  auto state = std::shared_ptr<MetadataCoreState>(new MetadataCoreState(resolved));
+  const OrtxMetadataConfig producer_config{state->TimestampsEnabled()};
+  CheckResult(OrtxSetDetokenizerCacheMetadataConfig(cache_, &producer_config));
+  metadata_state_ = state;
+  decode_mode_ = DecodeMode::Metadata;
+  return state;
+}
+
+std::shared_ptr<MetadataCoreState> TokenizerStream::CreateMetadataCoreStateUsingTokenizerConfig() {
+  return CreateMetadataCoreState(tokenizer_->GetMetadataCoreConfig());
+}
+
+const OgaTokenMetadataOutput& TokenizerStream::DecodeWithMetadata(const OgaTokenMetadataInput& token) {
+  // Use the explicitly initialized state owned by this stream.
+  if (!metadata_state_) throw std::runtime_error("Create metadata state before decoding metadata");
+
+  // Validate before advancing the Extensions decoder so rejected input consumes nothing.
+  metadata_state_->ValidateInput(token);
+
+  // Decode once and retain the text, timing, and borrowed token-span metadata.
+  const char* text = nullptr;
+  const OrtxMetadata* metadata = nullptr;
+  CheckResult(OrtxDetokenizeCachedWithMetadata(tokenizer_->tokenizer_, cache_, token.token_id, &text, &metadata));
+  metadata_state_->SetDecoded(token, text, *metadata);
+
+  // Process enabled features and expose their results through the typed metadata view.
+  return metadata_state_->ProcessMetadata();
+}
+
+const OgaTokenMetadataOutput& TokenizerStream::FinalizeMetadata() {
+  // Finalization requires the same explicitly initialized stream state as decoding.
+  if (!metadata_state_) throw std::runtime_error("Create metadata state before finalizing metadata");
+  metadata_state_->CheckCanAdvance();
+
+  // Flush pending token spans without injecting another token or timing record.
+  const OrtxMetadata* metadata = nullptr;
+  CheckResult(OrtxFinalizeDetokenizeCachedWithMetadata(cache_, &metadata));
+  metadata_state_->SetFinalized(*metadata);
+
+  // Complete trailing feature results and return the same metadata shape as decoding.
+  return metadata_state_->ProcessMetadata();
+}
+
+void TokenizerStream::Reset() {
+  if (metadata_state_) metadata_state_->Invalidate();
+  metadata_state_.reset();
+  OrtxDispose(&cache_.p_);
+  CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
+  chunk_.clear();
+  decode_mode_ = DecodeMode::Unset;
 }
 
 Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_token_id},
@@ -58,13 +134,22 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
                                              eot_token_id_{config.model.eot_token_id},
                                              bor_token_id_{config.model.bor_token_id},
                                              eor_token_id_{config.model.eor_token_id} {
+  ValidateTimestampConfiguration(config.model);
   // Default tokenizer options
-  const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
-  const char* values[] = {"false", "true"};
+  const bool timestamps_enabled = config.model.timestamp_level != Config::TimestampLevel::Off;
+  const char* keys[] = {"add_special_tokens", "skip_special_tokens", "track_timestamp_metadata"};
+  const char* values[] = {"false", "true", timestamps_enabled ? "true" : "false"};
 
   // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
+  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 3));
+
+  metadata_config_.timestamps = TimestampTokenizerConfig{timestamps_enabled ? config.model.timestamp_level : Config::TimestampLevel::Off,
+                                                config.model.segment_separators,
+                                                config.model.segment_gap_threshold_seconds,
+                                                config.model.sample_rate,
+                                                config.model.hop_length,
+                                                config.model.subsampling_factor};
 
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback.
@@ -96,6 +181,10 @@ int32_t Tokenizer::GetEorTokenId() const {
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
   return std::make_unique<TokenizerStream>(*this);
+}
+
+MetadataCoreConfig Tokenizer::GetMetadataCoreConfig() const {
+  return metadata_config_;
 }
 
 void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {

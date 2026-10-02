@@ -582,6 +582,89 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.Equal(str, tokenizerFromPath.Decode(sequences[0]));
         }
 
+        [Theory]
+        [InlineData("{\"model\":{\"type\":\"nemotron_speech\",\"timestamp_level\":\"word\"}}", "positive sample_rate")]
+        [InlineData("{\"model\":{\"type\":\"gpt2\",\"timestamp_level\":\"word\",\"sample_rate\":100,\"hop_length\":10,\"subsampling_factor\":1}}", "nemotron_speech model")]
+        public void TestRequestedTimestampsRejectInvalidModelConfig(string overlay, string reason)
+        {
+            using var config = new Config(_tinyRandomGpt2ModelPath);
+            config.Overlay(overlay);
+            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new Model(config));
+            Assert.Contains(reason, error.Message);
+        }
+
+        [Fact(DisplayName = "TestTokenizerStreamTimestampInitialization")]
+        public void TestTokenizerStreamTimestampInitialization()
+        {
+            Assert.NotNull(_tinyRandomGpt2ModelPath);
+            using var config = new Config(_tinyRandomGpt2ModelPath);
+            config.Overlay("{\"model\":{\"type\":\"nemotron_speech\",\"timestamp_level\":\"all\",\"sample_rate\":100,\"hop_length\":10,\"subsampling_factor\":1}}");
+            using var tokenizer = new Tokenizer(config);
+            using var stream = tokenizer.CreateStream();
+            Assert.Throws<OnnxRuntimeGenAIException>(() => stream.FinalizeMetadata());
+            stream.CreateMetadataCoreStateUsingTokenizerConfig();
+            var result = stream.FinalizeMetadata();
+            Assert.Empty(result.TimestampMetadata.Words);
+            Assert.Empty(result.TimestampMetadata.Segments);
+            Assert.Throws<OnnxRuntimeGenAIException>(() => stream.CreateMetadataCoreStateUsingTokenizerConfig());
+            stream.Reset();
+            Assert.Throws<OnnxRuntimeGenAIException>(() => stream.FinalizeMetadata());
+            using var metadataConfig = new TokenMetadataCoreConfig();
+            stream.CreateMetadataCoreState(metadataConfig);
+            Assert.Null(stream.FinalizeMetadata().TimestampMetadata);
+            Assert.Empty(result.TimestampMetadata.Words);
+            stream.Reset();
+            metadataConfig.Overlay("{\"timestamps\":{\"level\":\"all\",\"segment_separators\":[\".\"],\"segment_gap_threshold_seconds\":0.26}}");
+            Assert.Throws<OnnxRuntimeGenAIException>(() => metadataConfig.Overlay("{\"timestamps\":{\"level\":\"invalid\"}}"));
+            stream.CreateMetadataCoreState(metadataConfig);
+            metadataConfig.Overlay("{\"timestamps\":{\"level\":\"off\"}}");
+            metadataConfig.Dispose();
+            Assert.Empty(stream.FinalizeMetadata().TimestampMetadata.Segments);
+        }
+
+        [Fact(DisplayName = "TestTokenizerMetadataFromGenerator")]
+        public void TestTokenizerMetadataFromGenerator()
+        {
+            using var model = new Model(_tinyRandomGpt2ModelPath);
+            using var tokenizerConfig = new Config(_tinyRandomGpt2ModelPath);
+            tokenizerConfig.Overlay("{\"model\":{\"type\":\"nemotron_speech\",\"sample_rate\":100,\"hop_length\":10,\"subsampling_factor\":1}}");
+            using var tokenizer = new Tokenizer(tokenizerConfig);
+            using var parameters = new GeneratorParams(model);
+            parameters.SetSearchOption("max_length", 10);
+            using var generator = new Generator(model, parameters);
+            generator.AppendTokens(new int[] { 0, 0, 0, 52 });
+            generator.GenerateNextToken();
+            using var stream = tokenizer.CreateStream();
+            using var plain = tokenizer.CreateStream();
+            var token = Assert.Single(generator.GetNextTokensWithMetadata());
+            var tokenId = generator.GetNextTokens()[0];
+            Assert.Equal(tokenId, token.TokenId);
+            Assert.Null(token.TokenAcousticFrameInterval);
+            Assert.Throws<OnnxRuntimeGenAIException>(() => stream.DecodeWithMetadata(token));
+            using var metadataConfig = new TokenMetadataCoreConfig();
+            stream.CreateMetadataCoreState(metadataConfig);
+            var result = stream.DecodeWithMetadata(token);
+            var expectedText = plain.Decode(tokenId);
+            Assert.Equal(expectedText, result.Text);
+            Assert.Null(result.TimestampMetadata);
+            Assert.Null(stream.FinalizeMetadata().TimestampMetadata);
+            Assert.Equal(expectedText, result.Text);
+            stream.Reset();
+            Assert.Throws<OnnxRuntimeGenAIException>(() => stream.DecodeWithMetadata(token));
+            generator.GenerateNextToken();
+            generator.GetNextTokensWithMetadata();
+            generator.Dispose();
+            Assert.Equal(tokenId, token.TokenId);
+            Assert.Null(token.TokenAcousticFrameInterval);
+            stream.CreateMetadataCoreState(metadataConfig);
+            Assert.Equal(expectedText, stream.DecodeWithMetadata(token).Text);
+            stream.Reset();
+            metadataConfig.Overlay("{\"timestamps\":{\"level\":\"all\"}}");
+            stream.CreateMetadataCoreState(metadataConfig);
+            Assert.Throws<OnnxRuntimeGenAIException>(() => stream.DecodeWithMetadata(token));
+            Assert.Empty(stream.FinalizeMetadata().TimestampMetadata.Words);
+        }
+
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
         public void TestTokenizerBatchEncodeSingleDecode()
         {

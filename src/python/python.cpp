@@ -318,6 +318,34 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
   return d;
 }
 
+pybind11::dict ToMetadata(const OgaTokenMetadataOutput& result) {
+  pybind11::dict output;
+  output["text"] = result.text;
+  output["timestamp_metadata"] = pybind11::none();
+  if (!result.timestampMetadata) return output;
+
+  const auto copy_records = [](const OgaTokenMetadataTimestampRecord* source, size_t count) {
+    pybind11::list records;
+    for (size_t index = 0; index < count; ++index) {
+      const auto& value = source[index];
+      pybind11::dict record;
+      record["text"] = value.text;
+      record["start_frame"] = value.start_frame;
+      record["stop_frame"] = value.stop_frame;
+      record["start_time"] = value.start_time;
+      record["stop_time"] = value.stop_time;
+      records.append(std::move(record));
+    }
+    return records;
+  };
+
+  pybind11::dict timestamps;
+  timestamps["words"] = copy_records(result.timestampMetadata->words, result.timestampMetadata->word_count);
+  timestamps["segments"] = copy_records(result.timestampMetadata->segments, result.timestampMetadata->segment_count);
+  output["timestamp_metadata"] = std::move(timestamps);
+  return output;
+}
+
 struct PyGenerator {
   PyGenerator(const OgaModel& model, PyGeneratorParams& params) {
     generator_ = OgaGenerator::Create(model, *params.params_);
@@ -325,6 +353,10 @@ struct PyGenerator {
 
   pybind11::array_t<int32_t> GetNextTokens() {
     return ToPython(generator_->GetNextTokens());
+  }
+
+  std::vector<OgaTokenMetadataInput> GetNextTokensWithMetadata() {
+    return generator_->GetNextTokensWithMetadata();
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
@@ -495,8 +527,28 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            pybind11::arg("enable_ff_tokens") = false)
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
+    pybind11::class_<OgaTokenMetadataCoreConfig>(m, "TokenMetadataCoreConfig", "Metadata options copied when a tokenizer stream creates its state.")
+      .def(pybind11::init([]() { return OgaTokenMetadataCoreConfig::Create(); }))
+      .def("overlay", &OgaTokenMetadataCoreConfig::Overlay);
+
+  pybind11::class_<OgaTokenMetadataInput>(m, "TokenMetadataInput", "Emitted token with an optional acoustic interval stored by value.")
+      .def_readonly("token_id", &OgaTokenMetadataInput::token_id)
+      .def_property_readonly("token_acoustic_frame_interval", [](const OgaTokenMetadataInput& token) -> std::optional<std::pair<int64_t, int64_t>> {
+        if (!token.has_token_acoustic_frame_interval) return std::nullopt;
+        return std::make_pair(token.token_acoustic_frame_interval.start, token.token_acoustic_frame_interval.stop);
+      });
+
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
-      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
+      .def("create_metadata_core_state_using_tokenizer_config", &OgaTokenizerStream::CreateMetadataCoreStateUsingTokenizerConfig)
+      .def("create_metadata_core_state", &OgaTokenizerStream::CreateMetadataCoreState, pybind11::arg("config"))
+      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); })
+      .def("decode_with_metadata", [](OgaTokenizerStream& stream, const OgaTokenMetadataInput& token) {
+        return ToMetadata(stream.DecodeWithMetadata(token));
+      }, pybind11::arg("token"))
+      .def("finalize_metadata", [](OgaTokenizerStream& stream) {
+        return ToMetadata(stream.FinalizeMetadata());
+      })
+      .def("reset", &OgaTokenizerStream::Reset);
 
   pybind11::class_<OgaNamedTensors>(m, "NamedTensors")
       .def(pybind11::init([]() { return OgaNamedTensors::Create(); }))
@@ -658,6 +710,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("snapshot_state", &PyGenerator::SnapshotState)
       .def("set_hidden_states", &PyGenerator::SetHiddenStates)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
+      .def("get_next_tokens_with_metadata", &PyGenerator::GetNextTokensWithMetadata)
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
       .def("set_runtime_option", &PyGenerator::SetRuntimeOption)

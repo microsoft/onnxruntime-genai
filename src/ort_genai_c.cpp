@@ -108,6 +108,7 @@ struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
+struct OgaTokenMetadataCoreConfig : Generators::MetadataCoreConfig, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaEngineCapabilities : Generators::EngineCapabilities, OgaAbstract {};
 struct OgaEngineEvent : Generators::EngineEvent, OgaAbstract {};
@@ -708,6 +709,15 @@ OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithMetadata(const OgaGenerator* generator, const OgaTokenMetadataInput** out, size_t* out_count) {
+  OGA_TRY
+  const auto tokens = generator->GetNextTokensWithMetadata();
+  *out = tokens.data();
+  *out_count = tokens.size();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length) {
   OGA_TRY
   generator->RewindToLength(new_length);
@@ -1203,6 +1213,57 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModa
 OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t token, const char** out) {
   OGA_TRY
   *out = p->Decode(token).c_str();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateTokenMetadataCoreConfig(OgaTokenMetadataCoreConfig** out) {
+  OGA_TRY
+  *out = ReturnUnique<OgaTokenMetadataCoreConfig>(std::make_unique<Generators::MetadataCoreConfig>());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenMetadataCoreConfigOverlay(OgaTokenMetadataCoreConfig* config, const char* json) {
+  OGA_TRY
+  Generators::OverlayMetadataCoreConfig(*config, json);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig(OgaTokenizerStream* stream) {
+  OGA_TRY
+  stream->CreateMetadataCoreStateUsingTokenizerConfig();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamCreateMetadataCoreState(
+    OgaTokenizerStream* stream, const OgaTokenMetadataCoreConfig* config) {
+  OGA_TRY
+  stream->CreateMetadataCoreState(*config);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadata(
+    OgaTokenizerStream* stream, const OgaTokenMetadataInput* token, const OgaTokenMetadataOutput** out) {
+  OGA_TRY
+  *out = &stream->DecodeWithMetadata(*token);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadata(OgaTokenizerStream* stream, const OgaTokenMetadataOutput** out) {
+  OGA_TRY
+  *out = &stream->FinalizeMetadata();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream* stream) {
+  OGA_TRY
+  stream->Reset();
   return nullptr;
   OGA_CATCH
 }
@@ -2139,6 +2200,7 @@ void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* p) { p->External
 void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) { delete static_cast<Generators::Generator*>(p); }
 void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream* p) { delete static_cast<Generators::TokenizerStream*>(p); }
+void OGA_API_CALL OgaDestroyTokenMetadataCoreConfig(OgaTokenMetadataCoreConfig* p) { delete static_cast<Generators::MetadataCoreConfig*>(p); }
 void OGA_API_CALL OgaDestroyTensor(OgaTensor* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyImages(OgaImages* p) { delete static_cast<Generators::Images*>(p); }

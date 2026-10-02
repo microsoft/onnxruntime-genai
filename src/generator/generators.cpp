@@ -959,6 +959,36 @@ void Generator::GenerateNextToken() {
   generation_telemetry_.OnTokenGenerated(active_token_count);
 }
 
+std::span<const OgaTokenMetadataInput> Generator::GetNextTokensWithMetadata() const {
+  // Pair each emitted ID with its model-provided interval without advancing generation.
+  next_tokens_with_metadata_.clear();
+  if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
+    const auto tokens = transducer->GetStepTokens();
+    const bool timestamps_enabled = transducer->TimestampsEnabled();
+    const auto timings = timestamps_enabled ? transducer->GetStepTokenTimings() : std::span<const TokenTiming>{};
+    if (timestamps_enabled && timings.size() != tokens.size())
+      throw std::runtime_error("Generator timing count does not match emitted tokens");
+    next_tokens_with_metadata_.reserve(tokens.size());
+    for (size_t index = 0; index < tokens.size(); ++index) {
+      if (!timestamps_enabled) {
+        next_tokens_with_metadata_.push_back({tokens[index], 0, {}});
+      } else {
+        const auto& timing = timings[index];
+        if (timing.token_id != tokens[index])
+          throw std::runtime_error("Generator timing does not match the emitted token");
+        next_tokens_with_metadata_.push_back({tokens[index], 1, {timing.start_frame, timing.stop_frame}});
+      }
+    }
+  } else {
+    // Ordinary search provides IDs but no acoustic frame positions.
+    const auto tokens = search_->GetNextTokens().CopyDeviceToCpu();
+    next_tokens_with_metadata_.reserve(tokens.size());
+    for (const auto token_id : tokens)
+      next_tokens_with_metadata_.push_back({token_id, 0, {}});
+  }
+  return next_tokens_with_metadata_;
+}
+
 SpeculativeStats Generator::GetSpeculativeStats() const {
   return strategy_->GetStats();
 }
