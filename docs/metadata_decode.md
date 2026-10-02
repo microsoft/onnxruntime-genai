@@ -5,6 +5,24 @@
 internal C++ interfaces. Public C/C++/C#/Python bindings expose generic decode and
 finalize operations returning typed metadata. The state handle remains internal.
 
+For plain text (`timestamp_level: "off"`), the stream needs no metadata state. The
+generator returns token IDs; decode and append each incremental text fragment:
+
+```cpp
+auto stream = OgaTokenizerStream::Create(*tokenizer);
+while (!generator->IsDone()) {
+  generator->GenerateNextToken();
+  for (int32_t token_id : generator->GetNextTokens()) {
+    ProcessText(stream->Decode(token_id));
+  }
+}
+```
+
+For timestamps (`word`, `segment`, or `all`), initialize metadata state *before*
+decoding. The generator returns each ID with an acoustic frame interval; Extensions
+returns decoded text and completed word token spans. The stream joins the spans
+to buffered intervals and returns word/segment events:
+
 ```cpp
 auto stream = OgaTokenizerStream::Create(*tokenizer);
 stream->CreateMetadataCoreStateUsingTokenizerConfig();
@@ -23,6 +41,10 @@ while (!generator->IsDone()) {
 }
 ProcessTrailingMetadata(stream->FinalizeMetadata());
 ```
+
+`ProcessText` may display partial text as it arrives, while `ProcessWord` handles
+completed timestamped words; they should not both be appended to the same transcript.
+`FinalizeMetadata()` flushes a trailing word or segment without generating another token.
 
 The loop assumes one decoding sequence, such as a Nemotron transducer stream.
 For batches or beams, route each independent sequence to its own tokenizer stream.

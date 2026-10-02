@@ -42,9 +42,45 @@ If timestamps are requested for a non-Nemotron model, or these values are missin
 model or tokenizer creation fails. Unknown timestamp levels and negative or non-finite gap
 thresholds are rejected while loading the configuration.
 
+## Decoding flows
+
+Both paths start with audio processed into features, followed by generated token IDs. Choose the
+path when configuring the model; a tokenizer stream cannot switch decode modes without `Reset()`.
+
+```mermaid
+flowchart TB
+  audio[Audio chunks] --> processor[StreamingProcessor]
+  processor --> features[Mel features and optional chunk origin]
+  features --> generator[Generator / Nemotron]
+
+  subgraph plain[Without timestamps: timestamp_level = off]
+    ids[GetNextTokens: token IDs] --> decode[TokenizerStream.Decode: incremental text]
+    decode --> transcript[Plain-text transcript]
+  end
+
+  subgraph timed[With timestamps: word, segment, or all]
+    setup[Initialize stream metadata state] --> stream
+    timed_tokens[GetNextTokensWithMetadata: IDs + absolute frame intervals] --> stream[TokenizerStream.DecodeWithMetadata]
+    stream --> ortx[Extensions: decoded text + completed word token spans]
+    ortx --> align[TimestampDecodeState: align spans with buffered frames]
+    align --> events[Per-call word / segment events with frame and second bounds]
+    stream --> final[FinalizeMetadata: flush trailing word / segment]
+    final --> trailing[Trailing word / segment events]
+  end
+
+  generator --> ids
+  generator --> timed_tokens
+```
+
+For the timed path, create the stream's metadata state before decoding. The generator supplies
+*when* each token occurred; Extensions supplies *which tokens* form each word. `DecodeWithMetadata`
+also returns the ordinary incremental text fragment. Use that fragment for live text, or collect
+completed word/segment events for stable timestamped output; do not append both to one transcript.
+The plain path needs no metadata state or finalization call.
+
 ## Decoding
 
-After creating the tokenizer stream, explicitly initialize its metadata state with
+For the timestamp path, after creating the tokenizer stream, explicitly initialize its metadata state with
 `CreateMetadataCoreStateUsingTokenizerConfig()` (C++/C#) or
 `create_metadata_core_state_using_tokenizer_config()` (Python). Repeat initialization
 after `Reset()`. Metadata decode and finalization throw if the state is missing;
