@@ -5,11 +5,12 @@
 
 #include "generator/generators.h"
 #include "models/utils.h"
+#include "metadata_core_state.h"
 #include "ortx_tokenizer.h"
+#include "span.h"
 
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <vector>
 
@@ -21,14 +22,31 @@ struct Tensor;
 struct Tokenizer;
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {
+  enum class DecodeMode {
+    Unset,
+    Text,
+    Metadata,
+  };
+
   TokenizerStream(const Tokenizer& tokenizer);
+  ~TokenizerStream();
+  TokenizerStream(const TokenizerStream&) = delete;
+  TokenizerStream& operator=(const TokenizerStream&) = delete;
+
+  std::shared_ptr<MetadataCoreState> CreateMetadataCoreState(const MetadataCoreConfig& config);
+  std::shared_ptr<MetadataCoreState> CreateMetadataCoreStateUsingTokenizerConfig();
+  const OgaTokenMetadataOutput& DecodeWithMetadata(const OgaTokenMetadataInput& token);
+  const OgaTokenMetadataOutput& FinalizeMetadata();
 
   const std::string& Decode(int32_t token);
+  void Reset();
 
  private:
   std::shared_ptr<const Tokenizer> tokenizer_;
   OrtxPtr<OrtxObject> cache_;
   std::string chunk_;
+  DecodeMode decode_mode_{DecodeMode::Unset};
+  std::shared_ptr<MetadataCoreState> metadata_state_;
 };
 
 // Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model.
@@ -38,6 +56,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   Tokenizer(const Config& config);
 
   std::unique_ptr<TokenizerStream> CreateStream() const;
+  MetadataCoreConfig GetMetadataCoreConfig() const;
 
   void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options);
   std::vector<int32_t> Encode(const char* text) const;
@@ -63,6 +82,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
+  friend struct TokenizerStream;
+
   int32_t bos_token_id_;
   std::vector<int32_t> eos_token_id_;
   int32_t pad_token_id_;
@@ -70,6 +91,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::optional<int32_t> eot_token_id_;
   std::optional<int32_t> bor_token_id_;
   std::optional<int32_t> eor_token_id_;
+  MetadataCoreConfig metadata_config_;
 };
 
 }  // namespace Generators

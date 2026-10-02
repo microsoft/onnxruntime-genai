@@ -466,6 +466,20 @@ struct OgaTokenizer : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyTokenizer(reinterpret_cast<OgaTokenizer*>(p)); }
 };
 
+struct OgaTokenMetadataCoreConfig : OgaAbstract {
+  static std::unique_ptr<OgaTokenMetadataCoreConfig> Create() {
+    OgaTokenMetadataCoreConfig* config;
+    OgaCheckResult(OgaCreateTokenMetadataCoreConfig(&config));
+    return std::unique_ptr<OgaTokenMetadataCoreConfig>(config);
+  }
+
+  void Overlay(const char* json) {
+    OgaCheckResult(OgaTokenMetadataCoreConfigOverlay(this, json));
+  }
+
+  static void operator delete(void* config) { OgaDestroyTokenMetadataCoreConfig(reinterpret_cast<OgaTokenMetadataCoreConfig*>(config)); }
+};
+
 struct OgaTokenizerStream : OgaAbstract {
   static std::unique_ptr<OgaTokenizerStream> Create(const OgaTokenizer& tokenizer) {
     OgaTokenizerStream* p;
@@ -489,6 +503,27 @@ struct OgaTokenizerStream : OgaAbstract {
     OgaCheckResult(OgaTokenizerStreamDecode(this, token, &out));
     return out;
   }
+
+  void CreateMetadataCoreStateUsingTokenizerConfig() {
+    OgaCheckResult(OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig(this));
+  }
+
+  void CreateMetadataCoreState(const OgaTokenMetadataCoreConfig& config) {
+    OgaCheckResult(OgaTokenizerStreamCreateMetadataCoreState(this, &config));
+  }
+
+  const OgaTokenMetadataOutput& DecodeWithMetadata(const OgaTokenMetadataInput& token) {
+    const OgaTokenMetadataOutput* out;
+    OgaCheckResult(OgaTokenizerStreamDecodeWithMetadata(this, &token, &out));
+    return *out;
+  }
+  const OgaTokenMetadataOutput& FinalizeMetadata() {
+    const OgaTokenMetadataOutput* out;
+    OgaCheckResult(OgaTokenizerStreamFinalizeMetadata(this, &out));
+    return *out;
+  }
+
+  void Reset() { OgaCheckResult(OgaTokenizerStreamReset(this)); }
 
   static void operator delete(void* p) { OgaDestroyTokenizerStream(reinterpret_cast<OgaTokenizerStream*>(p)); }
 };
@@ -607,6 +642,14 @@ struct OgaGenerator : OgaAbstract {
     return std::vector<int32_t>(out, out + out_count);
   }
 #endif
+
+  std::vector<OgaTokenMetadataInput> GetNextTokensWithMetadata() {
+    const OgaTokenMetadataInput* out;
+    size_t out_count;
+    OgaCheckResult(OgaGenerator_GetNextTokensWithMetadata(this, &out, &out_count));
+    if (out_count == 0) return {};
+    return {out, out + out_count};
+  }
 
   void RewindTo(size_t new_length) {
     OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
