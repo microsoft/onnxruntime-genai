@@ -12,8 +12,6 @@ namespace Generators {
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
-  ValidateMultiModalSessionDevices(*config_, p_device_->GetType(), p_device_inputs_->GetType());
-
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
     vision_session_options_ = OrtSessionOptions::Create();

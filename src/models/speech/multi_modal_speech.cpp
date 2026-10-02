@@ -67,10 +67,4 @@ std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& mo
   return std::make_unique<SpeechState>(model, params);
 }
 
-void ValidateMultiModalSessionDevices(const Config& config, DeviceType decoder_device, DeviceType inputs_device) {
-  if (ModelType::IsLfm2Audio(config.model.type)) {
-    CheckLfm2AudioSessionDevices(config, decoder_device, inputs_device, /*with_audio=*/false);
-  }
-}
-
 }  // namespace Generators

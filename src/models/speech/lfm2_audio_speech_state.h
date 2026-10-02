@@ -7,14 +7,6 @@
 
 namespace Generators {
 
-// lfm2_audio exchanges tensors with its embedding and speech sessions in buffers allocated on the
-// decoder's devices. Throws if either has session_options of its own that leave it on CPU while a
-// buffer it would be handed is device memory, which the session would treat as host memory and
-// corrupt: the decoder's inputs for the embedding session, and with_audio, the audio features for
-// both.
-void CheckLfm2AudioSessionDevices(const Config& config, DeviceType decoder_device, DeviceType inputs_device,
-                                  bool with_audio);
-
 // Lfm2AudioSpeechState: per-clip encoder loop for LFM2-Audio.
 //
 // The processor stacks the clips of one prompt into a zero-padded [N, T_max, num_mels] mel tensor

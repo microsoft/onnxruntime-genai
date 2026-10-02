@@ -10,46 +10,6 @@
 
 namespace Generators {
 
-void CheckLfm2AudioSessionDevices(const Config& config, DeviceType decoder_device, DeviceType inputs_device,
-                                  bool with_audio) {
-  // Whether a buffer allocated on the device is device memory. OpenVINO allocates from the CPU and
-  // QNN from shared memory, both of which a CPU session can use.
-  const auto is_device_memory = [](DeviceType device) {
-    switch (device) {
-      case DeviceType::CUDA:
-      case DeviceType::DML:
-      case DeviceType::WEBGPU:
-      case DeviceType::NvTensorRtRtx:
-      case DeviceType::RyzenAI:
-      case DeviceType::AMDGPU:
-        return true;
-      default:
-        return false;
-    }
-  };
-  const auto check = [](const std::optional<Config::SessionOptions>& options, const char* graph,
-                        const char* buffers, DeviceType device) {
-    // Without session_options of its own a graph follows the decoder; with them, no provider but CPU
-    // leaves it on CPU.
-    if (!options.has_value() || !std::all_of(options->providers.begin(), options->providers.end(),
-                                             [](const std::string& provider) { return provider == "CPU"; })) {
-      return;
-    }
-    throw std::runtime_error(std::string("lfm2_audio: model.") + graph + ".session_options run the " + graph +
-                             " model on CPU, but " + buffers + " in " + to_string(device) +
-                             " memory, which it cannot use. Remove model." + graph +
-                             ".session_options so that it runs on the decoder's device.");
-  };
-
-  if (is_device_memory(inputs_device)) {
-    check(config.model.embedding.session_options, "embedding", "the decoder takes its inputs", inputs_device);
-  }
-  if (with_audio && is_device_memory(decoder_device)) {
-    check(config.model.speech.session_options, "speech", "the audio features are passed", decoder_device);
-    check(config.model.embedding.session_options, "embedding", "the audio features are passed", decoder_device);
-  }
-}
-
 void Lfm2AudioSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
   // The feature buffer is one sequence wide, so beams would fail as a shape mismatch inside the
   // encoder. The reference decodes greedily.
@@ -135,7 +95,7 @@ std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bi
   clip_length->GetTensorMutableData<int64_t>()[0] = num_frames;
 
   auto clip_features = OrtValue::CreateTensor(
-      model_.p_device_->GetAllocator(),
+      p_session_device_->GetAllocator(),
       std::vector<int64_t>{1, tokens_per_clip_[static_cast<size_t>(index)], bindings.hidden_size},
       bindings.features_type);
 
@@ -154,8 +114,6 @@ std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bi
 }
 
 DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  CheckLfm2AudioSessionDevices(*model_.config_, model_.p_device_->GetType(), model_.p_device_inputs_->GetType(),
-                               /*with_audio=*/true);
   if (model_.config_->model.speech.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.speech.run_options.value());
   }
@@ -167,7 +125,7 @@ DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32
 
   const SpeechBindings bindings = ResolveBindings();
   const int64_t* frames_per_clip = inputs_[bindings.lengths_index]->GetTensorData<int64_t>();
-  auto features_bytes = ByteWrapTensor(*model_.p_device_, *outputs_[bindings.features_index]);
+  auto features_bytes = ByteWrapTensor(*p_session_device_, *outputs_[bindings.features_index]);
   const size_t feature_row_bytes = static_cast<size_t>(bindings.hidden_size) * Ort::SizeOf(bindings.features_type);
   size_t destination = 0;
 
@@ -184,7 +142,7 @@ DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32
 
     auto clip_features = RunClip(bindings, clip, num_frames);
     const size_t clip_bytes = static_cast<size_t>(tokens_per_clip_[static_cast<size_t>(clip)]) * feature_row_bytes;
-    features_bytes.subspan(destination, clip_bytes).CopyFrom(ByteWrapTensor(*model_.p_device_, *clip_features));
+    features_bytes.subspan(destination, clip_bytes).CopyFrom(ByteWrapTensor(*p_session_device_, *clip_features));
     destination += clip_bytes;
   }
   return {};

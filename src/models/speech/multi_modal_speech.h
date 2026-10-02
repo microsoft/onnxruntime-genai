@@ -40,9 +40,4 @@ struct SpeechState : State {
 // Factory: pick the right SpeechState subclass based on model type.
 std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 
-// Validates model-specific device/session placement constraints for the multi-modal pipeline
-// (e.g. LFM2-Audio requires every session whose buffers it shares with the decoder to live on a
-// device the decoder's session can use). A no-op for models with no such requirement.
-void ValidateMultiModalSessionDevices(const Config& config, DeviceType decoder_device, DeviceType inputs_device);
-
 }  // namespace Generators
