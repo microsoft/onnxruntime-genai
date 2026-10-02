@@ -91,8 +91,9 @@ std::shared_ptr<TestWhisperModel> CreateTestModel(bool whisper_timestamps = true
   config->search.batch_size = batch_size;
   config->search.whisper_timestamps = whisper_timestamps;
   config->search.whisper_max_initial_timestamp_index = 2;
+  if (g_test_device == DeviceType::CUDA)
+    SetProviderOption(*config, "cuda", {}, {});
   auto model = std::make_shared<TestWhisperModel>(std::move(config));
-  model->p_device_scoring_ = GetDeviceInterface(g_test_device);
   return model;
 }
 

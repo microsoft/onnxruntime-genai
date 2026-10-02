@@ -683,6 +683,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
   std::string GetExecutionProviderName() const override { return "cuda"; }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    if (!ort_allocator_)
+      throw std::runtime_error("CUDA allocator is not initialized");
     return std::make_shared<GpuMemory>(size);
   }
 
