@@ -61,6 +61,8 @@ _DTYPES: dict[str, DtypeDescriptor] = {
     "int2": DtypeDescriptor("int2", "int", 2, signed=True),
     "int4": DtypeDescriptor("int4", "int", 4, signed=True),
     "uint4": DtypeDescriptor("uint4", "int", 4, signed=False),
+    "int2": DtypeDescriptor("int2", "int", 2, signed=True),
+    "uint2": DtypeDescriptor("uint2", "int", 2, signed=False),
     "mxfp4": DtypeDescriptor("mxfp4", "mx", 4, block_size=32),
     "nvfp4": DtypeDescriptor("nvfp4", "mx", 4, block_size=16),
     "none": DtypeDescriptor("none", "float", 0),  # explicit "do not quantize this target"
@@ -355,7 +357,9 @@ _LEGACY_ALGO_ALIASES: dict[str, tuple[str, dict[str, str]]] = {
 }
 
 # ``--precision`` -> weights.type. Float precisions do not quantize weights.
+# int2 quantizes dense weights to 2-bit MatMulNBits (asymmetric uint2, matching the Quark export).
 _PRECISION_TO_WEIGHTS_TYPE = {
+    "int2": "uint2",
     "int4": "int4",
     "int8": "int8",
     "fp16": "none",
@@ -365,7 +369,7 @@ _PRECISION_TO_WEIGHTS_TYPE = {
 
 
 def default_io_dtype(precision: str, execution_provider: str, extra_options: dict[str, Any]) -> str:
-    cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
+    cpu_quant = precision in {"int2", "int4", "int8"} and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and normalize_bool(
         extra_options.get("use_webgpu_fp32", False), "use_webgpu_fp32"
     )
@@ -511,7 +515,13 @@ class QuantConfig:
             Override(match={"preset": selector}, type=quant_type) for selector, quant_type in placement.items()
         )
 
-        is_symmetric = normalize_bool(extra_options.get("is_symmetric", True), "is_symmetric")
+        # When the user does not force symmetry, let WeightsConfig derive it from the dtype's
+        # signedness: signed int4/int8 default symmetric, unsigned uint2 defaults asymmetric.
+        is_symmetric = (
+            normalize_bool(extra_options["is_symmetric"], "is_symmetric")
+            if "is_symmetric" in extra_options
+            else None
+        )
         weights = WeightsConfig(
             type=weights_type,
             block_size=int(extra_options.get("block_size", 32)),
@@ -530,6 +540,9 @@ class QuantConfig:
             # Match the model precision unless the MoE target is configured independently.
             if precision == "int8" or extra_options.get("use_8bits_moe", False):
                 moe_quant_type = "int8"
+            elif precision == "int2":
+                # int2 quantizes MoE experts to 2-bit (asymmetric uint2 QMoE), matching the dense weights.
+                moe_quant_type = "uint2"
             elif precision in IO_DTYPES:
                 moe_quant_type = "none"
             else:
