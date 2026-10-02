@@ -164,6 +164,14 @@ Failed suffix publication rolls back its new identities without changing the
 request's committed state. When replacing a retained checkpoint, suffix metadata,
 checkpoint ownership metadata, and tensor-copy views are allocated before
 reclaiming its row, so a metadata allocation failure preserves the earlier hit.
+When prompts branch between fixed-state checkpoints, an identical intermediate KV
+block can belong to an older suffix that the new request cannot adopt. Publication
+stages the new suffix and checkpoint before retiring that entire conflicting
+history. A matching existing checkpoint still prevents duplicate publication.
+Active block owners, pending fixed-state matches, and leased draft snapshots
+defer retirement; later publication can retry after those leases are released.
+Dropped checkpoints can be rebuilt through the same mechanism without splicing
+canonical KV blocks into recomputed fixed state.
 After adoption, prefill resumes at that checkpoint and may
 process the full configured chunk, so later checkpoint positions can shift
 relative to the original request's chunk boundaries. A match pins both its
@@ -173,6 +181,12 @@ and its baseline committed-token count is the same as the paged match. Existing
 prepare/publish ordering then advances both components atomically; rollback
 discards the provisional fixed row, releases adopted paged references, and
 restores the request cursor.
+
+A windowed DFlash2 drafter without a matching optional draft checkpoint can ingest
+the recomputed target suffix into a fresh ring. Drafting and draft-checkpoint
+capture remain disabled until that ring holds a complete attention window.
+Full-attention drafters still require their entire prefix; their admission behavior
+is unchanged.
 
 The implementation applies only to newly admitted requests and does not splice
 a prefix into resident continuation turns. It still rejects target
@@ -187,7 +201,8 @@ The ring is restored into newly allocated drafter blocks before a cached
 request joins at a nonzero position. An unleased older ring checkpoint may be
 replaced at a later boundary without evicting target blocks or fixed state.
 If the matching draft checkpoint is absent, the request retains the full
-target hit and runs target-only. Full-attention DSpark remains target-only
+target hit and runs target-only until the windowed drafter has rebuilt its context.
+Full-attention DSpark remains target-only
 after a nonzero-position prefix hit.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.

@@ -3990,6 +3990,51 @@ TEST_F(EngineRunTest, HybridShortPrefixDoesNotStrandLongerCheckpoint) {
   EXPECT_EQ(metrics->retention_refusals, 0u);
 }
 
+TEST_F(EngineRunTest, HybridBranchBetweenCheckpointsPublishesItsLongerSuffix) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/8);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 2;
+  batching.num_blocks = 32;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 25> prompt{
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+      15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26};
+  std::vector<int32_t> seed(prompt.begin(), prompt.begin() + 17);
+  seed[15] = 30;
+  seed[16] = 29;
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    const auto& entry = context.plan->requests.front();
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, static_cast<float>(entry.target_cache_slots - entry.unprocessed_token_count));
+      FillFixedOutputRow(binding, 0, static_cast<float>(entry.target_cache_slots));
+    }
+  });
+  const auto finish = [&](std::span<const int32_t> tokens, size_t expected_cached) {
+    auto request = CreateRequestWithPrompt(engine.engine, tokens);
+    EngineEvent event;
+    for (size_t step = 0; step < 8 && !request->IsTurnComplete(); ++step) {
+      event = RunOne(*engine.engine);
+    }
+    EXPECT_TRUE(request->IsTurnComplete());
+    EXPECT_EQ(event.request, request);
+    EXPECT_EQ(event.usage.cached_prompt_tokens, expected_cached);
+    EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+    request->Close();
+  };
+  finish(seed, 0);
+  finish(seed, 16);
+  finish(prompt, 8);
+  finish(prompt, 24);
+  finish(seed, 8);
+  finish(seed, 16);
+  finish(prompt, 8);
+  finish(prompt, 24);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->duplicate_registrations, 0u);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->hash_collisions, 0u);
+}
+
 TEST_F(EngineRunTest, FailedHybridReplacementPreservesOldHitAndAllowsRetry) {
   model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/4);
   auto& batching = *model_->config_->engine.dynamic_batching;

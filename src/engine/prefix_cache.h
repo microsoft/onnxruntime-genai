@@ -238,6 +238,21 @@ class PrefixCache final : private BlockReferenceObserver {
     bool promote_on_release{true};
   };
 
+  struct CheckpointedPrefixPlan {
+    PrefixCacheRegistrationStatus status{PrefixCacheRegistrationStatus::Indexed};
+    std::vector<uint64_t> retiring_hashes;
+  };
+  CheckpointedPrefixPlan PlanCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent);
+  PrefixCacheRegistration ReplaceCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent,
+      const CheckpointedPrefixPlan& plan,
+      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint);
+
   // Keeps `entry` ordered immediately before the entry it chains from, so a chain is always
   // evicted from its tail rather than its head.
   void Reorder(Entry& entry, const std::shared_ptr<const BlockIdentity>& parent);

@@ -912,7 +912,7 @@ bool PagedKeyValueCache::CanSealPrefixCheckpoint(
       table.sealed_identity_);
   table.sealing_stopped_ = status == PrefixCacheRegistrationStatus::Duplicate ||
                            status == PrefixCacheRegistrationStatus::HashCollision;
-  return !table.sealing_stopped_;
+  return status == PrefixCacheRegistrationStatus::Indexed;
 }
 
 bool PagedKeyValueCache::CanAttachPrefixCheckpoint(
