@@ -217,6 +217,9 @@ struct MultiModalPipelineState : State {
   void RewindTo(size_t index) override;
   bool CanRewindTo(size_t index) const override { return !decoder_state_ || decoder_state_->CanRewindTo(index); }
   void SnapshotState(size_t position) override {
+    if (position != processed_length_)
+      throw std::runtime_error("SnapshotState(" + std::to_string(position) + "): the decoder has processed " +
+                               std::to_string(processed_length_) + " tokens; run the pending token first.");
     if (decoder_state_) decoder_state_->SnapshotState(position);
   }
 
@@ -240,6 +243,7 @@ struct MultiModalPipelineState : State {
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
   size_t prompt_length_{};  // Set once the prompt finishes
+  size_t processed_length_{};  // Tokens the decoder has run; a snapshot is only valid at this length
   // Set on first RewindTo(0); until then, features release after the prompt.
   bool has_rewound_{false};
 

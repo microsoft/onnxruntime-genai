@@ -700,6 +700,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
 
     is_prompt_ = false;
     prompt_length_ = static_cast<size_t>(current_length);
+    processed_length_ = static_cast<size_t>(current_length);
 
     return audio_output_ ? SampleAudioOrText(logits) : logits;
   }
@@ -716,6 +717,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     embedding_state_->Run(current_length, next_tokens, next_indices);
   }
   auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
+  processed_length_ = static_cast<size_t>(current_length);
   return audio_output_ ? SampleAudioOrText(logits) : logits;
 }
 
@@ -736,6 +738,7 @@ DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> l
 void MultiModalPipelineState::RewindTo(size_t index) {
   if (decoder_state_)
     decoder_state_->RewindTo(index);
+  processed_length_ = index;
   if (index == 0) {
     is_prompt_ = true;
     if (audio_output_) audio_output_->Reset();

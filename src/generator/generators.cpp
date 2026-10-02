@@ -1022,9 +1022,12 @@ DeviceSpan<float> Generator::GetLogits() {
 
 void Generator::SnapshotState() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  // A just-sampled token is in the sequence but not yet in the model state; run it so the snapshot matches its label.
-  if (last_action_ == Action::generated && !computed_logits_)
+  // After a rewind the state holds exactly the sequence; otherwise stale logits mean the newest token was never run.
+  if (!computed_logits_ && last_action_ != Action::rewound && search_->GetSequenceLength() > 0) {
     GetLogits();
+    if (!computed_logits_)
+      throw std::runtime_error("SnapshotState: the model state is not current with the sequence; call GetLogits first.");
+  }
   state_->SnapshotState(search_->GetSequenceLength());
 }
 
