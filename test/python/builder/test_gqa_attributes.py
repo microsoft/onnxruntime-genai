@@ -108,6 +108,7 @@ def test_paged_attention_preserves_sliding_window_size():
         cumulative_sequence_lengths="cumulative_sequence_lengths",
         past_sequence_lengths="past_sequence_lengths",
         block_table="block_table",
+        attention_metadata="attention_metadata",
     )
 
     assert model.nodes[-1]["attributes"]["local_window_size"] == 4096
@@ -142,6 +143,7 @@ def test_quantized_paged_attention_emits_scale_inputs_and_attributes():
         cumulative_sequence_lengths="cumulative_sequence_lengths",
         past_sequence_lengths="past_sequence_lengths",
         block_table="block_table",
+        attention_metadata="attention_metadata",
     )
 
     node = model.nodes[-1]
@@ -168,6 +170,7 @@ def test_quantized_paged_attention_requires_layer_id():
             cumulative_sequence_lengths="cumulative_sequence_lengths",
             past_sequence_lengths="past_sequence_lengths",
             block_table="block_table",
+            attention_metadata="attention_metadata",
         )
 
 
@@ -184,6 +187,7 @@ def test_paged_attention_rejects_unpaired_qk_norm_weights(provided):
             cumulative_sequence_lengths="cumulative_sequence_lengths",
             past_sequence_lengths="past_sequence_lengths",
             block_table="block_table",
+            attention_metadata="attention_metadata",
             **{provided: "norm"},
         )
 

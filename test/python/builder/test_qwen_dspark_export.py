@@ -45,7 +45,7 @@ def _draft_checkpoint(tmp_path, name="dspark_draft", target_layer_ids=TARGET_LAY
     return str(draft_dir)
 
 
-def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=None):
+def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=None, ep="cuda"):
     model = object.__new__(Qwen35MoEModel)
     model.dspark = None
     model.dspark_shared_initializers = []
@@ -71,6 +71,7 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=Non
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
         original_context_length=131072,
+        ep=ep,
     )
     return model
 
@@ -431,7 +432,7 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
 
     dspark_module = importlib.import_module("models.builders.dspark")
     monkeypatch.setattr(dspark_module, "DSparkBuilder", StubDSparkBuilder)
-    model = _composite()
+    model = _composite(ep="webgpu")
     model.dspark_path = _draft_checkpoint(tmp_path)
     model.dspark_attrs = {"io_dtype": None, "num_draft_tokens": None, "top_k": 16}
 

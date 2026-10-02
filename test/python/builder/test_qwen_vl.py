@@ -523,6 +523,7 @@ def test_qwen35_paged_attention_keeps_external_mrope(monkeypatch):
         cumulative_sequence_lengths="cumulative_sequence_lengths",
         past_sequence_lengths="past_sequence_lengths",
         block_table="block_table",
+        attention_metadata="attention_metadata",
     )
 
     assert model.input_names["position_ids"] == "position_ids"

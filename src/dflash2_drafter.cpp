@@ -1253,13 +1253,13 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       config_.inputs.aux_hidden_states.c_str(), config_.inputs.input_ids.c_str(),
       config_.inputs.qkv_row_map.c_str(),
       config_.inputs.block_row_index.c_str(), config_.inputs.cumulative_sequence_lengths.c_str(),
-      config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str(),
-      config_.inputs.attention_metadata.c_str()};
+      config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str()};
   std::vector<OrtValue*> inputs{packed_aux.GetOrtTensor(), input_ids.GetOrtTensor(),
                                 qkv_row_map.GetOrtTensor(),
                                 block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
-                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor(),
-                                metadata.GetOrtTensor()};
+                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor()};
+  input_names.push_back(config_.inputs.attention_metadata.c_str());
+  inputs.push_back(metadata.GetOrtTensor());
   if (q_row_map) {
     input_names.push_back(config_.inputs.q_row_map.c_str());
     inputs.push_back(q_row_map->GetOrtTensor());

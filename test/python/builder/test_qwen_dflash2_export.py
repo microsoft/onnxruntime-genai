@@ -51,7 +51,7 @@ def _draft_checkpoint(tmp_path, target_layer_ids=TARGET_LAYER_IDS):
     return str(draft_dir)
 
 
-def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
+def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, ep="cuda"):
     model = object.__new__(Qwen35MoEModel)
     model.dflash2 = None
     model.dflash2_shared_initializers = []
@@ -78,6 +78,7 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
         original_context_length=131072,
+        ep=ep,
     )
     return model
 
@@ -1760,7 +1761,7 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
 
     dflash2_module = importlib.import_module("models.builders.dflash2")
     monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
-    model = _composite()
+    model = _composite(ep="webgpu")
     model.make_dflash2_init(
         io_dtype=None,
         extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_gate_up": fuse_gate_up},

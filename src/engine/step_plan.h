@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -89,6 +90,7 @@ struct StepPlan {
   StepTransactionId transaction_id{};
   std::vector<RequestStepPlan> requests;
   size_t scheduled_request_limit{};  // Provisional rows cache feasibility may select.
+  std::optional<size_t> max_prefill_requests;  // Cap applied to feasible prefills selected for this step.
   size_t token_count{};
   size_t proposed_block_table_columns{};
   FixedStateResourcePlan fixed_state;

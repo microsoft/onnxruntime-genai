@@ -9,16 +9,21 @@
 namespace Generators {
 
 std::vector<size_t> DecodeFirstCandidateOrder(
-    std::span<const DecodeFirstBudgetCandidate> candidates) {
+    std::span<const DecodeFirstBudgetCandidate> candidates,
+    std::optional<size_t> max_prefill_requests) {
   std::vector<size_t> order;
   order.reserve(candidates.size());
   for (size_t i = 0; i < candidates.size(); ++i) {
     if (!candidates[i].is_prefill)
       order.push_back(i);
   }
+  size_t prefill_count = 0;
   for (size_t i = 0; i < candidates.size(); ++i) {
-    if (candidates[i].is_prefill)
+    if (candidates[i].is_prefill &&
+        (!max_prefill_requests || prefill_count < *max_prefill_requests)) {
       order.push_back(i);
+      ++prefill_count;
+    }
   }
   return order;
 }

@@ -4536,7 +4536,7 @@ class Model:
                 k_norm_weight,
                 k_scale_name,
                 v_scale_name,
-                kwargs.get("attention_metadata", ""),
+                kwargs["attention_metadata"],
             ],
         )
 
