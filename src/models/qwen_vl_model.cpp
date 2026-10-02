@@ -398,7 +398,11 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
     std::unique_ptr<OrtValue> owned(raw_output);
     if (owned->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       std::unique_ptr<OrtValue> cast_output;
-      Cast(*owned, cast_output, *vl_model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      // Cast allocates on the device it is handed, and p_device_inputs_ follows the decoder,
+      // which may be an accelerator. Everything downstream of this point is host code: the
+      // features are memcpy'd into image_features_buffer_ and wrapped in a CPU tagged OrtValue.
+      // Cast on CPU so that stays true no matter what device the decoder runs on.
+      Cast(*owned, cast_output, *GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
       owned = std::move(cast_output);
     }
     return owned;
