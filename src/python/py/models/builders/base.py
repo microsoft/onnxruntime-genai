@@ -127,15 +127,26 @@ class Model:
         self.hf_token = extra_options.get("hf_token", True)
         self.hf_remote = extra_options.get("hf_remote", False)
 
+        self.graph_attrs = {
+            "ai.onnx": 24,
+            "com.microsoft": 1,
+            "ir_version": 10,
+            "producer_name": "onnxruntime-genai",
+        }
+
         # States for building the model
         self.graph = ir.Graph(
             inputs=(),
             outputs=(),
             nodes=(),
-            opset_imports={"": 22, "com.microsoft": 1},
+            opset_imports={"": self.graph_attrs["ai.onnx"], "com.microsoft": self.graph_attrs["com.microsoft"]},
             name="main_graph",
         )
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
+        self.model = ir.Model(
+            self.graph,
+            ir_version=self.graph_attrs["ir_version"],
+            producer_name=self.graph_attrs["producer_name"],
+        )
         self.values = {}
 
         # EP-specific variables
@@ -1273,13 +1284,16 @@ class Model:
             "",
         )
 
+    def load_generation_config(self, extra_kwargs):
+        return GenerationConfig.from_pretrained(
+            self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+        )
+
     def make_genai_config(self, config, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         try:
             # Override search attributes in config based on values in generation_config.json
-            gen_config = GenerationConfig.from_pretrained(
-                self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
-            )
+            gen_config = self.load_generation_config(extra_kwargs)
             defaults = {
                 "bos_token_id": None,
                 "do_sample": False,
@@ -2413,6 +2427,32 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value(output, dtype, shape=shape)
+
+    def make_tensor_scatter(
+        self,
+        name,
+        data,
+        updates,
+        indices,
+        dtype,
+        shape,
+        *,
+        output=None,
+        axis=-2,
+        mode="linear",
+    ):
+        """Update slices of a tensor with the standard ONNX TensorScatter op."""
+        output = output or f"{name}/output_0"
+        self.make_node(
+            "TensorScatter",
+            inputs=[data, updates, indices],
+            outputs=[output],
+            name=name,
+            axis=axis,
+            mode=mode,
+        )
+        self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_lp_normalization(self, name, root_input, dtype, shape, axis=-1, p=2):
         output = f"{name}/output_0"
