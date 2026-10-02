@@ -58,6 +58,7 @@ class DSparkBuilder(BlockDrafterBuilder):
         filename="dspark.onnx",
         num_draft_tokens=None,
         top_k=16,
+        include_attention_metadata=True,
         embed_quant=None,
         lm_head_quant=None,
     ):
@@ -73,6 +74,7 @@ class DSparkBuilder(BlockDrafterBuilder):
         self.lm_head_quant = lm_head_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
+        self.include_attention_metadata = include_attention_metadata
 
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)
@@ -332,7 +334,7 @@ class DSparkBuilder(BlockDrafterBuilder):
                 k_norm,
                 "",
                 "",  # k_scale / v_scale
-                "attention_metadata",
+                "attention_metadata" if self.include_attention_metadata else "",
             ],
             [attn_out, f"present.{i}.key", f"present.{i}.value"],
             name=attn_name,
