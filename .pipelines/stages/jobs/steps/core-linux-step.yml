@@ -116,6 +116,13 @@ steps:
         --package \
         "${extra_cuda_args[@]}"
 
+      if [ "${{ parameters.arch }}" = "arm64" ] && [ "${{ parameters.ep }}" = "cuda" ]; then
+        cubins=$(cuobjdump --list-elf /ort_genai_src/install/lib/libonnxruntime-genai-cuda.so)
+        for sm in 89 90 100 103 120 121; do
+          grep -q "sm_${sm}\.cubin" <<< "$cubins" || { echo "Missing sm_${sm} CUDA cubin"; exit 1; }
+        done
+      fi
+
       # Probe: configuring + building the committed consumer against the exported
       # package is the real proof that find_package(onnxruntime-genai) is
       # consumable. A broken export fails here rather than in a later SDK job.
@@ -139,9 +146,18 @@ steps:
       'install/include/ort_genai.h'
       'install/lib/libonnxruntime-genai.so'
     )
+    if [ '${{ parameters.ep }}' = 'cuda' ]; then
+      req+=('install/lib/libonnxruntime-genai-cuda.so')
+    fi
     for f in "${req[@]}"; do
       [ -f "$f" ] || { echo "ASSERT FAIL: missing $f"; exit 1; }
     done
+    if [ '${{ parameters.arch }}' = 'arm64' ] && [ '${{ parameters.ep }}' = 'cuda' ]; then
+      for lib in install/lib/libonnxruntime-genai{,-cuda}.so; do
+        readelf -h "$lib" | grep -q 'Machine:.*AArch64' || {
+          echo "ASSERT FAIL: $lib is not AArch64"; exit 1; }
+      done
+    fi
     echo "ASSERT OK: CMake package installed at $(Build.SourcesDirectory)/install"
   displayName: 'Assert: CMake package installed'
   workingDirectory: '$(Build.SourcesDirectory)'
@@ -154,6 +170,10 @@ steps:
     if [ -z "$archive" ]; then
       echo "ASSERT FAIL: no CPack .tar.gz found in $pkg_dir"; exit 1
     fi
+    if [ '${{ parameters.arch }}' = 'arm64' ] && [ '${{ parameters.ep }}' = 'cuda' ]; then
+      [[ "$(basename "$archive")" == *-linux-arm64-cuda.tar.gz ]] || {
+        echo "ASSERT FAIL: ARM64 CUDA archive has the wrong name: $archive"; exit 1; }
+    fi
     echo "CPack archive: $archive"
     listing=$(tar -tzf "$archive")
     # The archive must ship the native library and the public C/C++ headers.
@@ -161,6 +181,10 @@ steps:
       echo "$listing" | grep -Eq "$pat$" || {
         echo "ASSERT FAIL: archive missing /$pat/"; exit 1; }
     done
+    if [ '${{ parameters.ep }}' = 'cuda' ]; then
+      echo "$listing" | grep -Eq 'libonnxruntime-genai-cuda\.so$' || {
+        echo "ASSERT FAIL: archive missing CUDA shim"; exit 1; }
+    fi
     echo "ASSERT OK: archive contains native lib + public headers"
   displayName: 'Assert: CPack archive contents'
   workingDirectory: '$(Build.SourcesDirectory)'
