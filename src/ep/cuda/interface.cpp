@@ -683,6 +683,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
   std::string GetExecutionProviderName() const override { return "cuda"; }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    if (!ort_allocator_)
+      throw std::runtime_error("CUDA allocator is not initialized");
     return std::make_shared<GpuMemory>(size);
   }
 
@@ -742,6 +744,34 @@ struct CudaInterfaceImplBase : DeviceInterface {
       cuda::LaunchInt32ToInt64(reinterpret_cast<const int32_t*>(input_data), reinterpret_cast<int64_t*>(output_data), static_cast<int>(element_count), GetStream());
     } else
       return false;
+    return true;
+  }
+
+  bool ApplyWhisperTimestampRules(float* logits, const int32_t* sequences,
+                                  const bool* sequence_done,
+                                  int batch_beam_size, int vocab_size,
+                                  int max_length, int current_length,
+                                  int sample_begin, int timestamp_begin,
+                                  int eot_token, int no_timestamps_token,
+                                  int max_initial_timestamp_index) override {
+    if (!whisper_timestamp_error_status_device_) {
+      whisper_timestamp_error_status_device_ = CudaMallocArray<int32_t>(1);
+      whisper_timestamp_error_status_host_ = CudaMallocHostArray<int32_t>(1);
+    }
+    CUDA_CHECK(cudaMemsetAsync(whisper_timestamp_error_status_device_.get(), 0,
+                               sizeof(int32_t), GetStream()));
+    cuda::LaunchWhisperTimestampRules(
+        logits, sequences, sequence_done, batch_beam_size, vocab_size, max_length, current_length,
+        sample_begin, timestamp_begin, eot_token, no_timestamps_token,
+        max_initial_timestamp_index, whisper_timestamp_error_status_device_.get(), GetStream());
+    CUDA_CHECK(cudaMemcpyAsync(whisper_timestamp_error_status_host_.get(),
+                               whisper_timestamp_error_status_device_.get(),
+                               sizeof(int32_t), cudaMemcpyDeviceToHost, GetStream()));
+    CUDA_CHECK(cudaStreamSynchronize(GetStream()));
+    if (*whisper_timestamp_error_status_host_ & 1)
+      throw std::runtime_error("Whisper timestamp logits contain NaN or positive infinity");
+    if (*whisper_timestamp_error_status_host_ & 2)
+      throw std::runtime_error("Whisper timestamp rules masked every token");
     return true;
   }
 
@@ -978,6 +1008,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
   cuda_host_unique_ptr<int32_t> topk_indices_host_;  // pinned host buffer for the top-k index copy
   cuda_host_unique_ptr<float> topk_scores_host_;     // pinned host buffer for the top-k score copy
   size_t topk_host_count_{0};
+  cuda_unique_ptr<int32_t> whisper_timestamp_error_status_device_;
+  cuda_host_unique_ptr<int32_t> whisper_timestamp_error_status_host_;
   std::mutex state_update_replay_mutex_;
   cuda_unique_ptr<StateUpdateReplayDesc> state_update_replay_descriptors_;
   size_t state_update_replay_capacity_{0};

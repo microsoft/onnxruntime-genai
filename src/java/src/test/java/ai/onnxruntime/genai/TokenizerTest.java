@@ -5,7 +5,9 @@
 package ai.onnxruntime.genai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
@@ -44,6 +46,26 @@ public class TokenizerTest {
         Tokenizer tokenizerFromPath = new Tokenizer(TestUtils.tinyGpt2ModelPath());
         Sequences encoded = tokenizerFromConfig.encode(input)) {
       assertEquals(input, tokenizerFromPath.decode(encoded.getSequence(0)));
+    }
+  }
+
+  @Test
+  public void testWhisperTimestampApi() throws GenAIException {
+    try (Tokenizer tokenizer = new Tokenizer(TestUtils.whisperModelPath())) {
+      assertTrue(tokenizer.hasTimestampTokens());
+      assertEquals(50364, tokenizer.getTimestampBeginTokenId());
+      assertFalse(tokenizer.isTimestampToken(50363));
+      assertTrue(tokenizer.isTimestampToken(50364));
+      assertTrue(tokenizer.isTimestampToken(51864));
+      assertFalse(tokenizer.isTimestampToken(51865));
+      assertEquals(0.7, tokenizer.timestampToSeconds(50399));
+      assertEquals("", tokenizer.decode(new int[] {50364}));
+      assertThrows(GenAIException.class, () -> tokenizer.timestampToSeconds(51865));
+    }
+
+    try (Tokenizer tokenizer = new Tokenizer(TestUtils.tinyGpt2ModelPath())) {
+      assertFalse(tokenizer.hasTimestampTokens());
+      assertThrows(GenAIException.class, tokenizer::getTimestampBeginTokenId);
     }
   }
 

@@ -94,6 +94,14 @@ def run_whisper():
             enable_graph_capture=False,
         )
 
+        with open(os.path.join(built_model, "genai_config.json"), encoding="utf-8") as config_file:
+            generated_config = json.load(config_file)
+        model_config = generated_config["model"]
+        assert model_config["no_timestamps_token_id"] == 50363
+        assert model_config["timestamp_begin_token_id"] == 50364
+        assert model_config["vocab_size"] == 51865
+        assert generated_config["search"]["whisper_max_initial_timestamp_index"] == 50
+
         # Get prebuilt model from CI
         ci_model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
         for model in [built_model, ci_model]:
@@ -119,6 +127,13 @@ def run_whisper():
                 "--non_interactive",
             ]
             run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+            if model == built_model:
+                run_subprocess(
+                    command + ["--timestamps", "--max_word_error_rate", "0.2"],
+                    cwd=cwd,
+                    log=log,
+                ).check_returncode()
 
 
 def run_tool_calling():

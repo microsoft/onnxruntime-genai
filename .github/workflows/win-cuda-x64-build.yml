@@ -232,6 +232,8 @@ jobs:
           echo "Current PATH variable is: $env:PATH"
           & .\$env:binaryDir\Release\unit_tests.exe --ep_dir "$env:GITHUB_WORKSPACE\ort\ep"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\$env:binaryDir\Release\whisper_timestamp_unit_tests.exe --ep_dir "$env:GITHUB_WORKSPACE\ort\ep" --device cuda
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\$env:binaryDir\Release\reinit_tests.exe --ep_dir "$env:GITHUB_WORKSPACE\ort\ep"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir "$env:GITHUB_WORKSPACE\ort\ep"

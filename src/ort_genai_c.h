@@ -945,6 +945,40 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBorTokenId(const OgaTokenizer*
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
+ * \brief Return whether Whisper timestamp metadata is available.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] has_timestamps Whether timestamp metadata is available
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerHasTimestampTokens(const OgaTokenizer* tokenizer, bool* has_timestamps);
+
+/**
+ * \brief Return the first Whisper timestamp token id. Returns an error when metadata is unavailable.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The first timestamp token id
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetTimestampBeginTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * \brief Return whether a token is a Whisper timestamp token.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[in] token_id The token id to classify
+ * \param[out] is_timestamp Whether token_id is in the timestamp token range
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerIsTimestampToken(const OgaTokenizer* tokenizer, int32_t token_id, bool* is_timestamp);
+
+/**
+ * \brief Convert a Whisper timestamp token to seconds relative to the current audio window. Returns an error for non-timestamp tokens.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[in] token_id The timestamp token id to convert
+ * \param[out] seconds The timestamp in seconds relative to the current audio window
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerTimestampToSeconds(const OgaTokenizer* tokenizer, int32_t token_id, double* seconds);
+
+/**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
  * when it is no longer needed.
  */

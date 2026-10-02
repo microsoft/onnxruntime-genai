@@ -8,6 +8,7 @@
 #include "tensor.h"
 
 #include <algorithm>
+#include <iterator>
 
 namespace Generators {
 
@@ -45,6 +46,10 @@ TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
 }
 
 const std::string& TokenizerStream::Decode(int32_t token) {
+  if (tokenizer_->IsTimestampToken(token)) {
+    chunk_.clear();
+    return chunk_;
+  }
   const char* string;
   CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
   chunk_ = string;
@@ -57,7 +62,14 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
                                              bot_token_id_{config.model.bot_token_id},
                                              eot_token_id_{config.model.eot_token_id},
                                              bor_token_id_{config.model.bor_token_id},
-                                             eor_token_id_{config.model.eor_token_id} {
+                                             eor_token_id_{config.model.eor_token_id},
+                                             timestamp_begin_token_id_{config.model.timestamp_begin_token_id},
+                                             vocab_size_{config.model.vocab_size} {
+  if (timestamp_begin_token_id_ &&
+      (*timestamp_begin_token_id_ < 0 || *timestamp_begin_token_id_ >= vocab_size_)) {
+    throw std::runtime_error(
+        "model.timestamp_begin_token_id must be within the tokenizer vocabulary");
+  }
   // Default tokenizer options
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
@@ -118,6 +130,16 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   // first token produces.
   if (tokens.empty()) {
     return {};
+  }
+
+  std::vector<int32_t> filtered_tokens;
+  if (timestamp_begin_token_id_) {
+    filtered_tokens.reserve(tokens.size());
+    std::copy_if(tokens.begin(), tokens.end(), std::back_inserter(filtered_tokens),
+                 [this](int32_t token) { return !IsTimestampToken(token); });
+    tokens = filtered_tokens;
+    if (tokens.empty())
+      return {};
   }
 
   OrtxPtr<OrtxStringArray> ortx_string_array;
@@ -209,6 +231,24 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   extTokenId_t token_id;
   CheckResult(OrtxConvertTokenToId(tokenizer_, token, &token_id));
   return token_id;
+}
+
+bool Tokenizer::IsTimestampToken(int32_t token) const {
+  return timestamp_begin_token_id_ &&
+         token >= *timestamp_begin_token_id_ &&
+         token < vocab_size_;
+}
+
+int32_t Tokenizer::GetTimestampBeginTokenId() const {
+  if (!timestamp_begin_token_id_)
+    throw std::runtime_error("Timestamp tokens are not defined for this model");
+  return *timestamp_begin_token_id_;
+}
+
+double Tokenizer::TimestampToSeconds(int32_t token) const {
+  if (!IsTimestampToken(token))
+    throw std::invalid_argument("Token is not a timestamp token");
+  return static_cast<double>(token - *timestamp_begin_token_id_) / 50.0;
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {

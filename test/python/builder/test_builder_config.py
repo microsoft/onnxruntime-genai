@@ -1149,6 +1149,38 @@ def test_runtime_search_rejects_unknown_fields():
         apply_runtime_config({"model": {"context_length": 4096}}, {"search": {"unsupported": 1}})
 
 
+def test_runtime_search_accepts_whisper_timestamp_options():
+    generated = {"model": {"context_length": 448}, "search": {"max_length": 448}}
+
+    updated = apply_runtime_config(
+        generated,
+        {
+            "search": {
+                "whisper_timestamps": True,
+                "whisper_max_initial_timestamp_index": 50,
+            }
+        },
+    )
+
+    assert updated["search"]["whisper_timestamps"] is True
+    assert updated["search"]["whisper_max_initial_timestamp_index"] == 50
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("whisper_timestamps", 1, "must be a boolean"),
+        ("whisper_max_initial_timestamp_index", -2, "must be an integer between -1 and 2147483647"),
+        ("whisper_max_initial_timestamp_index", 1.5, "must be an integer"),
+    ],
+)
+def test_runtime_search_validates_whisper_timestamp_options(field, value, error):
+    generated = {"model": {"context_length": 448}, "search": {"max_length": 448}}
+
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(generated, {"search": {field: value}})
+
+
 def test_runtime_allows_block_drafter_to_repeat_decoder_provider_options():
     generated = {
         "model": {

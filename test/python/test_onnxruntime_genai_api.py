@@ -76,6 +76,29 @@ def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):
     assert tokenizer.decode(np.arange(4, dtype=np.int32)[4:]) == ""
 
 
+def test_whisper_timestamp_tokenizer_api(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "whisper")
+    tokenizer = og.Tokenizer(model_path)
+
+    assert tokenizer.has_timestamp_tokens
+    assert tokenizer.timestamp_begin_token_id == 50364
+    assert not tokenizer.is_timestamp_token(50363)
+    assert tokenizer.is_timestamp_token(50364)
+    assert tokenizer.is_timestamp_token(51864)
+    assert not tokenizer.is_timestamp_token(51865)
+    assert tokenizer.timestamp_to_seconds(50399) == 0.7
+    assert tokenizer.decode([50364]) == ""
+    with pytest.raises(RuntimeError, match="Token is not a timestamp token"):
+        tokenizer.timestamp_to_seconds(51865)
+
+    tokenizer_without_timestamps = og.Tokenizer(
+        os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    )
+    assert not tokenizer_without_timestamps.has_timestamp_tokens
+    with pytest.raises(RuntimeError, match="Timestamp tokens are not defined for this model"):
+        _ = tokenizer_without_timestamps.timestamp_begin_token_id
+
+
 def test_telemetry_control():
     og.disable_telemetry_events()
     og.enable_telemetry_events()

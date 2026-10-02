@@ -11,6 +11,7 @@ import os
 
 import onnx_ir as ir
 import torch
+from transformers import AutoTokenizer, GenerationConfig
 
 class WhisperEncoder(Model):
     # Each Whisper encoder layer is typically defined as:
@@ -475,6 +476,74 @@ class WhisperModel(Model):
         self.hf_remote = self.decoder.hf_remote
         self.context_length = self.decoder.context_length
 
+    def resolve_timestamp_metadata(self, extra_kwargs):
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                self.decoder.model_name_or_path,
+                token=self.hf_token,
+                trust_remote_code=self.hf_remote,
+                **extra_kwargs,
+            )
+        except Exception as e:
+            print(f"Warning: could not resolve Whisper timestamp tokens ({e}).")
+            return None
+
+        vocabulary = tokenizer.get_vocab()
+        required_tokens = ("<|notimestamps|>", "<|0.00|>")
+        missing_tokens = [token for token in required_tokens if token not in vocabulary]
+        if missing_tokens:
+            print(
+                "Warning: Whisper tokenizer is missing required timestamp tokens: "
+                + ", ".join(missing_tokens)
+            )
+            return None
+
+        no_timestamps_token_id = vocabulary[required_tokens[0]]
+        timestamp_begin_token_id = vocabulary[required_tokens[1]]
+        if not 0 <= no_timestamps_token_id < timestamp_begin_token_id < self.vocab_size:
+            raise ValueError(
+                "Whisper timestamp token IDs must satisfy "
+                "0 <= no_timestamps_token_id < timestamp_begin_token_id < vocab_size"
+            )
+
+        tokens_by_id = {token_id: token for token, token_id in vocabulary.items()}
+        for token_id in range(timestamp_begin_token_id, self.vocab_size):
+            timestamp_index = token_id - timestamp_begin_token_id
+            hundredths = timestamp_index * 2
+            expected_token = f"<|{hundredths // 100}.{hundredths % 100:02d}|>"
+            if tokens_by_id.get(token_id) != expected_token:
+                raise ValueError(
+                    "Whisper timestamp tokens must form a contiguous 0.02-second suffix "
+                    "through vocab_size"
+                )
+
+        max_initial_timestamp_index = 50
+        try:
+            generation_config = GenerationConfig.from_pretrained(
+                self.decoder.model_name_or_path,
+                token=self.hf_token,
+                trust_remote_code=self.hf_remote,
+                **extra_kwargs,
+            )
+            configured_index = getattr(generation_config, "max_initial_timestamp_index", None)
+            if configured_index is not None:
+                max_initial_timestamp_index = configured_index
+        except Exception as e:
+            print(
+                "Warning: could not read Whisper max_initial_timestamp_index "
+                f"from generation_config.json ({e}); using 50."
+            )
+
+        if (
+            isinstance(max_initial_timestamp_index, bool)
+            or not isinstance(max_initial_timestamp_index, int)
+            or not 0 <= max_initial_timestamp_index < self.vocab_size - timestamp_begin_token_id
+        ):
+            raise ValueError(
+                "Whisper max_initial_timestamp_index must address an available timestamp token"
+            )
+        return no_timestamps_token_id, timestamp_begin_token_id, max_initial_timestamp_index
+
     def is_gqa_supported(self):
         # GQA is not supported in Whisper since there is no attention mask input
         return False
@@ -488,6 +557,7 @@ class WhisperModel(Model):
         self.decoder.save_model(output_dir)
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        timestamp_metadata = self.resolve_timestamp_metadata(extra_kwargs)
         audio_processor_cfg = {
             "feature_extraction": {
                 "sequence": [
@@ -988,6 +1058,11 @@ class WhisperModel(Model):
                 "top_p": 1.0,
             },
         }
+        if timestamp_metadata:
+            no_timestamps_token_id, timestamp_begin_token_id, max_initial_timestamp_index = timestamp_metadata
+            genai_config["model"]["no_timestamps_token_id"] = no_timestamps_token_id
+            genai_config["model"]["timestamp_begin_token_id"] = timestamp_begin_token_id
+            genai_config["search"]["whisper_max_initial_timestamp_index"] = max_initial_timestamp_index
 
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)

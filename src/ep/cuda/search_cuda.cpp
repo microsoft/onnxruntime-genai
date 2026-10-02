@@ -174,11 +174,6 @@ void BeamSearch_Cuda::SelectTop() {
   cuda::DispatchBlockwiseSoftmaxForward<true>(GetStream(), softmax_buffer_.get(), next_token_scores_.Span().data(), params_->config.model.vocab_size,
                                               params_->config.model.vocab_size, params_->config.model.vocab_size, params_->BatchBeamSize());
 
-  // Copy next_token_scores to CPU
-  auto next_token_scores_cpu = CudaMallocHostArray<float>(params_->BatchBeamSize() * params_->config.model.vocab_size);
-  CUDA_CHECK(cudaMemcpyAsync(next_token_scores_cpu.get(), softmax_buffer_.get(), params_->BatchBeamSize() * params_->config.model.vocab_size * sizeof(float), cudaMemcpyDeviceToHost, GetStream()));
-  CUDA_CHECK(cudaStreamSynchronize(GetStream()));
-
   auto beam_scores = beam_scorer_->GetNextScores();
 
   // Add beam score to next token scores. Corresponding python code is like:
@@ -224,7 +219,7 @@ void BeamSearch_Cuda::SelectTop() {
   DumpCudaSpan(std::cout, next_indices);
 #endif
 
-  beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
+  beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices, eos_seen_);
   auto next_tokens_device = beam_scorer_->GetNextTokens();
   next_tokens_ = gpu_span<int32_t>(next_tokens_device.Span());
   sequences_.AfterAppendNextTokens(next_tokens_device, params_->BatchBeamSize());

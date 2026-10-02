@@ -167,6 +167,8 @@ jobs:
           copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
           & .\$env:binaryDir\Release\unit_tests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\$env:binaryDir\Release\whisper_timestamp_unit_tests.exe --device cpu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\$env:binaryDir\Release\engine_unit_tests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
