@@ -21,24 +21,10 @@ from pathlib import Path
 import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
-BUILDERS_DIR = MODELS_DIR / "builders"
 sys.path.insert(0, str(MODELS_DIR))
 
 
 def _load_builder_entrypoint_module():
-    # builder.py imports every concrete model class; stub the package so these
-    # validation-only tests stay free of those dependencies.
-    builders_stub = types.ModuleType("builders")
-
-    def _stub_getattr(name):  # PEP 562: satisfies `from builders import <ModelClass>`
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return type(name, (), {})
-
-    builders_stub.__getattr__ = _stub_getattr
-    builders_stub.__path__ = [str(BUILDERS_DIR)]
-    sys.modules["builders"] = builders_stub
-
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
