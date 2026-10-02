@@ -5,11 +5,13 @@
 #include "models/vision/multi_modal_vision.h"
 #include "models/multi_modal.h"
 #include "models/model_type.h"
+#include "models/vision/gemma3_vision_state.h"
 #include "models/vision/gemma4_vision_state.h"
+#include "models/vision/lfm2_vision_state.h"
+#include "models/vision/phi3_vision_state.h"
+#include "models/vision/phi4_multimodal_vision_state.h"
 #include "models/vision/qwen_vision_state.h"
 #include "models/vision/pixtral_vision_state.h"
-
-#include <numeric>
 
 namespace Generators {
 
@@ -38,38 +40,28 @@ DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next
 }
 
 int64_t VisionState::GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) const {
-  for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == Config::Defaults::PixelValuesName) {
-      assert(extra_inputs[i].tensor->ort_tensor_);
-      const auto num_dims = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape().size();
-      if (num_dims < 3) {
-        return 0;
-      }
-      // Rank ≥ 3: batch size is the leading dimension (Phi, Gemma, legacy Qwen).
-      return extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape().front();
-    }
-  }
-
   return 0;
 }
 
 int64_t VisionState::GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) const {
-  for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == Config::Defaults::NumImageTokens) {
-      assert(extra_inputs[i].tensor->ort_tensor_);
-      const int64_t* num_image_tokens_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>();
-      return std::accumulate(num_image_tokens_data,
-                             num_image_tokens_data + extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount(),
-                             0LL);
-    }
-  }
-
   return 0;
 }
 
 std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
   if (model.config_->model.type == "gemma4") {
     return std::make_unique<Gemma4VisionState>(model, params);
+  }
+  if (model.config_->model.type == "phi4mm") {
+    return std::make_unique<Phi4MultimodalVisionState>(model, params);
+  }
+  if (model.config_->model.type == "phi3v") {
+    return std::make_unique<Phi3VisionState>(model, params);
+  }
+  if (model.config_->model.type == "gemma3") {
+    return std::make_unique<Gemma3VisionState>(model, params);
+  }
+  if (model.config_->model.type == "lfm2_vl") {
+    return std::make_unique<Lfm2VisionState>(model, params);
   }
   if (ModelType::IsQwenVLFamily(model.config_->model.type)) {
     return std::make_unique<QwenVisionState>(model, params);

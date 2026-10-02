@@ -5,17 +5,55 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <numeric>
 
 #include "generator/generators.h"
 #include "models/multi_modal.h"
 
 namespace Generators {
 
-int64_t QwenVisionState::GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) const {
-  if (const auto batch_size = VisionState::GetImageFeatureBatchSize(extra_inputs); batch_size != 0) {
-    return batch_size;
+namespace {
+
+void ValidateImageGridThwLayoutAndCount(const std::vector<int64_t>& shape,
+                                        size_t elem_count,
+                                        int64_t num_images,
+                                        const char* tensor_name) {
+  if (num_images < 0) {
+    throw std::runtime_error(std::string(tensor_name) + " num_images must be non-negative");
   }
+  if (shape.size() != 2) {
+    throw std::runtime_error(std::string(tensor_name) + " must have rank 2 [num_images, 3]");
+  }
+  if (shape[0] < 0 || shape[1] < 0) {
+    throw std::runtime_error(std::string(tensor_name) + " dimensions must be non-negative");
+  }
+  if (shape[1] != 3) {
+    throw std::runtime_error(std::string(tensor_name) + " second dimension must be 3");
+  }
+
+  const size_t expected_image_count = static_cast<size_t>(num_images);
+  if (static_cast<size_t>(shape[0]) < expected_image_count) {
+    throw std::runtime_error(std::string(tensor_name) + " shape[0] (" + std::to_string(shape[0]) +
+                             ") is less than required image count (" + std::to_string(expected_image_count) + ")");
+  }
+  if (elem_count % 3 != 0 || elem_count / 3 < expected_image_count) {
+    throw std::runtime_error(std::string(tensor_name) + " element count (" + std::to_string(elem_count) +
+                             ") is less than required for " + std::to_string(num_images) +
+                             " images (need at least 3 values per image)");
+  }
+}
+
+}  // namespace
+
+int64_t QwenVisionState::GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) const {
   for (const auto& input : extra_inputs) {
+    if (input.name == Config::Defaults::PixelValuesName) {
+      assert(input.tensor->ort_tensor_);
+      const auto shape = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+      if (shape.size() >= 3) {
+        return shape.front();
+      }
+    }
     if (input.name == Config::Defaults::ImageGridThwName) {
       assert(input.tensor->ort_tensor_);
       const auto info = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
@@ -23,6 +61,18 @@ int64_t QwenVisionState::GetImageFeatureBatchSize(const std::vector<ExtraInput>&
       const int64_t num_images = shape.empty() ? 0 : shape[0];
       ValidateImageGridThwLayoutAndCount(shape, info->GetElementCount(), num_images, "image_grid_thw");
       return num_images;
+    }
+  }
+  return 0;
+}
+
+int64_t QwenVisionState::GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) const {
+  for (const auto& input : extra_inputs) {
+    if (input.name == Config::Defaults::NumImageTokens) {
+      assert(input.tensor->ort_tensor_);
+      const auto info = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+      const int64_t* data = input.tensor->ort_tensor_->GetTensorData<int64_t>();
+      return std::accumulate(data, data + info->GetElementCount(), 0LL);
     }
   }
   return 0;

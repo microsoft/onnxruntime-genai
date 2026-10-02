@@ -15,7 +15,7 @@
 #include <ort_genai.h>
 
 #include "models/model.h"
-#include "models/vision/qwen_vl_model.h"
+#include "models/pipeline/qwen_vl_pipeline.h"
 #include "models/vision/qwen_vl_vision.h"
 
 #include "test_utils.h"

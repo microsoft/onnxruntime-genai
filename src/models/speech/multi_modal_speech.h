@@ -35,8 +35,6 @@ struct SpeechState : State {
   std::unique_ptr<MultiModalFeatures> audio_features_;
 };
 
-// Returns the total number of audio tokens across the clips in the current batch, read from the
-// `audio_sizes_name` extra input (each clip's contribution to the decoder's token sequence).
 // Factory: pick the right SpeechState subclass based on model type.
 std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 

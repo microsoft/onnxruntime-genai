@@ -104,6 +104,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${MODELS_ROOT}/vision/*.cpp"
   "${MODELS_ROOT}/speech/*.h"
   "${MODELS_ROOT}/speech/*.cpp"
+  "${MODELS_ROOT}/pipeline/*.h"
+  "${MODELS_ROOT}/pipeline/*.cpp"
   "${MODELS_ROOT}/preprocessing/*.h"
   "${MODELS_ROOT}/preprocessing/*.cpp"
   "${ENGINE_ROOT}/*.h"

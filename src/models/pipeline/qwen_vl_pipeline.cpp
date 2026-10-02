@@ -1,4 +1,4 @@
-#include "models/vision/qwen_vl_model.h"
+#include "models/pipeline/qwen_vl_pipeline.h"
 #include "models/model.h"
 #include "models/onnxruntime_api.h"
 #include "logging.h"

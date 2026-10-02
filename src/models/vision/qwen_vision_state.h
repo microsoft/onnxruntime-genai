@@ -11,6 +11,7 @@ struct QwenVisionState : VisionState {
   using VisionState::VisionState;
 
   int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) const override;
+  int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) const override;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
 };

@@ -7,8 +7,7 @@
 #include "models/model_type.h"
 #include "models/speech/gemma4_speech_state.h"
 #include "models/speech/lfm2_audio_speech_state.h"
-
-#include <numeric>
+#include "models/speech/phi4_multimodal_speech_state.h"
 
 namespace Generators {
 
@@ -35,21 +34,6 @@ DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next
 }
 
 int64_t SpeechState::GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs) const {
-  const auto& audio_sizes_name = model_.config_->model.speech.inputs.audio_sizes;
-  for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == audio_sizes_name) {
-      assert(extra_inputs[i].tensor->ort_tensor_);
-      auto type_and_shape_info = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
-      const auto element_count = type_and_shape_info->GetElementCount();
-      if (type_and_shape_info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-        const int64_t* audio_sizes_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>();
-        return std::accumulate(audio_sizes_data, audio_sizes_data + element_count, 0LL);
-      } else {
-        throw std::runtime_error("Unsupported data type " + std::to_string(static_cast<int64_t>(type_and_shape_info->GetElementType())) + " for audio_sizes tensor. Only int64 is supported.");
-      }
-    }
-  }
-
   return 0;
 }
 
@@ -60,6 +44,9 @@ void SpeechState::ReuseFeaturesBuffer(MultiModalFeatures& embedding_features) {
 std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
   if (model.config_->model.type == "gemma4") {
     return std::make_unique<Gemma4SpeechState>(model, params);
+  }
+  if (model.config_->model.type == "phi4mm") {
+    return std::make_unique<Phi4MultimodalSpeechState>(model, params);
   }
   if (ModelType::IsLfm2Audio(model.config_->model.type)) {
     return std::make_unique<Lfm2AudioSpeechState>(model, params);
