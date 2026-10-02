@@ -74,8 +74,8 @@ void ExpectFloat16ToFloat32(size_t count, size_t source_pad, size_t dest_pad) {
     source[source_pad + i] = Float16Pattern(i);
 
   ASSERT_TRUE(Cpu().Cast(source.data() + source_pad, dest.data() + dest_pad,
-                          Ort::TypeToTensorType<Ort::Float16_t>,
-                          Ort::TypeToTensorType<float>, count));
+                         Ort::TypeToTensorType<Ort::Float16_t>,
+                         Ort::TypeToTensorType<float>, count));
 
   for (size_t i = 0; i < count; ++i) {
     const uint16_t encoded = source[source_pad + i];
@@ -96,8 +96,8 @@ void ExpectBFloat16ToFloat32(size_t count, size_t source_pad) {
     source[source_pad + i] = static_cast<uint16_t>(i);
 
   ASSERT_TRUE(Cpu().Cast(source.data() + source_pad, dest.data(),
-                          Ort::TypeToTensorType<Ort::BFloat16_t>,
-                          Ort::TypeToTensorType<float>, count));
+                         Ort::TypeToTensorType<Ort::BFloat16_t>,
+                         Ort::TypeToTensorType<float>, count));
 
   for (size_t i = 0; i < count; ++i) {
     const uint16_t encoded = source[source_pad + i];
@@ -136,8 +136,8 @@ TEST(CpuCastTest, Float32ToFloat16) {
 
   std::vector<uint16_t> dest(std::size(values), 0x1234);
   ASSERT_TRUE(Cpu().Cast(const_cast<float*>(values), dest.data(),
-                          Ort::TypeToTensorType<float>,
-                          Ort::TypeToTensorType<Ort::Float16_t>, std::size(values)));
+                         Ort::TypeToTensorType<float>,
+                         Ort::TypeToTensorType<Ort::Float16_t>, std::size(values)));
   for (size_t i = 0; i < std::size(values); ++i)
     EXPECT_EQ(dest[i], expected[i]) << "value " << values[i];
 }
@@ -149,8 +149,8 @@ TEST(CpuCastTest, Float32ToBFloat16Truncates) {
 
   std::vector<uint16_t> dest(std::size(values));
   ASSERT_TRUE(Cpu().Cast(const_cast<float*>(values), dest.data(),
-                          Ort::TypeToTensorType<float>,
-                          Ort::TypeToTensorType<Ort::BFloat16_t>, std::size(values)));
+                         Ort::TypeToTensorType<float>,
+                         Ort::TypeToTensorType<Ort::BFloat16_t>, std::size(values)));
   for (size_t i = 0; i < std::size(values); ++i)
     EXPECT_EQ(dest[i], expected[i]);
 }
@@ -159,8 +159,8 @@ TEST(CpuCastTest, Int32ToInt64) {
   const int32_t values[] = {0, 1, -1, std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::min()};
   std::vector<int64_t> dest(std::size(values));
   ASSERT_TRUE(Cpu().Cast(const_cast<int32_t*>(values), dest.data(),
-                          Ort::TypeToTensorType<int32_t>,
-                          Ort::TypeToTensorType<int64_t>, std::size(values)));
+                         Ort::TypeToTensorType<int32_t>,
+                         Ort::TypeToTensorType<int64_t>, std::size(values)));
   for (size_t i = 0; i < std::size(values); ++i)
     EXPECT_EQ(dest[i], static_cast<int64_t>(values[i]));
 }
@@ -169,8 +169,8 @@ TEST(CpuCastTest, EmptyCountLeavesOutputUntouched) {
   uint16_t input = 0x3C00;
   float output = 42.0f;
   ASSERT_TRUE(Cpu().Cast(&input, &output,
-                          Ort::TypeToTensorType<Ort::Float16_t>,
-                          Ort::TypeToTensorType<float>, 0));
+                         Ort::TypeToTensorType<Ort::Float16_t>,
+                         Ort::TypeToTensorType<float>, 0));
   EXPECT_EQ(output, 42.0f);
 }
 
@@ -178,8 +178,8 @@ TEST(CpuCastTest, RejectsSameType) {
   float input = 1.0f;
   float output = 0.0f;
   EXPECT_THROW(Cpu().Cast(&input, &output,
-                           Ort::TypeToTensorType<float>,
-                           Ort::TypeToTensorType<float>, 1),
+                          Ort::TypeToTensorType<float>,
+                          Ort::TypeToTensorType<float>, 1),
                std::runtime_error);
 }
 
@@ -187,8 +187,8 @@ TEST(CpuCastTest, RejectsUnimplementedType) {
   double input = 1.0;
   float output = 0.0f;
   EXPECT_THROW(Cpu().Cast(&input, &output,
-                           Ort::TypeToTensorType<double>,
-                           Ort::TypeToTensorType<float>, 1),
+                          Ort::TypeToTensorType<double>,
+                          Ort::TypeToTensorType<float>, 1),
                std::runtime_error);
 }
 
