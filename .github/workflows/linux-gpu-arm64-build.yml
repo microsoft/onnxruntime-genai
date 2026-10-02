@@ -77,7 +77,11 @@ jobs:
                 --skip_examples \
                 --package \
                 --cmake_extra_defines MANYLINUX=ON PYTHON_EXECUTABLE="$PY" \
-                  "CMAKE_CUDA_ARCHITECTURES=89-real;90-real;120-real;121-real"
+                  "CMAKE_CUDA_ARCHITECTURES=89-real;90-real;100-real;103-real;120-real;121-real"
+              cubins=$(cuobjdump --list-elf /ort_genai_src/install/lib/libonnxruntime-genai-cuda.so)
+              for sm in 89 90 100 103 120 121; do
+                grep -q "sm_${sm}\.cubin" <<< "$cubins" || { echo "Missing sm_${sm} CUDA cubin"; exit 1; }
+              done
             '
 
       - name: Check ARM64 CUDA package contents
