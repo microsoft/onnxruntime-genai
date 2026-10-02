@@ -12,6 +12,7 @@ import android.net.Uri;
 import android.util.Log;
 
 import com.microsoft.applications.events.HttpClient;
+import com.microsoft.applications.events.OfflineRoom;
 
 /** Initializes the Android transport and platform context used by native 1DS telemetry. */
 public final class TelemetryInitializer extends ContentProvider {
@@ -33,6 +34,7 @@ public final class TelemetryInitializer extends ContentProvider {
       System.loadLibrary("mat");
       synchronized (TelemetryInitializer.class) {
         if (client == null) {
+          OfflineRoom.connectContext(context.getApplicationContext());
           client = new HttpClient(context.getApplicationContext());
         }
       }

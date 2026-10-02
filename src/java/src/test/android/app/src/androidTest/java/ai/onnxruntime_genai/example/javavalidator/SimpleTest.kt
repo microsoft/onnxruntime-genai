@@ -37,6 +37,22 @@ class SimpleTest {
         }
     }
 
+    @Test
+    fun telemetryRoomStorageOpens() {
+        if (!telemetryIncluded) return
+
+        val context = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+        val storage = Class.forName("com.microsoft.applications.events.OfflineRoom")
+        val room = storage.getConstructor(android.content.Context::class.java, String::class.java)
+            .newInstance(context, ":memory:")
+        try {
+            Assert.assertEquals(0L, storage.getMethod("getRecordCount", Int::class.javaPrimitiveType)
+                .invoke(room, -1))
+        } finally {
+            storage.getMethod("close").invoke(room)
+        }
+    }
+
     @Throws(IOException::class)
     private fun copyModelFromAssets(): String {
         // NOTE: We have to read from the app's assets (app/src/main/assets) and write the the app's filesDir.

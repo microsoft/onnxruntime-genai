@@ -73,7 +73,11 @@ if(ANDROID AND ENABLE_TELEMETRY)
   set(ANDROID_TELEMETRY_JAVA_PACKAGE_DIR
       ${ANDROID_TELEMETRY_JAVA_DIR}/com/microsoft/applications/events)
   file(MAKE_DIRECTORY ${ANDROID_TELEMETRY_JAVA_PACKAGE_DIR})
-  foreach(_telemetry_java_file HttpClient.java HttpClientRequest.java)
+  foreach(_telemetry_java_file
+      HttpClient.java HttpClientRequest.java ByTenant.java
+      OfflineRoom.java OfflineRoomDatabase.java
+      StorageRecord.java StorageRecordDao.java
+      StorageSetting.java StorageSettingDao.java)
     configure_file(
       ${ORTGENAI_TELEMETRY_ANDROID_JAVA_SOURCE_DIR}/com/microsoft/applications/events/${_telemetry_java_file}
       ${ANDROID_TELEMETRY_JAVA_PACKAGE_DIR}/${_telemetry_java_file}
@@ -302,7 +306,7 @@ if (ANDROID)
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E echo "Building and running Android test for Android AAR package..."
                      COMMAND ${POST_BUILD_GRADLE_EXECUTABLE} clean assembleDebug assembleDebugAndroidTest
-                       -DminSdkVer=${ANDROID_MIN_SDK} --stacktrace
+                       -DminSdkVer=${ANDROID_MIN_SDK} -DtelemetryEnabled=${ENABLE_TELEMETRY} --stacktrace
                      WORKING_DIRECTORY ${ANDROID_TEST_PACKAGE_DIR})
 endif()
 
