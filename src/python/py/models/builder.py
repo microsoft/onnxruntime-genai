@@ -63,6 +63,7 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35Model, Qwen35MoEModel
+from model_builder_telemetry import ModelBuilderTelemetry
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
@@ -620,6 +621,8 @@ def create_model(
     must supply the positional precision argument (None is allowed for an
     explicit target weight type), even when the CLI permits omitting it.
     """
+    telemetry = ModelBuilderTelemetry()
+    input_path = os.fsdecode(input_path) if input_path else input_path
     effective_config = extra_options.pop("_effective_builder_config", None)
     structured = {
         key: extra_options.pop(key)
@@ -647,6 +650,7 @@ def create_model(
     # Update name alias for TRT-RTX
     if execution_provider == "NvTensorRtRtx":
         execution_provider = "trt-rtx"
+        extra_options["use_qdq"] = True
 
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
@@ -833,6 +837,16 @@ def create_model(
 
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
+    telemetry.emit(
+        config=config,
+        onnx_model=onnx_model,
+        precision=precision,
+        execution_provider=execution_provider,
+        output_dir=output_dir,
+        extra_options=extra_options,
+        input_path=input_path,
+        model_name=model_name,
+    )
 
 
 def get_args():
@@ -889,6 +903,12 @@ def get_args():
         type=str,
         default=os.path.join(".", "cache_dir"),
         help="Cache directory for Hugging Face files and temporary ONNX external data files",
+    )
+
+    parser.add_argument(
+        "--disable_telemetry",
+        action="store_true",
+        help="Disable all Python telemetry for this process (equivalent to ORT_DISABLE_TELEMETRY=1).",
     )
 
     parser.add_argument(
@@ -1217,6 +1237,8 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
+    if args.disable_telemetry:
+        os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     extra_options = parse_extra_options(
         args.model_name,
         args.input,
@@ -1232,12 +1254,15 @@ if __name__ == "__main__":
         runtime_config=args.runtime_config,
         search=args.search,
     )
-    create_model(
-        args.model_name,
-        args.input,
-        args.output,
-        args.precision,
-        args.execution_provider,
-        args.cache_dir,
-        **extra_options,
-    )
+    try:
+        create_model(
+            args.model_name,
+            args.input,
+            args.output,
+            args.precision,
+            args.execution_provider,
+            args.cache_dir,
+            **extra_options,
+        )
+    finally:
+        ModelBuilderTelemetry().shutdown()

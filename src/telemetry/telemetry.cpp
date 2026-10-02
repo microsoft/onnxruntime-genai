@@ -108,6 +108,15 @@ bool PrepareSampledEvent(MAT::EventProperties& event, std::string_view app_sessi
   return true;
 }
 
+bool PrepareProcessEvent(MAT::EventProperties& event, std::string_view app_session_guid) {
+  if (!TelemetryInternal::ShouldSampleSession(
+          app_session_guid, 0, TelemetryInternal::kProcessEventSampleRatePercent)) {
+    return false;
+  }
+  event.SetPopsample(TelemetryInternal::kProcessEventSampleRatePercent);
+  return true;
+}
+
 #if defined(__linux__) && !defined(__ANDROID__)
 std::string GetCertificateAuthorityBundlePath() {
   if (const char* ssl_cert_file = std::getenv("SSL_CERT_FILE");
@@ -427,8 +436,7 @@ void GenAiTelemetry::LogProcessInfo() {
     warn_device_id_fallback = device.device_id_status == "Failed";
 
     auto event = MakeEvent("ProcessInfo", EventPriority::Critical);
-    if (!PrepareSampledEvent(event, app_session_guid_, 0,
-                             TelemetryInternal::kCriticalEventSampleRatePercent)) {
+    if (!PrepareProcessEvent(event, app_session_guid_)) {
       emitted = true;
       return;
     }

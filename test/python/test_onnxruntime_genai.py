@@ -27,6 +27,7 @@ def run_onnxruntime_genai_api_tests(
         "pytest",
         "-sv",
         "test_onnxruntime_genai_api.py",
+        "test_telemetry.py",
         "builder",
         "models",
         "--test_models",
