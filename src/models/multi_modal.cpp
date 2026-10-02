@@ -6,6 +6,7 @@
 #include "multi_modal.h"
 #include "models/io/default_position_inputs.h"
 #include "models/io/qwen_vl_position_inputs.h"
+#include <cstring>
 #include "pixtral_vision_state.h"
 #include "qwen_vl_state.h"
 #include <algorithm>
