@@ -165,13 +165,23 @@ request's committed state. When replacing a retained checkpoint, suffix metadata
 checkpoint ownership metadata, and tensor-copy views are allocated before
 reclaiming its row, so a metadata allocation failure preserves the earlier hit.
 When prompts branch between fixed-state checkpoints, an identical intermediate KV
-block can belong to an older suffix that the new request cannot adopt. Publication
-stages the new suffix and checkpoint before retiring that entire conflicting
-history. A matching existing checkpoint still prevents duplicate publication.
-Active block owners, pending fixed-state matches, and leased draft snapshots
-defer retirement; later publication can retry after those leases are released.
-Dropped checkpoints can be rebuilt through the same mechanism without splicing
-canonical KV blocks into recomputed fixed state.
+block can belong to an older suffix that the new request cannot adopt. With
+capacity for multiple checkpoints, the index may retain distinct physical
+histories for the same logical tokens. Logical identity verifies token content;
+physical ancestry identifies the exact KV chain that belongs with a checkpoint.
+A hybrid match selects a complete checkpointed history, never a mixture of
+blocks from different histories.
+
+Checkpoint reclamation prefers intermediate checkpoints in the publishing
+history before independent deep endpoints. This allows two warm branches to
+remain reusable without increasing the configured block or checkpoint budgets.
+A usable checkpoint at the same complete logical boundary still prevents
+redundant publication. When only one checkpoint or insufficient block capacity
+is available, publication stages its replacement before retiring an unleased
+conflicting suffix. Active block owners, pending fixed-state matches, and leased
+draft snapshots protect the old history. Metadata or capture-allocation failure
+preserves earlier hits; a later publication may retry after capacity or leases
+change. Recomputed private KV is never spliced into a different physical history.
 After adoption, prefill resumes at that checkpoint and may
 process the full configured chunk, so later checkpoint positions can shift
 relative to the original request's chunk boundaries. A match pins both its
@@ -204,6 +214,12 @@ If the matching draft checkpoint is absent, the request retains the full
 target hit and runs target-only until the windowed drafter has rebuilt its context.
 Full-attention DSpark remains target-only
 after a nonzero-position prefix hit.
+
+For operator-run boundary, request-order, branching, lease, cancellation, and
+bounded-pool checks on the intended GPU stack, see
+[Prefix-cache validation](prefix-cache-validation.md). The dedicated runner
+compares exact greedy output against cache-disabled references and checks
+post-release reuse progress independently of timing.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
