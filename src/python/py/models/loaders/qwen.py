@@ -154,7 +154,7 @@ class QwenMTPModel:
 class Qwen4ExpMTPModel(QwenMTPModel):
     @classmethod
     def from_modelopt(cls, model, layer_config, preserve_quantization, is_moe=True):
-        raise ValueError("Qwen4-Exp MTP export currently requires an unquantized safetensors checkpoint.")
+        return model.load_mtp()
 
     @staticmethod
     def from_state(mtp_state, embed_weight, lm_head_weight, layer_config, is_moe=True):

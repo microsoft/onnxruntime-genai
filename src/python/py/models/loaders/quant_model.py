@@ -5,12 +5,16 @@
 # --------------------------------------------------------------------------
 """Dispatch supported quantized checkpoint formats to their loaders."""
 
+import json
+import os
+
 from .awq import AWQModel
 from .gptq import GPTQModel
 from .modelopt import ModeloptModel
 from .olive import OliveModel
 from .quant_auto import QuantAutoModel
 from .quark import QuarkModel
+from .qwen3_8 import Qwen38ModeloptModel
 
 
 class QuantModel:
@@ -30,7 +34,10 @@ class QuantModel:
         elif quant_type == "quark":
             model = QuarkModel(quant_type, **kwargs)
         elif quant_type in {"modelopt", "compressed-tensors"}:
-            model = ModeloptModel(quant_type, **kwargs)
+            with open(os.path.join(kwargs["input_path"], "config.json")) as config_file:
+                config = json.load(config_file)
+            loader = Qwen38ModeloptModel if config.get("model_type") in {"qwen4_exp", "qwen4_exp_text"} else ModeloptModel
+            model = loader(quant_type, **kwargs)
         elif quant_type == "quant_auto":
             model = QuantAutoModel(quant_type, **kwargs)
         else:

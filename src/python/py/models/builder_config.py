@@ -319,7 +319,7 @@ def flatten_target_options(
     precision: str | None,
     execution_provider: str,
 ) -> tuple[dict[str, Any], QuantConfig, str]:
-    check_fields(options, {"quant_config", "attention", "optimizations", "vision"}, "target_options")
+    check_fields(options, {"quant_config", "attention", "vision"}, "target_options")
     if "vision" in options:
         raise ValueError("target_options.vision is reserved for a future schema capability")
 
@@ -368,12 +368,6 @@ def flatten_target_options(
         if field_name in kv_cache:
             warn_structured_override(legacy_options, legacy_key, f"target_options.attention.kv_cache.{field_name}")
             flattened[legacy_key] = kv_cache[field_name]
-
-    optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up"}, "target_options.optimizations")
-    if "fuse_mlp_gate_up" in optimizations:
-        warn_structured_override(legacy_options, "fuse_mlp_gate_up", "target_options.optimizations.fuse_mlp_gate_up")
-        flattened["fuse_mlp_gate_up"] = optimizations["fuse_mlp_gate_up"]
 
     return flattened, quant_config, effective_precision
 
@@ -456,7 +450,6 @@ def flatten_drafter_options(
             "shared_weights",
             "quant_config",
             "attention",
-            "optimizations",
             "dspark",
         },
         "drafter_options",
@@ -545,13 +538,6 @@ def flatten_drafter_options(
         if kv_cache.get("windowed", False):
             raise ValueError(f"{drafter_type} windowed KV cache is not supported")
 
-    optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up"}, "drafter_options.optimizations")
-    fuse_gate_up = optimizations.get("fuse_mlp_gate_up", False)
-    if fuse_gate_up and drafter_type != "dflash2":
-        raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
-    if drafter_type == "dflash2":
-        flattened["dflash2_fuse_gate_up"] = fuse_gate_up
 
     shared_weights = options.get("shared_weights", {})
     check_fields(shared_weights, {"embedding", "lm_head"}, "drafter_options.shared_weights")
@@ -608,6 +594,9 @@ def normalize_builder_config(
     here, although block-drafter config.json is read to resolve auxiliary taps.
     """
     legacy_options = copy.deepcopy(extra_options or {})
+    for removed_option in ("fuse_mlp_gate_up", "dflash2_fuse_gate_up", "use_device_allocator_for_initializers"):
+        if removed_option in legacy_options:
+            raise ValueError(f"extra_options.{removed_option} has been removed; this behavior is always enabled")
     structured_present = any(
         value is not None for value in (target_options, drafter_options, speculative_options, runtime_config)
     )

@@ -1124,8 +1124,7 @@ def test_prepack_keeps_ineligible_output_width_raw(tmp_path, bits, out_features)
 
 
 @pytest.mark.parametrize("bits", [None, 4, 8])
-@pytest.mark.parametrize("fuse_gate_up", [False, True])
-def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
+def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits):
     quant = {"bits": bits, "block_size": 8, "prepack": 0} if bits else None
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
@@ -1134,7 +1133,6 @@ def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
         paged_block_size=256,
         max_position_embeddings=128,
         quant=quant,
-        fuse_gate_up=fuse_gate_up,
     )
     generator = torch.Generator().manual_seed(42)
     weights = {
@@ -1149,12 +1147,7 @@ def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
     builder._make_mlp(0, "hidden_states", weights, "num_block")
 
     projections = [node for node in builder.graph if node.op_type in ("MatMul", "MatMulNBits")]
-    assert len(projections) == (2 if fuse_gate_up else 3)
-    if not fuse_gate_up:
-        assert not any(node.op_type == "Split" for node in builder.graph)
-        assert projections[0].name == "/dflash2/layers.0/mlp/gate_proj/MatMul"
-        assert projections[1].name == "/dflash2/layers.0/mlp/up_proj/MatMul"
-        return
+    assert len(projections) == 2
 
     projection = next(node for node in builder.graph if node.name == "/dflash2/layers.0/mlp/gate_up_proj/MatMul")
     assert projection.op_type == ("MatMulNBits" if bits else "MatMul")
@@ -1203,8 +1196,8 @@ def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
             paged_block_size=256,
             max_position_embeddings=128,
             quant={"bits": bits, "block_size": 32, "prepack": 0} if bits else None,
-            fuse_gate_up=fused,
         )
+        builder.mlp_attrs["fuse_gate_up"] = fused
         builder.io_dtype = ir.DataType.FLOAT
         builder.hidden_size = 32
         builder.intermediate_size = 64
@@ -1544,14 +1537,13 @@ def test_five_uniformly_windowed_layers_accept_total_layer_count(tmp_path):
     assert builder.sliding_window == 2048
 
 
-@pytest.mark.parametrize("fuse_gate_up", [False, True, "true", "false"])
-def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up):
+def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     captured = {}
 
     class StubDFlash2Builder:
         def __init__(self, _draft_dir, _target_dir, _io_dtype, _paged_block_size, max_position, **_kwargs):
             captured["max_position"] = max_position
-            captured["fuse_gate_up"] = _kwargs["fuse_gate_up"]
+            assert "fuse_gate_up" not in _kwargs
 
         def make_model(self):
             pass
@@ -1561,13 +1553,12 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
     model = _composite()
     model.make_dflash2_init(
         io_dtype=None,
-        extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_gate_up": fuse_gate_up},
+        extra_options={"dflash2_path": _draft_checkpoint(tmp_path)},
     )
 
     model.make_dflash2_model(str(tmp_path))
 
     assert captured["max_position"] == model.decoder.context_length
-    assert captured["fuse_gate_up"] is (str(fuse_gate_up).lower() == "true")
 
 
 def test_drafter_resolves_target_repository_to_local_snapshot(tmp_path, monkeypatch):
@@ -1607,22 +1598,20 @@ def test_drafter_resolves_target_repository_to_local_snapshot(tmp_path, monkeypa
     }
 
 
-def test_gate_up_fusion_defaults_off(tmp_path):
+def test_gate_up_fusion_is_always_enabled(tmp_path):
     model = _composite()
     model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
 
-    assert model.dflash2_attrs["fuse_gate_up"] is False
+    assert "fuse_gate_up" not in model.dflash2_attrs
     builder = DFlash2Builder(model.dflash2_path, str(tmp_path), ir.DataType.BFLOAT16, 256, 128)
-    assert builder.mlp_attrs["fuse_gate_up"] is False
+    assert builder.mlp_attrs["fuse_gate_up"] is True
 
 
-@pytest.mark.parametrize("value", ["yes", "", 1, None])
-def test_gate_up_fusion_rejects_invalid_option(tmp_path, value):
-    model = _composite()
-    with pytest.raises(ValueError, match="dflash2_fuse_gate_up must be true or false"):
-        model.make_dflash2_init(
-            io_dtype=None,
-            extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_gate_up": value},
+@pytest.mark.parametrize("value", [True, False])
+def test_gate_up_fusion_constructor_option_is_removed(tmp_path, value):
+    with pytest.raises(TypeError, match="fuse_gate_up"):
+        DFlash2Builder(
+            _draft_checkpoint(tmp_path), str(tmp_path), ir.DataType.BFLOAT16, 256, 128, fuse_gate_up=value
         )
 
 

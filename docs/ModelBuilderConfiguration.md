@@ -16,7 +16,7 @@ Tensor sharing follows the adoption approach in
 gate/up fusion follows
 [PR #2585](https://github.com/microsoft/onnxruntime-genai/pull/2585).
 The examples describe the proposed API; they are not runnable with the current
-builder unchanged. The explicit sharing policies and grouped optimization keys
+builder unchanged. The explicit sharing policies and grouped configuration keys
 below are new schema proposals, not existing flags introduced by those PRs.
 
 ## 1. Goals
@@ -46,8 +46,8 @@ same structure.
 | Field | Owner and purpose |
 | --- | --- |
 | `builder_config_version` | Structured builder schema version, proposed as `2`. Not written to the generated runtime config. |
-| `target_options` | Target text-decoder export policy: `quant_config`, `attention`, and `optimizations`. |
-| `drafter_options` | Drafter selection, source, quantization, attention, `optimizations`, `shared_weights`, and type-specific export settings. |
+| `target_options` | Target text-decoder export policy: `quant_config` and `attention`. |
+| `drafter_options` | Drafter selection, source, quantization, attention, `shared_weights`, and type-specific export settings. |
 | `speculative_options` | Graph requirements connecting the target and drafter. |
 | `runtime_config` | Inline runtime JSON fragment or a path/resource referencing one. |
 | `precision`, `search`, `extra_options` | Retained compatibility inputs. New recipes prefer the structured fields. |
@@ -173,16 +173,11 @@ runtime behavior even though they are not graph-construction options.
 
 ### Gate/Up Projection Fusion
 
-Expose `optimizations.fuse_mlp_gate_up` independently under `target_options` and
-`drafter_options`. The default is `false` for each; enabling target fusion does
-not enable drafter fusion or apply it to future vision components.
-
-For the target this maps to `fuse_mlp_gate_up` from PR #2585. It combines eligible
-MLP gate/up projections before weight quantization, producing a single projection
-(`MatMulNBits` for the INT4 example) followed by `Split`. For DFlash2 the same
-structured key maps to its existing `dflash2_fuse_gate_up` option. This supersedes
-the earlier draft's DFlash2-only `dflash2.fuse_gate_up` placement; reserve
-type-specific groups for settings that have no shared model-level meaning.
+Target MLP gate/up projections are always fused before weight quantization,
+producing a single projection (`MatMulNBits` for the INT4 example) followed by
+`Split`. DFlash2 drafter MLP gate/up projections are also always fused. Neither
+component exposes a fusion option or an `optimizations` group. This does not
+apply fusion to future vision components.
 
 Fusion requires a supported exporter and compatible projection shapes, biases,
 and quantization policy. Current target fusion requires unpacked floating-point
@@ -190,8 +185,7 @@ gate/up weights and does not support adapted projections. Reject unsupported
 requests, including any per-projection exclusion or precision rule that cannot
 be preserved. Resolve exact-name overrides against the final emitted graph;
 do not silently drop old gate/up names after fusion or change one projection's
-policy to match the other. An unsupported DSpark/MTP fusion request must fail,
-not be accepted just because the schema has the field.
+policy to match the other.
 
 Fusion is distinct from selecting the CUDA fpA/intB kernel family. The legacy
 `enable_cuda_fpa_intb_gemm` option maps to the runtime decoder session entry
@@ -205,7 +199,7 @@ must retain its own supported session settings rather than inherit target flags.
 only one drafter can be selected. `none` explicitly disables automatic MTP export;
 an omitted `drafter_options` retains current automatic discovery for compatibility.
 
-Common model fields are `quant_config`, `attention`, and `optimizations`.
+Common model fields are `quant_config` and `attention`.
 Additional drafter fields are:
 
 | Field | Applicability |
@@ -498,7 +492,7 @@ separate build/runtime caching is not required in the initial implementation.
 This is the proposed migration of the user-supplied Qwen3.8-27B DFlash2 Olive
 recipe, reproduced below without requiring a separate recipe checkout.
 It retains the target source, CUDA system, output/cache locations, and requested
-target INT4 plus INT8 embedding policy. It additionally opts into target gate/up
+target INT4 plus INT8 embedding policy. It uses mandatory target and drafter gate/up
 fusion and makes embedding/head sharing policy explicit. Fusion is an intentional
 graph change, so this extended example is not a claim of byte-identical migration.
 
@@ -569,9 +563,6 @@ there, or be supplied as resolved Olive resources.
             "scheme": "int4_per_channel",
             "scale_file": "kv_scales_int8_per_channel.json"
           }
-        },
-        "optimizations": {
-          "fuse_mlp_gate_up": true
         }
       },
       "drafter_options": {
@@ -581,9 +572,6 @@ there, or be supplied as resolved Olive resources.
         "shared_weights": {
           "embedding": "auto",
           "lm_head": "auto"
-        },
-        "optimizations": {
-          "fuse_mlp_gate_up": false
         },
         "quant_config": {
           "io_dtype": "bf16",
@@ -635,9 +623,8 @@ The two `auto` sharing settings request adoption when compatible, not guaranteed
 sharing. In particular, the INT8 embedding adoption path is an additional
 capability gate; this example must not be advertised as a one-copy package merely
 because it exports successfully. Use `required` below to enforce a memory budget.
-Target fusion is enabled; DFlash2 fusion is explicitly disabled independently.
-Set the drafter's `optimizations.fuse_mlp_gate_up` to `true` to opt into its own
-supported gate/up fusion as well, with separate numerical validation.
+Target and DFlash2 gate/up fusion are always enabled and require numerical
+validation for their respective quantization policies.
 
 ### Runtime Profile
 
@@ -858,8 +845,6 @@ target/drafter/runtime envelope.
 | `dflash2_path`, `dspark_path` | Drafter selection and `path` |
 | `dflash2_precision` | Drafter weight policy plus explicit legacy-derived settings |
 | `dflash2_num_draft_tokens`, `dspark_num_draft_tokens` | `drafter_options.num_draft_tokens` |
-| `fuse_mlp_gate_up` | `target_options.optimizations.fuse_mlp_gate_up` |
-| `dflash2_fuse_gate_up` | `drafter_options.optimizations.fuse_mlp_gate_up` |
 | `dspark_top_k` | `drafter_options.dspark.top_k` |
 | Existing automatic target/drafter tensor adoption | New `drafter_options.shared_weights` policies; preserve existing decisions for legacy-only calls |
 | `shared_embeddings` | Existing within-model tying; not an alias for cross-model `shared_weights` |
@@ -867,10 +852,14 @@ target/drafter/runtime envelope.
 | `max_draft_tokens` | Runtime `speculative.max_draft_tokens` |
 | `max_batch_size`, `max_scheduled_tokens`, `num_blocks`, `gpu_utilization_factor` | Runtime `engine.dynamic_batching` fields |
 | `paged_chunk_size` | Runtime `search.chunk_size` |
-| `enable_cuda_graph`, `use_device_allocator_for_initializers` | Runtime decoder session/provider settings |
+| `enable_cuda_graph` | Runtime decoder session/provider settings |
 | `enable_cuda_fpa_intb_gemm` | Runtime decoder session entry `ep.cuda.fpa_intb_gemm` |
 | Olive `search` | Runtime `search` |
 | Any other `extra_options` key | No canonical destination yet; see rule 8 |
+
+Target and DFlash2 gate/up fusion and device allocation for initializers are mandatory.
+The removed `fuse_mlp_gate_up`, `dflash2_fuse_gate_up`, and `use_device_allocator_for_initializers` extra
+options are rejected, including when set to `true`.
 
 Normalization rules:
 
@@ -940,7 +929,7 @@ and any later vision artifacts when packaging the result.
 2. Adapt MTP/DFlash2/DSpark to isolated policies and resolve cross-model graph
    requirements before export. Reject capabilities not implemented by each adapter.
   Reuse PR #2579's tensor-adoption mechanism with per-tensor sharing policies,
-  and PR #2585's target fusion path with independent per-model optimization flags.
+  and PR #2585's target fusion path with mandatory target and DFlash2 fusion.
 3. Add runtime fragment loading, validation, and finalization after composite
    model configuration is complete. Keep the existing runtime hierarchy.
 4. Integrate Olive fields, resources, cache identity, and typed forwarding.
@@ -981,7 +970,7 @@ feature, not merely a rename of configuration keys.
   private storage. Cover INT8 embeddings, target tying, QDQ, native FP8 heads,
   prepacked incompatibility, and distinct learned MTP heads without assuming
   every combination supports adoption.
-- Fusion tests for independent target/drafter flags, legacy mappings, one fused
+- Fusion tests for mandatory target/drafter behavior, removed-option rejection, one fused
   projection plus split, invalid shapes/adapters, and exclusion/override conflicts.
   Fusion can change quantization or kernel accumulation; compare numerical outputs
   and validate quality/acceptance rather than assuming bit-identical generation.

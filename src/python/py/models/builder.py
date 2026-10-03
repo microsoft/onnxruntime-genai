@@ -62,7 +62,7 @@ from builders import (
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from builders.qwen import Qwen35Model, Qwen35MoEModel
+from builders.qwen3_5 import Qwen35Model, Qwen35MoEModel
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
@@ -172,9 +172,7 @@ def check_extra_options(
         "use_paged_attention",
         "windowed_kv_cache",
         "text_only",
-        "use_device_allocator_for_initializers",
         "enable_cuda_fpa_intb_gemm",
-        "fuse_mlp_gate_up",
         "exclude_mtp",
     ]
 
@@ -991,15 +989,6 @@ def get_args():
                     dflash2_num_draft_tokens this does not change the exported drafter, so a model built
                     once can be re-tuned by editing the config. Default is unset, which leaves the runtime
                     default of 4 in effect.
-                dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
-                    Accepts true or false (default). Requires dflash2_path. Combines gate/up
-                    weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
-                    activations and body quantization; does not change the target or LM head.
-                    Requires re-export and workload-specific performance/quality validation.
-                fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
-                    MatMul or MatMulNBits followed by Split. Default is false. Applies before
-                    target weight quantization and requires unpacked, unadapted gate/up
-                    floating-point projections.
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
@@ -1102,10 +1091,6 @@ def get_args():
                 enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
                     If enabled, the model structure will be optimized for WebGPU graph execution.
                     This affects attention mask reformatting and position IDs handling.
-                use_device_allocator_for_initializers = Write `session.use_device_allocator_for_initializers=1` into
-                    the decoder's session options. Default is false. Initializers then bypass the arena, so the
-                    originals a kernel replaces during PrePack (notably the fpA_intB MatMulNBits layout conversion)
-                    are returned to the driver instead of being retained as free arena blocks.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
                 moe_quant_type = int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.

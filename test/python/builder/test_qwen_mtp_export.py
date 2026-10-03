@@ -1,14 +1,18 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+import importlib.util
 import json
 import os
+from pathlib import Path
 
+import numpy as np
 import onnx
 import pytest
 from onnx import external_data_helper, helper
 
 from models.builders.qwen import Qwen4ExpModel, Qwen35MoEModel
+from models.builders.qwen3_8 import Qwen4ExpMTPTextModel
 
 
 def _make_external_model(path, data_name, tensors):
@@ -46,6 +50,69 @@ def _make_qwen_mtp_model():
         "shared_initializer_prefixes": ("lm_head.MatMul.",),
     }
     return model
+
+
+def test_qwen4_exp_mtp_offset_rmsnorm_uses_onnx_domain():
+    model = object.__new__(Qwen4ExpMTPTextModel)
+    model.io_dtype = onnx.TensorProto.FLOAT16
+    model.layernorm_attrs = {"add_offset": 1.0, "epsilon": 1e-6}
+    initializers = {}
+    nodes = []
+    model.make_initializer = lambda value, name, **kwargs: initializers.update({name: value})
+    model.make_node = lambda op_type, **kwargs: nodes.append(helper.make_node(op_type, **kwargs))
+    model.make_value = lambda *args, **kwargs: None
+    model.make_hidden_state_shape = lambda: [1, 1, 3]
+
+    output = model.make_offset_rmsnorm("/mtp/enorm", "input", np.asarray([-1.0, 0.0, 1.0]))
+
+    assert output == "/mtp/enorm/output_0"
+    assert len(nodes) == 1
+    assert nodes[0].op_type == "SimplifiedLayerNormalization"
+    assert nodes[0].domain == ""
+    assert initializers["mtp.enorm.weight"].tolist() == [0.0, 1.0, 2.0]
+
+
+@pytest.mark.parametrize(
+    "model_type,head_type",
+    [
+        ("decoder", "decoder"),
+        ("qwen3_5", "qwen3_5_text"),
+        ("qwen3_5_moe", "qwen3_5_moe_text"),
+        ("qwen3_5_text", "qwen3_5_text"),
+        ("qwen4_exp", "qwen4_exp_text"),
+    ],
+)
+def test_mtp_decoder_overlay_excludes_multimodal_companions(tmp_path, model_type, head_type):
+    config = {
+        "model": {
+            "type": model_type,
+            "decoder": {"shared_initializers": []},
+            "mtp": {
+                "filename": "mtp.onnx",
+                "num_hidden_layers": 1,
+                "num_key_value_heads": 2,
+                "head_size": 256,
+                "shared_initializers": [],
+                "inputs": {"input_ids": "input_ids", "hidden_states": "hidden_states"},
+                "outputs": {"logits": "logits", "hidden_states": "hidden_states_out"},
+            },
+        }
+    }
+    (tmp_path / "genai_config.json").write_text(json.dumps(config))
+    example_path = Path(__file__).resolve().parents[3] / "examples/python/qwen-3.6-mtp.py"
+    spec = importlib.util.spec_from_file_location("qwen_mtp_example", example_path)
+    example = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(example)
+
+    overlay = example.mtp_decoder_overlay(tmp_path)["model"]
+
+    assert overlay["type"] == head_type
+    assert overlay["decoder"]["filename"] == "mtp.onnx"
+    assert overlay["decoder"]["layer_types"] == []
+    assert overlay["decoder"]["conv_cache_size"] == 0
+    assert overlay["decoder"]["inputs"] == config["model"]["mtp"]["inputs"]
+    for companion in ("embedding", "vision", "engram"):
+        assert overlay[companion]["filename"] == ""
 
 
 @pytest.mark.parametrize("prefix_caching", [None, False, True])

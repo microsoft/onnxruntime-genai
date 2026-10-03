@@ -1,0 +1,1335 @@
+import copy
+import json
+import os
+
+import onnx_ir as ir
+import torch
+
+from .base import Model
+from .expansions.qwen3_5 import Qwen35
+from .mtp import MTPModel
+
+
+class Qwen35TextModel(Qwen35, Model):
+    def validate_gated_delta_net_options(self, state_window, ep):
+        if ep != "cuda":
+            raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
+        if state_window == 1:
+            raise ValueError("GatedDeltaNet state_window must be 0 or at least 2")
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        self.configure_gated_delta_net_io()
+
+        # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
+        # Pre-bake the +1 into the weight initializer so the base class's
+        # SkipSimplifiedLayerNormalization can be used directly.
+        self.layernorm_attrs["add_offset"] = 1
+
+        # Qwen-3.5 uses interleaved, partial MRoPE for both text and multimodal inputs.
+        self.rope_attrs["mrope_layout"] = 1
+        self.rope_attrs["cast"]["use_fp32"] = True
+        self.rope_attrs["cast"]["root_input"] = True
+        self.rope_attrs["cast"]["output_0"] = True
+
+    def configure_gated_delta_net_io(self):
+        """Declare every linear-attention graph binding, so emitters never respell a name or shape."""
+        linear_layers = [
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        ]
+        if not linear_layers:
+            # Without a linear-attention layer nothing below is emitted, so the capacity has no bindings.
+            self.context_length_attrs["state_update_capacity"] = 0
+            return
+
+        self.validate_gated_delta_net_options(
+            self.context_length_attrs["state_window"],
+            self.ep,
+        )
+        if self.context_length_attrs["state_window"]:
+            self.context_length_attrs["state_update_capacity"] = (
+                self.context_length_attrs["state_window"] - 1
+            )
+
+        if self.use_paged_attention:
+            conv_shape = ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1]
+            self.input_shapes["past.conv"] = conv_shape
+            self.output_shapes["present.conv"] = conv_shape
+
+        recurrent_shape = [
+            "batch_size",
+            self.linear_num_value_heads,
+            self.linear_value_head_dim,
+            self.linear_key_head_dim,
+        ]
+        self.input_types["past.recurrent"] = ir.DataType.FLOAT
+        self.input_shapes["past.recurrent"] = recurrent_shape
+        self.output_types["present.recurrent"] = ir.DataType.FLOAT
+        self.output_shapes["present.recurrent"] = recurrent_shape
+
+        capacity = self.context_length_attrs["state_update_capacity"]
+        if not capacity:
+            return
+
+        self.input_names["state_update.capture_count"] = "state_update_capture_count"
+        self.input_types["state_update.capture_count"] = ir.DataType.INT32
+        self.input_shapes["state_update.capture_count"] = ["batch_size"]
+        self.input_names["state_update.active"] = "state_update_active"
+        self.input_types["state_update.active"] = ir.DataType.INT32
+        self.input_shapes["state_update.active"] = [1]
+
+        if self.use_paged_attention:
+            self.output_names["state_update.conv_value"] = {
+                layer_id: f"state_update.{layer_id}.conv_value" for layer_id in linear_layers
+            }
+            self.output_types["state_update.conv_value"] = self.io_dtype
+            self.output_shapes["state_update.conv_value"] = ["batch_size", capacity, self.linear_conv_dim]
+
+        # One capsule packs each captured token's decay gates, key row, and value row back to back.
+        capsule_width = capacity * (
+            self.linear_num_value_heads
+            + self.linear_num_key_heads * self.linear_key_head_dim
+            + self.linear_num_value_heads * self.linear_value_head_dim
+        )
+        self.output_names["state_update.recurrent_capsule"] = {
+            layer_id: f"state_update.{layer_id}.recurrent_capsule" for layer_id in linear_layers
+        }
+        self.output_types["state_update.recurrent_capsule"] = ir.DataType.FLOAT
+        self.output_shapes["state_update.recurrent_capsule"] = ["batch_size", capsule_width]
+
+    def make_inputs_and_outputs(self):
+        # Qwen-3.5 uses 3D position_ids
+        self.input_shapes["position_ids"] = (
+            [3, "num_tokens"] if self.use_paged_attention else [3, "batch_size", "sequence_length"]
+        )
+        super().make_inputs_and_outputs()
+
+    def is_packed_matmul_supported(self):
+        # Qwen-3.5 needs a separate Q projection to split its per-head Q and gate values.
+        return False
+
+    def is_packed_attn_supported(self):
+        return False
+
+    def make_attention_init(self, config):
+        # Set QK norm before the base class selects packed or paged attention paths.
+        self.attention_attrs["q_norm"] = True
+        self.attention_attrs["k_norm"] = True
+        super().make_attention_init(config)
+
+    def is_fused_rope_supported(self):
+        # Qwen-3.5 applies MRoPE manually before attention, not fused in the op
+        return False
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        """Dispatch to full attention or GatedDeltaNet based on layer type."""
+        if self.layer_types[layer_id] == "linear_attention":
+            self.make_qwen_gated_delta_net(layer_id, attention, root_input)
+        else:
+            super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    def get_attn_module(self, layer_id, layer):
+        return layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
+
+    def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
+        """Split Qwen3.5's doubled, per-head Q projection into Q and gate."""
+        super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
+
+        self.split_attention_query_gate(layer_id)
+
+
+
+    def make_qwen_gated_delta_net(self, layer_id, linear_attn, root_input):
+        """Build the Qwen linear-attention layer for dense or packed token layouts.
+
+        Uses com.microsoft contrib ops:
+        - CausalConvWithState / VarlenCausalConvWithState
+        - LinearAttention / GatedDeltaNet
+        """
+        basename = f"/model/layers.{layer_id}/linear_attn"
+
+        z_name, b_name, a_name, conv_input, conv_weight_name = self.make_linear_attention_input_proj(
+            layer_id, linear_attn, root_input
+        )
+
+        conv_bias_name = f"model.layers.{layer_id}.linear_attn.conv1d.bias"
+        self.make_initializer(torch.zeros(self.linear_conv_dim, dtype=torch.float32), conv_bias_name, to=self.io_dtype)
+
+        if self.use_paged_attention:
+            conv_op_name = f"{basename}/VarlenCausalConvWithState"
+            self.make_varlen_causal_conv_with_state(
+                conv_op_name,
+                root_input=conv_input,
+                weight=conv_weight_name,
+                bias=conv_bias_name,
+                cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
+                past_conv_state=self.input_names["past.conv"][layer_id],
+                present_conv_state=self.output_names["present.conv"][layer_id],
+                output_shape=["num_tokens", self.linear_conv_dim],
+                present_conv_shape=self.output_shapes["present.conv"],
+                **self.make_conv_state_update_kwargs(layer_id),
+            )
+            linear_output = self.make_gated_delta_net_layer(
+                layer_id,
+                linear_attn,
+                f"{conv_op_name}/output_0",
+                b_name,
+                a_name,
+            )
+            self.make_linear_attention_output_proj(layer_id, linear_attn, linear_output, z_name)
+            return
+
+        conv_op_name = f"{basename}/CausalConvWithState"
+        self.make_causal_conv_with_state(
+            conv_op_name,
+            root_input=conv_input,
+            weight=conv_weight_name,
+            bias=conv_bias_name,
+            past_conv_state=self.input_names["past.conv"][layer_id],
+            present_conv_state=self.output_names["present.conv"][layer_id],
+            channels=self.linear_conv_dim,
+        )
+        conv_out_t_name = f"{basename}/conv_out/Transpose"
+        conv_out_t_output = f"{conv_out_t_name}/output_0"
+        self.make_transpose(
+            conv_out_t_name,
+            f"{conv_op_name}/output_0",
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.linear_conv_dim],
+            [0, 2, 1],
+        )
+
+        linear_output = self.make_gated_delta_net_layer(
+            layer_id,
+            linear_attn,
+            conv_out_t_output,
+            b_name,
+            a_name,
+        )
+        self.make_linear_attention_output_proj(layer_id, linear_attn, linear_output, z_name)
+
+    def make_conv_state_update_kwargs(self, layer_id):
+        """Compact convolution-capture bindings for this layer, or nothing when capture is disabled."""
+        capacity = self.context_length_attrs["state_update_capacity"]
+        if not capacity:
+            return {}
+        return {
+            "state_update_capacity": capacity,
+            "state_update_capture_count": self.input_names["state_update.capture_count"],
+            "state_update_active": self.input_names["state_update.active"],
+            "state_update_value": self.output_names["state_update.conv_value"][layer_id],
+            "state_update_value_shape": self.output_shapes["state_update.conv_value"],
+        }
+
+    def make_recurrent_state_update_kwargs(self, layer_id):
+        """Compact recurrent-capture bindings for this layer, or nothing when capture is disabled."""
+        capacity = self.context_length_attrs["state_update_capacity"]
+        if not capacity:
+            return {}
+        return {
+            "state_update_capacity": capacity,
+            "state_update_capture_count": self.input_names["state_update.capture_count"],
+            "state_update_active": self.input_names["state_update.active"],
+            "state_update_capsule": self.output_names["state_update.recurrent_capsule"][layer_id],
+            "state_update_capsule_shape": self.output_shapes["state_update.recurrent_capsule"],
+        }
+
+    def make_gated_delta_net_layer(self, layer_id, linear_attn, conv_output, b_name, a_name):
+        """Run GatedDeltaNet directly from the packed convolution QKV output."""
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        packed = self.use_paged_attention
+        token_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
+        # Reshape constants keep every token axis, so packed layouts carry one leading 0 and dense two.
+        kept_axes = "0" if packed else "0, 0"
+        value_heads, value_head_dim = self.linear_num_value_heads, self.linear_value_head_dim
+        value_dim = self.linear_value_dim
+
+        # The kernel applies Qwen's own gate arithmetic, so the raw checkpoint tensors are exported as-is.
+        a_log_name = f"model.layers.{layer_id}.linear_attn.A_log"
+        self.make_initializer(linear_attn.A_log, a_log_name, to=ir.DataType.FLOAT)
+        dt_bias_name = f"model.layers.{layer_id}.linear_attn.dt_bias"
+        self.make_initializer(linear_attn.dt_bias, dt_bias_name, to=ir.DataType.FLOAT)
+
+        op_name = f"{basename}/GatedDeltaNet"
+        recurrent_shape = self.output_shapes["present.recurrent"]
+        shared_kwargs = {
+            "q_path": conv_output,
+            "k_path": "",
+            "v_path": "",
+            "decay": f"{a_name}/output_0",
+            "beta": f"{b_name}/output_0",
+            "a_log": a_log_name,
+            "dt_bias": dt_bias_name,
+            "gate_shape": [*token_shape, value_heads],
+            "gate_activation": "qwen",
+            "beta_activation": "sigmoid",
+            "qk_l2_norm": 1,
+            "update_rule": "gated_delta",
+            "scale": 0.0,
+            "output_shape": [*token_shape, value_heads, value_head_dim],
+        }
+        if packed:
+            self.make_varlen_gated_delta_net(
+                op_name,
+                cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
+                past_recurrent_state=self.input_names["past.recurrent"][layer_id],
+                present_recurrent_state=self.output_names["present.recurrent"][layer_id],
+                present_recurrent_shape=recurrent_shape,
+                **self.make_recurrent_state_update_kwargs(layer_id),
+                **shared_kwargs,
+            )
+        else:
+            self.make_gated_delta_net(
+                op_name,
+                initial_state=self.input_names["past.recurrent"][layer_id],
+                final_state=self.output_names["present.recurrent"][layer_id],
+                state_shape=recurrent_shape,
+                **self.make_recurrent_state_update_kwargs(layer_id),
+                **shared_kwargs,
+            )
+
+        reshape_name = f"{basename}/gdn_out/Reshape"
+        self.make_reshape(
+            reshape_name,
+            [f"{op_name}/output_0", f"/model/constants/INT64/[{kept_axes}, {value_dim}]"],
+            self.io_dtype,
+            [*token_shape, value_dim],
+        )
+        return f"{reshape_name}/output_0"
+
+    def make_linear_attention_input_proj(self, layer_id, attention, root_input):
+        """Build linear projections, conv weight initializer, and QKV transpose.
+
+        Returns:
+            (z_name, b_name, a_name, qkv_t_output, conv_weight_name)
+        """
+        basename = f"/model/layers.{layer_id}/linear_attn"
+
+        qkv_name, z_name = self.make_linear_attention_qkv_z_proj(layer_id, attention, root_input)
+
+        b_name, a_name = self.make_linear_attention_a_b_proj(layer_id, attention, root_input)
+
+        conv_input = f"{qkv_name}/output_0"
+        if not self.use_paged_attention:
+            qkv_t_name = f"{basename}/qkv_proj/Transpose"
+            conv_input = f"{qkv_t_name}/output_0"
+            self.make_transpose(
+                qkv_t_name,
+                f"{qkv_name}/output_0",
+                self.io_dtype,
+                ["batch_size", self.linear_conv_dim, "sequence_length"],
+                [0, 2, 1],
+            )
+
+        conv_weight_name = f"model.layers.{layer_id}.linear_attn.conv1d.weight"
+        self.make_initializer(attention.conv1d.weight, conv_weight_name, to=self.io_dtype)
+
+        return z_name, b_name, a_name, conv_input, conv_weight_name
+
+    def make_linear_attention_qkv_z_proj(self, layer_id, attention, root_input):
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        qkv_name = f"{basename}/qkv_proj/MatMul"
+        z_name = f"{basename}/z_proj/MatMul"
+        self.make_matmul(attention.in_proj_qkv, qkv_name, root_input)
+        self.make_matmul(attention.in_proj_z, z_name, root_input)
+        return qkv_name, z_name
+
+    def make_linear_attention_a_b_proj(self, layer_id, attention, root_input):
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
+        # ~0.1% of the model, so they stay dense regardless of which loader supplied them.
+        b_name = f"{basename}/b_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
+        self.exclude_node_from_quantization(b_name)
+        self.make_matmul(attention.in_proj_b, b_name, root_input)
+
+        a_name = f"{basename}/a_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
+        self.exclude_node_from_quantization(a_name)
+        self.make_matmul(attention.in_proj_a, a_name, root_input)
+        return b_name, a_name
+
+    def require_dense_linear_attention_gate(self, projection, name):
+        if hasattr(projection, "qweight") or getattr(projection, "quant_type", "none") != "none":
+            raise ValueError(
+                f"Linear-attention gate '{name}' must remain dense, but the checkpoint supplies "
+                "pre-quantized weights that its loader did not dequantize."
+            )
+
+    def make_linear_attention_output_proj(self, layer_id, attention, attn_output_3d, z_name):
+        """Build gated RMSNorm and output projection.
+
+        Args:
+            attn_output_3d: Attention output [B, S, linear_value_dim] (3D packed).
+            z_name: Name of the z-gate projection MatMul node.
+        """
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        output_shape = (
+            ["num_tokens", self.linear_value_dim]
+            if self.use_paged_attention
+            else ["batch_size", "sequence_length", self.linear_value_dim]
+        )
+        norm_weight = f"model.layers.{layer_id}.linear_attn.norm.weight"
+        self.make_initializer(attention.norm.weight, norm_weight, to=self.io_dtype)
+
+        gated_norm_name = f"{basename}/GatedRMSNorm"
+        self.make_gated_rms_norm(
+            gated_norm_name,
+            root_input=attn_output_3d,
+            scale=norm_weight,
+            gate=f"{z_name}/output_0",
+            shape=output_shape,
+            epsilon=self.layernorm_attrs["epsilon"],
+        )
+
+        o_name = f"{basename}/out_proj/MatMul"
+        self.make_matmul(attention.out_proj, o_name, f"{gated_norm_name}/output_0")
+
+        self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
+
+    def make_decoder_state_groups(self, inputs, outputs):
+        if not self.use_paged_attention:
+            return []
+
+        full_attention_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"full_attention", "sliding_attention"}
+        ]
+        conv_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"conv", "linear_attention"}
+        ]
+        linear_attention_layers = [
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        ]
+        state_groups = []
+        if full_attention_layers:
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
+        if not linear_attention_layers:
+            return state_groups
+
+        state_update_capacity = (
+            self.context_length_attrs["state_update_capacity"] if "state_update_capture_count" in inputs else 0
+        )
+
+        for state_name, layer_ids in (
+            ("conv", conv_layers),
+            ("recurrent", linear_attention_layers),
+        ):
+            group = {
+                "kind": f"fixed_{state_name}",
+                "layer_ids": layer_ids,
+            }
+            if state_update_capacity:
+                state_update = {
+                    "capacity": state_update_capacity,
+                }
+                if state_name == "recurrent":
+                    state_update["key_head_count"] = self.linear_num_key_heads
+                group["state_update"] = state_update
+            state_groups.append(group)
+
+        return state_groups
+
+
+
+class Qwen35MoETextModel(Qwen35TextModel):
+    """Qwen3.5 MoE hybrid model builder.
+
+    Extends ``Qwen35TextModel`` with Mixture-of-Experts MLP layers.
+    Each decoder layer replaces the dense MLP with:
+    - A router that selects top-k experts from ``num_experts`` candidates
+    - Packed routed expert weights (gate_up_proj + down_proj)
+    - A shared expert (always-active) with its own gating signal
+
+    The attention side (GatedDeltaNet linear + gated full) is inherited
+    unchanged from the parent class.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # MoE attributes specific to Qwen-3.5 MoE
+        self.moe_attrs["activation_type"] = "swiglu"
+        self.moe_attrs["swiglu_fusion"] = 1
+        self.moe_attrs["normalize_routing_weights"] = True
+
+        self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
+        self.shared_expert_intermediate_size = getattr(
+            config, "shared_expert_intermediate_size", self.moe_intermediate_size
+        )
+
+    def get_moe_module(self, layer_id, layer):
+        return layer.mlp
+
+    def make_moe_preprocessing(self, layer_id, moe, root_input):
+        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
+
+    def make_moe_router(self, layer_id, moe, root_input):
+        basename = f"/model/layers.{layer_id}/moe"
+        router_basename = f"{basename}/router/MatMul"
+        router_matmul_name = self.make_matmul(moe.gate, router_basename, root_input)
+        router_reshape_name = f"{basename}/router/Reshape"
+        self.make_reshape(
+            router_reshape_name,
+            [
+                f"{router_matmul_name}/output_0",
+                f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}",
+            ],
+            dtype=self.io_dtype,
+            shape=self.make_moe_router_shape(),
+        )
+
+    def make_moe_subgraph(self, layer_id, moe, root_input):
+        basename = f"/model/layers.{layer_id}/moe"
+        op_type = self.moe_attrs["op_type"]
+        names = self.make_moe_expert_names(layer_id)
+        gate_up_proj_global_scales, down_proj_global_scales = self.moe_attrs.get("global_scale_names", {}).get(
+            layer_id, ("", "")
+        )
+
+        moe_name = f"{basename}/{op_type}"
+        self.make_moe_op(
+            moe_name,
+            root_input=root_input,
+            router_probs=f"{basename}/router/Reshape/output_0",
+            weight1=names["gate_up_weight"],
+            scales1=names["gate_up_scales"] if op_type == "QMoE" else "",
+            bias1=names["gate_up_bias"],
+            weight2=names["down_weight"],
+            scales2=names["down_scales"] if op_type == "QMoE" else "",
+            bias2=names["down_bias"],
+            global_scales1=gate_up_proj_global_scales,
+            global_scales2=down_proj_global_scales,
+        )
+
+        shared_output, shared_gate = self.make_shared_expert(
+            layer_id, moe.shared_expert, moe.shared_expert_gate, root_input
+        )
+        combine_name = f"{basename}/GatedAdd"
+        self.make_gated_add(
+            combine_name,
+            root_input=f"{moe_name}/output_0",
+            scaled_input=shared_output,
+            gate=shared_gate,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+        )
+        return f"{combine_name}/output_0"
+
+    def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
+        basename = f"/model/layers.{layer_id}/shared_expert"
+
+        # Temporarily set new intermediate size from shared experts
+        intermediate_size = self.intermediate_size
+        try:
+            self.intermediate_size = self.shared_expert_intermediate_size
+            if self.mlp_attrs.get("fuse_gate_up", False):
+                self.make_mlp_proj_fused(layer_id, shared_expert, root_input)
+            else:
+                self.make_mlp_proj(layer_id, shared_expert, root_input)
+        finally:
+            self.intermediate_size = intermediate_size
+        shared_output = self.mlp_attrs["output_0"]
+
+        gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
+        gate_sigmoid_name = f"{basename}_gate/Sigmoid"
+        self.make_sigmoid(
+            gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", 1]
+        )
+
+        return shared_output, f"{gate_sigmoid_name}/output_0"
+
+
+
+class Qwen35MoEModel(MTPModel):
+    """Composite Qwen3.5 MoE builder for the decoder and optional MTP graph."""
+
+    # Extra options naming a block drafter. The Engine drives one drafter per model, so any of
+    # these supersedes the MTP head rather than shipping beside it.
+    block_drafter_options = ("dflash2_path", "dspark_path")
+
+    def requested_block_drafter(self, extra_options):
+        requested = [name for name in self.block_drafter_options if extra_options.get(name)]
+        if len(requested) > 1:
+            raise ValueError("Block drafter options are mutually exclusive: " + ", ".join(requested) + ".")
+        return requested[0] if requested else None
+
+    def get_decoder_model_class(self):
+        return Qwen35MoETextModel
+
+    def get_mtp_model_class(self):
+        return Qwen35MTPModel
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__()
+        decoder_options = self.make_mtp_init(config, extra_options)
+        self.decoder = self.get_decoder_model_class()(
+            copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options
+        )
+        self.mtp = None
+        if self.mtp_attrs["build"]:
+            self.make_mtp_model(config, io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
+
+        self.dflash2 = None
+        self.dflash2_shared_initializers = []
+        self.make_dflash2_init(io_dtype, extra_options)
+
+        self.dspark = None
+        self.dspark_shared_initializers = []
+        self.make_dspark_init(io_dtype, extra_options)
+
+        self.vocab_size = self.decoder.vocab_size
+        self.hf_token = self.decoder.hf_token
+        self.hf_remote = self.decoder.hf_remote
+        self.context_length = self.decoder.context_length
+        self.exclude_embeds = self.decoder.exclude_embeds
+        self.model_type = self.decoder.model_type
+
+    def make_mtp_init(self, config, extra_options):
+        decoder_options = super().make_mtp_init(config, extra_options)
+        text_config = getattr(config, "text_config", config)
+        num_mtp_layers = getattr(text_config, "mtp_num_hidden_layers", None)
+        if num_mtp_layers is None:
+            num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 0)
+        self.mtp_attrs["build"] = (num_mtp_layers or 0) > 0
+        self.mtp_attrs["shared_initializer_names"] = {"model.embed_tokens.weight"}
+        # `_` catches the quantized table's `weight_Q4` / `weight_scales` pair.
+        self.mtp_attrs["shared_initializer_prefixes"] = ("lm_head.MatMul.", "model.embed_tokens.weight_")
+
+        block_drafter = self.requested_block_drafter(extra_options)
+        if self.mtp_attrs["build"] and block_drafter:
+            print(f"Skipping the MTP head: {block_drafter} supersedes it.")
+            self.mtp_attrs["build"] = False
+
+        if self.mtp_attrs["build"] and extra_options.get("exclude_mtp", False):
+            print("Skipping the MTP head: exclude_mtp is set.")
+            self.mtp_attrs["build"] = False
+
+        if not self.mtp_attrs["build"]:
+            return decoder_options
+
+        incompatible_options = [
+            option for option in ("exclude_lm_head", "prune_lm_head") if extra_options.get(option, False)
+        ]
+        if incompatible_options:
+            raise ValueError("Qwen3.5 MTP export cannot be combined with " + ", ".join(incompatible_options) + ".")
+        decoder_options["include_hidden_states"] = True
+        return decoder_options
+
+    def make_mtp_model(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.mtp_attrs["io_dtype"] = io_dtype
+        self.mtp_attrs["onnx_dtype"] = onnx_dtype
+        self.mtp_attrs["extra_options"] = copy.deepcopy(extra_options)
+        self.resolve_mtp_model_config(extra_options)
+
+        mtp_options = self.mtp_attrs["extra_options"]
+        self.drop_unusable_mtp_kv_scales(mtp_options)
+        mtp_options["exclude_embeds"] = False
+        mtp_options["filename"] = "mtp.onnx"
+        mtp_options.pop("include_hidden_states", None)
+        mtp_options.pop("exclude_lm_head", None)
+        # The head is one layer deep and drafts for itself, so it never taps the target's
+        # residual streams; inheriting the target's tap set would fail its layer-range check.
+        mtp_options.pop("aux_hidden_state_layers", None)
+        # A block drafter reads the target's aux hidden states, so it is never nested in the head.
+        mtp_options.pop("dflash2_path", None)
+        mtp_options.pop("dflash2_num_draft_tokens", None)
+        mtp_options.pop("dspark_path", None)
+        mtp_options.pop("dspark_num_draft_tokens", None)
+        mtp_options.pop("dspark_top_k", None)
+        self.mtp = self.get_mtp_model_class()(
+            copy.deepcopy(config),
+            self.mtp_attrs["io_dtype"],
+            self.mtp_attrs["onnx_dtype"],
+            ep,
+            cache_dir,
+            mtp_options,
+        )
+
+    def drop_unusable_mtp_kv_scales(self, mtp_options):
+        scale_file = mtp_options.get("kv_cache_scale_file")
+        if not scale_file:
+            return
+        try:
+            with open(scale_file, encoding="utf-8") as handle:
+                has_mtp_section = "mtp" in json.load(handle)
+        except (OSError, ValueError):
+            return
+        if not has_mtp_section:
+            mtp_options.pop("kv_cache_quant_scheme", None)
+            mtp_options.pop("kv_cache_scale_file", None)
+
+    def make_model(self, input_path):
+        self.decoder.make_model(input_path)
+        if self.mtp is not None:
+            print("Building MTP (multi-token prediction) head -> mtp.onnx")
+            self.mtp.make_model(input_path)
+        self.make_dflash2_model(input_path)
+        self.make_dspark_model(input_path)
+
+    def save_model(self, output_dir):
+        self.decoder.save_model(output_dir)
+        if self.mtp is not None:
+            self.mtp.save_model(output_dir)
+            self.mtp_attrs["shared_initializers"] = self.share_initializers(
+                output_dir, self.decoder.filename, self.mtp.filename
+            )
+        self.save_dflash2_model(output_dir)
+        self.save_dspark_model(output_dir)
+
+    def make_genai_config(self, config, extra_kwargs, out_dir):
+        self.decoder.model_type = self.model_type
+        self.decoder.make_genai_config(config, extra_kwargs, out_dir)
+        if self.mtp is not None:
+            self.add_mtp_to_genai_config(out_dir)
+        if self.dflash2 is not None:
+            self.add_dflash2_to_genai_config(out_dir)
+        if self.dspark is not None:
+            self.add_dspark_to_genai_config(out_dir)
+        if self.dflash2 is not None or self.dspark is not None:
+            self.make_block_drafter_search_defaults(out_dir)
+
+    def make_block_drafter_search_defaults(self, out_dir):
+        """Ship greedy search defaults alongside a block drafter.
+
+        ``Engine::PrepareDflash2Feeds`` sets ``wants_drafts = greedy && ...``, so a checkpoint
+        whose ``generation_config.json`` asks for sampling would decode with zero drafts and no
+        error. Only ``do_sample`` is cleared; ``top_k``/``top_p``/``temperature`` stay as the
+        checkpoint declared them, so a caller who opts back into sampling per turn still gets them.
+        """
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+
+        if not genai_config["search"].get("do_sample", False):
+            return
+        genai_config["search"]["do_sample"] = False
+        with open(config_path, "w") as config_file:
+            json.dump(genai_config, config_file, indent=4)
+        print("Set search.do_sample to false: a block drafter only proposes drafts for greedy turns.")
+
+    def add_mtp_to_genai_config(self, out_dir):
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+
+        decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
+        decoder_outputs.setdefault("hidden_states", "hidden_states")
+        genai_config["model"]["mtp"] = {
+            "enabled": True,
+            "filename": "mtp.onnx",
+            "num_hidden_layers": 1,
+            "num_key_value_heads": self.decoder.num_kv_heads,
+            "head_size": self.decoder.head_size,
+            "main_hidden_states": "hidden_states",
+            "inputs": {
+                "input_ids": "input_ids",
+                "hidden_states": "hidden_states",
+                "attention_mask": "attention_mask",
+                "position_ids": "position_ids",
+                "past_key_names": "past_key_values.%d.key",
+                "past_value_names": "past_key_values.%d.value",
+            },
+            "outputs": {
+                "logits": "logits",
+                "hidden_states": "hidden_states_out",
+                "present_key_names": "present.%d.key",
+                "present_value_names": "present.%d.value",
+            },
+        }
+        dynamic_batching = genai_config.get("engine", {}).get("dynamic_batching")
+        if dynamic_batching is not None:
+            dynamic_batching.setdefault("prefix_caching", False)
+        self.add_shared_initializers_to_genai_config(genai_config)
+
+        with open(config_path, "w") as config_file:
+            json.dump(genai_config, config_file, indent=4)
+        print("Added 'mtp' section to genai_config.json")
+
+    def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
+        self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
+
+    def require_specforge_aux_taps(self, target_layer_ids, drafter_name):
+        if not target_layer_ids:
+            raise ValueError(f"The {drafter_name} checkpoint must define at least one target_layer_ids entry.")
+
+        aux_layers = [layer_id + 1 for layer_id in target_layer_ids]
+        untappable = [layer_id - 1 for layer_id in aux_layers if not 1 <= layer_id < self.decoder.num_layers]
+        if untappable:
+            raise ValueError(
+                f"The {drafter_name} checkpoint targets decoder layers {untappable}, whose outputs the exporter "
+                f"cannot expose; target_layer_ids must lie in [0, {self.decoder.num_layers - 1})."
+            )
+
+        expected = ",".join(str(layer_id) for layer_id in aux_layers)
+        actual = ",".join(str(layer_id) for layer_id in self.decoder.aux_hidden_state_layers)
+        if actual != expected:
+            raise ValueError(
+                f"The {drafter_name} drafter needs aux_hidden_state_layers={expected} on the main model, "
+                f"got '{actual}'."
+            )
+
+    def block_drafter_precision(self, extra_options, option_name):
+        precision = str(extra_options.get(option_name, "bf16")).lower()
+        allowed = {"bf16", "int4", "int8"}
+        if precision not in allowed:
+            raise ValueError(f"{option_name} must be one of {sorted(allowed)}, got '{precision}'.")
+        return precision
+
+    def block_drafter_quant(self, precision, quant_config=None):
+        """Resolve weight-only quantization for a block-drafter body, or ``None`` to keep it dense."""
+        if precision == "bf16":
+            return None
+        bits = 4 if precision == "int4" else 8
+        block_size = int(
+            quant_config.weights.block_size
+            if quant_config is not None
+            else self.decoder.quant_attrs["matmul_block_size"]
+        )
+        requested_prepack = int(
+            quant_config.format.matmulnbits_weights_prepacked
+            if quant_config is not None
+            else self.decoder.matmul_attrs["weights_prepacked"]
+        )
+        prepack = requested_prepack if self.decoder.ep == "cuda" else 0
+        return {"bits": bits, "block_size": block_size, "prepack": prepack}
+
+    def block_drafter_lm_head_quant(self):
+        """Resolve how a block drafter gets its LM head, or ``None`` to keep it dense.
+
+        The drafter's LM head *is* the target's, so it reuses the target's initializers rather
+        than quantizing a second copy (see ``adopt_target_tensors``). Only the
+        symmetric/``default`` ``MatMulNBits`` convention is wired up here; any other algorithm
+        or output format leaves the head dense instead of guessing at initializer names.
+        """
+        decoder = self.decoder
+        if decoder.exclude_lm_head or not decoder.is_lm_head_quantized():
+            return None
+        if decoder.quant_attrs["use_qdq"]:
+            print(
+                "Leaving the block drafter's LM head dense: use_qdq makes the target write a "
+                "DequantizeLinear/MatMul pair instead of the MatMulNBits this exporter can reuse."
+            )
+            return None
+        head_bits, weight_name, scales_name, zero_point_name = decoder.make_tied_quantized_embedding_input_names()
+        shareable = (
+            weight_name == f"lm_head.MatMul.weight_Q{head_bits}"
+            and scales_name == "lm_head.MatMul.weight_scales"
+            and not zero_point_name
+        )
+        if not shareable:
+            print(
+                f"Leaving the block drafter's LM head dense: the target writes '{weight_name}', "
+                "which this exporter does not know how to reuse."
+            )
+            return None
+        prepack = int(decoder.matmul_attrs["weights_prepacked"]) if decoder.ep == "cuda" else 0
+        adopt_target = not (prepack and decoder.io_dtype != ir.DataType.FLOAT16)
+        if not adopt_target:
+            print(
+                "Keeping a private raw quantized block-drafter LM head because its BF16 layout "
+                "cannot adopt the target's prepacked quantized weight."
+            )
+            prepack = 0
+        return {
+            "bits": head_bits,
+            "block_size": int(decoder.quant_attrs["matmul_block_size"]),
+            "prepack": prepack,
+            "adopt_target": adopt_target,
+        }
+
+    def block_drafter_embed_quant(self):
+        """Resolve the target's quantized embedding table, or ``None`` if the drafter keeps a dense one.
+
+        The drafter embeds with the target's table, so when the target quantizes it the drafter has
+        to emit the same ``GatherBlockQuantized`` over the same initializers. Emitting a dense
+        ``Gather`` instead costs a second, unshareable copy of the largest tensor in either graph.
+        """
+        decoder = self.decoder
+        if decoder.exclude_embeds or decoder.onnx_dtype not in {ir.DataType.INT4, ir.DataType.UINT4}:
+            return None
+        if "Gather" not in decoder.quant_attrs["op_types_to_quantize"]:
+            return None
+        if "/model/embed_tokens/Gather" in decoder.quant_attrs["nodes_to_exclude"]:
+            return None
+        if decoder.tied_quantized_embeddings:
+            # Tied embeddings gather from a reshape of the quantized LM head rather than from a
+            # table of their own, so there is no `model.embed_tokens.weight_Q4` to adopt.
+            print(
+                "Leaving the block drafter's embedding dense: shared_embeddings makes the target "
+                "gather from its LM head weight, which this exporter does not know how to reuse."
+            )
+            return None
+        # Only the symmetric/`default` convention names the table `*.weight_Q4` / `*.weight_scales`.
+        if decoder.quantization_algo != "default" or not decoder.quant_attrs["is_symmetric"]:
+            print(
+                f"Leaving the block drafter's embedding dense: the target quantizes it with "
+                f"'{decoder.quantization_algo}', whose initializer names this exporter does not know how to reuse."
+            )
+            return None
+        return {"bits": 4, "block_size": int(decoder.quant_attrs["matmul_block_size"])}
+
+    def make_dflash2_init(self, io_dtype, extra_options):
+        """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
+
+        ``dflash2_path`` points at the draft checkpoint. The drafter has no embedding and no
+        LM head of its own, so both come from the target source; sharing on disk is conditional. SpecForge taps
+        the output of each ``target_layer_ids`` entry, which is the residual stream entering the
+        following layer.
+        """
+        self.dflash2_path = extra_options.get("dflash2_path")
+        if not self.dflash2_path:
+            return
+        if not self.decoder.use_paged_attention:
+            raise ValueError("dflash2_path requires use_paged_attention=true.")
+
+        self.dflash2_shared_weight_policies = copy.deepcopy(
+            extra_options.get("_shared_weight_policies", {"embedding": "auto", "lm_head": "auto"})
+        )
+        drafter_quant_config = extra_options.get("_drafter_quant_config")
+
+        num_draft_tokens = None
+        if "dflash2_num_draft_tokens" in extra_options:
+            try:
+                num_draft_tokens = int(extra_options["dflash2_num_draft_tokens"])
+            except (TypeError, ValueError) as e:
+                raise ValueError("dflash2_num_draft_tokens must be a positive integer.") from e
+            if num_draft_tokens < 1:
+                raise ValueError("dflash2_num_draft_tokens must be a positive integer.")
+
+        self.dflash2_attrs = {
+            "io_dtype": io_dtype,
+            "num_draft_tokens": num_draft_tokens,
+            "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
+            "quant_config": drafter_quant_config,
+        }
+
+        with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
+            draft_config = json.load(handle)
+        dflash_config = draft_config["dflash_config"]
+        checkpoint_draft_limit = int(dflash_config["block_size"]) - 1
+        if num_draft_tokens is not None and num_draft_tokens > checkpoint_draft_limit:
+            raise ValueError(
+                f"dflash2_num_draft_tokens must not exceed the drafter checkpoint limit ({checkpoint_draft_limit})."
+            )
+        target_layer_ids = dflash_config["target_layer_ids"]
+        self.require_specforge_aux_taps(target_layer_ids, "DFlash 2")
+
+    def make_dflash2_model(self, input_path):
+        if not self.dflash2_path:
+            return
+        from .dflash2 import DFlash2Builder  # noqa: PLC0415
+
+        print("Building DFlash 2 draft model -> dflash2.onnx")
+        if input_path and os.path.isdir(input_path):
+            target_dir = input_path
+        else:
+            from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+            target_dir = snapshot_download(
+                self.decoder.model_name_or_path,
+                cache_dir=self.decoder.cache_dir,
+                token=self.decoder.hf_token,
+            )
+        self.dflash2 = DFlash2Builder(
+            self.dflash2_path,
+            target_dir,
+            self.dflash2_attrs["io_dtype"],
+            self.decoder.attention_attrs["paged_block_size"],
+            self.decoder.context_length,
+            num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
+            quant=self.block_drafter_quant(
+                self.dflash2_attrs["precision"], self.dflash2_attrs["quant_config"]
+            ),
+            lm_head_quant=self.block_drafter_lm_head_quant(),
+            embed_quant=self.block_drafter_embed_quant(),
+        )
+        self.dflash2.make_model()
+
+    def save_dflash2_model(self, output_dir):
+        if self.dflash2 is None:
+            return
+        self.dflash2_shared_initializers = self.save_block_drafter_model(
+            self.dflash2,
+            output_dir,
+            "DFlash 2",
+            getattr(self, "dflash2_shared_weight_policies", {"embedding": "auto", "lm_head": "auto"}),
+        )
+
+    def save_block_drafter_model(self, drafter, output_dir, drafter_name, shared_weight_policies=None):
+        """Adopt the target's tensors, save the drafter, and fold what the two share onto one copy."""
+        if hasattr(drafter, "adopt_target_tensors"):
+            drafter.adopt_target_tensors(os.path.join(output_dir, self.decoder.filename))
+        drafter.save_model(output_dir)
+
+        initializer_names = set(getattr(getattr(drafter, "graph", None), "initializers", {}))
+        embedding_initializers = frozenset(
+            name for name in initializer_names if name.startswith("model.embed_tokens.")
+        )
+        head_initializers = frozenset(name for name in initializer_names if name.startswith("lm_head.MatMul."))
+        embedding = getattr(drafter, "embed_quant", None)
+        if not embedding_initializers:
+            embedding_initializers = (
+                frozenset(
+                    {
+                        f"model.embed_tokens.weight_Q{embedding['bits']}",
+                        "model.embed_tokens.weight_scales",
+                    }
+                )
+                if embedding is not None
+                else frozenset({"model.embed_tokens.weight"})
+            )
+        head = getattr(drafter, "lm_head_quant", None)
+        if not head_initializers:
+            head_initializers = (
+                frozenset({f"lm_head.MatMul.weight_Q{head['bits']}", "lm_head.MatMul.weight_scales"})
+                if head is not None
+                else frozenset({"lm_head.MatMul.weight"})
+            )
+        # A head the drafter had to quantize itself must keep its private copy; an adopted one is
+        # the target's own tensor and has to fold back onto it.
+        adopted = set(head_initializers if head is not None and head["adopt_target"] else ())
+        required = set(adopted)
+        private = set(head_initializers - adopted) if head is not None else set()
+
+        if shared_weight_policies is not None:
+            for tensor_name, initializers in (
+                ("embedding", embedding_initializers),
+                ("lm_head", head_initializers),
+            ):
+                policy = shared_weight_policies[tensor_name]
+                if policy == "off":
+                    adopted.difference_update(initializers)
+                    required.difference_update(initializers)
+                    private.update(initializers)
+                elif policy == "required":
+                    if tensor_name == "lm_head" and head is not None and not head["adopt_target"]:
+                        raise ValueError("required LM-head sharing is incompatible with the drafter's private layout")
+                    adopted.update(initializers)
+                    required.update(initializers)
+                    private.difference_update(initializers)
+
+        shared = self.share_initializers(
+            output_dir,
+            self.decoder.filename,
+            drafter.filename,
+            adopt_source_initializers=adopted,
+            required_source_initializers=required,
+            excluded_source_initializers=private,
+        )
+        shared_names = {entry["name"] for entry in shared}
+        missing = required - shared_names
+        if missing:
+            raise ValueError("Required shared initializers are unavailable: " + ", ".join(sorted(missing)))
+        self.warn_unshared_lm_head(
+            drafter,
+            shared,
+            drafter_name,
+            shared_weight_policies.get("lm_head", "auto") if shared_weight_policies is not None else "auto",
+        )
+        return shared
+
+    def warn_unshared_lm_head(self, drafter, shared, drafter_name, sharing_policy="auto"):
+        """Report a drafter head that stayed a separate copy instead of folding onto the target's.
+
+        The drafter adopts the target's own initializers, so the two are identical by
+        construction and this should never fire. If it does, the bytes on disk diverged
+        somewhere after ``adopt_target_tensors``, which costs both a duplicated copy and the
+        guarantee that the drafter scores with the head the target verifies with.
+        """
+        head = drafter.lm_head_quant
+        if sharing_policy == "off" or head is None or not head["adopt_target"]:
+            return
+        weight_name = f"lm_head.MatMul.weight_Q{head['bits']}"
+        if any(entry["name"] == weight_name for entry in shared):
+            return
+        print(
+            f"WARNING: the {drafter_name} LM head adopted the target's '{weight_name}' but did not "
+            "share it. The two copies may no longer agree."
+        )
+
+    def add_dflash2_to_genai_config(self, out_dir):
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+
+        decoder = genai_config["model"]["decoder"]
+        decoder.setdefault("outputs", {}).setdefault("aux_hidden_states", "aux_hidden_states")
+
+        section = self.dflash2.genai_config_section()
+        section["aux_hidden_state_layers"] = list(self.decoder.aux_hidden_state_layers)
+        if self.dflash2_shared_initializers:
+            existing = decoder.get("shared_initializers", [])
+            known = {json.dumps(entry, sort_keys=True) for entry in existing}
+            for entry in self.dflash2_shared_initializers:
+                if json.dumps(entry, sort_keys=True) not in known:
+                    existing.append(entry)
+            decoder["shared_initializers"] = existing
+            section["shared_initializers"] = self.dflash2_shared_initializers
+        genai_config["model"]["dflash2"] = section
+        dynamic_batching = genai_config.get("engine", {}).get("dynamic_batching")
+        if dynamic_batching is not None and section.get("sliding_window", 0) <= 0:
+            dynamic_batching.setdefault("prefix_caching", False)
+
+        with open(config_path, "w") as config_file:
+            json.dump(genai_config, config_file, indent=4)
+        print("Added 'dflash2' section to genai_config.json")
+
+    def make_dspark_init(self, io_dtype, extra_options):
+        """DSpark block drafter, exported as an auxiliary ``dspark.onnx``.
+
+        ``dspark_path`` points at the draft checkpoint. SpecForge taps the *output* of each
+        ``target_layer_ids`` entry (``hidden_states[layer_id + 1]``), which is the residual stream
+        entering layer ``layer_id + 1`` -- the tensor aux_hidden_state_layers names. Getting that
+        off by one leaves acceptance at exactly 1.0.
+        """
+        self.dspark_path = extra_options.get("dspark_path")
+        if not self.dspark_path:
+            return
+        if self.dflash2_path:
+            raise ValueError("dspark_path and dflash2_path are mutually exclusive.")
+        if not self.decoder.use_paged_attention:
+            raise ValueError("dspark_path requires use_paged_attention=true.")
+
+        num_draft_tokens = None
+        if "dspark_num_draft_tokens" in extra_options:
+            try:
+                num_draft_tokens = int(extra_options["dspark_num_draft_tokens"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("dspark_num_draft_tokens must be between 2 and the checkpoint block size.") from error
+
+        try:
+            top_k = int(extra_options.get("dspark_top_k", 16))
+        except (TypeError, ValueError) as error:
+            raise ValueError("dspark_top_k must be a positive integer.") from error
+        if top_k < 1:
+            raise ValueError("dspark_top_k must be a positive integer.")
+
+        with open(os.path.join(self.dspark_path, "config.json"), encoding="utf-8") as handle:
+            draft_config = json.load(handle)
+        checkpoint_block_size = int(draft_config["block_size"])
+        if num_draft_tokens is not None and not 2 <= num_draft_tokens <= checkpoint_block_size:
+            raise ValueError(
+                "dspark_num_draft_tokens must be between 2 and the drafter checkpoint block size "
+                f"({checkpoint_block_size})."
+            )
+        vocab_size = int(draft_config["vocab_size"])
+        if top_k > vocab_size:
+            raise ValueError(f"dspark_top_k must not exceed the drafter vocabulary size ({vocab_size}).")
+
+        self.dspark_attrs = {
+            "io_dtype": io_dtype,
+            "num_draft_tokens": num_draft_tokens,
+            "top_k": top_k,
+        }
+
+        target_layer_ids = draft_config["dflash_config"]["target_layer_ids"]
+        self.require_specforge_aux_taps(target_layer_ids, "DSpark")
+
+    def make_dspark_model(self, input_path):
+        if not self.dspark_path:
+            return
+        from .dspark import DSparkBuilder  # noqa: PLC0415
+
+        print("Building DSpark draft model -> dspark.onnx")
+        target_dir = input_path if input_path and os.path.isdir(input_path) else self.decoder.model_name_or_path
+        self.dspark = DSparkBuilder(
+            self.dspark_path,
+            target_dir,
+            self.dspark_attrs["io_dtype"],
+            self.decoder.attention_attrs["paged_block_size"],
+            self.decoder.context_length,
+            num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
+            top_k=self.dspark_attrs["top_k"],
+            embed_quant=self.block_drafter_embed_quant(),
+            lm_head_quant=self.block_drafter_lm_head_quant(),
+        )
+        self.dspark.make_model()
+
+    def save_dspark_model(self, output_dir):
+        if self.dspark is None:
+            return
+        self.dspark_shared_initializers = self.save_block_drafter_model(self.dspark, output_dir, "DSpark")
+
+    def add_dspark_to_genai_config(self, out_dir):
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+
+        decoder = genai_config["model"]["decoder"]
+        decoder.setdefault("outputs", {}).setdefault("aux_hidden_states", "aux_hidden_states")
+
+        section = self.dspark.genai_config_section()
+        section["aux_hidden_state_layers"] = list(self.decoder.aux_hidden_state_layers)
+        if self.dspark_shared_initializers:
+            existing = decoder.get("shared_initializers", [])
+            known = {json.dumps(entry, sort_keys=True) for entry in existing}
+            for entry in self.dspark_shared_initializers:
+                if json.dumps(entry, sort_keys=True) not in known:
+                    existing.append(entry)
+            decoder["shared_initializers"] = existing
+            section["shared_initializers"] = self.dspark_shared_initializers
+        genai_config["model"]["dspark"] = section
+        genai_config["engine"]["dynamic_batching"].setdefault("prefix_caching", False)
+
+        with open(config_path, "w") as config_file:
+            json.dump(genai_config, config_file, indent=4)
+        print("Added 'dspark' section to genai_config.json")
+
+
+
+class Qwen35MTPModel(Qwen35MoETextModel):
+    """Qwen3.6 multi-token-prediction self-speculative head builder."""
+
+    is_moe_mtp = True
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.is_mtp_head = True
+
+        config = copy.deepcopy(config)
+        text_config = getattr(config, "text_config", config)
+        text_config.num_hidden_layers = 1
+        text_config.layer_types = ["full_attention"]
+        config.num_hidden_layers = 1
+        config.layer_types = ["full_attention"]
+
+        self.mtp_layer_config = copy.deepcopy(text_config)
+        self.mtp_layer_config.layer_types = ["full_attention"]
+        self.mtp_layer_config.num_hidden_layers = 1
+
+        extra_options = copy.deepcopy(extra_options)
+        extra_options["num_hidden_layers"] = 1
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        quant_config = extra_options.get("_quant_config")
+        self.preserve_mtp_quantization = (
+            quant_config is None or quant_config.checkpoint_policy == "preserve"
+        )
+        self.input_names["hidden_states"] = "hidden_states"
+        self.input_types["hidden_states"] = self.io_dtype
+        self.input_shapes["hidden_states"] = self.make_hidden_state_shape()
+
+    def make_model(self, input_path):
+        self.make_inputs_and_outputs()
+        self.load_mtp_weights(input_path)
+        self.make_preprocessing_nodes()
+
+        projected = self.make_mtp_input_projection()
+        self.layernorm_attrs["root_input"] = projected
+        self.layernorm_attrs["skip_input"] = projected
+        self.layernorm_attrs["first_layernorm"] = True
+
+        self.make_layer(0, self.mtp_weights.layers[0])
+        self.make_layernorm(1, self.mtp_weights.norm, skip=True, simple=True, location="final_norm")
+        mtp_norm_output = self.layernorm_attrs["output_0"]
+        self.make_lm_head(self.mtp_weights.lm_head)
+
+        hidden_states_output = "hidden_states_out"
+        self.make_node(
+            "Identity",
+            inputs=[mtp_norm_output],
+            outputs=[hidden_states_output],
+            name="/model/mtp/hidden_states_out/Identity",
+        )
+        hidden_states_value = self.make_value(
+            hidden_states_output,
+            self.io_dtype,
+            shape=self.make_hidden_state_shape(),
+        )
+        self.model.graph.outputs.append(hidden_states_value)
+
+        self.make_postprocessing_nodes()
+        del self.mtp_weights
+
+    def load_mtp_weights(self, input_path):
+        model_dir = input_path if input_path and os.path.isdir(input_path) else self.model_name_or_path
+        try:
+            from loaders.qwen import QwenMTPModel  # noqa: PLC0415
+        except ImportError:
+            from onnxruntime_genai.models.loaders.qwen import QwenMTPModel  # noqa: PLC0415
+
+        self.mtp_weights = QwenMTPModel.from_pretrained(
+            self.quant_type,
+            input_path,
+            model_dir,
+            self.mtp_layer_config,
+            preserve_quantization=self.preserve_mtp_quantization,
+            load_quantized_model=self.load_weights,
+            is_moe=self.is_moe_mtp,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
+        )
+
+    def make_offset_rmsnorm(self, name, root_input, weight_tensor):
+        weight_name = f"{name[1:].replace('/', '.')}.weight"
+        self.make_initializer(weight_tensor + self.layernorm_attrs["add_offset"], weight_name, to=self.io_dtype)
+        output = f"{name}/output_0"
+        self.make_node(
+            "SimplifiedLayerNormalization",
+            inputs=[root_input, weight_name],
+            outputs=[output],
+            name=name,
+            epsilon=self.layernorm_attrs["epsilon"],
+            axis=-1,
+            stash_type=1,
+        )
+        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape())
+        return output
+
+    def make_mtp_input_projection(self):
+        basename = "/model/mtp"
+
+        embed_output = self.make_mtp_embedding(basename)
+        self.make_value(embed_output, self.io_dtype, shape=self.make_hidden_state_shape())
+
+        embedding_norm = self.make_offset_rmsnorm(
+            f"{basename}/pre_fc_norm_embedding", embed_output, self.mtp_weights.pre_fc_norm_embedding.weight
+        )
+        hidden_states_norm = self.make_offset_rmsnorm(
+            f"{basename}/pre_fc_norm_hidden",
+            self.input_names["hidden_states"],
+            self.mtp_weights.pre_fc_norm_hidden.weight,
+        )
+
+        concat_name = f"{basename}/fc/Concat"
+        self.make_concat(
+            concat_name,
+            [embedding_norm, hidden_states_norm],
+            self.io_dtype,
+            self.make_hidden_state_shape(last_dim=2 * self.hidden_size),
+            axis=-1,
+        )
+
+        fc_name = self.make_matmul(self.mtp_weights.fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
+        return f"{fc_name}/output_0"
+
+    def make_mtp_embedding(self, basename):
+        return self.make_embedding_lookup(
+            self.mtp_weights.embedding.weight,
+            f"{basename}/embed_tokens",
+            self.mtp_weights.lm_head,
+        )
+
+
+
+class Qwen35DenseMTPModel(Qwen35MTPModel):
+    """Dense Qwen3.5/Qwen3.8 MTP head with one full-attention decoder layer."""
+
+    is_moe_mtp = False
+
+    def make_layer(self, layer_id, layer):
+        return Qwen35TextModel.make_layer(self, layer_id, layer)
+
+
+
+class Qwen35Model(Qwen35MoEModel):
+    """Composite dense Qwen3.5/Qwen3.8 builder with an optional MTP graph."""
+
+    def get_decoder_model_class(self):
+        return Qwen35TextModel
+
+    def get_mtp_model_class(self):
+        return Qwen35DenseMTPModel

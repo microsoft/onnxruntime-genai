@@ -146,7 +146,7 @@ def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):
     assert model.model_type == "qwen4_exp_text"
     assert model.decoder.model_type == "qwen4_exp_text"
     assert isinstance(model.mtp, FakeQwen4ExpComponent)
-    assert model.decoder.extra_options["external_engram"] is True
+    assert model.decoder.extra_options["external_engram"] is False
     assert model.decoder.extra_options["include_hidden_states"] is True
 
 

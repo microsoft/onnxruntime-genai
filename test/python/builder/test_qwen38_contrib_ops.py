@@ -9,8 +9,8 @@ import pytest
 import torch
 
 from models.builders.base import Model
-from models.builders.qwen import (
-    Qwen35MoETextModel,
+from models.builders.qwen3_5 import Qwen35MoETextModel
+from models.builders.qwen3_8 import (
     Qwen4ExpEngramModel,
     Qwen4ExpModel,
     Qwen4ExpMTPTextModel,
@@ -219,7 +219,7 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
         config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None,
         {"external_engram": True, "state_update_capacity": 7},
     )
-    assert "state_update.ple_tokens" not in external_model.output_names
+    assert "state_update.ple_tokens" in external_model.output_names
     assert external_model.output_names["state_update.ple_conv_value"] == {1: "state_update.1.ple_conv_value"}
 
 
@@ -1397,17 +1397,18 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only):
     wrapper.mtp = component("mtp.onnx")
     wrapper.mtp_attrs = {}
     wrapper.share_initializers = lambda *args: []
-    monkeypatch.setattr("models.builders.qwen.Qwen4ExpEmbeddingModel", lambda *args: SimpleNamespace(save_model=lambda _: None))
-    monkeypatch.setattr("models.builders.qwen.Qwen4ExpVisionModel", lambda *args: SimpleNamespace(save_model=lambda _: None))
+    monkeypatch.setattr("models.builders.qwen3_8.Qwen4ExpEmbeddingModel", lambda *args: SimpleNamespace(save_model=lambda _: None))
+    monkeypatch.setattr("models.builders.qwen3_8.Qwen4ExpVisionModel", lambda *args: SimpleNamespace(save_model=lambda _: None))
 
     wrapper.save_model(tmp_path)
 
-    filenames = ("engram.onnx", "model.onnx", "mtp.onnx")
+    filenames = ("model.onnx", "mtp.onnx") if text_only else ("engram.onnx", "model.onnx", "mtp.onnx")
     exported = [onnx.load(tmp_path / filename, load_external_data=False) for filename in filenames]
     tables = [next(value for value in model.graph.initializer if value.name == table_name) for model in exported]
     offsets = [next(entry.value for entry in value.external_data if entry.key == "offset") for value in tables]
     assert offsets == [offsets[0]] * len(tables)
-    assert all(next(entry.value for entry in value.external_data if entry.key == "location") == "engram.onnx.data"
+    data_file = "engram.onnx.data"
+    assert all(next(entry.value for entry in value.external_data if entry.key == "location") == data_file
                for value in tables)
     loaded = [onnx.load(tmp_path / filename, load_external_data=True) for filename in filenames]
     table_values = [onnx.numpy_helper.to_array(next(value for value in model.graph.initializer

@@ -59,7 +59,6 @@ class DFlash2Builder(BlockDrafterBuilder):
         quant=None,
         lm_head_quant=None,
         embed_quant=None,
-        fuse_gate_up=False,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
@@ -77,7 +76,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.embed_quant = embed_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
-        self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
+        self.mlp_attrs = {"fuse_gate_up": True}
 
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)

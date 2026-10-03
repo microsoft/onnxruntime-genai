@@ -27,6 +27,32 @@ def test_legacy_configuration_preserves_options():
     assert effective.extra_options == {"block_size": "64"}
 
 
+@pytest.mark.parametrize("option", ["fuse_mlp_gate_up", "dflash2_fuse_gate_up", "use_device_allocator_for_initializers"])
+@pytest.mark.parametrize("value", [True, False, "true", "false"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_always_enabled_options_are_no_longer_configurable(option, value, version):
+    with pytest.raises(ValueError, match="has been removed; this behavior is always enabled"):
+        normalize_builder_config("int4", "cuda", {option: value}, builder_config_version=version)
+
+
+def test_target_fusion_optimization_option_is_removed():
+    with pytest.raises(ValueError, match="optimizations"):
+        normalize_builder_config(
+            "int4", "cuda", target_options={"optimizations": {"fuse_mlp_gate_up": False}}
+        )
+
+
+@pytest.mark.parametrize("drafter_type", ["none", "mtp", "dflash2", "dspark"])
+@pytest.mark.parametrize("value", [True, False])
+def test_drafter_fusion_optimization_option_is_removed(drafter_type, value):
+    with pytest.raises(ValueError, match="optimizations"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            drafter_options={"drafter_type": drafter_type, "optimizations": {"fuse_mlp_gate_up": value}},
+        )
+
+
 def test_structured_fields_select_version_two():
     effective = normalize_builder_config(
         None,

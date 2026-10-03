@@ -14,6 +14,7 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from transformers import LlamaConfig
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
@@ -38,6 +39,23 @@ Qwen25VLTextModel = qwen_module.Qwen25VLTextModel
 Qwen3VLTextModel = qwen_module.Qwen3VLTextModel
 Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen35MoETextModel = qwen_module.Qwen35MoETextModel
+
+
+def test_base_mlp_fusion_is_always_enabled():
+    config = LlamaConfig(
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+        max_position_embeddings=128,
+        architectures=["LlamaForCausalLM"],
+    )
+
+    model = Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", "", {})
+
+    assert model.mlp_attrs["fuse_gate_up"] is True
 
 
 def test_base_matmul_honors_module_quantization_exclusion(monkeypatch):
@@ -430,6 +448,7 @@ def test_qwen35_genai_config_includes_recurrent_cache_names(monkeypatch, tmp_pat
 
     assert decoder["inputs"]["past_conv_names"] == "past.%d.conv"
     assert decoder["inputs"]["past_recurrent_names"] == "past.%d.recurrent"
+    assert decoder["session_options"]["session.use_device_allocator_for_initializers"] == "1"
     assert decoder["outputs"]["present_conv_names"] == "present.%d.conv"
     assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"
     assert model_config["bot_token_id"] == 10

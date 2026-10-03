@@ -406,7 +406,7 @@ class Model:
         self.mlp_attrs = {
             "use_proj": True,                                # Use projection style for MLP (GateProj/UpProj/DownProj)
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
-            "fuse_gate_up": extra_options.get("fuse_mlp_gate_up", False),  # Fuse gate/up projections before quantization
+            "fuse_gate_up": True,  # Fuse gate/up projections before quantization
             "output_0": "",                                  # Output 0 for MLP subgraph
         }
 
@@ -1445,8 +1445,7 @@ class Model:
             # Prepacked nodes take the fpA_intB path unconditionally. This flag also selects that
             # kernel family for raw-layout nodes and prepack-pass skips.
             session_options["ep.cuda.fpa_intb_gemm"] = "1"
-        if self.extra_options.get("use_device_allocator_for_initializers", False):
-            session_options["session.use_device_allocator_for_initializers"] = "1"
+        session_options["session.use_device_allocator_for_initializers"] = "1"
 
         if self.use_paged_attention:
             dynamic_batching = {
@@ -5305,17 +5304,17 @@ class Model:
         #    DownProjMatMul
 
         if hasattr(mlp.gate_proj, "base_layer") or hasattr(mlp.up_proj, "base_layer"):
-            raise ValueError("fuse_mlp_gate_up does not support adapted gate/up projections.")
+            raise ValueError("MLP gate/up fusion does not support adapted gate/up projections.")
         if getattr(mlp.gate_proj, "quant_type", "none") != "none" or getattr(
             mlp.up_proj, "quant_type", "none"
         ) != "none":
-            raise ValueError("fuse_mlp_gate_up requires unpacked gate/up projections.")
+            raise ValueError("MLP gate/up fusion requires unpacked gate/up projections.")
         if not mlp.gate_proj.weight.is_floating_point() or not mlp.up_proj.weight.is_floating_point():
-            raise ValueError("fuse_mlp_gate_up requires floating-point gate/up projections.")
+            raise ValueError("MLP gate/up fusion requires floating-point gate/up projections.")
         expected_shape = (self.intermediate_size, self.hidden_size)
         if tuple(mlp.gate_proj.weight.shape) != expected_shape or tuple(mlp.up_proj.weight.shape) != expected_shape:
             raise ValueError(
-                f"fuse_mlp_gate_up requires gate/up weights with shape {expected_shape}, got "
+                f"MLP gate/up fusion requires gate/up weights with shape {expected_shape}, got "
                 f"{tuple(mlp.gate_proj.weight.shape)} and {tuple(mlp.up_proj.weight.shape)}."
             )
 
@@ -5327,8 +5326,8 @@ class Model:
         up_excluded = getattr(mlp.up_proj, "exclude_from_quantization", False) or up_basename in excluded_nodes
         if gate_excluded != up_excluded:
             raise ValueError(
-                "fuse_mlp_gate_up cannot preserve a quantization exclusion that applies to only one of "
-                f"'{gate_basename}' and '{up_basename}'. Exclude both projections or disable fusion."
+                "MLP gate/up fusion cannot preserve a quantization exclusion that applies to only one of "
+                f"'{gate_basename}' and '{up_basename}'. Exclude both projections."
             )
 
         gate_bias = mlp.gate_proj.bias
@@ -5336,7 +5335,7 @@ class Model:
         for name, bias in (("gate", gate_bias), ("up", up_bias)):
             if bias is not None and tuple(bias.shape) != (self.intermediate_size,):
                 raise ValueError(
-                    f"fuse_mlp_gate_up requires the {name} bias to have shape "
+                    f"MLP gate/up fusion requires the {name} bias to have shape "
                     f"({self.intermediate_size},), got {tuple(bias.shape)}."
                 )
         bias_exists = (gate_bias is not None and torch.count_nonzero(gate_bias) > 0) or (
@@ -5706,7 +5705,7 @@ class Model:
         if "block_size" in self.moe_attrs:
             extra_kwargs["block_size"] = self.moe_attrs["block_size"]
 
-        if is_fp4:
+        if is_fp4 or quant_type == "fp8":
             # Select the MXFP4/NVFP4 kernel path; integer QMoE leaves quant_type at its default.
             extra_kwargs["quant_type"] = quant_type
 

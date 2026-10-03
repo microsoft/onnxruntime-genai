@@ -33,19 +33,23 @@ from .phi import (
 from .qwen import (
     Qwen3Model,
     Qwen3VLTextModel,
-    Qwen4ExpEmbeddingModel,
-    Qwen4ExpModel,
-    Qwen4ExpTextModel,
-    Qwen4ExpVisionModel,
     Qwen25VLTextModel,
+    QwenModel,
+    VideoChatFlashQwenModel,
+)
+from .qwen3_5 import (
     Qwen35DenseMTPModel,
     Qwen35Model,
     Qwen35MoEModel,
     Qwen35MoETextModel,
     Qwen35MTPModel,
     Qwen35TextModel,
-    QwenModel,
-    VideoChatFlashQwenModel,
+)
+from .qwen3_8 import (
+    Qwen4ExpEmbeddingModel,
+    Qwen4ExpModel,
+    Qwen4ExpTextModel,
+    Qwen4ExpVisionModel,
 )
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
@@ -62,8 +66,8 @@ __all__ = [
     "HunyuanDenseV1Model",
     "InternLM2Model",
     "LFM2AudioModel",
-    "LFM2Model",
     "LFM2MoEModel",
+    "LFM2Model",
     "LlamaModel",
     "MTPModel",
     "Mistral3TextModel",
@@ -87,10 +91,10 @@ __all__ = [
     "Qwen4ExpVisionModel",
     "Qwen25VLTextModel",
     "Qwen35DenseMTPModel",
-    "Qwen35Model",
+    "Qwen35MTPModel",
     "Qwen35MoEModel",
     "Qwen35MoETextModel",
-    "Qwen35MTPModel",
+    "Qwen35Model",
     "Qwen35TextModel",
     "QwenModel",
     "SmolLM3Model",
