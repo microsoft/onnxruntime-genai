@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
@@ -537,6 +538,58 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             });
 
             Assert.NotEmpty(completion.Text);
+        }
+
+        [Fact(DisplayName = "TestChatClientWithJsonSchemaResponseFormat")]
+        public async Task TestChatClientWithJsonSchemaResponseFormat()
+        {
+            // The schema only allows "{}". Once guidance has completed it, the last step ends the generation
+            // without appending a token.
+            OnnxRuntimeGenAIChatClientOptions options = new()
+            {
+                PromptFormatter = static (messages, options) => "a",
+            };
+
+            using var client = new OnnxRuntimeGenAIChatClient(_tinyRandomGpt2ModelPath, options);
+
+            using var schema = JsonDocument.Parse("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}");
+            var completion = await client.GetResponseAsync("a", new()
+            {
+                MaxOutputTokens = 10,
+                Temperature = 0f,
+                ResponseFormat = ChatResponseFormat.ForJsonSchema(schema.RootElement),
+            });
+
+            Assert.Equal("{}", completion.Text);
+        }
+
+        [Fact(DisplayName = "TestChatClientWithJsonSchemaResponseFormatAndCaching")]
+        public async Task TestChatClientWithJsonSchemaResponseFormatAndCaching()
+        {
+            // The second turn reuses the cached generator after guidance has completed the first output.
+            OnnxRuntimeGenAIChatClientOptions options = new()
+            {
+                PromptFormatter = static (messages, options) => "a",
+                EnableCaching = true,
+            };
+
+            using var client = new OnnxRuntimeGenAIChatClient(_tinyRandomGpt2ModelPath, options);
+
+            using var schema = JsonDocument.Parse("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}");
+            ChatOptions chatOptions = new()
+            {
+                MaxOutputTokens = 10,
+                Temperature = 0f,
+                ResponseFormat = ChatResponseFormat.ForJsonSchema(schema.RootElement),
+            };
+
+            var first = await client.GetResponseAsync("a", chatOptions);
+            Assert.Equal("{}", first.Text);
+            Assert.NotNull(first.ConversationId);
+
+            chatOptions.ConversationId = first.ConversationId;
+            var second = await client.GetResponseAsync("a", chatOptions);
+            Assert.Equal("{}", second.Text);
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
