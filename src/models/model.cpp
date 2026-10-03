@@ -41,6 +41,7 @@
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
+#include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
 #include "ep/openvino/interface.h"
 #include "ep/qnn/interface.h"
@@ -595,6 +596,19 @@ Model::~Model() {
     CloseDmlInterface();
   }
 #endif
+  if (p_device_ && p_device_->GetType() == DeviceType::AMDGPU) {
+    // Per-model teardown for the AMDGPU (DirectX plugin) path. All logic (allocator/session reset,
+    // singleton destruction, EP-library unregister so the plugin releases its process-global device
+    // and outstanding allocation handles) lives in CloseAMDGPUInterface() in the AMD module. Without
+    // it, a model that hangs the GPU leaves stale device-backed handles alive and the next model
+    // dereferences them on a dead device. The next model re-registers a fresh EP+device.
+    //
+    // Unlike the DML branch above, session_options_ is NOT reset here: the DML path bakes raw
+    // IDMLDevice*/command-queue pointers into its session options (SessionOptionsAppendExecutionProvider_DML1)
+    // that must be dropped before the device is destroyed, whereas the plugin path registers by
+    // library name and its session options carry only config strings — no device references.
+    CloseAMDGPUInterface();
+  }
 }
 
 // Returns the device the session will run on: CPU when the options name no device-backed provider.
