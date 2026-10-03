@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include "generator/generators.h"
 #include "models/preprocessing/nemotron_streaming_processor.h"
@@ -15,25 +16,26 @@ void PopulateMelTensorImpl(ThreadPool* thread_pool, T* output, std::span<const f
                            int cache_pos, std::span<const float> mel,
                            int num_frames, int num_mels, Convert convert) {
   const int cache_frames = static_cast<int>(cache.size()) / num_mels;
-  const int total_frames = cache_frames + num_frames;
+  if (cache.size() > static_cast<size_t>(std::numeric_limits<std::ptrdiff_t>::max()) - mel.size())
+    throw std::overflow_error("PopulateMelTensor: element count exceeds ptrdiff_t range");
+  const auto total_elements = static_cast<std::ptrdiff_t>(cache.size() + mel.size());
   ThreadPool::TryParallelFor(
-      thread_pool, total_frames, static_cast<double>(num_mels) * 8.0,
+      thread_pool, total_elements, 8.0,
       [&](std::ptrdiff_t first, std::ptrdiff_t last) {
         auto local_convert = convert;
-        for (auto frame = first; frame < last; ++frame) {
-          T* frame_output = output + frame * num_mels;
+        for (auto output_idx = first; output_idx < last; ++output_idx) {
+          const auto frame = output_idx / num_mels;
+          const auto mel_bin = output_idx % num_mels;
           if (frame < cache_frames) {
             const int source_frame = (cache_pos + static_cast<int>(frame)) % cache_frames;
-            for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
-              frame_output[mel_bin] = local_convert(
-                  cache[static_cast<size_t>(source_frame) * static_cast<size_t>(num_mels) +
-                        static_cast<size_t>(mel_bin)]);
+            output[output_idx] = local_convert(
+                cache[static_cast<size_t>(source_frame) * static_cast<size_t>(num_mels) +
+                      static_cast<size_t>(mel_bin)]);
           } else {
             const int chunk_frame = static_cast<int>(frame) - cache_frames;
-            for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
-              frame_output[mel_bin] = local_convert(
-                  mel[static_cast<size_t>(mel_bin) * static_cast<size_t>(num_frames) +
-                      static_cast<size_t>(chunk_frame)]);
+            output[output_idx] = local_convert(
+                mel[static_cast<size_t>(mel_bin) * static_cast<size_t>(num_frames) +
+                    static_cast<size_t>(chunk_frame)]);
           }
         }
       });
@@ -61,14 +63,17 @@ void PopulateMelTensor(ThreadPool* thread_pool, OrtValue& output, std::span<cons
                 static_cast<size_t>(cache_frames - first_run) * static_cast<size_t>(num_mels) * sizeof(float));
 
     auto* chunk_output = output_data + cache.size();
+    if (mel.size() > static_cast<size_t>(std::numeric_limits<std::ptrdiff_t>::max()))
+      throw std::overflow_error("PopulateMelTensor: mel element count exceeds ptrdiff_t range");
     ThreadPool::TryParallelFor(
-        thread_pool, num_frames, static_cast<double>(num_mels) * 2.0,
+        thread_pool, static_cast<std::ptrdiff_t>(mel.size()), 2.0,
         [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-          for (auto frame = first; frame < last; ++frame) {
-            for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
-              chunk_output[frame * num_mels + mel_bin] =
-                  mel[static_cast<size_t>(mel_bin) * static_cast<size_t>(num_frames) +
-                      static_cast<size_t>(frame)];
+          for (auto output_idx = first; output_idx < last; ++output_idx) {
+            const auto frame = output_idx / num_mels;
+            const auto mel_bin = output_idx % num_mels;
+            chunk_output[output_idx] =
+                mel[static_cast<size_t>(mel_bin) * static_cast<size_t>(num_frames) +
+                    static_cast<size_t>(frame)];
           }
         });
   } else if (output_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {

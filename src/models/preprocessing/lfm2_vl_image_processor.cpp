@@ -106,27 +106,29 @@ void WriteLfm2VlImagePatches(ThreadPool* thread_pool, const float* image, int64_
                              float* destination) {
   const int64_t channel_stride = padded_height * padded_width;
   const int64_t patch_dim = encoder_patch_size * encoder_patch_size * channels;
-  if (geometry.num_patches > std::numeric_limits<std::ptrdiff_t>::max()) {
-    throw std::overflow_error("Lfm2VlImageProcessor: image patch count exceeds ptrdiff_t range.");
+  if (patch_dim > 0 &&
+      geometry.num_patches > std::numeric_limits<std::ptrdiff_t>::max() / patch_dim) {
+    throw std::overflow_error("Lfm2VlImageProcessor: image patch element count exceeds ptrdiff_t range.");
   }
+  const auto total_elements =
+      static_cast<std::ptrdiff_t>(geometry.num_patches * patch_dim);
 
   ThreadPool::TryParallelFor(
-      thread_pool, static_cast<std::ptrdiff_t>(geometry.num_patches), static_cast<double>(patch_dim),
+      thread_pool, total_elements, 1.0,
       [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-        for (std::ptrdiff_t patch_index = first; patch_index < last; ++patch_index) {
-          const int64_t row = static_cast<int64_t>(patch_index) / geometry.patch_cols;
-          const int64_t col = static_cast<int64_t>(patch_index) % geometry.patch_cols;
-          float* patch = destination + static_cast<int64_t>(patch_index) * patch_dim;
-          for (int64_t y = 0; y < encoder_patch_size; ++y) {
-            const int64_t source_row = row * encoder_patch_size + y;
-            for (int64_t x = 0; x < encoder_patch_size; ++x) {
-              const int64_t source_col = col * encoder_patch_size + x;
-              for (int64_t c = 0; c < channels; ++c) {
-                patch[(y * encoder_patch_size + x) * channels + c] =
-                    image[c * channel_stride + source_row * padded_width + source_col];
-              }
-            }
-          }
+        for (std::ptrdiff_t output_idx = first; output_idx < last; ++output_idx) {
+          const int64_t patch_index = static_cast<int64_t>(output_idx) / patch_dim;
+          const int64_t patch_offset = static_cast<int64_t>(output_idx) % patch_dim;
+          const int64_t patch_pixel = patch_offset / channels;
+          const int64_t channel = patch_offset % channels;
+          const int64_t patch_y = patch_pixel / encoder_patch_size;
+          const int64_t patch_x = patch_pixel % encoder_patch_size;
+          const int64_t patch_row = patch_index / geometry.patch_cols;
+          const int64_t patch_col = patch_index % geometry.patch_cols;
+          const int64_t source_row = patch_row * encoder_patch_size + patch_y;
+          const int64_t source_col = patch_col * encoder_patch_size + patch_x;
+          destination[output_idx] =
+              image[channel * channel_stride + source_row * padded_width + source_col];
         }
       });
 }
