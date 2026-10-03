@@ -49,10 +49,11 @@ void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float
       });
 
   if (temporal_patch_size > 1) {
-    const int64_t replication_count = total_patches * (temporal_patch_size - 1);
-    if (replication_count > std::numeric_limits<std::ptrdiff_t>::max()) {
+    if (total_patches >
+        std::numeric_limits<std::ptrdiff_t>::max() / (temporal_patch_size - 1)) {
       throw std::overflow_error("Image patch replication count exceeds ptrdiff_t range");
     }
+    const int64_t replication_count = total_patches * (temporal_patch_size - 1);
     ThreadPool::TryParallelFor(
         thread_pool, static_cast<std::ptrdiff_t>(replication_count),
         static_cast<double>(spatial_patch_dim),
