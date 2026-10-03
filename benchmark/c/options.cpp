@@ -30,7 +30,11 @@ namespace {
     << "    -i,--input_folder <path>\n"
     << "      Path to the ONNX model directory to benchmark, compatible with onnxruntime-genai.\n"
     << "    -e,--execution_provider <provider>\n"
-    << "      Execution provider to use. Valid values are: cpu, cuda, dml, NvTensorRtRtx, AMDGPU. Default: " << defaults.execution_provider << "\n"
+    << "      Execution provider to use: follow_config, cpu, cuda, dml, NvTensorRtRtx, AMDGPU, webgpu.\n"
+    << "      With --ep_library_path, a custom provider name is also accepted. Default: " << defaults.execution_provider << "\n"
+    << "    --ep_library_path,--ep_path <path>\n"
+    << "      Register a plugin EP DLL/SO before loading the model. Provider options from\n"
+    << "      genai_config.json are preserved. Without -e, use the providers in that file.\n"
     << "    -b,--batch_size <number>\n"
     << "      Number of sequences to generate in parallel. Default: " << defaults.batch_size << "\n"
     << "    Prompt options:\n"
@@ -98,9 +102,11 @@ std::string ReadFileContent(std::string_view file_path) {
 }
 
 void ValidateExecutionProvider(const std::string& provider) {
-  if (provider != "cpu" && provider != "cuda" && provider != "dml" && provider != "NvTensorRtRtx" &&
-      provider != "AMDGPU") {
-    throw std::runtime_error("Invalid execution provider: " + provider + ". Valid values are: cpu, cuda, dml, NvTensorRtRtx, AMDGPU");
+  if (provider != "follow_config" && provider != "cpu" && provider != "cuda" && provider != "dml" &&
+      provider != "NvTensorRtRtx" && provider != "AMDGPU" && provider != "webgpu" && provider != "WebGPU") {
+    throw std::runtime_error("Invalid execution provider: " + provider +
+                             ". Use follow_config, cpu, cuda, dml, NvTensorRtRtx, AMDGPU, webgpu,"
+                             " or provide --ep_library_path for a custom provider.");
   }
 }
 
@@ -109,8 +115,12 @@ void VerifyOptions(const Options& opts) {
     throw std::runtime_error("ONNX model directory path must be provided.");
   }
 
-  // validate execution provider since it has a valid value
-  ValidateExecutionProvider(opts.execution_provider);
+  if (opts.execution_provider.empty()) {
+    throw std::runtime_error("Execution provider must not be empty.");
+  }
+  if (opts.ep_library_path.empty()) {
+    ValidateExecutionProvider(opts.execution_provider);
+  }
 }
 
 }  // namespace
@@ -136,6 +146,11 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.model_path = next_arg(i);
       } else if (arg == "-e" || arg == "--execution_provider") {
         opts.execution_provider = next_arg(i);
+      } else if (arg == "--ep_library_path" || arg == "--ep_path") {
+        opts.ep_library_path = next_arg(i);
+        if (opts.ep_library_path.empty()) {
+          throw std::runtime_error("Plugin EP library path must not be empty.");
+        }
       } else if (arg == "-b" || arg == "--batch_size") {
         opts.batch_size = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-l" || arg == "--prompt_length") {
