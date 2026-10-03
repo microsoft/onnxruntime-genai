@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <iomanip>
 #include <random>
 #include <iostream>
@@ -160,13 +161,26 @@ static std::unique_ptr<OgaGeneratorParams> MakeGeneratorParams(const benchmark::
 }
 
 void RunBenchmark(const benchmark::Options& opts) {
-  std::unique_ptr<OgaModel> model;
-  Duration model_creation_latency;
+  if (!opts.ep_library_path.empty()) {
+    const auto library_path = std::filesystem::absolute(opts.ep_library_path).string();
+    std::cout << "Registering plugin EP library: " << library_path << std::endl;
+    // Register on GenAI's OrtEnv, which owns the library until OgaHandle shuts it down.
+    OgaRegisterExecutionProviderLibrary("model_benchmark_plugin", library_path.c_str());
+  }
+
+  std::cout << "Execution provider: " << opts.execution_provider << std::endl;
+  const auto model_creation_start = Clock::now();
+  auto config = OgaConfig::Create(opts.model_path.c_str());
+  if (opts.execution_provider != "follow_config") {
+    // Clear only the active provider list, retaining options such as graph capture.
+    config->ClearProviders();
+    if (opts.execution_provider != "cpu") {
+      config->AppendProvider(opts.execution_provider.c_str());
+    }
+  }
 
   if (opts.batch_size > 1 && opts.execution_provider == "NvTensorRtRtx") {
     // Use OgaConfig::Overlay instead of RuntimeSettings for cleaner implementation
-    auto config = OgaConfig::Create(opts.model_path.c_str());
-
     // Create JSON overlay for batch_size
     std::string batch_size_overlay = R"({
   "search": {
@@ -176,14 +190,9 @@ void RunBenchmark(const benchmark::Options& opts) {
 })";
 
     config->Overlay(batch_size_overlay.c_str());
-    const auto model_creation_start = Clock::now();
-    model = OgaModel::Create(*config);
-    model_creation_latency = Clock::now() - model_creation_start;
-  } else {
-    const auto model_creation_start = Clock::now();
-    model = OgaModel::Create(opts.model_path.c_str());
-    model_creation_latency = Clock::now() - model_creation_start;
   }
+  auto model = OgaModel::Create(*config);
+  const auto model_creation_latency = Clock::now() - model_creation_start;
 
   const auto tokenizer_creation_start = Clock::now();
   auto tokenizer = OgaTokenizer::Create(*model);
