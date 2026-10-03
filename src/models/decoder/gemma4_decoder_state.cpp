@@ -3,7 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/multi_modal.h"
-#include "models/gemma4_decoder_state.h"
+#include "models/decoder/gemma4_decoder_state.h"
 
 namespace Generators {
 

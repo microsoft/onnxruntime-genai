@@ -3,7 +3,7 @@
 #pragma once
 #include <vector>
 #include "model.h"
-#include "decoder_only.h"
+#include "models/decoder/decoder_only.h"
 
 namespace Generators {
 

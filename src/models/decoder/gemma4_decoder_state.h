@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "models/multi_modal_decoder.h"
+#include "models/decoder/multi_modal_decoder.h"
 
 namespace Generators {
 

@@ -2,7 +2,7 @@
 
 #include "span.h"
 
-#include "models/decoder_only_pipeline.h"
+#include "models/qnn/decoder_only_pipeline.h"
 #include "models/vision/qwen_vl_vision.h"
 
 namespace Generators {

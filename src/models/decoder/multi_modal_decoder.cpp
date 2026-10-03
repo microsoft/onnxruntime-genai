@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
-#include "multi_modal.h"
-#include "multi_modal_decoder.h"
-#include "gemma4_decoder_state.h"
+#include "models/multi_modal.h"
+#include "models/decoder/multi_modal_decoder.h"
+#include "models/decoder/gemma4_decoder_state.h"
 
 #include <algorithm>
 

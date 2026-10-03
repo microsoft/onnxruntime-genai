@@ -7,7 +7,7 @@
 #include "decoding/standard_decoding_strategy.h"
 #include "constrained_logits_processor.h"
 #include "decoding/speculative_sampling.h"
-#include "models/decoder_only.h"
+#include "models/decoder/decoder_only.h"
 #include "models/model.h"
 
 #include <algorithm>

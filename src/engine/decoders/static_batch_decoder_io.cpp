@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include "static_batch_decoder_io.h"
-#include "../../models/decoder_only.h"
+#include "../../models/decoder/decoder_only.h"
 
 namespace Generators {
 

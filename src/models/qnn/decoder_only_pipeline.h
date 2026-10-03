@@ -6,7 +6,7 @@
 #include <future>
 #include <optional>
 
-#include "../worker_thread.h"
+#include "../../worker_thread.h"
 #include "model.h"
 #include "models/io/input_ids.h"
 #include "models/io/logits.h"

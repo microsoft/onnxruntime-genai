@@ -4,7 +4,7 @@
 #include "generator/generators.h"
 #include "models/multi_modal.h"
 #include "models/embedding/multi_modal_embedding.h"
-#include "models/multi_modal_decoder.h"
+#include "models/decoder/multi_modal_decoder.h"
 #include "models/embedding/gemma4_embedding_state.h"
 
 namespace Generators {

@@ -1,6 +1,6 @@
 #pragma once
-#include "model.h"
-#include "cpu_embedding.h"
+#include "models/model.h"
+#include "models/embedding/cpu_embedding.h"
 #include "models/io/input_ids.h"
 #include "models/io/logits.h"
 #include "io/kv_cache.h"

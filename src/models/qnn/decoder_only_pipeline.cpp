@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
-#include "../logging.h"
-#include "../tracing.h"
+#include "../../logging.h"
+#include "../../tracing.h"
 #include "decoder_only_pipeline.h"
 #include "io/windowed_kv_cache.h"
 

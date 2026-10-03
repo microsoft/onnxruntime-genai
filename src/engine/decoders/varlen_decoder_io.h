@@ -9,7 +9,7 @@
 #include "decoder.h"
 #include "../graph_annotation_ids.h"
 #include "../step_plan.h"
-#include "../../models/decoder_only.h"
+#include "../../models/decoder/decoder_only.h"
 
 namespace Generators {
 

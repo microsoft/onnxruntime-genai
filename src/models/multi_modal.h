@@ -18,8 +18,8 @@
 #include "models/speech/multi_modal_speech.h"
 #include "models/speech/lfm2_audio_speech_state.h"
 #include "models/embedding/multi_modal_embedding.h"
-#include "models/multi_modal_decoder.h"
-#include "models/gemma4_decoder_state.h"
+#include "models/decoder/multi_modal_decoder.h"
+#include "models/decoder/gemma4_decoder_state.h"
 
 namespace Generators {
 

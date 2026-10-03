@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "models/pipeline/model_pipeline.h"
+#include "models/qnn/model_pipeline.h"
 
-#include "models/decoder_only_pipeline.h"
+#include "models/qnn/decoder_only_pipeline.h"
 #include "models/model_type.h"
-#include "models/pipeline/qwen_vl_pipeline.h"
+#include "models/qnn/qwen_vl_pipeline.h"
 
 namespace Generators {
 
