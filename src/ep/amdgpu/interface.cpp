@@ -15,7 +15,7 @@
 #include "models/session_options.h"
 #include "models/io/kv_cache.h"
 #include "interface.h"
-#include "session_options.h"  // AMDGPUExecutionProvider::UnregisterUmbrellaEpIfOwned (teardown ownership gate)
+#include "session_options.h"  // AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp (teardown ownership gate)
 
 #include <stdexcept>
 
@@ -194,6 +194,16 @@ struct InterfaceImpl : DeviceInterface {
     ort_memory_info_ = &ort_allocator_->GetInfo();
   }
 
+  // Drop all allocator-derived state so a subsequent InitOrt can re-bind cleanly: nulling
+  // ort_allocator_ satisfies InitOrt's assert(!ort_allocator_), and clearing ort_pinned_allocator_
+  // makes InitDeviceAllocators re-fetch the host-accessible allocator.
+  void ResetOrt() {
+    ort_allocator_ = nullptr;
+    ort_memory_info_ = nullptr;
+    ort_pinned_allocator_ = nullptr;
+    device_id_ = 0;
+  }
+
   // Forward the caller's provider options to the trivial init session created by
   // EnsureDeviceOrtInit. That session is used only to construct the device allocator that is then
   // cached and reused for the model, so it must be configured the same way as the model session.
@@ -364,6 +374,17 @@ DeviceInterface* GetAMDGPUInterface() {
   return g_amdgpu_device.get();
 }
 
+void ResetAMDGPUInterfaceAllocatorState() {
+  // Null the allocator-derived state in place; do NOT destroy the singleton. Its pointer is the
+  // model's p_device_ for the model's whole lifetime, so destroying it here would dangle p_device_.
+  // Called per session (OGA creates a trivial dummy-allocator session then the real decoder session
+  // per model): the device_allocators_ cache is reset per session so EnsureDeviceOrtInit rebuilds the
+  // allocator and calls InitOrt again, which asserts(!ort_allocator_) and re-fetches the pinned
+  // allocator — both require the prior session's cached pointers to be cleared first.
+  if (g_amdgpu_device)
+    g_amdgpu_device->ResetOrt();
+}
+
 void CloseAMDGPUInterface() {
   // Full per-model teardown, mirroring the DML path's Model::~Model + CloseDmlInterface(). Called
   // from Model::~Model when the model is being destroyed, so p_device_ is going away too and it is
@@ -388,40 +409,14 @@ void CloseAMDGPUInterface() {
   g_amdgpu_pinned_inputs.reset();
   g_amdgpu_device.reset();
 
-  // Step 3: release the OrtEnv-SHARED allocators the plugin served through CreateAllocatorImpl. These
-  // are owned by the process-global OrtEnv (not by genai or the EP library), so UnregisterExecution-
-  // ProviderLibrary alone does NOT drop them: the shared GPU allocator holds the plugin's
-  // ExecutionContext -> command queue -> ID3D12Device, keeping the factory refcount above zero and
-  // pinning the device for the life of the process. If a model removed the GPU, that dead device is
-  // then reused by every subsequent model and they all fail (D3D12CreateDevice / CreateCommandQueue
-  // return DXGI_ERROR_DEVICE_*). Explicitly releasing the shared allocators here lets the factory
-  // refcount reach zero in Step 4 so the dead device is destroyed per model — mirroring the DML path,
-  // which owns its device directly (CloseDmlInterface: dml_objects_ = {}) and never goes through an
-  // OrtEnv-shared-allocator refcount. Must run while the EP device is still registered (before Step 4).
-  const auto release_shared = [](const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type) {
-    // Best-effort: ReleaseSharedAllocator is a documented no-op when no matching shared allocator
-    // exists. Release any returned status rather than throwing — teardown must not abort.
-    if (OrtStatus* status = Ort::api->ReleaseSharedAllocator(&GetOrtEnv(), ep_device, mem_type))
-      Ort::api->ReleaseStatus(status);
-  };
-  try {
-    for (const OrtEpDevice* ep_device : FindRegisteredEpDevices(kAMDGPUExecutionProviderName)) {
-      release_shared(ep_device, OrtDeviceMemoryType_DEFAULT);
-      release_shared(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE);
-    }
-  } catch (...) {
-    // Called from ~Model (noexcept): never let anything escape (incl. std::bad_alloc from the
-    // FindRegisteredEpDevices vector). Best-effort — a failed shared-allocator release is non-fatal.
-  }
-
-  // Step 4: unregister the umbrella EP library — but only if genai registered it. With the shared
-  // allocators released above, unregistering drops the factory's last reference, destroying the plugin
-  // ProviderFactory and releasing the device + allocators + all outstanding allocation handles; the
-  // next genai model's EnsureUmbrellaEpRegistered re-creates a fresh library + device. When a host
-  // pre-registered the library, its non-OGA sessions share that one process-global registration, so
-  // this is a no-op for them. Both the ownership check and the unregister live next to the
-  // registration logic in session_options.cpp (AMDGPUExecutionProvider::UnregisterUmbrellaEpIfOwned).
-  AMDGPUExecutionProvider::UnregisterUmbrellaEpIfOwned();
+  // Step 3: release the OrtEnv-shared allocators the plugin served and unregister the umbrella EP
+  // library — but ONLY when genai owns the registration. When a host pre-registered the library, its
+  // non-OGA sessions share that one process-global registration and its shared allocators, so this is
+  // a no-op for them. Both the shared-allocator release and the unregister live behind a single
+  // ownership gate next to the registration logic (AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp),
+  // so they can never disagree on ownership. Steps 1-2 above are unconditional because they reset
+  // genai's OWN per-model state, which genai always owns regardless of who registered the library.
+  AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp();
 }
 
 namespace AMDGPU {
