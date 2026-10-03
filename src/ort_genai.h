@@ -4,11 +4,16 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <variant>
 #include <vector>
 
 #if __cplusplus >= 202002L
@@ -17,6 +22,12 @@
 #endif
 
 #include "ort_genai_c.h"
+
+#if defined(__GNUC__) && !defined(_WIN32) && defined(BUILDING_ORT_GENAI_C)
+#define OGA_CPP_ONLY __attribute__((visibility("hidden")))
+#else
+#define OGA_CPP_ONLY
+#endif
 
 // GenAI C++ API
 //
@@ -56,6 +67,221 @@ struct OgaAbstract {
   void operator=(const OgaAbstract&) = delete;
 };
 
+// Uncached, C++-only execution API for independently exported ONNX components.
+struct OgaComponentInput {
+  std::string name;
+  const void* data{};
+  size_t byte_count{};
+  std::vector<int64_t> shape;
+  OgaElementType type{};
+};
+
+struct OgaComponentTensor {
+  std::string name;
+  std::vector<std::byte> data;
+  std::vector<int64_t> shape;
+  OgaElementType type{};
+};
+struct OgaComponentInfo {
+  std::string name;
+  std::vector<int64_t> shape;
+  std::vector<std::string> symbolic_dimensions;
+  OgaElementType type{};
+};
+
+class OGA_CPP_ONLY NamedComponentSession {
+ public:
+  NamedComponentSession(const std::string& package_path, const std::string& component,
+                        const std::vector<std::string>& providers = {});
+  ~NamedComponentSession() { OgaDestroyComponentSession(handle_); }
+  NamedComponentSession(NamedComponentSession&& other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)),
+        input_names_(std::move(other.input_names_)),
+        output_names_(std::move(other.output_names_)),
+        inputs_(std::move(other.inputs_)) {}
+  NamedComponentSession& operator=(NamedComponentSession&& other) noexcept {
+    if (this != &other) {
+      OgaDestroyComponentSession(handle_);
+      handle_ = std::exchange(other.handle_, nullptr);
+      input_names_ = std::move(other.input_names_);
+      output_names_ = std::move(other.output_names_);
+      inputs_ = std::move(other.inputs_);
+    }
+    return *this;
+  }
+  NamedComponentSession(const NamedComponentSession&) = delete;
+  NamedComponentSession& operator=(const NamedComponentSession&) = delete;
+  std::vector<OgaComponentTensor> Run(const std::vector<OgaComponentInput>& inputs,
+                                      const std::vector<std::string>& outputs = {});
+  const std::vector<std::string>& InputNames() const;
+  const std::vector<std::string>& OutputNames() const;
+  const std::vector<OgaComponentInfo>& Inputs() const;
+
+ private:
+  friend class RankingSession;
+  friend class DecisionSession;
+  explicit NamedComponentSession(OgaComponentSession* handle);
+  void LoadMetadata();
+  OgaComponentSession* handle_{};
+  std::vector<std::string> input_names_;
+  std::vector<std::string> output_names_;
+  std::vector<OgaComponentInfo> inputs_;
+};
+
+using ComponentSession = NamedComponentSession;
+
+// C++-only tokenizer for component packages that contain tokenizer files but
+// are not generative OgaModel packages.
+class OGA_CPP_ONLY DirectoryTokenizer {
+ public:
+  explicit DirectoryTokenizer(const std::string& package_path);
+  ~DirectoryTokenizer() { OgaDestroyDirectoryTokenizer(handle_); }
+  DirectoryTokenizer(DirectoryTokenizer&& other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)) {}
+  DirectoryTokenizer& operator=(DirectoryTokenizer&& other) noexcept {
+    if (this != &other) {
+      OgaDestroyDirectoryTokenizer(handle_);
+      handle_ = std::exchange(other.handle_, nullptr);
+    }
+    return *this;
+  }
+  DirectoryTokenizer(const DirectoryTokenizer&) = delete;
+  DirectoryTokenizer& operator=(const DirectoryTokenizer&) = delete;
+  std::vector<int32_t> Encode(const std::string& text) const;
+  int32_t PadTokenId() const;
+
+ private:
+  OgaDirectoryTokenizer* handle_{};
+};
+
+// JSON-independent structured values used by the non-generative model APIs.
+// Objects are vectors rather than maps so request ordering is preserved.
+struct OgaStructuredValue {
+  using Array = std::vector<OgaStructuredValue>;
+  using Object = std::vector<std::pair<std::string, OgaStructuredValue>>;
+  using Value = std::variant<std::monostate, bool, int64_t, double, std::string, Array, Object>;
+  Value value;
+
+  OgaStructuredValue() = default;
+  OgaStructuredValue(std::nullptr_t) {}
+  OgaStructuredValue(bool v) : value(v) {}
+  OgaStructuredValue(int v) : value(static_cast<int64_t>(v)) {}
+  OgaStructuredValue(int64_t v) : value(v) {}
+  OgaStructuredValue(double v) : value(v) {}
+  OgaStructuredValue(const char* v) : value(std::string(v)) {}
+  OgaStructuredValue(std::string v) : value(std::move(v)) {}
+  OgaStructuredValue(Array v) : value(std::move(v)) {}
+  OgaStructuredValue(Object v) : value(std::move(v)) {}
+};
+
+struct OgaQuestion {
+  std::string type;  // "noul", "choice", or "score"
+  OgaStructuredValue instructions;
+  OgaStructuredValue criteria;
+};
+
+struct OgaStructuredRequest {
+  OgaStructuredValue state;
+  std::vector<std::pair<std::string, OgaQuestion>> questions;
+  float temperature{1.0f};
+};
+
+struct OgaAnswer {
+  std::string type;
+  std::optional<double> noul;
+  std::optional<std::string> choice;
+  std::optional<double> score;
+  std::optional<double> confidence;
+  std::vector<std::pair<std::string, double>> probabilities;
+  std::vector<std::pair<std::string, std::string>> legend;
+};
+
+struct OgaModelResult {
+  std::string model;
+  std::vector<std::pair<std::string, OgaAnswer>> answers;
+};
+
+struct OgaFreeFormRankRequest {
+  OgaStructuredValue state;
+  OgaStructuredValue instructions;
+  std::vector<std::pair<std::string, OgaStructuredValue>> candidates;
+  float temperature{1.0f};
+};
+
+struct OgaRankedItem {
+  size_t rank{};
+  std::string key;
+  OgaStructuredValue value;
+  double probability{};
+};
+
+struct OgaRankingResult {
+  std::string model;
+  std::vector<OgaRankedItem> ranked;
+};
+
+// Typed package entry points. Component() remains available for callers that
+// need direct access to a named ONNX graph.
+class OGA_CPP_ONLY RankingSession {
+ public:
+  RankingSession(std::string package_path, std::vector<std::string> providers = {});
+  ~RankingSession() { OgaDestroyRankingSession(handle_); }
+  RankingSession(RankingSession&& other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)) {}
+  RankingSession& operator=(RankingSession&& other) noexcept {
+    if (this != &other) {
+      OgaDestroyRankingSession(handle_);
+      handle_ = std::exchange(other.handle_, nullptr);
+    }
+    return *this;
+  }
+  RankingSession(const RankingSession&) = delete;
+  RankingSession& operator=(const RankingSession&) = delete;
+  NamedComponentSession Component(const std::string& name) const;
+  OgaModelResult Run(const OgaStructuredRequest& request);
+  OgaRankingResult Rank(const OgaFreeFormRankRequest& request);
+  void SetCacheCapacity(size_t entry_capacity, size_t byte_capacity);
+  OgaNonGenerativeCacheStats CacheStats() const;
+  void ClearCache();
+  void InvalidateCache();
+
+ private:
+  OgaRankingSessionHandle* handle_{};
+};
+
+class OGA_CPP_ONLY DecisionSession {
+ public:
+  DecisionSession(std::string package_path, std::vector<std::string> providers = {});
+  ~DecisionSession() { OgaDestroyDecisionSession(handle_); }
+  DecisionSession(DecisionSession&& other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)) {}
+  DecisionSession& operator=(DecisionSession&& other) noexcept {
+    if (this != &other) {
+      OgaDestroyDecisionSession(handle_);
+      handle_ = std::exchange(other.handle_, nullptr);
+    }
+    return *this;
+  }
+  DecisionSession(const DecisionSession&) = delete;
+  DecisionSession& operator=(const DecisionSession&) = delete;
+  NamedComponentSession Component(const std::string& name) const;
+  OgaModelResult Run(const OgaStructuredRequest& request);
+  OgaModelResult Decide(const OgaStructuredRequest& request);
+  void SetCacheCapacity(size_t entry_capacity, size_t byte_capacity);
+  OgaNonGenerativeCacheStats CacheStats() const;
+  void SetPrefixReuseEnabled(bool enabled);
+  bool PrefixReuseEnabled() const;
+  std::string PrefixReuseStatus() const;
+  void SetPrefixCacheCapacity(size_t entry_capacity, size_t byte_capacity);
+  OgaNonGenerativeCacheStats PrefixCacheStats() const;
+  OgaKevPrefixReuseStats PrefixReuseStats() const;
+  void ClearCache();
+  void InvalidateCache();
+
+ private:
+  OgaDecisionSessionHandle* handle_{};
+};
+
 struct OgaResult : OgaAbstract {
   const char* GetError() const { return OgaResultGetError(this); }
   static void operator delete(void* p) { OgaDestroyResult(reinterpret_cast<OgaResult*>(p)); }
@@ -67,6 +293,484 @@ inline void OgaCheckResult(OgaResult* result) {
     std::unique_ptr<OgaResult> p_result{result};  // Take ownership so it's destroyed properly
     throw std::runtime_error(p_result->GetError());
   }
+}
+
+namespace OgaDetail {
+
+template <class T, void (*Destroy)(T*)>
+using Handle = std::unique_ptr<T, decltype(Destroy)>;
+
+using StructuredValueHandle =
+    Handle<OgaStructuredValueHandle, OgaDestroyStructuredValue>;
+using QuestionHandle = Handle<OgaQuestionHandle, OgaDestroyQuestion>;
+using StructuredRequestHandle =
+    Handle<OgaStructuredRequestHandle, OgaDestroyStructuredRequest>;
+using RankRequestHandle =
+    Handle<OgaFreeFormRankRequestHandle, OgaDestroyFreeFormRankRequest>;
+using ModelResultHandle = Handle<OgaModelResultHandle, OgaDestroyModelResult>;
+using RankingResultHandle = Handle<OgaRankingResultHandle, OgaDestroyRankingResult>;
+
+inline std::vector<const char*> StringPointers(const std::vector<std::string>& values) {
+  std::vector<const char*> result;
+  result.reserve(values.size());
+  for (const auto& value : values) result.push_back(value.c_str());
+  return result;
+}
+
+inline StructuredValueHandle MakeValue(const OgaStructuredValue& source) {
+  OgaStructuredValueHandle* raw{};
+  switch (source.value.index()) {
+    case 0:
+      OgaCheckResult(OgaCreateStructuredValueNull(&raw));
+      break;
+    case 1:
+      OgaCheckResult(OgaCreateStructuredValueBool(std::get<bool>(source.value), &raw));
+      break;
+    case 2:
+      OgaCheckResult(OgaCreateStructuredValueInt64(std::get<int64_t>(source.value), &raw));
+      break;
+    case 3:
+      OgaCheckResult(OgaCreateStructuredValueDouble(std::get<double>(source.value), &raw));
+      break;
+    case 4:
+      OgaCheckResult(OgaCreateStructuredValueString(
+          std::get<std::string>(source.value).c_str(), &raw));
+      break;
+    case 5: {
+      OgaCheckResult(OgaCreateStructuredValueArray(&raw));
+      StructuredValueHandle result(raw, OgaDestroyStructuredValue);
+      for (const auto& item : std::get<OgaStructuredValue::Array>(source.value)) {
+        auto child = MakeValue(item);
+        OgaCheckResult(OgaStructuredValueArrayAppend(result.get(), child.get()));
+      }
+      return result;
+    }
+    case 6: {
+      OgaCheckResult(OgaCreateStructuredValueObject(&raw));
+      StructuredValueHandle result(raw, OgaDestroyStructuredValue);
+      for (const auto& [key, item] : std::get<OgaStructuredValue::Object>(source.value)) {
+        auto child = MakeValue(item);
+        OgaCheckResult(
+            OgaStructuredValueObjectAppend(result.get(), key.c_str(), child.get()));
+      }
+      return result;
+    }
+    default:
+      throw std::runtime_error("unsupported structured value");
+  }
+  return StructuredValueHandle(raw, OgaDestroyStructuredValue);
+}
+
+inline OgaStructuredValue ReadValue(const OgaStructuredValueHandle* source) {
+  OgaStructuredValueType type{};
+  OgaCheckResult(OgaStructuredValueGetType(source, &type));
+  switch (type) {
+    case OgaStructuredValueType_Null:
+      return {};
+    case OgaStructuredValueType_Bool: {
+      bool value{};
+      OgaCheckResult(OgaStructuredValueGetBool(source, &value));
+      return value;
+    }
+    case OgaStructuredValueType_Int64: {
+      int64_t value{};
+      OgaCheckResult(OgaStructuredValueGetInt64(source, &value));
+      return value;
+    }
+    case OgaStructuredValueType_Double: {
+      double value{};
+      OgaCheckResult(OgaStructuredValueGetDouble(source, &value));
+      return value;
+    }
+    case OgaStructuredValueType_String: {
+      const char* value{};
+      OgaCheckResult(OgaStructuredValueGetString(source, &value));
+      return value;
+    }
+    case OgaStructuredValueType_Array: {
+      size_t count{};
+      OgaCheckResult(OgaStructuredValueGetCount(source, &count));
+      OgaStructuredValue::Array result;
+      result.reserve(count);
+      for (size_t i = 0; i < count; ++i) {
+        const OgaStructuredValueHandle* child{};
+        OgaCheckResult(OgaStructuredValueGetArrayItem(source, i, &child));
+        result.push_back(ReadValue(child));
+      }
+      return result;
+    }
+    case OgaStructuredValueType_Object: {
+      size_t count{};
+      OgaCheckResult(OgaStructuredValueGetCount(source, &count));
+      OgaStructuredValue::Object result;
+      result.reserve(count);
+      for (size_t i = 0; i < count; ++i) {
+        const char* key{};
+        const OgaStructuredValueHandle* child{};
+        OgaCheckResult(OgaStructuredValueGetObjectItem(source, i, &key, &child));
+        result.emplace_back(key, ReadValue(child));
+      }
+      return result;
+    }
+  }
+  throw std::runtime_error("unsupported structured value type");
+}
+
+inline StructuredRequestHandle MakeRequest(const OgaStructuredRequest& source) {
+  OgaStructuredRequestHandle* raw{};
+  OgaCheckResult(OgaCreateStructuredRequest(&raw));
+  StructuredRequestHandle result(raw, OgaDestroyStructuredRequest);
+  auto state = MakeValue(source.state);
+  OgaCheckResult(OgaStructuredRequestSetState(result.get(), state.get()));
+  OgaCheckResult(OgaStructuredRequestSetTemperature(result.get(), source.temperature));
+  for (const auto& [id, question] : source.questions) {
+    auto instructions = MakeValue(question.instructions);
+    auto criteria = MakeValue(question.criteria);
+    OgaQuestionHandle* question_raw{};
+    OgaCheckResult(OgaCreateQuestion(question.type.c_str(), instructions.get(),
+                                     criteria.get(), &question_raw));
+    QuestionHandle question_handle(question_raw, OgaDestroyQuestion);
+    OgaCheckResult(
+        OgaStructuredRequestAddQuestion(result.get(), id.c_str(), question_handle.get()));
+  }
+  return result;
+}
+
+inline RankRequestHandle MakeRequest(const OgaFreeFormRankRequest& source) {
+  OgaFreeFormRankRequestHandle* raw{};
+  OgaCheckResult(OgaCreateFreeFormRankRequest(&raw));
+  RankRequestHandle result(raw, OgaDestroyFreeFormRankRequest);
+  auto state = MakeValue(source.state);
+  auto instructions = MakeValue(source.instructions);
+  OgaCheckResult(OgaFreeFormRankRequestSetState(result.get(), state.get()));
+  OgaCheckResult(
+      OgaFreeFormRankRequestSetInstructions(result.get(), instructions.get()));
+  OgaCheckResult(OgaFreeFormRankRequestSetTemperature(result.get(), source.temperature));
+  for (const auto& [key, value] : source.candidates) {
+    auto native_value = MakeValue(value);
+    OgaCheckResult(OgaFreeFormRankRequestAddCandidate(
+        result.get(), key.c_str(), native_value.get()));
+  }
+  return result;
+}
+
+inline OgaModelResult ReadModelResult(const OgaModelResultHandle* source) {
+  const char* model{};
+  OgaCheckResult(OgaModelResultGetModel(source, &model));
+  OgaModelResult result;
+  result.model = model;
+  size_t count{};
+  OgaCheckResult(OgaModelResultGetAnswerCount(source, &count));
+  result.answers.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    const char* id{};
+    const char* type{};
+    OgaCheckResult(OgaModelResultGetAnswerId(source, i, &id));
+    OgaCheckResult(OgaModelResultGetAnswerType(source, i, &type));
+    OgaAnswer answer;
+    answer.type = type;
+    bool present{};
+    double number{};
+    OgaCheckResult(OgaModelResultGetAnswerNoul(source, i, &number, &present));
+    if (present) answer.noul = number;
+    const char* choice{};
+    OgaCheckResult(OgaModelResultGetAnswerChoice(source, i, &choice, &present));
+    if (present) answer.choice = choice;
+    OgaCheckResult(OgaModelResultGetAnswerScore(source, i, &number, &present));
+    if (present) answer.score = number;
+    OgaCheckResult(OgaModelResultGetAnswerConfidence(source, i, &number, &present));
+    if (present) answer.confidence = number;
+    size_t item_count{};
+    OgaCheckResult(OgaModelResultGetProbabilityCount(source, i, &item_count));
+    for (size_t j = 0; j < item_count; ++j) {
+      const char* key{};
+      OgaCheckResult(OgaModelResultGetProbability(source, i, j, &key, &number));
+      answer.probabilities.emplace_back(key, number);
+    }
+    OgaCheckResult(OgaModelResultGetLegendCount(source, i, &item_count));
+    for (size_t j = 0; j < item_count; ++j) {
+      const char* key{};
+      const char* value{};
+      OgaCheckResult(OgaModelResultGetLegend(source, i, j, &key, &value));
+      answer.legend.emplace_back(key, value);
+    }
+    result.answers.emplace_back(id, std::move(answer));
+  }
+  return result;
+}
+
+inline OgaRankingResult ReadRankingResult(const OgaRankingResultHandle* source) {
+  const char* model{};
+  OgaCheckResult(OgaRankingResultGetModel(source, &model));
+  OgaRankingResult result;
+  result.model = model;
+  size_t count{};
+  OgaCheckResult(OgaRankingResultGetCount(source, &count));
+  result.ranked.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    OgaRankedItem item;
+    const char* key{};
+    const OgaStructuredValueHandle* value{};
+    OgaCheckResult(OgaRankingResultGetRank(source, i, &item.rank));
+    OgaCheckResult(OgaRankingResultGetKey(source, i, &key));
+    OgaCheckResult(OgaRankingResultGetValue(source, i, &value));
+    OgaCheckResult(OgaRankingResultGetProbability(source, i, &item.probability));
+    item.key = key;
+    item.value = ReadValue(value);
+    result.ranked.push_back(std::move(item));
+  }
+  return result;
+}
+
+}  // namespace OgaDetail
+
+inline NamedComponentSession::NamedComponentSession(
+    const std::string& package_path, const std::string& component,
+    const std::vector<std::string>& providers) {
+  const auto provider_ptrs = OgaDetail::StringPointers(providers);
+  OgaCheckResult(OgaCreateComponentSession(
+      package_path.c_str(), component.c_str(), provider_ptrs.data(),
+      provider_ptrs.size(), &handle_));
+  try {
+    LoadMetadata();
+  } catch (...) {
+    OgaDestroyComponentSession(std::exchange(handle_, nullptr));
+    throw;
+  }
+}
+
+inline NamedComponentSession::NamedComponentSession(OgaComponentSession* handle)
+    : handle_(handle) {
+  if (!handle_) throw std::invalid_argument("component session handle must not be null");
+  try {
+    LoadMetadata();
+  } catch (...) {
+    OgaDestroyComponentSession(std::exchange(handle_, nullptr));
+    throw;
+  }
+}
+
+inline void NamedComponentSession::LoadMetadata() {
+  size_t count{};
+  OgaCheckResult(OgaComponentSessionGetInputCount(handle_, &count));
+  input_names_.reserve(count);
+  inputs_.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    const char* name{};
+    OgaComponentInfo info;
+    OgaCheckResult(OgaComponentSessionGetInputName(handle_, i, &name));
+    OgaCheckResult(OgaComponentSessionGetInputType(handle_, i, &info.type));
+    info.name = name;
+    size_t rank{};
+    OgaCheckResult(OgaComponentSessionGetInputShapeRank(handle_, i, &rank));
+    info.shape.resize(rank);
+    info.symbolic_dimensions.resize(rank);
+    for (size_t dimension = 0; dimension < rank; ++dimension) {
+      const char* symbol{};
+      OgaCheckResult(OgaComponentSessionGetInputShapeDimension(
+          handle_, i, dimension, &info.shape[dimension]));
+      OgaCheckResult(OgaComponentSessionGetInputSymbolicDimension(
+          handle_, i, dimension, &symbol));
+      info.symbolic_dimensions[dimension] = symbol;
+    }
+    input_names_.emplace_back(name);
+    inputs_.push_back(std::move(info));
+  }
+  OgaCheckResult(OgaComponentSessionGetOutputCount(handle_, &count));
+  output_names_.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    const char* name{};
+    OgaCheckResult(OgaComponentSessionGetOutputName(handle_, i, &name));
+    output_names_.emplace_back(name);
+  }
+}
+
+inline std::vector<OgaComponentTensor> NamedComponentSession::Run(
+    const std::vector<OgaComponentInput>& inputs,
+    const std::vector<std::string>& outputs) {
+  OgaComponentInputs* input_raw{};
+  OgaCheckResult(OgaCreateComponentInputs(&input_raw));
+  OgaDetail::Handle<OgaComponentInputs, OgaDestroyComponentInputs>
+      native_inputs(input_raw, OgaDestroyComponentInputs);
+  for (const auto& input : inputs)
+    OgaCheckResult(OgaComponentInputsAdd(
+        native_inputs.get(), input.name.c_str(), input.data, input.byte_count,
+        input.shape.data(), input.shape.size(), input.type));
+  const auto output_ptrs = OgaDetail::StringPointers(outputs);
+  OgaComponentTensors* tensor_raw{};
+  OgaCheckResult(OgaComponentSessionRun(
+      handle_, native_inputs.get(), output_ptrs.data(), output_ptrs.size(), &tensor_raw));
+  OgaDetail::Handle<OgaComponentTensors, OgaDestroyComponentTensors>
+      tensors(tensor_raw, OgaDestroyComponentTensors);
+  size_t count{};
+  OgaCheckResult(OgaComponentTensorsGetCount(tensors.get(), &count));
+  std::vector<OgaComponentTensor> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    OgaComponentTensor tensor;
+    const char* name{};
+    OgaCheckResult(OgaComponentTensorsGetName(tensors.get(), i, &name));
+    OgaCheckResult(OgaComponentTensorsGetType(tensors.get(), i, &tensor.type));
+    tensor.name = name;
+    size_t rank{};
+    OgaCheckResult(OgaComponentTensorsGetShapeRank(tensors.get(), i, &rank));
+    tensor.shape.resize(rank);
+    for (size_t dimension = 0; dimension < rank; ++dimension)
+      OgaCheckResult(OgaComponentTensorsGetShapeDimension(
+          tensors.get(), i, dimension, &tensor.shape[dimension]));
+    const void* data{};
+    size_t byte_count{};
+    OgaCheckResult(
+        OgaComponentTensorsGetData(tensors.get(), i, &data, &byte_count));
+    tensor.data.resize(byte_count);
+    if (byte_count) std::memcpy(tensor.data.data(), data, byte_count);
+    result.push_back(std::move(tensor));
+  }
+  return result;
+}
+
+inline const std::vector<std::string>& NamedComponentSession::InputNames() const {
+  return input_names_;
+}
+inline const std::vector<std::string>& NamedComponentSession::OutputNames() const {
+  return output_names_;
+}
+inline const std::vector<OgaComponentInfo>& NamedComponentSession::Inputs() const {
+  return inputs_;
+}
+
+inline DirectoryTokenizer::DirectoryTokenizer(const std::string& package_path) {
+  OgaCheckResult(OgaCreateDirectoryTokenizer(package_path.c_str(), &handle_));
+}
+inline std::vector<int32_t> DirectoryTokenizer::Encode(const std::string& text) const {
+  OgaTokenIds* raw{};
+  OgaCheckResult(OgaDirectoryTokenizerEncode(handle_, text.c_str(), &raw));
+  OgaDetail::Handle<OgaTokenIds, OgaDestroyTokenIds> values(raw, OgaDestroyTokenIds);
+  const int32_t* data{};
+  size_t count{};
+  OgaCheckResult(OgaTokenIdsGetData(values.get(), &data, &count));
+  if (!count) return {};
+  return {data, data + count};
+}
+inline int32_t DirectoryTokenizer::PadTokenId() const {
+  int32_t result{};
+  OgaCheckResult(OgaDirectoryTokenizerGetPadTokenId(handle_, &result));
+  return result;
+}
+
+inline RankingSession::RankingSession(
+    std::string package_path, std::vector<std::string> providers) {
+  const auto provider_ptrs = OgaDetail::StringPointers(providers);
+  OgaCheckResult(OgaCreateRankingSession(
+      package_path.c_str(), provider_ptrs.data(), provider_ptrs.size(), &handle_));
+}
+inline NamedComponentSession RankingSession::Component(const std::string& name) const {
+  OgaComponentSession* result{};
+  OgaCheckResult(OgaRankingSessionCreateComponent(handle_, name.c_str(), &result));
+  return NamedComponentSession(result);
+}
+inline OgaModelResult RankingSession::Run(const OgaStructuredRequest& request) {
+  auto native_request = OgaDetail::MakeRequest(request);
+  OgaModelResultHandle* raw{};
+  OgaCheckResult(OgaRankingSessionRun(handle_, native_request.get(), &raw));
+  OgaDetail::ModelResultHandle result(raw, OgaDestroyModelResult);
+  return OgaDetail::ReadModelResult(result.get());
+}
+inline OgaRankingResult RankingSession::Rank(
+    const OgaFreeFormRankRequest& request) {
+  auto native_request = OgaDetail::MakeRequest(request);
+  OgaRankingResultHandle* raw{};
+  OgaCheckResult(OgaRankingSessionRank(handle_, native_request.get(), &raw));
+  OgaDetail::RankingResultHandle result(raw, OgaDestroyRankingResult);
+  return OgaDetail::ReadRankingResult(result.get());
+}
+
+inline void RankingSession::SetCacheCapacity(size_t entries, size_t bytes) {
+  OgaCheckResult(OgaRankingSessionSetCacheCapacity(handle_, entries, bytes));
+}
+inline OgaNonGenerativeCacheStats RankingSession::CacheStats() const {
+  OgaNonGenerativeCacheStats result{};
+  OgaCheckResult(OgaRankingSessionGetCacheStats(handle_, &result));
+  return result;
+}
+inline void RankingSession::ClearCache() {
+  OgaCheckResult(OgaRankingSessionClearCache(handle_));
+}
+inline void RankingSession::InvalidateCache() {
+  OgaCheckResult(OgaRankingSessionInvalidateCache(handle_));
+}
+
+inline DecisionSession::DecisionSession(
+    std::string package_path, std::vector<std::string> providers) {
+  const auto provider_ptrs = OgaDetail::StringPointers(providers);
+  OgaCheckResult(OgaCreateDecisionSession(
+      package_path.c_str(), provider_ptrs.data(), provider_ptrs.size(), &handle_));
+}
+inline NamedComponentSession DecisionSession::Component(const std::string& name) const {
+  OgaComponentSession* result{};
+  OgaCheckResult(OgaDecisionSessionCreateComponent(handle_, name.c_str(), &result));
+  return NamedComponentSession(result);
+}
+inline OgaModelResult DecisionSession::Run(const OgaStructuredRequest& request) {
+  auto native_request = OgaDetail::MakeRequest(request);
+  OgaModelResultHandle* raw{};
+  OgaCheckResult(OgaDecisionSessionRun(handle_, native_request.get(), &raw));
+  OgaDetail::ModelResultHandle result(raw, OgaDestroyModelResult);
+  return OgaDetail::ReadModelResult(result.get());
+}
+inline OgaModelResult DecisionSession::Decide(const OgaStructuredRequest& request) {
+  auto native_request = OgaDetail::MakeRequest(request);
+  OgaModelResultHandle* raw{};
+  OgaCheckResult(OgaDecisionSessionDecide(handle_, native_request.get(), &raw));
+  OgaDetail::ModelResultHandle result(raw, OgaDestroyModelResult);
+  return OgaDetail::ReadModelResult(result.get());
+}
+inline void DecisionSession::SetCacheCapacity(size_t entries, size_t bytes) {
+  OgaCheckResult(OgaDecisionSessionSetCacheCapacity(handle_, entries, bytes));
+}
+inline OgaNonGenerativeCacheStats DecisionSession::CacheStats() const {
+  OgaNonGenerativeCacheStats result{};
+  OgaCheckResult(OgaDecisionSessionGetCacheStats(handle_, &result));
+  return result;
+}
+inline void DecisionSession::SetPrefixReuseEnabled(bool enabled) {
+  OgaCheckResult(OgaDecisionSessionSetPrefixReuseEnabled(handle_, enabled));
+}
+inline bool DecisionSession::PrefixReuseEnabled() const {
+  bool result{};
+  OgaCheckResult(OgaDecisionSessionGetPrefixReuseEnabled(handle_, &result));
+  return result;
+}
+inline std::string DecisionSession::PrefixReuseStatus() const {
+  size_t required{};
+  OgaCheckResult(OgaDecisionSessionCopyPrefixReuseStatus(
+      handle_, nullptr, 0, &required));
+  std::string result(required, '\0');
+  if (required) {
+    OgaCheckResult(OgaDecisionSessionCopyPrefixReuseStatus(
+        handle_, result.data(), required, &required));
+    result.resize(required - 1);
+  }
+  return result;
+}
+inline void DecisionSession::SetPrefixCacheCapacity(size_t entries, size_t bytes) {
+  OgaCheckResult(OgaDecisionSessionSetPrefixCacheCapacity(handle_, entries, bytes));
+}
+inline OgaNonGenerativeCacheStats DecisionSession::PrefixCacheStats() const {
+  OgaNonGenerativeCacheStats result{};
+  OgaCheckResult(OgaDecisionSessionGetPrefixCacheStats(handle_, &result));
+  return result;
+}
+inline OgaKevPrefixReuseStats DecisionSession::PrefixReuseStats() const {
+  OgaKevPrefixReuseStats result{};
+  OgaCheckResult(OgaDecisionSessionGetPrefixReuseStats(handle_, &result));
+  return result;
+}
+inline void DecisionSession::ClearCache() {
+  OgaCheckResult(OgaDecisionSessionClearCache(handle_));
+}
+inline void DecisionSession::InvalidateCache() {
+  OgaCheckResult(OgaDecisionSessionInvalidateCache(handle_));
 }
 
 struct OgaSpeculativeStats : OgaAbstract {
