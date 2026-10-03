@@ -3,11 +3,13 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/parallel_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/lfm2_vl_image_processor.h"
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 namespace Generators {
@@ -98,27 +100,48 @@ std::string ResolvePrompt(const Payload& payload) {
 
 }  // namespace
 
-void WriteLfm2VlImagePatches(const float* image, int64_t channels, int64_t padded_height, int64_t padded_width,
+void WriteLfm2VlImagePatches(ThreadPool* thread_pool, const float* image, int64_t channels,
+                             int64_t padded_height, int64_t padded_width,
                              const Lfm2VlImageGeometry& geometry, int64_t encoder_patch_size,
                              float* destination) {
   const int64_t channel_stride = padded_height * padded_width;
   const int64_t patch_dim = encoder_patch_size * encoder_patch_size * channels;
+  if (encoder_patch_size > 0 &&
+      geometry.num_patches > std::numeric_limits<std::ptrdiff_t>::max() / encoder_patch_size) {
+    throw std::overflow_error("Lfm2VlImageProcessor: image patch row count exceeds ptrdiff_t range.");
+  }
+  const auto total_patch_rows =
+      static_cast<std::ptrdiff_t>(geometry.num_patches * encoder_patch_size);
 
-  for (int64_t row = 0; row < geometry.patch_rows; ++row) {
-    for (int64_t col = 0; col < geometry.patch_cols; ++col) {
-      float* patch = destination + (row * geometry.patch_cols + col) * patch_dim;
-      for (int64_t y = 0; y < encoder_patch_size; ++y) {
-        const int64_t source_row = row * encoder_patch_size + y;
-        for (int64_t x = 0; x < encoder_patch_size; ++x) {
-          const int64_t source_col = col * encoder_patch_size + x;
-          for (int64_t c = 0; c < channels; ++c) {
-            patch[(y * encoder_patch_size + x) * channels + c] =
-                image[c * channel_stride + source_row * padded_width + source_col];
+  ThreadPool::TryParallelFor(
+      thread_pool, total_patch_rows,
+      static_cast<double>(encoder_patch_size * channels),
+      [&](std::ptrdiff_t first, std::ptrdiff_t last) {
+        int64_t patch_index =
+            static_cast<int64_t>(first) / encoder_patch_size;
+        int64_t patch_y =
+            static_cast<int64_t>(first) % encoder_patch_size;
+        for (std::ptrdiff_t patch_row_idx = first; patch_row_idx < last; ++patch_row_idx) {
+          const int64_t patch_row = patch_index / geometry.patch_cols;
+          const int64_t patch_col = patch_index % geometry.patch_cols;
+          const int64_t source_row = patch_row * encoder_patch_size + patch_y;
+          float* destination_row =
+              destination + patch_index * patch_dim +
+              patch_y * encoder_patch_size * channels;
+          for (int64_t patch_x = 0; patch_x < encoder_patch_size; ++patch_x) {
+            const int64_t source_col = patch_col * encoder_patch_size + patch_x;
+            for (int64_t channel = 0; channel < channels; ++channel) {
+              destination_row[patch_x * channels + channel] =
+                  image[channel * channel_stride +
+                        source_row * padded_width + source_col];
+            }
+          }
+          if (++patch_y == encoder_patch_size) {
+            patch_y = 0;
+            ++patch_index;
           }
         }
-      }
-    }
-  }
+      });
 }
 
 Lfm2VlImageGeometry ComputeLfm2VlImageGeometry(int64_t image_height, int64_t image_width,
@@ -140,6 +163,9 @@ Lfm2VlImageGeometry ComputeLfm2VlImageGeometry(int64_t image_height, int64_t ima
   Lfm2VlImageGeometry geometry;
   geometry.patch_rows = image_height / encoder_patch_size;
   geometry.patch_cols = image_width / encoder_patch_size;
+  if (geometry.patch_rows > std::numeric_limits<int64_t>::max() / geometry.patch_cols) {
+    throw std::overflow_error("Lfm2VlImageProcessor: image patch count exceeds int64_t range.");
+  }
   geometry.num_patches = geometry.patch_rows * geometry.patch_cols;
   geometry.num_tokens = DownsampledLength(geometry.patch_rows, downsample_factor) *
                         DownsampledLength(geometry.patch_cols, downsample_factor);
@@ -279,7 +305,8 @@ std::unique_ptr<NamedTensors> Lfm2VlImageProcessor::Process(const Tokenizer& tok
   const int64_t patch_dim = encoder_patch_size_ * encoder_patch_size_ * channels;
   auto patched = OrtValue::CreateTensor<float>(allocator, std::vector<int64_t>{num_images, padded_patch_count, patch_dim});
   float* patched_data = patched->GetTensorMutableData<float>();
-  std::fill_n(patched_data, static_cast<size_t>(num_images * padded_patch_count * patch_dim), 0.0f);
+  const size_t patched_element_count = patched->GetTensorTypeAndShapeInfo()->GetElementCount();
+  ParallelFill(thread_pool_, std::span<float>{patched_data, patched_element_count}, 0.0f);
 
   std::vector<int64_t> attention_mask(static_cast<size_t>(num_images * padded_patch_count), 0);
   std::vector<int64_t> spatial_shapes(static_cast<size_t>(num_images * 2), 0);
@@ -289,7 +316,7 @@ std::unique_ptr<NamedTensors> Lfm2VlImageProcessor::Process(const Tokenizer& tok
 
   for (int64_t i = 0; i < num_images; ++i) {
     const auto& geometry = geometries[static_cast<size_t>(i)];
-    WriteLfm2VlImagePatches(pixels + i * channels * padded_height * padded_width, channels, padded_height,
+    WriteLfm2VlImagePatches(thread_pool_, pixels + i * channels * padded_height * padded_width, channels, padded_height,
                             padded_width, geometry, encoder_patch_size_, patched_data + i * padded_patch_count * patch_dim);
     std::fill_n(attention_mask.begin() + static_cast<size_t>(i * padded_patch_count),
                 static_cast<size_t>(geometry.num_patches), 1);

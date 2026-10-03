@@ -27,6 +27,7 @@
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "threadpool.h"
 #include "runtime_profiles.h"
 #include "model_package.h"
 #include "gpt.h"

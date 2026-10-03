@@ -34,10 +34,10 @@ std::unique_ptr<NamedTensors> WhisperProcessor::Process(const Tokenizer& tokeniz
 
   if (audio_features_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
-                           std::make_shared<Tensor>(ProcessTensor<float>(mel.get(), allocator)));
+                           std::make_shared<Tensor>(ProcessTensor<float>(thread_pool_, mel.get(), allocator)));
   } else {
     named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
-                           std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(mel.get(), allocator)));
+                           std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(thread_pool_, mel.get(), allocator)));
   }
 
   std::shared_ptr<Tensor> input_ids;

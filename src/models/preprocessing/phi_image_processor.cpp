@@ -128,18 +128,18 @@ std::unique_ptr<NamedTensors> PhiImageProcessor::Process(const Tokenizer& tokeni
                          std::make_shared<Tensor>(ProcessImagePrompt(tokenizer, prompt, num_img_tokens, allocator)));
   if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(ProcessTensor<float>(pixel_values, allocator)));
+                           std::make_shared<Tensor>(ProcessTensor<float>(thread_pool_, pixel_values, allocator)));
   } else if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(pixel_values, allocator)));
+                           std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(thread_pool_, pixel_values, allocator)));
   } else {
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(pixel_values, allocator)));
+                           std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(thread_pool_, pixel_values, allocator)));
   }
   named_tensors->emplace(std::string(Config::Defaults::ImageSizesName),
-                         std::make_shared<Tensor>(ProcessTensor<int64_t>(image_sizes, allocator)));
+                         std::make_shared<Tensor>(ProcessTensor<int64_t>(thread_pool_, image_sizes, allocator)));
   named_tensors->emplace(Config::Defaults::NumImageTokens,
-                         std::make_shared<Tensor>(ProcessTensor<int64_t>(num_img_tokens, allocator)));
+                         std::make_shared<Tensor>(ProcessTensor<int64_t>(thread_pool_, num_img_tokens, allocator)));
 
   return named_tensors;
 }
