@@ -9,7 +9,7 @@
 #include "decoder.h"
 #include "../graph_annotation_ids.h"
 #include "../step_plan.h"
-#include "../../models/decoder_only.h"
+#include "../../models/decoder/multi_modal_decoder.h"
 
 namespace Generators {
 
@@ -87,7 +87,7 @@ struct VarlenGraphBuffers {
   // for the [3, num_tokens] multimodal-rope layout. `max_query_tokens` is the largest number of
   // tokens one request may contribute to a step, which the engine caps at one plus the draft width
   // its cache can roll back.
-  VarlenGraphBuffers(DecoderOnly_Model& model, size_t position_planes, size_t max_query_tokens);
+  VarlenGraphBuffers(DecoderOnlyModel& model, size_t position_planes, size_t max_query_tokens);
 
   // Annotation id for a decode step of this shape, or -1 when it cannot be captured.
   int GraphId(size_t batch_size, size_t tokens_per_request, size_t block_table_columns,
@@ -146,7 +146,7 @@ struct VarlenGraphBuffers {
  * PagedAttention operator.
  */
 struct VarlenDecoderIO : DecoderIO {
-  VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
+  VarlenDecoderIO(std::shared_ptr<DecoderOnlyModel> model,
                   ScheduledRequests& scheduled_requests,
                   std::shared_ptr<CacheManager> cache_manager,
                   const ExecutionContext* execution_context = nullptr,
@@ -166,14 +166,14 @@ struct VarlenDecoderIO : DecoderIO {
   Tensor* AuxHiddenStates() const override { return active_aux_hidden_states_; }
 
  private:
-  void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
-  void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
-  void PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
-  void PrepareHiddenStatesInput(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
-  void PrepareLogitsIndices(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
-  void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
-  void PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
-  void PrepareAuxHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareInputIds(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
+  void PreparePositionIds(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
+  void PrepareAttentionMetadata(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
+  void PrepareHiddenStatesInput(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
+  void PrepareLogitsIndices(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
+  void PrepareLogits(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
+  void PrepareHiddenStates(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
+  void PrepareAuxHiddenStates(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
 
   // Number of packed token rows in this step, which is what both the logits and the hidden states
   // are indexed by.

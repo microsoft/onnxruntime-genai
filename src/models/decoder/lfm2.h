@@ -1,0 +1,48 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#pragma once
+#include "models/model.h"
+#include "models/io/input_ids.h"
+#include "models/io/logits.h"
+#include "models/io/kv_cache.h"
+#include "models/io/position_inputs.h"
+#include "models/io/extra_inputs.h"
+
+namespace Generators {
+
+struct LFM2_Model : Model {
+  LFM2_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
+
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params) const override;
+
+  std::unique_ptr<OrtSession> session_decoder_;
+};
+
+// Whether the model's hybrid attention/conv architecture (LFM2 family) requires the conv+attention
+// key-value cache even when the decoder config doesn't declare per-layer layer_types (older
+// exports that predate that metadata). Used by CreateStandardKeyValueCache's conv-cache dispatch.
+bool RequiresLfm2ConvKeyValueCache(const Model& model);
+
+struct LFM2_State : State {
+  LFM2_State(const LFM2_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params);
+
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+
+  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+
+  void RewindTo(size_t index) override;
+
+ private:
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
+
+  const LFM2_Model& model_;
+
+  DefaultInputIDs input_ids_{*this};
+  Logits logits_{*this};
+  std::unique_ptr<KeyValueCache> cache_;
+  std::unique_ptr<PositionInputs> position_inputs_;
+  ExtraInputs extra_inputs_{*this};
+};
+
+}  // namespace Generators

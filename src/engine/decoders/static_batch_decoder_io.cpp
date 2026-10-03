@@ -2,11 +2,11 @@
 // Licensed under the MIT License.
 
 #include "static_batch_decoder_io.h"
-#include "../../models/decoder_only.h"
+#include "../../models/decoder/multi_modal_decoder.h"
 
 namespace Generators {
 
-StaticBatchDecoderIO::StaticBatchDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
+StaticBatchDecoderIO::StaticBatchDecoderIO(std::shared_ptr<DecoderOnlyModel> model,
                                            ScheduledRequests& scheduled_requests,
                                            std::shared_ptr<CacheManager> cache_manager)
     : DecoderIO(model, scheduled_requests, cache_manager) {
@@ -27,7 +27,7 @@ StaticBatchDecoderIO::StaticBatchDecoderIO(std::shared_ptr<DecoderOnly_Model> mo
   }
 }
 
-void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests) {
   auto request_with_max_sequence_length =
       std::max_element(
           scheduled_requests.begin(), scheduled_requests.end(),
@@ -58,7 +58,7 @@ void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> mo
   owned_inputs_.push_back(std::move(input_ids_tensor));
 }
 
-void StaticBatchDecoderIO::PrepareAttentionMask(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+void StaticBatchDecoderIO::PrepareAttentionMask(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests) {
   auto request_with_max_sequence_length =
       std::max_element(
           scheduled_requests.begin(), scheduled_requests.end(),
@@ -90,7 +90,7 @@ void StaticBatchDecoderIO::PrepareAttentionMask(std::shared_ptr<DecoderOnly_Mode
   owned_inputs_.push_back(std::move(attention_mask_tensor));
 }
 
-void StaticBatchDecoderIO::PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+void StaticBatchDecoderIO::PreparePositionIds(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests) {
   if (!model->session_info_.HasInput(model->config_->model.decoder.inputs.position_ids)) {
     return;
   }
@@ -129,7 +129,7 @@ void StaticBatchDecoderIO::PreparePositionIds(std::shared_ptr<DecoderOnly_Model>
   owned_inputs_.push_back(std::move(position_ids_tensor));
 }
 
-void StaticBatchDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+void StaticBatchDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests) {
   auto request_with_max_sequence_length =
       std::max_element(
           scheduled_requests.begin(), scheduled_requests.end(),

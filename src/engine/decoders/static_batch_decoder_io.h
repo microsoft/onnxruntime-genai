@@ -4,7 +4,7 @@
 #pragma once
 
 #include "decoder.h"
-#include "../../models/decoder_only.h"
+#include "../../models/decoder/multi_modal_decoder.h"
 
 namespace Generators {
 
@@ -26,17 +26,17 @@ namespace Generators {
  * or MultiHeadAttention operators.
  */
 struct StaticBatchDecoderIO : DecoderIO {
-  StaticBatchDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
+  StaticBatchDecoderIO(std::shared_ptr<DecoderOnlyModel> model,
                        ScheduledRequests& scheduled_requests,
                        std::shared_ptr<CacheManager> cache_manager);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
 
  private:
-  void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
-  void PrepareAttentionMask(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
-  void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
-  void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareInputIds(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
+  void PrepareAttentionMask(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
+  void PreparePositionIds(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
+  void PrepareLogits(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests);
 
   std::vector<std::unique_ptr<Tensor>> owned_inputs_;
   std::unique_ptr<Tensor> logits_;
