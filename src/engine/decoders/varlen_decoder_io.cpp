@@ -11,7 +11,7 @@
 #include <string>
 #include <string_view>
 
-#include "../../models/decoder/decoder_only.h"
+#include "../../models/decoder/decoder.h"
 #include "../../models/utils.h"
 #include "../paged_key_value_cache.h"
 #include "../sequence_positions.h"
@@ -313,7 +313,7 @@ size_t VarlenGraphBufferBytes(const Model& model, size_t position_planes,
   return bytes;
 }
 
-VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position_planes,
+VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnlyModel& model, size_t position_planes,
                                        size_t max_query_tokens_per_request) {
   const auto plan = PlanGraphBuffers(model, position_planes, max_query_tokens_per_request);
   max_batch_size = plan.max_batch_size;
@@ -359,7 +359,7 @@ std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t 
   return GraphAnnotationIds::Key{batch_size, tokens_per_request, columns_bucket, state_binding_key};
 }
 
-VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
+VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnlyModel> model,
                                  ScheduledRequests& scheduled_requests,
                                  std::shared_ptr<CacheManager> cache_manager,
                                  const ExecutionContext* execution_context,
@@ -401,7 +401,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
 }
 
 void VarlenDecoderIO::PrepareHiddenStatesInput(
-    std::shared_ptr<DecoderOnly_Model> model,
+    std::shared_ptr<DecoderOnlyModel> model,
     ScheduledRequests& scheduled_requests) {
   const auto& hidden_states_name = model->config_->model.decoder.inputs.hidden_states;
   if (hidden_states_name.empty() || !model->session_info_.HasInput(hidden_states_name)) {
@@ -442,7 +442,7 @@ void VarlenDecoderIO::PrepareHiddenStatesInput(
   inputs_.push_back(active_hidden_states_input);
 }
 
-void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests) {
   const StepPlan* plan = plan_;
   if (plan && plan->requests.size() != scheduled_requests.size()) {
     throw std::runtime_error("Step plan size does not match the scheduled batch.");
@@ -569,7 +569,7 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
 }
 
 void VarlenDecoderIO::PreparePositionIds(
-    std::shared_ptr<DecoderOnly_Model> model,
+    std::shared_ptr<DecoderOnlyModel> model,
     ScheduledRequests& scheduled_requests) {
   if (position_planes_ == 0) {
     return;
@@ -651,7 +651,7 @@ void VarlenDecoderIO::PreparePositionIds(
 // The engine already has both quantities on the host while it builds the sequence length inputs, so
 // this costs nothing. Eager bounds are exact. Captured bounds describe the entire graph bucket so
 // they remain valid when the graph is replayed for different requests.
-void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests) {
   const std::string& metadata_name = model->config_->model.decoder.inputs.attention_metadata;
   if (!model->session_info_.HasInput(metadata_name)) {
     // Model was built before `attention_metadata` existed. The operator falls back to the readback.
@@ -704,7 +704,7 @@ size_t VarlenDecoderIO::TokenCount(ScheduledRequests& scheduled_requests) const 
 }
 
 void VarlenDecoderIO::PrepareLogitsIndices(
-    std::shared_ptr<DecoderOnly_Model> model,
+    std::shared_ptr<DecoderOnlyModel> model,
     ScheduledRequests& scheduled_requests) {
   if (logits_are_per_token_) {
     if (plan_) {
@@ -780,7 +780,7 @@ void VarlenDecoderIO::PrepareLogitsIndices(
   }
 }
 
-void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnlyModel> model, ScheduledRequests& scheduled_requests) {
   const size_t logits_rows = logits_are_selected_
                                  ? valid_token_indices_.size()
                                  : (logits_are_per_token_ ? TokenCount(scheduled_requests)
@@ -803,7 +803,7 @@ void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, Sc
   outputs_.push_back(active_logits_->GetOrtTensor());
 }
 
-void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model,
+void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnlyModel> model,
                                           ScheduledRequests& scheduled_requests) {
   // Bind this optional output only when the Engine declared that it consumes these hidden states.
   // A model may expose hidden states for other clients without requiring the Engine to produce them
@@ -834,7 +834,7 @@ void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> mod
   outputs_.push_back(active_hidden_states_->GetOrtTensor());
 }
 
-void VarlenDecoderIO::PrepareAuxHiddenStates(std::shared_ptr<DecoderOnly_Model> model,
+void VarlenDecoderIO::PrepareAuxHiddenStates(std::shared_ptr<DecoderOnlyModel> model,
                                              ScheduledRequests& scheduled_requests) {
   // Only models exported with aux_hidden_state_layers expose this; it is what a DFlash 2 drafter
   // turns into its own per-layer K/V. Engine construction points this at

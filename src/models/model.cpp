@@ -30,7 +30,7 @@
 #include "runtime_profiles.h"
 #include "model_package.h"
 #include "decoder/gpt.h"
-#include "decoder/decoder_only.h"
+#include "decoder/decoder.h"
 #include "speculative_decoding.h"
 #include "speech/whisper.h"
 #include "speech/parakeet.h"
@@ -954,7 +954,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
-    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+    return std::make_shared<DecoderOnlyModel>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsStreamingEncDecASR(config->model.type))

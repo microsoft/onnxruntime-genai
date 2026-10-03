@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Creates minimal dummy multi-modal test models for testing DecoderState input_ids injection.
+Creates minimal dummy multi-modal test models for testing MultiModalDecoderState input_ids injection.
 
 Two model variants are generated:
   - multimodal-decoder-no-input-ids/  (Mistral3-like: decoder has NO input_ids input)

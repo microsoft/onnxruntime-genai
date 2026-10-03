@@ -3,13 +3,13 @@
 #pragma once
 #include <vector>
 #include "model.h"
-#include "models/decoder/decoder_only.h"
+#include "models/decoder/decoder.h"
 
 namespace Generators {
 
 struct Generator;
 
-// Composes two DecoderOnly_Model instances each with its own cloned Config
+// Composes two DecoderOnlyModel instances each with its own cloned Config
 // reused verbatim for session loading, KV cache, and logits I/O.
 struct SpeculativeDecodingModel : Model {
   SpeculativeDecodingModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
@@ -17,12 +17,12 @@ struct SpeculativeDecodingModel : Model {
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
 
-  const DecoderOnly_Model& target_model() const { return *target_model_; }
-  const DecoderOnly_Model& draft_model() const { return *draft_model_; }
+  const DecoderOnlyModel& target_model() const { return *target_model_; }
+  const DecoderOnlyModel& draft_model() const { return *draft_model_; }
 
  private:
-  std::shared_ptr<DecoderOnly_Model> target_model_;
-  std::shared_ptr<DecoderOnly_Model> draft_model_;
+  std::shared_ptr<DecoderOnlyModel> target_model_;
+  std::shared_ptr<DecoderOnlyModel> draft_model_;
 };
 
 // 2 inner States + the cross-round "pending draft probs"

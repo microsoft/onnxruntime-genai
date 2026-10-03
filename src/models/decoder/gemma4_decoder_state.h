@@ -3,13 +3,13 @@
 
 #pragma once
 
-#include "models/decoder/multi_modal_decoder.h"
+#include "models/decoder/decoder.h"
 
 namespace Generators {
 
 // Gemma4DecoderState: alongside inputs_embeds, Gemma4's decoder also accepts per_layer_inputs from
 // the embedding model, and its sequence-length/chunk-view bookkeeping must track inputs_embeds_'s.
-struct Gemma4DecoderState : DecoderState {
+struct Gemma4DecoderState : MultiModalDecoderState {
   Gemma4DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths,
                      const GeneratorParams& params);
 

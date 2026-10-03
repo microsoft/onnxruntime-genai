@@ -1,9 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-"""Tests for the DecoderState input_ids injection fix (PR #2148).
+"""Tests for the MultiModalDecoderState input_ids injection fix (PR #2148).
 
-Bug: DecoderState constructor checked *combined* session_info_ (decoder + vision +
+Bug: MultiModalDecoderState constructor checked *combined* session_info_ (decoder + vision +
 embedding) for HasInput('input_ids').  The embedding session always declares
 input_ids, so the check incorrectly injected input_ids into the decoder for models
 like Mistral3 whose decoder has no input_ids input — causing an ORT error
@@ -59,10 +59,10 @@ def _run_text_generation(
 def test_decoder_no_input_ids_does_not_inject_input_ids(test_data_path, relative_model_path):
     """Mistral3-like model: decoder declares no input_ids input.
 
-    With the fix, DecoderState uses decoder-only SessionInfo and does NOT inject
+    With the fix, MultiModalDecoderState uses decoder-only SessionInfo and does NOT inject
     input_ids into decoder feeds.  Generation must succeed.
 
-    Without the fix, DecoderState would use combined session_info_ (which includes
+    Without the fix, MultiModalDecoderState would use combined session_info_ (which includes
     the embedding session that always has input_ids) and incorrectly inject input_ids
     into the decoder, causing ORT to raise "Invalid Feed Input Name: input_ids".
     """
@@ -78,7 +78,7 @@ def test_decoder_no_input_ids_does_not_inject_input_ids(test_data_path, relative
 def test_decoder_with_input_ids_receives_input_ids(test_data_path, relative_model_path):
     """Gemma4-like model: decoder declares input_ids as one of its inputs.
 
-    With the fix, DecoderState uses decoder-only SessionInfo and correctly injects
+    With the fix, MultiModalDecoderState uses decoder-only SessionInfo and correctly injects
     input_ids into decoder feeds because the decoder session declares it.
     Generation must succeed.
     """

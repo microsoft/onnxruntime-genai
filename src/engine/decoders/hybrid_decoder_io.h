@@ -5,14 +5,14 @@
 
 #include "decoder.h"
 #include "varlen_decoder_io.h"
-#include "../../models/decoder/decoder_only.h"
+#include "../../models/decoder/decoder.h"
 
 namespace Generators {
 
 // Extends the packed variable-length decoder contract with the fixed request-state tensors gathered
 // and staged by the current composite cache reservation.
 struct HybridDecoderIO : DecoderIO {
-  HybridDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
+  HybridDecoderIO(std::shared_ptr<DecoderOnlyModel> model,
                   ScheduledRequests& scheduled_requests,
                   std::shared_ptr<CacheManager> cache_manager,
                   const ExecutionContext& execution_context,

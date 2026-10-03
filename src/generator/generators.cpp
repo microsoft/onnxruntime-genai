@@ -16,7 +16,7 @@
 #include "models/env_utils.h"
 #include "models/model.h"
 #include "models/model_type.h"
-#include "models/decoder/decoder_only.h"
+#include "models/decoder/decoder.h"
 #include "models/io/kv_cache.h"
 #include "models/io/position_inputs.h"
 #include "decoding/decoding_strategy.h"

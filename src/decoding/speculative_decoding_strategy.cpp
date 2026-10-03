@@ -7,7 +7,7 @@
 #include "decoding/standard_decoding_strategy.h"
 #include "constrained_logits_processor.h"
 #include "decoding/speculative_sampling.h"
-#include "models/decoder/decoder_only.h"
+#include "models/decoder/decoder.h"
 #include "models/model.h"
 
 #include <algorithm>
@@ -108,8 +108,8 @@ void AppendGuidanceSamplingOutput(
   rng_states.push_back(rng_state);
 }
 
-DecoderOnly_State& RequireDecoderOnlyState(State& state) {
-  auto* decoder_state = dynamic_cast<DecoderOnly_State*>(&state);
+DecoderOnlyState& RequireDecoderOnlyState(State& state) {
+  auto* decoder_state = dynamic_cast<DecoderOnlyState*>(&state);
   if (!decoder_state)
     throw std::runtime_error(
         "Speculative decoding requires a plain decoder-only target state.");

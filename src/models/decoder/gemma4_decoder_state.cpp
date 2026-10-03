@@ -8,7 +8,7 @@
 namespace Generators {
 
 Gemma4DecoderState::Gemma4DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
-    : DecoderState(model, sequence_lengths, params) {
+    : MultiModalDecoderState(model, sequence_lengths, params) {
   // Gemma4: decoder accepts per_layer_inputs from the embedding model
   if (!model_.config_->model.decoder.inputs.per_layer_inputs.empty()) {
     auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.per_layer_inputs);

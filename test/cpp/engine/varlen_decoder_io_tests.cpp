@@ -228,8 +228,8 @@ TEST(VarlenDecoderIOTest, RejectsSelectedRowsPastThePackedStep) {
 }
 
 TEST(VarlenDecoderIOTest, SelectedLogitsModelGetsAPersistentIndicesBuffer) {
-  auto selected = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedSelectedLogitsModel());
-  auto per_token = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  auto selected = std::dynamic_pointer_cast<DecoderOnlyModel>(LoadSyntheticPagedSelectedLogitsModel());
+  auto per_token = std::dynamic_pointer_cast<DecoderOnlyModel>(LoadSyntheticPagedPerTokenModel());
   ASSERT_TRUE(selected);
   ASSERT_TRUE(per_token);
 
@@ -276,7 +276,7 @@ TEST(VarlenDecoderIOTest, GraphBufferBytesGrowWithTheVerifiedBlock) {
 }
 
 TEST(VarlenDecoderIOTest, GraphBuffersRejectStepsWiderThanTheyWereSizedFor) {
-  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  auto model = std::dynamic_pointer_cast<DecoderOnlyModel>(LoadSyntheticPagedPerTokenModel());
   ASSERT_TRUE(model);
   const size_t max_batch_size = model->config_->engine.dynamic_batching->max_batch_size;
   VarlenGraphBuffers buffers{*model, PackedPositionIdPlanes(*model), kMaxDraftTokensPerStep + 1};

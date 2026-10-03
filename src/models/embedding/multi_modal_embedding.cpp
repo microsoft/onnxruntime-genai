@@ -4,7 +4,7 @@
 #include "generator/generators.h"
 #include "models/multi_modal.h"
 #include "models/embedding/multi_modal_embedding.h"
-#include "models/decoder/multi_modal_decoder.h"
+#include "models/decoder/decoder.h"
 #include "models/embedding/gemma4_embedding_state.h"
 
 namespace Generators {
@@ -50,7 +50,7 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   return {};
 }
 
-void EmbeddingState::ReuseBuffersInDecoder(DecoderState& decoder) {
+void EmbeddingState::ReuseBuffersInDecoder(MultiModalDecoderState& decoder) {
   inputs_embeds_.ReuseEmbeddingsBuffer(decoder.GetInputsEmbeds());
 }
 

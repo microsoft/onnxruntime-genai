@@ -20,7 +20,7 @@
 namespace Generators {
 
 struct Generator;
-struct DecoderOnly_State;
+struct DecoderOnlyState;
 struct Model;
 struct State;
 struct SpeculativeStats;
@@ -389,7 +389,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   virtual void PopulateProposerStats(SpeculativeStats& stats) const {}
 
-  DecoderOnly_State& target_state_;
+  DecoderOnlyState& target_state_;
   const Model& target_model_;
 
   // Stats accumulators.

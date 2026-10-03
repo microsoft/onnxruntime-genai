@@ -15,7 +15,7 @@ namespace Generators {
 
 struct MultiModalLanguageModel;
 struct MultiModalPipelineState;
-struct DecoderState;
+struct MultiModalDecoderState;
 
 struct EmbeddingState : State {
   EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params);
@@ -29,7 +29,7 @@ struct EmbeddingState : State {
   // Hands the embedding buffers this state produced off to the decoder for the next run, so the
   // decoder can consume them without an extra device copy. Subclasses that carry additional
   // per-model outputs (e.g. Gemma4's per_layer_inputs) override this to also hand those off.
-  virtual void ReuseBuffersInDecoder(DecoderState& decoder);
+  virtual void ReuseBuffersInDecoder(MultiModalDecoderState& decoder);
 
  protected:
   friend struct MultiModalPipelineState;

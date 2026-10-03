@@ -11,7 +11,7 @@ struct Gemma4EmbeddingState : EmbeddingState {
   Gemma4EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 
   void SetExtraInputs(int64_t num_images, int64_t num_image_tokens, int64_t num_audio_tokens) override;
-  void ReuseBuffersInDecoder(DecoderState& decoder) override;
+  void ReuseBuffersInDecoder(MultiModalDecoderState& decoder) override;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
 
