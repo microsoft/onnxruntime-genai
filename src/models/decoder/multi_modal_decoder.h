@@ -17,7 +17,6 @@
 namespace Generators {
 
 struct MultiModalLanguageModel;
-struct MultiModalPipelineState;
 
 struct DecoderOnlyModel : Model {
   DecoderOnlyModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
@@ -65,7 +64,6 @@ struct DecoderState : State {
   Embeddings* GetPerLayerInputs() { return per_layer_inputs_.get(); }
 
  private:
-  friend struct MultiModalPipelineState;
   DecoderState(const GeneratorParams& params, const Model& model, OrtSession& session,
                DeviceSpan<int32_t> sequence_lengths);
 
