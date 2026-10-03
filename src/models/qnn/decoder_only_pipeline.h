@@ -7,11 +7,11 @@
 #include <optional>
 
 #include "../../worker_thread.h"
-#include "model.h"
+#include "models/model.h"
 #include "models/io/input_ids.h"
 #include "models/io/logits.h"
-#include "io/kv_cache.h"
-#include "io/windowed_kv_cache.h"
+#include "models/io/kv_cache.h"
+#include "models/io/windowed_kv_cache.h"
 #include "models/io/position_inputs.h"
 #include "models/io/extra_inputs.h"
 #include "models/io/recurrent_state.h"
