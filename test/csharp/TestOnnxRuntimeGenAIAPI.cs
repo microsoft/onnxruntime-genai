@@ -563,6 +563,35 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.Equal("{}", completion.Text);
         }
 
+        [Fact(DisplayName = "TestChatClientWithJsonSchemaResponseFormatAndCaching")]
+        public async Task TestChatClientWithJsonSchemaResponseFormatAndCaching()
+        {
+            // The second turn reuses the cached generator after guidance has completed the first output.
+            OnnxRuntimeGenAIChatClientOptions options = new()
+            {
+                PromptFormatter = static (messages, options) => "a",
+                EnableCaching = true,
+            };
+
+            using var client = new OnnxRuntimeGenAIChatClient(_tinyRandomGpt2ModelPath, options);
+
+            using var schema = JsonDocument.Parse("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}");
+            ChatOptions chatOptions = new()
+            {
+                MaxOutputTokens = 10,
+                Temperature = 0f,
+                ResponseFormat = ChatResponseFormat.ForJsonSchema(schema.RootElement),
+            };
+
+            var first = await client.GetResponseAsync("a", chatOptions);
+            Assert.Equal("{}", first.Text);
+            Assert.NotNull(first.ConversationId);
+
+            chatOptions.ConversationId = first.ConversationId;
+            var second = await client.GetResponseAsync("a", chatOptions);
+            Assert.Equal("{}", second.Text);
+        }
+
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
         public void TestTokenizerBatchEncodeDecode()
         {
