@@ -211,7 +211,7 @@ The Python tests require model files. From the repository root, point pytest at 
 python -m pytest -sv test/python/test_onnxruntime_genai_api.py -k "test_greedy_search" --test_models test/models
 ```
 
-Drop the `-k` filter to run the whole file. See [`test/python/README.md`](test/python/README.md). Provider-specific tests may require additional dependency files under `test/python/<provider>/`.
+Drop the `-k` filter to run the whole file. See [`test/python/README.md`](../test/python/README.md). Provider-specific tests may require additional dependency files under `test/python/<provider>/`.
 
 ---
 
