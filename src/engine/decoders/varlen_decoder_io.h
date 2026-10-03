@@ -9,7 +9,7 @@
 #include "decoder.h"
 #include "../graph_annotation_ids.h"
 #include "../step_plan.h"
-#include "../../models/decoder/decoder.h"
+#include "../../models/decoder/multi_modal_decoder.h"
 
 namespace Generators {
 

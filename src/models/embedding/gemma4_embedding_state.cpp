@@ -4,7 +4,7 @@
 #include "models/embedding/gemma4_embedding_state.h"
 
 #include "models/multi_modal.h"
-#include "models/decoder/decoder.h"
+#include "models/decoder/multi_modal_decoder.h"
 
 namespace Generators {
 
@@ -31,7 +31,7 @@ void Gemma4EmbeddingState::SetExtraInputs(int64_t num_images, int64_t num_image_
   }
 }
 
-void Gemma4EmbeddingState::ReuseBuffersInDecoder(MultiModalDecoderState& decoder) {
+void Gemma4EmbeddingState::ReuseBuffersInDecoder(DecoderState& decoder) {
   EmbeddingState::ReuseBuffersInDecoder(decoder);
   if (per_layer_inputs_) {
     if (auto* decoder_per_layer_inputs = decoder.GetPerLayerInputs()) {

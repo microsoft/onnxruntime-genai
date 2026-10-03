@@ -30,7 +30,7 @@
 #include "runtime_profiles.h"
 #include "model_package.h"
 #include "decoder/gpt.h"
-#include "decoder/decoder.h"
+#include "decoder/multi_modal_decoder.h"
 #include "speculative_decoding.h"
 #include "speech/whisper.h"
 #include "speech/parakeet.h"

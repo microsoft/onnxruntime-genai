@@ -427,7 +427,7 @@ speculative counters such as rounds, accepted tokens, adaptive moves, or cooldow
 
 ## Target logits and cache requirements
 
-Verification needs one target distribution per proposal position. `DecoderOnlyState::RunUnchunked`
+Verification needs one target distribution per proposal position. `DecoderState::RunUnchunked`
 bypasses prefill chunking for the verification input because chunked prefill can expose only the
 final chunk's logits. This is a correctness requirement, not a general recommendation to disable
 prefill chunking. If the output still contains only the final row, base speculative decoding

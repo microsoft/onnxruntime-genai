@@ -4,7 +4,7 @@
 #pragma once
 
 #include "decoder.h"
-#include "../../models/decoder/decoder.h"
+#include "../../models/decoder/multi_modal_decoder.h"
 
 namespace Generators {
 

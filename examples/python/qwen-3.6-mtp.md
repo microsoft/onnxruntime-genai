@@ -243,7 +243,7 @@ from one forward.
 
 `set_hidden_states` is backed by a `HiddenStatesInputs` feeder (`src/models/hidden_states.*`):
 a resizable `[batch, seq, hidden]` device tensor refreshed each step from the staged value. It is
-created by `DecoderOnlyState` only when `config.model.decoder.inputs.hidden_states` is set, so
+created by `DecoderState` only when `config.model.decoder.inputs.hidden_states` is set, so
 models without an MTP head are unaffected.
 
 ## Running the example
@@ -312,7 +312,7 @@ Two CUDA-graph caveats matter for MTP:
    `gpu_graph_id` and replaying a chosen id, so the 1-token decode and the 2-token verify can
    each have their own captured graph bound to their own (different-shape) buffers. genai today
    uses a single `graph_id_` per `State` and only captures `shape[1] == 1`
-   (`DecoderOnlyState::Run`); extending it to allocate a second graph id for the
+   (`DecoderState::Run`); extending it to allocate a second graph id for the
    `shape[1] == 2` verify (with its own static I/O buffers) would let both the decode and the
    verify replay from CUDA graph. CUDA-graph replay also synchronizes on each step today
    (onnxruntime PR \#28686 adds async replay), so a fully async speculative loop depends on that

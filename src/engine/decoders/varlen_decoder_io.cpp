@@ -11,7 +11,7 @@
 #include <string>
 #include <string_view>
 
-#include "../../models/decoder/decoder.h"
+#include "../../models/decoder/multi_modal_decoder.h"
 #include "../../models/utils.h"
 #include "../paged_key_value_cache.h"
 #include "../sequence_positions.h"

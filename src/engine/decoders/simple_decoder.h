@@ -5,7 +5,7 @@
 
 #include "decoder.h"
 #include "varlen_decoder_io.h"
-#include "../../models/decoder/decoder.h"
+#include "../../models/decoder/multi_modal_decoder.h"
 
 namespace Generators {
 

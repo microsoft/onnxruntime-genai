@@ -7,7 +7,7 @@
 #include <string>
 #include <utility>
 
-#include "../models/decoder/decoder.h"
+#include "../models/decoder/multi_modal_decoder.h"
 #include "decoders/decoder.h"
 #include "scheduled_requests.h"
 #include "cache_manager.h"

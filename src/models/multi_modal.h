@@ -18,8 +18,7 @@
 #include "models/speech/multi_modal_speech.h"
 #include "models/speech/lfm2_audio_speech_state.h"
 #include "models/embedding/multi_modal_embedding.h"
-#include "models/decoder/decoder.h"
-#include "models/decoder/gemma4_decoder_state.h"
+#include "models/decoder/multi_modal_decoder.h"
 
 namespace Generators {
 
@@ -80,7 +79,7 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<VisionState> vision_state_;
   std::unique_ptr<SpeechState> speech_state_;
   std::unique_ptr<EmbeddingState> embedding_state_;
-  std::unique_ptr<MultiModalDecoderState> decoder_state_;
+  std::unique_ptr<DecoderState> decoder_state_;
   std::unique_ptr<Lfm2AudioOutput> audio_output_;  // LFM2-Audio speech output, when the model has it
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
