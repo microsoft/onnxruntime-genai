@@ -5,11 +5,12 @@
 
 #include <memory>
 
+struct OrtEnv;
+
 namespace Generators {
 
 struct Config;
 struct Model;
-struct OrtEnv;
 
 std::shared_ptr<Model> CreatePipelineModel(std::unique_ptr<Config>& config, OrtEnv& ort_env);
 
