@@ -29,22 +29,19 @@ void TransposeVideoChatFlashHwcToChw(ThreadPool* thread_pool, const float* sourc
     throw std::overflow_error("VideoChatFlash channel-row count exceeds ptrdiff_t range");
   }
   const auto total_rows = total_planes * height;
-  if (width > 0 && total_rows > std::numeric_limits<std::ptrdiff_t>::max() / width) {
-    throw std::overflow_error("VideoChatFlash element count exceeds ptrdiff_t range");
-  }
-  const auto total_elements = total_rows * width;
   ThreadPool::TryParallelFor(
-      thread_pool, total_elements, 1.0,
+      thread_pool, total_rows, static_cast<double>(width),
       [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-        for (auto output_idx = first; output_idx < last; ++output_idx) {
-          const int64_t row = static_cast<int64_t>(output_idx) / width;
-          const int64_t w = static_cast<int64_t>(output_idx) % width;
-          const int64_t plane = row / height;
-          const int64_t h = row % height;
+        for (auto row = first; row < last; ++row) {
+          const int64_t plane = static_cast<int64_t>(row) / height;
+          const int64_t h = static_cast<int64_t>(row) % height;
           const int64_t image = plane / channels;
           const int64_t channel = plane % channels;
           const float* src_image = source + image * plane_size * channels;
-          destination[output_idx] = src_image[(h * width + w) * channels + channel];
+          float* dst_row = destination + plane * plane_size + h * width;
+          for (int64_t w = 0; w < width; ++w) {
+            dst_row[w] = src_image[(h * width + w) * channels + channel];
+          }
         }
       });
 }
