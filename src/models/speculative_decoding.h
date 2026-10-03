@@ -38,6 +38,8 @@ struct SpeculativeDecodingState : State {
                         DeviceSpan<int32_t> next_indices) override;
 
   void RewindTo(size_t index) override;
+  bool CanRewindTo(size_t index) const override;
+  void SnapshotState(size_t position) override;
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;
   void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) override;

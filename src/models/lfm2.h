@@ -27,6 +27,7 @@ struct LFM2_State : State {
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
   void RewindTo(size_t index) override;
+  bool CanRewindTo(size_t index) const override;
 
  private:
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
