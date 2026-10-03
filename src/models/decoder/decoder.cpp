@@ -3,6 +3,8 @@
 #include "models/multi_modal.h"
 #include "models/decoder/gemma4_decoder_state.h"
 
+#include <algorithm>
+
 namespace Generators {
 DeviceSpan<float> DecoderState::RunDecoder(Logits& logits, RecurrentState* recurrent_state,
                                            int sequence_length, bool graph_capture_this_run) {

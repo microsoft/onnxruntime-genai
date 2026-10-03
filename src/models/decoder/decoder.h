@@ -1,4 +1,8 @@
 #pragma once
+
+#include <cstddef>
+#include <memory>
+
 #include "models/model.h"
 #include "models/embedding/cpu_embedding.h"
 #include "models/embedding/embeddings.h"
