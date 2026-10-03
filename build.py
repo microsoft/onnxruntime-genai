@@ -114,7 +114,7 @@ def _parse_args():
     )
     parser.add_argument(
         "--sdk",
-        choices=["python", "java", "csharp"],
+        choices=["python", "java", "javascript", "csharp"],
         default=None,
         help="Build a single SDK layer incrementally against a prebuilt core "
         "(requires --prebuilt_genai_home and --ort_home). Skips building the core.",
@@ -859,7 +859,7 @@ def _sdk_build_dir(args: argparse.Namespace) -> Path:
 
 def build_sdk(args: argparse.Namespace, env: dict[str, str]):
     """
-    Build a single SDK layer (python, java, or csharp) incrementally against a prebuilt core
+    Build a single SDK layer (python, Java, JavaScript, or C#) incrementally against a prebuilt core
     referenced by --prebuilt_genai_home. The core itself is not rebuilt.
     """
     if args.sdk == "csharp":
@@ -869,8 +869,8 @@ def build_sdk(args: argparse.Namespace, env: dict[str, str]):
 
 
 def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
-    """Configure and build a CMake-based SDK project (python or java) standalone."""
-    sdk_src = REPO_ROOT / "src" / args.sdk
+    """Configure and build a CMake-based SDK project standalone."""
+    sdk_src = REPO_ROOT / "src" / ("js" if args.sdk == "javascript" else args.sdk)
     build_dir = _sdk_build_dir(args)
     genai_cmake_dir = args.prebuilt_genai_home / "lib" / "cmake" / "onnxruntime-genai"
     if not genai_cmake_dir.is_dir():
@@ -878,6 +878,10 @@ def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
             f"Could not find the exported onnxruntime-genai CMake package at {genai_cmake_dir}. "
             "Build the core with --install_dir first."
         )
+
+    if args.sdk == "javascript":
+        npm = str(_resolve_executable_path("npm"))
+        util.run([npm, "install", "--no-package-lock"], env=env, cwd=sdk_src)
 
     command = [str(args.cmake_path), "-G", args.cmake_generator]
     command += [
@@ -910,7 +914,7 @@ def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
     util.run(build_command, env=env)
 
     if args.sdk == "python" and not args.skip_wheel:
-        util.run(build_command + ["--target", "PyPackageBuild"], env=env)
+        util.run([*build_command, "--target", "PyPackageBuild"], env=env)
 
 
 def _build_sdk_csharp(args: argparse.Namespace, env: dict[str, str]):
