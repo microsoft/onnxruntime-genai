@@ -102,6 +102,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${MODELS_ROOT}/embedding/*.cpp"
   "${MODELS_ROOT}/decoder/*.h"
   "${MODELS_ROOT}/decoder/*.cpp"
+  "${MODELS_ROOT}/encoder_decoder/*.h"
+  "${MODELS_ROOT}/encoder_decoder/*.cpp"
   "${MODELS_ROOT}/vision/*.h"
   "${MODELS_ROOT}/vision/*.cpp"
   "${MODELS_ROOT}/speech/*.h"

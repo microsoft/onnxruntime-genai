@@ -1,6 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "model.h"
+#include "models/model.h"
 #include "models/io/input_ids.h"
 #include "models/io/default_position_inputs.h"
 
