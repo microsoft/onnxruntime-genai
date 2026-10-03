@@ -78,7 +78,7 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
     speech_state_ = CreateSpeechState(model_, params);
   }
   embedding_state_ = CreateEmbeddingState(model_, params);
-  decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
+  decoder_state_ = CreateDecoderState(model_, sequence_lengths, params);
   if (model_.depthformer_session_) {
     audio_output_ = std::make_unique<Lfm2AudioOutput>(model_, params);
   }

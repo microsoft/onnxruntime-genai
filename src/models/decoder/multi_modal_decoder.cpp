@@ -1,4 +1,5 @@
 #include "generator/generators.h"
+#include "models/decoder/gemma4_decoder_state.h"
 #include "models/decoder/multi_modal_decoder.h"
 #include "models/multi_modal.h"
 
@@ -68,16 +69,6 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model,
     input_ids_->Add();
   }
   Initialize();
-
-  if (!model.config_->model.decoder.inputs.per_layer_inputs.empty()) {
-    const auto shape = model.session_info_.GetInputShape(
-        model.config_->model.decoder.inputs.per_layer_inputs);
-    const int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
-    per_layer_inputs_ = std::make_unique<Embeddings>(
-        *this, Embeddings::Mode::Input,
-        model.config_->model.decoder.inputs.per_layer_inputs, per_layer_dim);
-    per_layer_inputs_->Add();
-  }
 }
 
 void DecoderState::Initialize() {
@@ -162,8 +153,7 @@ DeviceSpan<float> DecoderState::RunWithChunking(
         recurrent_state_->Update();
       logits_.Update(chunk_tokens, current_chunk_size);
       inputs_embeds_->UseChunkView(processed_tokens, current_chunk_size);
-      if (per_layer_inputs_)
-        per_layer_inputs_->UseChunkView(processed_tokens, current_chunk_size);
+      UseExtraChunkView(processed_tokens, current_chunk_size);
     } else {
       UpdateInputsOutputs(chunk_tokens, length, next_indices);
     }
@@ -174,8 +164,7 @@ DeviceSpan<float> DecoderState::RunWithChunking(
 
   if (UsesEmbeddings()) {
     inputs_embeds_->RestoreFullView();
-    if (per_layer_inputs_)
-      per_layer_inputs_->RestoreFullView();
+    RestoreExtraFullView();
   }
   return logits_.Get();
 }
@@ -188,8 +177,7 @@ bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {
 
 void DecoderState::PrepareEmbeddingsForPrefill(size_t new_length) {
   inputs_embeds_->UpdateSequenceLength(new_length);
-  if (per_layer_inputs_)
-    per_layer_inputs_->UpdateSequenceLength(new_length);
+  UpdateExtraSequenceLength(new_length);
 }
 
 DeviceSpan<float> DecoderState::RunPrefillWithChunking(
@@ -236,8 +224,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
 
   if (UsesEmbeddings()) {
     inputs_embeds_->UpdateSequenceLength(new_length);
-    if (per_layer_inputs_)
-      per_layer_inputs_->UpdateSequenceLength(new_length);
+    UpdateExtraSequenceLength(new_length);
   }
 }
 
@@ -268,6 +255,15 @@ void DecoderState::CropToAccepted(size_t new_length, size_t recurrent_position) 
     kv_cache_->RewindTo(new_length);
   if (recurrent_state_)
     recurrent_state_->CropToPosition(recurrent_position);
+}
+
+std::unique_ptr<DecoderState> CreateDecoderState(
+    const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths,
+    const GeneratorParams& params) {
+  if (!model.config_->model.decoder.inputs.per_layer_inputs.empty()) {
+    return std::make_unique<Gemma4DecoderState>(model, sequence_lengths, params);
+  }
+  return std::make_unique<DecoderState>(model, sequence_lengths, params);
 }
 
 }  // namespace Generators

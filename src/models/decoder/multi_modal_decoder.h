@@ -61,7 +61,12 @@ struct DecoderState : State {
 
   Embeddings& GetInputsEmbeds() { return *inputs_embeds_; }
   PositionInputs& GetPositionInputs() { return *position_inputs_; }
-  Embeddings* GetPerLayerInputs() { return per_layer_inputs_.get(); }
+  virtual Embeddings* GetPerLayerInputs() { return nullptr; }
+
+ protected:
+  virtual void UpdateExtraSequenceLength(size_t new_length) {}
+  virtual void UseExtraChunkView(size_t offset, size_t count) {}
+  virtual void RestoreExtraFullView() {}
 
  private:
   DecoderState(const GeneratorParams& params, const Model& model, OrtSession& session,
@@ -77,7 +82,6 @@ struct DecoderState : State {
   OrtSession& decoder_session_;
   std::unique_ptr<DefaultInputIDs> input_ids_;
   std::unique_ptr<Embeddings> inputs_embeds_;
-  std::unique_ptr<Embeddings> per_layer_inputs_;
   std::unique_ptr<PositionInputs> position_inputs_;
   std::unique_ptr<KeyValueCache> kv_cache_;
   std::unique_ptr<RecurrentState> recurrent_state_;
@@ -86,5 +90,9 @@ struct DecoderState : State {
   std::unique_ptr<HiddenStatesOutputs> hidden_states_output_;
   ExtraInputs extra_inputs_{*this};
 };
+
+std::unique_ptr<DecoderState> CreateDecoderState(
+    const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths,
+    const GeneratorParams& params);
 
 }  // namespace Generators
