@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 from types import MethodType, SimpleNamespace
+import json
 
 import onnx
 import onnx_ir as ir
@@ -40,6 +41,46 @@ def test_composite_float_checkpoint_loader_and_sparse_bindings(monkeypatch, tmp_
     assert set(model.decoder.input_names["past.indexer"]) == {3}
     assert set(model.decoder.output_names["present.key"]) == {3}
     assert config.text_config.layer_types == original_layer_types
+
+
+def test_paged_mtp_config_preserves_engine_state_bindings(tmp_path):
+    from transformers import Qwen4ExpConfig
+
+    config = Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        text_config={
+            "num_hidden_layers": 4,
+            "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+            "mtp_num_hidden_layers": 1,
+            "indexer_compress_ratio": 4,
+            "indexer_head_dim": 256,
+            "indexer_n_heads": 4,
+            "indexer_kv_heads": 1,
+            "indexer_budget": 2048,
+        },
+    )
+    model = Qwen4ExpModel(
+        config,
+        ir.DataType.FLOAT16,
+        ir.DataType.INT4,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "state_update_capacity": 4},
+    )
+    groups = model.decoder.make_decoder_state_groups({}, {})
+    path = tmp_path / "genai_config.json"
+    path.write_text(json.dumps({
+        "model": {"decoder": {"outputs": {}, "state_groups": groups}},
+        "engine": {"dynamic_batching": {}},
+    }))
+    model.add_mtp_to_genai_config(str(tmp_path))
+    result = json.loads(path.read_text())
+    assert result["model"]["mtp"]["enabled"] is True
+    assert result["engine"]["dynamic_batching"]["prefix_caching"] is False
+    assert result["model"]["decoder"]["state_groups"] == groups
+    assert result["model"]["mtp"]["inputs"]["past_indexer_names"] == "past.%d.indexer_key"
+    assert model.decoder.input_shapes["input_ids"] == ["num_tokens"]
+    assert model.mtp.input_shapes["hidden_states"] == ["num_tokens", model.decoder.hc_hidden_size]
 
 
 def record_calls(model, method_names):

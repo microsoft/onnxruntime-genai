@@ -2359,6 +2359,7 @@ class Qwen4ExpModel(MTPModel):
         decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
         decoder_outputs["hidden_states"] = "hidden_states"
         genai_config["model"]["mtp"] = {
+            "enabled": True,
             "filename": "mtp.onnx",
             "num_hidden_layers": 1,
             "num_key_value_heads": self.decoder.num_kv_heads,
@@ -2382,6 +2383,9 @@ class Qwen4ExpModel(MTPModel):
                 "present_indexer_names": "present.%d.indexer_key",
             },
         }
+        dynamic_batching = genai_config.get("engine", {}).get("dynamic_batching")
+        if dynamic_batching is not None:
+            dynamic_batching.setdefault("prefix_caching", False)
         self.add_shared_initializers_to_genai_config(genai_config)
         with open(config_path, "w") as config_file:
             json.dump(genai_config, config_file, indent=4)
