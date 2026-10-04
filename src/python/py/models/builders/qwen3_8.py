@@ -224,6 +224,10 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         extra_options["exclude_embeds"] = not text_only
         extra_options.setdefault("filename", "model.onnx" if text_only else "text.onnx")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layer_types = [
+            "qwen_sparse_attention" if layer_type in {"full_attention", "indexed_attention"} else layer_type
+            for layer_type in self.layer_types
+        ]
         if not hasattr(self, "context_length_attrs"):
             self.context_length_attrs = {"state_window": 0, "state_window_dims": []}
         self.use_cpu_embedding_gather = text_only
@@ -2177,7 +2181,7 @@ class Qwen4ExpModel(MTPModel):
         self.decoder = Qwen4ExpTextModel(
             copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options
         )
-        self.decoder.model_type = "qwen4_exp_text" if self.text_only else "qwen3_5"
+        self.decoder.model_type = "qwen4_exp_text"
         self.mtp = None
         if self.mtp_attrs["build"]:
             self.decoder.emit_pre_final_hidden_states = True

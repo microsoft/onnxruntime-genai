@@ -18,6 +18,30 @@ from models.builders.qwen3_8 import (
 )
 
 
+def test_composite_float_checkpoint_loader_and_sparse_bindings(monkeypatch, tmp_path):
+    from transformers import Qwen4ExpConfig, Qwen4ExpForConditionalGeneration
+
+    config = Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        text_config={
+            "num_hidden_layers": 4,
+            "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+            "mtp_num_hidden_layers": 0,
+        },
+    )
+    original_layer_types = list(config.text_config.layer_types)
+    model = Qwen4ExpModel(
+        config, ir.DataType.FLOAT16, ir.DataType.INT4, "cuda", str(tmp_path), {"exclude_mtp": True}
+    )
+    loaded = object()
+    monkeypatch.setattr(Qwen4ExpForConditionalGeneration, "from_pretrained", lambda *args, **kwargs: loaded)
+    assert model.decoder.load_weights("unused") is loaded
+    assert set(model.decoder.input_names["past_key_values.key"]) == {3}
+    assert set(model.decoder.input_names["past.indexer"]) == {3}
+    assert set(model.decoder.output_names["present.key"]) == {3}
+    assert config.text_config.layer_types == original_layer_types
+
+
 def record_calls(model, method_names):
     model.calls = []
 
