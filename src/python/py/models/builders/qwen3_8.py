@@ -2321,6 +2321,10 @@ class Qwen4ExpModel(MTPModel):
         decoder_inputs["engram_embeddings"] = "engram_embeddings"
         model_config["embedding"] = {
             "filename": "embedding.onnx",
+            "session_options": {
+                "intra_op_num_threads": 8,
+                "provider_options": [{"cpu": {}}],
+            },
             "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
             "outputs": {"inputs_embeds": "inputs_embeds"},
         }

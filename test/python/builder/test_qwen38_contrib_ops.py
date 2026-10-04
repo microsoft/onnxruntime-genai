@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+import json
 from types import MethodType, SimpleNamespace
 
 import onnx
@@ -40,6 +41,17 @@ def test_composite_float_checkpoint_loader_and_sparse_bindings(monkeypatch, tmp_
     assert set(model.decoder.input_names["past.indexer"]) == {3}
     assert set(model.decoder.output_names["present.key"]) == {3}
     assert config.text_config.layer_types == original_layer_types
+
+    def save_decoder_config(*args):
+        (tmp_path / "genai_config.json").write_text(json.dumps({
+            "model": {"decoder": {"inputs": {}, "session_options": {"provider_options": [{"cuda": {}}]}}}
+        }))
+
+    monkeypatch.setattr(model.decoder, "make_genai_config", save_decoder_config)
+    model.make_genai_config(config, {}, str(tmp_path))
+    generated = json.loads((tmp_path / "genai_config.json").read_text())
+    for component in ("embedding", "engram"):
+        assert generated["model"][component]["session_options"]["provider_options"] == [{"cpu": {}}]
 
 
 def record_calls(model, method_names):
