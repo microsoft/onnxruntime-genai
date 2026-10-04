@@ -12,6 +12,11 @@ constexpr const char* kAMDGPUExecutionProviderName = "AMDGPUExecutionProvider";
 
 DeviceInterface* GetAMDGPUInterface();
 
+// Acquire a reference to the shared AMDGPU interface singleton, once per Model whose device is AMDGPU.
+// Pairs with the release in CloseAMDGPUInterface so the singleton outlives every model using it (e.g.
+// a target + draft decoder pair); the full teardown runs only on the last release.
+void AcquireAMDGPUInterface();
+
 // Null the AMDGPU interface singleton's allocator-derived state (allocator, memory info, pinned
 // allocator, device id) in place, without destroying the singleton. Called per session so the next
 // device init (InitOrt / InitDeviceAllocators) rebinds a fresh allocator instead of reusing stale

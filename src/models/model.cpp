@@ -524,6 +524,11 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
+
+  // Acquire the shared AMDGPU singleton, released in ~Model. Done last, after everything that can
+  // throw: a failed construction never runs ~Model, so acquiring earlier would pin the device forever.
+  if (p_device_ && p_device_->GetType() == DeviceType::AMDGPU)
+    AcquireAMDGPUInterface();
 }
 
 void Model::AddSharedInitializers() {
@@ -597,16 +602,14 @@ Model::~Model() {
   }
 #endif
   if (p_device_ && p_device_->GetType() == DeviceType::AMDGPU) {
-    // Per-model teardown for the AMDGPU (DirectX plugin) path. All logic (allocator/session reset,
-    // singleton destruction, EP-library unregister so the plugin releases its process-global device
-    // and outstanding allocation handles) lives in CloseAMDGPUInterface() in the AMD module. Without
-    // it, a model that hangs the GPU leaves stale device-backed handles alive and the next model
-    // dereferences them on a dead device. The next model re-registers a fresh EP+device.
+    // Per-model teardown for the AMDGPU (DirectX plugin) path; CloseAMDGPUInterface() in the AMD module
+    // does the allocator/singleton reset and EP-library unregister. Unlike DML, session_options_ is not
+    // reset here: the plugin registers by library name and its options hold only config strings.
     //
-    // Unlike the DML branch above, session_options_ is NOT reset here: the DML path bakes raw
-    // IDMLDevice*/command-queue pointers into its session options (SessionOptionsAppendExecutionProvider_DML1)
-    // that must be dropped before the device is destroyed, whereas the plugin path registers by
-    // library name and its session options carry only config strings — no device references.
+    // Clear device-backed shared initializers first: each owns a GpuMemory that frees through the
+    // AMDGPU allocator CloseAMDGPUInterface destroys. Members are destroyed only after this body, so
+    // leaving them would free through a dangling allocator.
+    shared_initializer_entries_.clear();
     CloseAMDGPUInterface();
   }
 }

@@ -3033,15 +3033,17 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         }
         return true;
       } else if (provider_options->name == "AMDGPU") {
-        // Graph capture defaults to ON for the AMDGPU (DirectX) backend but can be
-        // opted out per model via the provider option "enable_graph_capture": "0"
-        // (mirrors the DML branch above).
+        // Graph capture defaults to OFF for the AMDGPU (DirectX) backend and is opt-in per model via
+        // the provider option "enable_graph_capture": "1" (like CUDA/WebGPU, unlike DML). Captured-
+        // command-list replay only benefits the autoregressive decoder loop and is unsafe on graphs
+        // with control-flow nodes (encoders/joiners/vision), so it should be enabled only on decoder
+        // models validated to work under capture rather than turned on for every session by default.
         for (const auto& value : provider_options->options) {
-          if (value.first == "enable_graph_capture" && value.second == "0") {
-            return false;
+          if (value.first == "enable_graph_capture" && value.second == "1") {
+            return true;
           }
         }
-        return true;
+        return false;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {
           if (value.first == "enableGraphCapture" && value.second == "1") {

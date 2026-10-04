@@ -20,10 +20,8 @@ namespace Generators::AMDGPUExecutionProvider {
 
 namespace {
 
-// Whether genai itself registered the umbrella EP library (vs. a host pre-registering it). Guards
-// the teardown-time unregister so genai never tears down a registration it does not own. See the
-// header for the full rationale. Process-global; AppendExecutionProvider runs single-threaded per
-// model so no synchronization is needed beyond the register path below.
+// Whether genai itself registered the umbrella EP library (vs. a host pre-registering it). Guards the
+// teardown-time unregister so genai never tears down a registration it does not own. Single-threaded.
 bool g_genai_owns_ep_registration = false;
 
 constexpr const char* kEpPathEnvKey = "AMDGPU_EP_PATH";
@@ -38,10 +36,8 @@ constexpr const char* kEpFilename = "libamdgpu-ep.so";
 // already registered or the library is not found, so an explicit registration always wins.
 void EnsureUmbrellaEpRegistered() {
   if (!FindRegisteredEpDevices(kAMDGPUExecutionProviderName).empty()) {
-    // Already registered — by a prior genai model (we re-registered after our own teardown) or by a
-    // host at startup. Either way genai is not introducing a NEW registration here, so it must not
-    // claim ownership: if a host owns it, g_genai_owns_ep_registration must stay false so teardown
-    // leaves the host's registration intact. If genai already owned it, the flag is already true.
+    // Already registered (by a host, or by a prior genai model). genai introduces nothing here, so it
+    // does not claim ownership — a host-owned registration must keep g_genai_owns_ep_registration false.
     return;
   }
 
@@ -120,25 +116,17 @@ void SetStaticPaddingConfig(OrtSessionOptions& session_options, const Config& co
 }  // namespace
 
 void ReleaseOwnedUmbrellaEp() {
-  // The EP library and its OrtEnv-shared allocators live on the process-global OrtEnv, which is shared
-  // with the host. When a host (e.g. a benchmark harness) registered the library itself, its own
-  // non-OGA sessions depend on that single registration — and on the shared allocators the plugin
-  // served through them — for the life of the process. Releasing either here would pull them out from
-  // under the host. So genai touches the shared allocators AND unregisters only when it owns the
-  // registration (i.e. EnsureUmbrellaEpRegistered introduced it); otherwise it leaves everything in
-  // place and relies on the host's own teardown. Both steps share this single ownership gate so they
-  // can never disagree: releasing the shared allocators only matters as the precondition that lets the
-  // unregister below drop the plugin factory's last reference and destroy the device per model.
+  // The EP library and its OrtEnv-shared allocators live on the process-global OrtEnv, shared with the
+  // host. A host that registered the library itself depends on it (and its shared allocators) for the
+  // whole process, so genai releases them only when it owns the registration; otherwise it leaves
+  // everything in place. One gate covers both the allocator release and the unregister.
   if (!g_genai_owns_ep_registration)
     return;
 
-  // Release the OrtEnv-shared allocators the plugin served via CreateAllocatorImpl. They are owned by
-  // the process-global OrtEnv (not the EP library), so UnregisterExecutionProviderLibrary alone does
-  // not drop them: the shared GPU allocator holds the plugin's ExecutionContext -> command queue ->
-  // ID3D12Device, keeping the factory refcount above zero and pinning the device for the process. If a
-  // model removed the GPU, that dead device would be reused by every later model. Must run while the EP
-  // device is still registered (before the unregister below). Best-effort: ReleaseSharedAllocator is a
-  // documented no-op when no matching shared allocator exists.
+  // Release the OrtEnv-shared allocators first: the shared GPU allocator holds the plugin's
+  // ExecutionContext -> command queue -> device, so UnregisterExecutionProviderLibrary alone cannot
+  // drop the device until these are gone. Must run while the EP device is still registered.
+  // Best-effort: ReleaseSharedAllocator is a no-op when no matching shared allocator exists.
   const auto release_shared = [](const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type) {
     if (OrtStatus* status = Ort::api->ReleaseSharedAllocator(&GetOrtEnv(), ep_device, mem_type))
       Ort::api->ReleaseStatus(status);
@@ -158,12 +146,10 @@ void ReleaseOwnedUmbrellaEp() {
   // The next genai model's EnsureUmbrellaEpRegistered re-creates a fresh library + device.
   try {
     Ort::UnregisterExecutionProviderLibrary(&GetOrtEnv(), kAMDGPUExecutionProviderName);
+    g_genai_owns_ep_registration = false;
   } catch (...) {
     // Called from ~Model (noexcept): best-effort. Never let an exception escape the destructor.
   }
-  // The registration is gone; the next genai model's EnsureUmbrellaEpRegistered will re-create it and
-  // re-assert ownership. Clear the flag either way so we never try to double-release.
-  g_genai_owns_ep_registration = false;
 }
 
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
@@ -183,13 +169,10 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // therefore advisory; the plugin owns the policy. Left as "1" as the intended request.
   session_options.AddConfigEntry("ep.directml.enable_host_accessible", "1");
 
-  // DirectML backend: runtime (deferred, dynamic-shape) graph fusion. Mirrors the stock
-  // DML path (ep/dml/session_options.cpp) but under the ep.directml.* namespace this
-  // umbrella forwards to the DirectML backend (the same namespace as enable_host_accessible
-  // above). Decoder sessions default ON; the caller passes disable_graph_capture=true for
-  // non-decoder sub-sessions (vision/speech) whose control-flow nodes are incompatible with
-  // captured-graph replay. Per-model opt-out via provider option enable_graph_capture="0"
-  // is honored through IsGraphCaptureEnabled.
+  // DirectML backend: runtime (deferred, dynamic-shape) graph fusion, forwarded under the
+  // ep.directml.* namespace. Opt-in per model via provider option enable_graph_capture="1"
+  // (IsGraphCaptureEnabled); disable_graph_capture lets a caller force it off for non-decoder
+  // sub-sessions whose control-flow nodes are incompatible with captured-graph replay.
   if (IsGraphCaptureEnabled(config.model.decoder.session_options) && !disable_graph_capture) {
     session_options.AddConfigEntry("ep.directml.enable_graph_capture", "1");
   }
