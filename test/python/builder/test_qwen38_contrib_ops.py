@@ -12,6 +12,7 @@ import torch
 from models.builders.base import Model
 from models.builders.qwen3_5 import Qwen35MoETextModel
 from models.builders.qwen3_8 import (
+    Qwen4ExpEmbeddingModel,
     Qwen4ExpEngramModel,
     Qwen4ExpModel,
     Qwen4ExpMTPTextModel,
@@ -80,6 +81,7 @@ def test_paged_mtp_config_preserves_engine_state_bindings(tmp_path):
     assert result["model"]["decoder"]["state_groups"] == groups
     assert result["model"]["mtp"]["inputs"]["past_indexer_names"] == "past.%d.indexer_key"
     assert model.decoder.input_shapes["input_ids"] == ["num_tokens"]
+    assert model.decoder.input_shapes["inputs_embeds"] == ["num_tokens", model.decoder.hidden_size]
     assert model.mtp.input_shapes["hidden_states"] == ["num_tokens", model.decoder.hc_hidden_size]
 
 
@@ -96,6 +98,16 @@ def record_calls(model, method_names):
 
     for method_name in method_names:
         setattr(model, method_name, MethodType(make_recorder(method_name), model))
+
+
+def test_engine_embedding_has_only_packed_ids_and_gather():
+    model = Qwen4ExpEmbeddingModel(
+        SimpleNamespace(), torch.zeros(8, 4), ir.DataType.FLOAT16, use_paged_attention=True
+    )
+    assert [value.name for value in model.graph.inputs] == ["input_ids"]
+    assert [str(dim) for dim in model.graph.inputs[0].shape] == ["num_tokens"]
+    assert [str(dim) for dim in model.graph.outputs[0].shape] == ["num_tokens", "4"]
+    assert [node.op_type for node in model.graph] == ["Gather"]
 
 
 def make_sparse_model(paged):
@@ -1330,6 +1342,30 @@ def test_paged_ple_appends_compact_token_and_conv_updates():
     assert conv["state_update_capacity"] == 7
 
 
+def test_external_engram_captures_identity_token_state():
+    model, ple = make_ple_model(paged=True)
+    model.external_engram = True
+    model.context_length_attrs = {"state_update_capacity": 4}
+    model.input_names.update({
+        "engram_embeddings": "engram_embeddings",
+        "state_update.capture_count": "state_update_capture_count",
+        "state_update.active": "state_update_active",
+    })
+    model.output_names.update({
+        "state_update.ple_tokens": {1: "state_update.1.ple_tokens"},
+        "state_update.ple_conv_value": {1: "state_update.1.ple_conv_value"},
+    })
+    model.output_shapes = {"state_update.ple_conv_value": ["batch_size", 4, 16]}
+    model.make_ple(1, ple, "hidden_states")
+    nodes = emitted_nodes(model)
+    identity = next(kwargs for op_type, kwargs in nodes if op_type == "Identity")
+    assert identity["inputs"] == ["past.1.ple_tokens"]
+    assert identity["outputs"] == ["present.1.ple_tokens"]
+    expand = next(kwargs for op_type, kwargs in nodes if op_type == "Expand")
+    assert expand["outputs"] == ["state_update.1.ple_tokens"]
+    assert not any(op_type == "VarlenNGramHashMapping" for op_type, _ in nodes)
+
+
 def test_paged_ple_emits_packed_engram_gate_shapes():
     model, ple = make_ple_model(paged=True)
 
@@ -1452,6 +1488,7 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only):
     wrapper.config = SimpleNamespace(text_config=text_config, vision_config=SimpleNamespace(out_hidden_size=8))
     wrapper.decoder = component("model.onnx")
     wrapper.decoder.io_dtype = ir.DataType.FLOAT16
+    wrapper.decoder.use_paged_attention = False
     wrapper.decoder.ple_layer_ids = {1}
     wrapper.decoder.hidden_size = 8
     language_model = SimpleNamespace(
@@ -1462,7 +1499,7 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only):
     wrapper.mtp = component("mtp.onnx")
     wrapper.mtp_attrs = {}
     wrapper.share_initializers = lambda *args: []
-    monkeypatch.setattr("models.builders.qwen3_8.Qwen4ExpEmbeddingModel", lambda *args: SimpleNamespace(save_model=lambda _: None))
+    monkeypatch.setattr("models.builders.qwen3_8.Qwen4ExpEmbeddingModel", lambda *args, **kwargs: SimpleNamespace(save_model=lambda _: None))
     monkeypatch.setattr("models.builders.qwen3_8.Qwen4ExpVisionModel", lambda *args: SimpleNamespace(save_model=lambda _: None))
 
     wrapper.save_model(tmp_path)

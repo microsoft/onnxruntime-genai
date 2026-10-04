@@ -186,6 +186,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   // A chained draft feeds every stage the previous stage's hidden states, so the head must emit its
   // own hidden states. Record that before clearing the MTP section the demand was inferred from.
   projected->engine.hidden_states_output_required = true;
+  projected->model.embedding = {};
   projected->model.engram = {};
   projected->model.mtp = {};
   return projected;

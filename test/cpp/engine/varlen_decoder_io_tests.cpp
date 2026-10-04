@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -288,6 +289,30 @@ TEST(VarlenDecoderIOTest, GraphBufferBytesGrowWithTheVerifiedBlock) {
   // The packed rows a verify step needs are what the engine has to take off the cache budget.
   EXPECT_GT(verified_block, single_token);
 }
+
+  TEST(VarlenDecoderIOTest, TokenAndEngramEmbeddingsHaveSeparateGraphBuffers) {
+    auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+    ASSERT_TRUE(model);
+    const size_t planes = PackedPositionIdPlanes(*model);
+    const size_t without_embeddings = VarlenGraphBufferBytes(*model, planes, 4);
+    auto& decoder = model->config_->model.decoder;
+    const std::string input = "past_key_values.1.key";
+    ASSERT_TRUE(model->session_info_.HasInput(input));
+    model->config_->model.embedding.filename = "synthetic-token-embedding.onnx";
+    decoder.inputs.embeddings = input;
+    model->config_->model.engram.filename = "synthetic-engram.onnx";
+    decoder.inputs.engram_embeddings = input;
+
+    VarlenGraphBuffers buffers{*model, planes, 4};
+    ASSERT_NE(buffers.embeddings, nullptr);
+    ASSERT_NE(buffers.engram_embeddings, nullptr);
+    EXPECT_NE(buffers.embeddings.get(), buffers.engram_embeddings.get());
+    const auto element_size = Ort::SizeOf(model->session_info_.GetInputDataType(input));
+    const auto engram_width = model->session_info_.GetInputShape(input).back();
+    const size_t embedding_bytes = buffers.max_token_rows *
+        static_cast<size_t>(decoder.hidden_size + engram_width) * element_size;
+    EXPECT_EQ(VarlenGraphBufferBytes(*model, planes, 4), without_embeddings + embedding_bytes);
+  }
 
 TEST(VarlenDecoderIOTest, GraphBuffersRejectStepsWiderThanTheyWereSizedFor) {
   auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());

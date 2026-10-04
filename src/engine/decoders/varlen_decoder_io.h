@@ -111,6 +111,7 @@ struct VarlenGraphBuffers {
 
   std::unique_ptr<Tensor> input_ids;
   std::unique_ptr<Tensor> embeddings;
+  std::unique_ptr<Tensor> engram_embeddings;
   std::unique_ptr<Tensor> cumulative_sequence_lengths;
   std::unique_ptr<Tensor> past_sequence_lengths;
   // Null unless the model consumes packed position_ids.
@@ -198,6 +199,7 @@ struct VarlenDecoderIO : DecoderIO {
   std::vector<std::unique_ptr<Tensor>> owned_inputs_;
   CpuEmbedding::Workspace local_embedding_workspace_;
   CpuEmbedding::Workspace* embedding_workspace_{};
+  CpuEmbedding::Workspace engram_workspace_;
   std::unique_ptr<Tensor> logits_;
   Tensor* active_logits_{};
   std::unique_ptr<Tensor> logits_fp32_;

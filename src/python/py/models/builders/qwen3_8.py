@@ -259,6 +259,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.tile_first_hidden_state = True
         self.emit_pre_final_hidden_states = False
         self.external_engram = extra_options.get("external_engram", False)
+        if self.use_paged_attention:
+            self.input_shapes["inputs_embeds"] = self.make_hidden_state_shape()
         if getattr(self, "external_engram", False):
             self.input_names["engram_embeddings"] = "engram_embeddings"
             self.input_types["engram_embeddings"] = self.io_dtype
@@ -679,6 +681,33 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 outputs=[self.output_names["present.ple_tokens"][layer_id]],
                 name=f"{basename}/token_state/Identity",
             )
+            if state_update_capacity:
+                axes = f"model.layers.{layer_id}.ple.token_state.axes"
+                dimensions = f"model.layers.{layer_id}.ple.token_state.dimensions"
+                self.make_initializer(torch.tensor([1], dtype=torch.int64), axes)
+                self.make_initializer(
+                    torch.tensor([state_update_capacity, self.ngram_size - 1], dtype=torch.int64), dimensions
+                )
+                expanded = f"{basename}/token_state/Unsqueeze/output_0"
+                batch_shape = f"{basename}/token_state/Shape/output_0"
+                capture_shape = f"{basename}/token_state/Concat/output_0"
+                self.make_node(
+                    "Unsqueeze", inputs=[self.input_names["past.ple_tokens"][layer_id], axes],
+                    outputs=[expanded], name=f"{basename}/token_state/Unsqueeze",
+                )
+                self.make_node(
+                    "Shape", inputs=[self.input_names["state_update.capture_count"]],
+                    outputs=[batch_shape], name=f"{basename}/token_state/Shape",
+                )
+                self.make_node(
+                    "Concat", inputs=[batch_shape, dimensions], outputs=[capture_shape],
+                    name=f"{basename}/token_state/Concat", axis=0,
+                )
+                self.make_node(
+                    "Expand", inputs=[expanded, capture_shape],
+                    outputs=[self.output_names["state_update.ple_tokens"][layer_id]],
+                    name=f"{basename}/token_state/Expand",
+                )
         else:
             multipliers = f"model.layers.{layer_id}.ple.layer_multipliers"
             vocab_sizes = f"model.layers.{layer_id}.ple.head_vocab_sizes"
@@ -1309,19 +1338,26 @@ class _Qwen4ExpGraphModel(Model):
 
 
 class Qwen4ExpEmbeddingModel(_Qwen4ExpGraphModel):
-    def __init__(self, config, embedding_weight, io_dtype):
+    def __init__(self, config, embedding_weight, io_dtype, use_paged_attention=False):
         super().__init__(io_dtype, "embedding.onnx", "qwen4_exp_embedding")
         hidden_size = embedding_weight.shape[1]
-        input_ids = self.make_value("input_ids", ir.DataType.INT64, ["batch_size", "sequence_length"])
-        image_features = self.make_value("image_features", self.io_dtype, ["num_image_tokens", hidden_size])
+        token_shape = ["num_tokens"] if use_paged_attention else ["batch_size", "sequence_length"]
+        input_ids = self.make_value("input_ids", ir.DataType.INT64, token_shape)
         inputs_embeds = self.make_value(
-            "inputs_embeds", self.io_dtype, ["batch_size", "sequence_length", hidden_size]
+            "inputs_embeds", self.io_dtype, [*token_shape, hidden_size]
         )
-        self.graph.inputs.extend([input_ids, image_features])
+        self.graph.inputs.append(input_ids)
         self.graph.outputs.append(inputs_embeds)
 
         weight_name = "model.embed_tokens.weight"
         self.make_initializer(embedding_weight, weight_name, to=self.io_dtype)
+        if use_paged_attention:
+            self.make_node(
+                "Gather", [weight_name, "input_ids"], ["inputs_embeds"], name="/model/embed_tokens/Gather", axis=0
+            )
+            return
+        image_features = self.make_value("image_features", self.io_dtype, ["num_image_tokens", hidden_size])
+        self.graph.inputs.append(image_features)
         image_token = "image_token_id"
         video_token = "video_token_id"
         self.make_initializer(torch.tensor(config.image_token_id, dtype=torch.int64), image_token)
@@ -2287,7 +2323,8 @@ class Qwen4ExpModel(MTPModel):
         if self.text_only:
             return
         embedding_model = Qwen4ExpEmbeddingModel(
-            self.config, language_model.embed_tokens.weight.detach().cpu(), self.decoder.io_dtype
+            self.config, language_model.embed_tokens.weight.detach().cpu(), self.decoder.io_dtype,
+            use_paged_attention=self.decoder.use_paged_attention,
         )
         embedding_model.save_model(output_dir)
         vision_config = self.config.vision_config
@@ -2312,7 +2349,7 @@ class Qwen4ExpModel(MTPModel):
             genai_config = json.load(config_file)
 
         model_config = genai_config["model"]
-        model_config["type"] = "qwen3_5"
+        model_config["type"] = "qwen4_exp_text" if self.decoder.use_paged_attention else "qwen3_5"
         model_config["image_token_id"] = config.image_token_id
         model_config["vision_start_token_id"] = config.vision_start_token_id
         decoder_inputs = model_config["decoder"]["inputs"]
@@ -2321,9 +2358,11 @@ class Qwen4ExpModel(MTPModel):
         decoder_inputs["engram_embeddings"] = "engram_embeddings"
         model_config["embedding"] = {
             "filename": "embedding.onnx",
-            "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
+            "inputs": {"input_ids": "input_ids"},
             "outputs": {"inputs_embeds": "inputs_embeds"},
         }
+        if not self.decoder.use_paged_attention:
+            model_config["embedding"]["inputs"]["image_features"] = "image_features"
         model_config["vision"] = {
             "filename": "vision.onnx",
             "spatial_merge_size": config.vision_config.spatial_merge_size,

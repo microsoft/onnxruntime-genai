@@ -311,6 +311,7 @@ struct GraphBufferPlan {
   enum Slot {
     kInputIds,
     kEmbeddings,
+    kEngramEmbeddings,
     kCumulativeSequenceLengths,
     kPastSequenceLengths,
     kPositionIds,
@@ -355,15 +356,15 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
   const int64_t hidden_size = model.config_->model.decoder.hidden_size;
 
   plan.buffers[GraphBufferPlan::kInputIds] = {Ort::TypeToTensorType<int64_t>, {rows}};
-  if (!model.config_->model.embedding.filename.empty() ||
-      !model.config_->model.engram.filename.empty()) {
-    const auto& name = !model.config_->model.engram.filename.empty()
-                           ? model.config_->model.decoder.inputs.engram_embeddings
-                           : model.config_->model.decoder.inputs.embeddings;
+  if (!model.config_->model.embedding.filename.empty()) {
+    const auto& name = model.config_->model.decoder.inputs.embeddings;
     plan.buffers[GraphBufferPlan::kEmbeddings] = {
-        model.session_info_.GetInputDataType(name),
-        {rows, model.config_->model.engram.filename.empty()
-                   ? hidden_size : model.session_info_.GetInputShape(name).back()}};
+        model.session_info_.GetInputDataType(name), {rows, hidden_size}};
+  }
+  if (!model.config_->model.engram.filename.empty()) {
+    const auto& name = model.config_->model.decoder.inputs.engram_embeddings;
+    plan.buffers[GraphBufferPlan::kEngramEmbeddings] = {
+        model.session_info_.GetInputDataType(name), {rows, model.session_info_.GetInputShape(name).back()}};
   }
   plan.buffers[GraphBufferPlan::kCumulativeSequenceLengths] = {Ort::TypeToTensorType<int32_t>,
                                                                {batch + 1}};
@@ -453,6 +454,7 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position
 
   input_ids = make(GraphBufferPlan::kInputIds);
   embeddings = make(GraphBufferPlan::kEmbeddings);
+  engram_embeddings = make(GraphBufferPlan::kEngramEmbeddings);
   cumulative_sequence_lengths = make(GraphBufferPlan::kCumulativeSequenceLengths);
   past_sequence_lengths = make(GraphBufferPlan::kPastSequenceLengths);
   position_ids = make(GraphBufferPlan::kPositionIds);
@@ -660,21 +662,24 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     if (!device_input_ids.empty()) {
       device_span.CopyDeviceToCpu();
     }
-    std::optional<CpuEngram> engram;
-    if (model->session_engram_) engram.emplace(*model);
+  }
+  if (model->cpu_embedding_) {
     std::unique_ptr<Tensor> owned_embeddings;
     auto* embeddings = reshape(owned_embeddings, graph_buffers_ ? graph_buffers_->embeddings.get() : nullptr,
-                               engram ? engram->type : model->cpu_embedding_->type_,
-                               {static_cast<int64_t>(num_tokens),
-                                engram ? engram->width : model->cpu_embedding_->hidden_size_});
-    if (engram) {
-      engram->Run(scheduled_requests.Requests(), *embeddings, *embedding_workspace_);
-    } else {
-      model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
-    }
-    input_names_.push_back(engram
-                               ? model->config_->model.decoder.inputs.engram_embeddings.c_str()
-                               : model->config_->model.decoder.inputs.embeddings.c_str());
+                               model->cpu_embedding_->type_,
+                               {static_cast<int64_t>(num_tokens), model->cpu_embedding_->hidden_size_});
+    model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
+    input_names_.push_back(model->config_->model.decoder.inputs.embeddings.c_str());
+    inputs_.push_back(embeddings->GetOrtTensor());
+    if (owned_embeddings) owned_inputs_.push_back(std::move(owned_embeddings));
+  }
+  if (model->session_engram_) {
+    CpuEngram engram{*model};
+    std::unique_ptr<Tensor> owned_embeddings;
+    auto* embeddings = reshape(owned_embeddings, graph_buffers_ ? graph_buffers_->engram_embeddings.get() : nullptr,
+                               engram.type, {static_cast<int64_t>(num_tokens), engram.width});
+    engram.Run(scheduled_requests.Requests(), *embeddings, engram_workspace_);
+    input_names_.push_back(model->config_->model.decoder.inputs.engram_embeddings.c_str());
     inputs_.push_back(embeddings->GetOrtTensor());
     if (owned_embeddings) owned_inputs_.push_back(std::move(owned_embeddings));
   }
