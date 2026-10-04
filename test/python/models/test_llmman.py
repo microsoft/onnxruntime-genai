@@ -117,6 +117,12 @@ def test_reports_a_non_ok_status(daemon):
         llmman.pull(daemon.url, "ref")
 
 
+def test_stops_reading_at_success(daemon):
+    # Success is terminal, so anything after it is not read.
+    daemon.pull_body = _ndjson({"status": "success"}, {"error": "late"})
+    llmman.pull(daemon.url, "ref")
+
+
 def test_tolerates_a_non_json_diagnostic_line(daemon):
     daemon.pull_body = "not json\n" + _ndjson({"status": "success"})
     llmman.pull(daemon.url, "ref")

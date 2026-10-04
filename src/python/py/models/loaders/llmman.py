@@ -143,8 +143,9 @@ def pull(base: str, reference: str, progress=None) -> None:
                     raise RuntimeError(f"llmman pull of {reference!r} failed: {obj['error']}")
                 status = obj.get("status")
                 if status == "success":
+                    # Terminal: don't wait for the daemon to close the stream.
                     succeeded = True
-                    continue
+                    break
                 if progress is not None and status:
                     progress(status, obj.get("completed", 0), obj.get("total", 0))
     except urllib.error.HTTPError as exc:
