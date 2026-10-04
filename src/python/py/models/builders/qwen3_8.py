@@ -226,7 +226,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         if not hasattr(self, "context_length_attrs"):
             self.context_length_attrs = {"state_window": 0, "state_window_dims": []}
-        self.use_cpu_embedding_gather = text_only
+        self.use_cpu_embedding_gather = False
         if self.use_paged_attention:
             self.input_names.pop("position_ids", None)
         self.model.metadata_props["qwen4_exp.past_indexer_names"] = "past.%d.indexer_key"
@@ -547,8 +547,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.make_value(output, self.io_dtype, [*token_shape, self.hidden_size])
         return output
 
-    def make_hyper_connection_post_mix(self, name, streams, block_output, post_mix, token_shape):
-        output = f"{name}/output_0"
+    def make_hyper_connection_post_mix(self, name, streams, block_output, post_mix, token_shape, output_name=None):
+        output = f"{name}/output_0" if output_name is None else output_name
         self.make_node(
             "HyperConnectionPostMix",
             inputs=[streams, block_output, post_mix],
@@ -650,11 +650,11 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         )
         return down_name, inject_name
 
-    def make_hyper_connection_injection(self, layer_id, block_output, hyper_input, injection_weights, location):
+    def make_hyper_connection_injection(self, layer_id, block_output, hyper_input, injection_weights, location, output_name=None):
         basename = f"/model/layers.{layer_id}/{location}_hyper_connection/injection"
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
         return self.make_hyper_connection_post_mix(
-            basename, hyper_input, block_output, injection_weights, token_shape
+            basename, hyper_input, block_output, injection_weights, token_shape, output_name=output_name
         )
 
     def make_ple(self, layer_id, ple, root_input):
@@ -667,15 +667,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             else 0
         )
         flatten_dims = [-1, self.ple_embed_dim] if self.use_paged_attention else [0, 0, self.ple_embed_dim]
-        if getattr(self, "external_engram", False):
-            engram_embeddings = self.input_names["engram_embeddings"]
-            self.make_node(
-                "Identity",
-                inputs=[self.input_names["past.ple_tokens"][layer_id]],
-                outputs=[self.output_names["present.ple_tokens"][layer_id]],
-                name=f"{basename}/token_state/Identity",
-            )
-        else:
+        if not getattr(self, "external_engram", False) or self.use_paged_attention:
             multipliers = f"model.layers.{layer_id}.ple.layer_multipliers"
             vocab_sizes = f"model.layers.{layer_id}.ple.head_vocab_sizes"
             offsets = f"model.layers.{layer_id}.ple.head_offsets"
@@ -695,7 +687,10 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             )
             if self.use_paged_attention and state_update_capacity:
                 ngram_inputs.extend(["", "", self.input_names["state_update.capture_count"]])
-            ngram_outputs = [ngram_ids, self.output_names["present.ple_tokens"][layer_id]]
+            ngram_outputs = [
+                ngram_ids,
+                self.output_names["present.ple_tokens"][layer_id],
+            ]
             if self.use_paged_attention and state_update_capacity:
                 ngram_outputs.extend(["", self.output_names["state_update.ple_tokens"][layer_id]])
             self.make_node(
@@ -722,6 +717,20 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 if self.use_paged_attention
                 else ["batch_size", "sequence_length", ngram_heads],
             )
+            if getattr(self, "external_engram", False):
+                self.make_value(
+                    ngram_outputs[1], ir.DataType.INT64, ["batch_size", self.ngram_size - 1]
+                )
+        if getattr(self, "external_engram", False):
+            engram_embeddings = self.input_names["engram_embeddings"]
+            if not self.use_paged_attention:
+                self.make_node(
+                    "Identity",
+                    inputs=[self.input_names["past.ple_tokens"][layer_id]],
+                    outputs=[self.output_names["present.ple_tokens"][layer_id]],
+                    name=f"{basename}/token_state/Identity",
+                )
+        else:
             table_name = "model.ple.ngram_embedding.weight"
             table = embedding.ngram_embedding
             if table_name not in self.values:
@@ -1205,8 +1214,14 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.make_moe_preprocessing(layer_id, moe, mixed)
         self.make_moe_router(layer_id, moe, mixed)
         moe_output = self.make_moe_subgraph(layer_id, moe, mixed)
+        hidden_states_output = (
+            self.output_names["hidden_states"]
+            if layer_id == self.num_layers - 1 and self.emit_pre_final_hidden_states
+            and (self.include_hidden_states or self.exclude_lm_head)
+            else None
+        )
         hyper_states = self.make_hyper_connection_injection(
-            layer_id, moe_output, residual, injection, "mlp"
+            layer_id, moe_output, residual, injection, "mlp", output_name=hidden_states_output
         )
         self.layernorm_attrs["root_input"] = hyper_states
         self.layernorm_attrs["skip_input"] = hyper_states
@@ -1219,15 +1234,14 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 "final",
                 combine=False,
             )
-            if self.include_hidden_states or self.exclude_lm_head:
+            if (self.include_hidden_states or self.exclude_lm_head) and not self.emit_pre_final_hidden_states:
                 self.make_node(
                     "Identity",
-                    inputs=[hyper_states if self.emit_pre_final_hidden_states else final_output],
+                    inputs=[final_output],
                     outputs=[self.output_names["hidden_states"]],
                     name="/model/final_hidden_states/Identity",
                 )
-                if not self.emit_pre_final_hidden_states:
-                    final_output = self.output_names["hidden_states"]
+                final_output = self.output_names["hidden_states"]
             self.layernorm_attrs["output_0"] = final_output
 
     def get_final_hyper_connection_mixer(self):
@@ -1379,16 +1393,17 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
         ngram_heads = (ngram_size - 1) * heads_per_ngram
         ple_embed_dim = config.ple_embed_dim
         head_dim = ple_embed_dim // ngram_heads
+        ple_layer_id = config.ple_layer_ids[0] - 1
 
         input_ids = self.make_value("input_ids", ir.DataType.INT64, ["batch_size", "sequence_length"])
         past_tokens = self.make_value(
-            "past_ple_tokens", ir.DataType.INT64, ["batch_size", ngram_size - 1]
+            f"past.{ple_layer_id}.ple_tokens", ir.DataType.INT64, ["batch_size", ngram_size - 1]
         )
         engram_embeddings = self.make_value(
             "engram_embeddings", self.io_dtype, ["batch_size", "sequence_length", ple_embed_dim]
         )
         present_tokens = self.make_value(
-            "present_ple_tokens", ir.DataType.INT64, ["batch_size", ngram_size - 1]
+            f"present.{ple_layer_id}.ple_tokens", ir.DataType.INT64, ["batch_size", ngram_size - 1]
         )
         self.graph.inputs.extend([input_ids, past_tokens])
         self.graph.outputs.extend([engram_embeddings, present_tokens])
@@ -1437,6 +1452,7 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
             outputs=[gathered],
             name="/model/ple/ngram_embedding/GatherBlockQuantized",
             domain="com.microsoft",
+            metadata_props={"layer_ann": Qwen4ExpTextModel.CPU_EMBEDDING_ANNOTATION},
             gather_axis=0,
             quantize_axis=1,
             block_size=0,
@@ -1451,12 +1467,7 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
             [gathered, f"/model/constants/INT64/[0, 0, {ple_embed_dim}]"],
             self.io_dtype,
             ["batch_size", "sequence_length", ple_embed_dim],
-        )
-        self.make_node(
-            "Identity",
-            ["/model/ple/ngram_embedding/Reshape/output_0"],
-            [engram_embeddings.name],
-            name="/model/ple/ngram_embedding/Identity",
+            output_name=engram_embeddings.name,
         )
 
     def save_model(self, output_dir):
@@ -2173,7 +2184,7 @@ class Qwen4ExpModel(MTPModel):
         self.extra_options = copy.deepcopy(extra_options)
         self.text_only = self.extra_options.get("text_only", False)
         decoder_options = self.make_mtp_init(config, self.extra_options)
-        decoder_options["external_engram"] = not self.text_only
+        decoder_options["external_engram"] = True
         self.decoder = Qwen4ExpTextModel(
             copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options
         )
@@ -2202,6 +2213,7 @@ class Qwen4ExpModel(MTPModel):
         decoder_options = super().make_mtp_init(config, extra_options)
         num_mtp_layers = getattr(config.text_config, "mtp_num_hidden_layers", 0) or 0
         self.mtp_attrs["build"] = num_mtp_layers > 0 and not extra_options.get("exclude_mtp", False)
+        self.mtp_attrs["shared_initializer_names"] = {"model.embed_tokens.weight"}
         self.mtp_attrs["shared_initializer_prefixes"] = ("lm_head.MatMul.",)
         if not self.mtp_attrs["build"]:
             return decoder_options
@@ -2250,32 +2262,28 @@ class Qwen4ExpModel(MTPModel):
 
     def save_model(self, output_dir):
         table_name = "model.ple.ngram_embedding.weight"
-        if not self.text_only:
-            if self.input_path is None:
-                raise RuntimeError("make_model must be called before save_model.")
-            weights = self.decoder.load_weights(self.input_path)
-            language_model = weights.model.language_model
-            if len(self.decoder.ple_layer_ids) != 1:
-                raise ValueError(
-                    f"Qwen4-Exp Engram export requires exactly one PLE layer, got {sorted(self.decoder.ple_layer_ids)}."
-                )
-            ple_layer_id = next(iter(self.decoder.ple_layer_ids))
-            engram_model = Qwen4ExpEngramModel(
-                language_model.layers[ple_layer_id].ple,
-                self.config.text_config,
-                self.decoder.io_dtype,
+        if self.input_path is None:
+            raise RuntimeError("make_model must be called before save_model.")
+        weights = self.decoder.load_weights(self.input_path)
+        language_model = weights.model.language_model
+        if len(self.decoder.ple_layer_ids) != 1:
+            raise ValueError(
+                f"Qwen4-Exp Engram export requires exactly one PLE layer, got {sorted(self.decoder.ple_layer_ids)}."
             )
-            engram_model.save_model(output_dir)
-            table = ir.load(os.path.join(output_dir, engram_model.filename)).graph.initializers[table_name].const_value
-            for component in (self.decoder, self.mtp):
-                if component is not None and table_name in getattr(component, "external_data_files", {}):
-                    component.external_data_tensors = {table_name: table}
+        ple_layer_id = next(iter(self.decoder.ple_layer_ids))
+        engram_model = Qwen4ExpEngramModel(
+            language_model.layers[ple_layer_id].ple,
+            self.config.text_config,
+            self.decoder.io_dtype,
+        )
+        engram_model.save_model(output_dir)
+        table = ir.load(os.path.join(output_dir, engram_model.filename)).graph.initializers[table_name].const_value
+        for component in (self.decoder, self.mtp):
+            if component is not None and table_name in getattr(component, "external_data_files", {}):
+                component.external_data_tensors = {table_name: table}
 
         self.decoder.save_model(output_dir)
         if self.mtp is not None:
-            if self.text_only and table_name in getattr(self.mtp, "external_data_files", {}):
-                table = ir.load(os.path.join(output_dir, self.decoder.filename)).graph.initializers[table_name].const_value
-                self.mtp.external_data_tensors = {table_name: table}
             self.mtp.save_model(output_dir)
             self.mtp_attrs["shared_initializers"] = self.share_initializers(
                 output_dir, self.decoder.filename, self.mtp.filename
@@ -2299,47 +2307,50 @@ class Qwen4ExpModel(MTPModel):
 
     def make_genai_config(self, config, extra_kwargs, out_dir):
         self.decoder.make_genai_config(config.text_config, extra_kwargs, out_dir)
-        if self.text_only:
-            if self.mtp is not None:
-                self.add_mtp_to_genai_config(out_dir)
-            return
         config_path = os.path.join(out_dir, "genai_config.json")
         with open(config_path) as config_file:
             genai_config = json.load(config_file)
 
         model_config = genai_config["model"]
-        model_config["type"] = "qwen3_5"
-        model_config["image_token_id"] = config.image_token_id
-        model_config["vision_start_token_id"] = config.vision_start_token_id
         decoder_inputs = model_config["decoder"]["inputs"]
-        decoder_inputs["inputs_embeds"] = "inputs_embeds"
-        decoder_inputs["input_ids"] = "input_ids"
         decoder_inputs["engram_embeddings"] = "engram_embeddings"
-        model_config["embedding"] = {
-            "filename": "embedding.onnx",
-            "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
-            "outputs": {"inputs_embeds": "inputs_embeds"},
+        if not self.text_only:
+            model_config["type"] = "qwen3_5"
+            model_config["image_token_id"] = config.image_token_id
+            model_config["vision_start_token_id"] = config.vision_start_token_id
+            decoder_inputs["inputs_embeds"] = "inputs_embeds"
+            decoder_inputs["input_ids"] = "input_ids"
+            model_config["embedding"] = {
+                "filename": "embedding.onnx",
+                "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
+                "outputs": {"inputs_embeds": "inputs_embeds"},
+            }
+            model_config["vision"] = {
+                "filename": "vision.onnx",
+                "spatial_merge_size": config.vision_config.spatial_merge_size,
+                "inputs": {"pixel_values": "pixel_values", "image_grid_thw": "image_grid_thw"},
+                "outputs": {"image_features": "image_features"},
+            }
+        ple_layer_id = config.text_config.ple_layer_ids[0] - 1
+        engram_session_options = {
+            "intra_op_num_threads": 8,
+            "provider_options": [{"cuda" if self.decoder.ep == "cuda" else "cpu": {}}],
         }
-        model_config["vision"] = {
-            "filename": "vision.onnx",
-            "spatial_merge_size": config.vision_config.spatial_merge_size,
-            "inputs": {"pixel_values": "pixel_values", "image_grid_thw": "image_grid_thw"},
-            "outputs": {"image_features": "image_features"},
-        }
+        if self.decoder.ep == "cuda":
+            engram_session_options["session.layer_assignment_settings"] = (
+                f"cpu(={Qwen4ExpTextModel.CPU_EMBEDDING_ANNOTATION})"
+            )
         model_config["engram"] = {
             "filename": "engram.onnx",
             "cache_capacity": 4096,
-            "session_options": {
-                "intra_op_num_threads": 8,
-                "provider_options": [{"cpu": {}}],
-            },
+            "session_options": engram_session_options,
             "inputs": {
                 "input_ids": "input_ids",
-                "past_tokens": "past_ple_tokens",
+                "past_ple_token_names": f"past.{ple_layer_id}.ple_tokens",
             },
             "outputs": {
                 "embeddings": "engram_embeddings",
-                "present_tokens": "present_ple_tokens",
+                "present_ple_token_names": f"present.{ple_layer_id}.ple_tokens",
             },
         }
         with open(config_path, "w") as config_file:

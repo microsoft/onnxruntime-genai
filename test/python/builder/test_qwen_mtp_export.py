@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import onnx
@@ -175,7 +176,8 @@ def test_add_qwen4_exp_mtp_to_genai_config(tmp_path):
     assert config["model"]["mtp"]["outputs"]["present_indexer_names"] == "present.%d.indexer_key"
 
 
-def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):
+@pytest.mark.parametrize("qwen38", [False, True])
+def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path, qwen38):
     main_data = b"samecodescalglob"
     mtp_data = b"samecodescalglobkeep"
     (tmp_path / "model.onnx.data").write_bytes(main_data)
@@ -203,6 +205,9 @@ def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):
     )
 
     model_builder = _make_qwen_mtp_model()
+    if qwen38:
+        model_builder = object.__new__(Qwen4ExpModel)
+        model_builder.make_mtp_init(SimpleNamespace(text_config=SimpleNamespace(mtp_num_hidden_layers=1)), {})
     shared_initializers = model_builder.share_initializers(tmp_path, "model.onnx", "mtp.onnx")
 
     assert (tmp_path / "mtp.onnx.data").read_bytes() == b"keep"

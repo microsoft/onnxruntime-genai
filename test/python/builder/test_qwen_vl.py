@@ -58,6 +58,68 @@ def test_base_mlp_fusion_is_always_enabled():
     assert model.mlp_attrs["fuse_gate_up"] is True
 
 
+@pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "trt-rtx"])
+@pytest.mark.parametrize("capability,mode", [((7, 5), 0), ((8, 0), 1), ((8, 6), 1), ((8, 9), 1), ((9, 0), 2)])
+def test_base_weight_packing_uses_selected_gpu(monkeypatch, provider, capability, mode):
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+    queried_devices = []
+
+    def get_capability(device):
+        queried_devices.append(device)
+        return capability
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", get_capability)
+    source_config = base_module.QuantConfig.from_dict({})
+    model = Model.__new__(Model)
+    model.ep = provider
+    model.onnx_dtype = ir.DataType.INT4
+    model.extra_options = {"_quant_config": source_config}
+
+    model.make_quant_config_init()
+
+    expected_mode = mode if provider == "cuda" else 0
+    assert queried_devices == ([3] if provider == "cuda" else [])
+    assert model.quant_config.runtime.matmulnbits_weights_prepacked == expected_mode
+    assert model.quant_config.moe.weights_prepacked == int(expected_mode > 0)
+    assert source_config.moe.weights_prepacked == -1
+    assert source_config.runtime.matmulnbits_weights_prepacked == 0
+
+
+@pytest.mark.parametrize("available,hip", [(False, None), (True, "6.0")])
+def test_base_weight_packing_requires_nvidia_cuda(monkeypatch, available, hip):
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: available)
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.quant_config = base_module.QuantConfig.from_dict({})
+
+    model.make_weight_packing_init()
+
+    assert model.quant_config.runtime.matmulnbits_weights_prepacked == 0
+    assert model.quant_config.moe.weights_prepacked == 0
+
+
+def test_base_weight_packing_handles_detection_failure(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+
+    def fail_capability(device):
+        raise RuntimeError("CUDA driver unavailable")
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", fail_capability)
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.quant_config = base_module.QuantConfig.from_dict({})
+
+    model.make_weight_packing_init()
+
+    assert model.quant_config.runtime.matmulnbits_weights_prepacked == 0
+    assert model.quant_config.moe.weights_prepacked == 0
+
+
 def test_base_matmul_honors_module_quantization_exclusion(monkeypatch):
     model = Model.__new__(Model)
     model.quant_attrs = {"nodes_to_exclude": []}

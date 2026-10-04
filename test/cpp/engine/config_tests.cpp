@@ -43,6 +43,28 @@ TEST(ConfigTest, ParsesSelectedLogitsInput) {
   EXPECT_EQ(config.model.decoder.inputs.logits_indices, "selected_rows");
 }
 
+TEST(ConfigTest, ParsesEngramPleTokenNames) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{
+    "inputs":{"past_ple_token_names":"past.1.ple_tokens"},
+    "outputs":{"present_ple_token_names":"present.1.ple_tokens"}
+  }}})");
+
+  EXPECT_EQ(config.model.engram.inputs.past_tokens, "past.1.ple_tokens");
+  EXPECT_EQ(config.model.engram.outputs.present_tokens, "present.1.ple_tokens");
+}
+
+TEST(ConfigTest, ParsesLegacyEngramTokenNames) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{
+    "inputs":{"past_tokens":"legacy_past"},
+    "outputs":{"present_tokens":"legacy_present"}
+  }}})");
+
+  EXPECT_EQ(config.model.engram.inputs.past_tokens, "legacy_past");
+  EXPECT_EQ(config.model.engram.outputs.present_tokens, "legacy_present");
+}
+
 TEST(ConfigTest, RejectsNonPositiveStaticBatchSize) {
   Config config;
 

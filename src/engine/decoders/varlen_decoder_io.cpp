@@ -75,6 +75,13 @@ struct CpuEngram {
     }
     history_length = history_shape[1];
     width = output_shape[2];
+    if (model.session_info_.HasInput(config.outputs.present_tokens)) {
+      const auto shape = model.session_info_.GetInputShape(config.outputs.present_tokens);
+      if (model.session_info_.GetInputDataType(config.outputs.present_tokens) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+          shape.size() != 2 || shape[1] != history_length) {
+        throw std::runtime_error("Engram token history must match the packed decoder history input.");
+      }
+    }
     run_options = OrtRunOptions::Create();
     if (config.run_options) {
       for (const auto& [key, value] : *config.run_options) {
@@ -84,7 +91,7 @@ struct CpuEngram {
   }
 
   void Run(std::span<const std::shared_ptr<Request>> requests, Tensor& output,
-           CpuEmbedding::Workspace& workspace) const {
+           CpuEmbedding::Workspace& workspace, Tensor* present_tokens) const {
     auto bytes = workspace.Prepare(output);
     auto host = bytes.CpuSpan();
     const size_t row_bytes = static_cast<size_t>(width) * Ort::SizeOf(type);
@@ -94,6 +101,9 @@ struct CpuEngram {
                                                      output.p_device_->GetMemoryInfo()->GetDeviceId(), OrtMemTypeCPUOutput)
                              : OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
     size_t offset = 0;
+    size_t history_offset = 0;
+    DeviceSpan<int64_t> present_span;
+    if (present_tokens) present_span = present_tokens->GetDeviceSpan<int64_t>();
     for (const auto& request : requests) {
       const auto tokens = request->UnprocessedTokensCpu();
       const auto history = request->TokensCpu();
@@ -115,15 +125,21 @@ struct CpuEngram {
                                                 past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
       auto embeddings = OrtValue::CreateTensor(*output_memory, host.data() + offset * row_bytes,
                                                 ids.size() * row_bytes, embeddings_shape, type);
-      auto present = OrtValue::CreateTensor(GetDeviceInterface(DeviceType::CPU)->GetAllocator(),
-                                            past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      auto present = present_tokens
+             ? OrtValue::CreateTensor(cpu_memory, present_span.CpuSpan().data() + history_offset,
+                      static_cast<size_t>(history_length) * sizeof(int64_t),
+                      past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+             : OrtValue::CreateTensor(GetDeviceInterface(DeviceType::CPU)->GetAllocator(),
+                      past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
       const char* input_names[]{config.inputs.input_ids.c_str(), config.inputs.past_tokens.c_str()};
       OrtValue* input_values[]{ids_tensor.get(), past_tensor.get()};
       const char* output_names[]{config.outputs.embeddings.c_str(), config.outputs.present_tokens.c_str()};
       OrtValue* output_values[]{embeddings.get(), present.get()};
       session.Run(run_options.get(), input_names, input_values, 2, output_names, output_values, 2);
       offset += ids.size();
+      history_offset += static_cast<size_t>(history_length);
     }
+    if (present_tokens) present_span.CopyCpuToDevice();
     workspace.Upload();
   }
 
@@ -311,6 +327,7 @@ struct GraphBufferPlan {
   enum Slot {
     kInputIds,
     kEmbeddings,
+    kEngramPresentTokens,
     kCumulativeSequenceLengths,
     kPastSequenceLengths,
     kPositionIds,
@@ -367,6 +384,11 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
   }
   plan.buffers[GraphBufferPlan::kCumulativeSequenceLengths] = {Ort::TypeToTensorType<int32_t>,
                                                                {batch + 1}};
+  const auto& engram_tokens_name = model.config_->model.engram.outputs.present_tokens;
+  if (!model.config_->model.engram.filename.empty() && model.session_info_.HasInput(engram_tokens_name)) {
+    plan.buffers[GraphBufferPlan::kEngramPresentTokens] = {
+        Ort::TypeToTensorType<int64_t>, {batch, model.session_info_.GetInputShape(engram_tokens_name)[1]}};
+  }
   plan.buffers[GraphBufferPlan::kPastSequenceLengths] = {Ort::TypeToTensorType<int32_t>, {batch}};
   if (position_planes != 0) {
     plan.buffers[GraphBufferPlan::kPositionIds] = {
@@ -453,6 +475,7 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position
 
   input_ids = make(GraphBufferPlan::kInputIds);
   embeddings = make(GraphBufferPlan::kEmbeddings);
+  engram_present_tokens = make(GraphBufferPlan::kEngramPresentTokens);
   cumulative_sequence_lengths = make(GraphBufferPlan::kCumulativeSequenceLengths);
   past_sequence_lengths = make(GraphBufferPlan::kPastSequenceLengths);
   position_ids = make(GraphBufferPlan::kPositionIds);
@@ -668,7 +691,21 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
                                {static_cast<int64_t>(num_tokens),
                                 engram ? engram->width : model->cpu_embedding_->hidden_size_});
     if (engram) {
-      engram->Run(scheduled_requests.Requests(), *embeddings, *embedding_workspace_);
+      std::unique_ptr<Tensor> owned_present_tokens;
+      Tensor* present_tokens = nullptr;
+      const auto& name = model->config_->model.engram.outputs.present_tokens;
+      if (model->session_info_.HasInput(name)) {
+        present_tokens = reshape(owned_present_tokens,
+                                 graph_buffers_ ? graph_buffers_->engram_present_tokens.get() : nullptr,
+                                 ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+                                 {static_cast<int64_t>(scheduled_requests.size()), engram->history_length});
+      }
+      engram->Run(scheduled_requests.Requests(), *embeddings, *embedding_workspace_, present_tokens);
+      if (present_tokens) {
+        input_names_.push_back(name.c_str());
+        inputs_.push_back(present_tokens->GetOrtTensor());
+        if (owned_present_tokens) owned_inputs_.push_back(std::move(owned_present_tokens));
+      }
     } else {
       model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
     }

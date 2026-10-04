@@ -438,21 +438,22 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
     assert result == "quantized-proto"
 
 
-def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch):
+@pytest.mark.parametrize("mode,block_size,expected", [(1, 32, 1), (2, 64, 2), (2, 32, 0)])
+def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mode, block_size, expected):
     model = Model.__new__(Model)
     model.ep = "cuda"
-    model.matmul_attrs = {"weights_prepacked": 1}
+    model.matmul_attrs = {"weights_prepacked": mode}
     model.quant_attrs = {"is_symmetric": True}
 
-    weight = np.zeros((64, 1, 16), dtype=np.uint8)
+    weight = np.zeros((64, 1, block_size // 2), dtype=np.uint8)
     node = onnx.helper.make_node(
         "MatMulNBits",
         ["input", "weight", "scale", "zero_point"],
         ["output"],
         domain="com.microsoft",
         bits=4,
-        block_size=32,
-        K=32,
+        block_size=block_size,
+        K=block_size,
         N=64,
     )
     graph = onnx.helper.make_graph(
@@ -478,9 +479,11 @@ def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch):
         attr.name: onnx.helper.get_attribute_value(attr)
         for attr in model_proto.graph.node[0].attribute
     }
-    assert attrs["weight_prepacked"] == 1
-    assert model_proto.graph.node[0].input[3] == ""
-    assert "zero_point" not in {initializer.name for initializer in model_proto.graph.initializer}
+    assert attrs.get("weight_prepacked", 0) == expected
+    assert model_proto.graph.node[0].input[3] == ("" if expected else "zero_point")
+    assert ("zero_point" in {initializer.name for initializer in model_proto.graph.initializer}) == (not expected)
+    if not expected:
+        np.testing.assert_array_equal(onnx.numpy_helper.to_array(model_proto.graph.initializer[0]), weight)
     model_proto.SerializeToString()
 
 

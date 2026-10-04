@@ -433,7 +433,7 @@ class Model:
         # prepacks the weights into the fpA_intB mixed-GEMM layout so the kernel can consume them directly:
         # 0 = off (raw blockwise layout), 1 = SM80/Ampere fpA_intB layout (weight_prepacked=1),
         # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
-        # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
+        # keep the raw blockwise layout. The execution provider and active NVIDIA GPU SM determine the mode.
         self.matmul_attrs["weights_prepacked"] = self.quant_config.runtime.matmulnbits_weights_prepacked
 
         self.quant_attrs = {
@@ -1002,7 +1002,7 @@ class Model:
             self.make_initializer(make_kv_cache_scale(v_scales_per_layer, scale_index, layer_id), v_scale_name)
 
     def make_quant_config_init(self):
-        self.quant_config = self.extra_options.get("_quant_config", None)
+        self.quant_config = copy.deepcopy(self.extra_options.get("_quant_config", None))
         if self.quant_config is None:
             self.quant_config = QuantConfig.from_extra_options(
                 extra_options=self.extra_options,
@@ -1011,6 +1011,20 @@ class Model:
             )
         elif not isinstance(self.quant_config, QuantConfig):
             raise TypeError("_quant_config must be a QuantConfig instance")
+        self.make_weight_packing_init()
+
+    def make_weight_packing_init(self):
+        """Resolve CUDA layouts from the active GPU; integer QMoE uses SM80 packing on SM90 too."""
+        packing_mode = 0
+        if self.ep == "cuda" and torch.version.hip is None:
+            try:
+                if torch.cuda.is_available():
+                    major = torch.cuda.get_device_capability(torch.cuda.current_device())[0]
+                    packing_mode = 2 if major >= 9 else int(major >= 8)
+            except (RuntimeError, AssertionError):
+                packing_mode = 0
+        self.quant_config.moe.weights_prepacked = int(packing_mode > 0)
+        self.quant_config.runtime.matmulnbits_weights_prepacked = packing_mode
 
     def make_moe_attrs_init(self, config):
         num_experts = (
@@ -1068,8 +1082,7 @@ class Model:
 
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
-        # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
-        # raw [E, N, K/pack] weights and let the CUDA runtime PrePack hook transform them).
+        # with CPU/WebGPU/TRT-RTX. The execution provider and active NVIDIA GPU SM determine the mode.
         self.moe_attrs["weights_prepacked"] = self.quant_config.moe.weights_prepacked
 
         if self.moe_attrs["swiglu_limit"] is None and self.ep == "trt-rtx":
@@ -1887,7 +1900,7 @@ class Model:
         CUDA mixed-GEMM kernel consumes directly; it does not change the numeric values and
         is independent of the quantization method (default/rtn/k_quant) and bit width
         (int4/int8) used to produce them. This lets any `algo_config` (e.g. `k_quant`)
-        be combined with `matmulnbits_weights_prepacked > 0`.
+        be combined with automatic hardware-specific prepacking.
 
         Eligibility mirrors the runtime fpA_intB kernel: bits in {4, 8}, block_size supported
         by the target layout (SM80 -> {32, 64, 128}, SM90 -> {64, 128}), K % block_size == 0,
@@ -1909,7 +1922,6 @@ class Model:
 
         candidates = 0
         prepacked = 0
-        skipped_block_sizes = set()
         redundant_zero_points = set()
 
         for node in model_proto.graph.node:
@@ -1933,8 +1945,6 @@ class Model:
                 and n % (32 if bits == 8 else 64) == 0
             )
             if not fpa_intb_eligible:
-                if block_size not in allowed_block_sizes:
-                    skipped_block_sizes.add(block_size)
                 continue
 
             init = initializers.get(node.input[1])
@@ -1956,19 +1966,6 @@ class Model:
                 if initializer.name in redundant_zero_points and initializer.name not in referenced_initializers:
                     del model_proto.graph.initializer[index]
 
-        if candidates and not prepacked:
-            reason = (
-                f"block_size {sorted(skipped_block_sizes)} is not one of {list(allowed_block_sizes)} "
-                f"for the SM{force_arch} layout"
-                if skipped_block_sizes
-                else "no node met the fpA_intB K/N alignment"
-            )
-            raise ValueError(
-                f"matmulnbits_weights_prepacked={prepack_mode} prepacked 0 of {candidates} MatMulNBits "
-                f"nodes: {reason}. Choose a compatible block_size, use "
-                "matmulnbits_weights_prepacked=1 (SM80 layout, accepts block_size 32), or 0 to "
-                "prepack at session creation instead."
-            )
         if candidates:
             print(f"Prepacked {prepacked}/{candidates} MatMulNBits weights into the SM{force_arch} fpA_intB layout.")
 
@@ -2326,8 +2323,8 @@ class Model:
         self.make_value(outputs[0], dtype, shape=shape)
         self.make_value(outputs[1], ir.DataType.INT64, shape=shape)
 
-    def make_reshape(self, name, inputs, dtype, shape):
-        output = f"{name}/output_0"
+    def make_reshape(self, name, inputs, dtype, shape, output_name=None):
+        output = f"{name}/output_0" if output_name is None else output_name
         self.make_node("Reshape", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 

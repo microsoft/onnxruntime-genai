@@ -311,15 +311,7 @@ def check_extra_options(
 
     for key in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
         if key in extra_options:
-            extra_options[key] = int(extra_options[key])
-
-    if extra_options.get("qmoe_weights_prepacked", -1) not in (-1, 0, 1):
-        raise ValueError(f"qmoe_weights_prepacked must be -1, 0, or 1, got {extra_options['qmoe_weights_prepacked']}.")
-
-    if extra_options.get("matmulnbits_weights_prepacked", 0) not in (0, 1, 2):
-        raise ValueError(
-            f"matmulnbits_weights_prepacked must be 0, 1, or 2, got {extra_options['matmulnbits_weights_prepacked']}."
-        )
+            raise ValueError(f"{key} has been removed; weight packing is determined by the execution provider and GPU SM.")
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
@@ -896,13 +888,11 @@ def get_args():
                     WebGPU requires hidden_size and moe_intermediate_size to be divisible by qmoe_block_size.
                     Raw block-wise INT4 QMoE requires both dimensions to be even.
                     Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
-                qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
-                    -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.
-                    Default is -1.
-                matmulnbits_weights_prepacked = 0/1/2: Specify the CUDA MatMulNBits (int4/int8) weight layout.
-                    0 exports raw blockwise weights, 1 exports the SM80/Ampere fpA_intB prepacked layout, and 2 exports the SM90/Hopper fpA_intB prepacked layout.
-                    Only applies to the CUDA EP. Eligible prepacked nodes select fpA_intB automatically; the builder enables it for any ineligible nodes left in raw layout.
-                    Default is 0.
+                CUDA weight packing is automatic from the active NVIDIA GPU: MatMulNBits uses
+                    mode 1 on SM80-class GPUs and mode 2 on SM90-class GPUs. Integer QMoE uses
+                    mode 1 on both because its CUDA kernel uses the SM80 layout even on SM90.
+                    Other EPs, unavailable NVIDIA GPUs, and pre-SM80 GPUs use mode 0 (raw).
+                    Ineligible MatMulNBits projections stay raw. Packing is not configurable.
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
                 op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
@@ -993,8 +983,8 @@ def get_args():
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
                     small dynamic-convolution and candidate-selector projections dense. The body
-                    uses the raw blockwise layout by default. On CUDA, a drafter quantization
-                    format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
+                    uses the target's automatic hardware-specific packing policy. CUDA emits
+                    the corresponding fpA-intB layout for
                     projections the kernel supports (N % 64 for int4, N % 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
                     Body activations and KV caches remain bf16; this option does not quantize the

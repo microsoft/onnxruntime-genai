@@ -74,7 +74,7 @@ compatibility defaults are provider-dependent today:
 | `weights.accuracy_level` | `4` on CPU/WebGPU, else `0` |
 | `moe.block_size` | `128` on TRT-RTX, else `32` |
 | `moe.type` | `mxfp4`/`nvfp4` accepted only on CUDA |
-| `format.matmulnbits_weights_prepacked` | Prepacked layouts are CUDA-only, including block-drafter body weights |
+| Automatic weight packing | CUDA SM80-class GPUs use MatMulNBits mode `1`, SM90-class GPUs use `2`; integer QMoE uses `1` on both. Other EPs and unavailable/older NVIDIA GPUs use `0`. |
 | `format.use_qdq` | Required `true` for TRT-RTX integer dense weights |
 
 So the resolver signature is (envelope, execution provider), and rule 1 in
@@ -100,19 +100,22 @@ full quantization configuration from PR #2588:
 | `io_dtype` | Requested activation/I/O dtype, subject to the component's supported contract. |
 | `checkpoint_policy` | Reserved for loaders that implement both paths. Target options currently reject it; MTP supports `preserve` and `requantize`. |
 | `weights` | `type`, `block_size`, `symmetric`, `method`, `accuracy_level`, `op_types`, and ordered `overrides`. |
-| `moe` | Expert quantization type, block size, and packing. |
-| `format` | `use_qdq` and `matmulnbits_weights_prepacked`. |
+| `moe` | Expert quantization type and block size. |
+| `format` | `use_qdq`. |
 
-`format` is the proposed replacement name for `quant_config.runtime`: QDQ and
-weight packing change the exported graph or its initializers. They are not
-runtime-profile overrides. Keep `quant_config.runtime` as a compatibility alias;
+`format` is the proposed replacement name for `quant_config.runtime`: QDQ changes
+the exported graph and is not a runtime-profile override. Weight packing is
+automatic rather than a configurable format field. Keep `quant_config.runtime` as a compatibility alias;
 conflicting values supplied through both names are errors.
 
-Structured `weights.accuracy_level` must be a JSON integer from `0` to `4`,
-`moe.weights_prepacked` must be `-1`, `0`, or `1`, and
-`format.matmulnbits_weights_prepacked` must be `0`, `1`, or `2`. Booleans,
-floating-point values, and numeric strings are rejected for these fields;
-legacy adapters retain their string conversion. `weights.op_types` must be a
+Structured `weights.accuracy_level` must be a JSON integer from `0` to `4`.
+Booleans, floating-point values, and numeric strings are rejected for this field;
+legacy adapters retain their string conversion. Weight packing is resolved by
+the model builder from the execution provider and active NVIDIA GPU SM, not from
+user configuration. Supplying `moe.weights_prepacked` or
+`format.matmulnbits_weights_prepacked` (including the `runtime` alias) is rejected.
+Ineligible projections stay raw, including SM90 MatMulNBits with block size `32`.
+`weights.op_types` must be a
 non-empty JSON array containing only `"MatMul"` and/or `"Gather"`, not a single
 string.
 
@@ -552,8 +555,7 @@ there, or be supplied as resolved Olive resources.
             ]
           },
           "format": {
-            "use_qdq": false,
-            "matmulnbits_weights_prepacked": 1
+            "use_qdq": false
           }
         },
         "attention": {
@@ -583,8 +585,7 @@ there, or be supplied as resolved Olive resources.
             "op_types": ["MatMul"]
           },
           "format": {
-            "use_qdq": false,
-            "matmulnbits_weights_prepacked": 0
+            "use_qdq": false
           }
         }
       },
@@ -614,7 +615,7 @@ The scale filename retains the original `int8` label intentionally: validate its
 contents for the selected INT4 KV scheme rather than inferring format from its name.
 
 Drafter block size is explicit to reproduce the former target-derived value
-without new implicit inheritance. Drafter packing `0` describes the BF16 body;
+without new implicit inheritance. A BF16 drafter body needs no integer packing;
 the target's borrowed head follows its separately validated sharing/layout policy.
 Effective shared tensor behavior must be checked during migration, not assumed
 from these numeric settings alone.
@@ -672,21 +673,14 @@ The profile does not duplicate them. For an inline profile, replace the recipe's
 For a package that must store one target/drafter copy of each tensor, change both
 policies to `required`. The fragment below is a variant of the pass above, shown
 without repeating it. Compose it using the section 6 convention: objects merge
-recursively, scalars replace, arrays replace whole. So its
-`target_options.quant_config.format` changes only
-`matmulnbits_weights_prepacked`, and the base pass's `use_qdq: false` survives;
-its `runtime_config` object first replaces the recipe's profile filename with
+recursively, scalars replace, arrays replace whole. Its `runtime_config` object
+first replaces the recipe's profile filename with
 that file's loaded contents, then merges the session entries shown here on top,
 leaving the base profile's `provider_options` array and `engine`, `search`, and
 `speculative` sections intact. The result is one complete pass.
 
 ```json
 {
-  "target_options": {
-    "quant_config": {
-      "format": {"matmulnbits_weights_prepacked": 0}
-    }
-  },
   "drafter_options": {
     "shared_weights": {
       "embedding": "required",
@@ -706,12 +700,10 @@ leaving the base profile's `provider_options` array and `engine`, `search`, and
 }
 ```
 
-Raw target layout plus target-only fpA/intB session selection follows PR #2585
-and avoids one offline-prepacked-layout obstacle to sharing. It does not by
-itself guarantee adoption: the actual head format, boundary dtype, target tying,
-and INT8 embedding adoption must still pass validation. Keep the target's INT8
-embedding requirement; fail rather than downgrade it to satisfy sharing. Some
-compatible prepacked exports can share already and need not switch to raw layout.
+Offline packing follows the active GPU automatically; runtime flags do not force
+raw initializer storage. Sharing is checked against the actual saved head layout,
+boundary dtype, target tying, and INT8 embedding adoption. Keep the target's INT8
+embedding requirement; fail rather than downgrade it to satisfy sharing.
 The runtime flags above select kernels independently of the still-enabled target
 fusion; DFlash2's session does not inherit the target's fpA/intB setting.
 
@@ -835,8 +827,9 @@ target/drafter/runtime envelope.
 | `block_size`, `op_types_to_quantize` | Target `quant_config.weights` fields |
 | `is_symmetric`, `accuracy_level` | Target `quant_config.weights.symmetric` and `weights.accuracy_level` |
 | `algo_config`, `nodes_to_exclude` | Target `quant_config.weights.method` plus generated `weights.overrides` entries; exclusions precede generated preset rules so they stay unconditional |
-| `matmulnbits_weights_prepacked`, `use_qdq` | Target `quant_config.format` fields |
-| `moe_quant_type`, `qmoe_block_size`, `qmoe_weights_prepacked` | Target `quant_config.moe` fields |
+| `use_qdq` | Target `quant_config.format.use_qdq` |
+| `moe_quant_type`, `qmoe_block_size` | Target `quant_config.moe` fields |
+| `matmulnbits_weights_prepacked`, `qmoe_weights_prepacked` | Removed; packing is automatic from the execution provider and GPU SM |
 | `use_8bits_moe` | Deprecated `moe_quant_type` alias; unchanged |
 | `use_paged_attention`, `paged_block_size` | Target `attention.implementation` and `attention.paged.block_size` |
 | `kv_cache_quant_scheme`, `kv_cache_scale_file` | Target `attention.kv_cache` fields |

@@ -472,6 +472,12 @@ class QuantConfig:
         """
         precision = onnx_dtype_to_precision(precision)
         extra_options = dict(extra_options or {})
+        for option in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
+            if option in extra_options:
+                raise ValueError(
+                    f"extra_options.{option} has been removed; "
+                    "weight packing is determined by the execution provider and GPU SM"
+                )
 
         weights_type = _PRECISION_TO_WEIGHTS_TYPE.get(precision, "none")
 
@@ -516,13 +522,13 @@ class QuantConfig:
         moe = MoEConfig(
             type=moe_quant_type,
             block_size=int(extra_options.get("qmoe_block_size", default_moe_block)),
-            weights_prepacked=int(extra_options.get("qmoe_weights_prepacked", -1)),
+            weights_prepacked=0,
         )
 
         # --- runtime -----------------------------------------------------
         runtime = RuntimeConfig(
             use_qdq=normalize_bool(extra_options.get("use_qdq", False), "use_qdq"),
-            matmulnbits_weights_prepacked=int(extra_options.get("matmulnbits_weights_prepacked", 0)),
+            matmulnbits_weights_prepacked=0,
         )
 
         io_dtype = default_io_dtype(precision, execution_provider, extra_options)

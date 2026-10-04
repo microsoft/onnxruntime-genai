@@ -405,7 +405,7 @@ Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx
 
 `max_draft_tokens` writes `speculative.max_draft_tokens` into `genai_config.json`, capping how many drafted tokens the engine verifies each step. It must be between 1 and 16, and defaults to unset, which leaves the runtime default of 4 in effect. This differs from `dflash2_num_draft_tokens`: the drafter's exported block costs the same to run no matter how many of its tokens are verified, so raising this value buys extra accepted tokens for free until the wider verification step costs more than it saves. The best value is workload-specific and must be measured; it can be retuned on an already-exported model by editing the config.
 
-`dflash2_precision` accepts `bf16` (default), `int4`, or `int8`. Integer modes quantize the attention and MLP weights at the target's block size while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches remain BF16; this option does not quantize the drafter's KV cache. The body uses the portable raw blockwise layout by default. On CUDA, set the drafter quantization format's `matmulnbits_weights_prepacked` to `1` or `2` to emit the corresponding fpA-intB layout when the runtime supports BF16 activations for that layout. Only projections the kernel supports are prepacked (output width divisible by 64 for INT4 or 32 for INT8); the rest stay in the raw layout. Normally the LM head is not quantized separately: the drafter adopts the target's saved head, bytes and layout alike, so the two always agree and are deduplicated into one copy on disk. When the target's head uses a format the drafter cannot address by name, such as asymmetric, `use_qdq`, or `rtn`/`k_quant` layouts, the drafter's head stays dense. A head the checkpoint supplies already quantized (FP8) overrides `--precision` for the target and for the drafter alike. The embedding table works the same way: `op_types_to_quantize=MatMul/Gather` turns the target's `Gather` into `GatherBlockQuantized`, and the drafter adopts that table rather than keeping a dense copy. It has to, because the two graphs are deduplicated by initializer name — a target that renames the table while the drafter keeps a dense `Gather` costs more than the target saved. Under `shared_embeddings` the target gathers from its LM-head weight instead of a table of its own, so the drafter's embedding stays dense.
+`dflash2_precision` accepts `bf16` (default), `int4`, or `int8`. Integer modes quantize the attention and MLP weights at the target's block size while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches remain BF16; this option does not quantize the drafter's KV cache. The body uses the target's automatic hardware-specific packing policy: CUDA SM80-class GPUs select mode `1`, SM90-class GPUs select mode `2`, and other EPs or unavailable/older NVIDIA GPUs select raw mode `0`. Only projections the kernel supports are prepacked (output width divisible by 64 for INT4 or 32 for INT8, with a supported block size); the rest stay in the raw layout. Normally the LM head is not quantized separately: the drafter adopts the target's saved head, bytes and layout alike, so the two always agree and are deduplicated into one copy on disk. When the target's head uses a format the drafter cannot address by name, such as asymmetric, `use_qdq`, or `rtn`/`k_quant` layouts, the drafter's head stays dense. A head the checkpoint supplies already quantized (FP8) overrides `--precision` for the target and for the drafter alike. The embedding table works the same way: `op_types_to_quantize=MatMul/Gather` turns the target's `Gather` into `GatherBlockQuantized`, and the drafter adopts that table rather than keeping a dense copy. It has to, because the two graphs are deduplicated by initializer name — a target that renames the table while the drafter keeps a dense `Gather` costs more than the target saved. Under `shared_embeddings` the target gathers from its LM-head weight instead of a table of its own, so the drafter's embedding stays dense.
 
 ```bash
 python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 max_draft_tokens=7
@@ -544,6 +544,12 @@ The `--precision` argument controls the unquantized tensors and model I/O; it do
 
 NVIDIA's `nvidia/Qwen3.8-Flash-Next-NVFP4` checkpoint is also supported. Its routed main-model experts remain native NVFP4, attention/shared experts/hyper-connections follow `--precision`, and the sharded PLE table retains its FP8 bytes and per-tensor scale. The loader concatenates PLE shards in numeric order without loading the checkpoint through Hugging Face's eager ModelOpt quantizer. Vision weights are loaded only when exporting the multimodal components.
 
+Qwen3.8 Flash exports always include `engram.onnx` and `engram.onnx.data`, including paged exports with `text_only=true` or `exclude_mtp=true`. The main decoder consumes embeddings from the standalone Engram session instead of repeating the table lookup internally. CUDA exports run Engram with the CUDA provider and assign its `cpu_embedding`-annotated `GatherBlockQuantized` lookup to CPU using `session.layer_assignment_settings="cpu(=cpu_embedding)"`. Engram retains the native FP8 table without duplicating or dequantizing its stored weights. Text-only export does not require vision or embedding companion graphs.
+
+Engram token history follows the decoder's `past.%d.ple_tokens` / `present.%d.ple_tokens` naming convention, using the zero-based PLE layer ID. Its config uses `inputs.past_ple_token_names` and `outputs.present_ple_token_names` with concrete bindings such as `past.1.ple_tokens` and `present.1.ple_tokens`. The runtime also accepts the legacy `past_tokens` and `present_tokens` keys for older exports.
+
+For paged decoding, the runtime packs Engram's `[batch_size, sequence_length, ple_embed_dim]` output into the decoder's `[num_tokens, ple_embed_dim]` `engram_embeddings` input. The decoder does not consume or forward Engram's token-history output. Its small token-history operation supplies the final PLE history directly and, with compact speculative-state capture enabled, records per-token rollback snapshots; it does not perform another embedding lookup.
+
 ```bash
 python builder.py -i /home/kvaishnavi/Qwen3.8-Flash-Next-NVFP4 \
   -o /home/kvaishnavi/qwen38_nvfp4_onnx -p fp16 -e cuda \
@@ -556,7 +562,7 @@ Use `--extra_options text_only=true` to omit the vision and embedding components
 
 When a Qwen3.5 MoE configuration declares one or more MTP layers with `mtp_num_hidden_layers`, the builder exports the multi-token-prediction head for self-speculative decoding. An auxiliary `mtp.onnx` (plus its `mtp.onnx.data`) is generated alongside the main model, and the main model automatically exposes the hidden states consumed by the MTP head. Models without declared MTP layers do not produce this file or an MTP section in `genai_config.json`.
 
-Qwen3.8 Flash Next checkpoints (`Qwen4ExpForConditionalGeneration`) use their native one-layer MTP head automatically. The exporter preserves the target's hyper-connection streams, applies the checkpoint's separate `mtp.fc_embedding` and `mtp.fc_hidden` projections, and exports the QSA indexer cache bindings required by the draft layer. Both the original floating-point checkpoint and NVIDIA's mixed NVFP4 checkpoint are supported, with the FP8 MTP reconstruction described above.
+Qwen3.8 Flash Next checkpoints (`Qwen4ExpForConditionalGeneration`) use their native one-layer MTP head automatically. The exporter preserves the target's hyper-connection streams, applies the checkpoint's separate `mtp.fc_embedding` and `mtp.fc_hidden` projections, and exports the QSA indexer cache bindings required by the draft layer. Identical `model.embed_tokens.weight` and LM-head tensors share external storage and are declared as shared initializers for runtime reuse. Both the original floating-point checkpoint and NVIDIA's mixed NVFP4 checkpoint are supported, with the FP8 MTP reconstruction described above.
 
 ```bash
 # From wheel:
@@ -699,31 +705,31 @@ ONNX Runtime builds that include [microsoft/onnxruntime#32644](https://github.co
 
 ##### QMoE Weights Prepacked
 
-This scenario is for when you want to control the CUDA QMoE expert weight layout. The default value is `-1`, which lets the builder choose the layout automatically. Use `0` to export raw weights and let CUDA prepack them at runtime, or `1` to export CUTLASS-prepacked weights.
+Integer QMoE weight packing is automatic. With the CUDA EP and an active NVIDIA GPU of SM80 or newer, the builder exports CUTLASS-prepacked weights (mode `1`). Other EPs, unavailable NVIDIA GPUs, and pre-SM80 GPUs use raw weights (mode `0`). Integer QMoE uses the SM80 layout even on SM90 because its CUDA kernel does not accept mode `2`. Native NVFP4/FP8 checkpoint layouts remain governed by their loader metadata. The `qmoe_weights_prepacked` option has been removed.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda
 ```
 
 ##### MatMulNBits Weights Prepacked
 
-This scenario is for when you want to control the CUDA MatMulNBits (int4/int8) weight layout. The default value is `0`, which exports raw blockwise weights. Use `1` to export the SM80/Ampere `fpA_intB` prepacked layout, or `2` to export the SM90/Hopper `fpA_intB` prepacked layout. This only applies to the CUDA EP. Eligible prepacked nodes select the `fpA_intB` path automatically, so `ORT_FPA_INTB_GEMM` or `ep.cuda.fpa_intb_gemm=1` is not required to run them.
+MatMulNBits (int4/int8) weight packing is automatic from the active NVIDIA GPU when exporting for CUDA: SM80-class GPUs select mode `1` (Ampere), and SM90-class GPUs select mode `2` (Hopper). Other EPs, unavailable NVIDIA GPUs, and pre-SM80 GPUs select mode `0` (raw). The `matmulnbits_weights_prepacked` option has been removed. Eligible nodes select the `fpA_intB` path automatically. Ineligible nodes remain raw; in particular, SM90 packing supports block sizes `64` and `128`, not the default `32`. An export with no eligible nodes still succeeds with raw weights.
 
 The builder writes `ep.cuda.fpa_intb_gemm=1` automatically for prepacked exports so that nodes the prepack pass skipped because their `N`, `K`, or `block_size` is unsupported use the same kernel family. This setting is optional for the eligible nodes that were prepacked.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda
 ```
 
-Set `enable_cuda_fpa_intb_gemm=true` to select the same CUDA kernel family while retaining the default raw blockwise weight layout. The default is `false`; the option writes `ep.cuda.fpa_intb_gemm=1` to the decoder session options and only applies to the CUDA EP.
+Set `enable_cuda_fpa_intb_gemm=true` to select the same CUDA kernel family independently of offline weight packing. This does not override the automatic packing policy. The default is `false`; the option writes `ep.cuda.fpa_intb_gemm=1` to the decoder session options and only applies to the CUDA EP.
 
 ```bash
 # From wheel:

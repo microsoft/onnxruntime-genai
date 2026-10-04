@@ -224,6 +224,12 @@ def canonical_quant_data(data: dict[str, Any]) -> dict[str, Any]:
     if runtime_data is not None:
         result["format"] = runtime_data
         del result["runtime"]
+    for section, field in (("moe", "weights_prepacked"), ("format", "matmulnbits_weights_prepacked")):
+        if field in result.get(section, {}):
+            raise ValueError(
+                f"quant_config.{section}.{field} has been removed; "
+                "weight packing is determined by the execution provider and GPU SM"
+            )
     return result
 
 
@@ -283,8 +289,6 @@ def normalize_target_quant_config(
         raise ValueError("target weight overrides are not supported when weights.type=none")
     if merged["moe"]["type"] in ("mxfp4", "nvfp4") and execution_provider != "cuda":
         raise ValueError(f"moe.type={merged['moe']['type']} is supported only on CUDA")
-    if merged["format"]["matmulnbits_weights_prepacked"] and execution_provider != "cuda":
-        raise ValueError("format.matmulnbits_weights_prepacked is supported only on CUDA")
     if execution_provider == "trt-rtx" and weights_type in ("int4", "uint4", "int8", "uint8"):
         if "format" in canonical and canonical["format"].get("use_qdq") is False:
             raise ValueError("TRT-RTX integer dense weights require quant_config.format.use_qdq=true")
@@ -298,9 +302,7 @@ def normalize_target_quant_config(
         "algo_config": "weights.method",
         "moe_quant_type": "moe.type",
         "qmoe_block_size": "moe.block_size",
-        "qmoe_weights_prepacked": "moe.weights_prepacked",
         "use_qdq": "format.use_qdq",
-        "matmulnbits_weights_prepacked": "format.matmulnbits_weights_prepacked",
     }
     for legacy_key, path in aliases.items():
         section, leaf = path.split(".")
@@ -332,7 +334,6 @@ def flatten_target_options(
     flattened["is_symmetric"] = quant_config.weights.symmetric
     flattened["op_types_to_quantize"] = quant_config.weights.op_types
     flattened["use_qdq"] = quant_config.format.use_qdq
-    flattened["matmulnbits_weights_prepacked"] = quant_config.format.matmulnbits_weights_prepacked
     if "type" in options.get("quant_config", {}).get("moe", {}):
         if quant_config.moe.type == "none":
             flattened.pop("moe_quant_type", None)
@@ -420,17 +421,8 @@ def normalize_drafter_quant_config(
             raise ValueError("DFlash2 supports only symmetric DEFAULT integer weight quantization")
         if quant_config.format.use_qdq:
             raise ValueError("DFlash2 body weights require QOperator format")
-        if quant_config.weights.type != "none" and quant_config.format.matmulnbits_weights_prepacked:
-            prepack_mode = quant_config.format.matmulnbits_weights_prepacked
-            allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
-            if quant_config.weights.block_size not in allowed_block_sizes:
-                raise ValueError(
-                    f"DFlash2 prepacked body weights require block_size in {allowed_block_sizes} for mode {prepack_mode}"
-                )
     if quant_config.moe.type != "none":
         raise ValueError(f"{drafter_type} does not support MoE expert quantization")
-    if execution_provider != "cuda" and quant_config.format.matmulnbits_weights_prepacked:
-        raise ValueError("prepacked MatMulNBits weights are supported only on CUDA")
     return quant_config
 
 
@@ -594,6 +586,12 @@ def normalize_builder_config(
     here, although block-drafter config.json is read to resolve auxiliary taps.
     """
     legacy_options = copy.deepcopy(extra_options or {})
+    for option in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
+        if option in legacy_options:
+            raise ValueError(
+                f"extra_options.{option} has been removed; "
+                "weight packing is determined by the execution provider and GPU SM"
+            )
     for removed_option in ("fuse_mlp_gate_up", "dflash2_fuse_gate_up", "use_device_allocator_for_initializers"):
         if removed_option in legacy_options:
             raise ValueError(f"extra_options.{removed_option} has been removed; this behavior is always enabled")

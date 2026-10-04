@@ -789,12 +789,7 @@ class Qwen35MoEModel(MTPModel):
             if quant_config is not None
             else self.decoder.quant_attrs["matmul_block_size"]
         )
-        requested_prepack = int(
-            quant_config.format.matmulnbits_weights_prepacked
-            if quant_config is not None
-            else self.decoder.matmul_attrs["weights_prepacked"]
-        )
-        prepack = requested_prepack if self.decoder.ep == "cuda" else 0
+        prepack = self.decoder.matmul_attrs["weights_prepacked"] if self.decoder.ep == "cuda" else 0
         return {"bits": bits, "block_size": block_size, "prepack": prepack}
 
     def block_drafter_lm_head_quant(self):

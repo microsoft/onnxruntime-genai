@@ -2240,7 +2240,7 @@ struct EngramInputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "input_ids") {
       v_.input_ids = JSON::Get<std::string_view>(value);
-    } else if (name == "past_tokens") {
+    } else if (name == "past_ple_token_names" || name == "past_tokens") {
       v_.past_tokens = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
@@ -2257,7 +2257,7 @@ struct EngramOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "embeddings") {
       v_.embeddings = JSON::Get<std::string_view>(value);
-    } else if (name == "present_tokens") {
+    } else if (name == "present_ple_token_names" || name == "present_tokens") {
       v_.present_tokens = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};

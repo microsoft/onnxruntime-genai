@@ -796,7 +796,7 @@ def test_quantized_drafter_reuses_the_targets_lm_head_names():
     }
 
 
-def test_structured_drafter_quantization_does_not_inherit_target_layout():
+def test_structured_drafter_quantization_uses_target_hardware_layout():
     quant_config = types.SimpleNamespace(
         weights=types.SimpleNamespace(block_size=128),
         format=types.SimpleNamespace(matmulnbits_weights_prepacked=0),
@@ -805,7 +805,7 @@ def test_structured_drafter_quantization_does_not_inherit_target_layout():
     quant = _quant_composite().block_drafter_quant("int4", quant_config)
 
     assert quant["block_size"] == 128
-    assert quant["prepack"] == 0
+    assert quant["prepack"] == 1
 
 
 @pytest.mark.parametrize(
