@@ -332,6 +332,12 @@ size_t RequiredSlots(const std::shared_ptr<Request>& request) {
 
 }  // namespace
 
+size_t PagedCacheMemoryBudget(size_t available_memory_bytes, float gpu_utilization_factor) {
+  constexpr float memory_fragmentation_factor = 0.9f;
+  return static_cast<size_t>(
+      available_memory_bytes * memory_fragmentation_factor * gpu_utilization_factor);
+}
+
 size_t ComputePagedBlockCapacityFromBytes(size_t available_memory_bytes,
                                           float gpu_utilization_factor,
                                           size_t reserved_memory_bytes,
@@ -340,9 +346,7 @@ size_t ComputePagedBlockCapacityFromBytes(size_t available_memory_bytes,
   if (primary_bytes_per_block == 0) {
     throw std::invalid_argument("Paged cache bytes per block must be greater than zero");
   }
-  constexpr float memory_fragmentation_factor = 0.9f;
-  const auto budget = static_cast<size_t>(
-      available_memory_bytes * memory_fragmentation_factor * gpu_utilization_factor);
+  const auto budget = PagedCacheMemoryBudget(available_memory_bytes, gpu_utilization_factor);
   if (budget <= reserved_memory_bytes) {
     throw std::runtime_error("The key-value cache budget is too small to hold the reserved decoder state.");
   }
@@ -811,8 +815,17 @@ const PrefixCacheMetrics& PagedKeyValueCache::PrefixMetrics() const {
 }
 
 void PagedKeyValueCache::SealCommittedBlocks(
-    const void* request_id, std::span<const int32_t> tokens) {
+    const void* request_id, std::span<const int32_t> tokens,
+    std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint) {
   if (!prefix_cache_->Enabled()) {
+    return;
+  }
+  if (RequiresPrefixCheckpoint()) {
+    if (checkpoint) {
+      const size_t token_count = checkpoint->TokenCount();
+      SealCheckpointedPrefix(
+          request_id, tokens, token_count, [checkpoint = std::move(checkpoint)] { return checkpoint; });
+    }
     return;
   }
   const auto table_index = block_table_index_->Find(request_id);
@@ -849,6 +862,59 @@ void PagedKeyValueCache::SealCommittedBlocks(
   }
 }
 
+void PagedKeyValueCache::SealCheckpointedPrefix(
+    const void* request_id, std::span<const int32_t> tokens, size_t token_count,
+    const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint) {
+  if (!prefix_cache_->Enabled() || !RequiresPrefixCheckpoint() ||
+      !CanSealPrefixCheckpoint(request_id, token_count, tokens)) {
+    return;
+  }
+  auto& table = block_tables_[*block_table_index_->Find(request_id)];
+  const size_t block_size = block_pool_->BlockSize();
+  const size_t full_blocks = token_count / block_size;
+  auto registration = prefix_cache_->RegisterCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>>{table.blocks_}.subspan(
+          table.sealed_blocks_, full_blocks - table.sealed_blocks_),
+      tokens.subspan(table.sealed_blocks_ * block_size,
+                     (full_blocks - table.sealed_blocks_) * block_size),
+      table.sealed_identity_, capture_checkpoint);
+  if (registration.identity) {
+    table.sealed_blocks_ = full_blocks;
+    table.sealed_identity_ = std::move(registration.identity);
+  } else {
+    table.sealing_stopped_ = registration.StopsSealing();
+  }
+}
+
+bool PagedKeyValueCache::CanSealPrefixCheckpoint(
+    const void* request_id, size_t token_count,
+    std::span<const int32_t> tokens) {
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return false;
+  }
+  auto& table = block_tables_[*table_index];
+  const size_t block_size = block_pool_->BlockSize();
+  if (table.sealing_stopped_ || token_count == 0 ||
+      token_count != table.committed_slots_ || token_count % block_size != 0 ||
+      table.sealed_blocks_ >= token_count / block_size) {
+    return false;
+  }
+  if (tokens.size() < token_count) {
+    throw std::runtime_error(
+        "The request token mirror is shorter than its committed paged cache.");
+  }
+  const auto status = prefix_cache_->CheckCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>>{table.blocks_}.subspan(
+          table.sealed_blocks_, token_count / block_size - table.sealed_blocks_),
+      tokens.subspan(table.sealed_blocks_ * block_size,
+                     token_count - table.sealed_blocks_ * block_size),
+      table.sealed_identity_);
+  table.sealing_stopped_ = status == PrefixCacheRegistrationStatus::Duplicate ||
+                           status == PrefixCacheRegistrationStatus::HashCollision;
+  return status == PrefixCacheRegistrationStatus::Indexed;
+}
+
 bool PagedKeyValueCache::CanAttachPrefixCheckpoint(
     const void* request_id, size_t token_count) const {
   const auto table_index = block_table_index_->Find(request_id);
@@ -876,6 +942,38 @@ bool PagedKeyValueCache::AttachPrefixCheckpoint(
       block_tables_[*table_index].sealed_identity_, std::move(checkpoint));
 }
 
+std::optional<DraftPrefixBoundary> PagedKeyValueCache::DraftBoundary(
+    const void* request_id, size_t token_count) const {
+  if (!prefix_cache_->Enabled() || !prefix_cache_->Options().requires_checkpoint) {
+    return std::nullopt;
+  }
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return std::nullopt;
+  }
+  const auto& table = block_tables_[*table_index];
+  if (token_count == 0 || token_count != table.committed_slots_ ||
+      token_count % block_pool_->BlockSize() != 0 ||
+      table.sealed_blocks_ != token_count / block_pool_->BlockSize()) {
+    return std::nullopt;
+  }
+  auto checkpoint = prefix_cache_->DraftBoundary(table.sealed_identity_, token_count);
+  if (!checkpoint) {
+    return std::nullopt;
+  }
+  return DraftPrefixBoundary{table.sealed_identity_, std::move(checkpoint)};
+}
+
+bool PagedKeyValueCache::AttachDraftCheckpoint(
+    const DraftPrefixBoundary& boundary,
+    std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint) {
+  return prefix_cache_->AttachDraftCheckpoint(boundary.first, boundary.second, std::move(checkpoint));
+}
+
+void PagedKeyValueCache::DropUnleasedDraftCheckpoints() {
+  prefix_cache_->DropUnleasedDraftCheckpoints();
+}
+
 size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
     size_t checkpoints_needed) {
   return prefix_cache_->ReclaimCheckpoints(checkpoints_needed);
@@ -883,6 +981,10 @@ size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
 
 size_t PagedKeyValueCache::ReclaimablePrefixCheckpoints() const {
   return prefix_cache_->ReclaimableCheckpoints();
+}
+
+const FixedStatePrefixCheckpoint* PagedKeyValueCache::ReclaimablePrefixCheckpoint() const {
+  return prefix_cache_->ReclaimableCheckpoint();
 }
 
 bool PagedKeyValueCache::RequiresPrefixCheckpoint() const {

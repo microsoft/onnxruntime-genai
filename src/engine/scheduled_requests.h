@@ -18,6 +18,10 @@ enum class BatchedGuidanceMaskStatus {
   FallbackRequired,
 };
 
+TargetTokenSelection BuildTopKTargetSelection(
+    std::span<const int32_t> tokens, std::span<const float> scores,
+    const EffectiveTurnPolicy& policy);
+
 BatchedGuidanceMaskStatus CollectBatchedGuidanceMasks(
     std::span<const std::shared_ptr<Request>> requests,
     size_t words_per_row,
@@ -121,12 +125,15 @@ struct ScheduledRequests {
   // plus the target-distributed correction or bonus token to commit; confirmed_draft_counts[i] is
   // that same request's confirmed prefix length alone (excluding the trailing correction/bonus),
   // used by the caller to tell a confirmed final draft apart from a replacement/bonus token when a
-  // stop match or the turn/context limit ends verification on the request's last staged token.
+  // stop match or the turn/context limit ends verification on the request's last staged token. For a
+  // greedy drafted request, greedy_tokens[i] is the target's argmax on the row after the accepted
+  // prefix (the correction or bonus token); it is -1 for every other request.
   std::vector<DeviceSpan<float>> SelectSampledRows(
       std::vector<DeviceSpan<float>>& verify_rows,
       std::vector<std::vector<int32_t>>& selected_tokens,
       std::vector<size_t>& confirmed_draft_counts,
-      std::vector<std::vector<std::mt19937>>& rng_checkpoints);
+      std::vector<std::vector<std::mt19937>>& rng_checkpoints,
+      std::vector<int32_t>& greedy_tokens);
 
   std::vector<std::shared_ptr<Request>> requests_;
   // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty

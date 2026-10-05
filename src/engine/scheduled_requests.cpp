@@ -12,8 +12,41 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <numeric>
 
 namespace Generators {
+
+TargetTokenSelection BuildTopKTargetSelection(
+    std::span<const int32_t> tokens, std::span<const float> scores,
+    const EffectiveTurnPolicy& policy) {
+  TargetTokenSelection selection;
+  const float max_score = scores[0];
+  const float inverse_temperature = 1.0f / policy.temperature;
+  std::vector<float> probabilities(scores.size());
+  float sum = 0.0f;
+  for (size_t i = 0; i < scores.size(); ++i) {
+    probabilities[i] = std::exp((scores[i] - max_score) * inverse_temperature);
+    sum += probabilities[i];
+  }
+  for (float& probability : probabilities)
+    probability /= sum;
+
+  float cumulative = 0.0f;
+  for (size_t i = 0; i < scores.size(); ++i) {
+    const float probability = probabilities[i];
+    const bool keep_top_p = !(policy.top_p > 0.0f && policy.top_p < 1.0f) ||
+                            cumulative < policy.top_p;
+    cumulative += probability;
+    if (keep_top_p) {
+      selection.indices.push_back(tokens[i]);
+      selection.probs.push_back(probability);
+    }
+  }
+  const float retained_mass = std::accumulate(selection.probs.begin(), selection.probs.end(), 0.0f);
+  for (float& probability : selection.probs)
+    probability /= retained_mass;
+  return selection;
+}
 
 namespace {
 
@@ -101,40 +134,9 @@ TargetTokenSelection BuildTargetSelection(
 
   const int k = std::min(policy.top_k, topk.k);
   const size_t offset = row * static_cast<size_t>(topk.k);
-  const float max_score = topk.scores[offset];
-  const float inverse_temperature = 1.0f / policy.temperature;
-  std::vector<float> probabilities(static_cast<size_t>(k));
-  float sum = 0.0f;
-  for (int i = 0; i < k; ++i) {
-    probabilities[static_cast<size_t>(i)] =
-        std::exp((topk.scores[offset + static_cast<size_t>(i)] - max_score) *
-                 inverse_temperature);
-    sum += probabilities[static_cast<size_t>(i)];
-  }
-  for (float& probability : probabilities)
-    probability /= sum;
-
-  int keep = k;
-  if (policy.top_p > 0.0f && policy.top_p < 1.0f) {
-    float cumulative = 0.0f;
-    for (int i = 0; i < k; ++i) {
-      cumulative += probabilities[static_cast<size_t>(i)];
-      if (cumulative >= policy.top_p) {
-        keep = i + 1;
-        break;
-      }
-    }
-  }
-  float kept_sum = 0.0f;
-  for (int i = 0; i < keep; ++i)
-    kept_sum += probabilities[static_cast<size_t>(i)];
-  selection.indices.assign(
-      topk.tokens.begin() + static_cast<ptrdiff_t>(offset),
-      topk.tokens.begin() + static_cast<ptrdiff_t>(offset + static_cast<size_t>(keep)));
-  selection.probs.assign(probabilities.begin(), probabilities.begin() + keep);
-  for (float& probability : selection.probs)
-    probability /= kept_sum;
-  return selection;
+  return BuildTopKTargetSelection(
+      std::span<const int32_t>{topk.tokens}.subspan(offset, static_cast<size_t>(k)),
+      std::span<const float>{topk.scores}.subspan(offset, static_cast<size_t>(k)), policy);
 }
 
 }  // namespace
@@ -265,6 +267,8 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
   }
 
   // A verify step gets one row per draft on top of the row that predicts the request's next token.
+  // The current contract keeps at least one row per request, including an incomplete prefill chunk
+  // whose row is not sampled. This could later be optimized by allowing zero rows for such chunks.
   size_t expected_rows = requests_.size();
   for (size_t draft_count : draft_token_counts_) {
     expected_rows += draft_count;
@@ -288,10 +292,12 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     std::vector<DeviceSpan<float>>& verify_rows,
     std::vector<std::vector<int32_t>>& selected_tokens,
     std::vector<size_t>& confirmed_draft_counts,
-    std::vector<std::vector<std::mt19937>>& rng_checkpoints) {
+    std::vector<std::vector<std::mt19937>>& rng_checkpoints,
+    std::vector<int32_t>& greedy_tokens) {
   std::vector<DeviceSpan<float>> sampled_rows;
   sampled_rows.reserve(requests_.size());
   selected_tokens.resize(requests_.size());
+  greedy_tokens.assign(requests_.size(), -1);
   confirmed_draft_counts.assign(requests_.size(), 0);
   // Left completely empty (no allocation at all) unless the pre-scan below finds at least one
   // random-sampled drafted request with an active stop controller; only then is it sized once, to
@@ -376,6 +382,8 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
         rng_checkpoints[i].reserve(draft_count + 1);
       }
       const auto drafts = requests_[i]->StagedDraftTokens();
+      const auto draft_distributions = requests_[i]->StagedDraftTokenDistributions();
+      const bool ratio_verification = draft_distributions.size() == draft_count;
       const size_t token_budget = requests_[i]->RemainingTurnTokenBudget();
       requests_[i]->RewindDraftsForTransaction(0);
       size_t accepted_count = 0;
@@ -384,12 +392,32 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
         const auto selection = BuildTargetSelection(
             row + accepted_count, verify_rows[row + accepted_count],
             requests_[i]->TurnPolicy(), topk, sampling_scratch);
-        const int32_t token = SampleTargetToken(selection, requests_[i]->rng_);
+        int32_t token;
+        bool accepted = false;
+        if (ratio_verification) {
+          const int32_t draft_token = drafts[accepted_count];
+          const auto& draft_distribution = draft_distributions[accepted_count];
+          const float target_probability = GetTargetTokenProbability(selection, draft_token);
+          const float draft_probability = GetSparseTokenProbability(
+              draft_distribution.indices, draft_distribution.probs, draft_token);
+          std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+          accepted = uniform(requests_[i]->rng_) <
+                     ComputeAcceptProb(target_probability, draft_probability);
+          token = accepted
+                      ? draft_token
+                      : SampleCorrectionToken(
+                            selection.indices, selection.probs,
+                            draft_distribution.indices, draft_distribution.probs,
+                            requests_[i]->rng_);
+        } else {
+          token = SampleTargetToken(selection, requests_[i]->rng_);
+          accepted = token == drafts[accepted_count];
+        }
         selected_tokens[i].push_back(token);
         if (checkpoint_rng) {
           rng_checkpoints[i].push_back(requests_[i]->rng_);
         }
-        if (token != drafts[accepted_count] || requests_[i]->IsStopToken(token))
+        if (!accepted || requests_[i]->IsStopToken(token))
           break;
         ++accepted_count;
       }
@@ -422,6 +450,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       ++accepted_count;
     }
     requests_[i]->CommitAcceptedDraftsForTransaction(accepted_count);
+    greedy_tokens[i] = row_argmax[row + accepted_count];
     sampled_rows.push_back(verify_rows[row + accepted_count]);
     row += draft_count + 1;
   }
@@ -621,8 +650,9 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
     if (!status_is_executable ||
         !request->IsChunkComplete())
       continue;
-    if (require_transaction_support && draft_token_counts_[request_index] != 0 &&
-        !request->TurnPolicy().IsGreedy()) {
+    // Drafted requests select every committed token during verification: a sampled request draws
+    // on its host stream, and a greedy request takes the verification argmax.
+    if (require_transaction_support && draft_token_counts_[request_index] != 0) {
       continue;
     }
 
@@ -645,16 +675,35 @@ void ScheduledRequests::BeginTransaction() {
   transaction_uses_batched_sampler_ = PrepareBatchedSamplingPlan(true);
   checkpointed_sampler_states_.clear();
   try {
-    for (const auto& request : requests_) {
+    std::vector<size_t> greedy_drafted_rows;
+    for (size_t i = 0; i < requests_.size(); ++i) {
+      const auto& request = requests_[i];
       const bool uses_batched_sampler =
           transaction_uses_batched_sampler_ &&
           std::find(sampling_plan_->requests.begin(), sampling_plan_->requests.end(),
                     request.get()) != sampling_plan_->requests.end();
-      if (uses_batched_sampler)
+      // A greedy drafted request selects its tokens from the verification argmax and commits them
+      // into a slot this transaction owns (bound below), so like a batched-sampled request its
+      // Search owns no RNG or next-token scratch worth checkpointing.
+      const bool commits_external_tokens =
+          i < draft_token_counts_.size() && draft_token_counts_[i] != 0 &&
+          request->TurnPolicy().IsGreedy() && request->SupportsBatchedSampling();
+      if (uses_batched_sampler || commits_external_tokens)
         request->SaveStateForExternalSamplingTransaction();
       else
         request->SaveStateForTransaction();
       ++transaction_checkpoint_count_;
+      if (commits_external_tokens)
+        greedy_drafted_rows.push_back(i);
+    }
+    // Such a Search may still be bound to a batched-sampler slot from an earlier step, which the
+    // sampler now hands to another request. Give it a private slot before it commits any token.
+    if (!greedy_drafted_rows.empty()) {
+      auto slots = model_->p_device_->Allocate<int32_t>(greedy_drafted_rows.size());
+      for (size_t row = 0; row < greedy_drafted_rows.size(); ++row) {
+        if (!requests_[greedy_drafted_rows[row]]->BindNextTokensSlot(slots.subspan(row, 1)))
+          throw std::logic_error("A greedy drafted request lost batched-search support.");
+      }
     }
     // Drafts join the sequence only after every checkpoint exists, so an abort rewinds them for
     // free through the same restore path as a sampled token.
@@ -726,8 +775,9 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
   std::vector<std::vector<int32_t>> selected_tokens;
   std::vector<size_t> confirmed_draft_counts;
   std::vector<std::vector<std::mt19937>> rng_checkpoints;
+  std::vector<int32_t> greedy_tokens;
   auto logits = SelectSampledRows(verify_rows, selected_tokens, confirmed_draft_counts,
-                                  rng_checkpoints);
+                                  rng_checkpoints, greedy_tokens);
   const bool guidance_applied = TryApplyBatchedGuidanceMasks(logits);
   results.assign(requests_.size(), RequestStepResult{});
   std::vector<bool> sampled_by_batched_sampler(requests_.size(), false);
@@ -893,7 +943,15 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
           requests_[i]->StageDraftCompletionForTransaction();
     } else if (requests_[i]->IsChunkComplete() && selected_tokens[i].empty() &&
                !sampled_by_batched_sampler[i]) {
-      results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i], guidance_applied);
+      if (greedy_tokens[i] >= 0) {
+        // Drafted requests run without logits processors (see Request::DraftTokenValidationError),
+        // so the verification argmax of this row already is the greedy token. Committing it directly
+        // skips a second pass over the vocabulary and its device round trip.
+        requests_[i]->search_->CommitToken(greedy_tokens[i]);
+        results[i] = requests_[i]->StageGenerationForTransaction(plan.requests[i]);
+      } else {
+        results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i], guidance_applied);
+      }
     }
   }
 }

@@ -136,6 +136,11 @@ void AppendExecutionProviderV1(OrtSessionOptions& session_options,
                                           values.data(), keys.size());
 }
 
+DeviceInterface* SelectPrimarySessionDevice(DeviceInterface* selected_device,
+                                            DeviceInterface* candidate_device) {
+  return selected_device ? selected_device : candidate_device;
+}
+
 DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            const std::vector<std::string>& providers,
                                            const std::vector<Config::ProviderOptions>& provider_options_list,
@@ -203,8 +208,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
     const auto append_provider_it = append_execution_provider.find(provider_options.name);
     if (append_provider_it != append_execution_provider.end()) {
       auto session_device = append_provider_it->second(session_options, provider_options, config, disable_graph_capture);
-      if (is_primary_session_options && session_device && !device) {
-        device = session_device;  // Set the device if not already set by a previous provider
+      if (is_primary_session_options) {
+        device = SelectPrimarySessionDevice(device, session_device);
       }
     } else {
       if (!AppendExecutionProviderV2(session_options, provider_options,

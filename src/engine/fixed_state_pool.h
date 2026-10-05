@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -58,7 +59,11 @@ struct FixedStateSlotHandle {
     return pool != nullptr && request_id != nullptr;
   }
 
-  bool operator==(const FixedStateSlotHandle&) const = default;
+  bool operator==(const FixedStateSlotHandle& other) const {
+    return pool == other.pool && request_id == other.request_id && slot == other.slot &&
+           generation == other.generation;
+  }
+  bool operator!=(const FixedStateSlotHandle& other) const { return !(*this == other); }
 };
 
 struct FixedStateCommittedState {
@@ -256,7 +261,9 @@ class FixedStatePool {
   size_t PrefixCheckpointCapacity() const;
   size_t AvailablePrefixCheckpoints() const;
   std::shared_ptr<const FixedStatePrefixCheckpoint> CapturePrefixCheckpoint(
-      const void* request_id);
+      const void* request_id,
+      const FixedStatePrefixCheckpoint* replacement = nullptr,
+      const std::function<void()>& reclaim_checkpoint = {});
 
   FixedStateSlotHandle HandleFor(const void* request_id) const;
   // True when `request_id` currently owns a committed slot. Non-throwing counterpart to HandleFor

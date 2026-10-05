@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "fixed_state_pool.h"
+#include "dflash2_drafter.h"
 
 namespace Generators {
 
@@ -93,6 +94,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   std::vector<std::unordered_map<uint64_t, Entry>::iterator> hits;
   size_t safe_hit_count = 0;
   std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint;
+  std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint;
   for (size_t offset = 0; offset + block_size <= adoptable; offset += block_size) {
     const auto chunk = tokens.subspan(offset, block_size);
     const uint64_t hash = Hash(parent_hash, chunk);
@@ -121,6 +123,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
         it->second.checkpoint->TokenCount() == offset + block_size) {
       safe_hit_count = hits.size();
       checkpoint = it->second.checkpoint;
+      draft_checkpoint = it->second.draft_checkpoint;
     }
     parent = it->second.identity;
     parent_hash = hash;
@@ -139,6 +142,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   }
   match.token_count = hits.size() * block_size;
   match.fixed_state_checkpoint = std::move(checkpoint);
+  match.draft_checkpoint = std::move(draft_checkpoint);
   ++metrics_.matches;
 
   return match;
@@ -203,8 +207,10 @@ PrefixCacheRegistration PrefixCache::Register(
   const auto parent_entry = parent ? entries_.find(parent->hash) : entries_.end();
   Entry* const parent_entry_ptr =
       parent_entry == entries_.end() ? nullptr : &parent_entry->second;
+  const auto parent_block_id =
+      parent_entry_ptr ? std::optional<size_t>{parent_entry_ptr->block->Id()} : std::nullopt;
   auto [entry_it, inserted] = entries_.try_emplace(
-      hash, Entry{block, identity, nullptr, {}, {}, !parent_entry_ptr ? std::optional<size_t>{} : std::optional<size_t>{parent_entry_ptr->block->Id()}});
+      hash, Entry{block, identity, nullptr, nullptr, {}, {}, parent_block_id});
   if (!inserted) {
     throw std::logic_error("Prefix cache identity became occupied during registration.");
   }
@@ -250,6 +256,253 @@ PrefixCacheRegistration PrefixCache::Register(
     throw;
   }
   ++metrics_.registered_blocks;
+  return {PrefixCacheRegistrationStatus::Indexed, std::move(identity)};
+}
+
+PrefixCacheRegistrationStatus PrefixCache::CheckCheckpointedPrefix(
+    std::span<const std::shared_ptr<Block>> blocks,
+    std::span<const int32_t> tokens,
+    const std::shared_ptr<const BlockIdentity>& parent) {
+  return PlanCheckpointedPrefix(blocks, tokens, parent).status;
+}
+
+PrefixCache::CheckpointedPrefixPlan PrefixCache::PlanCheckpointedPrefix(
+    std::span<const std::shared_ptr<Block>> blocks,
+    std::span<const int32_t> tokens,
+    const std::shared_ptr<const BlockIdentity>& parent) {
+  const size_t block_size = block_pool_.BlockSize();
+  if (blocks.empty() || tokens.size() / block_size != blocks.size() ||
+      tokens.size() % block_size != 0) {
+    throw std::invalid_argument("A hybrid prefix publication requires complete blocks.");
+  }
+  CheckpointedPrefixPlan plan;
+  uint64_t hash = parent ? parent->hash : RootHash();
+  auto canonical_parent = parent;
+  std::shared_ptr<const BlockIdentity> duplicate_root;
+  bool canonical_history = true;
+  for (size_t index = 0; index < blocks.size(); ++index) {
+    const auto& block = blocks[index];
+    if (!block || block->HasIdentity() || !block->IsFull() ||
+        block->Capacity() != block_size || !block_pool_.Owns(block)) {
+      throw std::logic_error("A hybrid prefix suffix must contain only private blocks.");
+    }
+    const auto chunk = tokens.subspan(index * block_size, block_size);
+    hash = Hash(hash, chunk);
+    const auto existing = entries_.find(hash);
+    if (existing == entries_.end()) {
+      canonical_history = false;
+      continue;
+    }
+    const auto& identity = *existing->second.identity;
+    if (!canonical_history || identity.parent != canonical_parent ||
+        identity.tokens.size() != chunk.size() ||
+        !std::equal(identity.tokens.begin(), identity.tokens.end(), chunk.begin())) {
+      ++metrics_.hash_collisions;
+      plan.status = PrefixCacheRegistrationStatus::HashCollision;
+      return plan;
+    }
+    // A competing request already published a usable checkpoint for these tokens. Never splice
+    // its physical history into this request or replace a prefix this request could have adopted.
+    if (existing->second.checkpoint) {
+      ++metrics_.duplicate_registrations;
+      plan.status = PrefixCacheRegistrationStatus::Duplicate;
+      return plan;
+    }
+    if (!duplicate_root) {
+      duplicate_root = existing->second.identity;
+    }
+    canonical_parent = existing->second.identity;
+  }
+  if (!duplicate_root) {
+    return plan;
+  }
+
+  // A branch between checkpoints, or a dropped checkpoint, can leave identical KV blocks that
+  // cannot be adopted. Retire their entire old suffix, but only after staging a replacement and
+  // only when no request or pending match can still use any of that history.
+  for (const auto* entry : recency_) {
+    auto identity = entry->identity;
+    while (identity && identity != duplicate_root) {
+      identity = identity->parent;
+    }
+    if (!identity) {
+      continue;
+    }
+    if (entry->block->RefCount() != 1 ||
+        (entry->checkpoint && entry->checkpoint.use_count() != 1) ||
+        (entry->draft_checkpoint && entry->draft_checkpoint.use_count() != 1)) {
+      ++metrics_.retention_refusals;
+      plan.status = PrefixCacheRegistrationStatus::CapacityRefused;
+      return plan;
+    }
+    plan.retiring_hashes.push_back(entry->identity->hash);
+  }
+  if (blocks.size() > options_.max_blocks ||
+      entries_.size() - plan.retiring_hashes.size() > options_.max_blocks - blocks.size() ||
+      (checkpoint_count_ >= options_.max_checkpoints && ReclaimableCheckpoints() == 0)) {
+    ++metrics_.retention_refusals;
+    plan.status = PrefixCacheRegistrationStatus::CapacityRefused;
+  }
+  return plan;
+}
+
+PrefixCacheRegistration PrefixCache::ReplaceCheckpointedPrefix(
+    std::span<const std::shared_ptr<Block>> blocks,
+    std::span<const int32_t> tokens,
+    const std::shared_ptr<const BlockIdentity>& parent,
+    const CheckpointedPrefixPlan& plan,
+    const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint) {
+  std::unordered_map<uint64_t, Entry> staged;
+  std::list<Entry*> staged_recency;
+  std::list<Entry*> staged_references;
+  std::vector<uint64_t> staged_hashes;
+  staged_hashes.reserve(blocks.size());
+  entries_.reserve(entries_.size() + blocks.size());
+  auto identity = parent;
+  size_t token_count = tokens.size();
+  for (auto ancestor = parent; ancestor; ancestor = ancestor->parent) {
+    token_count += block_pool_.BlockSize();
+  }
+  for (size_t index = 0; index < blocks.size(); ++index) {
+    const auto chunk = tokens.subspan(index * block_pool_.BlockSize(), block_pool_.BlockSize());
+    auto next = std::make_shared<BlockIdentity>();
+    next->hash = Hash(identity ? identity->hash : RootHash(), chunk);
+    next->parent = identity;
+    next->tokens.assign(chunk.begin(), chunk.end());
+    std::optional<size_t> parent_block_id;
+    if (index != 0) {
+      parent_block_id = blocks[index - 1]->Id();
+    } else if (parent) {
+      const auto ancestor = entries_.find(parent->hash);
+      if (ancestor == entries_.end() || ancestor->second.identity != parent) {
+        throw std::logic_error("A hybrid replacement lost its adopted parent.");
+      }
+      parent_block_id = ancestor->second.block->Id();
+    }
+    auto [it, inserted] = staged.try_emplace(
+        next->hash, Entry{blocks[index], next, nullptr, nullptr, {}, {}, parent_block_id});
+    if (!inserted) {
+      ++metrics_.hash_collisions;
+      return {PrefixCacheRegistrationStatus::HashCollision, nullptr};
+    }
+    auto& entry = it->second;
+    entry.recency = staged_recency.insert(staged_recency.end(), &entry);
+    entry.reference_state = staged_references.insert(staged_references.end(), &entry);
+    staged_hashes.push_back(next->hash);
+    identity = std::move(next);
+  }
+  auto checkpoint = capture_checkpoint();
+  if (!checkpoint) {
+    return {PrefixCacheRegistrationStatus::CapacityRefused, nullptr};
+  }
+  if (checkpoint->TokenCount() != token_count) {
+    throw std::runtime_error("Fixed state checkpoint does not match its paged prefix boundary.");
+  }
+
+  // Node handles, list splices, and prevalidated block references publish without allocation.
+  // Until this point the old suffix and its checkpoints remain available on any failure.
+  for (const uint64_t hash : plan.retiring_hashes) {
+    const auto entry = entries_.find(hash);
+    if (entry == entries_.end()) {
+      std::terminate();
+    }
+    Evict(entry);
+    ++metrics_.evictions;
+  }
+  if (checkpoint_count_ >= options_.max_checkpoints && ReclaimCheckpoints(1) != 1) {
+    std::terminate();
+  }
+  auto current = parent;
+  for (size_t index = 0; index < blocks.size(); ++index) {
+    const auto& block = blocks[index];
+    const auto pending = staged.find(staged_hashes[index]);
+    if (pending == staged.end()) {
+      std::terminate();
+    }
+    auto result = entries_.insert(staged.extract(pending));
+    if (!result.inserted) {
+      std::terminate();
+    }
+    auto& entry = result.position->second;
+    const auto ancestor = current ? entries_.find(current->hash) : entries_.end();
+    recency_.splice(
+        ancestor == entries_.end() ? recency_.end() : ancestor->second.recency,
+        staged_recency, entry.recency);
+    referenced_entries_.splice(
+        referenced_entries_.end(), staged_references, entry.reference_state);
+    block_pool_.AddRef(block);
+    block->SetIdentity(entry.identity);
+    entries_by_block_id_[block->Id()] = &entry;
+    block_pool_.SetReferenceObserverCookie(block, &entry);
+    current = entry.identity;
+    ++metrics_.registered_blocks;
+  }
+  entries_.at(identity->hash).checkpoint = std::move(checkpoint);
+  ++checkpoint_count_;
+  return {PrefixCacheRegistrationStatus::Indexed, std::move(identity)};
+}
+
+PrefixCacheRegistration PrefixCache::RegisterCheckpointedPrefix(
+    std::span<const std::shared_ptr<Block>> blocks,
+    std::span<const int32_t> tokens,
+    const std::shared_ptr<const BlockIdentity>& parent,
+    std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint) {
+  if (!checkpoint) {
+    throw std::invalid_argument("A hybrid prefix publication requires a checkpoint.");
+  }
+  return RegisterCheckpointedPrefix(
+      blocks, tokens, parent, [checkpoint = std::move(checkpoint)] { return checkpoint; });
+}
+
+PrefixCacheRegistration PrefixCache::RegisterCheckpointedPrefix(
+    std::span<const std::shared_ptr<Block>> blocks,
+    std::span<const int32_t> tokens,
+    const std::shared_ptr<const BlockIdentity>& parent,
+    const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint) {
+  if (!capture_checkpoint) {
+    throw std::invalid_argument("A hybrid prefix publication requires a checkpoint capture.");
+  }
+  const auto plan = PlanCheckpointedPrefix(blocks, tokens, parent);
+  if (plan.status != PrefixCacheRegistrationStatus::Indexed) {
+    return {plan.status, nullptr};
+  }
+  if (!plan.retiring_hashes.empty()) {
+    return ReplaceCheckpointedPrefix(blocks, tokens, parent, plan, capture_checkpoint);
+  }
+  const size_t block_size = block_pool_.BlockSize();
+  size_t registered = 0;
+  auto rollback = [&]() noexcept {
+    while (registered != 0) {
+      const auto& block = blocks[--registered];
+      const auto entry = entries_.find(block->IdentityPtr()->hash);
+      if (entry == entries_.end() || entry->second.block != block) {
+        std::terminate();
+      }
+      Evict(entry);
+      --metrics_.registered_blocks;
+    }
+  };
+  auto identity = parent;
+  try {
+    for (size_t index = 0; index < blocks.size(); ++index) {
+      auto result = Register(
+          blocks[index], tokens.subspan(index * block_size, block_size), identity);
+      if (!result.identity) {
+        rollback();
+        return result;
+      }
+      ++registered;
+      identity = std::move(result.identity);
+    }
+    auto checkpoint = capture_checkpoint();
+    if (!checkpoint || !AttachCheckpoint(identity, std::move(checkpoint))) {
+      rollback();
+      return {PrefixCacheRegistrationStatus::CapacityRefused, nullptr};
+    }
+  } catch (...) {
+    rollback();
+    throw;
+  }
   return {PrefixCacheRegistrationStatus::Indexed, std::move(identity)};
 }
 
@@ -324,6 +577,48 @@ bool PrefixCache::AttachCheckpoint(
   return true;
 }
 
+bool PrefixCache::CanAttachDraftCheckpoint(
+    const std::shared_ptr<const BlockIdentity>& identity, size_t token_count) const {
+  if (!Enabled() || !identity) {
+    return false;
+  }
+  const auto it = entries_.find(identity->hash);
+  return it != entries_.end() && it->second.identity == identity &&
+         it->second.checkpoint && it->second.checkpoint->TokenCount() == token_count &&
+         !it->second.draft_checkpoint;
+}
+
+std::shared_ptr<const FixedStatePrefixCheckpoint> PrefixCache::DraftBoundary(
+    const std::shared_ptr<const BlockIdentity>& identity, size_t token_count) const {
+  return CanAttachDraftCheckpoint(identity, token_count)
+             ? entries_.at(identity->hash).checkpoint
+             : nullptr;
+}
+
+bool PrefixCache::AttachDraftCheckpoint(
+    const std::shared_ptr<const BlockIdentity>& identity,
+    const std::shared_ptr<const FixedStatePrefixCheckpoint>& fixed_checkpoint,
+    std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint) {
+  if (!draft_checkpoint || !fixed_checkpoint ||
+      !CanAttachDraftCheckpoint(identity, draft_checkpoint->token_count)) {
+    return false;
+  }
+  auto& entry = entries_.at(identity->hash);
+  if (entry.checkpoint != fixed_checkpoint) {
+    return false;
+  }
+  entry.draft_checkpoint = std::move(draft_checkpoint);
+  return true;
+}
+
+void PrefixCache::DropUnleasedDraftCheckpoints() {
+  for (auto& [hash, entry] : entries_) {
+    if (entry.draft_checkpoint && entry.draft_checkpoint.use_count() == 1) {
+      entry.draft_checkpoint.reset();
+    }
+  }
+}
+
 size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {
   size_t reclaimed = 0;
   for (auto recency = recency_.begin();
@@ -333,11 +628,21 @@ size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {
     if (entry.checkpoint &&
         entry.checkpoint.use_count() == 1) {
       entry.checkpoint.reset();
+      entry.draft_checkpoint.reset();
       --checkpoint_count_;
       ++reclaimed;
     }
   }
   return reclaimed;
+}
+
+const FixedStatePrefixCheckpoint* PrefixCache::ReclaimableCheckpoint() const {
+  for (const auto* entry : recency_) {
+    if (entry->checkpoint && entry->checkpoint.use_count() == 1) {
+      return entry->checkpoint.get();
+    }
+  }
+  return nullptr;
 }
 
 size_t PrefixCache::ReclaimableCheckpoints() const {

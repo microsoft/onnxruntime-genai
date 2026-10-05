@@ -76,7 +76,7 @@
       "component": {
         "type": "git",
         "git": {
-          "commitHash": "e71bdaafdb263c09f280474f2e241613529f33f2",
+          "commitHash": "88defca71f0f0afe406a892b32e61e0cf6d915fe",
           "repositoryUrl": "https://github.com/microsoft/cpp_client_telemetry.git"
         },
         "comments": "cpp_client_telemetry"
