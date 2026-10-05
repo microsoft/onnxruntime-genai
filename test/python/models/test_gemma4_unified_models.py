@@ -76,7 +76,7 @@ def _media_path(test_data_path, relative_path):
     for path in candidates:
         if path.is_file():
             return os.fspath(path)
-    pytest.fail(f"Missing validation media; checked {candidates}")
+    return pytest.fail(f"Missing validation media; checked {candidates}")
 
 
 def _to_numpy(tensor):
