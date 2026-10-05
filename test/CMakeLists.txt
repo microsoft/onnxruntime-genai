@@ -106,6 +106,16 @@ endif()
 
 add_test(NAME UnitTests COMMAND unit_tests)
 
+if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
+  add_test(NAME SharedLibraryExports
+    COMMAND ${CMAKE_COMMAND}
+      "-DLIBRARY=$<TARGET_FILE:onnxruntime-genai>"
+      "-DNM=${CMAKE_NM}"
+      "-DAPI_HEADER=${CMAKE_SOURCE_DIR}/src/ort_genai_c.h"
+      "-DAPPLE_EXPORTS=${APPLE}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check-shared-library-exports.cmake")
+endif()
+
 add_executable(telemetry_helpers_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
 target_include_directories(telemetry_helpers_tests PRIVATE

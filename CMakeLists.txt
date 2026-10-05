@@ -129,6 +129,18 @@ else()
   target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj)
 endif()
 
+# Keep bundled dependencies (including curl) and C++ internals private so a
+# host cannot interpose their calls with incompatible implementations.
+if(APPLE)
+  set(ORTGENAI_EXPORTS_LIST "${CMAKE_CURRENT_SOURCE_DIR}/src/exported-symbols.lst")
+  target_link_options(onnxruntime-genai PRIVATE "LINKER:-exported_symbols_list,${ORTGENAI_EXPORTS_LIST}")
+  set_property(TARGET onnxruntime-genai APPEND PROPERTY LINK_DEPENDS "${ORTGENAI_EXPORTS_LIST}")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
+  set(ORTGENAI_EXPORTS_MAP "${CMAKE_CURRENT_SOURCE_DIR}/src/exports.map")
+  target_link_options(onnxruntime-genai PRIVATE "LINKER:--version-script,${ORTGENAI_EXPORTS_MAP}")
+  set_property(TARGET onnxruntime-genai APPEND PROPERTY LINK_DEPENDS "${ORTGENAI_EXPORTS_MAP}")
+endif()
+
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_HEADER_DIR})
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE ${GENERATORS_ROOT})

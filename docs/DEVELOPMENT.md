@@ -196,6 +196,23 @@ python build.py --config RelWithDebInfo --test
 
 > Note: `build.py` automatically disables the native test phase for `--arm64` and `--arm64ec`. Android and iOS disable CMake unit-test targets during configuration; Android emulator tests are available only for an x86-64 Android build with `--build_java --android_run_emulator`.
 
+### Native shared-library exports
+
+On Linux and Android, `src/exports.map` restricts `onnxruntime-genai` exports to
+the public `Oga*` C API. Apple builds use `src/exported-symbols.lst` for the same
+restriction. C++ consumers use the header-only wrappers over that API;
+GenAI internals and statically linked dependencies, including curl, remain private
+to prevent symbol collisions with libraries loaded by the host process. This
+does not hide symbols in separately shipped shared dependencies. Windows retains
+its explicit `OGA_EXPORT` exports, and CUDA add-on export policies are unchanged.
+
+With `ENABLE_TESTS=ON` on Linux or macOS, check that every public API declared in
+`src/ort_genai_c.h` is exported and no other symbols are exported:
+
+```bash
+ctest --test-dir build/Linux/Release -R '^SharedLibraryExports$' --output-on-failure
+```
+
 ### Python tests (pytest)
 
 Install the Python test dependencies and the wheel produced by your build:
