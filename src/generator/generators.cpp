@@ -32,6 +32,7 @@
 #include "ep/openvino/interface.h"
 #include "ep/ryzenai/interface.h"
 #include "ep/amdgpu/interface.h"
+#include "ep/amdgpu/session_options.h"
 #include "engine/engine.h"
 
 #if defined(_WIN32)
@@ -332,6 +333,13 @@ OrtGlobals::~OrtGlobals() {
   // 3. The trivial-session env-derived allocators, now unreferenced by any interface. Within each
   //    entry session_ is declared before allocator_, so ~allocator_ runs first.
   for (auto& a : device_allocators_) a = {};
+
+  // 3.5 Release a genai-owned AMDGPU umbrella-EP registration while env_ is still valid, in case a host
+  //     retains the env past step 4 (then ORT's auto-unregister never fires) or a Model ctor threw
+  //     before ~Model could release. Passed by reference to avoid re-locking g_ort_globals_mutex; no-op
+  //     unless genai owns it. Skipped at process exit (env_ released; __cxa_finalize teardown can abort).
+  if (!g_process_exiting && env_)
+    AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp(*env_, amdgpu_owns_ep_registration_);
 
   // 4. Finally the env. If genai held the last reference, ORT destroys the environment here,
   //    unregistering / unloading any still-registered EP libraries — by now nothing references them.

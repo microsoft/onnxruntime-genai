@@ -424,7 +424,9 @@ void CloseAMDGPUInterface() {
   // Step 3: release the OrtEnv-shared allocators and unregister the EP library, but only when genai
   // owns the registration (a host that pre-registered it keeps both). Both live behind one ownership
   // gate in ReleaseOwnedUmbrellaEp. Steps 1-2 are unconditional — they reset genai's own state.
-  AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp();
+  // Live context here (called from ~Model, not shutdown), so resolving env + flag via the global
+  // accessors is safe.
+  AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp(GetOrtEnv(), GetOrtGlobals()->amdgpu_owns_ep_registration_);
 }
 
 namespace AMDGPU {

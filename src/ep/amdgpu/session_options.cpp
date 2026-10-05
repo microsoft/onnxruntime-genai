@@ -110,40 +110,43 @@ void SetStaticPaddingConfig(OrtSessionOptions& session_options, const Config& co
 
 }  // namespace
 
-void ReleaseOwnedUmbrellaEp() {
-  // The EP library and its OrtEnv-shared allocators live on the process-global OrtEnv, shared with the
-  // host. A host that registered the library itself depends on it (and its shared allocators) for the
-  // whole process, so genai releases them only when it owns the registration; otherwise it leaves
-  // everything in place. One gate covers both the allocator release and the unregister.
-  if (!GetOrtGlobals()->amdgpu_owns_ep_registration_)
+void ReleaseOwnedUmbrellaEp(OrtEnv& env, bool& owns_registration) {
+  // genai releases the library + its OrtEnv-shared allocators only when it owns the registration; a host
+  // that registered them keeps both. env and owns_registration are passed in (not fetched via
+  // GetOrtEnv() / GetOrtGlobals()) because ~OrtGlobals calls this while g_ort_globals_mutex is held, so
+  // re-entering those accessors — including via FindRegisteredEpDevices — would re-lock it and deadlock.
+  if (!owns_registration)
     return;
 
   // Release the OrtEnv-shared allocators first: the shared GPU allocator holds the plugin's
   // ExecutionContext -> command queue -> device, so UnregisterExecutionProviderLibrary alone cannot
   // drop the device until these are gone. Must run while the EP device is still registered.
   // Best-effort: ReleaseSharedAllocator is a no-op when no matching shared allocator exists.
-  const auto release_shared = [](const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type) {
-    if (OrtStatus* status = Ort::api->ReleaseSharedAllocator(&GetOrtEnv(), ep_device, mem_type))
+  const auto release_shared = [&env](const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type) {
+    if (OrtStatus* status = Ort::api->ReleaseSharedAllocator(&env, ep_device, mem_type))
       Ort::api->ReleaseStatus(status);
   };
   try {
-    for (const OrtEpDevice* ep_device : FindRegisteredEpDevices(kAMDGPUExecutionProviderName)) {
+    for (const OrtEpDevice* ep_device : env.GetEpDevices()) {
+      if (ep_device->Name() != kAMDGPUExecutionProviderName)
+        continue;
       release_shared(ep_device, OrtDeviceMemoryType_DEFAULT);
       release_shared(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE);
     }
   } catch (...) {
-    // Called from ~Model (noexcept): never let anything escape (incl. std::bad_alloc from the
-    // FindRegisteredEpDevices vector). Best-effort — a failed shared-allocator release is non-fatal.
+    // Called from noexcept destruction paths (~Model, ~OrtGlobals): never let anything escape (incl.
+    // std::bad_alloc from the GetEpDevices vector). Best-effort — a failed release is non-fatal.
   }
 
   // With the shared allocators released, unregistering drops the factory's last reference, destroying
   // the plugin ProviderFactory and releasing the device + allocators + outstanding allocation handles.
   // The next genai model's EnsureUmbrellaEpRegistered re-creates a fresh library + device.
   try {
-    Ort::UnregisterExecutionProviderLibrary(&GetOrtEnv(), kAMDGPUExecutionProviderName);
-    GetOrtGlobals()->amdgpu_owns_ep_registration_ = false;
+    Ort::UnregisterExecutionProviderLibrary(&env, kAMDGPUExecutionProviderName);
+    owns_registration = false;
   } catch (...) {
-    // Called from ~Model (noexcept): best-effort. Never let an exception escape the destructor.
+    // Called from noexcept destruction paths (~Model, ~OrtGlobals): best-effort. Leave owns_registration
+    // true on failure so a later teardown retries rather than orphaning the registration.
   }
 }
 
