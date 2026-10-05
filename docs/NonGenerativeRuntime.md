@@ -149,6 +149,22 @@ matching C/C++ APIs configure it. Clearing or invalidating a session clears
 both caches. Cached tensors are immutable values and every branch feed owns a
 deep copy, while session execution and cache mutation are serialized.
 
+### KEV component thread pools
+
+Component sessions apply `intra_op_num_threads`, `inter_op_num_threads`, and
+string-valued ORT config entries from `model.decoder.session_options` in an
+optional package `genai_config.json`. KEV CPU packages use these settings to
+select 16 intra-op threads, one inter-op thread, and non-spinning idle pools
+instead of creating an unrestricted pool for every component. Package builders
+can tune this policy for their target hardware without adding model-specific
+behavior to the runtime. CUDA KEV packages specify one host thread because their
+serialized GPU execution needs little host-side parallelism.
+
+Mobius ORT GenAI export emits these defaults automatically for packages with a
+`backbone` and `pointer_head`: 16/1 threads for CPU and 1/1 for accelerator
+providers. Exporters may edit the generated standard session options for
+hardware-specific tuning.
+
 ### Optional KEV CUDA graph capture
 
 Set `ORT_GENAI_KEV_CUDA_GRAPH=1` before constructing a CUDA

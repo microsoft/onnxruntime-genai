@@ -43,6 +43,31 @@ def _package(root: Path, filename: str = "graphs/arbitrary-name.onnx") -> Path:
     return root
 
 
+def _write_component_genai_config(root: Path, filename: str, threads: int) -> None:
+    (root / "genai_config.json").write_text(
+        json.dumps(
+            {
+                "model": {
+                    "type": "component",
+                    "pad_token_id": 0,
+                    "eos_token_id": 0,
+                    "vocab_size": 1,
+                    "context_length": 8,
+                    "decoder": {
+                        "filename": filename,
+                        "session_options": {
+                            "intra_op_num_threads": threads,
+                            "inter_op_num_threads": 1,
+                            "session.intra_op.allow_spinning": "0",
+                            "session.inter_op.allow_spinning": "0",
+                        },
+                    },
+                }
+            }
+        )
+    )
+
+
 def _cuda_graph_package(root: Path) -> Path:
     weight = helper.make_tensor(
         "weight",
@@ -107,6 +132,25 @@ def test_manifest_mapping_arbitrary_filename_and_native_run(tmp_path):
     np.testing.assert_array_equal(result["output"], value)
     assert session.input_names == ["input"]
     assert session.input_info["input"]["shape"] == [-1, 2]
+
+
+def test_component_session_applies_genai_config_session_options(tmp_path):
+    filename = "graphs/arbitrary-name.onnx"
+    package = _package(tmp_path, filename)
+    _write_component_genai_config(package, filename, 1)
+    session = og.ComponentSession(str(package), "unusual.component", ["cpu"])
+    value = np.asarray([[1.5, -2.0]], dtype=np.float32)
+    np.testing.assert_array_equal(
+        session.run({"input": value}, ["output"])["output"], value
+    )
+
+
+def test_component_session_rejects_malformed_genai_config(tmp_path):
+    filename = "graphs/arbitrary-name.onnx"
+    package = _package(tmp_path, filename)
+    (package / "genai_config.json").write_text("{")
+    with pytest.raises(RuntimeError):
+        og.ComponentSession(str(package), "unusual.component", ["cpu"])
 
 
 def test_zero_element_component_output_is_supported(tmp_path):
