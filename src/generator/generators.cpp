@@ -389,6 +389,11 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
     return GetDmlInterface();
 #endif
 
+  // AMDGPU, like DML, is NOT cached: g_amdgpu_device is destroyed per-Model in CloseAMDGPUInterface(),
+  // so a cached pointer would dangle. Always fetch the current instance.
+  if (type == DeviceType::AMDGPU)
+    return GetAMDGPUInterface();
+
   auto& slot = device_interfaces_[type];
   if (slot)
     return slot;
@@ -415,9 +420,7 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
       owned_interfaces_.push_back(CreateRyzenAIInterface(*env_));
       slot = owned_interfaces_.back().get();
       break;
-    case DeviceType::AMDGPU:
-      slot = GetAMDGPUInterface();
-      break;
+    // DeviceType::AMDGPU is handled by the early return above (not cached).
     case DeviceType::CPU:
     default:
       owned_interfaces_.push_back(CreateCpuInterface());

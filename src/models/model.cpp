@@ -41,6 +41,7 @@
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
+#include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
 #include "ep/openvino/interface.h"
 #include "ep/qnn/interface.h"
@@ -523,6 +524,11 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
+
+  // Acquire the shared AMDGPU singleton, released in ~Model. Done last, after everything that can
+  // throw: a failed construction never runs ~Model, so acquiring earlier would pin the device forever.
+  if (p_device_->GetType() == DeviceType::AMDGPU)
+    AcquireAMDGPUInterface();
 }
 
 void Model::AddSharedInitializers() {
@@ -595,6 +601,17 @@ Model::~Model() {
     CloseDmlInterface();
   }
 #endif
+  if (p_device_ && p_device_->GetType() == DeviceType::AMDGPU) {
+    // Per-model teardown for the AMDGPU (DirectX plugin) path; CloseAMDGPUInterface() in the AMD module
+    // does the allocator/singleton reset and EP-library unregister. Unlike DML, session_options_ is not
+    // reset here: the plugin registers by library name and its options hold only config strings.
+    //
+    // Clear device-backed shared initializers first: each owns a GpuMemory that frees through the
+    // AMDGPU allocator CloseAMDGPUInterface destroys. Members are destroyed only after this body, so
+    // leaving them would free through a dangling allocator.
+    shared_initializer_entries_.clear();
+    CloseAMDGPUInterface();
+  }
 }
 
 // Returns the device the session will run on: CPU when the options name no device-backed provider.

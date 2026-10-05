@@ -36,7 +36,10 @@ bool SameDimensions(const std::vector<int64_t>& left, const std::vector<const ch
 MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   encoder_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true);
+  // AMDGPU-only: the DirectX/MIGraphX backends cannot capture this control-flow encoder graph. DML's
+  // existing (default-on) capture behavior is intentionally left unchanged.
+  const bool disable_encoder_graph_capture = p_device_ && p_device_->GetType() == DeviceType::AMDGPU;
+  CreateSessionOptionsFromConfig(config_->model.encoder.session_options.has_value() ? config_->model.encoder.session_options.value() : config_->model.decoder.session_options, *encoder_session_options_, true, /*disable_graph_capture=*/disable_encoder_graph_capture);
 
   session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, encoder_session_options_.get());
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());

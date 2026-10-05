@@ -183,21 +183,24 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   decoder_session_options_ = OrtSessionOptions::Create();
   joiner_session_options_ = OrtSessionOptions::Create();
 
+  // AMDGPU-only: the DirectX/MIGraphX backends cannot capture these control-flow encoder/joiner
+  // graphs. DML's existing (default-on) capture behavior is intentionally left unchanged.
+  const bool disable_subsession_graph_capture = p_device_ && p_device_->GetType() == DeviceType::AMDGPU;
   if (config_->model.encoder.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(),
-                                   *encoder_session_options_, true);
+                                   *encoder_session_options_, true, /*disable_graph_capture=*/disable_subsession_graph_capture);
   } else {
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *encoder_session_options_, true);
+                                   *encoder_session_options_, true, /*disable_graph_capture=*/disable_subsession_graph_capture);
   }
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
                                  *decoder_session_options_, true);
   if (config_->model.joiner.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
-                                   *joiner_session_options_, true);
+                                   *joiner_session_options_, true, /*disable_graph_capture=*/disable_subsession_graph_capture);
   } else {
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
-                                   *joiner_session_options_, true);
+                                   *joiner_session_options_, true, /*disable_graph_capture=*/disable_subsession_graph_capture);
   }
 
   // Load the three ONNX models

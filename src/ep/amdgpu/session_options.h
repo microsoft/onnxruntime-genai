@@ -13,4 +13,10 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config& config,
                                          bool disable_graph_capture = false);
 
+// Teardown counterpart to the registration done in AppendExecutionProvider. Releases the OrtEnv-shared
+// allocators and unregisters the umbrella EP library, but only when genai itself registered it — a host
+// that pre-registered the library keeps both for its own sessions. Called from Model::~Model via
+// CloseAMDGPUInterface; ownership is tracked privately in session_options.cpp.
+void ReleaseOwnedUmbrellaEp();
+
 }  // namespace Generators::AMDGPUExecutionProvider

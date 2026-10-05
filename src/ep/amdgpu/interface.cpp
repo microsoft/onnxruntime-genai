@@ -15,6 +15,7 @@
 #include "models/session_options.h"
 #include "models/io/kv_cache.h"
 #include "interface.h"
+#include "session_options.h"  // AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp (teardown ownership gate)
 
 #include <stdexcept>
 
@@ -367,6 +368,19 @@ struct PinnedInputsImpl : DeviceInterface {
 static std::unique_ptr<AMDGPU::InterfaceImpl> g_amdgpu_device;
 static std::unique_ptr<AMDGPU::PinnedInputsImpl> g_amdgpu_pinned_inputs;
 
+// Live Models sharing the process-global AMDGPU interface singleton. Several can be alive at once
+// (e.g. a target + draft decoder pair), so the full teardown must run only when the last one goes away.
+// Not synchronized: genai's model lifecycle is single-threaded.
+static int g_amdgpu_model_refcount = 0;
+
+void AcquireAMDGPUInterface() {
+  ++g_amdgpu_model_refcount;
+}
+
+bool HasLiveAMDGPUModel() {
+  return g_amdgpu_model_refcount > 0;
+}
+
 DeviceInterface* GetAMDGPUInterface() {
   if (!g_amdgpu_device)
     g_amdgpu_device = std::make_unique<AMDGPU::InterfaceImpl>();
@@ -374,11 +388,40 @@ DeviceInterface* GetAMDGPUInterface() {
 }
 
 void ResetAMDGPUInterfaceAllocatorState() {
-  // Null the allocator state in place; do NOT destroy the singleton. Its pointer is the model's
-  // p_device_ for the model's whole lifetime, so destroying it here would dangle p_device_.
-  // g_amdgpu_pinned_inputs aliases the same base singleton and needs no separate reset.
+  // Null the cached allocator pointers in place without destroying the singleton (it is p_device_ for
+  // the model's lifetime). Called per session, in lockstep with the per-session device_allocators_
+  // reset, so the next InitOrt (which asserts !ort_allocator_) and InitDeviceAllocators rebind cleanly.
   if (g_amdgpu_device)
     g_amdgpu_device->ResetOrt();
+}
+
+void CloseAMDGPUInterface() {
+  // Release this model's hold; only the last model standing runs the real teardown. Freeing the shared
+  // singleton while another AMDGPU model is alive would dangle its p_device_.
+  if (g_amdgpu_model_refcount > 0)
+    --g_amdgpu_model_refcount;
+  if (g_amdgpu_model_refcount > 0)
+    return;
+
+  // Full per-model teardown, mirroring the DML path's CloseDmlInterface(). The plugin caches a
+  // process-global device + OrtEnv-shared allocators; leaving them alive after a GPU hang lets the
+  // next model dereference a stale handle on a dead device.
+
+  // Step 1: drop genai's references to the device allocator + init session.
+  auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::AMDGPU)];
+  allocator.allocator_.reset();
+  allocator.session_.reset();
+  allocator.host_accessible_allocator_ = nullptr;
+  allocator.device_id_ = 0;
+
+  // Step 2: destroy the interface singletons.
+  g_amdgpu_pinned_inputs.reset();
+  g_amdgpu_device.reset();
+
+  // Step 3: release the OrtEnv-shared allocators and unregister the EP library, but only when genai
+  // owns the registration (a host that pre-registered it keeps both). Both live behind one ownership
+  // gate in ReleaseOwnedUmbrellaEp. Steps 1-2 are unconditional — they reset genai's own state.
+  AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp();
 }
 
 namespace AMDGPU {
