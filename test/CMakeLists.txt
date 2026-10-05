@@ -13,8 +13,9 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 )
 
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
-list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cpu_cast_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
@@ -181,6 +182,27 @@ if (NOT MSVC)
   target_compile_options(kv_cache_unit_tests PRIVATE "-fvisibility=hidden")
 endif()
 add_test(NAME KvCacheUnitTests COMMAND kv_cache_unit_tests)
+# Cast tests call CreateCpuInterface, which is not part of the public shared-library API.
+add_executable(cpu_cast_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cpu_cast_test.cpp")
+target_include_directories(cpu_cast_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/cpp
+)
+target_link_libraries(cpu_cast_tests PRIVATE
+  onnxruntime-genai-obj
+  GTest::gtest
+)
+add_dependencies(cpu_cast_tests onnxruntime-genai)
+set_target_properties(cpu_cast_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  FOLDER "Tests"
+)
+if (NOT MSVC)
+  target_compile_options(cpu_cast_tests PRIVATE "-fvisibility=hidden")
+endif()
+add_test(NAME CpuCastTests COMMAND cpu_cast_tests)
 
 if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   add_executable(telemetry_device_info_tests
