@@ -747,7 +747,7 @@ namespace {
  * \param[out] out The returned OgaTensor.
  * \return OgaResult containing the error message if the computation failed.
  */
-OgaResult* OGA_API_CALL OgaGenerator_GetInputOutput(const OgaGenerator* oga_generator, const char* name, bool is_input, OgaTensor** out) {
+static OgaResult* OGA_API_CALL OgaGenerator_GetInputOutput(const OgaGenerator* oga_generator, const char* name, bool is_input, OgaTensor** out) {
   OGA_TRY
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   auto* ortvalue = is_input ? generator.state_->GetInput(name) : generator.state_->GetOutput(name);
