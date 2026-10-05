@@ -185,20 +185,14 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
     amdgpu_allocator.device_id_ = 0;
     // Mirror the reset on the interface singleton so the rebuilt allocator's InitOrt rebinds cleanly.
     ResetAMDGPUInterfaceAllocatorState();
-  } else if (const auto& filtering = provider_options.device_filtering_options;
-             filtering && filtering->hardware_device_id &&
-             *filtering->hardware_device_id != static_cast<uint32_t>(amdgpu_allocator.device_id_)) {
-    // Another AMDGPU model is live, so the reset is skipped and this model will reuse the cached
-    // allocator (device_allocators_ has one slot per DeviceType). That is only safe when both models
-    // target the same device — the speculative decoding target + draft case. A model that explicitly
-    // selects a different device would get an allocator bound to the live model's device while its
-    // session runs on the requested one, silently corrupting its KV cache / shared initializers across
-    // devices. Reject it rather than reuse a mismatched allocator; concurrent multi-device AMDGPU models
-    // are not supported (one shared allocator slot per DeviceType).
-    throw std::runtime_error(
-        "AMDGPU: a model is already live on device " + std::to_string(amdgpu_allocator.device_id_) +
-        ", but this model requested device " + std::to_string(*filtering->hardware_device_id) +
-        ". Concurrent AMDGPU models must target the same device.");
+  } else {
+    const int requested_device_id = GetAMDGPUInterface()->GetDeviceId(&provider_options);
+    if (requested_device_id != amdgpu_allocator.device_id_) {
+      throw std::runtime_error(
+          "AMDGPU: a model is already live on device " + std::to_string(amdgpu_allocator.device_id_) +
+          ", but this model requested device " + std::to_string(requested_device_id) +
+          ". Concurrent AMDGPU models must target the same device.");
+    }
   }
 
   AppendExecutionProviderV2(session_options, provider_options,
