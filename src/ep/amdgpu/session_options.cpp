@@ -186,7 +186,15 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
     // Mirror the reset on the interface singleton so the rebuilt allocator's InitOrt rebinds cleanly.
     ResetAMDGPUInterfaceAllocatorState();
   } else {
-    const int requested_device_id = GetAMDGPUInterface()->GetDeviceId(&provider_options);
+    const auto requested_devices = ApplyDeviceFiltering(
+        provider_options, FindRegisteredEpDevices(kAMDGPUExecutionProviderName));
+    int requested_device_id = amdgpu_allocator.device_id_;
+    if (!requested_devices.empty()) {
+      if (const OrtMemoryInfo* memory_info =
+              Ort::api->EpDevice_MemoryInfo(requested_devices.front(), OrtDeviceMemoryType_DEFAULT)) {
+        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(memory_info, &requested_device_id));
+      }
+    }
     if (requested_device_id != amdgpu_allocator.device_id_) {
       throw std::runtime_error(
           "AMDGPU: a model is already live on device " + std::to_string(amdgpu_allocator.device_id_) +
