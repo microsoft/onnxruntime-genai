@@ -605,13 +605,10 @@ Model::~Model() {
   }
 #endif
   if (device_type == DeviceType::AMDGPU) {
-    // Per-model teardown for the AMDGPU (DirectX plugin) path; CloseAMDGPUInterface() in the AMD module
-    // does the allocator/singleton reset and EP-library unregister. Unlike DML, session_options_ is not
-    // reset here: the plugin registers by library name and its options hold only config strings.
-    //
-    // Clear device-backed shared initializers first: each owns a GpuMemory that frees through the
-    // AMDGPU allocator CloseAMDGPUInterface destroys. Members are destroyed only after this body, so
-    // leaving them would free through a dangling allocator.
+    // Drop EP factory references before unregistering the library, and release device-backed
+    // initializers while the AMDGPU allocator is still alive.
+    pipeline_session_options_.clear();
+    session_options_.reset();
     shared_initializer_entries_.clear();
     CloseAMDGPUInterface();
   }
