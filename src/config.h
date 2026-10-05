@@ -712,6 +712,7 @@ struct Config {
         std::string hidden_states{Defaults::HiddenStatesName};
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string logits_indices;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
         std::string past_indexer_names;

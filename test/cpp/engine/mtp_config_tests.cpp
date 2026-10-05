@@ -36,6 +36,7 @@ fs_std::path WriteDisabledMtpConfig() {
         "enabled": false,
         "filename": "mtp.onnx",
         "main_hidden_states": "main_hidden",
+        "inputs": { "logits_indices": "head_selected_rows" },
         "outputs": { "hidden_states": "head_feedback" }
       }
     },
@@ -92,6 +93,7 @@ TEST(MtpDecoderConfigTest, ParsesDisabledRuntimeToggle) {
   EXPECT_FALSE(config.model.mtp.enabled);
   EXPECT_FALSE(config.model.mtp.IsEnabled());
   EXPECT_EQ(config.model.mtp.filename, "mtp.onnx");
+  EXPECT_EQ(config.model.mtp.inputs.logits_indices, "head_selected_rows");
 }
 
 TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
@@ -107,6 +109,7 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   decoder.inputs.past_sequence_lengths = "past_sequence_lengths";
   decoder.inputs.attention_metadata = "attention_metadata";
   decoder.inputs.engram_embeddings = "engram_embeddings";
+  decoder.inputs.logits_indices = "target_selected_rows";
   config.model.engram.filename = "engram.onnx";
   config.model.embedding.filename = "embedding.onnx";
   decoder.session_options.providers = {"cuda"};
@@ -150,6 +153,10 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_EQ(head.head_size, 64);
   EXPECT_EQ(head.hidden_size, 2048);
   EXPECT_EQ(head.inputs.hidden_states, "head_hidden");
+  EXPECT_TRUE(head.inputs.logits_indices.empty());
+  mtp.inputs.logits_indices = "head_selected_rows";
+  EXPECT_EQ(CreateMtpDecoderConfig(config)->model.decoder.inputs.logits_indices, "head_selected_rows");
+  EXPECT_EQ(config.model.decoder.inputs.logits_indices, "target_selected_rows");
   EXPECT_EQ(head.outputs.hidden_states, "head_hidden_out");
   EXPECT_EQ(head.inputs.block_table, "block_table");
   EXPECT_EQ(head.inputs.cumulative_sequence_lengths, "cumulative_sequence_lengths");

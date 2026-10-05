@@ -4,6 +4,7 @@
 from types import MethodType, SimpleNamespace
 import json
 
+import numpy as np
 import onnx
 import onnx_ir as ir
 import pytest
@@ -44,7 +45,8 @@ def test_composite_float_checkpoint_loader_and_sparse_bindings(monkeypatch, tmp_
     assert config.text_config.layer_types == original_layer_types
 
 
-def test_paged_mtp_config_preserves_engine_state_bindings(tmp_path):
+@pytest.mark.parametrize("prune_mtp, explicit_quant_config", [(False, False), (True, False), (True, True)])
+def test_paged_mtp_config_preserves_engine_state_bindings(tmp_path, prune_mtp, explicit_quant_config):
     from transformers import Qwen4ExpConfig
 
     config = Qwen4ExpConfig(
@@ -60,13 +62,16 @@ def test_paged_mtp_config_preserves_engine_state_bindings(tmp_path):
             "indexer_budget": 2048,
         },
     )
+    options = {"use_paged_attention": True, "state_update_capacity": 4, "mtp_prune_lm_head": prune_mtp}
+    if explicit_quant_config:
+        options["mtp_quant_config"] = '{"io_dtype":"fp16","weights":{"type":"int4","block_size":64}}'
     model = Qwen4ExpModel(
         config,
         ir.DataType.FLOAT16,
         ir.DataType.INT4,
         "cuda",
         str(tmp_path),
-        {"use_paged_attention": True, "state_update_capacity": 4},
+        options,
     )
     groups = model.decoder.make_decoder_state_groups({}, {})
     path = tmp_path / "genai_config.json"
@@ -80,9 +85,105 @@ def test_paged_mtp_config_preserves_engine_state_bindings(tmp_path):
     assert result["engine"]["dynamic_batching"]["prefix_caching"] is False
     assert result["model"]["decoder"]["state_groups"] == groups
     assert result["model"]["mtp"]["inputs"]["past_indexer_names"] == "past.%d.indexer_key"
+    assert ("logits_indices" in result["model"]["mtp"]["inputs"]) is prune_mtp
+    if prune_mtp:
+        model.mtp.input_names["logits_indices"] = "head_selected_rows"
+        model.add_mtp_to_genai_config(str(tmp_path))
+        assert json.loads(path.read_text())["model"]["mtp"]["inputs"]["logits_indices"] == "head_selected_rows"
+        model.mtp.input_names["logits_indices"] = "logits_indices"
     assert model.decoder.input_shapes["input_ids"] == ["num_tokens"]
     assert model.decoder.input_shapes["inputs_embeds"] == ["num_tokens", model.decoder.hidden_size]
     assert model.mtp.input_shapes["hidden_states"] == ["num_tokens", model.decoder.hc_hidden_size]
+    assert model.mtp.output_shapes["hidden_states"] == ["num_tokens", model.decoder.hc_hidden_size]
+    assert model.mtp.output_shapes["logits"] == ["num_logits" if prune_mtp else "num_tokens", model.vocab_size]
+    assert ("logits_indices" in model.mtp.input_names) is prune_mtp
+    assert "logits_indices" not in model.decoder.input_names
+    assert model.decoder.prune_lm_head is False
+    assert model.mtp.prunes_hidden_rows() is False
+    model.mtp.layernorm_attrs["output_0"] = "full_final_hidden"
+    record_calls(model.mtp, ["make_gather", "make_matmul"])
+    model.mtp.make_lm_head(SimpleNamespace(bias=None))
+    gathers = [call for call in model.mtp.calls if call[0] == "make_gather"]
+    assert len(gathers) == int(prune_mtp)
+    if prune_mtp:
+        assert gathers[0][1][1] == ["full_final_hidden", "logits_indices"]
+        assert gathers[0][2]["axis"] == 0
+        assert gathers[0][2]["shape"] == ["num_logits", model.mtp.hidden_size]
+    matmul = next(call for call in model.mtp.calls if call[0] == "make_matmul")
+    assert matmul[1][2] == (
+        "/lm_head/selected_hidden_states/Gather/output_0" if prune_mtp else "full_final_hidden"
+    )
+    assert model.mtp.hidden_rows_dim == "num_tokens"
+
+
+@pytest.mark.parametrize("selected_rows", [[1], [1, 3]])
+def test_mtp_selected_int4_head_rows_preserve_logits_and_full_feedback(tmp_path, selected_rows):
+    import onnxruntime as ort
+    from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer
+    from transformers import Qwen4ExpConfig
+
+    config = Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        text_config={
+            "hidden_size": 64,
+            "vocab_size": 32,
+            "hc_count": 4,
+            "indexer_compress_ratio": 4,
+            "indexer_head_dim": 256,
+            "indexer_n_heads": 4,
+            "indexer_kv_heads": 1,
+            "indexer_budget": 32,
+        },
+    )
+    weights = (torch.arange(32 * 64).reshape(32, 64) % 17 - 8).to(torch.float16) / 8
+    head_input = (np.arange(4 * 64).reshape(4, 64) % 13 - 6).astype(np.float16) / 8
+    feedback = np.arange(4 * 256).reshape(4, 256).astype(np.float16)
+    results = []
+    for prune_mtp in (False, True):
+        model = Qwen4ExpMTPTextModel(
+            config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", str(tmp_path),
+            {"use_paged_attention": True, "prune_lm_head": prune_mtp},
+        )
+        model.model.graph.inputs.append(model.make_value("head_input", model.io_dtype, ["num_tokens", 64]))
+        model.model.graph.inputs.append(model.make_value("hidden_states", model.io_dtype, ["num_tokens", 256]))
+        if prune_mtp:
+            model.model.graph.inputs.append(model.make_value("logits_indices", ir.DataType.INT32, ["num_logits"]))
+        model.layernorm_attrs["output_0"] = "head_input"
+        model.make_lm_head(SimpleNamespace(weight=weights, bias=None))
+        model.make_node("Identity", ["hidden_states"], ["hidden_states_out"], name="/feedback/Identity")
+        model.model.graph.outputs.append(model.make_value("logits", model.output_types["logits"], model.output_shapes["logits"]))
+        model.model.graph.outputs.append(model.make_value("hidden_states_out", model.io_dtype, ["num_tokens", 256]))
+        quantizer = MatMulNBitsQuantizer(ir.serde.serialize_model(model.model), block_size=32, is_symmetric=True)
+        quantizer.process()
+        graph = quantizer.model.model
+        assert sum(node.op_type == "MatMulNBits" for node in graph.graph.node) == 1
+        session = ort.InferenceSession(graph.SerializeToString(), providers=["CPUExecutionProvider"])
+        inputs = {"head_input": head_input, "hidden_states": feedback}
+        if prune_mtp:
+            inputs["logits_indices"] = np.asarray(selected_rows, dtype=np.int32)
+        results.append(session.run(None, inputs))
+    np.testing.assert_array_equal(results[1][0].view(np.uint16), results[0][0][selected_rows].view(np.uint16))
+    np.testing.assert_array_equal(results[1][1].view(np.uint16), results[0][1].view(np.uint16))
+    np.testing.assert_array_equal(results[1][1], feedback)
+
+
+@pytest.mark.parametrize("options", [
+    {},
+    {"use_paged_attention": True, "exclude_mtp": True},
+])
+def test_mtp_prune_lm_head_rejects_unsupported_export(options):
+    model = object.__new__(Qwen4ExpModel)
+    config = SimpleNamespace(text_config=SimpleNamespace(mtp_num_hidden_layers=1))
+    with pytest.raises(ValueError, match="mtp_prune_lm_head requires"):
+        model.make_mtp_init(config, {**options, "mtp_prune_lm_head": True})
+
+
+@pytest.mark.parametrize("option", ["prune_lm_head", "exclude_lm_head"])
+def test_mtp_prune_lm_head_keeps_target_head_restrictions(option):
+    model = object.__new__(Qwen4ExpModel)
+    config = SimpleNamespace(text_config=SimpleNamespace(mtp_num_hidden_layers=1))
+    with pytest.raises(ValueError, match="Qwen4-Exp MTP export cannot be combined with"):
+        model.make_mtp_init(config, {"use_paged_attention": True, "mtp_prune_lm_head": True, option: True})
 
 
 def record_calls(model, method_names):

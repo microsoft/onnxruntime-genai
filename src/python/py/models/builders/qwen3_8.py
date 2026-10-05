@@ -2243,6 +2243,9 @@ class Qwen4ExpModel(MTPModel):
         num_mtp_layers = getattr(config.text_config, "mtp_num_hidden_layers", 0) or 0
         self.mtp_attrs["build"] = num_mtp_layers > 0 and not extra_options.get("exclude_mtp", False)
         self.mtp_attrs["shared_initializer_prefixes"] = ("lm_head.MatMul.",)
+        if extra_options.get("mtp_prune_lm_head", False):
+            if not self.mtp_attrs["build"] or not extra_options.get("use_paged_attention", False):
+                raise ValueError("mtp_prune_lm_head requires a Qwen4-Exp MTP head and use_paged_attention=true.")
         if not self.mtp_attrs["build"]:
             return decoder_options
         if num_mtp_layers != 1:
@@ -2272,6 +2275,11 @@ class Qwen4ExpModel(MTPModel):
         mtp_options.pop("include_hidden_states", None)
         mtp_options.pop("exclude_lm_head", None)
         mtp_options.pop("external_engram", None)
+        mtp_options["prune_lm_head"] = extra_options.get("mtp_prune_lm_head", False)
+        if mtp_options["prune_lm_head"]:
+            for option in ("use_paged_attention", "paged_block_size", "state_update_capacity"):
+                if option in extra_options:
+                    mtp_options[option] = extra_options[option]
         self.mtp = Qwen4ExpMTPTextModel(
             copy.deepcopy(config),
             self.mtp_attrs["io_dtype"],
@@ -2425,6 +2433,8 @@ class Qwen4ExpModel(MTPModel):
         dynamic_batching = genai_config.get("engine", {}).get("dynamic_batching")
         if dynamic_batching is not None:
             dynamic_batching.setdefault("prefix_caching", False)
+        if "logits_indices" in self.mtp.input_names:
+            genai_config["model"]["mtp"]["inputs"]["logits_indices"] = self.mtp.input_names["logits_indices"]
         self.add_shared_initializers_to_genai_config(genai_config)
         with open(config_path, "w") as config_file:
             json.dump(genai_config, config_file, indent=4)
@@ -2565,6 +2575,7 @@ class Qwen4ExpMTPTextModel(Qwen4ExpTextModel):
         extra_options = copy.deepcopy(extra_options)
         extra_options["num_hidden_layers"] = 1
         extra_options["text_only"] = True
+        extra_options["include_hidden_states"] = True
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         self.tile_first_hidden_state = False
