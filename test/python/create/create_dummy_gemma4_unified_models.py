@@ -9,21 +9,23 @@ embedding contract but consumes raw 48px merged pixel patches
 (``audio_embeds`` last dim = 640) directly, instead of the SigLIP 16px /
 128-dim log-mel contract.
 
-This derives ``test/models/gemma4_unified`` from the existing
+This derives a temporary unified model from the existing
 ``test/models/gemma4`` fixtures: the embedding / text decoders are copied
-verbatim, the vision / speech dummies get the unified input dims, and the
+verbatim, the vision / speech graphs consume the unified inputs, and the
 genai / processor configs are rewritten for the ``gemma4_unified`` type.
 
 Usage (from the repo root):
-    python test/python/create/create_dummy_gemma4_unified_models.py
+    python test/python/create/create_dummy_gemma4_unified_models.py --output /tmp/gemma4-unified-validation
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 from pathlib import Path
 
+import numpy as np
 import onnx
 
 _UNIFIED_PIXEL_DIM = 48 * 48 * 3  # 6912
@@ -40,50 +42,122 @@ _TOKENIZER_FILES = [
 ]
 
 
-def _set_input_last_dim(model_path: Path, out_path: Path, input_name: str, last_dim: int) -> None:
-    """Rewrite the last dimension of a named graph input to a fixed value."""
-    model = onnx.load(str(model_path))
-    for inp in model.graph.input:
-        if inp.name == input_name:
-            dims = inp.type.tensor_type.shape.dim
-            dims[-1].ClearField("dim_param")
-            dims[-1].dim_value = last_dim
-            break
-    else:
-        raise ValueError(f"input {input_name!r} not found in {model_path}")
-    onnx.save(model, str(out_path))
+def _create_unified_vision_model(out_path: Path) -> None:
+    """Select real patches by XY positions and expose their pixel means."""
+    h, t = onnx.helper, onnx.TensorProto
+    inputs = [
+        h.make_tensor_value_info(
+            "pixel_values", t.FLOAT, ["batch_size", 280, _UNIFIED_PIXEL_DIM]
+        ),
+        h.make_tensor_value_info("pixel_position_ids", t.INT64, ["batch_size", 280, 2]),
+    ]
+    outputs = [h.make_tensor_value_info("image_features", t.FLOAT, ["tokens", 2048])]
+    nodes = [
+        h.make_node("Gather", ["pixel_position_ids", "x_axis"], ["x"], axis=2),
+        h.make_node("Greater", ["x", "negative_one"], ["valid"]),
+        h.make_node("NonZero", ["valid"], ["indices_t"]),
+        h.make_node("Transpose", ["indices_t"], ["indices"], perm=[1, 0]),
+        h.make_node("GatherND", ["pixel_values", "indices"], ["patches"]),
+        h.make_node("ReduceMean", ["patches"], ["means"], axes=[1], keepdims=1),
+        h.make_node("Shape", ["means"], ["mean_shape"]),
+        h.make_node("Gather", ["mean_shape", "first_axis"], ["token_count"], axis=0),
+        h.make_node(
+            "Concat", ["token_count", "hidden_size"], ["feature_shape"], axis=0
+        ),
+        h.make_node("Expand", ["means", "feature_shape"], ["image_features"]),
+    ]
+    initializers = [
+        onnx.numpy_helper.from_array(np.array(0, np.int64), "x_axis"),
+        onnx.numpy_helper.from_array(np.array(-1, np.int64), "negative_one"),
+        onnx.numpy_helper.from_array(np.array([0], np.int64), "first_axis"),
+        onnx.numpy_helper.from_array(np.array([2048], np.int64), "hidden_size"),
+    ]
+    graph = h.make_graph(
+        nodes, "unified_input_sensitive_vision", inputs, outputs, initializers
+    )
+    model = h.make_model(graph, opset_imports=[h.make_opsetid("", 14)], ir_version=7)
+    onnx.checker.check_model(model)
+    onnx.save(model, out_path)
 
 
-def main() -> None:
-    if not _SRC_DIR.exists():
+def _create_unified_speech_model(out_path: Path) -> None:
+    """Consume PCM, the actual frame mask, and the requested audio token count."""
+    h, t = onnx.helper, onnx.TensorProto
+    inputs = [
+        h.make_tensor_value_info(
+            "input_features", t.FLOAT, ["batch_size", "num_frames", _UNIFIED_AUDIO_DIM]
+        ),
+        h.make_tensor_value_info(
+            "input_features_mask", t.BOOL, ["batch_size", "num_frames"]
+        ),
+        h.make_tensor_value_info("audio_sizes", t.INT64, ["batch_size"]),
+    ]
+    # SpeechState binds rank-3 output, then reshapes it to rank 2 for embedding.
+    outputs = [h.make_tensor_value_info("audio_features", t.FLOAT, [1, "tokens", 2048])]
+    nodes = [
+        h.make_node(
+            "ReduceMean", ["input_features"], ["frame_means"], axes=[2], keepdims=0
+        ),
+        h.make_node("Cast", ["input_features_mask"], ["mask_float"], to=t.FLOAT),
+        h.make_node("Mul", ["frame_means", "mask_float"], ["masked_means"]),
+        h.make_node("ReduceSum", ["masked_means"], ["audio_sum"], keepdims=0),
+        h.make_node("Cast", ["audio_sizes"], ["sizes_float"], to=t.FLOAT),
+        h.make_node("ReduceSum", ["sizes_float"], ["size_sum"], keepdims=0),
+        h.make_node("Add", ["audio_sum", "size_sum"], ["signal"]),
+        h.make_node(
+            "Concat",
+            ["batch_size", "audio_sizes", "hidden_size"],
+            ["feature_shape"],
+            axis=0,
+        ),
+        h.make_node("Expand", ["signal", "feature_shape"], ["audio_features"]),
+    ]
+    initializers = [
+        onnx.numpy_helper.from_array(np.array([1], np.int64), "batch_size"),
+        onnx.numpy_helper.from_array(np.array([2048], np.int64), "hidden_size"),
+    ]
+    graph = h.make_graph(
+        nodes, "unified_input_sensitive_speech", inputs, outputs, initializers
+    )
+    model = h.make_model(graph, opset_imports=[h.make_opsetid("", 14)], ir_version=7)
+    onnx.checker.check_model(model)
+    onnx.save(model, out_path)
+
+
+def create_model(source_dir: Path, output_dir: Path) -> None:
+    """Derive an isolated fixture; never rewrite the tracked model directory."""
+    if not source_dir.exists():
         raise SystemExit(
-            f"Source gemma4 fixtures not found at {_SRC_DIR}. Generate/download the "
+            f"Source gemma4 fixtures not found at {source_dir}. Generate/download the "
             "gemma4 test model directory first; gemma4_unified is derived from it."
         )
-    _DST_DIR.mkdir(parents=True, exist_ok=True)
+    if output_dir.resolve() in {source_dir.resolve(), _DST_DIR.resolve()}:
+        raise ValueError(
+            "Use a temporary output directory, not a tracked fixture directory"
+        )
+    output_dir.mkdir(parents=True, exist_ok=False)
 
     # Decoder + embedding are identical to gemma4.
     for name in ("dummy_text.onnx", "dummy_embedding.onnx"):
-        shutil.copyfile(_SRC_DIR / name, _DST_DIR / name)
+        shutil.copyfile(source_dir / name, output_dir / name)
 
-    # Vision / speech dummies: same trivial constant-output graphs, but declare
-    # the unified input dims so the fixtures document the real contract.
-    _set_input_last_dim(
-        _SRC_DIR / "dummy_vision.onnx", _DST_DIR / "dummy_vision.onnx", "pixel_values", _UNIFIED_PIXEL_DIM
-    )
-    _set_input_last_dim(
-        _SRC_DIR / "dummy_speech.onnx", _DST_DIR / "dummy_speech.onnx", "audio_embeds", _UNIFIED_AUDIO_DIM
-    )
+    _create_unified_vision_model(output_dir / "dummy_vision.onnx")
+    _create_unified_speech_model(output_dir / "dummy_speech.onnx")
 
     for name in _TOKENIZER_FILES:
-        shutil.copyfile(_SRC_DIR / name, _DST_DIR / name)
+        shutil.copyfile(source_dir / name, output_dir / name)
 
     # genai_config.json: switch the model type and vision processor config file.
-    with open(_SRC_DIR / "genai_config.json") as f:
+    with open(source_dir / "genai_config.json") as f:
         genai_config = json.load(f)
     genai_config["model"]["type"] = "gemma4_unified"
     genai_config["model"]["vision"]["config_filename"] = "image_processor.json"
-    with open(_DST_DIR / "genai_config.json", "w") as f:
+    genai_config["model"]["speech"]["inputs"] = {
+        "audio_embeds": "input_features",
+        "attention_mask": "input_features_mask",
+        "audio_sizes": "audio_sizes",
+    }
+    with open(output_dir / "genai_config.json", "w") as f:
         json.dump(genai_config, f, indent=4)
 
     # image_processor.json: reuse Gemma4ImageTransform with the merged geometry
@@ -92,18 +166,28 @@ def main() -> None:
         "processor": {
             "name": "gemma_4_unified_image_processing",
             "transforms": [
-                {"operation": {"name": "decode_image", "type": "DecodeImage", "attrs": {"color_space": "RGB"}}},
+                {
+                    "operation": {
+                        "name": "decode_image",
+                        "type": "DecodeImage",
+                        "attrs": {"color_space": "RGB"},
+                    }
+                },
                 {
                     "operation": {
                         "name": "gemma4_image_transform",
                         "type": "Gemma4ImageTransform",
-                        "attrs": {"patch_size": 48, "max_soft_tokens": 280, "pooling_kernel_size": 1},
+                        "attrs": {
+                            "patch_size": 48,
+                            "max_soft_tokens": 280,
+                            "pooling_kernel_size": 1,
+                        },
                     }
                 },
             ],
         }
     }
-    with open(_DST_DIR / "image_processor.json", "w") as f:
+    with open(output_dir / "image_processor.json", "w") as f:
         json.dump(image_processor, f, indent=4)
 
     # audio_feature_extraction.json: raw 640-sample waveform framing.
@@ -126,10 +210,20 @@ def main() -> None:
             ]
         }
     }
-    with open(_DST_DIR / "audio_feature_extraction.json", "w") as f:
+    with open(output_dir / "audio_feature_extraction.json", "w") as f:
         json.dump(audio_config, f, indent=4)
 
-    print(f"Wrote gemma4_unified dummy model to {_DST_DIR}")
+    print(f"Wrote gemma4_unified dummy model to {output_dir}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", type=Path, default=_SRC_DIR)
+    parser.add_argument(
+        "--output", type=Path, required=True, help="New temporary model directory"
+    )
+    args = parser.parse_args()
+    create_model(args.source, args.output)
 
 
 if __name__ == "__main__":
