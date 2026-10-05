@@ -135,4 +135,4 @@ frame gaps, or finalization.
 
 When `timestamp_level` is `off`, use ordinary `GetNextTokens()` and tokenizer stream `Decode()`.
 The streaming processor does not create timestamp origin metadata, the transducer does not append
-token timing records, and the tokenizer stream does not allocate timestamp accumulator state.
+token intervals, and the tokenizer stream does not buffer intervals or build timestamp events.
