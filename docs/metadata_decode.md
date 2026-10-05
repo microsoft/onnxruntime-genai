@@ -117,20 +117,23 @@ Creating metadata state does not enable timing collection in an existing generat
 configure the model's timestamp level before creating the generator.
 
 The stream has one metadata decoder and one finalizer, both using its owned state.
-Decode validates the selected token and timing, calls Extensions once, retains the
-result with `SetDecoded`, and calls `ProcessMetadata` before returning. Feature
-processing remains separate inside `MetadataCoreState`, but callers do not need a
-second operation to consume the decoded step. Invalid/missing timing is rejected
-before advancing the decoder. When timestamp production is enabled, the generator
-getter checks that model-produced timing records match the emitted token count and
-IDs before returning them; missing timing for emitted transducer tokens is an error.
+Decode validates the selected token and timing before advancing Extensions, then
+`MetadataCoreState` buffers the token interval, matches completed-word token spans
+to their first and last intervals, and directly publishes per-call word/segment
+records. It retains intervals until Extensions' pending-token watermark releases
+them; unfinished segments persist between calls. The stream still owns the state,
+including any retained internal state handles. When timestamp production is enabled,
+the generator getter checks that model-produced interval counts match emitted token
+counts and pairs them by position; missing intervals are an error. IDs can repeat
+and cannot be used to look up timing.
 
 An enabled timestamp consumer receives each token's timing, including steps that
-complete no words. Repeated processing of the same step returns the cached result.
-Results contain only events completed by the current call, not cumulative history.
+complete no words. Results contain only events completed by the current call, not
+cumulative history. Completed text is owned by the state and the C records borrow
+it until the next stream operation.
 
-Finalization flushes Extensions, retains the trailing spans with `SetFinalized`,
-and calls `ProcessMetadata` to complete pending words and segments. Repeating stream
+Finalization flushes Extensions, completes trailing words and segments, and publishes
+the same result shape without adding a token. Repeating stream
 finalization returns no duplicate words or segments. Finalization does not inject
 a token. Decoding may resume after finalization; use reset for an independent sequence.
 
@@ -210,12 +213,11 @@ configuration uses an opaque handle.
 ## Adding a Feature
 
 Add typed settings to `MetadataCoreConfig`, configure the corresponding Extensions
-producer per cache, and keep the feature's calculator and consumption method in
-`MetadataCoreState` (or an owned helper). Clear its per-step outputs when a new
-result is installed. Stateful consumers add a pending check before advancement;
-stateless optional readers need not. Finalization and invalidation must include
-the feature. No additional feature-specific stream decode method or runtime
-registry is required.
+producer per cache, and process its per-step data in `MetadataCoreState` (or an owned
+helper). Keep unfinished work across calls and clear only completed per-call outputs
+at the start of each decode/finalize operation. Validate inputs before advancing
+Extensions. Finalization and invalidation must include the feature. No additional
+feature-specific stream decode method or runtime registry is required.
 
 This workflow requires Extensions with the per-cache configuration API. The local
 integration build uses the modified Extensions checkout; the packaged dependency

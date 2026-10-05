@@ -8,7 +8,6 @@
 
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
-#include "models/preprocessing/timestamp_decode.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/whisper.h"
 
@@ -75,8 +74,7 @@ TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
   Generators::NemotronConfig nemotron_config;
   EXPECT_NO_THROW(nemotron_config.PopulateFromConfig(config));
   EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::All);
-  EXPECT_EQ(nemotron_config.segment_separators, (std::vector<std::string>{".", "!"}));
-  EXPECT_EQ(nemotron_config.segment_gap_threshold_frames, 13);
+  EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(config.model), 13);
 }
 
 TEST(AudioSpeechValidationTests, NemotronTimestampGapRoundsToNearestFrame) {
@@ -90,11 +88,11 @@ TEST(AudioSpeechValidationTests, NemotronTimestampGapRoundsToNearestFrame) {
 
   config.model.segment_gap_threshold_seconds = 0.99;
   nemotron_config.PopulateFromConfig(config);
-  EXPECT_EQ(nemotron_config.segment_gap_threshold_frames, 12);
+  EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(config.model), 12);
 
   config.model.segment_gap_threshold_seconds = 1.0;
   nemotron_config.PopulateFromConfig(config);
-  EXPECT_EQ(nemotron_config.segment_gap_threshold_frames, 13);
+  EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(config.model), 13);
 }
 
 TEST(AudioSpeechValidationTests, NemotronGlobalFrameUsesAbsoluteSampleOrigin) {
@@ -114,133 +112,29 @@ TEST(AudioSpeechValidationTests, NemotronTimestampsRejectMissingFrameDurationPar
   EXPECT_THROW(nemotron_config.PopulateFromConfig(config), std::runtime_error);
 }
 
-TEST(AudioSpeechValidationTests, TimestampSegmentGapSecondsRoundToNearestFrame) {
-  const Generators::TimestampTokenizerConfig config{
-      Generators::Config::TimestampLevel::Segment, {}, 0.26, 100, 10, 1};
-  Generators::TimestampDecodeState state{config};
-  const OrtxTimestampWordMetadata first{"first", 0, 1};
-  state.Consume({10, 0, 1}, {&first, 1, 1});
-  EXPECT_TRUE(state.result_.segments.empty());
-  const OrtxTimestampWordMetadata second{" second", 1, 2};
-  state.Consume({11, 3, 4}, {&second, 1, 2});
-  EXPECT_TRUE(state.result_.segments.empty());
-  const OrtxTimestampWordMetadata third{" third", 2, 3};
-  state.Consume({12, 7, 8}, {&third, 1, 3});
-  ASSERT_EQ(state.result_.segments.size(), 1U);
-  EXPECT_EQ(state.result_.segments[0].text, "first second");
-  EXPECT_EQ(state.result_.segments[0].start_frame, 0);
-  EXPECT_EQ(state.result_.segments[0].stop_frame, 4);
-  state.Finalize({nullptr, 0, 3});
-  ASSERT_EQ(state.result_.segments.size(), 2U);
-  EXPECT_EQ(state.result_.segments[1].text, " third");
+TEST(AudioSpeechValidationTests, NemotronTimestampsRejectOversizedSegmentGap) {
+  Generators::Config config;
+  config.model.type = "nemotron_speech";
+  config.model.timestamp_level = Generators::Config::TimestampLevel::Segment;
+  config.model.sample_rate = 16000;
+  config.model.hop_length = 160;
+  config.model.subsampling_factor = 8;
+  config.model.segment_gap_threshold_seconds = 1e20;
+
+  Generators::NemotronConfig nemotron_config;
+  EXPECT_THROW(nemotron_config.PopulateFromConfig(config), std::runtime_error);
 }
 
 TEST(AudioSpeechValidationTests, ZeroAndSubFrameGapsSplitEachWord) {
   for (double threshold : {0.0, 0.01}) {
-    for (int64_t second_start_frame : {int64_t{0}, int64_t{1}}) {
-      EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(threshold, 100, 10, 1), 0);
-      const Generators::TimestampTokenizerConfig config{
-          Generators::Config::TimestampLevel::Segment, {}, threshold, 100, 10, 1};
-      Generators::TimestampDecodeState state{config};
-      const OrtxTimestampWordMetadata first{"first", 0, 1};
-      state.Consume({10, 0, 1}, {&first, 1, 1});
-      state.ClearResult();
-      const OrtxTimestampWordMetadata second{" second", 1, 2};
-      state.Consume({11, second_start_frame, second_start_frame + 1}, {&second, 1, 2});
-      ASSERT_EQ(state.result_.segments.size(), 1U);
-      EXPECT_EQ(state.result_.segments[0].text, "first");
-      state.ClearResult();
-      state.Finalize({nullptr, 0, 2});
-      ASSERT_EQ(state.result_.segments.size(), 1U);
-      EXPECT_EQ(state.result_.segments[0].text, " second");
-    }
+    EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(threshold, 100, 10, 1), 0);
   }
-}
-
-TEST(AudioSpeechValidationTests, TimestampAccumulatorAttachesPunctuationAndCompletesSegment) {
-  Generators::TimestampTokenizerConfig config{
-      Generators::Config::TimestampLevel::All, {"."}, std::nullopt, 100, 10, 1};
-  Generators::TimestampDecodeState state{config};
-
-  state.Consume({10, 0, 1}, {nullptr, 0, 0});
-  state.ClearResult();
-  state.Consume({11, 1, 2}, {nullptr, 0, 0});
-  state.ClearResult();
-  const OrtxTimestampWordMetadata word{" Hello.", 0, 2};
-  state.Consume({12, 3, 4}, {&word, 1, 2});
-
-  ASSERT_EQ(state.result_.words.size(), 1u);
-  EXPECT_EQ(state.result_.words[0].text, " Hello.");
-  EXPECT_EQ(state.result_.words[0].start_frame, 0);
-  EXPECT_EQ(state.result_.words[0].stop_frame, 2);
-  EXPECT_DOUBLE_EQ(state.result_.words[0].stop_time, 0.2);
-  ASSERT_EQ(state.result_.segments.size(), 1u);
-  EXPECT_EQ(state.result_.segments[0].text, " Hello.");
-}
-
-TEST(AudioSpeechValidationTests, TimestampAccumulatorCompletesSegmentAtFrameGap) {
-  Generators::TimestampTokenizerConfig config{
-      Generators::Config::TimestampLevel::Segment, {}, 0.3, 100, 10, 1};
-  Generators::TimestampDecodeState state{config};
-
-  state.Consume({1, 0, 1}, {nullptr, 0, 0});
-  state.ClearResult();
-  const OrtxTimestampWordMetadata first_word{" one", 0, 1};
-  state.Consume({2, 1, 2}, {&first_word, 1, 1});
-  state.ClearResult();
-  const OrtxTimestampWordMetadata second_word{" two", 1, 2};
-  state.Consume({3, 8, 9}, {&second_word, 1, 2});
-  state.ClearResult();
-  const OrtxTimestampWordMetadata trailing_word{" three", 2, 3};
-  state.Finalize({&trailing_word, 1, 3});
-
-  EXPECT_TRUE(state.result_.words.empty());
-  ASSERT_EQ(state.result_.segments.size(), 2u);
-  EXPECT_EQ(state.result_.segments[0].text, " one two");
-  EXPECT_EQ(state.result_.segments[1].text, " three");
-
-  state.ClearResult();
-  state.Finalize({nullptr, 0, 3});
-  EXPECT_TRUE(state.result_.segments.empty());
-}
-
-TEST(AudioSpeechValidationTests, TimestampAccumulatorPreservesSharedFrames) {
-  Generators::TimestampTokenizerConfig config{
-      Generators::Config::TimestampLevel::Word, {}, std::nullopt, 100, 10, 1};
-  Generators::TimestampDecodeState state{config};
-  state.Consume({1, 4, 5}, {nullptr, 0, 0});
-  const OrtxTimestampWordMetadata first_word{" one", 0, 1};
-  const OrtxTimestampWordMetadata second_word{" two", 1, 2};
-  state.Consume({2, 4, 5}, {&first_word, 1, 1});
-  state.Finalize({&second_word, 1, 2});
-  ASSERT_EQ(state.result_.words.size(), 2U);
-  for (const auto& word : state.result_.words) {
-    EXPECT_EQ(word.start_frame, 4);
-    EXPECT_EQ(word.stop_frame, 5);
-    EXPECT_DOUBLE_EQ(word.start_time, 0.4);
-    EXPECT_DOUBLE_EQ(word.stop_time, 0.5);
-  }
-}
-
-TEST(AudioSpeechValidationTests, TimestampAccumulatorCopiesBorrowedText) {
-  Generators::TimestampTokenizerConfig config{
-      Generators::Config::TimestampLevel::All, {}, std::nullopt, 100, 10, 1};
-  Generators::TimestampDecodeState state{config};
-  state.Consume({1, 0, 1}, {nullptr, 0, 0});
-  std::string text(" word");
-  const OrtxTimestampWordMetadata word{text.c_str(), 0, 1};
-  state.Finalize({&word, 1, 1});
-  text.assign("changed source");
-  ASSERT_EQ(state.result_.words.size(), 1U);
-  ASSERT_EQ(state.result_.segments.size(), 1U);
-  EXPECT_EQ(state.result_.words[0].text, " word");
-  EXPECT_EQ(state.result_.segments[0].text, " word");
 }
 
 class MetadataCoreStateTests : public testing::Test {
  protected:
   struct TestTransducerState : Generators::TransducerState {
-    using TransducerState::last_token_timings_;
+    using TransducerState::last_token_intervals_;
     using TransducerState::TransducerState;
     void SetTimestampsEnabled(bool enabled) { timestamps_enabled_ = enabled; }
     Generators::DeviceSpan<float> Run(int, Generators::DeviceSpan<int32_t>&, Generators::DeviceSpan<int32_t>) override {
@@ -249,8 +143,9 @@ class MetadataCoreStateTests : public testing::Test {
     void StepToken() override {}
     void SetStep(const std::vector<int32_t>& tokens, int64_t token_frame_position) {
       last_tokens_ = tokens;
-      last_token_timings_.clear();
-      for (const auto token : tokens) last_token_timings_.push_back({token, token_frame_position, token_frame_position + 1});
+      last_token_intervals_.clear();
+      for (size_t index = 0; index < tokens.size(); ++index)
+        last_token_intervals_.push_back({token_frame_position, token_frame_position + 1});
     }
   };
 
@@ -297,40 +192,115 @@ TEST_F(MetadataCoreStateTests, DecodeProcessesMetadataOncePerStep) {
   auto state = stream->CreateMetadataCoreState(metadata_config);
   auto plain = tokenizer->CreateStream();
   EXPECT_THROW(state->Metadata(), std::runtime_error);
-  EXPECT_THROW(state->ConsumeTimestamps(), std::runtime_error);
-  EXPECT_THROW(state->ConsumeFinalTimestamps(), std::runtime_error);
+  std::string transcript;
+  std::string words;
+  std::string segments;
 
   for (size_t index = 0; index < tokens.size(); ++index) {
     const auto& expected = stream->DecodeWithMetadata({tokens[index], 1, interval});
     EXPECT_EQ(state->Text(), plain->Decode(tokens[index]));
+    transcript += expected.text;
     ASSERT_NE(state->Metadata().timestampMetadata, nullptr);
-    EXPECT_EQ(&state->ProcessMetadata(), &expected);
-    const auto& result = state->ConsumeTimestamps();
-    EXPECT_EQ(result.text, expected.text);
-    ASSERT_EQ(result.words.size(), expected.timestampMetadata->word_count);
-    for (size_t word_index = 0; word_index < result.words.size(); ++word_index) {
-      EXPECT_EQ(result.words[word_index].text, expected.timestampMetadata->words[word_index].text);
-      EXPECT_EQ(result.words[word_index].start_frame, expected.timestampMetadata->words[word_index].start_frame);
-      EXPECT_EQ(result.words[word_index].stop_frame, expected.timestampMetadata->words[word_index].stop_frame);
+    for (size_t word_index = 0; word_index < expected.timestampMetadata->word_count; ++word_index) {
+      const auto& word = expected.timestampMetadata->words[word_index];
+      words += word.text;
+      EXPECT_EQ(word.start_frame, 4);
+      EXPECT_EQ(word.stop_frame, 5);
+      EXPECT_DOUBLE_EQ(word.start_time, 0.4);
+      EXPECT_DOUBLE_EQ(word.stop_time, 0.5);
     }
-    const auto count = result.words.size();
-    EXPECT_EQ(&state->ConsumeTimestamps(), &result);
-    EXPECT_EQ(result.words.size(), count);
+    for (size_t segment_index = 0; segment_index < expected.timestampMetadata->segment_count; ++segment_index)
+      segments += expected.timestampMetadata->segments[segment_index].text;
   }
 
-  const auto& expected = stream->FinalizeMetadata();
-  const auto& final = state->ConsumeFinalTimestamps();
-  ASSERT_EQ(final.words.size(), expected.timestampMetadata->word_count);
-  ASSERT_EQ(final.segments.size(), expected.timestampMetadata->segment_count);
-  for (size_t index = 0; index < final.words.size(); ++index) {
-    EXPECT_EQ(final.words[index].text, expected.timestampMetadata->words[index].text);
-    EXPECT_DOUBLE_EQ(final.words[index].start_time, expected.timestampMetadata->words[index].start_time);
-    EXPECT_DOUBLE_EQ(final.words[index].stop_time, expected.timestampMetadata->words[index].stop_time);
+  const auto& final = stream->FinalizeMetadata();
+  for (size_t index = 0; index < final.timestampMetadata->word_count; ++index) {
+    const auto& word = final.timestampMetadata->words[index];
+    words += word.text;
+    EXPECT_EQ(word.start_frame, 4);
+    EXPECT_EQ(word.stop_frame, 5);
   }
-  EXPECT_EQ(&state->ConsumeFinalTimestamps(), &final);
-  stream->FinalizeMetadata();
-  EXPECT_TRUE(state->ConsumeFinalTimestamps().words.empty());
-  EXPECT_TRUE(state->ConsumeFinalTimestamps().segments.empty());
+  for (size_t index = 0; index < final.timestampMetadata->segment_count; ++index)
+    segments += final.timestampMetadata->segments[index].text;
+  EXPECT_EQ(transcript, "Hello world.");
+  EXPECT_EQ(words, transcript);
+  EXPECT_EQ(segments, transcript);
+  const auto& repeated = stream->FinalizeMetadata();
+  EXPECT_EQ(repeated.timestampMetadata->word_count, 0U);
+  EXPECT_EQ(repeated.timestampMetadata->segment_count, 0U);
+}
+
+TEST_F(MetadataCoreStateTests, ZeroAndSubFrameGapsSplitWordsEvenOnSharedFrames) {
+  for (const double threshold : {0.0, 0.01}) {
+    auto config = metadata_config;
+    config.timestamps.segment_separators.clear();
+    config.timestamps.segment_gap_threshold_seconds = threshold;
+    auto stream = tokenizer->CreateStream();
+    stream->CreateMetadataCoreState(config);
+    std::vector<std::string> words;
+    std::vector<std::string> segments;
+    const auto collect = [&](const OgaTokenMetadataOutput& result) {
+      ASSERT_NE(result.timestampMetadata, nullptr);
+      for (size_t i = 0; i < result.timestampMetadata->word_count; ++i)
+        words.emplace_back(result.timestampMetadata->words[i].text);
+      for (size_t i = 0; i < result.timestampMetadata->segment_count; ++i) {
+        const auto& segment = result.timestampMetadata->segments[i];
+        segments.emplace_back(segment.text);
+        EXPECT_EQ(segment.start_frame, 4);
+        EXPECT_EQ(segment.stop_frame, 5);
+      }
+    };
+    for (const auto token : tokens)
+      collect(stream->DecodeWithMetadata({token, 1, interval}));
+    collect(stream->FinalizeMetadata());
+    ASSERT_GE(words.size(), 2U);
+    EXPECT_EQ(segments, words);
+  }
+}
+
+TEST_F(MetadataCoreStateTests, FrameGapCompletesPriorSegmentBeforeNextWord) {
+  auto config = metadata_config;
+  config.timestamps.segment_separators.clear();
+  config.timestamps.segment_gap_threshold_seconds = 0.3;  // Three frames at 100 Hz / 10 samples per frame.
+  auto stream = tokenizer->CreateStream();
+  stream->CreateMetadataCoreState(config);
+  std::vector<std::string> segments;
+  std::vector<std::pair<int64_t, int64_t>> bounds;
+  size_t completed_words = 0;
+  for (size_t index = 0; index < tokens.size(); ++index) {
+    const int64_t frame = index == 0 ? 0 : 8;
+    const auto& result = stream->DecodeWithMetadata({tokens[index], 1, {frame, frame + 1}});
+    completed_words += result.timestampMetadata->word_count;
+    for (size_t i = 0; i < result.timestampMetadata->segment_count; ++i) {
+      const auto& segment = result.timestampMetadata->segments[i];
+      segments.emplace_back(segment.text);
+      bounds.emplace_back(segment.start_frame, segment.stop_frame);
+    }
+  }
+  const auto& trailing = stream->FinalizeMetadata();
+  completed_words += trailing.timestampMetadata->word_count;
+  EXPECT_EQ(completed_words, 2U);
+  for (size_t i = 0; i < trailing.timestampMetadata->segment_count; ++i) {
+    const auto& segment = trailing.timestampMetadata->segments[i];
+    segments.emplace_back(segment.text);
+    bounds.emplace_back(segment.start_frame, segment.stop_frame);
+  }
+  ASSERT_EQ(segments.size(), 2U);
+  EXPECT_EQ(bounds[0], (std::pair<int64_t, int64_t>{0, 1}));
+  EXPECT_EQ(bounds[1], (std::pair<int64_t, int64_t>{8, 9}));
+  EXPECT_EQ(segments[0] + segments[1], "Hello world.");
+}
+
+TEST_F(MetadataCoreStateTests, RepeatedTokenIdsKeepPositionSpecificIntervals) {
+  source->SetStep({tokens[0], tokens[0]}, 4);
+  source->last_token_intervals_[1] = {9, 12};
+  const auto emitted = generator->GetNextTokensWithMetadata();
+  ASSERT_EQ(emitted.size(), 2U);
+  EXPECT_EQ(emitted[0].token_id, emitted[1].token_id);
+  EXPECT_EQ(emitted[0].token_acoustic_frame_interval.start, 4);
+  EXPECT_EQ(emitted[0].token_acoustic_frame_interval.stop, 5);
+  EXPECT_EQ(emitted[1].token_acoustic_frame_interval.start, 9);
+  EXPECT_EQ(emitted[1].token_acoustic_frame_interval.stop, 12);
 }
 
 TEST_F(MetadataCoreStateTests, DisabledConsumersDoNotBlockOrEnableProducers) {
@@ -346,17 +316,14 @@ TEST_F(MetadataCoreStateTests, DisabledConsumersDoNotBlockOrEnableProducers) {
     EXPECT_EQ(state->Metadata().timestampMetadata, nullptr);
     const auto* current_metadata = &state->Metadata();
     const auto current_text = state->Text();
-    EXPECT_THROW(state->ConsumeTimestamps(), std::runtime_error);
     EXPECT_EQ(&state->Metadata(), current_metadata);
     EXPECT_EQ(state->Text(), current_text);
     EXPECT_FALSE(state->TimestampsEnabled());
     enabled->DecodeWithMetadata({tokens[index], 1, interval});
     EXPECT_NE(enabled_state->Metadata().timestampMetadata, nullptr);
-    enabled_state->ConsumeTimestamps();
   }
   stream->FinalizeMetadata();
   EXPECT_EQ(state->Metadata().timestampMetadata, nullptr);
-  EXPECT_THROW(state->ConsumeFinalTimestamps(), std::runtime_error);
   EXPECT_NO_THROW(stream->FinalizeMetadata());
 }
 
@@ -372,7 +339,6 @@ TEST_F(MetadataCoreStateTests, StreamBindingResetAndDestructionInvalidateState) 
   stream->Reset();
   EXPECT_THROW(state->Text(), std::runtime_error);
   EXPECT_THROW(state->Metadata(), std::runtime_error);
-  EXPECT_THROW(state->ConsumeTimestamps(), std::runtime_error);
   EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 1, interval}), std::runtime_error);
   auto replacement = stream->CreateMetadataCoreState(Generators::MetadataCoreConfig{});
   EXPECT_NO_THROW(stream->DecodeWithMetadata({tokens[0], 1, interval}));
@@ -400,7 +366,6 @@ TEST_F(MetadataCoreStateTests, ConfigurationValidationAndSnapshots) {
   EXPECT_TRUE(state->TimestampsEnabled());
   stream->DecodeWithMetadata({tokens[0], 1, interval});
   ASSERT_NE(state->Metadata().timestampMetadata, nullptr);
-  EXPECT_NO_THROW(state->ConsumeTimestamps());
   const auto& final = stream->FinalizeMetadata();
   ASSERT_NE(final.timestampMetadata, nullptr);
   ASSERT_EQ(final.timestampMetadata->word_count, 1U);
@@ -477,12 +442,11 @@ TEST_F(MetadataCoreStateTests, TokenizerConfigurationIsAnIndependentCopy) {
   EXPECT_THROW(enabled_stream->CreateMetadataCoreStateUsingTokenizerConfig(), std::runtime_error);
   for (const auto token : tokens) {
     enabled_stream->DecodeWithMetadata({token, 1, interval});
-    enabled->ConsumeTimestamps();
   }
-  enabled_stream->FinalizeMetadata();
-  const auto& result = enabled->ConsumeFinalTimestamps();
-  ASSERT_FALSE(result.words.empty());
-  for (const auto& word : result.words) {
+  const auto& result = enabled_stream->FinalizeMetadata();
+  ASSERT_GT(result.timestampMetadata->word_count, 0U);
+  for (size_t index = 0; index < result.timestampMetadata->word_count; ++index) {
+    const auto& word = result.timestampMetadata->words[index];
     EXPECT_DOUBLE_EQ(word.start_time, word.start_frame * 0.1);
     EXPECT_DOUBLE_EQ(word.stop_time, word.stop_frame * 0.1);
   }
@@ -514,8 +478,7 @@ TEST_F(MetadataCoreStateTests, GenericMetadataRequiresExplicitState) {
 TEST_F(MetadataCoreStateTests, GeneratorOmitsTimingWhenDisabled) {
   model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Off;
   source->SetTimestampsEnabled(false);
-  source->last_token_timings_[0].token_id = tokens[0] + 1;
-  source->last_token_timings_.pop_back();
+  source->last_token_intervals_.pop_back();
   const auto records = generator->GetNextTokensWithMetadata();
   ASSERT_EQ(records.size(), tokens.size());
   auto plain = tokenizer->CreateStream();
@@ -545,7 +508,7 @@ TEST_F(MetadataCoreStateTests, GeneratorOmitsTimingWhenDisabled) {
 TEST_F(MetadataCoreStateTests, GeneratedMetadataPreservesMultiFrameIntervals) {
   auto stream = tokenizer->CreateStream();
   stream->CreateMetadataCoreState(metadata_config);
-  for (auto& timing : source->last_token_timings_) timing.stop_frame = 9;
+  for (auto& timing : source->last_token_intervals_) timing.stop = 9;
   const auto emitted = generator->GetNextTokensWithMetadata();
   ASSERT_EQ(emitted.size(), tokens.size());
   std::string transcript;
@@ -589,15 +552,10 @@ TEST_F(MetadataCoreStateTests, RetainsGenerationTimingAfterGeneratorAdvances) {
   stream->DecodeWithMetadata(token);
   source->SetStep({}, 99);
   EXPECT_TRUE(generator->GetNextTokensWithMetadata().empty());
-  EXPECT_NO_THROW(state->ConsumeTimestamps());
-  EXPECT_NO_THROW(state->ConsumeTimestamps());
-  const auto* processed = &state->ProcessMetadata();
-  EXPECT_EQ(&state->ProcessMetadata(), processed);
-  stream->FinalizeMetadata();
-  const auto& result = state->ConsumeFinalTimestamps();
-  ASSERT_EQ(result.words.size(), 1U);
-  EXPECT_EQ(result.words[0].start_frame, 4);
-  EXPECT_EQ(result.words[0].stop_frame, 5);
+  const auto& result = stream->FinalizeMetadata();
+  ASSERT_EQ(result.timestampMetadata->word_count, 1U);
+  EXPECT_EQ(result.timestampMetadata->words[0].start_frame, 4);
+  EXPECT_EQ(result.timestampMetadata->words[0].stop_frame, 5);
 }
 
 TEST_F(MetadataCoreStateTests, EmptyFinalizationAndInputValidation) {
@@ -609,16 +567,13 @@ TEST_F(MetadataCoreStateTests, EmptyFinalizationAndInputValidation) {
   auto state = stream->CreateMetadataCoreState(metadata_config);
   stream->FinalizeMetadata();
   EXPECT_EQ(state->Metadata().timestampMetadata, nullptr);
-  EXPECT_TRUE(state->ConsumeFinalTimestamps().words.empty());
   EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 1, negative_interval}), std::runtime_error);
   EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 1, empty_interval}), std::runtime_error);
   EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 1, reversed_interval}), std::runtime_error);
   EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 0, {}}), std::runtime_error);
-  source->last_token_timings_[0] = {tokens[0] + 1, 0, 1};
+  source->last_token_intervals_.pop_back();
   EXPECT_THROW(generator->GetNextTokensWithMetadata(), std::runtime_error);
-  source->last_token_timings_.pop_back();
-  EXPECT_THROW(generator->GetNextTokensWithMetadata(), std::runtime_error);
-  source->last_token_timings_.clear();
+  source->last_token_intervals_.clear();
   EXPECT_THROW(generator->GetNextTokensWithMetadata(), std::runtime_error);
   const OgaTokenMetadataInput token{tokens[0], 0, {}};
   EXPECT_THROW(stream->DecodeWithMetadata(token), std::runtime_error);

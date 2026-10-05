@@ -95,11 +95,9 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   max_symbols_per_step = config.model.max_symbols_per_step;
   blank_penalty = config.search.blank_penalty;
   timestamp_level = config.model.timestamp_level;
-  segment_separators = config.model.segment_separators;
 
   ValidateTimestampConfiguration(config.model);
-
-  segment_gap_threshold_frames = TimestampsEnabled() ? GetSegmentGapThresholdFrames(config.model) : std::nullopt;
+  if (TimestampsEnabled()) (void)GetSegmentGapThresholdFrames(config.model);
 
   // Vocab size from top-level config
   vocab_size = config.model.vocab_size;
@@ -540,7 +538,7 @@ void NemotronSpeechState::ResetStreamingState() {
   need_encoder_run_ = false;
   chunk_done_ = true;
   last_tokens_.clear();
-  last_token_timings_.clear();
+  last_token_intervals_.clear();
 }
 
 void NemotronSpeechState::RunEncoder() {
@@ -597,7 +595,7 @@ void NemotronSpeechState::StepToken() {
 
   last_tokens_.clear();
   if (timestamps_enabled_) {
-    last_token_timings_.clear();
+    last_token_intervals_.clear();
   }
 
   auto enc_info = encoded_output_->GetTensorTypeAndShapeInfo();
@@ -690,7 +688,7 @@ void NemotronSpeechState::StepToken() {
     last_tokens_.push_back(static_cast<int32_t>(best_token));
     all_tokens_.push_back(static_cast<int32_t>(best_token));
     if (timestamps_enabled_) {
-      last_token_timings_.push_back({static_cast<int32_t>(best_token), token_frame, token_frame + 1});
+      last_token_intervals_.push_back({token_frame, token_frame + 1});
     }
     return;
   }

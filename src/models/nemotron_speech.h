@@ -76,10 +76,8 @@ struct NemotronConfig {
   int subsampling_factor{};
   int max_symbols_per_step{};
 
-  // Timestamp output and segment-completion policy copied from the model configuration.
+  // Timestamp production; segment policy belongs to the tokenizer stream.
   Config::TimestampLevel timestamp_level{Config::TimestampLevel::Off};
-  std::vector<std::string> segment_separators;
-  std::optional<int> segment_gap_threshold_frames;
 
   bool TimestampsEnabled() const { return timestamp_level != Config::TimestampLevel::Off; }
 

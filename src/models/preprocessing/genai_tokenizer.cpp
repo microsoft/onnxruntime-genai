@@ -94,28 +94,22 @@ const OgaTokenMetadataOutput& TokenizerStream::DecodeWithMetadata(const OgaToken
   // Validate before advancing the Extensions decoder so rejected input consumes nothing.
   metadata_state_->ValidateInput(token);
 
-  // Decode once and retain the text, timing, and borrowed token-span metadata.
+  // Extensions supplies word token spans; the stream pairs them with buffered frame intervals.
   const char* text = nullptr;
   const OrtxMetadata* metadata = nullptr;
   CheckResult(OrtxDetokenizeCachedWithMetadata(tokenizer_->tokenizer_, cache_, token.token_id, &text, &metadata));
-  metadata_state_->SetDecoded(token, text, *metadata);
-
-  // Process enabled features and expose their results through the typed metadata view.
-  return metadata_state_->ProcessMetadata();
+  return metadata_state_->ProcessDecoded(token, text, *metadata);
 }
 
 const OgaTokenMetadataOutput& TokenizerStream::FinalizeMetadata() {
   // Finalization requires the same explicitly initialized stream state as decoding.
   if (!metadata_state_) throw std::runtime_error("Create metadata state before finalizing metadata");
-  metadata_state_->CheckCanAdvance();
+  metadata_state_->CheckValid();
 
   // Flush pending token spans without injecting another token or timing record.
   const OrtxMetadata* metadata = nullptr;
   CheckResult(OrtxFinalizeDetokenizeCachedWithMetadata(cache_, &metadata));
-  metadata_state_->SetFinalized(*metadata);
-
-  // Complete trailing feature results and return the same metadata shape as decoding.
-  return metadata_state_->ProcessMetadata();
+  return metadata_state_->ProcessFinalized(*metadata);
 }
 
 void TokenizerStream::Reset() {

@@ -965,18 +965,16 @@ std::span<const OgaTokenMetadataInput> Generator::GetNextTokensWithMetadata() co
   if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
     const auto tokens = transducer->GetStepTokens();
     const bool timestamps_enabled = transducer->TimestampsEnabled();
-    const auto timings = timestamps_enabled ? transducer->GetStepTokenTimings() : std::span<const TokenTiming>{};
-    if (timestamps_enabled && timings.size() != tokens.size())
+    const auto intervals = timestamps_enabled ? transducer->GetStepTokenIntervals() : std::span<const OgaTokenMetadataAcousticFrameInterval>{};
+    if (timestamps_enabled && intervals.size() != tokens.size())
       throw std::runtime_error("Generator timing count does not match emitted tokens");
     next_tokens_with_metadata_.reserve(tokens.size());
     for (size_t index = 0; index < tokens.size(); ++index) {
       if (!timestamps_enabled) {
         next_tokens_with_metadata_.push_back({tokens[index], 0, {}});
       } else {
-        const auto& timing = timings[index];
-        if (timing.token_id != tokens[index])
-          throw std::runtime_error("Generator timing does not match the emitted token");
-        next_tokens_with_metadata_.push_back({tokens[index], 1, {timing.start_frame, timing.stop_frame}});
+        // The interval at this index was emitted with this token, not looked up by vocabulary ID.
+        next_tokens_with_metadata_.push_back({tokens[index], 1, intervals[index]});
       }
     }
   } else {
