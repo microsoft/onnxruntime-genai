@@ -151,10 +151,25 @@ bool KevCudaGraphEnabled() {
 
 std::unique_ptr<OrtSession> CreateComponentSession(
     const fs::path& model_path, const std::vector<std::string>& providers,
-    bool capture,
+    bool capture, const Config* component_config,
     const std::map<std::string, int64_t>& dimension_overrides = {}) {
   auto options = OrtSessionOptions::Create();
-  Config config;
+  Config config = component_config ? *component_config : Config{};
+  auto& configured_session_options =
+      config.model.decoder.session_options;
+  if (component_config) {
+    if (configured_session_options.intra_op_num_threads)
+      options->SetIntraOpNumThreads(
+          *configured_session_options.intra_op_num_threads);
+    if (configured_session_options.inter_op_num_threads)
+      options->SetInterOpNumThreads(
+          *configured_session_options.inter_op_num_threads);
+    for (const auto& [name, value] :
+         configured_session_options.config_entries)
+      options->AddConfigEntry(name.c_str(), value.c_str());
+  }
+  configured_session_options.providers.clear();
+  configured_session_options.provider_options.clear();
   for (const auto& provider : providers) {
     if (provider.empty())
       throw std::runtime_error("provider name must not be empty");
@@ -230,6 +245,7 @@ struct ComponentCudaGraphState {
 
   fs::path model_path;
   std::vector<std::string> providers;
+  std::unique_ptr<Config> config;
   DeviceInterface* device{};
   std::unique_ptr<OrtMemoryInfo> device_memory;
   std::unique_ptr<OrtRunOptions> eager_options;
@@ -243,7 +259,13 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
   auto components = LoadComponents(package_path);
   auto found = components.find(component);
   if (found == components.end()) throw std::runtime_error("component not declared: " + component);
-  session_ = CreateComponentSession(found->second, providers, false);
+  std::unique_ptr<Config> component_config;
+  if (std::filesystem::is_regular_file(
+          (package_path / "genai_config.json").c_str()))
+    component_config =
+        std::make_unique<Config>(package_path, std::string_view{});
+  session_ = CreateComponentSession(found->second, providers, false,
+                                    component_config.get());
   input_names_ = session_->GetInputNames();
   output_names_ = session_->GetOutputNames();
   for (size_t i = 0; i < input_names_.size(); ++i) {
@@ -266,6 +288,7 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
     cuda_graph_ = std::make_unique<ComponentCudaGraphState>();
     cuda_graph_->model_path = found->second;
     cuda_graph_->providers = providers;
+    cuda_graph_->config = std::move(component_config);
     cuda_graph_->device = GetDeviceInterface(DeviceType::CUDA);
     EnsureDeviceOrtInit(*cuda_graph_->device, config);
     cuda_graph_->device_memory = cuda_graph_->device->GetMemoryInfo();
@@ -324,12 +347,14 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
     }
     session_.reset();
     try {
-      session_ = CreateComponentSession(cuda_graph_->model_path,
-                                        cuda_graph_->providers, true, overrides);
+      session_ = CreateComponentSession(
+          cuda_graph_->model_path, cuda_graph_->providers, true,
+          cuda_graph_->config.get(), overrides);
       cuda_graph_->specialized = true;
     } catch (...) {
-      session_ = CreateComponentSession(cuda_graph_->model_path,
-                                        cuda_graph_->providers, false);
+      session_ = CreateComponentSession(
+          cuda_graph_->model_path, cuda_graph_->providers, false,
+          cuda_graph_->config.get());
       cuda_graph_->disabled = true;
       throw;
     }
@@ -345,8 +370,9 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
 #endif
     cuda_graph_->run.reset();
     session_.reset();
-    session_ = CreateComponentSession(cuda_graph_->model_path,
-                                      cuda_graph_->providers, false);
+    session_ = CreateComponentSession(
+        cuda_graph_->model_path, cuda_graph_->providers, false,
+        cuda_graph_->config.get());
     cuda_graph_->specialized = false;
     cuda_graph_->disabled = true;
   }
