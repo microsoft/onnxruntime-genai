@@ -20,10 +20,6 @@ namespace Generators::AMDGPUExecutionProvider {
 
 namespace {
 
-// Whether genai itself registered the umbrella EP library (vs. a host pre-registering it). Guards the
-// teardown-time unregister so genai never tears down a registration it does not own. Single-threaded.
-bool g_genai_owns_ep_registration = false;
-
 constexpr const char* kEpPathEnvKey = "AMDGPU_EP_PATH";
 #if defined(_WIN32)
 constexpr const char* kEpFilename = "amdgpu-ep.dll";
@@ -37,7 +33,7 @@ constexpr const char* kEpFilename = "libamdgpu-ep.so";
 void EnsureUmbrellaEpRegistered() {
   if (!FindRegisteredEpDevices(kAMDGPUExecutionProviderName).empty()) {
     // Already registered (by a host, or by a prior genai model). genai introduces nothing here, so it
-    // does not claim ownership — a host-owned registration must keep g_genai_owns_ep_registration false.
+    // does not claim ownership — a host-owned registration must keep the ownership flag false.
     return;
   }
 
@@ -85,12 +81,13 @@ void EnsureUmbrellaEpRegistered() {
 
   try {
     Ort::RegisterExecutionProviderLibrary(&GetOrtEnv(), kAMDGPUExecutionProviderName, ep_path.native().c_str());
-    // genai introduced this registration -> genai owns it and may unregister it at teardown.
-    g_genai_owns_ep_registration = true;
+    // genai introduced this registration -> genai owns it and may unregister it at teardown. Scoped to
+    // the current OrtGlobals so it is cleared when the env is torn down (Shutdown / re-init).
+    GetOrtGlobals()->amdgpu_owns_ep_registration_ = true;
   } catch (const Ort::Exception& e) {
     // Registered but advertising no device: the check above cannot see that, ORT reports it here.
     // A concurrent/pre-existing registration raced us: genai did not introduce it, so do not take
-    // ownership (leave g_genai_owns_ep_registration as-is, default false).
+    // ownership (leave amdgpu_owns_ep_registration_ as-is, default false).
     if (std::string(e.what()).find("already registered") == std::string::npos)
       throw;
   }
@@ -109,8 +106,6 @@ void SetStaticPaddingConfig(OrtSessionOptions& session_options, const Config& co
   session_options.AddConfigEntry("ep.migraphx.static_pad_seq_len", seq_len.c_str());
   session_options.AddConfigEntry("ep.migraphx.static_pad_inputs", pad_inputs.c_str());
   session_options.AddConfigEntry("ep.migraphx.static_pad_outputs", pad_outputs.c_str());
-
-  session_options.AddConfigEntry("ep.migraphx.hip_graph_enable", "1");
 }
 
 }  // namespace
@@ -120,7 +115,7 @@ void ReleaseOwnedUmbrellaEp() {
   // host. A host that registered the library itself depends on it (and its shared allocators) for the
   // whole process, so genai releases them only when it owns the registration; otherwise it leaves
   // everything in place. One gate covers both the allocator release and the unregister.
-  if (!g_genai_owns_ep_registration)
+  if (!GetOrtGlobals()->amdgpu_owns_ep_registration_)
     return;
 
   // Release the OrtEnv-shared allocators first: the shared GPU allocator holds the plugin's
@@ -146,7 +141,7 @@ void ReleaseOwnedUmbrellaEp() {
   // The next genai model's EnsureUmbrellaEpRegistered re-creates a fresh library + device.
   try {
     Ort::UnregisterExecutionProviderLibrary(&GetOrtEnv(), kAMDGPUExecutionProviderName);
-    g_genai_owns_ep_registration = false;
+    GetOrtGlobals()->amdgpu_owns_ep_registration_ = false;
   } catch (...) {
     // Called from ~Model (noexcept): best-effort. Never let an exception escape the destructor.
   }
@@ -169,28 +164,41 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // therefore advisory; the plugin owns the policy. Left as "1" as the intended request.
   session_options.AddConfigEntry("ep.directml.enable_host_accessible", "1");
 
-  // DirectML backend: runtime (deferred, dynamic-shape) graph fusion, forwarded under the
-  // ep.directml.* namespace. On by default for AMDGPU, opt-out per model via provider option
-  // enable_graph_capture="0" (IsGraphCaptureEnabled); disable_graph_capture lets a caller force it off
-  // for non-decoder sub-sessions whose control-flow nodes are incompatible with captured-graph replay.
-  if (IsGraphCaptureEnabled(config.model.decoder.session_options) && !disable_graph_capture) {
-    session_options.AddConfigEntry("ep.directml.enable_graph_capture", "1");
-  }
+  // Runtime (deferred, dynamic-shape) graph capture, applied to whichever backend the umbrella EP
+  // routes to: ep.directml.enable_graph_capture for DirectX, ep.migraphx.hip_graph_enable for MIGraphX.
+  // On by default for AMDGPU, opt-out per model via provider option enable_graph_capture="0"
+  // (IsGraphCaptureEnabled); disable_graph_capture lets a caller force it off for non-decoder
+  // sub-sessions whose control-flow nodes are incompatible with captured-graph replay. Both keys are
+  // written explicitly so the effective decision overrides any backend default.
+  const bool enable_graph_capture =
+      IsGraphCaptureEnabled(config.model.decoder.session_options) && !disable_graph_capture;
+  session_options.AddConfigEntry("ep.directml.enable_graph_capture", enable_graph_capture ? "1" : "0");
+  session_options.AddConfigEntry("ep.migraphx.hip_graph_enable", enable_graph_capture ? "1" : "0");
 
   // Drop any cached device allocator + init session so this model rebuilds its own; otherwise the
   // dummy-allocator session reuses a prior model's allocator over an already-freed allocation.
-  // Skip it when another AMDGPU model is still live (e.g. speculative decoding's target + draft):
-  // its buffers hold the cached allocator as a raw pointer, so resetting it would dangle them — the
-  // second model safely reuses the first's live allocator instead. (device_allocators_ holds one slot
-  // per DeviceType, so all live AMDGPU models already share a single allocator by construction.)
+  auto& amdgpu_allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::AMDGPU)];
   if (!HasLiveAMDGPUModel()) {
-    auto& amdgpu_allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::AMDGPU)];
     amdgpu_allocator.allocator_.reset();
     amdgpu_allocator.session_.reset();
     amdgpu_allocator.host_accessible_allocator_ = nullptr;
     amdgpu_allocator.device_id_ = 0;
     // Mirror the reset on the interface singleton so the rebuilt allocator's InitOrt rebinds cleanly.
     ResetAMDGPUInterfaceAllocatorState();
+  } else if (const auto& filtering = provider_options.device_filtering_options;
+             filtering && filtering->hardware_device_id &&
+             *filtering->hardware_device_id != static_cast<uint32_t>(amdgpu_allocator.device_id_)) {
+    // Another AMDGPU model is live, so the reset is skipped and this model will reuse the cached
+    // allocator (device_allocators_ has one slot per DeviceType). That is only safe when both models
+    // target the same device — the speculative decoding target + draft case. A model that explicitly
+    // selects a different device would get an allocator bound to the live model's device while its
+    // session runs on the requested one, silently corrupting its KV cache / shared initializers across
+    // devices. Reject it rather than reuse a mismatched allocator; concurrent multi-device AMDGPU models
+    // are not supported (one shared allocator slot per DeviceType).
+    throw std::runtime_error(
+        "AMDGPU: a model is already live on device " + std::to_string(amdgpu_allocator.device_id_) +
+        ", but this model requested device " + std::to_string(*filtering->hardware_device_id) +
+        ". Concurrent AMDGPU models must target the same device.");
   }
 
   AppendExecutionProviderV2(session_options, provider_options,

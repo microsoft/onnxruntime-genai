@@ -370,7 +370,10 @@ static std::unique_ptr<AMDGPU::PinnedInputsImpl> g_amdgpu_pinned_inputs;
 
 // Live Models sharing the process-global AMDGPU interface singleton. Several can be alive at once
 // (e.g. a target + draft decoder pair), so the full teardown must run only when the last one goes away.
-// Not synchronized: genai's model lifecycle is single-threaded.
+//
+// Unsynchronized, mirroring the DML interface (g_dml_device) and its assumption of a serialized Model
+// lifecycle; it shares the same limitation, where overlapping lifetimes (e.g. the C# GC finalizer
+// thread) can race this counter.
 static int g_amdgpu_model_refcount = 0;
 
 void AcquireAMDGPUInterface() {
