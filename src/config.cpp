@@ -129,7 +129,6 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.inputs.input_ids = mtp.inputs.input_ids;
   decoder.inputs.hidden_states = mtp.inputs.hidden_states;
   decoder.inputs.position_ids = mtp.inputs.position_ids;
-  decoder.inputs.logits_indices = mtp.inputs.logits_indices;
   decoder.inputs.past_key_names = mtp.inputs.past_key_names;
   decoder.inputs.past_value_names = mtp.inputs.past_value_names;
   decoder.inputs.past_indexer_names = mtp.inputs.past_indexer_names;
@@ -1131,8 +1130,6 @@ struct MtpInputs_Element : JSON::Element {
       v_.input_ids = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
-    } else if (name == "logits_indices") {
-      v_.logits_indices = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {

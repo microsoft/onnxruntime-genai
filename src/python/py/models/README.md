@@ -558,24 +558,6 @@ When a Qwen3.5 MoE configuration declares one or more MTP layers with `mtp_num_h
 
 Qwen3.8 Flash Next checkpoints (`Qwen4ExpForConditionalGeneration`) use their native one-layer MTP head automatically. The exporter preserves the target's hyper-connection streams, applies the checkpoint's separate `mtp.fc_embedding` and `mtp.fc_hidden` projections, and exports the QSA indexer cache bindings required by the draft layer. Both the original floating-point checkpoint and NVIDIA's mixed NVFP4 checkpoint are supported, with the FP8 MTP reconstruction described above.
 
-For Qwen4-Exp only, `mtp_prune_lm_head=true` opts into selecting the final packed
-LM-head row per request in the MTP drafter. The option accepts `true`/`false` and
-defaults to `false`. It requires `use_paged_attention=true` and an exported MTP
-head. It adds `model.mtp.inputs.logits_indices` and emits `[num_logits, vocab_size]`
-draft logits while preserving every body, hidden-feedback, KV, and indexer row.
-The target remains unpruned; its existing `prune_lm_head` restriction still applies.
-This requires a GenAI native build supporting the MTP `logits_indices` binding.
-Changing the head's MatMul row count can change kernel dispatch, so validate
-selected-row numerical parity and draft/acceptance trajectories before deployment.
-
-```bash
-# From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_qwen4_exp_checkpoint -o output -p int4 -e cuda --extra_options use_paged_attention=true mtp_prune_lm_head=true
-
-# From source, at the repository root:
-python src/python/py/models/builder.py -i path_to_qwen4_exp_checkpoint -o output -p int4 -e cuda --extra_options use_paged_attention=true mtp_prune_lm_head=true
-```
-
 ```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files

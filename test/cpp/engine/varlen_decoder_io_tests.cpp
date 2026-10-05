@@ -219,22 +219,6 @@ TEST(VarlenDecoderIOTest, SelectsOnlyConsumedLogitsRowsInRequestOrder) {
             (std::vector<size_t>{0, 1, 2, 3, 4, 14}));
 }
 
-TEST(VarlenDecoderIOTest, MtpSelectsOnlyTheLastCommittedRowPerRequest) {
-  StepPlan plan;
-  RequestStepPlan first;
-  first.packed_token_offset = 0;
-  first.logits_row_index = 1;
-  first.unprocessed_token_count = 2;
-  RequestStepPlan second;
-  second.packed_token_offset = 2;
-  second.logits_row_index = 3;
-  second.unprocessed_token_count = 2;
-  plan.requests = {first, second};
-  plan.token_count = 4;
-
-  EXPECT_EQ(GetSelectedLogitsIndices(plan), (std::vector<size_t>{1, 3}));
-}
-
 TEST(VarlenDecoderIOTest, RejectsVerificationRowsOutsideTheRequestRange) {
   StepPlan plan;
   RequestStepPlan invalid;

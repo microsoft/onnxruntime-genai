@@ -169,7 +169,6 @@ def check_extra_options(
         "disable_qkv_fusion",
         "fuse_qk_norm_gqa",
         "prune_lm_head",
-        "mtp_prune_lm_head",
         "use_paged_attention",
         "windowed_kv_cache",
         "text_only",
@@ -970,10 +969,6 @@ def get_args():
                     of [B,S,H]. For paged-attention models, gathers the final packed hidden state for each sequence so
                     the MatMul input is [B,H] instead of [num_tokens,H].
                     Ignored when exclude_lm_head is true.
-                mtp_prune_lm_head = Select only the final packed LM-head row per request in the Qwen4-Exp MTP drafter.
-                    Accepts true/false; default is false. Requires use_paged_attention=true and an exported MTP head.
-                    Keeps all MTP body, hidden-feedback, KV and indexer rows; the target LM head is unchanged.
-                    Adds model.mtp.inputs.logits_indices and emits [num_logits, vocab_size] draft logits.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
