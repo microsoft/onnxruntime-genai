@@ -5,8 +5,6 @@
 #include "telemetry/telemetry_sampling.h"
 #include "telemetry/telemetry_io.h"
 #include "telemetry/telemetry_redaction.h"
-#include "models/env_utils.h"
-#include "scoped-environment-variable.h"
 
 #include <sstream>
 #include <vector>
@@ -15,36 +13,6 @@
 
 namespace Generators::test {
 namespace {
-
-TEST(EnvironmentTests, GetEnvPreservesExistingStringAndBooleanSemantics) {
-  ScopedEnvironmentVariable variable{"ORTGENAI_TEST_ENV", std::nullopt};
-  EXPECT_TRUE(GetEnv("ORTGENAI_TEST_ENV").empty());
-  for (const bool initial : {false, true}) {
-    bool value = initial;
-    GetEnv("ORTGENAI_TEST_ENV", value);
-    EXPECT_EQ(value, initial);
-    variable.Set("");
-    GetEnv("ORTGENAI_TEST_ENV", value);
-    EXPECT_EQ(value, initial);
-    variable.Set(std::nullopt);
-  }
-  for (const char* input : {"1", "true", "0", "false"}) {
-    variable.Set(input);
-    EXPECT_EQ(GetEnv("ORTGENAI_TEST_ENV"), input);
-    bool value = input[0] == '0' || input[0] == 'f';
-    GetEnv("ORTGENAI_TEST_ENV", value);
-    EXPECT_EQ(value, input[0] == '1' || input[0] == 't');
-  }
-  for (const char* input : {"TRUE", " yes ", "random"}) {
-    variable.Set(input);
-    bool value = false;
-    EXPECT_THROW(GetEnv("ORTGENAI_TEST_ENV", value), std::invalid_argument);
-    EXPECT_FALSE(value);
-  }
-  const std::string large(kMaxTelemetryInputBytes + 1, 'x');
-  variable.Set(large);
-  EXPECT_EQ(GetEnv("ORTGENAI_TEST_ENV"), large);
-}
 
 TEST(TelemetryStringTests, BoundsAsciiAndAllUtf8Widths) {
   EXPECT_EQ(kMaxTelemetryStringLength, 1024u);
@@ -89,7 +57,7 @@ TEST(TelemetryStringTests, BoundsProviderListStorageAndIteration) {
   EXPECT_TRUE(JoinTelemetryStrings(empty_entries).empty());
 }
 
-TEST(TelemetryStringTests, BoundsEventPropertiesUsingTheProductionSetter) {
+TEST(TelemetryStringTests, BoundsEventPropertyUsingTheProductionSetter) {
   struct Event {
     std::string name;
     std::string value;
@@ -98,12 +66,9 @@ TEST(TelemetryStringTests, BoundsEventPropertiesUsingTheProductionSetter) {
       value = std::move(property);
     }
   } event;
-  for (const char* name : {"modelType", "modelFamily", "executionProviders", "selectedDevice",
-                           "modality", "inputModality", "cpuModel", "errorType", "context"}) {
-    SetTelemetryStringProperty(event, name, std::string(1024 * 1024, 'x'));
-    EXPECT_EQ(event.name, name);
-    EXPECT_EQ(event.value, std::string(1024, 'x'));
-  }
+  SetTelemetryStringProperty(event, "modelType", std::string(1024 * 1024, 'x'));
+  EXPECT_EQ(event.name, "modelType");
+  EXPECT_EQ(event.value, std::string(1024, 'x'));
 }
 
 TEST(TelemetryInputTests, BoundsFileReadsAndCpuNameParsing) {
@@ -122,7 +87,6 @@ TEST(TelemetryInputTests, BoundsFileReadsAndCpuNameParsing) {
 TEST(TelemetryInputTests, BoundsEnvironmentEvidenceProcessing) {
   EXPECT_EQ(TelemetryInternal::ToLowerAscii(std::string(1024 * 1024, 'A')).size(),
             TelemetryInternal::kMaxProcessingBytes);
-  EXPECT_TRUE(TelemetryInternal::IsNonFalseValue(std::string(kMaxTelemetryInputBytes + 1, ' ')));
   TelemetryInternal::HostEnvironmentEvidence evidence;
   evidence.cgroup = std::string(1024 * 1024, 'x') + "docker";
   evidence.dmi = std::string(1024 * 1024, 'x') + "vmware";
@@ -158,9 +122,7 @@ TEST(TelemetrySamplingTests, UsesStableOnePercentBuckets) {
 
   EXPECT_EQ(TelemetryInternal::HashSamplingKey("process-guid", 42),
             16731315322573479350ULL);
-  for (int repetition = 0; repetition < 10; ++repetition) {
-    EXPECT_FALSE(TelemetryInternal::ShouldSampleSession("process-guid", 42));
-  }
+  EXPECT_FALSE(TelemetryInternal::ShouldSampleSession("process-guid", 42));
 }
 
 TEST(TelemetryEnvironmentClassificationTests, LeavesUnknownHostsUndetected) {

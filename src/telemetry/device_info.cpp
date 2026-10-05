@@ -259,7 +259,7 @@ TelemetryInternal::HostEnvironmentInfo GetHostEnvironmentInfo() {
   evidence.aws_ecs = !ReadTelemetryEnvironment("ECS_CONTAINER_METADATA_URI").empty() ||
                      !ReadTelemetryEnvironment("ECS_CONTAINER_METADATA_URI_V4").empty();
   evidence.generic_container =
-      TelemetryInternal::IsNonFalseValue(
+      TelemetryInternal::IsTruthyValue(
           ReadTelemetryEnvironment("DOTNET_RUNNING_IN_CONTAINER"));
   evidence.systemd_container =
       ReadBoundedFile("/run/systemd/container") + ReadTelemetryEnvironment("container");

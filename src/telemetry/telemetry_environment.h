@@ -47,9 +47,8 @@ inline std::string ToLowerAscii(std::string_view s) {
   return out;
 }
 
-// A CI variable counts as present unless its (trimmed) value is empty or an explicit falsey token, so
-// a runner exporting e.g. CI=false does not trip detection.
-inline bool IsNonFalseValue(std::string_view value) {
+// CI/test flags accept any nonempty value except 0/false/no/off, ignoring case and whitespace.
+inline bool IsTruthyValue(std::string_view value) {
   if (value.size() > kMaxTelemetryInputBytes) return true;
   const std::string v = ToLowerAscii(TrimAscii(value));
   return !v.empty() && v != "0" && v != "false" && v != "no" && v != "off";
@@ -207,7 +206,7 @@ inline HostEnvironmentInfo ClassifyHostEnvironment(const HostEnvironmentEvidence
 inline bool ShouldSuppressTelemetryFromEnvironment() {
   for (const char* name : kTelemetrySuppressionVariables) {
     const auto value = ReadEnvironmentVariable(name, kMaxTelemetryInputBytes);
-    if (!value || IsNonFalseValue(*value)) return true;
+    if (!value || IsTruthyValue(*value)) return true;
   }
   const auto input = ReadEnvironmentVariable("ORT_DISABLE_TELEMETRY", kMaxTelemetryInputBytes);
   if (!input) return true;

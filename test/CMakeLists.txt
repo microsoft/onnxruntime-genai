@@ -13,6 +13,7 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 )
 
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp")
@@ -119,7 +120,7 @@ endif()
 
 add_executable(telemetry_helpers_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_environment_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp"
   "${CMAKE_SOURCE_DIR}/src/models/env_utils.cpp")
 target_include_directories(telemetry_helpers_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src
