@@ -118,7 +118,9 @@ if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
 endif()
 
 add_executable(telemetry_helpers_tests
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_environment_tests.cpp"
+  "${CMAKE_SOURCE_DIR}/src/models/env_utils.cpp")
 target_include_directories(telemetry_helpers_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src
 )

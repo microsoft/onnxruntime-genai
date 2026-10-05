@@ -5,6 +5,8 @@
 #include "telemetry/telemetry_sampling.h"
 #include "telemetry/telemetry_io.h"
 #include "telemetry/telemetry_redaction.h"
+#include "models/env_utils.h"
+#include "scoped-environment-variable.h"
 
 #include <sstream>
 #include <vector>
@@ -13,6 +15,36 @@
 
 namespace Generators::test {
 namespace {
+
+TEST(EnvironmentTests, GetEnvPreservesExistingStringAndBooleanSemantics) {
+  ScopedEnvironmentVariable variable{"ORTGENAI_TEST_ENV", std::nullopt};
+  EXPECT_TRUE(GetEnv("ORTGENAI_TEST_ENV").empty());
+  for (const bool initial : {false, true}) {
+    bool value = initial;
+    GetEnv("ORTGENAI_TEST_ENV", value);
+    EXPECT_EQ(value, initial);
+    variable.Set("");
+    GetEnv("ORTGENAI_TEST_ENV", value);
+    EXPECT_EQ(value, initial);
+    variable.Set(std::nullopt);
+  }
+  for (const char* input : {"1", "true", "0", "false"}) {
+    variable.Set(input);
+    EXPECT_EQ(GetEnv("ORTGENAI_TEST_ENV"), input);
+    bool value = input[0] == '0' || input[0] == 'f';
+    GetEnv("ORTGENAI_TEST_ENV", value);
+    EXPECT_EQ(value, input[0] == '1' || input[0] == 't');
+  }
+  for (const char* input : {"TRUE", " yes ", "random"}) {
+    variable.Set(input);
+    bool value = false;
+    EXPECT_THROW(GetEnv("ORTGENAI_TEST_ENV", value), std::invalid_argument);
+    EXPECT_FALSE(value);
+  }
+  const std::string large(kMaxTelemetryInputBytes + 1, 'x');
+  variable.Set(large);
+  EXPECT_EQ(GetEnv("ORTGENAI_TEST_ENV"), large);
+}
 
 TEST(TelemetryStringTests, BoundsAsciiAndAllUtf8Widths) {
   EXPECT_EQ(kMaxTelemetryStringLength, 1024u);
@@ -90,7 +122,7 @@ TEST(TelemetryInputTests, BoundsFileReadsAndCpuNameParsing) {
 TEST(TelemetryInputTests, BoundsEnvironmentEvidenceProcessing) {
   EXPECT_EQ(TelemetryInternal::ToLowerAscii(std::string(1024 * 1024, 'A')).size(),
             TelemetryInternal::kMaxProcessingBytes);
-  EXPECT_TRUE(TelemetryInternal::IsCiValueTruthy(std::string(kMaxTelemetryInputBytes + 1, ' ')));
+  EXPECT_TRUE(TelemetryInternal::IsNonFalseValue(std::string(kMaxTelemetryInputBytes + 1, ' ')));
   TelemetryInternal::HostEnvironmentEvidence evidence;
   evidence.cgroup = std::string(1024 * 1024, 'x') + "docker";
   evidence.dmi = std::string(1024 * 1024, 'x') + "vmware";
@@ -157,6 +189,25 @@ TEST(TelemetryEnvironmentClassificationTests, PrioritizesSpecificContainerEviden
   EXPECT_STREQ(info.environment_class, "container");
   EXPECT_STREQ(info.detection_confidence, "high");
   EXPECT_STREQ(info.device_id_scope, "container");
+}
+
+TEST(TelemetryEnvironmentClassificationTests, MatchesNormalizedContainerEvidence) {
+  struct Case {
+    const char* value;
+    const char* container_type;
+  };
+  for (const auto& entry : {Case{"KuBePoDs", "kubernetes"}, Case{"LiBpOd", "podman"},
+                            Case{"PoDmAn", "podman"}, Case{"DoCkEr", "docker"},
+                            Case{"CoNtAiNeRd", "containerd"}, Case{"LxC", "lxc"}}) {
+    TelemetryInternal::HostEnvironmentEvidence evidence;
+    evidence.cgroup = std::string{"0::/"} + entry.value + "/container";
+    EXPECT_STREQ(TelemetryInternal::ClassifyHostEnvironment(evidence).container_type,
+                 entry.container_type);
+    evidence.cgroup.clear();
+    evidence.systemd_container = std::string{" \t"} + entry.value + "\n";
+    EXPECT_STREQ(TelemetryInternal::ClassifyHostEnvironment(evidence).container_type,
+                 entry.container_type);
+  }
 }
 
 TEST(TelemetryEnvironmentClassificationTests, ClassifiesContainersOnVirtualMachines) {

@@ -110,7 +110,7 @@ bool PrepareSampledEvent(MAT::EventProperties& event, std::string_view app_sessi
 
 #if defined(__linux__) && !defined(__ANDROID__)
 std::string GetCertificateAuthorityBundlePath() {
-  const auto ssl_cert_file = TelemetryInternal::GetTelemetryEnv("SSL_CERT_FILE");
+  const auto ssl_cert_file = ReadEnvironmentVariable("SSL_CERT_FILE", kMaxTelemetryInputBytes);
   if (!ssl_cert_file) {
     if (g_log.enabled && g_log.warning) {
       Log("warning", "Ignoring oversized or unstable telemetry SSL_CERT_FILE");
@@ -195,9 +195,7 @@ void GenAiTelemetry::Initialize() {
   // Full suppression is process-wide and irreversible: never create the uploader, emit an event, or
   // persist a device id. Latching also covers later GenAI reinitialization after an environment change.
   if (telemetry_disabled_.load() ||
-      TelemetryInternal::IsRunningInCI() ||
-      TelemetryInternal::IsRunningUnitTests() ||
-      TelemetryInternal::IsTelemetryDisabledByEnvironment()) {
+      TelemetryInternal::ShouldSuppressTelemetryFromEnvironment()) {
     telemetry_disabled_.store(true);
     enabled_.store(false);
     return;

@@ -1,170 +1,123 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include "scoped-environment-variable.h"
 #include "telemetry/telemetry_environment.h"
 
-#include <stdlib.h>
-#include <string>
-
-#include <gtest/gtest.h>
+#include <array>
+#include <memory>
+#include <vector>
 
 namespace {
 
-void SetEnv(const char* name, const char* value) {
-#ifdef _WIN32
-  EXPECT_NE(::SetEnvironmentVariableA(name, value), 0);
-#else
-  setenv(name, value, 1);
-#endif
-}
+using Generators::test::ScopedEnvironmentVariable;
+using namespace Generators::TelemetryInternal;
 
-void UnsetEnv(const char* name) {
-#ifdef _WIN32
-  EXPECT_NE(::SetEnvironmentVariableA(name, nullptr), 0);
-#else
-  unsetenv(name);
-#endif
-}
-
-class ScopedEnvVar {
- public:
-  explicit ScopedEnvVar(const char* name) : name_{name} {
-#ifdef _WIN32
-    for (;;) {
-      ::SetLastError(ERROR_SUCCESS);
-      const DWORD required_size = ::GetEnvironmentVariableA(name, nullptr, 0);
-      if (required_size == 0) {
-        had_value_ = ::GetLastError() != ERROR_ENVVAR_NOT_FOUND;
-        return;
-      }
-
-      saved_.resize(required_size);
-      ::SetLastError(ERROR_SUCCESS);
-      const DWORD written = ::GetEnvironmentVariableA(name, saved_.data(), required_size);
-      if (written == 0) {
-        had_value_ = ::GetLastError() != ERROR_ENVVAR_NOT_FOUND;
-        saved_.clear();
-        return;
-      }
-      if (written < required_size) {
-        had_value_ = true;
-        saved_.resize(written);
-        return;
-      }
-      // The value grew between calls; retry with its new required size.
+class TelemetryEnvironmentTests : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    for (const char* name : kTelemetrySuppressionVariables) {
+      variables_.push_back(std::make_unique<ScopedEnvironmentVariable>(name, std::nullopt));
     }
-#else
-    const char* value = std::getenv(name);
-    had_value_ = value != nullptr;
-    if (had_value_) saved_ = value;
-#endif
-  }
-
-  ~ScopedEnvVar() {
-    if (had_value_) {
-      SetEnv(name_, saved_.c_str());
-    } else {
-      UnsetEnv(name_);
-    }
+    variables_.push_back(
+        std::make_unique<ScopedEnvironmentVariable>("ORT_DISABLE_TELEMETRY", std::nullopt));
   }
 
  private:
-  const char* name_;
-  bool had_value_{false};
-  std::string saved_;
+  std::vector<std::unique_ptr<ScopedEnvironmentVariable>> variables_;
 };
 
-void ExpectOptOutEnv(const char* value, bool expected) {
-  ScopedEnvVar opt_out_guard{"ORT_DISABLE_TELEMETRY"};
-
-  if (value != nullptr) {
-    SetEnv("ORT_DISABLE_TELEMETRY", value);
-  } else {
-    UnsetEnv("ORT_DISABLE_TELEMETRY");
+TEST_F(TelemetryEnvironmentTests, NonFalseValueTruthTable) {
+  for (const char* value : {"1", "true", "TRUE", " yes ", "anything"}) {
+    EXPECT_TRUE(IsNonFalseValue(value)) << value;
   }
-
-  EXPECT_EQ(Generators::TelemetryInternal::IsTelemetryDisabledByEnvironment(), expected);
+  for (const char* value : {"", " ", "0", "false", "FALSE", "no", "off"}) {
+    EXPECT_FALSE(IsNonFalseValue(value)) << value;
+  }
 }
 
-}  // namespace
-
-TEST(TelemetryEnvironmentTests, CiValueTruthTable) {
-  using Generators::TelemetryInternal::IsCiValueTruthy;
-
-  EXPECT_TRUE(IsCiValueTruthy("1"));
-  EXPECT_TRUE(IsCiValueTruthy("true"));
-  EXPECT_TRUE(IsCiValueTruthy("TRUE"));
-  EXPECT_TRUE(IsCiValueTruthy(" yes "));
-  EXPECT_TRUE(IsCiValueTruthy("anything"));
-
-  EXPECT_FALSE(IsCiValueTruthy(""));
-  EXPECT_FALSE(IsCiValueTruthy(" "));
-  EXPECT_FALSE(IsCiValueTruthy("0"));
-  EXPECT_FALSE(IsCiValueTruthy("false"));
-  EXPECT_FALSE(IsCiValueTruthy("FALSE"));
-  EXPECT_FALSE(IsCiValueTruthy("no"));
-  EXPECT_FALSE(IsCiValueTruthy("off"));
+TEST_F(TelemetryEnvironmentTests, ExplicitOptOutTruthTable) {
+  ScopedEnvironmentVariable opt_out{"ORT_DISABLE_TELEMETRY"};
+  for (const char* value : {"1", "true", "TRUE", " yes ", "on", "Y"}) {
+    opt_out.Set(value);
+    EXPECT_TRUE(ShouldSuppressTelemetryFromEnvironment()) << value;
+  }
+  for (const char* value : {"", " ", "0", "false", "no", "off", "random"}) {
+    opt_out.Set(value);
+    EXPECT_FALSE(ShouldSuppressTelemetryFromEnvironment()) << value;
+  }
+  opt_out.Set(std::nullopt);
+  EXPECT_FALSE(ShouldSuppressTelemetryFromEnvironment());
 }
 
-TEST(TelemetryEnvironmentTests, EnvVarOptOut) {
-  ExpectOptOutEnv("1", true);
-  ExpectOptOutEnv("true", true);
-  ExpectOptOutEnv("TRUE", true);
-  ExpectOptOutEnv(" yes ", true);
-  ExpectOptOutEnv("on", true);
-  ExpectOptOutEnv("Y", true);
-  ExpectOptOutEnv("", false);
-  ExpectOptOutEnv(" ", false);
-  ExpectOptOutEnv("0", false);
-  ExpectOptOutEnv("false", false);
-  ExpectOptOutEnv("no", false);
-  ExpectOptOutEnv("off", false);
-  ExpectOptOutEnv("random", false);
-  ExpectOptOutEnv(nullptr, false);
+TEST_F(TelemetryEnvironmentTests, EveryCiAndTestFlagUsesNonFalseSemantics) {
+  EXPECT_FALSE(ShouldSuppressTelemetryFromEnvironment());
+  for (const char* name : kTelemetrySuppressionVariables) {
+    ScopedEnvironmentVariable variable{name};
+    for (const char* value : {"1", "TRUE", " yes ", "random"}) {
+      variable.Set(value);
+      EXPECT_TRUE(ShouldSuppressTelemetryFromEnvironment()) << name << "=" << value;
+    }
+    for (const char* value : {"", " ", "0", "FALSE", "no", "off"}) {
+      variable.Set(value);
+      EXPECT_FALSE(ShouldSuppressTelemetryFromEnvironment()) << name << "=" << value;
+    }
+    variable.Set(std::nullopt);
+    EXPECT_FALSE(ShouldSuppressTelemetryFromEnvironment()) << name;
+  }
 }
 
-TEST(TelemetryEnvironmentTests, CiDetectionSuppresses) {
-  ScopedEnvVar guard{"APPVEYOR"};
-
-  // Only assert the positive direction so the test remains deterministic when it itself runs in CI.
-  SetEnv("APPVEYOR", "true");
-  EXPECT_TRUE(Generators::TelemetryInternal::IsRunningInCI());
-}
-
-TEST(TelemetryEnvironmentTests, RunningUnitTestsSuppresses) {
-  ScopedEnvVar guard{"ORT_RUNNING_UNIT_TESTS"};
-
-  SetEnv("ORT_RUNNING_UNIT_TESTS", "1");
-  EXPECT_TRUE(Generators::TelemetryInternal::IsRunningUnitTests());
-
-  SetEnv("ORT_RUNNING_UNIT_TESTS", "0");
-  EXPECT_FALSE(Generators::TelemetryInternal::IsRunningUnitTests());
-
-  UnsetEnv("ORT_RUNNING_UNIT_TESTS");
-  EXPECT_FALSE(Generators::TelemetryInternal::IsRunningUnitTests());
-}
-
-TEST(TelemetryEnvironmentTests, RejectsOversizedEnvironmentInsteadOfTruncating) {
-  ScopedEnvVar guard{"ORTGENAI_TEST_BOUNDED_ENV"};
+TEST_F(TelemetryEnvironmentTests, RejectsOversizedEnvironmentInsteadOfTruncating) {
+  ScopedEnvironmentVariable variable{"ORTGENAI_TEST_BOUNDED_ENV", std::nullopt};
   using namespace Generators;
+  EXPECT_EQ(ReadEnvironmentVariable("ORTGENAI_TEST_BOUNDED_ENV", 0), std::string{});
   for (const size_t size : {0u, 1024u, 16384u}) {
     const std::string value(size, 'x');
-    SetEnv("ORTGENAI_TEST_BOUNDED_ENV", value.c_str());
-    const auto actual = TelemetryInternal::GetTelemetryEnv("ORTGENAI_TEST_BOUNDED_ENV");
+    variable.Set(value);
+    const auto actual = ReadEnvironmentVariable("ORTGENAI_TEST_BOUNDED_ENV", kMaxTelemetryInputBytes);
     ASSERT_TRUE(actual);
     EXPECT_EQ(*actual, value);
   }
-  SetEnv("ORTGENAI_TEST_BOUNDED_ENV", std::string(kMaxTelemetryInputBytes + 1, 'x').c_str());
-  EXPECT_FALSE(TelemetryInternal::GetTelemetryEnv("ORTGENAI_TEST_BOUNDED_ENV").has_value());
+  variable.Set(std::string(kMaxTelemetryInputBytes + 1, 'x'));
+  EXPECT_FALSE(ReadEnvironmentVariable("ORTGENAI_TEST_BOUNDED_ENV", kMaxTelemetryInputBytes));
+  variable.Set("x");
+  EXPECT_FALSE(ReadEnvironmentVariable("ORTGENAI_TEST_BOUNDED_ENV", 0));
 }
 
-TEST(TelemetryEnvironmentTests, OversizedSuppressionVariablesFailClosed) {
-  ScopedEnvVar ci_guard{"APPVEYOR"};
-  ScopedEnvVar tests_guard{"ORT_RUNNING_UNIT_TESTS"};
+TEST_F(TelemetryEnvironmentTests, EveryOversizedSuppressionFlagFailsClosed) {
   const std::string oversized(Generators::kMaxTelemetryInputBytes + 1, ' ');
-  SetEnv("APPVEYOR", oversized.c_str());
-  SetEnv("ORT_RUNNING_UNIT_TESTS", oversized.c_str());
-  EXPECT_TRUE(Generators::TelemetryInternal::IsRunningInCI());
-  EXPECT_TRUE(Generators::TelemetryInternal::IsRunningUnitTests());
-  ExpectOptOutEnv(oversized.c_str(), true);
+  for (const char* name : kTelemetrySuppressionVariables) {
+    ScopedEnvironmentVariable variable{name, oversized};
+    EXPECT_TRUE(ShouldSuppressTelemetryFromEnvironment()) << name;
+  }
+  ScopedEnvironmentVariable opt_out{"ORT_DISABLE_TELEMETRY", oversized};
+  EXPECT_TRUE(ShouldSuppressTelemetryFromEnvironment());
 }
+
+TEST(EnvironmentTests, ScopedVariableRestoresUnsetEmptyAndPopulatedValues) {
+  ScopedEnvironmentVariable original{"ORTGENAI_TEST_ENV_RESTORE", std::nullopt};
+  for (const std::optional<std::string>& value :
+       std::array<std::optional<std::string>, 3>{std::nullopt, std::string{}, "original"}) {
+    original.Set(value);
+    {
+      ScopedEnvironmentVariable temporary{"ORTGENAI_TEST_ENV_RESTORE", "temporary"};
+      EXPECT_EQ(Generators::ReadEnvironmentVariable("ORTGENAI_TEST_ENV_RESTORE", 1024), "temporary");
+    }
+    EXPECT_EQ(Generators::ReadEnvironmentVariable("ORTGENAI_TEST_ENV_RESTORE", 1024),
+              value.value_or(std::string{}));
+#ifdef _WIN32
+    ::SetLastError(ERROR_SUCCESS);
+    const DWORD size = ::GetEnvironmentVariableA("ORTGENAI_TEST_ENV_RESTORE", nullptr, 0);
+    if (!value) {
+      EXPECT_EQ(size, 0u);
+      EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_ENVVAR_NOT_FOUND));
+    } else {
+      EXPECT_NE(::GetLastError(), static_cast<DWORD>(ERROR_ENVVAR_NOT_FOUND));
+    }
+#else
+    EXPECT_EQ(std::getenv("ORTGENAI_TEST_ENV_RESTORE") != nullptr, value.has_value());
+#endif
+  }
+}
+
+}  // namespace

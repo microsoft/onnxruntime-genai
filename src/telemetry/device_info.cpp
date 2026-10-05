@@ -75,7 +75,7 @@ void WarnOversizedTelemetryInput() {
 }
 
 std::string ReadTelemetryEnvironment(const char* name) {
-  const auto value = TelemetryInternal::GetTelemetryEnv(name);
+  const auto value = ReadEnvironmentVariable(name, kMaxTelemetryInputBytes);
   if (!value) {
     WarnOversizedTelemetryInput();
     return {};
@@ -259,7 +259,7 @@ TelemetryInternal::HostEnvironmentInfo GetHostEnvironmentInfo() {
   evidence.aws_ecs = !ReadTelemetryEnvironment("ECS_CONTAINER_METADATA_URI").empty() ||
                      !ReadTelemetryEnvironment("ECS_CONTAINER_METADATA_URI_V4").empty();
   evidence.generic_container =
-      TelemetryInternal::IsCiValueTruthy(
+      TelemetryInternal::IsNonFalseValue(
           ReadTelemetryEnvironment("DOTNET_RUNNING_IN_CONTAINER"));
   evidence.systemd_container =
       ReadBoundedFile("/run/systemd/container") + ReadTelemetryEnvironment("container");
@@ -271,12 +271,12 @@ TelemetryInternal::HostEnvironmentInfo GetHostEnvironmentInfo() {
                  ReadBoundedFile("/sys/class/dmi/id/product_name") +
                  ReadBoundedFile("/sys/class/dmi/id/board_vendor");
 #if defined(__ANDROID__)
-  const std::string android_properties = ReadBoundedFile("/system/build.prop");
+  const std::string android_properties =
+      TelemetryInternal::ToLowerAscii(ReadBoundedFile("/system/build.prop"));
   evidence.android_emulator =
-      TelemetryInternal::ContainsAscii(android_properties, "ro.kernel.qemu=1") ||
-      TelemetryInternal::ContainsAscii(android_properties, "ro.boot.qemu=1") ||
-      TelemetryInternal::ContainsAscii(android_properties,
-                                       "ro.product.manufacturer=genymotion");
+      android_properties.find("ro.kernel.qemu=1") != std::string::npos ||
+      android_properties.find("ro.boot.qemu=1") != std::string::npos ||
+      android_properties.find("ro.product.manufacturer=genymotion") != std::string::npos;
 #endif
 #elif defined(__APPLE__) && !TARGET_OS_IPHONE
   int is_virtual_machine = 0;
@@ -691,15 +691,6 @@ struct DeviceIdFileRead {
   std::string uuid;
 };
 
-void TrimAsciiWhitespace(std::string& value) {
-  value.erase(std::find_if_not(value.rbegin(), value.rend(),
-                               [](unsigned char c) { return std::isspace(c); })
-                  .base(),
-              value.end());
-  value.erase(value.begin(), std::find_if_not(value.begin(), value.end(),
-                                              [](unsigned char c) { return std::isspace(c); }));
-}
-
 DeviceIdFileRead ReadDeviceIdFileNoFollow(int directory_fd, const char* file_name) {
   int flags = O_RDONLY;
 #ifdef O_NOFOLLOW
@@ -741,8 +732,7 @@ DeviceIdFileRead ReadDeviceIdFileNoFollow(int directory_fd, const char* file_nam
   if (!read_ok) return {DeviceIdReadResult::Failed, {}};
   if (total == buffer.size()) return {DeviceIdReadResult::Invalid, {}};
 
-  std::string uuid(buffer.data(), total);
-  TrimAsciiWhitespace(uuid);
+  std::string uuid{TelemetryInternal::TrimAscii(std::string_view{buffer.data(), total})};
   return {IsValidUuid(uuid) ? DeviceIdReadResult::Valid : DeviceIdReadResult::Invalid,
           std::move(uuid)};
 }

@@ -29,3 +29,9 @@ Telemetry can be disabled in any of these ways:
 - **Don't build it in.** Telemetry is compiled by default when using `build.py`, `build.bat`, or `build.sh` on supported platforms. Pass `--no_telemetry` to produce a binary that collects no telemetry, or configure CMake directly with `-DENABLE_TELEMETRY=OFF`.
 - **Disable all telemetry at runtime.** Set `ORT_DISABLE_TELEMETRY=1` before ONNX Runtime GenAI initializes. This prevents the uploader, events, and persistent device identifier from being created for the process lifetime.
 - **Disable non-essential events via the API.** The C API (and the C++ wrapper, C#, Python, Java, and Objective-C bindings) can suppress non-essential telemetry. A process information event may still be emitted when only API suppression is used. For the full process-lifetime opt-out, use `ORT_DISABLE_TELEMETRY` before initialization.
+
+CI and native test-harness flags also suppress all telemetry. Their values are trimmed and
+case-insensitive: any nonempty value other than `0`, `false`, `no`, or `off` suppresses collection.
+The explicit `ORT_DISABLE_TELEMETRY` opt-out accepts only `1`, `true`, `yes`, `on`, or `y`.
+Environment values exceeding 16 KiB or failing bounded reads suppress collection when used as
+suppression flags; filesystem-path values are rejected rather than truncated.

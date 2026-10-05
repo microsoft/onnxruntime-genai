@@ -3,41 +3,19 @@
 
 #include "env_utils.h"
 
+#include <limits>
 #include <stdexcept>
-
-#if _MSC_VER
-#include <Windows.h>
-#endif
+#include "../environment.h"
 
 namespace Generators {
 
 std::string GetEnv(const char* var_name) {
-#if _MSC_VER
-  // Why getenv() should be avoided on Windows:
-  // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/getenv-wgetenv
-  // Instead use the Win32 API: GetEnvironmentVariableA()
-
-  // Max limit of an environment variable on Windows including the null-terminating character
-  constexpr DWORD kBufferSize = 32767;
-
-  // Create buffer to hold the result
-  std::string buffer(kBufferSize, '\0');
-
-  // The last argument is the size of the buffer pointed to by the lpBuffer parameter, including the null-terminating character, in characters.
-  // If the function succeeds, the return value is the number of characters stored in the buffer pointed to by lpBuffer, not including the terminating null character.
-  // Therefore, If the function succeeds, kBufferSize should be larger than char_count.
-  auto char_count = ::GetEnvironmentVariableA(var_name, buffer.data(), kBufferSize);
-
-  if (kBufferSize > char_count) {
-    buffer.resize(char_count);
-    return buffer;
-  }
-
-  return {};
+#ifdef _WIN32
+  constexpr size_t max_bytes = 32766;
 #else
-  const char* val = getenv(var_name);
-  return val == nullptr ? "" : std::string(val);
-#endif  // _MSC_VER
+  constexpr size_t max_bytes = (std::numeric_limits<size_t>::max)();
+#endif
+  return ReadEnvironmentVariable(var_name, max_bytes).value_or(std::string{});
 }
 
 void GetEnv(const char* var_name, bool& value) {

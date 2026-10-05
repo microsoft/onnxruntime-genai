@@ -5,22 +5,15 @@
 
 #include <array>
 #include <cctype>
-#include <cstdlib>
-#include <optional>
 #include <string>
 #include <string_view>
+#include "../environment.h"
 #include "telemetry_string.h"
-
-#ifdef _WIN32
-#include <Windows.h>
-#endif
 
 namespace Generators::TelemetryInternal {
 
-// Well-known CI / build-pipeline environment variables. Mirrors ONNX Runtime, Olive, and Foundry
-// Local so telemetry suppression behaves consistently across stacks; keep the lists in sync if any
-// changes.
-inline constexpr std::array<const char*, 13> kCiEnvironmentVariableNames = {
+// CI flags mirror ONNX Runtime, Olive, and Foundry Local. The test-harness flag is shared with ORT.
+inline constexpr std::array<const char*, 14> kTelemetrySuppressionVariables = {
     "CI",                                  // Generic CI flag used by many providers
     "TF_BUILD",                            // Azure Pipelines
     "GITHUB_ACTIONS",                      // GitHub Actions
@@ -34,35 +27,8 @@ inline constexpr std::array<const char*, 13> kCiEnvironmentVariableNames = {
     "APPVEYOR",                            // AppVeyor
     "BITBUCKET_BUILD_NUMBER",              // Bitbucket Pipelines
     "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",  // Azure DevOps
+    "ORT_RUNNING_UNIT_TESTS",              // GenAI / ORT native test harness
 };
-
-// nullopt distinguishes an oversized or unstable value from an unset/empty variable.
-inline std::optional<std::string> GetTelemetryEnv(const char* name) {
-#ifdef _WIN32
-  DWORD required_size = ::GetEnvironmentVariableA(name, nullptr, 0);
-  for (int attempt = 0; attempt < 3 && required_size != 0; ++attempt) {
-    if (required_size > kMaxTelemetryInputBytes + 1) return std::nullopt;
-    std::string value(required_size, '\0');
-    const DWORD written = ::GetEnvironmentVariableA(name, value.data(), required_size);
-    if (written == 0) {
-      return std::string{};
-    }
-    if (written < required_size) {
-      value.resize(written);
-      return value;
-    }
-
-    // The value grew between calls. Windows returns its new required size, including the null.
-    required_size = written;
-  }
-  return required_size == 0 ? std::optional<std::string>{std::string{}} : std::nullopt;
-#else
-  const char* value = std::getenv(name);
-  const auto bounded = BoundedTelemetryCString(value);
-  if (bounded.size() > kMaxTelemetryInputBytes) return std::nullopt;
-  return std::string{bounded};
-#endif
-}
 
 inline constexpr size_t kMaxProcessingBytes = 64 * 1024;
 
@@ -83,15 +49,10 @@ inline std::string ToLowerAscii(std::string_view s) {
 
 // A CI variable counts as present unless its (trimmed) value is empty or an explicit falsey token, so
 // a runner exporting e.g. CI=false does not trip detection.
-inline bool IsCiValueTruthy(std::string_view value) {
+inline bool IsNonFalseValue(std::string_view value) {
   if (value.size() > kMaxTelemetryInputBytes) return true;
   const std::string v = ToLowerAscii(TrimAscii(value));
   return !v.empty() && v != "0" && v != "false" && v != "no" && v != "off";
-}
-
-inline bool IsCiEnvironmentTruthy(const char* name) {
-  const auto value = GetTelemetryEnv(name);
-  return !value || IsCiValueTruthy(*value);
 }
 
 struct HostEnvironmentEvidence {
@@ -120,10 +81,6 @@ struct HostEnvironmentInfo {
   const char* device_id_scope;
 };
 
-inline bool ContainsAscii(std::string_view haystack, std::string_view needle) {
-  return ToLowerAscii(haystack).find(ToLowerAscii(needle)) != std::string::npos;
-}
-
 // Classifies only positive evidence. "undetected" deliberately does not claim bare metal.
 inline HostEnvironmentInfo ClassifyHostEnvironment(const HostEnvironmentEvidence& evidence) {
   const std::string container_name = ToLowerAscii(TrimAscii(evidence.systemd_container));
@@ -134,23 +91,23 @@ inline HostEnvironmentInfo ClassifyHostEnvironment(const HostEnvironmentEvidence
 
   const char* container_type = "none";
   int container_confidence = 0;
-  if (evidence.kubernetes || ContainsAscii(combined_container_evidence, "kubepods")) {
+  if (evidence.kubernetes || combined_container_evidence.find("kubepods") != std::string::npos) {
     container_type = "kubernetes";
     container_confidence = 2;
   } else if (evidence.aws_ecs) {
     container_type = "amazonECS";
     container_confidence = 2;
-  } else if (evidence.podman_marker || ContainsAscii(combined_container_evidence, "libpod") ||
-             ContainsAscii(combined_container_evidence, "podman")) {
+  } else if (evidence.podman_marker || combined_container_evidence.find("libpod") != std::string::npos ||
+             combined_container_evidence.find("podman") != std::string::npos) {
     container_type = "podman";
     container_confidence = 2;
-  } else if (evidence.docker_marker || ContainsAscii(combined_container_evidence, "docker")) {
+  } else if (evidence.docker_marker || combined_container_evidence.find("docker") != std::string::npos) {
     container_type = "docker";
     container_confidence = 2;
-  } else if (ContainsAscii(combined_container_evidence, "containerd")) {
+  } else if (combined_container_evidence.find("containerd") != std::string::npos) {
     container_type = "containerd";
     container_confidence = 1;
-  } else if (ContainsAscii(combined_container_evidence, "lxc")) {
+  } else if (combined_container_evidence.find("lxc") != std::string::npos) {
     container_type = "lxc";
     container_confidence = 1;
   } else if (!container_name.empty() && container_name != "none") {
@@ -245,28 +202,15 @@ inline HostEnvironmentInfo ClassifyHostEnvironment(const HostEnvironmentEvidence
                                                           : "installation"};
 }
 
-// True if a well-known CI / build-pipeline environment variable is set to a truthy value. Telemetry
-// is suppressed in CI to avoid polluting the tenant from automated builds and tests.
-inline bool IsRunningInCI() {
-  for (const char* name : kCiEnvironmentVariableNames) {
-    if (IsCiEnvironmentTruthy(name)) return true;
+// CI/test flags accept any non-false value; the explicit opt-out accepts only affirmative tokens.
+// Rejected reads fail closed so an unreadable suppression flag never enables collection.
+inline bool ShouldSuppressTelemetryFromEnvironment() {
+  for (const char* name : kTelemetrySuppressionVariables) {
+    const auto value = ReadEnvironmentVariable(name, kMaxTelemetryInputBytes);
+    if (!value || IsNonFalseValue(*value)) return true;
   }
-  return false;
-}
-
-// True if ORT_RUNNING_UNIT_TESTS is set to a truthy value. onnxruntime-genai's and ONNX Runtime's own
-// unit-test entry points set this before creating anything, so local (non-CI) test runs never
-// initialize the telemetry uploader or emit events. This is an internal harness signal, not a
-// user-facing opt-out. The variable name is shared with ONNX Runtime.
-inline bool IsRunningUnitTests() {
-  return IsCiEnvironmentTruthy("ORT_RUNNING_UNIT_TESTS");
-}
-
-// True if ORT_DISABLE_TELEMETRY is set to a truthy value (1/true/yes/on/y, case-insensitive).
-// The 1DS provider latches this full opt-out during initialization on every supported platform.
-inline bool IsTelemetryDisabledByEnvironment() {
-  const auto input = GetTelemetryEnv("ORT_DISABLE_TELEMETRY");
-  if (!input) return true;  // An unreadable opt-out must never enable collection.
+  const auto input = ReadEnvironmentVariable("ORT_DISABLE_TELEMETRY", kMaxTelemetryInputBytes);
+  if (!input) return true;
   const std::string value = ToLowerAscii(TrimAscii(*input));
   return value == "1" || value == "true" || value == "yes" || value == "on" || value == "y";
 }
