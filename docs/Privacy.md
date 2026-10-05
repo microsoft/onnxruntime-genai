@@ -22,6 +22,21 @@ ONNX Runtime GenAI uses the cross-platform 1DS SDK (cpp_client_telemetry) to sen
 
 For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
 
+GenAI-owned string event properties are limited to **1 KiB (1,024 UTF-8 bytes)**, including error
+messages, model metadata, execution-provider lists, CPU names, and input modalities. Values are
+bounded before copying or caching and again when constructing events. Truncation never splits a
+valid UTF-8 codepoint; malformed UTF-8 bytes are replaced with `?`. Existing tighter limits, such as
+the 256-byte Apple CPU-name buffer and fixed-size device identifiers, remain in place.
+
+Error redaction inspects at most 16 KiB. If a longer message could conceal a path anchor beyond that
+boundary, its uncertain token/path suffix is conservatively removed before applying the 1 KiB output
+limit. Environment inputs are limited to 16 KiB; oversized paths are rejected, never truncated into
+different paths. Persistence falls back to another valid per-user location or an in-memory identifier,
+and certificate lookup falls back to known system bundles. Unreadable or oversized suppression
+variables suppress telemetry. Host-evidence files retain their existing 16 KiB read limit, with a
+64 KiB processing limit for combined evidence. These limits govern GenAI's own collection code, not
+platform context synthesized internally by the telemetry SDK.
+
 ### Disabling Telemetry
 
 Telemetry can be disabled in any of these ways:

@@ -10,6 +10,8 @@
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
 
 #include "telemetry_environment.h"
+#include "telemetry_io.h"
+#include "../logging.h"
 
 #include <algorithm>
 #include <array>
@@ -65,6 +67,25 @@ namespace Generators {
 namespace {
 
 constexpr char kDeviceIdHashSalt[] = "onnxruntime-genai:";
+
+void WarnOversizedTelemetryInput() {
+  if (g_log.enabled && g_log.warning) {
+    Log("warning", "Ignoring oversized or unstable telemetry environment/path input");
+  }
+}
+
+std::string ReadTelemetryEnvironment(const char* name) {
+  const auto value = TelemetryInternal::GetTelemetryEnv(name);
+  if (!value) {
+    WarnOversizedTelemetryInput();
+    return {};
+  }
+  return *value;
+}
+
+#if defined(__linux__) || defined(__ANDROID__)
+std::string ReadBoundedFile(const char* path);
+#endif
 
 // FNV-1a 64-bit hash -> fixed-width hex. Stable across platforms and runs
 // (unlike std::hash), so the derived device id stays consistent over time.
@@ -169,7 +190,7 @@ std::string GetCpuModel() {
         return {};
       }
 
-      for (;;) {
+      for (int attempt = 0; attempt < 3; ++attempt) {
         std::string value(size, '\0');
         DWORD bytes_read = size;
         type = 0;
@@ -189,8 +210,9 @@ std::string GetCpuModel() {
         while (!value.empty() && value.back() == '\0') {
           value.pop_back();
         }
-        return value;
+        return BoundTelemetryString(value);
       }
+      return {};
     };
 
     const std::string processor_name = read_processor_name();
@@ -208,35 +230,17 @@ std::string GetCpuModel() {
   }
   return "unknown";
 #else
-  std::ifstream ifs("/proc/cpuinfo");
-  std::string line;
-  while (std::getline(ifs, line)) {
-    if (line.find("model name") == 0) {
-      auto pos = line.find(':');
-      if (pos != std::string::npos) {
-        auto result = line.substr(pos + 1);
-        // Trim leading whitespace
-        auto start = result.find_first_not_of(" \t");
-        return start != std::string::npos ? result.substr(start) : result;
-      }
-    }
-  }
-  return "unknown";
+  return TelemetryInternal::CpuModelFromTelemetryInput(ReadBoundedFile("/proc/cpuinfo"));
 #endif
 }
 
 #if defined(__linux__) || defined(__ANDROID__)
 
-constexpr size_t kMaxHostEvidenceBytes = 16 * 1024;
-
 std::string ReadBoundedFile(const char* path) {
   std::ifstream input(path, std::ios::binary);
   if (!input) return {};
 
-  std::string contents(kMaxHostEvidenceBytes, '\0');
-  input.read(contents.data(), static_cast<std::streamsize>(contents.size()));
-  contents.resize(static_cast<size_t>(input.gcount()));
-  return contents;
+  return TelemetryInternal::ReadTelemetryInput(input);
 }
 
 bool FileExists(const char* path) {
@@ -251,14 +255,14 @@ TelemetryInternal::HostEnvironmentInfo GetHostEnvironmentInfo() {
 #if defined(__linux__) || defined(__ANDROID__)
   evidence.docker_marker = FileExists("/.dockerenv");
   evidence.podman_marker = FileExists("/run/.containerenv");
-  evidence.kubernetes = !TelemetryInternal::GetTelemetryEnv("KUBERNETES_SERVICE_HOST").empty();
-  evidence.aws_ecs = !TelemetryInternal::GetTelemetryEnv("ECS_CONTAINER_METADATA_URI").empty() ||
-                     !TelemetryInternal::GetTelemetryEnv("ECS_CONTAINER_METADATA_URI_V4").empty();
+  evidence.kubernetes = !ReadTelemetryEnvironment("KUBERNETES_SERVICE_HOST").empty();
+  evidence.aws_ecs = !ReadTelemetryEnvironment("ECS_CONTAINER_METADATA_URI").empty() ||
+                     !ReadTelemetryEnvironment("ECS_CONTAINER_METADATA_URI_V4").empty();
   evidence.generic_container =
       TelemetryInternal::IsCiValueTruthy(
-          TelemetryInternal::GetTelemetryEnv("DOTNET_RUNNING_IN_CONTAINER"));
+          ReadTelemetryEnvironment("DOTNET_RUNNING_IN_CONTAINER"));
   evidence.systemd_container =
-      ReadBoundedFile("/run/systemd/container") + TelemetryInternal::GetTelemetryEnv("container");
+      ReadBoundedFile("/run/systemd/container") + ReadTelemetryEnvironment("container");
   evidence.cgroup =
       ReadBoundedFile("/proc/1/cgroup") + ReadBoundedFile("/proc/self/cgroup");
   evidence.cpu_info = ReadBoundedFile("/proc/cpuinfo");
@@ -292,22 +296,22 @@ TelemetryInternal::HostEnvironmentInfo GetHostEnvironmentInfo() {
 // rather than writing to a predictable world-writable temp path. Never throws.
 std::filesystem::path GetDeviceIdStorageDir() {
 #if defined(_WIN32)
-  const char* base = std::getenv("LOCALAPPDATA");
-  if (!base) return {};
+  const auto base = ReadTelemetryEnvironment("LOCALAPPDATA");
+  if (base.empty()) return {};
   return std::filesystem::path(base) / "Microsoft" / "DeveloperTools" / ".onnxruntime";
 #else
 #if !defined(__APPLE__)
   // XDG requires absolute paths. Ignore relative values so telemetry state is never written below
   // the process working directory.
-  if (const char* xdg = std::getenv("XDG_CACHE_HOME");
-      xdg != nullptr && std::filesystem::path(xdg).is_absolute()) {
+  if (const auto xdg = ReadTelemetryEnvironment("XDG_CACHE_HOME");
+      !xdg.empty() && std::filesystem::path(xdg).is_absolute()) {
     return std::filesystem::path(xdg) / "Microsoft" / "DeveloperTools" / ".onnxruntime";
   }
 #endif
 
   std::filesystem::path home;
-  if (const char* h = std::getenv("HOME");
-      h != nullptr && std::filesystem::path(h).is_absolute()) {
+  if (const auto h = ReadTelemetryEnvironment("HOME");
+      !h.empty() && std::filesystem::path(h).is_absolute()) {
     home = h;
   } else {
     struct passwd pwd{};
@@ -319,9 +323,13 @@ std::filesystem::path GetDeviceIdStorageDir() {
         sc > 0 ? std::min(static_cast<size_t>(sc), kMaxPwBufferSize) : kDefaultPwBufferSize;
     std::vector<char> buf(pw_buffer_size);
     if (getpwuid_r(getuid(), &pwd, buf.data(), buf.size(), &result) == 0 &&
-        result != nullptr && result->pw_dir != nullptr &&
-        std::filesystem::path(result->pw_dir).is_absolute()) {
-      home = result->pw_dir;
+        result != nullptr && result->pw_dir != nullptr) {
+      const auto directory = BoundedTelemetryCString(result->pw_dir);
+      if (directory.size() > kMaxTelemetryInputBytes) {
+        WarnOversizedTelemetryInput();
+      } else if (std::filesystem::path(directory).is_absolute()) {
+        home = directory;
+      }
     }
   }
   if (home.empty()) return {};
@@ -398,6 +406,7 @@ class ScopedDeviceIdMutex {
 
     DWORD size = 0;
     GetTokenInformation(token_handle.Get(), TokenUser, nullptr, 0, &size);
+    if (size < sizeof(TOKEN_USER) || size > sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE) return;
     std::vector<unsigned char> token_info(size);
     if (size == 0 ||
         !GetTokenInformation(token_handle.Get(), TokenUser, token_info.data(), size, &size)) {
@@ -911,7 +920,7 @@ const DeviceInfo& GetDeviceInfo() {
     di.os_architecture = GetOsArchitecture();
     di.processor_count = GetProcessorCount();
     di.total_memory_mb = GetTotalMemoryMB();
-    di.cpu_model = GetCpuModel();
+    di.cpu_model = BoundTelemetryString(GetCpuModel());
     const auto host_environment = GetHostEnvironmentInfo();
     di.is_container = host_environment.is_container;
     di.is_virtual_machine = host_environment.is_virtual_machine;

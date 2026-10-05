@@ -126,4 +126,34 @@ TEST(TelemetryRedactionTest, LengthCapDoesNotSplitUtf8Codepoint) {
   EXPECT_EQ(ScrubStringForTelemetry(exact_boundary), exact_boundary);
 }
 
+TEST(TelemetryRedactionTest, RedactsAnchorsAcrossTheOutputBoundary) {
+  for (const char* path : {"C:\\Users\\First Last\\model", "\\\\server\\share",
+                           "~/alice/model", "/home/alice/model", "alice/models/weights",
+                           "alice\\models\\weights"}) {
+    for (size_t offset = 1018; offset <= 1025; ++offset) {
+      const std::string prefix = std::string(offset - 1, 'x') + " ";
+      const auto result = ScrubStringForTelemetry(prefix + path);
+      EXPECT_LE(result.size(), 1024u);
+      EXPECT_EQ(result.find("alice"), std::string::npos);
+      EXPECT_EQ(result.find("First"), std::string::npos);
+      EXPECT_EQ(result, BoundTelemetryString(prefix + "[path]"));
+    }
+  }
+}
+
+TEST(TelemetryRedactionTest, UnseenSuffixCannotCompleteAnExposedPath) {
+  const std::string huge(kMaxTelemetryInputBytes, 'a');
+  for (const std::string message : {
+           "error alice" + huge + "/models/weights",
+           "error alice\\" + huge + "\\weights",
+           "error /alice/" + huge + "/weights",
+           "error alice\\First Last " + huge + "\\weights",
+           "error C" + huge + ":\\Users\\First Last\\weights"}) {
+    EXPECT_EQ(ScrubStringForTelemetry(message), "error [path]");
+    EXPECT_EQ(ScrubStringForTelemetry(BoundedTelemetryCString(message.c_str())),
+              "error [path]");
+  }
+  EXPECT_EQ(ScrubStringForTelemetry("error " + huge), "error [path]");
+}
+
 }  // namespace Generators::test

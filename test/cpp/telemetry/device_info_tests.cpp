@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "telemetry/device_info.h"
+#include "telemetry/telemetry_string.h"
 #include "telemetry_test_environment.h"
 
 namespace {
@@ -81,6 +82,16 @@ TEST(TelemetryDeviceInfoTest, IgnoresRelativeXdgCacheHome) {
   ScopedEnvironmentVariable home{"HOME", home_path.string()};
   ScopedEnvironmentVariable xdg_cache_home{"XDG_CACHE_HOME", "relative-cache"};
 
+  EXPECT_EQ(Generators::GetTelemetryStorageDir(),
+            home_path / ".cache" / "Microsoft" / "DeveloperTools" / ".onnxruntime");
+}
+
+TEST(TelemetryDeviceInfoTest, RejectsOversizedXdgCacheHomeWithoutTruncating) {
+  ScopedTestDirectory test_dir{"oversized_xdg"};
+  const fs::path home_path = test_dir.Path() / "home";
+  ScopedEnvironmentVariable home{"HOME", home_path.string()};
+  ScopedEnvironmentVariable xdg_cache_home{
+      "XDG_CACHE_HOME", "/" + std::string(Generators::kMaxTelemetryInputBytes, 'x')};
   EXPECT_EQ(Generators::GetTelemetryStorageDir(),
             home_path / ".cache" / "Microsoft" / "DeveloperTools" / ".onnxruntime");
 }

@@ -4,6 +4,7 @@
 #include "model_telemetry.h"
 
 #include "telemetry.h"
+#include "telemetry_string.h"
 #include "../models/model.h"
 #include "../models/model_type.h"
 #include "../smartptrs.h"
@@ -56,8 +57,8 @@ ModelLoadInfo BuildModelLoadInfo(const Model& model) {
   const auto& decoder = config.model.decoder;
 
   ModelLoadInfo info;
-  info.model_type = config.model.type;
-  info.model_family = DeriveModelFamily(config.model.type);
+  info.model_type = BoundTelemetryString(config.model.type);
+  info.model_family = DeriveModelFamily(info.model_type);
   info.selected_device = to_string(model.p_device_->GetType());
   info.vocab_size = config.model.vocab_size;
   info.context_length = config.model.context_length;
@@ -67,12 +68,7 @@ ModelLoadInfo BuildModelLoadInfo(const Model& model) {
   info.num_key_value_heads = decoder.num_key_value_heads;
   info.is_in_memory = !config.model_data_spans_.empty();
 
-  for (const auto& provider : decoder.session_options.providers) {
-    if (!info.execution_providers.empty()) {
-      info.execution_providers += ",";
-    }
-    info.execution_providers += provider;
-  }
+  info.execution_providers = JoinTelemetryStrings(decoder.session_options.providers);
 
   if (decoder.session_options.intra_op_num_threads.has_value()) {
     info.intra_op_num_threads = *decoder.session_options.intra_op_num_threads;
@@ -136,10 +132,11 @@ std::shared_ptr<Model> CreateModelWithTelemetry(
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - start)
                 .count();
-        telemetry.LogModelLoadEnd(session_id, false, elapsed_ms, error.what());
+        telemetry.LogModelLoadEnd(session_id, false, elapsed_ms,
+                                  BoundedTelemetryCString(error.what()));
       }
       telemetry.LogRuntimeError(
-          session_id, "std::exception", error.what(), "model_load");
+          session_id, "std::exception", BoundedTelemetryCString(error.what()), "model_load");
       throw;
     }
   }

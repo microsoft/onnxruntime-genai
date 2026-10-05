@@ -3,11 +3,112 @@
 
 #include "telemetry/telemetry_environment.h"
 #include "telemetry/telemetry_sampling.h"
+#include "telemetry/telemetry_io.h"
+#include "telemetry/telemetry_redaction.h"
+
+#include <sstream>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 namespace Generators::test {
 namespace {
+
+TEST(TelemetryStringTests, BoundsAsciiAndAllUtf8Widths) {
+  EXPECT_EQ(kMaxTelemetryStringLength, 1024u);
+  for (const size_t size : {0u, 1023u, 1024u, 1025u, 1024u * 1024u}) {
+    EXPECT_EQ(BoundTelemetryString(std::string(size, 'x')),
+              std::string(std::min<size_t>(size, 1024), 'x'));
+  }
+  for (const std::string codepoint : {"\xC2\xA2", "\xE2\x82\xAC", "\xF0\x9F\x98\x80"}) {
+    for (size_t remaining = 1; remaining < codepoint.size(); ++remaining) {
+      const std::string prefix(1024 - remaining, 'x');
+      EXPECT_EQ(BoundTelemetryString(prefix + codepoint), prefix);
+    }
+    const std::string exact = std::string(1024 - codepoint.size(), 'x') + codepoint;
+    EXPECT_EQ(BoundTelemetryString(exact), exact);
+    EXPECT_EQ(BoundTelemetryString(exact + "tail"), exact);
+  }
+  EXPECT_EQ(BoundTelemetryString(std::string(300, 'x'), 256), std::string(256, 'x'));
+}
+
+TEST(TelemetryStringTests, SanitizesMalformedUtf8) {
+  EXPECT_EQ(BoundTelemetryString("\x80\xC0\xAF\xED\xA0\x80\xF4\x90\x80\x80"), "??????????");
+  EXPECT_EQ(BoundTelemetryString("\xF0\x9F"), "??");
+  EXPECT_EQ(BoundTelemetryString("valid \xC2\xA2"), "valid \xC2\xA2");
+}
+
+TEST(TelemetryStringTests, DoesNotScanUnterminatedCStringBeyondBudget) {
+  const char buffer[] = {'a', 'b', 'c'};
+  EXPECT_EQ(BoundedTelemetryCString(buffer, sizeof(buffer)), "abc");
+  EXPECT_TRUE(BoundedTelemetryCString(nullptr).empty());
+  const std::string huge(1024 * 1024, 'x');
+  EXPECT_EQ(BoundedTelemetryCString(huge.c_str()).size(), kMaxTelemetryInputBytes + 1);
+}
+
+TEST(TelemetryStringTests, BoundsProviderListStorageAndIteration) {
+  EXPECT_EQ(JoinTelemetryStrings(std::vector<std::string>{"CPU", "CUDA"}), "CPU,CUDA");
+  EXPECT_EQ(JoinTelemetryStrings(std::vector<std::string>{"CPU", std::string(1024 * 1024, 'x'), "tail"}),
+            "CPU," + std::string(1020, 'x'));
+  EXPECT_EQ(JoinTelemetryStrings(std::vector<std::string>{std::string(1023, 'x'), "\xC2\xA2"}),
+            std::string(1023, 'x') + ",");
+  std::vector<std::string> empty_entries(1025);
+  empty_entries.back() = "must not be processed";
+  EXPECT_TRUE(JoinTelemetryStrings(empty_entries).empty());
+}
+
+TEST(TelemetryStringTests, BoundsEventPropertiesUsingTheProductionSetter) {
+  struct Event {
+    std::string name;
+    std::string value;
+    void SetProperty(const char* key, std::string property) {
+      name = key;
+      value = std::move(property);
+    }
+  } event;
+  for (const char* name : {"modelType", "modelFamily", "executionProviders", "selectedDevice",
+                           "modality", "inputModality", "cpuModel", "errorType", "context"}) {
+    SetTelemetryStringProperty(event, name, std::string(1024 * 1024, 'x'));
+    EXPECT_EQ(event.name, name);
+    EXPECT_EQ(event.value, std::string(1024, 'x'));
+  }
+}
+
+TEST(TelemetryInputTests, BoundsFileReadsAndCpuNameParsing) {
+  std::istringstream input(std::string(1024 * 1024, 'x'));
+  EXPECT_EQ(TelemetryInternal::ReadTelemetryInput(input).size(), kMaxTelemetryInputBytes);
+  EXPECT_EQ(input.tellg(), static_cast<std::streamoff>(kMaxTelemetryInputBytes));
+  EXPECT_EQ(TelemetryInternal::CpuModelFromTelemetryInput("processor : 0\nmodel name : Test CPU\n"),
+            "Test CPU");
+  EXPECT_EQ(TelemetryInternal::CpuModelFromTelemetryInput("model name : " + std::string(1024 * 1024, 'x')),
+            std::string(1024, 'x'));
+  EXPECT_EQ(TelemetryInternal::CpuModelFromTelemetryInput(
+                std::string(kMaxTelemetryInputBytes, 'x') + "\nmodel name : hidden"),
+            "unknown");
+}
+
+TEST(TelemetryInputTests, BoundsEnvironmentEvidenceProcessing) {
+  EXPECT_EQ(TelemetryInternal::ToLowerAscii(std::string(1024 * 1024, 'A')).size(),
+            TelemetryInternal::kMaxHostEvidenceProcessingBytes);
+  EXPECT_TRUE(TelemetryInternal::IsCiValueTruthy(std::string(kMaxTelemetryInputBytes + 1, ' ')));
+  TelemetryInternal::HostEnvironmentEvidence evidence;
+  evidence.cgroup = std::string(1024 * 1024, 'x') + "docker";
+  evidence.dmi = std::string(1024 * 1024, 'x') + "vmware";
+  const auto unknown = TelemetryInternal::ClassifyHostEnvironment(evidence);
+  EXPECT_FALSE(unknown.is_container);
+  EXPECT_FALSE(unknown.is_virtual_machine);
+  evidence.cgroup = "docker" + evidence.cgroup;
+  evidence.dmi = "vmware" + evidence.dmi;
+  const auto detected = TelemetryInternal::ClassifyHostEnvironment(evidence);
+  EXPECT_STREQ(detected.container_type, "docker");
+  EXPECT_STREQ(detected.virtualization_type, "vmware");
+}
+
+TEST(TelemetrySamplingTests, BoundsGuidHashingWithoutChangingGeneratedGuids) {
+  const std::string guid = "11111111-2222-4333-8444-555555555555";
+  EXPECT_EQ(TelemetryInternal::HashSamplingKey(guid + std::string(1024 * 1024, 'x'), 42),
+            TelemetryInternal::HashSamplingKey(guid, 42));
+}
 
 TEST(TelemetrySamplingTests, HonorsBoundaryRates) {
   EXPECT_EQ(TelemetryInternal::kCriticalEventSampleRatePercent, 100.0);

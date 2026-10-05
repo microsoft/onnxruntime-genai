@@ -143,3 +143,28 @@ TEST(TelemetryEnvironmentTests, RunningUnitTestsSuppresses) {
   UnsetEnv("ORT_RUNNING_UNIT_TESTS");
   EXPECT_FALSE(Generators::TelemetryInternal::IsRunningUnitTests());
 }
+
+TEST(TelemetryEnvironmentTests, RejectsOversizedEnvironmentInsteadOfTruncating) {
+  ScopedEnvVar guard{"ORTGENAI_TEST_BOUNDED_ENV"};
+  using namespace Generators;
+  for (const size_t size : {0u, 1024u, 16384u}) {
+    const std::string value(size, 'x');
+    SetEnv("ORTGENAI_TEST_BOUNDED_ENV", value.c_str());
+    const auto actual = TelemetryInternal::GetTelemetryEnv("ORTGENAI_TEST_BOUNDED_ENV");
+    ASSERT_TRUE(actual);
+    EXPECT_EQ(*actual, value);
+  }
+  SetEnv("ORTGENAI_TEST_BOUNDED_ENV", std::string(kMaxTelemetryInputBytes + 1, 'x').c_str());
+  EXPECT_FALSE(TelemetryInternal::GetTelemetryEnv("ORTGENAI_TEST_BOUNDED_ENV").has_value());
+}
+
+TEST(TelemetryEnvironmentTests, OversizedSuppressionVariablesFailClosed) {
+  ScopedEnvVar ci_guard{"APPVEYOR"};
+  ScopedEnvVar tests_guard{"ORT_RUNNING_UNIT_TESTS"};
+  const std::string oversized(Generators::kMaxTelemetryInputBytes + 1, ' ');
+  SetEnv("APPVEYOR", oversized.c_str());
+  SetEnv("ORT_RUNNING_UNIT_TESTS", oversized.c_str());
+  EXPECT_TRUE(Generators::TelemetryInternal::IsRunningInCI());
+  EXPECT_TRUE(Generators::TelemetryInternal::IsRunningUnitTests());
+  ExpectOptOutEnv(oversized.c_str(), true);
+}
