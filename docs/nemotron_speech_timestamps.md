@@ -62,7 +62,7 @@ flowchart TB
     setup[Initialize stream metadata state] --> stream
     timed_tokens[GetNextTokensWithMetadata: IDs + absolute frame intervals] --> stream[TokenizerStream.DecodeWithMetadata]
     stream --> ortx[Extensions: decoded text + completed word token spans]
-    ortx --> align[TimestampDecodeState: align spans with buffered frames]
+    ortx --> align[Stream metadata state: align word spans with buffered frames]
     align --> events[Per-call word / segment events with frame and second bounds]
     stream --> final[FinalizeMetadata: flush trailing word / segment]
     final --> trailing[Trailing word / segment events]
@@ -77,6 +77,12 @@ For the timed path, create the stream's metadata state before decoding. The gene
 also returns the ordinary incremental text fragment. Use that fragment for live text, or collect
 completed word/segment events for stable timestamped output; do not append both to one transcript.
 The plain path needs no metadata state or finalization call.
+
+Internally, the stream buffers the frame intervals in token order until Extensions reports
+completed word spans and a pending-token watermark. It uses the first and last token
+intervals of each word, accumulates unfinished segments across calls, and owns the
+completed event text for the lifetime of the returned per-call result. The generator
+pairs tokens and intervals by emission position, not by token ID.
 
 ## Decoding
 
