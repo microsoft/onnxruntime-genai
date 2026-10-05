@@ -64,10 +64,10 @@ inline std::optional<std::string> GetTelemetryEnv(const char* name) {
 #endif
 }
 
-inline constexpr size_t kMaxHostEvidenceProcessingBytes = 64 * 1024;
+inline constexpr size_t kMaxProcessingBytes = 64 * 1024;
 
 inline std::string_view TrimAscii(std::string_view s) {
-  s = s.substr(0, kMaxHostEvidenceProcessingBytes);
+  s = s.substr(0, kMaxProcessingBytes);
   size_t begin = 0;
   size_t end = s.size();
   while (begin < end && std::isspace(static_cast<unsigned char>(s[begin]))) ++begin;
@@ -76,7 +76,7 @@ inline std::string_view TrimAscii(std::string_view s) {
 }
 
 inline std::string ToLowerAscii(std::string_view s) {
-  std::string out{s.substr(0, kMaxHostEvidenceProcessingBytes)};
+  std::string out{s.substr(0, kMaxProcessingBytes)};
   for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   return out;
 }
@@ -129,7 +129,7 @@ inline HostEnvironmentInfo ClassifyHostEnvironment(const HostEnvironmentEvidence
   const std::string container_name = ToLowerAscii(TrimAscii(evidence.systemd_container));
   const std::string combined_container_evidence =
       ToLowerAscii(std::string{std::string_view{evidence.cgroup}.substr(
-                       0, kMaxHostEvidenceProcessingBytes / 2)} +
+                       0, kMaxProcessingBytes / 2)} +
                    " " + container_name);
 
   const char* container_type = "none";

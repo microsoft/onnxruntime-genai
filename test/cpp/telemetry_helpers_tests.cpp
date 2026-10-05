@@ -89,7 +89,7 @@ TEST(TelemetryInputTests, BoundsFileReadsAndCpuNameParsing) {
 
 TEST(TelemetryInputTests, BoundsEnvironmentEvidenceProcessing) {
   EXPECT_EQ(TelemetryInternal::ToLowerAscii(std::string(1024 * 1024, 'A')).size(),
-            TelemetryInternal::kMaxHostEvidenceProcessingBytes);
+            TelemetryInternal::kMaxProcessingBytes);
   EXPECT_TRUE(TelemetryInternal::IsCiValueTruthy(std::string(kMaxTelemetryInputBytes + 1, ' ')));
   TelemetryInternal::HostEnvironmentEvidence evidence;
   evidence.cgroup = std::string(1024 * 1024, 'x') + "docker";
