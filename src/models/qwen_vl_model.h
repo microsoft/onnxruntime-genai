@@ -48,11 +48,11 @@ struct Qwen2_5_VL_PipelineModel : public DecoderOnlyPipelineModel {
   // Vision pipeline shared across states (sessions reused).
   std::unique_ptr<QwenVisionPipeline> vision_pipeline_;
 
-  // Single-ONNX vision encoder, for models that export the encoder as one graph
-  // (e.g. Gemma-4) instead of Qwen's three-stage pipeline. Exactly one of
-  // vision_pipeline_ and vision_session_ is populated by the constructor.
+  // Gemma-4 vision uses either a single session or an encoder and projector pair.
   std::unique_ptr<OrtSessionOptions> vision_session_options_;
   std::unique_ptr<OrtSession> vision_session_;
+  std::unique_ptr<OrtSessionOptions> vision_projector_session_options_;
+  std::unique_ptr<OrtSession> vision_projector_session_;
 };
 
 struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
@@ -72,7 +72,7 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
  private:
   void InjectVisionEmbeddings(const std::string& embeddings_output_name);
 
-  // Runs a single-ONNX vision encoder and publishes image_features_value_.
+  // Runs the Gemma-4 vision session(s) and publishes image_features_value_.
   void RunSingleSessionVision(const std::vector<ExtraInput>& extra_inputs);
 
   // Runs whichever vision path this model was configured with, at most once.
