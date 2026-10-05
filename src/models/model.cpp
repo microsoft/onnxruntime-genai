@@ -588,8 +588,11 @@ void Model::AddSharedInitializers() {
 }
 
 Model::~Model() {
+  // Snapshot the type before teardown: CloseDmlInterface() frees the singleton p_device_ points to,
+  // so reading p_device_->GetType() afterwards would be a use-after-free.
+  const DeviceType device_type = p_device_ ? p_device_->GetType() : DeviceType::CPU;
 #if USE_DML
-  if (p_device_->GetType() == DeviceType::DML) {
+  if (device_type == DeviceType::DML) {
     auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::DML)];
     allocator.session_.reset();
     allocator.allocator_.reset();
@@ -601,7 +604,7 @@ Model::~Model() {
     CloseDmlInterface();
   }
 #endif
-  if (p_device_ && p_device_->GetType() == DeviceType::AMDGPU) {
+  if (device_type == DeviceType::AMDGPU) {
     // Per-model teardown for the AMDGPU (DirectX plugin) path; CloseAMDGPUInterface() in the AMD module
     // does the allocator/singleton reset and EP-library unregister. Unlike DML, session_options_ is not
     // reset here: the plugin registers by library name and its options hold only config strings.
