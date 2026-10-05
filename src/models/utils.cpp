@@ -3,6 +3,29 @@
 #include "../generators.h"
 #include "utils.h"
 
+#include <cstring>
+
+#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#define OGA_ARCH_X86 1
+#include <immintrin.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
+#endif
+
+#if defined(__clang__) || defined(__GNUC__)
+#define OGA_NOINLINE __attribute__((noinline))
+#define OGA_TARGET_F16C __attribute__((target("avx,f16c")))
+#elif defined(_MSC_VER)
+#define OGA_NOINLINE __declspec(noinline)
+#define OGA_TARGET_F16C
+#else
+#define OGA_NOINLINE
+#define OGA_TARGET_F16C
+#endif
+
 namespace Generators {
 
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value) {
@@ -114,6 +137,133 @@ uint16_t FastFloat32ToFloat16(float v) {
   const uint32_t e = (b & 0x7F800000) >> 23;                                                                                                                                                                  // exponent
   const uint32_t m = b & 0x007FFFFF;                                                                                                                                                                          // mantissa; in line below: 0x007FF000 = 0x00800000-0x00001000 = decimal indicator flag - initial rounding
   return static_cast<uint16_t>((b & 0x80000000) >> 16 | (e > 112) * ((((e - 112) << 10) & 0x7C00) | m >> 13) | ((e < 113) & (e > 101)) * ((((0x007FF000 + m) >> (125 - e)) + 1) >> 1) | (e > 143) * 0x7FFF);  // sign : normalized : denormalized : saturate
+}
+
+namespace {
+
+float LoadBFloat16AsFloat(uint16_t v) {
+  const uint32_t bits = static_cast<uint32_t>(v) << 16;
+  float result;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+#if defined(OGA_ARCH_X86)
+
+void CpuId(int out[4], int leaf) {
+#if defined(_MSC_VER)
+  __cpuid(out, leaf);
+#else
+  unsigned int a = 0, b = 0, c = 0, d = 0;
+  __cpuid(leaf, a, b, c, d);
+  out[0] = static_cast<int>(a);
+  out[1] = static_cast<int>(b);
+  out[2] = static_cast<int>(c);
+  out[3] = static_cast<int>(d);
+#endif
+}
+
+unsigned long long Xcr0() {
+#if defined(_MSC_VER)
+  return _xgetbv(0);
+#else
+  unsigned int eax = 0, edx = 0;
+  __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+  return (static_cast<unsigned long long>(edx) << 32) | eax;
+#endif
+}
+
+bool CpuHasF16C() {
+  constexpr int kCpuidBasicLeaf = 0;
+  constexpr int kCpuidFeatureLeaf = 1;
+  constexpr int kEax = 0;
+  constexpr int kEcx = 2;
+  // CPUID leaf 1, ECX feature bits.
+  constexpr int kOsxsaveBit = 1 << 27;
+  constexpr int kAvxBit = 1 << 28;
+  constexpr int kF16cBit = 1 << 29;
+  // XCR0 bit 1 enables XMM state, bit 2 enables YMM state.
+  constexpr unsigned long long kXcr0Xmm = 1ull << 1;
+  constexpr unsigned long long kXcr0Ymm = 1ull << 2;
+  constexpr unsigned long long kXcr0XmmYmm = kXcr0Xmm | kXcr0Ymm;
+
+  int info[4] = {};
+  CpuId(info, kCpuidBasicLeaf);
+  if (info[kEax] < kCpuidFeatureLeaf)
+    return false;
+
+  CpuId(info, kCpuidFeatureLeaf);
+  const int ecx = info[kEcx];
+  const bool osxsave = (ecx & kOsxsaveBit) != 0;
+  const bool avx = (ecx & kAvxBit) != 0;
+  const bool f16c = (ecx & kF16cBit) != 0;
+  if (!osxsave || !avx || !f16c)
+    return false;
+
+  return (Xcr0() & kXcr0XmmYmm) == kXcr0XmmYmm;
+}
+
+// Not inlined into the dispatcher: vcvtph2ps and vzeroupper must not run when F16C is absent.
+OGA_NOINLINE OGA_TARGET_F16C void ConvertFloat16ToFloat32F16C(const uint16_t* src, float* dst, size_t count) {
+  size_t i = 0;
+  for (; i + 8 <= count; i += 8) {
+    const __m128i halves = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+    const __m256 values = _mm256_cvtph_ps(halves);
+    _mm256_storeu_ps(dst + i, values);
+  }
+  for (; i < count; ++i) {
+    const __m128i half = _mm_cvtsi32_si128(static_cast<int>(src[i]));
+    dst[i] = _mm_cvtss_f32(_mm_cvtph_ps(half));
+  }
+}
+
+// SSE2 is the baseline ISA, so this can be inlined into the caller.
+void ConvertBFloat16ToFloat32Sse(const uint16_t* src, float* dst, size_t count) {
+  size_t i = 0;
+  const __m128i zero = _mm_setzero_si128();
+  for (; i + 4 <= count; i += 4) {
+    __m128i halves = _mm_setzero_si128();
+    std::memcpy(&halves, src + i, sizeof(uint64_t));
+    const __m128i extended = _mm_unpacklo_epi16(zero, halves);
+    _mm_storeu_ps(dst + i, _mm_castsi128_ps(extended));
+  }
+  for (; i < count; ++i)
+    dst[i] = LoadBFloat16AsFloat(src[i]);
+}
+
+#endif  // OGA_ARCH_X86
+
+}  // namespace
+
+void ConvertFloat16ToFloat32(const uint16_t* src, float* dst, size_t count) {
+#if defined(OGA_ARCH_X86)
+  static const bool use_f16c = CpuHasF16C();
+  if (use_f16c) {
+    ConvertFloat16ToFloat32F16C(src, dst, count);
+    return;
+  }
+#endif
+  for (size_t i = 0; i < count; ++i)
+    dst[i] = FastFloat16ToFloat32(src[i]);
+}
+
+void ConvertFloat32ToFloat16(const float* src, uint16_t* dst, size_t count) {
+  for (size_t i = 0; i < count; ++i)
+    dst[i] = FastFloat32ToFloat16(src[i]);
+}
+
+void ConvertBFloat16ToFloat32(const uint16_t* src, float* dst, size_t count) {
+#if defined(OGA_ARCH_X86)
+  ConvertBFloat16ToFloat32Sse(src, dst, count);
+#else
+  for (size_t i = 0; i < count; ++i)
+    dst[i] = LoadBFloat16AsFloat(src[i]);
+#endif
+}
+
+void ConvertFloat32ToBFloat16(const float* src, uint16_t* dst, size_t count) {
+  for (size_t i = 0; i < count; ++i)
+    dst[i] = Float32ToBFloat16(src[i]);
 }
 
 }  // namespace Generators
