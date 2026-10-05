@@ -12,19 +12,22 @@ loads alongside the decoder.
 
 from __future__ import annotations
 
-import contextlib
 import glob
-import io
 import json
 import os
 from collections.abc import Iterator, Mapping
 from typing import Any
 
+import numpy as np
 import onnx
+import onnx_ir as ir
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from safetensors.torch import load_file
+
+from ..base import Model
+from .trt_rtx import TRT_RTX
+
+_MAX_VISION_PATCHES = 4096
 
 
 class ConfigView(Mapping):
@@ -114,7 +117,9 @@ def resolve_qwen35_model_dir(model_name_or_path: str, token=True, cache_dir: str
     return os.path.dirname(_resolve_hf_file(model_name_or_path, "config.json", cache_dir, token))
 
 
-def load_qwen35_state_dict(model_name_or_path: str, token=True, cache_dir: str | None = None) -> dict[str, torch.Tensor]:
+def load_qwen35_state_dict(
+    model_name_or_path: str, token=True, cache_dir: str | None = None
+) -> dict[str, torch.Tensor]:
     model_dir = resolve_qwen35_model_dir(model_name_or_path, token=token, cache_dir=cache_dir)
     safetensor_files = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
     if not safetensor_files and cache_dir is not None and not os.path.isdir(model_name_or_path):
@@ -129,283 +134,276 @@ def load_qwen35_state_dict(model_name_or_path: str, token=True, cache_dir: str |
     return state_dict
 
 
-def maybe_load_qwen35_config(model_name_or_path: str, token=True, cache_dir: str | None = None, error: Exception | None = None):
+def maybe_load_qwen35_config(
+    model_name_or_path: str, token=True, cache_dir: str | None = None, error: Exception | None = None
+):
     if error is not None and not _is_qwen35_config_error(error):
         raise error
     return load_qwen35_config(model_name_or_path, token=token, cache_dir=cache_dir)
 
 
-def _activation(name: str):
-    if name == "gelu_pytorch_tanh":
-        return lambda x: F.gelu(x, approximate="tanh")
-    if name == "gelu":
-        return F.gelu
-    if name == "silu":
-        return F.silu
-    raise ValueError(f"Unsupported Qwen3.5 vision activation: {name}")
+class Qwen35VLMModel(Model):
+    """Build auxiliary graphs with the same IR and serialization as the decoder."""
 
+    constant = TRT_RTX.make_expansion_constant
 
-class VisionMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.linear_fc1 = nn.Linear(config.hidden_size, config.intermediate_size, bias=True)
-        self.linear_fc2 = nn.Linear(config.intermediate_size, config.hidden_size, bias=True)
-        self.act_fn = _activation(config.hidden_act)
-
-    def forward(self, hidden_state):
-        return self.linear_fc2(self.act_fn(self.linear_fc1(hidden_state)))
-
-
-class VisionPatchEmbed(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.patch_size = config.patch_size
-        self.temporal_patch_size = config.temporal_patch_size
-        self.in_channels = config.in_channels
-        self.embed_dim = config.hidden_size
-        kernel_size = [self.temporal_patch_size, self.patch_size, self.patch_size]
-        self.proj = nn.Conv3d(self.in_channels, self.embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = hidden_states.view(
-            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
-        )
-        return self.proj(hidden_states.to(dtype=self.proj.weight.dtype)).view(-1, self.embed_dim)
-
-
-class VisionRotaryEmbedding(nn.Module):
-    def __init__(self, dim: int, theta: float = 10000.0):
-        super().__init__()
-        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-    def forward(self, seqlen):
-        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-        return torch.outer(seq, self.inv_freq)
-
-
-class VisionPatchMerger(nn.Module):
-    def __init__(self, config, use_postshuffle_norm: bool = False):
-        super().__init__()
-        self.hidden_size = config.hidden_size * (config.spatial_merge_size**2)
-        self.use_postshuffle_norm = use_postshuffle_norm
-        norm_size = self.hidden_size if use_postshuffle_norm else config.hidden_size
-        self.norm = nn.LayerNorm(norm_size, eps=1e-6)
-        self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)
-        self.act_fn = nn.GELU()
-        self.linear_fc2 = nn.Linear(self.hidden_size, config.out_hidden_size)
-
-    def forward(self, x):
-        x = self.norm(x.view(-1, self.hidden_size) if self.use_postshuffle_norm else x).view(-1, self.hidden_size)
-        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
-
-
-def _rotate_half(x):
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def _apply_rotary_pos_emb_vision(q, k, cos, sin):
-    q_dtype = q.dtype
-    k_dtype = k.dtype
-    q = q.float()
-    k = k.float()
-    cos = cos.unsqueeze(-2).float()
-    sin = sin.unsqueeze(-2).float()
-    q_embed = (q * cos) + (_rotate_half(q) * sin)
-    k_embed = (k * cos) + (_rotate_half(k) * sin)
-    return q_embed.to(q_dtype), k_embed.to(k_dtype)
-
-
-class VisionAttention(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dim = config.hidden_size
-        self.num_heads = config.num_heads
-        self.head_dim = self.dim // self.num_heads
-        self.qkv = nn.Linear(self.dim, self.dim * 3, bias=True)
-        self.proj = nn.Linear(self.dim, self.dim)
-        self.scaling = self.head_dim**-0.5
-
-    def forward(self, hidden_states, position_embeddings):
-        seq_length = hidden_states.shape[0]
-        query_states, key_states, value_states = (
-            self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        )
-        cos, sin = position_embeddings
-        query_states, key_states = _apply_rotary_pos_emb_vision(query_states, key_states, cos, sin)
-
-        query_states = query_states.transpose(0, 1).unsqueeze(0)
-        key_states = key_states.transpose(0, 1).unsqueeze(0)
-        value_states = value_states.transpose(0, 1).unsqueeze(0)
-
-        if getattr(torch.compiler, "is_exporting", lambda: False)():
-            query_3d = query_states.transpose(1, 2).reshape(query_states.shape[0], query_states.shape[2], -1)
-            key_3d = key_states.transpose(1, 2).reshape(key_states.shape[0], key_states.shape[2], -1)
-            value_3d = value_states.transpose(1, 2).reshape(value_states.shape[0], value_states.shape[2], -1)
-            attn_output = torch.onnx.ops.symbolic(
-                "com.microsoft::MultiHeadAttention",
-                (query_3d, key_3d, value_3d),
-                dict(scale=self.scaling, num_heads=self.num_heads),
-                dtype=query_states.dtype,
-                shape=(query_states.shape[0], query_states.shape[2], self.dim),
-                version=1,
-            )
-        else:
-            attn_output = F.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                attn_mask=None,
-                dropout_p=0.0,
-                scale=self.scaling,
-                is_causal=False,
-            ).transpose(1, 2)
-
-        return self.proj(attn_output.reshape(seq_length, -1).contiguous())
-
-
-class VisionBlock(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(config.hidden_size, eps=1e-6)
-        self.norm2 = nn.LayerNorm(config.hidden_size, eps=1e-6)
-        self.attn = VisionAttention(config)
-        self.mlp = VisionMLP(config)
-
-    def forward(self, hidden_states, position_embeddings):
-        hidden_states = hidden_states + self.attn(self.norm1(hidden_states), position_embeddings=position_embeddings)
-        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
-        return hidden_states
-
-
-class Qwen35VisionModel(nn.Module):
-    def __init__(self, config, fixed_image_grid_thw: torch.Tensor | None = None):
-        super().__init__()
+    def __init__(self, config, state_dict, io_dtype, filename, out_dir):
         self.config = config
-        self.spatial_merge_size = config.spatial_merge_size
-        self.patch_size = config.patch_size
-        if fixed_image_grid_thw is None:
-            self.fixed_image_grid_thw = None
-        else:
-            self.register_buffer("fixed_image_grid_thw", fixed_image_grid_thw, persistent=False)
-        self.patch_embed = VisionPatchEmbed(config)
-        self.pos_embed = nn.Embedding(config.num_position_embeddings, config.hidden_size)
-        self.num_grid_per_side = int(config.num_position_embeddings**0.5)
-        head_dim = config.hidden_size // config.num_heads
-        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
-        self.blocks = nn.ModuleList([VisionBlock(config) for _ in range(config.depth)])
-        self.merger = VisionPatchMerger(config, use_postshuffle_norm=False)
-
-    def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
-        merge_size = self.spatial_merge_size
-        max_hw = grid_thw[:, 1:].max()
-        freq_table = self.rotary_pos_emb(max_hw)
-        device = freq_table.device
-        all_embeddings = []
-        for num_frames, height, width in grid_thw:
-            merged_h, merged_w = height // merge_size, width // merge_size
-            block_rows = torch.arange(merged_h, device=device)
-            block_cols = torch.arange(merged_w, device=device)
-            intra_row = torch.arange(merge_size, device=device)
-            intra_col = torch.arange(merge_size, device=device)
-            row_idx = (
-                block_rows[:, None, None, None] * merge_size + intra_row[None, None, :, None]
-            ).expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
-            col_idx = (
-                block_cols[None, :, None, None] * merge_size + intra_col[None, None, None, :]
-            ).expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
-            coords = torch.stack((row_idx, col_idx), dim=-1)
-            coords = coords.repeat(num_frames, 1)
-            all_embeddings.append(freq_table[coords].flatten(1))
-        return torch.cat(all_embeddings, dim=0)
-
-    def fast_pos_embed_interpolate(self, grid_thw):
-        merge_size = self.config.spatial_merge_size
-        dev = self.pos_embed.weight.device
-        dtype = self.pos_embed.weight.dtype
-        n = self.num_grid_per_side
-        all_pos_embeds = []
-        for t, h, w in zip(grid_thw[:, 0], grid_thw[:, 1], grid_thw[:, 2]):
-            h_idxs = torch.arange(h, dtype=torch.float32, device=dev) * ((n - 1) / (h - 1))
-            w_idxs = torch.arange(w, dtype=torch.float32, device=dev) * ((n - 1) / (w - 1))
-            h_floor = h_idxs.int()
-            w_floor = w_idxs.int()
-            h_ceil = (h_floor + 1).clamp(max=n - 1)
-            w_ceil = (w_floor + 1).clamp(max=n - 1)
-            dh = (h_idxs - h_floor.float()).to(dtype)
-            dw = (w_idxs - w_floor.float()).to(dtype)
-            base_h = h_floor.long() * n
-            base_hc = h_ceil.long() * n
-            idx_00 = (base_h[:, None] + w_floor.long()[None]).reshape(-1)
-            idx_01 = (base_h[:, None] + w_ceil.long()[None]).reshape(-1)
-            idx_10 = (base_hc[:, None] + w_floor.long()[None]).reshape(-1)
-            idx_11 = (base_hc[:, None] + w_ceil.long()[None]).reshape(-1)
-            wt_00 = ((1.0 - dh)[:, None] * (1.0 - dw)[None]).reshape(-1)
-            wt_01 = ((1.0 - dh)[:, None] * dw[None]).reshape(-1)
-            wt_10 = (dh[:, None] * (1.0 - dw)[None]).reshape(-1)
-            wt_11 = (dh[:, None] * dw[None]).reshape(-1)
-            pos = (
-                self.pos_embed(idx_00.to(dev)) * wt_00[:, None]
-                + self.pos_embed(idx_01.to(dev)) * wt_01[:, None]
-                + self.pos_embed(idx_10.to(dev)) * wt_10[:, None]
-                + self.pos_embed(idx_11.to(dev)) * wt_11[:, None]
-            )
-            pos = pos.repeat(t, 1)
-            pos = (
-                pos.reshape(t, h // merge_size, merge_size, w // merge_size, merge_size, -1)
-                .permute(0, 1, 3, 2, 4, 5)
-                .flatten(0, 4)
-            )
-            all_pos_embeds.append(pos)
-        return torch.cat(all_pos_embeds)
-
-    def forward(self, pixel_values: torch.Tensor, image_grid_thw: torch.Tensor | None = None) -> torch.Tensor:
-        if self.fixed_image_grid_thw is not None:
-            image_grid_thw = self.fixed_image_grid_thw
-        if image_grid_thw is None:
-            raise RuntimeError("image_grid_thw is required when Qwen35VisionModel is not exported with a fixed grid")
-        hidden_states = self.patch_embed(pixel_values)
-        hidden_states = hidden_states + self.fast_pos_embed_interpolate(image_grid_thw)
-        rotary_pos_emb = self.rot_pos_emb(image_grid_thw)
-        seq_len, _ = hidden_states.size()
-        hidden_states = hidden_states.reshape(seq_len, -1)
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-        position_embeddings = (emb.cos(), emb.sin())
-        for block in self.blocks:
-            hidden_states = block(hidden_states, position_embeddings=position_embeddings)
-        return self.merger(hidden_states)
-
-
-class Qwen35EmbeddingModel(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.image_token_id = config.image_token_id
-        self.vocab_size = config.text_config.vocab_size
-        self.hidden_size = config.text_config.hidden_size
-        self.embed_tokens = nn.Embedding(self.vocab_size, self.hidden_size)
-
-    def forward(self, input_ids: torch.Tensor, image_features: torch.Tensor) -> torch.Tensor:
-        image_mask = input_ids == self.image_token_id
-        safe_input_ids = torch.where(image_mask, torch.zeros_like(input_ids), input_ids)
-        inputs_embeds = self.embed_tokens(safe_input_ids)
-
-        mask_i64 = image_mask.to(torch.int64)
-        image_offsets = torch.cumsum(mask_i64, dim=1) - 1
-        zero_offsets = torch.zeros_like(image_offsets)
-        image_offsets = torch.where(image_mask, image_offsets, zero_offsets)
-
-        dummy_row = torch.zeros((1, image_features.shape[1]), dtype=image_features.dtype, device=image_features.device)
-        padded_image_features = torch.cat((image_features, dummy_row), dim=0)
-        dummy_index = torch.full_like(image_offsets, image_features.shape[0])
-        gather_indices = torch.where(image_mask, image_offsets, dummy_index)
-        image_embeds = padded_image_features[gather_indices.reshape(-1)].reshape(
-            input_ids.shape[0], input_ids.shape[1], self.hidden_size
+        self.state_dict = state_dict
+        self.io_dtype = ir.DataType[getattr(io_dtype, "name", str(io_dtype))]
+        self.onnx_dtype = self.io_dtype
+        self.quant_type = None
+        self.filename = filename
+        self.cache_dir = out_dir
+        self.values = {}
+        self.node_names = set()
+        self.model = ir.Model(
+            ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 21, "com.microsoft": 1}, name=filename),
+            ir_version=10,
         )
-        image_embeds = image_embeds.to(inputs_embeds.dtype)
-        return torch.where(image_mask.unsqueeze(-1), image_embeds, inputs_embeds)
+
+    def node(self, op_type, inputs, name, **attributes):
+        output = f"{name}/output_0"
+        self.make_node(op_type, inputs, [output], name=name, **attributes)
+        return output
+
+    def input(self, name, dtype, shape):
+        self.model.graph.inputs.append(self.make_value(name, dtype, shape))
+        return name
+
+    def output(self, root_input, name, shape):
+        self.make_node("Identity", [root_input], [name], name=name)
+        self.model.graph.outputs.append(self.make_value(name, self.io_dtype, shape))
+
+    def weight(self, name, tensor=None):
+        self.make_initializer(self.state_dict[name] if tensor is None else tensor, name, to=self.io_dtype)
+        return name
+
+    def linear(self, root_input, name):
+        weight = self.state_dict[f"{name}.weight"]
+        weight = self.weight(f"{name}.weight", weight.reshape(weight.shape[0], -1).T)
+        output = self.node("MatMul", [root_input, weight], f"{name}/MatMul")
+        if f"{name}.bias" in self.state_dict:
+            output = self.node("Add", [output, self.weight(f"{name}.bias")], f"{name}/Add")
+        return output
+
+    def norm(self, root_input, name):
+        return self.node(
+            "LayerNormalization",
+            [root_input, self.weight(f"{name}.weight"), self.weight(f"{name}.bias")],
+            f"{name}/LayerNormalization",
+            axis=-1,
+            epsilon=1e-6,
+            stash_type=1,
+        )
+
+    def make_embedding(self):
+        config = self.config
+        hidden_size = config.text_config.hidden_size
+        ids = self.input("input_ids", ir.DataType.INT64, ["batch_size", "sequence_length"])
+        features = self.input("image_features", self.io_dtype, ["num_image_tokens", hidden_size])
+        zero = self.constant("embedding/zero", 0)
+        one = self.constant("embedding/one", 1)
+        image_token = self.constant("embedding/image_token", config.image_token_id)
+        mask = self.node("Equal", [ids, image_token], "embedding/image_mask")
+        safe_ids = self.node("Where", [mask, zero, ids], "embedding/safe_ids")
+        embedded = self.node("Gather", [self.weight("embed_tokens.weight"), safe_ids], "embedding/Gather", axis=0)
+        flat_shape = self.constant("embedding/flat_shape", [-1])
+        flat_mask = self.node("Reshape", [mask, flat_shape], "embedding/flat_mask")
+        flat_mask = self.node("Cast", [flat_mask], "embedding/Cast", to=ir.DataType.INT64)
+        offsets = self.node("CumSum", [flat_mask, zero], "embedding/CumSum")
+        offsets = self.node("Sub", [offsets, one], "embedding/offsets")
+        ids_shape = self.node("Shape", [ids], "embedding/ids_shape")
+        offsets = self.node("Reshape", [offsets, ids_shape], "embedding/indices")
+        feature_shape = self.node("Shape", [features], "embedding/feature_shape")
+        dummy_index = self.node("Gather", [feature_shape, zero], "embedding/dummy_index", axis=0)
+        indices = self.node("Where", [mask, offsets, dummy_index], "embedding/gather_indices")
+        dummy = self.weight("embedding/dummy", torch.zeros(1, hidden_size))
+        padded = self.node("Concat", [features, dummy], "embedding/padded_features", axis=0)
+        image_embeds = self.node("Gather", [padded, indices], "embedding/image_embeddings", axis=0)
+        axes = self.constant("embedding/mask_axis", [-1])
+        mask = self.node("Unsqueeze", [mask, axes], "embedding/broadcast_mask")
+        merged = self.node("Where", [mask, image_embeds, embedded], "embedding/Where")
+        self.output(merged, "inputs_embeds", ["batch_size", "sequence_length", hidden_size])
+
+    def make_vision_positions(self, pixels, grid):
+        config = self.config.vision_config
+        merge = self.constant("vision/merge_size", config.spatial_merge_size)
+        merge_unit = self.constant("vision/merge_unit", config.spatial_merge_size**2)
+        zero = self.constant("vision/zero", 0)
+        one = self.constant("vision/one", 1)
+        axis0 = self.constant("vision/axis0", [0])
+        axis1 = self.constant("vision/axis1", [1])
+        shape = self.node("Shape", [pixels], "vision/pixel_shape")
+        count = self.node("Gather", [shape, zero], "vision/patch_count", axis=0)
+        patches = self.node("Range", [zero, count, one], "vision/patch_indices")
+        sizes = self.node("ReduceProd", [grid, axis1], "vision/image_sizes", keepdims=0)
+        ends = self.node("CumSum", [sizes, zero], "vision/image_ends")
+        starts = self.node("Sub", [ends, sizes], "vision/image_starts")
+        patch_column = self.node("Unsqueeze", [patches, axis1], "vision/patch_column")
+        image_ends = self.node("Unsqueeze", [ends, axis0], "vision/image_ends_row")
+        previous = self.node("GreaterOrEqual", [patch_column, image_ends], "vision/previous_images")
+        previous = self.node("Cast", [previous], "vision/previous_images_int", to=ir.DataType.INT64)
+        image_ids = self.node("ReduceSum", [previous, axis1], "vision/image_ids", keepdims=0)
+        start = self.node("Gather", [starts, image_ids], "vision/image_start", axis=0)
+        local_patch = self.node("Sub", [patches, start], "vision/local_patch")
+        dimensions = []
+        for index, label in enumerate(("frames", "height", "width")):
+            index_value = self.constant(f"vision/{label}_axis", index)
+            dimensions.append(self.node("Gather", [grid, index_value], f"vision/{label}", axis=1))
+        frames, heights, widths = dimensions
+        height = self.node("Gather", [heights, image_ids], "vision/patch_height", axis=0)
+        width = self.node("Gather", [widths, image_ids], "vision/patch_width", axis=0)
+        frame_size = self.node("Mul", [height, width], "vision/frame_size")
+        frame = self.node("Div", [local_patch, frame_size], "vision/local_frame")
+        frame_ends = self.node("CumSum", [frames, zero], "vision/frame_ends")
+        frame_starts = self.node("Sub", [frame_ends, frames], "vision/frame_starts")
+        frame_start = self.node("Gather", [frame_starts, image_ids], "vision/frame_start", axis=0)
+        frame_ids = self.node("Add", [frame_start, frame], "vision/frame_ids")
+        local_patch = self.node("Mod", [local_patch, frame_size], "vision/frame_patch")
+        block = self.node("Div", [local_patch, merge_unit], "vision/block")
+        block_width = self.node("Div", [width, merge], "vision/block_width")
+        block_row = self.node("Div", [block, block_width], "vision/block_row")
+        block_col = self.node("Mod", [block, block_width], "vision/block_col")
+        intra = self.node("Mod", [local_patch, merge_unit], "vision/intra_block")
+        intra_row = self.node("Div", [intra, merge], "vision/intra_row")
+        intra_col = self.node("Mod", [intra, merge], "vision/intra_col")
+        row = self.node("Mul", [block_row, merge], "vision/row_start")
+        col = self.node("Mul", [block_col, merge], "vision/col_start")
+        row = self.node("Add", [row, intra_row], "vision/row")
+        col = self.node("Add", [col, intra_col], "vision/col")
+        return row, col, height, width, frame_ids
+
+    def make_vision_position_embeddings(self, row, col, height, width):
+        config = self.config.vision_config
+        side = int(config.num_position_embeddings**0.5)
+        side_value = self.constant("vision/position_side", side)
+        maximum = self.constant("vision/position_max", side - 1)
+        one = self.constant("vision/one", 1)
+        one_float = self.constant("vision/one_float", 1.0, np.float32)
+        maximum_float = self.constant("vision/position_max_float", side - 1, np.float32)
+        axis1 = self.constant("vision/axis1", [1])
+        positions = []
+        for coordinate_input, dimension_input, label in ((row, height, "row"), (col, width, "col")):
+            coordinate = self.node("Cast", [coordinate_input], f"vision/{label}_float", to=ir.DataType.FLOAT)
+            dimension = self.node("Sub", [dimension_input, one], f"vision/{label}_extent")
+            dimension = self.node("Cast", [dimension], f"vision/{label}_extent_float", to=ir.DataType.FLOAT)
+            scale = self.node("Div", [maximum_float, dimension], f"vision/{label}_scale")
+            position = self.node("Mul", [coordinate, scale], f"vision/{label}_position")
+            floor = self.node("Cast", [position], f"vision/{label}_floor", to=ir.DataType.INT64)
+            ceil = self.node("Add", [floor, one], f"vision/{label}_next")
+            ceil = self.node("Min", [ceil, maximum], f"vision/{label}_ceil")
+            floor_float = self.node("Cast", [floor], f"vision/{label}_floor_float", to=ir.DataType.FLOAT)
+            fraction = self.node("Sub", [position, floor_float], f"vision/{label}_fraction")
+            complement = self.node("Sub", [one_float, fraction], f"vision/{label}_complement")
+            positions.append(((floor, ceil), (complement, fraction)))
+        positional_weight = self.weight("pos_embed.weight")
+        terms = []
+        for h in range(2):
+            for w in range(2):
+                prefix = f"vision/position_{h}{w}"
+                base = self.node("Mul", [positions[0][0][h], side_value], f"{prefix}/base")
+                indices = self.node("Add", [base, positions[1][0][w]], f"{prefix}/indices")
+                weight = self.node("Mul", [positions[0][1][h], positions[1][1][w]], f"{prefix}/weight")
+                weight = self.node("Cast", [weight], f"{prefix}/Cast", to=self.io_dtype)
+                weight = self.node("Unsqueeze", [weight, axis1], f"{prefix}/Unsqueeze")
+                table = self.node("Gather", [positional_weight, indices], f"{prefix}/Gather", axis=0)
+                terms.append(self.node("Mul", [table, weight], f"{prefix}/Mul"))
+        output = terms[0]
+        for index, term in enumerate(terms[1:]):
+            output = self.node("Add", [output, term], f"vision/position_sum_{index}")
+        head_dim = config.hidden_size // config.num_heads
+        inv_freq = 1.0 / (10000.0 ** (np.arange(0, head_dim // 2, 2, dtype=np.float32) / (head_dim // 2)))
+        frequencies = self.constant("vision/inv_freq", inv_freq, np.float32)
+        coordinates = []
+        for coordinate_input, label in ((row, "row"), (col, "col")):
+            coordinate = self.node("Cast", [coordinate_input], f"vision/rotary_{label}_float", to=ir.DataType.FLOAT)
+            coordinate = self.node("Unsqueeze", [coordinate, axis1], f"vision/rotary_{label}_column")
+            coordinates.append(self.node("Mul", [coordinate, frequencies], f"vision/rotary_{label}_freq"))
+        angles = self.node("Concat", coordinates, "vision/rotary_angles", axis=-1)
+        angles = self.node("Concat", [angles, angles], "vision/rotary_angles_full", axis=-1)
+        cos = self.node("Cos", [angles], "vision/rotary_cos")
+        sin = self.node("Sin", [angles], "vision/rotary_sin")
+        cos = self.node("Unsqueeze", [cos, axis1], "vision/rotary_cos_heads")
+        sin = self.node("Unsqueeze", [sin, axis1], "vision/rotary_sin_heads")
+        return output, cos, sin
+
+    def make_vision(self):
+        config = self.config.vision_config
+        hidden_size = config.hidden_size
+        head_dim = hidden_size // config.num_heads
+        patch_size = config.in_channels * config.temporal_patch_size * config.patch_size**2
+        pixels = self.input("pixel_values", self.io_dtype, ["num_patches", patch_size])
+        grid = self.input("image_grid_thw", ir.DataType.INT64, ["num_images", 3])
+        row, col, height, width, frame_ids = self.make_vision_positions(pixels, grid)
+        position, cos, sin = self.make_vision_position_embeddings(row, col, height, width)
+        hidden = self.linear(pixels, "patch_embed.proj")
+        hidden = self.node("Add", [hidden, position], "vision/position_Add")
+        frame_column = self.node("Unsqueeze", [frame_ids, self.constant("vision/axis1", [1])], "vision/frame_column")
+        frame_row = self.node("Unsqueeze", [frame_ids, self.constant("vision/axis0", [0])], "vision/frame_row")
+        same_frame = self.node("Equal", [frame_column, frame_row], "vision/same_frame")
+        zero = self.constant("vision/mask_zero", 0.0, np.float32)
+        negative = self.constant("vision/mask_negative", -10000.0, np.float32)
+        bias = self.node("Where", [same_frame, zero, negative], "vision/attention_mask")
+        bias = self.node("Cast", [bias], "vision/attention_mask_Cast", to=self.io_dtype)
+        bias = self.node("Unsqueeze", [bias, self.constant("vision/mask_axes", [0, 1])], "vision/attention_bias")
+        split_sizes = self.constant("vision/qkv_split", [hidden_size] * 3)
+        head_shape = self.constant("vision/head_shape", [-1, config.num_heads, head_dim])
+        attention_shape = self.constant("vision/attention_shape", [1, -1, hidden_size])
+        hidden_shape = self.constant("vision/hidden_shape", [-1, hidden_size])
+        half_sizes = self.constant("vision/half_split", [head_dim // 2] * 2)
+        for layer in range(config.depth):
+            prefix = f"blocks.{layer}"
+            normalized = self.norm(hidden, f"{prefix}.norm1")
+            qkv = self.linear(normalized, f"{prefix}.attn.qkv")
+            q, k, v = [f"{prefix}/qkv/{label}" for label in ("q", "k", "v")]
+            self.make_node("Split", [qkv, split_sizes], [q, k, v], name=f"{prefix}/qkv/Split", axis=-1)
+            queries = []
+            for root_input, label in ((q, "q"), (k, "k")):
+                name = f"{prefix}/{label}"
+                value = self.node("Reshape", [root_input, head_shape], f"{name}/Reshape")
+                value = self.node("Cast", [value], f"{name}/Cast", to=ir.DataType.FLOAT)
+                first, second = f"{name}/first_half", f"{name}/second_half"
+                self.make_node("Split", [value, half_sizes], [first, second], name=f"{name}/Split", axis=-1)
+                negative = self.node("Neg", [second], f"{name}/Neg")
+                rotated = self.node("Concat", [negative, first], f"{name}/rotate_half", axis=-1)
+                direct = self.node("Mul", [value, cos], f"{name}/cos_Mul")
+                rotated = self.node("Mul", [rotated, sin], f"{name}/sin_Mul")
+                rotated = self.node("Add", [direct, rotated], f"{name}/rotary_Add")
+                rotated = self.node("Cast", [rotated], f"{name}/rotary_Cast", to=self.io_dtype)
+                queries.append(self.node("Reshape", [rotated, attention_shape], f"{name}/attention_Reshape"))
+            v = self.node("Reshape", [v, attention_shape], f"{prefix}/v/Reshape")
+            attention = self.node(
+                "MultiHeadAttention",
+                [*queries, v, "", "", bias],
+                f"{prefix}/MultiHeadAttention",
+                domain="com.microsoft",
+                num_heads=config.num_heads,
+                scale=head_dim**-0.5,
+            )
+            attention = self.node("Reshape", [attention, hidden_shape], f"{prefix}/attention_Reshape")
+            attention = self.linear(attention, f"{prefix}.attn.proj")
+            hidden = self.node("Add", [hidden, attention], f"{prefix}/attention_residual")
+            normalized = self.norm(hidden, f"{prefix}.norm2")
+            mlp = self.linear(normalized, f"{prefix}.mlp.linear_fc1")
+            if config.hidden_act == "silu":
+                sigmoid = self.node("Sigmoid", [mlp], f"{prefix}/mlp/Sigmoid")
+                mlp = self.node("Mul", [mlp, sigmoid], f"{prefix}/mlp/SiLU")
+            else:
+                mlp = self.node(
+                    "Gelu", [mlp], f"{prefix}/mlp/Gelu", approximate="tanh" if "tanh" in config.hidden_act else "none"
+                )
+            mlp = self.linear(mlp, f"{prefix}.mlp.linear_fc2")
+            hidden = self.node("Add", [hidden, mlp], f"{prefix}/mlp_residual")
+        hidden = self.norm(hidden, "merger.norm")
+        merged_size = hidden_size * config.spatial_merge_size**2
+        hidden = self.node(
+            "Reshape", [hidden, self.constant("vision/merger_shape", [-1, merged_size])], "merger/Reshape"
+        )
+        hidden = self.linear(hidden, "merger.linear_fc1")
+        hidden = self.node("Gelu", [hidden], "merger/Gelu", approximate="none")
+        hidden = self.linear(hidden, "merger.linear_fc2")
+        self.output(hidden, "image_features", ["num_image_tokens", config.out_hidden_size])
 
 
 def _snapshot_dir(model_name_or_path: str, cache_dir: str | None, token) -> str:
@@ -439,38 +437,6 @@ def _load_qwen35_aux_state(model_name_or_path: str, cache_dir: str | None, token
     return state_dict
 
 
-def _torch_dtype_from_io_dtype(io_dtype) -> torch.dtype:
-    name = getattr(io_dtype, "name", str(io_dtype))
-    if name == "BFLOAT16":
-        return torch.bfloat16
-    if name == "FLOAT":
-        return torch.float32
-    return torch.float16
-
-
-def _export_onnx(model, args, out_path: str, input_names, output_names, dynamic_shapes=None):
-    if os.path.exists(out_path):
-        os.remove(out_path)
-    data_path = out_path + ".data"
-    if os.path.exists(data_path):
-        os.remove(data_path)
-
-    with contextlib.redirect_stdout(io.StringIO()):
-        torch.onnx.export(
-            model,
-            args,
-            out_path,
-            input_names=input_names,
-            output_names=output_names,
-            opset_version=20,
-            dynamo=True,
-            external_data=True,
-            dynamic_shapes=dynamic_shapes,
-            optimize=True,
-            verbose=False,
-        )
-
-
 def _validate_no_ops(model_path: str, blocked_ops: set[str]):
     model = onnx.load(model_path, load_external_data=False)
     present = sorted({node.op_type for node in model.graph.node if node.op_type in blocked_ops})
@@ -478,7 +444,10 @@ def _validate_no_ops(model_path: str, blocked_ops: set[str]):
         raise RuntimeError(f"{model_path} contains unsupported ops after export: {present}")
 
 
-def _write_processor_config(out_dir: str, vision_config):
+def _write_processor_config(out_dir: str, vision_config, execution_provider: str):
+    max_pixels = 16777216
+    if execution_provider == "trt-rtx":
+        max_pixels = _MAX_VISION_PATCHES * vision_config.patch_size**2
     processor_config = {
         "processor": {
             "name": "qwen2_5_image_processor",
@@ -493,8 +462,8 @@ def _write_processor_config(out_dir: str, vision_config):
                             "width": 960,
                             "height": 672,
                             "smart_resize": 1,
-                            "min_pixels": 65536,
-                            "max_pixels": 16777216,
+                            "min_pixels": min(65536, max_pixels),
+                            "max_pixels": max_pixels,
                             "patch_size": vision_config.patch_size,
                             "merge_size": vision_config.spatial_merge_size,
                         },
@@ -564,15 +533,18 @@ def _patch_genai_config(out_dir: str, config, execution_provider: str):
     genai_config["search"]["top_p"] = 1.0
 
     if execution_provider == "trt-rtx":
+        hidden_size = config.text_config.hidden_size
+        vision_config = config.vision_config
+        patch_size = vision_config.in_channels * vision_config.temporal_patch_size * vision_config.patch_size**2
         model_config["embedding"]["session_options"] = {
             "log_id": "onnxruntime-genai",
             "provider_options": [
                 {
                     "NvTensorRtRtx": {
                         "enable_cuda_graph": "0",
-                        "nv_profile_min_shapes": "input_ids:1x1,image_features:0x1024",
-                        "nv_profile_opt_shapes": "input_ids:1x609,image_features:576x1024",
-                        "nv_profile_max_shapes": "input_ids:1x1057,image_features:576x1024",
+                        "nv_profile_min_shapes": f"input_ids:1x1,image_features:0x{hidden_size}",
+                        "nv_profile_opt_shapes": f"input_ids:1x609,image_features:576x{hidden_size}",
+                        "nv_profile_max_shapes": f"input_ids:1x4096,image_features:{_MAX_VISION_PATCHES // vision_config.spatial_merge_size**2}x{hidden_size}",
                     }
                 }
             ],
@@ -583,9 +555,9 @@ def _patch_genai_config(out_dir: str, config, execution_provider: str):
                 {
                     "NvTensorRtRtx": {
                         "enable_cuda_graph": "0",
-                        "nv_profile_min_shapes": "pixel_values:2304x1536",
-                        "nv_profile_opt_shapes": "pixel_values:2304x1536",
-                        "nv_profile_max_shapes": "pixel_values:2304x1536",
+                        "nv_profile_min_shapes": f"pixel_values:4x{patch_size},image_grid_thw:1x3",
+                        "nv_profile_opt_shapes": f"pixel_values:2304x{patch_size},image_grid_thw:1x3",
+                        "nv_profile_max_shapes": f"pixel_values:{_MAX_VISION_PATCHES}x{patch_size},image_grid_thw:8x3",
                     }
                 }
             ],
@@ -604,66 +576,22 @@ def export_qwen35_vlm_components(
     io_dtype,
 ):
     config = load_qwen35_config(model_name_or_path, token=token, cache_dir=cache_dir)
-    dtype = _torch_dtype_from_io_dtype(io_dtype)
     state_dict = _load_qwen35_aux_state(model_name_or_path, cache_dir, token)
-
     print("Exporting Qwen3.5 embedding.onnx...")
-    embedding = Qwen35EmbeddingModel(config)
-    missing, unexpected = embedding.load_state_dict(
-        {"embed_tokens.weight": state_dict["embed_tokens.weight"]}, strict=False
+    embedding = Qwen35VLMModel(
+        config, {"embed_tokens.weight": state_dict["embed_tokens.weight"]}, io_dtype, "embedding.onnx", out_dir
     )
-    if missing or unexpected:
-        raise RuntimeError(f"Unexpected embedding state dict keys. Missing={missing}, unexpected={unexpected}")
-    embedding = embedding.to(dtype).eval()
-    patches_per_image = 630
-    input_ids = torch.randint(0, config.image_token_id, (1, patches_per_image + 33), dtype=torch.int64)
-    input_ids[:, 2] = config.vision_start_token_id
-    input_ids[:, 3 : 3 + patches_per_image] = config.image_token_id
-    image_features = torch.randn((input_ids.shape[0] * patches_per_image, config.vision_config.out_hidden_size), dtype=dtype)
-    _export_onnx(
-        embedding,
-        (input_ids, image_features),
-        os.path.join(out_dir, "embedding.onnx"),
-        ["input_ids", "image_features"],
-        ["inputs_embeds"],
-        dynamic_shapes={
-            "input_ids": {0: torch.export.Dim("batch_size"), 1: torch.export.Dim("sequence_length")},
-            "image_features": {0: torch.export.Dim("num_logical_patches")},
-        },
-    )
-    _validate_no_ops(os.path.join(out_dir, "embedding.onnx"), {"NonZero", "ScatterND"})
-
+    embedding.make_embedding()
+    embedding.save_model(out_dir)
     print("Exporting Qwen3.5 vision.onnx...")
-    fixed_trt_rtx_grid = execution_provider == "trt-rtx"
-    image_grid_thw = torch.tensor([[1, 36, 64]] if fixed_trt_rtx_grid else [[1, 42, 60]], dtype=torch.int64)
-    vision = Qwen35VisionModel(config.vision_config, fixed_image_grid_thw=image_grid_thw if fixed_trt_rtx_grid else None)
     visual_state = {name[len("visual.") :]: tensor for name, tensor in state_dict.items() if name.startswith("visual.")}
-    missing, unexpected = vision.load_state_dict(visual_state, strict=False)
-    if missing or unexpected:
-        raise RuntimeError(f"Unexpected vision state dict keys. Missing={missing}, unexpected={unexpected}")
-    vision = vision.to(dtype).eval()
-    num_vision_patches = int(torch.prod(image_grid_thw[0]).item())
-    pixel_values = torch.randn(
-        (num_vision_patches, 3 * config.vision_config.temporal_patch_size * config.vision_config.patch_size**2),
-        dtype=dtype,
-    )
-    vision_args = (pixel_values,) if fixed_trt_rtx_grid else (pixel_values, image_grid_thw)
-    vision_input_names = ["pixel_values"] if fixed_trt_rtx_grid else ["pixel_values", "image_grid_thw"]
-    vision_dynamic_shapes = None if fixed_trt_rtx_grid else {
-        "pixel_values": {0: torch.export.Dim("num_patches")},
-        "image_grid_thw": {},
-    }
-
-    _export_onnx(
-        vision,
-        vision_args,
-        os.path.join(out_dir, "vision.onnx"),
-        vision_input_names,
-        ["image_features"],
-        dynamic_shapes=vision_dynamic_shapes,
-    )
-    _validate_no_ops(os.path.join(out_dir, "vision.onnx"), {"Loop", "MemcpyToHost", "MemcpyFromHost"})
-
-    _write_processor_config(out_dir, config.vision_config)
+    vision = Qwen35VLMModel(config, visual_state, io_dtype, "vision.onnx", out_dir)
+    vision.make_vision()
+    vision.save_model(out_dir)
+    for filename in ("embedding.onnx", "vision.onnx"):
+        _validate_no_ops(
+            os.path.join(out_dir, filename), {"Loop", "NonZero", "ScatterND", "MemcpyToHost", "MemcpyFromHost"}
+        )
+    _write_processor_config(out_dir, config.vision_config, execution_provider)
     _patch_genai_config(out_dir, config, execution_provider)
     print("Qwen3.5 VLM auxiliary ONNX export complete.")

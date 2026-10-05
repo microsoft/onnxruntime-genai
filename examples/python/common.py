@@ -24,9 +24,7 @@ def set_logger(inputs: bool = True, outputs: bool = True) -> None:
     og.set_log_options(enabled=True, model_input_values=inputs, model_output_values=outputs)
 
 
-def _get_model_session_options_overlay(
-    path: str, ep: str, ep_options: dict[str, str]
-) -> dict[str, Any]:
+def get_model_session_options_overlay(path: str, ep: str, ep_options: dict[str, str]) -> dict[str, Any]:
     config_path = os.path.join(path, "genai_config.json")
     if not os.path.exists(config_path):
         return {}
@@ -134,9 +132,7 @@ def get_config(
     config = og.Config(path)
     if not ep_path and ep != "follow_config":
         config.clear_providers()
-        model_provider_overlay = _get_model_session_options_overlay(
-            path, ep, ep_options
-        )
+        model_provider_overlay = get_model_session_options_overlay(path, ep, ep_options)
         if ep != "cpu":
             print(f"Setting model to {ep}")
         if model_provider_overlay:

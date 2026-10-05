@@ -416,8 +416,6 @@ def check_extra_options(
     extra_options["hf_details"] = hf_details
 
     if extra_options.get("qwen_vlm", False):
-        if execution_provider not in {"NvTensorRtRtx", "trt-rtx"}:
-            raise ValueError("qwen_vlm=true currently supports TRT-RTX/NvTensorRtRtx export only.")
         if getattr(config, "architectures", [None])[0] not in _QWEN_VLM_ARCHITECTURES:
             raise ValueError("qwen_vlm=true currently supports Qwen3.5/Qwen3.6 VLM architectures only.")
         if extra_options.get("exclude_embeds") is False:
@@ -856,8 +854,6 @@ def create_model(
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
 
     if not config_only and extra_options.get("qwen_vlm", False):
-        if execution_provider != "trt-rtx":
-            raise ValueError("qwen_vlm=true currently supports TRT-RTX/NvTensorRtRtx export only.")
         if config.architectures[0] not in _QWEN_VLM_ARCHITECTURES:
             raise ValueError("qwen_vlm=true currently supports Qwen3.5/Qwen3.6 VLM architectures only.")
         from builders.expansions.trt_rtx_qwen35_vlm_export import export_qwen35_vlm_components
@@ -992,8 +988,8 @@ def get_args():
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
-                qwen_vlm = true/false: Export Qwen3.5/Qwen3.6 VLM auxiliary embedding and vision models for TRT-RTX alongside the text decoder. Default is false.
-                    Requires execution_provider=NvTensorRtRtx, a Qwen3.5/Qwen3.6 VLM architecture, and exclude_embeds=true; the builder sets exclude_embeds=true unless exclude_embeds=false is explicitly provided.
+                qwen_vlm = true/false: Export Qwen3.5/Qwen3.6 VLM auxiliary embedding and vision models alongside the text decoder. Default is false.
+                    Requires a Qwen3.5/Qwen3.6 VLM architecture and exclude_embeds=true; the builder sets exclude_embeds=true unless exclude_embeds=false is explicitly provided.
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.
