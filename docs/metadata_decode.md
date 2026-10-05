@@ -102,9 +102,9 @@ factor. Configuration is copied into the state and stays fixed until reset.
 Creation configures the stream's Extensions cache through
 `OrtxSetDetokenizerCacheMetadataConfig`. This overrides shared tokenizer metadata
 options only for that cache. Streams sharing a tokenizer may select different
-features without toggling shared options. Disabled timestamps allocate no
-calculator or grouping state, produce a null `timestampMetadata`, and impose no
-consumption requirement.
+features without toggling shared options. Disabled timestamps do not buffer
+token intervals or accumulate words and segments, return a null
+`timestampMetadata`, and impose no timing requirement.
 
 ## Decode and Process
 
@@ -122,7 +122,7 @@ Decode validates the selected token and timing before advancing Extensions, then
 to their first and last intervals, and directly publishes per-call word/segment
 records. It retains intervals until Extensions' pending-token watermark releases
 them; unfinished segments persist between calls. The stream still owns the state,
-including any retained internal state handles. When timestamp production is enabled,
+even if an internal caller retains its shared handle. When timestamp production is enabled,
 the generator getter checks that model-produced interval counts match emitted token
 counts and pairs them by position; missing intervals are an error. IDs can repeat
 and cannot be used to look up timing.
