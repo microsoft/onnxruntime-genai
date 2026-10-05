@@ -88,15 +88,15 @@ def _register_gemma4_image_token(model_path):
     tokenizer_path.write_text(json.dumps(tokenizer), encoding="utf-8")
 
 
-def _create_static_batch_vision_model(onnx, output_path):
+def _create_static_batch_vision_model(onnx, output_path, num_patches="num_patches"):
     """Create a static-B=1 vision model that removes padding and pools 3x3 patches."""
     helper = onnx.helper
     tensor_proto = onnx.TensorProto
     pixel_values = helper.make_tensor_value_info(
-        "pixel_values", tensor_proto.FLOAT, [1, "num_patches", 768]
+        "pixel_values", tensor_proto.FLOAT, [1, num_patches, 768]
     )
     position_ids = helper.make_tensor_value_info(
-        "pixel_position_ids", tensor_proto.INT64, [1, "num_patches", 2]
+        "pixel_position_ids", tensor_proto.INT64, [1, num_patches, 2]
     )
     image_features = helper.make_tensor_value_info(
         "image_features", tensor_proto.FLOAT, ["num_soft_tokens", 2048]
@@ -167,6 +167,56 @@ def _set_vision_position_dtype(onnx, model_path, dtype):
             )
     onnx.checker.check_model(model)
     onnx.save(model, model_path)
+
+
+def _create_static_batch_vision_pipeline(onnx, encoder_path, projector_path, num_patches="num_patches"):
+    """Split the static-B=1 vision fixture at a vision_features boundary."""
+    helper = onnx.helper
+    tensor_proto = onnx.TensorProto
+
+    pixel_values = helper.make_tensor_value_info("pixel_values", tensor_proto.FLOAT, [1, num_patches, 768])
+    position_ids = helper.make_tensor_value_info("pixel_position_ids", tensor_proto.INT64, [1, num_patches, 2])
+    vision_features = helper.make_tensor_value_info("vision_features", tensor_proto.FLOAT, [1, num_patches, 768])
+    encoder_graph = helper.make_graph(
+        [helper.make_node("Identity", ["pixel_values"], ["vision_features"])],
+        "gemma4_vision_encoder",
+        [pixel_values, position_ids],
+        [vision_features],
+    )
+    encoder = helper.make_model(encoder_graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7)
+    onnx.save(encoder, encoder_path)
+
+    image_features = helper.make_tensor_value_info("image_features", tensor_proto.FLOAT, ["num_soft_tokens", 2048])
+    projector_nodes = [
+        helper.make_node("Gather", ["pixel_position_ids", "x_axis"], ["x_positions"], axis=2),
+        helper.make_node("Greater", ["x_positions", "negative_one"], ["valid_mask"]),
+        helper.make_node("NonZero", ["valid_mask"], ["valid_indices_transposed"]),
+        helper.make_node("Transpose", ["valid_indices_transposed"], ["valid_indices"], perm=[1, 0]),
+        helper.make_node("GatherND", ["vision_features", "valid_indices"], ["valid_patches"]),
+        helper.make_node(
+            "Slice", ["valid_patches", "slice_start", "slice_end", "slice_axis", "slice_step"], ["pooled_patches"]
+        ),
+        helper.make_node("Pad", ["pooled_patches", "feature_padding", "zero"], ["image_features"]),
+    ]
+    initializers = [
+        onnx.numpy_helper.from_array(np.array(0, dtype=np.int64), "x_axis"),
+        onnx.numpy_helper.from_array(np.array(-1, dtype=np.int64), "negative_one"),
+        onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "slice_start"),
+        onnx.numpy_helper.from_array(np.array([np.iinfo(np.int64).max], dtype=np.int64), "slice_end"),
+        onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "slice_axis"),
+        onnx.numpy_helper.from_array(np.array([9], dtype=np.int64), "slice_step"),
+        onnx.numpy_helper.from_array(np.array([0, 0, 0, 1280], dtype=np.int64), "feature_padding"),
+        onnx.numpy_helper.from_array(np.array(0, dtype=np.float32), "zero"),
+    ]
+    projector_graph = helper.make_graph(
+        projector_nodes,
+        "gemma4_vision_projector",
+        [vision_features, position_ids],
+        [image_features],
+        initializers,
+    )
+    projector = helper.make_model(projector_graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7)
+    onnx.save(projector, projector_path)
 
 
 def _create_dynamic_embedding_model(
@@ -787,6 +837,101 @@ def test_gemma4_static_batch_vision_executes_multiple_images(
     assert sequence[-1] == 2
 
 
+def test_gemma4_split_vision_requires_decoder_pipeline(test_data_path, tmp_path):
+    """A split vision export cannot use the flat-decoder multimodal model."""
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4"
+    shutil.copytree(source_model_path, model_path)
+
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["model"]["vision"]["pipeline"] = {
+        "encoder": {
+            "filename": "dummy_vision_encoder.onnx",
+        },
+        "projector": {
+            "filename": "dummy_vision_projector.onnx",
+        },
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(RuntimeError, match=r"split vision requires decoder\.pipeline"):
+        og.Model(os.fspath(model_path))
+
+
+@pytest.mark.parametrize(
+    "relative_image_paths",
+    [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
+)
+def test_gemma4_fixed_patch_vision_pads_multiple_images(test_data_path, tmp_path, relative_image_paths):
+    """Test that processor output is padded to the vision model's fixed patch capacity."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    image_paths = [os.fspath(_get_test_media_path(test_data_path, path)) for path in relative_image_paths]
+    images = og.Images.open(*image_paths)
+
+    source_model = og.Model(os.fspath(source_model_path))
+    source_processor = source_model.create_multimodal_processor()
+    source_inputs = source_processor("<|image|><|image|>Compare these images", images=images)
+    image_token_counts = _to_numpy(source_inputs["num_image_tokens"])
+    fixed_num_patches = (int(image_token_counts.max()) + 1) * 9
+
+    model_path = tmp_path / "gemma4"
+    shutil.copytree(source_model_path, model_path)
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["model"]["speech"] = {"filename": "", "config_filename": ""}
+    config["model"]["vocab_size"] = 8
+    config["model"]["eos_token_id"] = [1]
+    config["search"]["past_present_share_buffer"] = False
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx", fixed_num_patches)
+    _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx")
+    _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")
+
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    inputs = processor("<|image|><|image|>Compare these images", images=images)
+    pixel_values = _to_numpy(inputs["pixel_values"])
+    pixel_position_ids = _to_numpy(inputs["pixel_position_ids"])
+
+    assert pixel_values.shape == (len(image_paths), fixed_num_patches, 768)
+    assert pixel_position_ids.shape == (len(image_paths), fixed_num_patches, 2)
+    assert np.all(pixel_values[:, -9:, :] == 0)
+    assert np.all(pixel_position_ids[:, -9:, :] == -1)
+    np.testing.assert_array_equal(_to_numpy(inputs["num_image_tokens"]), image_token_counts)
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.generate_next_token()
+
+
+@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+def test_gemma4_fixed_patch_vision_rejects_too_many_patches(test_data_path, tmp_path, relative_image_path):
+    """Test that valid image patches are never truncated to fit a fixed vision input."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    image_path = os.fspath(_get_test_media_path(test_data_path, relative_image_path))
+    images = og.Images.open(image_path)
+
+    source_model = og.Model(os.fspath(source_model_path))
+    source_processor = source_model.create_multimodal_processor()
+    source_inputs = source_processor("<|image|>Describe this image", images=images)
+    actual_num_patches = int(_to_numpy(source_inputs["num_image_tokens"])[0]) * 9
+
+    model_path = tmp_path / "gemma4"
+    shutil.copytree(source_model_path, model_path)
+    _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx", actual_num_patches - 9)
+
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    with pytest.raises(
+        RuntimeError, match="vision model accepts .* patches, but preprocessing produced .* valid patches"
+    ):
+        processor("<|image|>Describe this image", images=images)
+
+
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
 def test_gemma4_processor_creates_token_type_ids(test_data_path, relative_image_path):
     """Test that Gemma4 processor creates token_type_ids for image prompts."""
@@ -960,8 +1105,8 @@ def _write_pipelined_gemma4(
 ):
     """Copy the Gemma4 fixture and rewrite it as a pipelined decoder.
 
-    A pipelined decoder is what routes the config to Qwen2_5_VL_PipelineModel, which runs the
-    vision encoder as a single session instead of the three-stage Qwen vision pipeline.
+    A pipelined decoder routes the config to Qwen2_5_VL_PipelineModel, which supports
+    either a single vision session or a split encoder/projector.
     """
     shutil.copytree(source_model_path, model_path)
     _register_gemma4_image_token(model_path)
@@ -1255,6 +1400,60 @@ def test_gemma4_pipelined_decoder_injects_features_when_embedding_has_no_feature
     assert generator.get_next_tokens() == [2]
     generator.generate_next_token()
     assert generator.get_next_tokens() == [0]
+
+
+@pytest.mark.parametrize("fixed_patches", [False, True])
+def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fixed_patches):
+    """A decoder pipeline must also run both vision stages for every image."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4-split-pipeline"
+    _write_pipelined_gemma4(onnx, source_model_path, model_path)
+    _create_static_batch_vision_pipeline(
+        onnx,
+        model_path / "dummy_vision_encoder.onnx",
+        model_path / "dummy_vision_projector.onnx",
+        2520 if fixed_patches else "num_patches",
+    )
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    vision = config["model"]["vision"]
+    vision.pop("filename", None)
+    vision["pipeline"] = [
+        {
+            "encoder": {
+                "filename": "dummy_vision_encoder.onnx",
+                "inputs": ["pixel_values", "pixel_position_ids"],
+                "outputs": ["vision_features"],
+                "session_options": {"provider_options": []},
+            },
+            "projector": {
+                "filename": "dummy_vision_projector.onnx",
+                "inputs": ["vision_features", "pixel_position_ids"],
+                "outputs": ["image_features"],
+                "run_on_cpu": True,
+            },
+        }
+    ]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    image_paths = [
+        os.fspath(_get_test_media_path(test_data_path, Path("images") / name))
+        for name in ("australia.jpg", "sheet.png")
+    ]
+    if not all(os.path.exists(path) for path in image_paths):
+        pytest.skip("Gemma4 test images not available")
+    inputs = processor("<|image|><|image|>Compare these images", images=og.Images.open(*image_paths))
+    if fixed_patches:
+        assert _to_numpy(inputs["pixel_values"]).shape[1] == 2520
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.generate_next_token()
+    assert len(generator.get_next_tokens()) == 1
 
 
 def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(

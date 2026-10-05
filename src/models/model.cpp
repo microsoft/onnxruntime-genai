@@ -46,7 +46,7 @@
 #include "ep/qnn/interface.h"
 #include "ep/ryzenai/interface.h"
 #include "session_options.h"
-
+#include <iostream>
 namespace Generators {
 
 namespace {
@@ -954,6 +954,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
       throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   }
+  if (config->model.type == "gemma4" && !config->model.vision.pipeline.empty())
+    throw std::runtime_error("Gemma 4 split vision requires decoder.pipeline; a flat decoder only supports vision.filename");
   if (ModelType::IsLFM2(config->model.type))
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
