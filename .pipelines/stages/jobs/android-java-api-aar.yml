@@ -25,6 +25,11 @@ jobs:
     submodules: none
 
   - template: steps/utils/use-android-ndk.yml
+  - bash: |
+      set -e
+      "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34"
+    displayName: Install Android SDK platform 34
+
   - template: steps/utils/apply-genai-version.yml
     parameters:
       os: linux
