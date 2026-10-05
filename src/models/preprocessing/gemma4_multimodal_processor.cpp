@@ -10,6 +10,8 @@ namespace Generators {
 
 namespace {
 
+constexpr int64_t kGemma4PoolingKernelSize = 3;
+
 // Simple literal string count (no regex overhead for fixed tokens)
 size_t CountOccurrences(const std::string& text, const std::string& token) {
   size_t count = 0;
@@ -188,9 +190,29 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
 
 Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
+  const auto pixel_values_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_values);
+  if (pixel_values_shape.size() == 3 && pixel_values_shape[1] > 0) {
+    vision_fixed_num_patches_ = pixel_values_shape[1];
+  } else if (pixel_values_shape.size() == 2 && pixel_values_shape[0] > 0) {
+    vision_fixed_num_patches_ = pixel_values_shape[0];
+  }
+  if (vision_fixed_num_patches_ > 0 &&
+      vision_fixed_num_patches_ % (kGemma4PoolingKernelSize * kGemma4PoolingKernelSize) != 0) {
+    throw std::runtime_error("Gemma4 vision model's fixed num_patches dimension must be divisible by 9");
+  }
+
   // Query pixel_position_ids type (int32 or int64) if the vision model has this input
   if (session_info.HasInput(config.model.vision.inputs.pixel_position_ids)) {
     pixel_position_ids_type_ = session_info.GetInputDataType(config.model.vision.inputs.pixel_position_ids);
+    const auto position_ids_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_position_ids);
+    const int64_t position_ids_num_patches =
+        position_ids_shape.size() == 3   ? position_ids_shape[1]
+        : position_ids_shape.size() == 2 ? position_ids_shape[0]
+                                         : -1;
+    if (vision_fixed_num_patches_ > 0 && position_ids_num_patches > 0 &&
+        position_ids_num_patches != vision_fixed_num_patches_) {
+      throw std::runtime_error("Gemma4 vision model's pixel_values and pixel_position_ids inputs must have the same num_patches dimension");
+    }
   }
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
@@ -345,10 +367,17 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
   if (payload.images) {
     // The Gemma4ImageTransform pads pixel_values and position_ids to max_patches.
-    // The vision ONNX model expects the actual (unpadded) number of patches.
-    // Trim the tensors to actual_patches = actual_soft_tokens * pooling_kernel_size².
-    constexpr int64_t kPoolingKernelSize = 3;
-    const int64_t actual_patches = static_cast<int64_t>(max_soft_tokens) * kPoolingKernelSize * kPoolingKernelSize;
+    // Dynamic models receive the largest image's valid patch count. Fixed-shape
+    // models receive their declared patch capacity, with any extra rows padded.
+    const int64_t actual_patches =
+        static_cast<int64_t>(max_soft_tokens) * kGemma4PoolingKernelSize * kGemma4PoolingKernelSize;
+    if (vision_fixed_num_patches_ > 0 && vision_fixed_num_patches_ < actual_patches) {
+      throw std::runtime_error("Gemma4 vision model accepts " + std::to_string(vision_fixed_num_patches_) +
+                               " patches, but preprocessing produced " + std::to_string(actual_patches) +
+                               " valid patches");
+    }
+    const int64_t target_patches =
+        vision_fixed_num_patches_ > 0 ? vision_fixed_num_patches_ : actual_patches;
 
     // Get padded pixel_values shape
     const float* pv_data{};
@@ -358,37 +387,39 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
     // Determine the patches dimension and patch_dim based on tensor rank
     // 2D: (num_patches, patch_dim) or 3D: (batch, num_patches, patch_dim)
+    if (pv_dims != 2 && pv_dims != 3) {
+      throw std::runtime_error("pixel_values has unexpected rank " + std::to_string(pv_dims) +
+                               ". Expected 2 (num_patches, patch_dim) or 3 (batch, num_patches, patch_dim).");
+    }
     const int64_t num_padded_patches = (pv_dims == 3) ? pv_shape[1] : pv_shape[0];
     const int64_t patch_dim = (pv_dims == 3) ? pv_shape[2] : pv_shape[1];
 
-    if (actual_patches < num_padded_patches) {
-      // Trim: copy only the first actual_patches from the padded tensor.
-      // The preprocessor outputs float32 data, so we trim using float32 strides,
-      // then cast to the model's pixel_values type (float, fp16, or bf16).
+    if (target_patches != num_padded_patches) {
       const int64_t batch = (pv_dims == 3) ? pv_shape[0] : 1;
-      auto trimmed_shape = (pv_dims == 3) ? std::vector<int64_t>{batch, actual_patches, patch_dim}
-                                          : std::vector<int64_t>{actual_patches, patch_dim};
+      auto processed_shape = (pv_dims == 3) ? std::vector<int64_t>{batch, target_patches, patch_dim}
+                                            : std::vector<int64_t>{target_patches, patch_dim};
 
-      // Trim in float32 (source is always float32 from the preprocessor)
-      auto trimmed_fp32 = OrtValue::CreateTensor<float>(allocator, trimmed_shape);
-      float* dst = trimmed_fp32->GetTensorMutableData<float>();
+      auto processed_fp32 = OrtValue::CreateTensor<float>(allocator, processed_shape);
+      float* dst = processed_fp32->GetTensorMutableData<float>();
+      std::fill_n(dst, batch * target_patches * patch_dim, 0.0f);
       const float* src = pv_data;
       const size_t src_row = static_cast<size_t>(num_padded_patches * patch_dim);
-      const size_t dst_row = static_cast<size_t>(actual_patches * patch_dim);
+      const size_t dst_row = static_cast<size_t>(target_patches * patch_dim);
+      const size_t copy_row = static_cast<size_t>(std::min(num_padded_patches, target_patches) * patch_dim);
       for (int64_t b = 0; b < batch; ++b) {
-        std::memcpy(dst + b * dst_row, src + b * src_row, dst_row * sizeof(float));
+        std::memcpy(dst + b * dst_row, src + b * src_row, copy_row * sizeof(float));
       }
 
       // Cast to model's pixel_values type if needed (e.g. float32 -> float16)
       if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
         named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                               std::make_shared<Tensor>(std::move(trimmed_fp32)));
+                               std::make_shared<Tensor>(std::move(processed_fp32)));
       } else {
-        auto trimmed_target = OrtValue::CreateTensor(allocator, trimmed_shape, pixel_values_type_);
+        auto processed_target = OrtValue::CreateTensor(allocator, processed_shape, pixel_values_type_);
         auto p_device = GetDeviceInterface(DeviceType::CPU);
-        Cast(*trimmed_fp32, trimmed_target, *p_device, pixel_values_type_);
+        Cast(*processed_fp32, processed_target, *p_device, pixel_values_type_);
         named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                               std::make_shared<Tensor>(std::move(trimmed_target)));
+                               std::make_shared<Tensor>(std::move(processed_target)));
       }
     } else {
       EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
@@ -396,34 +427,49 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
 
-    // Trim pixel_position_ids similarly
+    // Resize pixel_position_ids to the same patch count.
     if (pixel_position_ids) {
-      const void* pos_data_raw{};
+      const int64_t* pos_data{};
       const int64_t* pos_shape{};
       size_t pos_dims;
-      CheckResult(OrtxGetTensorData(pixel_position_ids, &pos_data_raw, &pos_shape, &pos_dims));
+      CheckResult(OrtxGetTensorData(pixel_position_ids, reinterpret_cast<const void**>(&pos_data), &pos_shape, &pos_dims));
 
+      if (pos_dims != 2 && pos_dims != 3) {
+        throw std::runtime_error("pixel_position_ids has unexpected rank " + std::to_string(pos_dims) +
+                                 ". Expected 2 (num_patches, 2) or 3 (batch, num_patches, 2).");
+      }
       const int64_t num_padded_pos = (pos_dims == 3) ? pos_shape[1] : pos_shape[0];
       const int64_t pos_last_dim = (pos_dims == 3) ? pos_shape[2] : pos_shape[1];
 
-      if (actual_patches < num_padded_pos) {
-        // Trim position_ids: for 3D, copy per-batch with correct stride.
-        // Detect the element type from the vision model's input to handle both int32 and int64.
+      if (target_patches != num_padded_pos) {
         const int64_t pos_batch = (pos_dims == 3) ? pos_shape[0] : 1;
-        auto trimmed_pos_shape = (pos_dims == 3) ? std::vector<int64_t>{pos_batch, actual_patches, pos_last_dim}
-                                                 : std::vector<int64_t>{actual_patches, pos_last_dim};
+        auto processed_pos_shape = (pos_dims == 3)
+                                       ? std::vector<int64_t>{pos_batch, target_patches, pos_last_dim}
+                                       : std::vector<int64_t>{target_patches, pos_last_dim};
 
-        auto trimmed_pos = OrtValue::CreateTensor(allocator, trimmed_pos_shape, pixel_position_ids_type_);
-        const size_t pos_elem_size = (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) ? 4 : 8;
-        auto* dst = static_cast<uint8_t*>(trimmed_pos->GetTensorMutableRawData());
-        const auto* src = static_cast<const uint8_t*>(pos_data_raw);
-        const size_t src_stride = static_cast<size_t>(num_padded_pos * pos_last_dim) * pos_elem_size;
-        const size_t dst_stride = static_cast<size_t>(actual_patches * pos_last_dim) * pos_elem_size;
-        for (int64_t b = 0; b < pos_batch; ++b) {
-          std::memcpy(dst + b * dst_stride, src + b * src_stride, dst_stride);
+        auto create_position_ids = [&](auto value_type) {
+          using T = decltype(value_type);
+          auto processed_pos = OrtValue::CreateTensor<T>(allocator, processed_pos_shape);
+          auto* dst = processed_pos->template GetTensorMutableData<T>();
+          std::fill_n(dst, pos_batch * target_patches * pos_last_dim, static_cast<T>(-1));
+          const size_t src_stride = static_cast<size_t>(num_padded_pos * pos_last_dim);
+          const size_t dst_stride = static_cast<size_t>(target_patches * pos_last_dim);
+          const size_t copy_count =
+              static_cast<size_t>(std::min(num_padded_pos, target_patches) * pos_last_dim);
+          for (int64_t b = 0; b < pos_batch; ++b) {
+            std::transform(pos_data + b * src_stride, pos_data + b * src_stride + copy_count,
+                           dst + b * dst_stride, [](int64_t value) { return static_cast<T>(value); });
+          }
+          return processed_pos;
+        };
+
+        if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+          named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
+                                 std::make_shared<Tensor>(create_position_ids(int32_t{})));
+        } else {
+          named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
+                                 std::make_shared<Tensor>(create_position_ids(int64_t{})));
         }
-        named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
-                               std::make_shared<Tensor>(std::move(trimmed_pos)));
       } else {
         if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
           named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
