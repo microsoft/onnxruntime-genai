@@ -396,9 +396,9 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   }
   // SimpleDecoder allocates its persistent capture buffers only after the cache has chosen its
   // block count, so the automatic free-memory probe has to know about them or the paged pool claims
-  // the memory they still need. Sizing uses the engine-wide draft ceiling, which is at least what
-  // each decoder will ask for. An explicit num_blocks is the caller pinning the pool, so it is left
-  // alone.
+  // the memory they still need. The shared planner includes an auxiliary decoder's committed-refeed
+  // capacity; the target keeps its conservative engine-wide draft reservation. An explicit
+  // num_blocks is the caller pinning the pool, so it is left alone.
   size_t graph_buffer_reserved_bytes = 0;
   if (model->config_->engine.dynamic_batching &&
       !model->config_->engine.dynamic_batching->num_blocks.has_value()) {
@@ -409,7 +409,13 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       return VarlenGraphBufferBytes(*decoder, PackedPositionIdPlanes(*decoder),
                                     kMaxDraftTokensPerStep + 1);
     };
-    graph_buffer_reserved_bytes = reserve_for(model) + reserve_for(mtp_model);
+    graph_buffer_reserved_bytes = reserve_for(model);
+    const size_t mtp_graph_buffer_bytes = reserve_for(mtp_model);
+    if (mtp_graph_buffer_bytes >
+        std::numeric_limits<size_t>::max() - graph_buffer_reserved_bytes) {
+      throw std::runtime_error("Engine CUDA graph buffer bytes overflow size_t.");
+    }
+    graph_buffer_reserved_bytes += mtp_graph_buffer_bytes;
   }
   if (graph_buffer_reserved_bytes >
       std::numeric_limits<size_t>::max() - dflash2_reserved_memory_bytes) {

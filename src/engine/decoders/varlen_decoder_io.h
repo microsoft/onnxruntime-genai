@@ -92,8 +92,8 @@ std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t 
 struct VarlenGraphBuffers {
   // `position_planes` is 0 when the model takes no packed position_ids, 1 for [num_tokens], and 3
   // for the [3, num_tokens] multimodal-rope layout. `max_query_tokens` is the largest number of
-  // tokens one request may contribute to a step, which the engine caps at one plus the draft width
-  // its cache can roll back.
+  // tokens one request may contribute to a step. The shared planner also applies the runtime-only
+  // auxiliary query capacity, which covers committed refeed independently of cache rollback.
   VarlenGraphBuffers(DecoderOnly_Model& model, size_t position_planes, size_t max_query_tokens);
 
   // Annotation id for a decode step of this shape, or -1 when it cannot be captured.

@@ -3,6 +3,7 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #include "generator/generators.h"
+#include "engine/step_plan.h"
 #include "models/model_state_manifest.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
@@ -186,6 +187,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   // A chained draft feeds every stage the previous stage's hidden states, so the head must emit its
   // own hidden states. Record that before clearing the MTP section the demand was inferred from.
   projected->engine.hidden_states_output_required = true;
+  projected->engine.max_graph_query_tokens_per_request = kMaxDraftTokensPerStep + 1;
   projected->model.embedding = {};
   projected->model.engram = {};
   projected->model.mtp = {};

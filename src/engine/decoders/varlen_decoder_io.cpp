@@ -339,11 +339,17 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
   GraphBufferPlan plan;
   plan.max_batch_size = model.config_->engine.dynamic_batching->max_batch_size;
   const bool logits_are_per_token = DecoderLogitsArePerToken(model);
+  const size_t graph_query_capacity =
+      std::max(max_query_tokens_per_request,
+               model.config_->engine.max_graph_query_tokens_per_request);
+  if (graph_query_capacity > kMaxDraftTokensPerStep + 1) {
+    throw std::runtime_error("CUDA graph query capacity exceeds the Engine query ceiling.");
+  }
   // A speculative step submits the drafted tokens plus the token the target always advances, so the
   // packed row count is a multiple of the batch rather than equal to it. A model whose logits carry
   // one row per request cannot verify drafts at all, so its steps are always one token wide.
   plan.max_query_tokens =
-      logits_are_per_token ? std::max<size_t>(max_query_tokens_per_request, 1) : 1;
+      logits_are_per_token ? std::max<size_t>(graph_query_capacity, 1) : 1;
   plan.max_token_rows = plan.max_batch_size * plan.max_query_tokens;
   const size_t scheduled_token_cap = model.config_->engine.dynamic_batching->max_scheduled_tokens;
   if (scheduled_token_cap != 0) {

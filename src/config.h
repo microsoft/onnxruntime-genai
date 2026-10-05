@@ -853,6 +853,9 @@ struct Config {
     bool hidden_states_output_required{};
     // Runtime-only counterpart for the auxiliary hidden states consumed by DFlash 2.
     bool aux_hidden_states_output_required{};
+    // Runtime-only graph capacity for committed auxiliary refeed, independent of cache rollback.
+    // Zero keeps cache-derived sizing; a projected MTP head covers the Engine-wide query ceiling.
+    size_t max_graph_query_tokens_per_request{};
   } engine;  // Engine settings
 
   struct RuntimeProfile {

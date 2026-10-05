@@ -327,6 +327,93 @@ TEST(VarlenDecoderIOTest, GraphBuffersRejectStepsWiderThanTheyWereSizedFor) {
   EXPECT_FALSE(buffers.Fits(1, kMaxDraftTokensPerStep + 2));
 }
 
+TEST(VarlenDecoderIOTest, MtpHeadGraphBuffersCoverCommittedRefeed) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  ASSERT_TRUE(model);
+  const size_t planes = PackedPositionIdPlanes(*model);
+  VarlenGraphBuffers target_buffers{*model, planes, 1};
+  EXPECT_EQ(model->config_->engine.max_graph_query_tokens_per_request, 0u);
+  EXPECT_EQ(target_buffers.max_query_tokens, 1u);
+  EXPECT_FALSE(target_buffers.Fits(1, 2));
+
+  model->config_->speculative.max_draft_tokens = 1;
+  model->config_->model.mtp.filename = "decoder.onnx";
+  model->config_->model.mtp.num_key_value_heads = 1;
+  model->config_->model.mtp.head_size = 1;
+  const auto projected = CreateMtpDecoderConfig(*model->config_);
+  model->config_->engine = projected->engine;
+  VarlenGraphBuffers head_buffers{*model, planes, 1};
+
+  EXPECT_EQ(head_buffers.max_query_tokens, kMaxDraftTokensPerStep + 1);
+  EXPECT_TRUE(head_buffers.Fits(1, 1));
+  EXPECT_TRUE(head_buffers.Fits(1, 2));
+  EXPECT_TRUE(head_buffers.Fits(1, kMaxDraftTokensPerStep + 1));
+  EXPECT_FALSE(head_buffers.Fits(1, kMaxDraftTokensPerStep + 2));
+  EXPECT_FALSE(head_buffers.Fits(head_buffers.max_batch_size + 1, 1));
+  EXPECT_EQ(target_buffers.max_query_tokens, 1u);
+
+  size_t allocated_bytes = 0;
+  for (Tensor* buffer : {
+           head_buffers.input_ids.get(), head_buffers.embeddings.get(),
+           head_buffers.engram_embeddings.get(), head_buffers.cumulative_sequence_lengths.get(),
+           head_buffers.past_sequence_lengths.get(), head_buffers.position_ids.get(),
+           head_buffers.logits_indices.get(), head_buffers.logits.get(),
+           head_buffers.hidden_states_input.get(), head_buffers.hidden_states.get(),
+           head_buffers.aux_hidden_states.get()}) {
+    if (buffer) {
+      allocated_bytes += buffer->GetByteSpan().size();
+    }
+  }
+  EXPECT_EQ(VarlenGraphBufferBytes(*model, planes, 1), allocated_bytes);
+  EXPECT_EQ(VarlenGraphBufferBytes(*model, planes, kMaxDraftTokensPerStep + 1), allocated_bytes);
+
+  const auto* input_address = head_buffers.input_ids->GetByteSpan().Span().data();
+  const auto* logits_address = head_buffers.logits->GetByteSpan().Span().data();
+  std::vector<int> graph_ids;
+  for (const size_t width : std::array<size_t, 3>{1, 2, 4}) {
+    for (const size_t binding : std::array<size_t, 2>{0, 2}) {
+      const int annotation_id = head_buffers.GraphId(1, width, 8, binding);
+      EXPECT_TRUE(head_buffers.Fits(1, width));
+      EXPECT_GT(annotation_id, 0);
+      EXPECT_EQ(std::find(graph_ids.begin(), graph_ids.end(), annotation_id), graph_ids.end());
+      EXPECT_EQ(head_buffers.GraphId(1, width, 8, binding), annotation_id);
+      EXPECT_EQ(head_buffers.input_ids->GetByteSpan().Span().data(), input_address);
+      EXPECT_EQ(head_buffers.logits->GetByteSpan().Span().data(), logits_address);
+      graph_ids.push_back(annotation_id);
+    }
+  }
+  EXPECT_EQ(head_buffers.graph_ids.size(), 6u);
+}
+
+TEST(VarlenDecoderIOTest, MtpHeadGraphCapacityDoesNotEnableCacheRollback) {
+  auto model = LoadSyntheticCompositeModel();
+  ASSERT_TRUE(model->config_->model.decoder.state_groups.has_value());
+  for (auto& group : *model->config_->model.decoder.state_groups) {
+    if (group.state_update) {
+      group.state_update->enabled = false;
+    }
+  }
+  auto original_cache = CacheManager::Create(model);
+  ASSERT_EQ(original_cache->MaxDraftTokensPerStep(), 0u);
+
+  model->config_->engine.max_graph_query_tokens_per_request = kMaxDraftTokensPerStep + 1;
+  auto head_cache = CacheManager::Create(model);
+  EXPECT_TRUE(head_cache->SupportsDynamicBatching());
+  EXPECT_EQ(head_cache->MaxDraftTokensPerStep(), 0u);
+  EXPECT_EQ(model->config_->engine.max_graph_query_tokens_per_request, kMaxDraftTokensPerStep + 1);
+}
+
+TEST(VarlenDecoderIOTest, GraphQueryCapacityRejectsWidthsBeyondTheEngineLimit) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  ASSERT_TRUE(model);
+  const size_t planes = PackedPositionIdPlanes(*model);
+
+  EXPECT_THROW(VarlenGraphBufferBytes(*model, planes, kMaxDraftTokensPerStep + 2), std::runtime_error);
+  model->config_->engine.max_graph_query_tokens_per_request = kMaxDraftTokensPerStep + 2;
+  EXPECT_THROW(VarlenGraphBufferBytes(*model, planes, 1), std::runtime_error);
+  EXPECT_THROW((VarlenGraphBuffers{*model, planes, 1}), std::runtime_error);
+}
+
 TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {
   GraphAnnotationIds ids;
   const auto id = [&](size_t batch, size_t tokens, size_t columns, size_t binding) {

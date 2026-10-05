@@ -40,9 +40,9 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
   }
   if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
       cache_manager_->SupportsDynamicBatching()) {
-    // The scheduler clamps every request's draft width to what the cache can roll back, and a
-    // verify step runs one token plus those drafts. A per-request speculative option can raise the
-    // width above the config default, so the cache's ceiling is what the buffers have to cover.
+    // Target queries cover the cache's rollback ceiling, not the speculative config default.
+    // The shared planner also covers a projected MTP head's committed refeed without enabling
+    // speculative rollback in that head's cache.
     graph_buffers_ = std::make_unique<VarlenGraphBuffers>(
         *model_, position_planes_, cache_manager_->MaxDraftTokensPerStep() + 1);
   }

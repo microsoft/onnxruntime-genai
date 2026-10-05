@@ -191,6 +191,8 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   // The projection clears model.mtp, so the head's own demand for hidden states must be recorded
   // explicitly. Without it a chained draft cannot feed the next stage.
   EXPECT_TRUE(projected->engine.hidden_states_output_required);
+  EXPECT_EQ(config.engine.max_graph_query_tokens_per_request, 0u);
+  EXPECT_EQ(projected->engine.max_graph_query_tokens_per_request, kMaxDraftTokensPerStep + 1);
   ASSERT_EQ(head.layer_types.size(), 1u);
   EXPECT_EQ(head.layer_types[0], "full_attention");
   EXPECT_THROW(CreateMtpDecoderConfig(*projected), std::runtime_error);
@@ -239,6 +241,8 @@ TEST(MtpDecoderConfigTest, ProjectsOneLayerFixedIndexerStateForTheHead) {
   EXPECT_FALSE(indexer.state_update->enabled);
   EXPECT_EQ(indexer.state_update->compress_ratio, 4);
   EXPECT_EQ(head.state_update_capacity, 7);
+  EXPECT_EQ(projected->engine.max_graph_query_tokens_per_request, kMaxDraftTokensPerStep + 1);
+  EXPECT_EQ(config.engine.max_graph_query_tokens_per_request, 0u);
   EXPECT_EQ(head.inputs.past_indexer_kv_buffer_names,
             "past.%d.indexer_kv_buffer");
   EXPECT_EQ(head.outputs.state_update_indexer_names,
