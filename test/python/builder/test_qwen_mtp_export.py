@@ -156,9 +156,21 @@ def test_add_mtp_to_static_genai_config(tmp_path):
     assert config["model"]["mtp"]["filename"] == "mtp.onnx"
 
 
-def test_add_qwen4_exp_mtp_to_genai_config(tmp_path):
+@pytest.mark.parametrize("fpa_intb_gemm", [None, "0", "1"])
+def test_add_qwen4_exp_mtp_to_genai_config(tmp_path, fpa_intb_gemm):
     config_path = tmp_path / "genai_config.json"
-    config_path.write_text(json.dumps({"model": {"decoder": {}}}))
+    expected_session_options = {"session.use_device_allocator_for_initializers": "1"}
+    if fpa_intb_gemm is not None:
+        expected_session_options["ep.cuda.fpa_intb_gemm"] = fpa_intb_gemm
+    decoder_session_options = {
+        **expected_session_options,
+        "log_id": "onnxruntime-genai",
+        "provider_options": [{"cuda": {"enable_cuda_graph": "0"}}],
+        "session.layer_assignment_settings": "cpu(=cpu_embedding)",
+        "session.disable_prepacking": "1",
+        "ep.cuda.qmoe_row_tile_size": "1",
+    }
+    config_path.write_text(json.dumps({"model": {"decoder": {"session_options": decoder_session_options}}}))
     model = object.__new__(Qwen4ExpModel)
     model.decoder = type(
         "Decoder",
@@ -174,6 +186,8 @@ def test_add_qwen4_exp_mtp_to_genai_config(tmp_path):
     assert config["model"]["mtp"]["inputs"]["past_indexer_names"] == "past.%d.indexer_key"
     assert config["model"]["mtp"]["inputs"]["past_sequence_length"] == "past_sequence_length"
     assert config["model"]["mtp"]["outputs"]["present_indexer_names"] == "present.%d.indexer_key"
+    assert config["model"]["mtp"]["session_options"] == expected_session_options
+    assert config["model"]["decoder"]["session_options"] == decoder_session_options
 
 
 @pytest.mark.parametrize("qwen38", [False, True])

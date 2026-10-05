@@ -5496,6 +5496,8 @@ class Model:
                     f"{self.moe_attrs['quant_type']}."
                 )
             self.moe_attrs["block_size"] = experts.block_size
+            if native_quant_type == "nvfp4":
+                self.moe_attrs["weights_prepacked"] = -1
             if experts.weights_prepacked is not None:
                 self.moe_attrs["weights_prepacked"] = experts.weights_prepacked
             self.make_initializer(experts.gate_up_qweight, gate_up_name)
@@ -5705,19 +5707,8 @@ class Model:
         if is_fp4 or quant_type == "fp8":
             # Select the MXFP4/NVFP4 kernel path; integer QMoE leaves quant_type at its default.
             extra_kwargs["quant_type"] = quant_type
-
-        # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout
-        # (see make_qmoe_weights, which produces the matching bytes):
-        #   -1       -> omit the attribute; the op treats weights as already
-        #               CUTLASS-prepacked, which is what the builder ships for CUDA.
-        #   1        -> weights are CUTLASS-prepacked (explicit form of the above).
-        #   0        -> weights are raw [E, N, K/pack]; the runtime PrePack hook
-        #               transforms them at load time.
-        # It is only meaningful for integer (INT4/INT8) CUDA QMoE and requires an ONNX Runtime build with
-        # the com.microsoft QMoE PrePack hook, so non-CUDA exports omit it and keep their own blockwise
-        # QMoE layout. Build separate ONNX files when CPU/WebGPU/TRT-RTX and CUDA QMoE exports are needed.
-        weights_prepacked = self.moe_attrs.get("weights_prepacked")
-        if weights_prepacked != -1 and self.ep == "cuda" and not is_fp4:
+        weights_prepacked = self.moe_attrs.get("weights_prepacked", -1)
+        if weights_prepacked != -1 and self.ep == "cuda" and (not is_fp4 or quant_type == "nvfp4"):
             extra_kwargs["weights_prepacked"] = weights_prepacked
 
         self.make_node(

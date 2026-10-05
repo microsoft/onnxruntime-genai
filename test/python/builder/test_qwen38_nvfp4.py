@@ -9,6 +9,7 @@ from safetensors.torch import save_file
 from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpVisionConfig
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpVisionModel
 
+from models.builders.base import Model
 from models.builders.qwen3_8 import Qwen4ExpModel, Qwen4ExpMTPTextModel
 from models.loaders.quant_model import QuantModel
 from models.loaders.qwen import Qwen4ExpMTPModel
@@ -135,12 +136,75 @@ def test_nvfp4_dispatch_and_qwen38_surface(checkpoint):
     assert isinstance(model, Qwen38ModeloptModel)
     assert model.modules() == [model.embedding, *model.layers, model.lm_head]
     assert model.layers[0].mlp.experts.quant_type == "nvfp4"
+    assert model.layers[0].mlp.experts.weights_prepacked == 1
     assert model.layers[0].mlp.experts.gate_up_qweight.shape == (2, 16, 16)
     assert model.layers[0].mlp.experts.gate_up_global_scales.tolist() == [0.5, 0.5]
     assert model.layers[0].attn_hyper_connection.input_mix_weight_down.out_features == 16
     assert model.layers[1].self_attn.indexer.index_qk_proj.weight.dtype == torch.bfloat16
     assert model.model.language_model.layers is model.layers
     assert model.handles == {}
+
+
+@pytest.mark.parametrize("weights_prepacked", [None, -1, 0, 1])
+def test_nvfp4_experts_keep_row_major_checkpoint_bytes(weights_prepacked):
+    loader = object.__new__(Qwen38ModeloptModel)
+    experts = []
+    for expert_id in range(2):
+        projections = {}
+        for projection_id, name in enumerate(("gate_proj", "up_proj", "down_proj")):
+            projections[name] = SimpleNamespace(
+                weight=(torch.arange(128).reshape(16, 8) + expert_id * 53 + projection_id * 37).to(torch.uint8),
+                weight_scale=torch.arange(1, 17).reshape(16, 1).to(torch.float8_e4m3fn),
+                weight_scale_2=torch.tensor(0.5 + expert_id),
+            )
+        experts.append(SimpleNamespace(**projections))
+
+    prepared = loader.prepare_qmoe_experts(experts)
+    assert prepared.weights_prepacked == 1
+    assert prepared.gate_up_qweight.dtype == prepared.down_qweight.dtype == torch.uint8
+    for expert_id, expert in enumerate(experts):
+        fused_weight = prepared.gate_up_qweight[expert_id].reshape(32, 8)
+        assert torch.equal(fused_weight[0::2], expert.gate_proj.weight)
+        assert torch.equal(fused_weight[1::2], expert.up_proj.weight)
+        assert torch.equal(prepared.down_qweight[expert_id].reshape(16, 8), expert.down_proj.weight)
+        fused_scales = prepared.gate_up_scales[expert_id].reshape(32, 1)
+        assert torch.equal(fused_scales[0::2], expert.gate_proj.weight_scale.view(torch.uint8))
+        assert torch.equal(fused_scales[1::2], expert.up_proj.weight_scale.view(torch.uint8))
+        assert torch.equal(prepared.down_scales[expert_id], expert.down_proj.weight_scale.view(torch.uint8))
+    assert prepared.gate_up_global_scales.tolist() == prepared.down_global_scales.tolist() == [0.5, 1.5]
+
+    builder = object.__new__(Model)
+    builder.ep = "cuda"
+    builder.io_dtype = ir.DataType.FLOAT16
+    builder.moe_attrs = {
+        "op_type": "QMoE", "quant_type": "nvfp4", "num_experts": 2,
+        "weights_prepacked": 1,
+        "expert_weight_bits": 4, "top_k": 1, "normalize_routing_weights": True,
+        "activation_type": "swiglu", "activation_alpha": 1.702, "activation_beta": 1.0,
+        "swiglu_fusion": 1, "swiglu_limit": 7.0, "use_sparse_mixer": False,
+    }
+    initializers = {}
+    builder.make_initializer = lambda tensor, name, **kwargs: initializers.setdefault(name, tensor)
+    prepared.weights_prepacked = weights_prepacked
+    builder.make_moe_expert_initializers(0, prepared)
+    names = builder.make_moe_expert_names(0)
+    assert torch.equal(initializers[names["gate_up_weight"]], prepared.gate_up_qweight)
+    assert torch.equal(initializers[names["down_weight"]], prepared.down_qweight)
+    recorded = {}
+    builder.make_node = lambda op_type, **kwargs: recorded.update(op_type=op_type, **kwargs)
+    builder.make_value = lambda *args, **kwargs: None
+    builder.make_hidden_state_shape = lambda: ["batch", "sequence", 16]
+    builder.make_moe_op(
+        "/model/layers.0/moe/QMoE", root_input="hidden", router_probs="router",
+        weight1=names["gate_up_weight"], scales1=names["gate_up_scales"],
+        weight2=names["down_weight"], scales2=names["down_scales"],
+    )
+    if weights_prepacked in (None, -1):
+        assert "weights_prepacked" not in recorded
+    else:
+        assert recorded["weights_prepacked"] == weights_prepacked
+    assert "nvfp4_weight_layout" not in recorded
+    assert recorded["quant_type"] == "nvfp4" and recorded["block_size"] == 16
 
 
 def test_ple_shards_preserve_fp8_scale_and_order(checkpoint):

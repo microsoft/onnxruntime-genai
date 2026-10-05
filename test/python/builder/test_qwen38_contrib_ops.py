@@ -1532,7 +1532,11 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
 @pytest.mark.parametrize("include_mtp", [False, True])
 @pytest.mark.parametrize("ple_layer_id", [1, 4])
 @pytest.mark.parametrize("ep", ["cpu", "cuda"])
-def test_text_only_config_connects_external_engram(tmp_path, include_mtp, ple_layer_id, ep):
+@pytest.mark.parametrize("moe_quant_type", [None, "int", "fp4", "nvfp4", "fp8"])
+@pytest.mark.parametrize("weights_prepacked", [None, -1, 0, 1])
+def test_text_only_config_connects_external_engram(
+    tmp_path, include_mtp, ple_layer_id, ep, moe_quant_type, weights_prepacked
+):
     def write_decoder_config(config, extra_kwargs, out_dir):
         (out_dir / "genai_config.json").write_text(json.dumps({
             "model": {"type": "qwen4_exp_text", "decoder": {"inputs": {}}},
@@ -1540,7 +1544,12 @@ def test_text_only_config_connects_external_engram(tmp_path, include_mtp, ple_la
 
     wrapper = object.__new__(Qwen4ExpModel)
     wrapper.text_only = True
-    wrapper.decoder = SimpleNamespace(make_genai_config=write_decoder_config, ep=ep)
+    wrapper.decoder = SimpleNamespace(
+        make_genai_config=write_decoder_config, ep=ep,
+        moe_attrs={"quant_type": moe_quant_type}
+    )
+    if weights_prepacked is not None:
+        wrapper.decoder.moe_attrs["weights_prepacked"] = weights_prepacked
     wrapper.mtp = object() if include_mtp else None
     mtp_calls = []
     wrapper.add_mtp_to_genai_config = lambda directory: mtp_calls.append(directory)
@@ -1550,6 +1559,9 @@ def test_text_only_config_connects_external_engram(tmp_path, include_mtp, ple_la
     config = json.loads((tmp_path / "genai_config.json").read_text())["model"]
     assert config["type"] == "qwen4_exp_text"
     assert config["decoder"]["inputs"]["engram_embeddings"] == "engram_embeddings"
+    assert config["decoder"].get("session_options", {}).get("session.disable_prepacking") == (
+        "1" if ep == "cuda" and moe_quant_type == "nvfp4" and weights_prepacked != 1 else None
+    )
     assert config["engram"]["filename"] == "engram.onnx"
     assert config["engram"]["inputs"] == {
         "input_ids": "input_ids", "past_ple_token_names": f"past.{ple_layer_id}.ple_tokens",
@@ -1561,6 +1573,7 @@ def test_text_only_config_connects_external_engram(tmp_path, include_mtp, ple_la
     assert config["engram"]["session_options"].get("session.layer_assignment_settings") == (
         "cpu(=cpu_embedding)" if ep == "cuda" else None
     )
+    assert "intra_op_num_threads" not in config["engram"]["session_options"]
     assert "embedding" not in config and "vision" not in config
     assert mtp_calls == ([tmp_path] if include_mtp else [])
 

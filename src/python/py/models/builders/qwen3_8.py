@@ -2312,6 +2312,12 @@ class Qwen4ExpModel(MTPModel):
             genai_config = json.load(config_file)
 
         model_config = genai_config["model"]
+        if (
+            self.decoder.ep == "cuda"
+            and self.decoder.moe_attrs.get("quant_type") == "nvfp4"
+            and self.decoder.moe_attrs.get("weights_prepacked", -1) != 1
+        ):
+            model_config["decoder"].setdefault("session_options", {})["session.disable_prepacking"] = "1"
         decoder_inputs = model_config["decoder"]["inputs"]
         decoder_inputs["engram_embeddings"] = "engram_embeddings"
         if not self.text_only:
@@ -2333,7 +2339,6 @@ class Qwen4ExpModel(MTPModel):
             }
         ple_layer_id = config.text_config.ple_layer_ids[0] - 1
         engram_session_options = {
-            "intra_op_num_threads": 8,
             "provider_options": [{"cuda" if self.decoder.ep == "cuda" else "cpu": {}}],
         }
         if self.decoder.ep == "cuda":
@@ -2387,6 +2392,11 @@ class Qwen4ExpModel(MTPModel):
                 "present_key_names": "present.%d.key",
                 "present_value_names": "present.%d.value",
                 "present_indexer_names": "present.%d.indexer_key",
+            },
+            "session_options": {
+                name: value
+                for name, value in genai_config["model"]["decoder"].get("session_options", {}).items()
+                if name in ("ep.cuda.fpa_intb_gemm", "session.use_device_allocator_for_initializers")
             },
         }
         self.add_shared_initializers_to_genai_config(genai_config)

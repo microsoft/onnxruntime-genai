@@ -196,34 +196,23 @@ class ModeloptModel(QuantizedModel):
         return module
 
     def prepare_qmoe_experts(self, experts):
-        def unpack(weight):
-            low = weight & 0x0F
-            high = weight >> 4
-            return torch.stack((low, high), dim=-1).reshape(weight.shape[0], -1)
-
-        def pack(codes):
-            if codes.shape[0] % 2 != 0:
-                raise ValueError(f"NVFP4 QMoE packing requires an even N={codes.shape[0]} for nibble packing.")
-            codes = codes.T.contiguous()
-            return ((codes[:, 1::2] << 4) | (codes[:, 0::2] & 0x0F)).contiguous()
-
         def scale_bytes(projection):
             return projection.weight_scale.view(torch.uint8).contiguous()
 
         gate_up_weights, gate_up_scales, gate_up_globals = [], [], []
         down_weights, down_scales, down_globals = [], [], []
         for expert_id, expert in enumerate(experts):
-            gate_codes = unpack(expert.gate_proj.weight)
-            up_codes = unpack(expert.up_proj.weight)
-            if gate_codes.shape != up_codes.shape:
+            gate_weight = expert.gate_proj.weight
+            up_weight = expert.up_proj.weight
+            if gate_weight.shape != up_weight.shape:
                 raise ValueError(
                     f"ModelOpt expert {expert_id} gate/up weights must have matching shapes, "
-                    f"got {tuple(gate_codes.shape)} and {tuple(up_codes.shape)}."
+                    f"got {tuple(gate_weight.shape)} and {tuple(up_weight.shape)}."
                 )
 
-            intermediate_size = gate_codes.shape[0]
-            fused_codes = torch.stack((gate_codes, up_codes), dim=1).reshape(2 * intermediate_size, -1)
-            gate_up_weights.append(pack(fused_codes))
+            intermediate_size = gate_weight.shape[0]
+            fused_weight = torch.stack((gate_weight, up_weight), dim=1).reshape(2 * intermediate_size, -1)
+            gate_up_weights.append(fused_weight.reshape(fused_weight.shape[1] * 2, intermediate_size))
             gate_up_scales.append(
                 torch.stack((scale_bytes(expert.gate_proj), scale_bytes(expert.up_proj)), dim=1).reshape(
                     2 * intermediate_size, -1
@@ -239,12 +228,16 @@ class ModeloptModel(QuantizedModel):
                 )
             gate_up_globals.append(gate_global)
 
-            down_weights.append(pack(unpack(expert.down_proj.weight)))
+            down_weight = expert.down_proj.weight
+            if down_weight.shape[0] % 2 != 0:
+                raise ValueError(f"NVFP4 QMoE packing requires an even N={down_weight.shape[0]} for nibble packing.")
+            down_weights.append(down_weight.reshape(down_weight.shape[1] * 2, down_weight.shape[0] // 2))
             down_scales.append(scale_bytes(expert.down_proj))
             down_globals.append(expert.down_proj.weight_scale_2.float().reshape(()))
 
         prepared = QuantizedExperts()
         prepared.quant_type = "nvfp4"
+        prepared.weights_prepacked = 1
         prepared.block_size = 16
         prepared.scale_dtype = ir.DataType.FLOAT8E4M3FN
         prepared.scales_raw = True
