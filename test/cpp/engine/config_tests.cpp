@@ -192,6 +192,102 @@ TEST(ConfigTest, IntegratedEligibilityRequiresBooleanAndDisjointRanges) {
   }
 }
 
+TEST(ConfigTest, FreeMemoryProfilesMatchInclusiveBoundsAndKeepLegacyCallersSafe) {
+  Config config;
+  OverlayConfig(config, R"({
+    "engine":{"dynamic_batching":{"num_blocks":32}},
+    "runtime_profiles":[
+      {"id":"less-free","eligibility":{"minimum_total_device_memory_bytes":100,
+        "minimum_free_device_memory_bytes":50,"maximum_free_device_memory_bytes":80},
+       "overlay":{"engine":{"dynamic_batching":{"num_blocks":40}}}},
+      {"id":"more-free","eligibility":{"minimum_total_device_memory_bytes":100,
+        "minimum_free_device_memory_bytes":81,"maximum_free_device_memory_bytes":100},
+       "overlay":{"engine":{"dynamic_batching":{"num_blocks":80}}}}
+    ]
+  })");
+
+  for (const auto [free_bytes, expected_blocks] : {
+           std::pair{49u, 32u}, std::pair{50u, 40u}, std::pair{80u, 40u},
+           std::pair{81u, 80u}, std::pair{100u, 80u}, std::pair{101u, 32u}}) {
+    auto candidate = config;
+    CountingCudaDevice device;
+    device.state->total_memory_bytes = 200;
+    device.state->free_memory_bytes = free_bytes;
+    ApplyRuntimeProfileForSelectedDevice(candidate, device);
+    EXPECT_EQ(*candidate.engine.dynamic_batching->num_blocks, expected_blocks) << free_bytes;
+    EXPECT_EQ(device.state->memory_queries, 1u);
+    EXPECT_EQ(device.state->integrated_queries, 0u);
+  }
+
+  auto legacy_caller = config;
+  ApplyRuntimeProfile(legacy_caller, 200);
+  EXPECT_EQ(*legacy_caller.engine.dynamic_batching->num_blocks, 32u);
+}
+
+TEST(ConfigTest, FreeMemoryEligibilityRespectsPhysicalMemoryDomain) {
+  Config config;
+  OverlayConfig(config, R"({
+    "runtime_profiles":[
+      {"id":"first","eligibility":{"minimum_total_device_memory_bytes":100,
+        "maximum_total_device_memory_bytes":150,"minimum_free_device_memory_bytes":140,
+        "maximum_free_device_memory_bytes":200},"overlay":{"search":{"chunk_size":1}}},
+      {"id":"second","eligibility":{"minimum_total_device_memory_bytes":100,
+        "maximum_total_device_memory_bytes":200,"minimum_free_device_memory_bytes":160,
+        "maximum_free_device_memory_bytes":200},"overlay":{"search":{"chunk_size":2}}}
+    ]
+  })");
+  auto second = config;
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{150, false, 140});
+  EXPECT_EQ(config.search.chunk_size, 1u);
+  ApplyRuntimeProfile(second, RuntimeProfileDeviceFacts{160, false, 160});
+  EXPECT_EQ(second.search.chunk_size, 2u);
+
+  for (const auto* other_free : {"80", "81"}) {
+    Config overlapping;
+    const auto json = std::string{R"({"runtime_profiles":[
+      {"id":"first","eligibility":{"minimum_total_device_memory_bytes":100,
+        "maximum_free_device_memory_bytes":80},"overlay":{"search":{"chunk_size":1}}},
+      {"id":"second","eligibility":{"minimum_total_device_memory_bytes":100,
+        "minimum_free_device_memory_bytes":)"} +
+                      other_free + R"(},"overlay":{"search":{"chunk_size":2}}}
+    ]})";
+    if (std::string_view{other_free} == "80") {
+      EXPECT_THROW(OverlayConfig(overlapping, json), std::runtime_error);
+    } else {
+      EXPECT_NO_THROW(OverlayConfig(overlapping, json));
+    }
+  }
+}
+
+TEST(ConfigTest, FreeMemoryEligibilityRejectsInvalidAndUnreachableRanges) {
+  for (const auto* field : {"minimum_free_device_memory_bytes", "maximum_free_device_memory_bytes"}) {
+    for (const auto* value : {"-1", "1.5", "true", "null", "\"100\"", "9007199254740992"}) {
+      Config config;
+      const auto json = std::string{R"({"runtime_profiles":[{
+        "id":"invalid","eligibility":{"minimum_total_device_memory_bytes":0,")"} +
+                        field + R"(":)" + value + R"(},"overlay":{"search":{"chunk_size":1}}}]})";
+      EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << field << ": " << value;
+    }
+  }
+
+  for (const auto* eligibility : {
+           R"("minimum_free_device_memory_bytes":81,"maximum_free_device_memory_bytes":80)",
+           R"("maximum_total_device_memory_bytes":100,"minimum_free_device_memory_bytes":101)"}) {
+    Config config;
+    const auto json = std::string{R"({"runtime_profiles":[{
+      "id":"invalid","eligibility":{"minimum_total_device_memory_bytes":0,)"} +
+                      eligibility + R"(},"overlay":{"search":{"chunk_size":1}}}]})";
+    EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << eligibility;
+  }
+
+  Config zero_free;
+  OverlayConfig(zero_free, R"({"runtime_profiles":[{
+    "id":"zero","eligibility":{"minimum_total_device_memory_bytes":100,
+      "maximum_free_device_memory_bytes":0},"overlay":{"search":{"chunk_size":1}}}]})");
+  ApplyRuntimeProfile(zero_free, RuntimeProfileDeviceFacts{100, false, 0});
+  EXPECT_EQ(zero_free.search.chunk_size, 1u);
+}
+
 TEST(ConfigTest, RuntimeProfilesRejectAmbiguousCudaDeviceBeforeMemoryQuery) {
   for (const auto& selection : {"provider", "filter", "current"}) {
     SCOPED_TRACE(selection);

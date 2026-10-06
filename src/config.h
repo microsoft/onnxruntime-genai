@@ -820,6 +820,8 @@ struct Config {
     struct Eligibility {
       std::optional<uint64_t> minimum_total_device_memory_bytes;
       std::optional<uint64_t> maximum_total_device_memory_bytes;
+      std::optional<uint64_t> minimum_free_device_memory_bytes;
+      std::optional<uint64_t> maximum_free_device_memory_bytes;
       std::optional<bool> is_integrated;
     } eligibility;
 
@@ -868,6 +870,7 @@ void OverlayConfig(Config& config, std::string_view json);
 struct RuntimeProfileDeviceFacts {
   uint64_t total_device_memory_bytes{};
   std::optional<bool> is_integrated;
+  std::optional<uint64_t> free_device_memory_bytes;
 };
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);

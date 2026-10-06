@@ -881,6 +881,108 @@ def test_runtime_profiles_reject_overlapping_device_conditions(first, second):
         apply_runtime_config(generated, {"runtime_profiles": profiles})
 
 
+def test_runtime_profiles_allow_disjoint_free_memory_ranges():
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": str(index),
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "minimum_free_device_memory_bytes": minimum,
+                "maximum_free_device_memory_bytes": maximum,
+            },
+            "overlay": {"search": {"chunk_size": index + 1}},
+        }
+        for index, (minimum, maximum) in enumerate([(0, 80), (81, 100)])
+    ]
+    assert apply_runtime_config(generated, {"runtime_profiles": profiles})["runtime_profiles"] == profiles
+
+
+def test_runtime_profiles_allow_only_physically_disjoint_overlapping_ranges():
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": "first",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "maximum_total_device_memory_bytes": 150,
+                "minimum_free_device_memory_bytes": 140,
+                "maximum_free_device_memory_bytes": 200,
+            },
+            "overlay": {"search": {"chunk_size": 1}},
+        },
+        {
+            "id": "second",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "maximum_total_device_memory_bytes": 200,
+                "minimum_free_device_memory_bytes": 160,
+                "maximum_free_device_memory_bytes": 200,
+            },
+            "overlay": {"search": {"chunk_size": 2}},
+        },
+    ]
+    assert apply_runtime_config(generated, {"runtime_profiles": profiles})["runtime_profiles"] == profiles
+
+
+@pytest.mark.parametrize("first_free,second_free", [(None, 0), (None, 1), (80, 80)])
+def test_runtime_profiles_reject_overlapping_free_memory_conditions(first_free, second_free):
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": "first",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                **({"maximum_free_device_memory_bytes": first_free} if first_free is not None else {}),
+            },
+            "overlay": {"search": {"chunk_size": 1}},
+        },
+        {
+            "id": "second",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": 100,
+                "minimum_free_device_memory_bytes": second_free,
+            },
+            "overlay": {"search": {"chunk_size": 2}},
+        },
+    ]
+    with pytest.raises(ValueError, match="eligibility ranges overlap"):
+        apply_runtime_config(generated, {"runtime_profiles": profiles})
+
+
+@pytest.mark.parametrize("field", ["minimum_free_device_memory_bytes", "maximum_free_device_memory_bytes"])
+@pytest.mark.parametrize("invalid", [True, -1, 1.5, "100", None, 2**53])
+def test_runtime_profiles_require_valid_free_memory_bytes(field, invalid):
+    generated = {"model": {"decoder": {}}}
+    profile = {
+        "id": "invalid",
+        "eligibility": {"minimum_total_device_memory_bytes": 0, field: invalid},
+        "overlay": {"search": {"chunk_size": 1}},
+    }
+    with pytest.raises(ValueError, match=f"{field} must be a non-negative integer"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+@pytest.mark.parametrize(
+    "eligibility,error",
+    [
+        ({"minimum_free_device_memory_bytes": 81, "maximum_free_device_memory_bytes": 80},
+         "maximum free memory must not be below minimum"),
+        ({"maximum_total_device_memory_bytes": 100, "minimum_free_device_memory_bytes": 101},
+         "minimum free memory exceeds maximum total memory"),
+    ],
+)
+def test_runtime_profiles_reject_impossible_free_memory_ranges(eligibility, error):
+    generated = {"model": {"decoder": {}}}
+    profile = {
+        "id": "invalid",
+        "eligibility": {"minimum_total_device_memory_bytes": 0, **eligibility},
+        "overlay": {"search": {"chunk_size": 1}},
+    }
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
 @pytest.mark.parametrize("in_profile", [False, True])
 @pytest.mark.parametrize(
     "engine,field,value,error",

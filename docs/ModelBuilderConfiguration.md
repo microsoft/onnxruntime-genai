@@ -450,15 +450,17 @@ parser, `max_batch_size` cannot exceed 256, and batching overrides require an
 exported dynamic-batching configuration. Draft-token overrides are checked
 against the same exported drafter/state capacity as ordinary runtime overlays.
 
-Profile `eligibility` combines its required inclusive total-device-memory range
-with optional `is_integrated: true|false`. Omitted `is_integrated` matches either
-device type. Equal memory ranges may use separate integrated and discrete profiles;
-a generic profile must not overlap either one. The builder checks the same
-ambiguity rules as the C++ loader and rejects non-boolean `is_integrated` values.
-Further typed conditions belong in this existing eligibility object, with matching
-and intersection validation added on both sides. On an integrated device, select
-conservative `num_blocks` using measured peak OS-memory headroom: this predicate
-alone does not account for memory shared with the CPU.
+Profile `eligibility` combines its required inclusive total-device-memory range with
+optional inclusive `minimum_free_device_memory_bytes` and `maximum_free_device_memory_bytes`
+bounds and optional `is_integrated: true|false`. Omitted free-memory bounds match any
+free-memory value; omitted `is_integrated` matches either device type. Equal total-memory
+ranges may use disjoint free-memory ranges or separate integrated and discrete profiles.
+The builder checks the same reachable-overlap rules as the C++ loader, rejects invalid
+byte counts and non-boolean `is_integrated`, and rejects a free-memory minimum above the
+maximum total memory. Further typed conditions belong in this existing eligibility object,
+with matching and intersection validation added on both sides. CUDA free memory is sampled
+once at Model creation, not reserved; on integrated devices it is not a measure of free
+OS memory. Select conservative `num_blocks` using measured peak OS-memory headroom.
 
 With a CUDA-enabled GenAI build and ORT built with INT4 KV-cache support, this
 integration test assembles a temporary shared-weight package, selects each
