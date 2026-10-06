@@ -68,7 +68,9 @@ def _write_component_genai_config(root: Path, filename: str, threads: int) -> No
     )
 
 
-def _cuda_graph_package(root: Path) -> Path:
+def _cuda_graph_package(
+    root: Path, component: str = "backbone"
+) -> Path:
     weight = helper.make_tensor(
         "weight",
         TensorProto.FLOAT,
@@ -91,7 +93,7 @@ def _cuda_graph_package(root: Path) -> Path:
                 "schema_version": 1,
                 "model_type": "synthetic-cuda-graph",
                 "components": {
-                    "backbone": {"filename": "backbone.onnx"},
+                    component: {"filename": "backbone.onnx"},
                 },
             }
         )
@@ -123,6 +125,30 @@ def test_cuda_graph_capture_replays_and_falls_back_for_new_shape(tmp_path, monke
         session.run({"input": changed_shape})["output"],
         changed_shape @ np.asarray([[1.0, 0.5], [-0.25, 2.0]], dtype=np.float32),
     )
+
+
+def test_clm_cuda_graph_capture_replays_multiple_shapes(tmp_path, monkeypatch):
+    package = _cuda_graph_package(tmp_path, "fused_state_ranking")
+    try:
+        session = og.ComponentSession(
+            str(package), "fused_state_ranking", ["cuda"]
+        )
+    except RuntimeError as error:
+        if "Cuda interface not available" in str(error):
+            pytest.skip(str(error))
+        raise
+
+    weight = np.asarray([[1.0, 0.5], [-0.25, 2.0]], dtype=np.float32)
+    batches = [
+        np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.asarray([[5.0, 6.0]], dtype=np.float32),
+        np.asarray([[7.0, 8.0], [9.0, 10.0]], dtype=np.float32),
+    ]
+    for value in batches:
+        np.testing.assert_allclose(
+            session.run({"input": value})["output"],
+            value @ weight,
+        )
 
 
 def test_manifest_mapping_arbitrary_filename_and_native_run(tmp_path):

@@ -48,6 +48,9 @@ std::string PackageIdentity(const std::string& package_path,
       "component_manifest.json", "tokenizer.json", "tokenizer_config.json",
       "encoder/model.onnx", "backbone/model.onnx", "state_head/model.onnx",
       "action_head/model.onnx", "scorer/model.onnx", "clm_heads/model.onnx",
+      "fused_state_ranking/model.onnx",
+      "fused_state_ranking/model.onnx.data",
+      "fused_state_ranking.experimental.onnx",
       "pointer_head/model.onnx", "kev_head/model.onnx",
       "encoder/model.onnx.data", "backbone/model.onnx.data",
       "state_head/model.onnx.data", "action_head/model.onnx.data",
@@ -511,6 +514,25 @@ TokenBatch Tokenize(DirectoryTokenizer& tokenizer, const std::vector<std::string
   return result;
 }
 
+TokenBatch BucketClmBatch(TokenBatch batch) {
+  static constexpr size_t buckets[] = {96, 120, 144, 168, 256, 512, 1024, 2048};
+  const auto found = std::lower_bound(
+      std::begin(buckets), std::end(buckets), batch.width);
+  if (found == std::end(buckets) || *found == batch.width) return batch;
+  TokenBatch padded;
+  padded.rows = batch.rows;
+  padded.width = *found;
+  padded.ids.assign(padded.rows * padded.width, batch.ids.front());
+  padded.mask.assign(padded.ids.size(), 0);
+  for (size_t row = 0; row < batch.rows; ++row) {
+    std::copy_n(batch.ids.begin() + row * batch.width, batch.width,
+                padded.ids.begin() + row * padded.width);
+    std::copy_n(batch.mask.begin() + row * batch.width, batch.width,
+                padded.mask.begin() + row * padded.width);
+  }
+  return padded;
+}
+
 FeedStorage BackboneFeeds(const NamedComponentSession& session, const TokenBatch& batch) {
   FeedStorage feeds;
   feeds.bytes.reserve(session.Inputs().size());
@@ -706,6 +728,14 @@ struct NativeRankingSession {
       action = std::make_unique<NamedComponentSession>(Component("action_head"));
       scorer = std::make_unique<NamedComponentSession>(Component("scorer"));
     }
+    try {
+      fused = std::make_unique<NamedComponentSession>(
+          Component("fused_state_ranking"));
+    } catch (const std::exception& error) {
+      if (std::string_view(error.what()).find("component not declared:") ==
+          std::string_view::npos)
+        throw;
+    }
   }
   NamedComponentSession Component(const std::string& name) const {
     return NamedComponentSession(package_path, name, providers);
@@ -717,7 +747,7 @@ struct NativeRankingSession {
   SessionLruCache<std::vector<float>> cache;
   DirectoryTokenizer tokenizer;
   NamedComponentSession encoder;
-  std::unique_ptr<NamedComponentSession> combined, state, action, scorer;
+  std::unique_ptr<NamedComponentSession> combined, state, action, scorer, fused;
   OgaModelResult Run(const OgaStructuredRequest& request);
   OgaRankingResult Rank(const OgaFreeFormRankRequest& request);
   void SetCacheCapacity(size_t entries, size_t bytes) {
@@ -852,11 +882,99 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       }))
     throw std::runtime_error("candidate owner index is out of range");
   std::vector<float> probabilities;
+  bool fused_scored = false;
+  if (fused && !all_states_cached && missing_indices.empty()) {
+    const auto projection_size = cached.front().size();
+    if (!projection_size)
+      throw std::runtime_error(
+          "cached CLM action projection must not be empty");
+    std::vector<float> action_projection(candidate_count * projection_size);
+    for (size_t row = 0; row < candidate_count; ++row) {
+      if (cached[row].size() != projection_size)
+        throw std::runtime_error(
+            "cached CLM action projection layout mismatch");
+      std::copy(cached[row].begin(), cached[row].end(),
+                action_projection.begin() + row * projection_size);
+    }
+    auto batch = BucketClmBatch(Tokenize(tokenizer, texts));
+    auto feeds = BackboneFeeds(*fused, batch);
+    const auto selector_info = std::find_if(
+        fused->Inputs().begin(), fused->Inputs().end(),
+        [](const OgaComponentInfo& value) {
+          return value.name == "last_token_selector";
+        });
+    if (selector_info == fused->Inputs().end())
+      throw std::runtime_error(
+          "fused CLM component is missing last_token_selector metadata");
+    std::vector<size_t> selected_indices(batch.rows);
+    for (size_t row = 0; row < batch.rows; ++row) {
+      const auto attended = std::accumulate(
+          batch.mask.begin() + row * batch.width,
+          batch.mask.begin() + (row + 1) * batch.width, int64_t{});
+      if (attended <= 0 || static_cast<size_t>(attended) > batch.width)
+        throw std::runtime_error(
+            "fused CLM attention mask has no valid token");
+      selected_indices[row] =
+          row * batch.width + static_cast<size_t>(attended) - 1;
+    }
+    const std::vector<int64_t> selector_shape{
+        static_cast<int64_t>(batch.rows),
+        static_cast<int64_t>(batch.width), 1};
+    if (selector_info->type == OgaElementType_float16) {
+      std::vector<uint16_t> selector(
+          batch.rows * batch.width, uint16_t{});
+      for (const auto index : selected_indices)
+        selector[index] = uint16_t{0x3c00};
+      feeds.Add("last_token_selector", selector, selector_shape,
+                OgaElementType_float16);
+    } else if (selector_info->type == OgaElementType_float32) {
+      std::vector<float> selector(batch.rows * batch.width, 0.0f);
+      for (const auto index : selected_indices) selector[index] = 1.0f;
+      feeds.Add("last_token_selector", selector, selector_shape,
+                OgaElementType_float32);
+    } else {
+      throw std::runtime_error(
+          "fused CLM last_token_selector must be float16 or float32");
+    }
+    feeds.Add(
+        "action_projections", action_projection,
+        {static_cast<int64_t>(candidate_count),
+         static_cast<int64_t>(projection_size)},
+        OgaElementType_float32);
+    feeds.Add("temperature", std::vector<float>{request.temperature},
+              {}, OgaElementType_float32);
+    feeds.Add(
+        "candidate_owners", owners,
+        {static_cast<int64_t>(owners.size())}, OgaElementType_int64);
+    const auto outputs = fused->Run(
+        feeds.inputs, {"probabilities", "state/projections"});
+    const auto& probability_tensor =
+        FindTensor(outputs, "probabilities");
+    RequireShape(probability_tensor, {candidate_count},
+                 "fused CLM probabilities");
+    probabilities = FloatTensor(probability_tensor);
+    RequireFloatCount(probability_tensor, probabilities,
+                      "fused CLM probabilities");
+    const auto& state_tensor = FindTensor(outputs, "state/projections");
+    RequireShape(state_tensor, {question_count, projection_size},
+                 "fused CLM state projections");
+    const auto state_projection = FloatTensor(state_tensor);
+    RequireFloatCount(state_tensor, state_projection,
+                      "fused CLM state projections");
+    for (size_t row = 0; row < question_count; ++row) {
+      cache.Put(
+          state_cache_keys[row],
+          std::vector<float>(
+              state_projection.begin() + row * projection_size,
+              state_projection.begin() + (row + 1) * projection_size));
+    }
+    fused_scored = true;
+  }
   const bool fully_cached =
       !combined && all_states_cached && missing_indices.empty();
   std::vector<float> pooled;
   size_t hidden_size{};
-  if (!fully_cached) {
+  if (!fully_cached && !fused_scored) {
     std::tie(pooled, hidden_size) = EncodeAndPool(tokenizer, encoder, texts);
     if (!hidden_size || pooled.size() != texts.size() * hidden_size)
       throw std::runtime_error(
@@ -871,7 +989,9 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
                     missing_pooled.end());
     }
   }
-  if (fully_cached) {
+  if (fused_scored) {
+    // The fused component already produced probabilities and cached state rows.
+  } else if (fully_cached) {
     const auto projection_size = cached_states.front().size();
     if (!projection_size)
       throw std::runtime_error(
