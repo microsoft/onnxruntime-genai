@@ -466,20 +466,6 @@ struct OgaTokenizer : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyTokenizer(reinterpret_cast<OgaTokenizer*>(p)); }
 };
 
-struct OgaTokenMetadataCoreConfig : OgaAbstract {
-  static std::unique_ptr<OgaTokenMetadataCoreConfig> Create() {
-    OgaTokenMetadataCoreConfig* config;
-    OgaCheckResult(OgaCreateTokenMetadataCoreConfig(&config));
-    return std::unique_ptr<OgaTokenMetadataCoreConfig>(config);
-  }
-
-  void Overlay(const char* json) {
-    OgaCheckResult(OgaTokenMetadataCoreConfigOverlay(this, json));
-  }
-
-  static void operator delete(void* config) { OgaDestroyTokenMetadataCoreConfig(reinterpret_cast<OgaTokenMetadataCoreConfig*>(config)); }
-};
-
 struct OgaTokenizerStream : OgaAbstract {
   static std::unique_ptr<OgaTokenizerStream> Create(const OgaTokenizer& tokenizer) {
     OgaTokenizerStream* p;
@@ -502,14 +488,6 @@ struct OgaTokenizerStream : OgaAbstract {
     const char* out;
     OgaCheckResult(OgaTokenizerStreamDecode(this, token, &out));
     return out;
-  }
-
-  void CreateMetadataCoreStateUsingTokenizerConfig() {
-    OgaCheckResult(OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig(this));
-  }
-
-  void CreateMetadataCoreState(const OgaTokenMetadataCoreConfig& config) {
-    OgaCheckResult(OgaTokenizerStreamCreateMetadataCoreState(this, &config));
   }
 
   const OgaTokenMetadataOutput& DecodeWithMetadata(const OgaTokenMetadataInput& token) {

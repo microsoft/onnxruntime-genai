@@ -44,11 +44,31 @@ std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, in
 TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
     : tokenizer_{tokenizer.shared_from_this()} {
   CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
+  InitializeDefaultMetadataState();
+}
+
+void TokenizerStream::InitializeDefaultMetadataState() {
+  if (tokenizer_->metadata_config_.timestamps.level != Config::TimestampLevel::Off) {
+    EnsureMetadataState();
+  }
+}
+
+void TokenizerStream::EnsureMetadataState() {
+  if (metadata_state_) return;
+  auto state = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(tokenizer_->metadata_config_));
+  const OrtxMetadataConfig producer_config{state->TimestampsEnabled()};
+  CheckResult(OrtxSetDetokenizerCacheMetadataConfig(cache_, &producer_config));
+  metadata_state_ = std::move(state);
 }
 
 const std::string& TokenizerStream::Decode(int32_t token) {
   if (decode_mode_ == DecodeMode::Metadata) {
     throw std::runtime_error("Cannot mix text and metadata decoding before Reset");
+  }
+  if (metadata_state_) {
+    const OrtxMetadataConfig producer_config{false};
+    CheckResult(OrtxSetDetokenizerCacheMetadataConfig(cache_, &producer_config));
+    metadata_state_.reset();
   }
   decode_mode_ = DecodeMode::Text;
   const char* string;
@@ -57,39 +77,12 @@ const std::string& TokenizerStream::Decode(int32_t token) {
   return chunk_;
 }
 
-TokenizerStream::~TokenizerStream() {
-  if (metadata_state_) metadata_state_->Invalidate();
-}
-
-std::shared_ptr<MetadataCoreState> TokenizerStream::CreateMetadataCoreState(const MetadataCoreConfig& config) {
-  if (decode_mode_ != DecodeMode::Unset || metadata_state_) {
-    throw std::runtime_error("Create one metadata state before decoding; Reset to change configuration");
-  }
-  auto resolved = config;
-  const auto& model_timing = tokenizer_->GetMetadataCoreConfig().timestamps;
-  resolved.timestamps.sample_rate = model_timing.sample_rate;
-  resolved.timestamps.hop_length = model_timing.hop_length;
-  resolved.timestamps.subsampling_factor = model_timing.subsampling_factor;
-  if (resolved.timestamps.level != Config::TimestampLevel::Off &&
-      (resolved.timestamps.sample_rate <= 0 || resolved.timestamps.hop_length <= 0 ||
-       resolved.timestamps.subsampling_factor <= 0)) {
-    throw std::runtime_error("Timestamp metadata requires positive sample_rate, hop_length, and subsampling_factor");
-  }
-  auto state = std::shared_ptr<MetadataCoreState>(new MetadataCoreState(resolved));
-  const OrtxMetadataConfig producer_config{state->TimestampsEnabled()};
-  CheckResult(OrtxSetDetokenizerCacheMetadataConfig(cache_, &producer_config));
-  metadata_state_ = state;
-  decode_mode_ = DecodeMode::Metadata;
-  return state;
-}
-
-std::shared_ptr<MetadataCoreState> TokenizerStream::CreateMetadataCoreStateUsingTokenizerConfig() {
-  return CreateMetadataCoreState(tokenizer_->GetMetadataCoreConfig());
-}
+TokenizerStream::~TokenizerStream() = default;
 
 const OgaTokenMetadataOutput& TokenizerStream::DecodeWithMetadata(const OgaTokenMetadataInput& token) {
-  // Use the explicitly initialized state owned by this stream.
-  if (!metadata_state_) throw std::runtime_error("Create metadata state before decoding metadata");
+  if (decode_mode_ == DecodeMode::Text)
+    throw std::runtime_error("Cannot mix text and metadata decoding before Reset");
+  EnsureMetadataState();
 
   // Validate before advancing the Extensions decoder so rejected input consumes nothing.
   metadata_state_->ValidateInput(token);
@@ -98,27 +91,31 @@ const OgaTokenMetadataOutput& TokenizerStream::DecodeWithMetadata(const OgaToken
   const char* text = nullptr;
   const OrtxMetadata* metadata = nullptr;
   CheckResult(OrtxDetokenizeCachedWithMetadata(tokenizer_->tokenizer_, cache_, token.token_id, &text, &metadata));
-  return metadata_state_->ProcessDecoded(token, text, *metadata);
+  const auto& result = metadata_state_->ProcessDecoded(token, text, *metadata);
+  decode_mode_ = DecodeMode::Metadata;
+  return result;
 }
 
 const OgaTokenMetadataOutput& TokenizerStream::FinalizeMetadata() {
-  // Finalization requires the same explicitly initialized stream state as decoding.
-  if (!metadata_state_) throw std::runtime_error("Create metadata state before finalizing metadata");
-  metadata_state_->CheckValid();
+  if (decode_mode_ == DecodeMode::Text)
+    throw std::runtime_error("Cannot mix text and metadata decoding before Reset");
+  EnsureMetadataState();
 
   // Flush pending token spans without injecting another token or timing record.
   const OrtxMetadata* metadata = nullptr;
   CheckResult(OrtxFinalizeDetokenizeCachedWithMetadata(cache_, &metadata));
-  return metadata_state_->ProcessFinalized(*metadata);
+  const auto& result = metadata_state_->ProcessFinalized(*metadata);
+  decode_mode_ = DecodeMode::Metadata;
+  return result;
 }
 
 void TokenizerStream::Reset() {
-  if (metadata_state_) metadata_state_->Invalidate();
   metadata_state_.reset();
   OrtxDispose(&cache_.p_);
   CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
   chunk_.clear();
   decode_mode_ = DecodeMode::Unset;
+  InitializeDefaultMetadataState();
 }
 
 Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_token_id},
@@ -175,10 +172,6 @@ int32_t Tokenizer::GetEorTokenId() const {
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
   return std::make_unique<TokenizerStream>(*this);
-}
-
-MetadataCoreConfig Tokenizer::GetMetadataCoreConfig() const {
-  return metadata_config_;
 }
 
 void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {

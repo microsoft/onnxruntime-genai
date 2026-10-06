@@ -43,23 +43,7 @@ MetadataCoreState::MetadataCoreState(const MetadataCoreConfig& config) : config_
   }
 }
 
-void MetadataCoreState::CheckValid() const {
-  if (!valid_) throw std::runtime_error("Metadata state was invalidated by stream reset or destruction");
-}
-
-const std::string& MetadataCoreState::Text() const {
-  CheckValid();
-  return text_;
-}
-
-const OrtxMetadata& MetadataCoreState::Metadata() const {
-  CheckValid();
-  if (!metadata_) throw std::runtime_error("No metadata has been decoded yet");
-  return *metadata_;
-}
-
 void MetadataCoreState::ValidateInput(const OgaTokenMetadataInput& token) const {
-  CheckValid();
   if (TimestampsEnabled()) {
     if (!token.has_token_acoustic_frame_interval)
       throw std::runtime_error("Enabled timestamps require generation timing metadata");
@@ -69,10 +53,9 @@ void MetadataCoreState::ValidateInput(const OgaTokenMetadataInput& token) const 
   }
 }
 
-void MetadataCoreState::BeginResult(const char* text, const OrtxMetadata& metadata) {
+void MetadataCoreState::BeginResult(const char* text) {
   // Only completed events are per-call; buffered intervals and the unfinished segment survive.
   text_ = text;
-  metadata_ = &metadata;
   record_texts_.clear();
   word_records_.clear();
   segment_records_.clear();
@@ -161,8 +144,7 @@ const OgaTokenMetadataOutput& MetadataCoreState::PublishResult() {
 
 const OgaTokenMetadataOutput& MetadataCoreState::ProcessDecoded(
     const OgaTokenMetadataInput& token, const char* text, const OrtxMetadata& metadata) {
-  CheckValid();
-  BeginResult(text, metadata);
+  BeginResult(text);
   if (TimestampsEnabled()) {
     if (!metadata.timestampMetadata) throw std::runtime_error("Tokenizer metadata is missing timestamp data");
     // One interval enters for each decoded token, even when this call completes no words.
@@ -173,8 +155,7 @@ const OgaTokenMetadataOutput& MetadataCoreState::ProcessDecoded(
 }
 
 const OgaTokenMetadataOutput& MetadataCoreState::ProcessFinalized(const OrtxMetadata& metadata) {
-  CheckValid();
-  BeginResult("", metadata);
+  BeginResult("");
   if (TimestampsEnabled()) {
     // Finalization contributes no interval, but Extensions may now release trailing words.
     const OrtxTimestampMetadata empty{};
@@ -182,19 +163,6 @@ const OgaTokenMetadataOutput& MetadataCoreState::ProcessFinalized(const OrtxMeta
     CompleteSegment();
   }
   return PublishResult();
-}
-
-void MetadataCoreState::Invalidate() {
-  valid_ = false;
-  metadata_ = nullptr;
-  text_.clear();
-  pending_token_intervals_.clear();
-  pending_segment_text_.reset();
-  record_texts_.clear();
-  result_ = {};
-  timestamp_result_ = {};
-  word_records_.clear();
-  segment_records_.clear();
 }
 
 }  // namespace Generators

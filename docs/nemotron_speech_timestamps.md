@@ -44,8 +44,9 @@ thresholds are rejected while loading the configuration.
 
 ## Decoding flows
 
-Both paths start with audio processed into features, followed by generated token IDs. Choose the
-path when configuring the model; a tokenizer stream cannot switch decode modes without `Reset()`.
+Both paths start with audio processed into features, followed by generated token IDs. Model
+configuration determines whether acoustic timing is produced; the first decode chooses each
+stream's mode. A tokenizer stream cannot switch decode modes without `Reset()`.
 
 ```mermaid
 flowchart TB
@@ -59,7 +60,7 @@ flowchart TB
   end
 
   subgraph timed[With timestamps: word, segment, or all]
-    setup[Initialize stream metadata state] --> stream
+    setup[Stream starts with tokenizer metadata defaults] --> stream
     timed_tokens[GetNextTokensWithMetadata: IDs + absolute frame intervals] --> stream[TokenizerStream.DecodeWithMetadata]
     stream --> ortx[Extensions: decoded text + completed word token spans]
     ortx --> align[Stream metadata state: align word spans with buffered frames]
@@ -72,7 +73,8 @@ flowchart TB
   generator --> timed_tokens
 ```
 
-For the timed path, create the stream's metadata state before decoding. The generator supplies
+For the timed path, create a tokenizer stream; its metadata state is initialized from
+the tokenizer configuration. The generator supplies
 *when* each token occurred; Extensions supplies *which tokens* form each word. `DecodeWithMetadata`
 also returns the ordinary incremental text fragment. Use that fragment for live text, or collect
 completed word/segment events for stable timestamped output; do not append both to one transcript.
@@ -86,11 +88,13 @@ pairs tokens and intervals by emission position, not by token ID.
 
 ## Decoding
 
-For the timestamp path, after creating the tokenizer stream, explicitly initialize its metadata state with
-`CreateMetadataCoreStateUsingTokenizerConfig()` (C++/C#) or
-`create_metadata_core_state_using_tokenizer_config()` (Python). Repeat initialization
-after `Reset()`. Metadata decode and finalization throw if the state is missing;
-neither method creates state automatically. Disabled timestamps produce null timestamp data.
+For the timestamp path, create the tokenizer stream and use metadata decoding
+directly. The stream initializes enabled model-derived metadata when created
+and restores it after `Reset()`. Configure timestamp level and grouping rules on
+the model before creating the tokenizer; the stream does not expose its internal
+metadata state. Plain-text `Decode()` still works on a timestamp-configured
+tokenizer when selected first. Disabled
+timestamps produce null timestamp data.
 
 For each generation step, use `GetNextTokensWithMetadata()` (C++/C#) or
 `get_next_tokens_with_metadata()` (Python). Pass each whole record directly to

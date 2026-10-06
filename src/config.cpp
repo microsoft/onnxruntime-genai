@@ -5,7 +5,6 @@
 #include "generator/generators.h"
 #include "models/model_state_manifest.h"
 #include "models/model_type.h"
-#include "models/preprocessing/metadata_core_state.h"
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
@@ -594,61 +593,6 @@ struct StringArray_Element : JSON::Element {
 
  private:
   std::vector<std::string>& v_;
-};
-
-struct TimestampMetadataConfig_Element : JSON::Element {
-  explicit TimestampMetadataConfig_Element(TimestampTokenizerConfig& config) : config_{config} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "level") {
-      const auto level = JSON::Get<std::string_view>(value);
-      if (level == "off")
-        config_.level = Config::TimestampLevel::Off;
-      else if (level == "word")
-        config_.level = Config::TimestampLevel::Word;
-      else if (level == "segment")
-        config_.level = Config::TimestampLevel::Segment;
-      else if (level == "all")
-        config_.level = Config::TimestampLevel::All;
-      else
-        throw std::runtime_error("Timestamp level must be one of: off, word, segment, all");
-    } else if (name == "segment_gap_threshold_seconds") {
-      if (std::holds_alternative<std::nullptr_t>(value)) {
-        config_.segment_gap_threshold_seconds.reset();
-      } else {
-        const double threshold = JSON::Get<double>(value);
-        if (!std::isfinite(threshold) || threshold < 0.0)
-          throw std::runtime_error("segment_gap_threshold_seconds must be finite and >= 0");
-        config_.segment_gap_threshold_seconds = threshold;
-      }
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-  }
-
-  Element& OnArray(std::string_view name) override {
-    if (name == "segment_separators") {
-      config_.segment_separators.clear();
-      return separators_;
-    }
-    throw JSON::unknown_value_error{};
-  }
-
- private:
-  TimestampTokenizerConfig& config_;
-  StringArray_Element separators_{config_.segment_separators};
-};
-
-struct MetadataCoreConfig_Element : JSON::Element {
-  explicit MetadataCoreConfig_Element(MetadataCoreConfig& config) : timestamps_{config.timestamps} {}
-
-  Element& OnObject(std::string_view name) override {
-    if (name == "timestamps") return timestamps_;
-    throw JSON::unknown_value_error{};
-  }
-
- private:
-  TimestampMetadataConfig_Element timestamps_;
 };
 
 struct IntArray_Element : JSON::Element {
@@ -3296,14 +3240,6 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
   ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
-  std::swap(config, candidate);
-}
-
-void OverlayMetadataCoreConfig(MetadataCoreConfig& config, std::string_view json) {
-  MetadataCoreConfig candidate{config};
-  MetadataCoreConfig_Element root{candidate};
-  RootObject_Element element{root};
-  JSON::Parse(element, json);
   std::swap(config, candidate);
 }
 

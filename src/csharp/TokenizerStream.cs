@@ -18,16 +18,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _tokenizerStreamHandle; } }
 
-        public void CreateMetadataCoreStateUsingTokenizerConfig()
-        {
-            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig(_tokenizerStreamHandle));
-        }
-
-        public void CreateMetadataCoreState(TokenMetadataCoreConfig config)
-        {
-            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamCreateMetadataCoreState(_tokenizerStreamHandle, config.Handle));
-        }
-
         public string Decode(int token)
         {
             IntPtr decodedStr = IntPtr.Zero;

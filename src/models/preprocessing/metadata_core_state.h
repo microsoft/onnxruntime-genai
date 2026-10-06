@@ -6,7 +6,6 @@
 
 #include <cstddef>
 #include <deque>
-#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -26,43 +25,33 @@ struct TimestampTokenizerConfig {
   int subsampling_factor{};
 };
 
-// Configurable metadata options; streams snapshot these when creating a state.
+// Model-derived metadata options copied into each stream.
 struct MetadataCoreConfig {
   TimestampTokenizerConfig timestamps;
 };
 
-void OverlayMetadataCoreConfig(MetadataCoreConfig& config, std::string_view json);
-
-// Owns one stream's decoded metadata and an independent, immutable config copy.
+// Owned exclusively by TokenizerStream; never exposed to API callers.
 class MetadataCoreState {
- public:
-  MetadataCoreState(const MetadataCoreState&) = delete;
-  MetadataCoreState& operator=(const MetadataCoreState&) = delete;
-
-  const std::string& Text() const;
-  const OrtxMetadata& Metadata() const;
-  bool TimestampsEnabled() const { return config_.timestamps.level != Config::TimestampLevel::Off; }
+  friend struct TokenizerStream;
 
  private:
-  friend struct TokenizerStream;
   explicit MetadataCoreState(const MetadataCoreConfig& config);
-  void CheckValid() const;
+  MetadataCoreState(const MetadataCoreState&) = delete;
+  MetadataCoreState& operator=(const MetadataCoreState&) = delete;
+  bool TimestampsEnabled() const { return config_.timestamps.level != Config::TimestampLevel::Off; }
   void ValidateInput(const OgaTokenMetadataInput& token) const;
   const OgaTokenMetadataOutput& ProcessDecoded(const OgaTokenMetadataInput& token, const char* text, const OrtxMetadata& metadata);
   const OgaTokenMetadataOutput& ProcessFinalized(const OrtxMetadata& metadata);
-  void BeginResult(const char* text, const OrtxMetadata& metadata);
+  void BeginResult(const char* text);
   void ConsumeCompletedWords(const OrtxTimestampMetadata& metadata);
   void PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval);
   void CompleteSegment();
   void AddRecord(std::vector<OgaTokenMetadataTimestampRecord>& records, std::string_view text,
                  OgaTokenMetadataAcousticFrameInterval interval);
   const OgaTokenMetadataOutput& PublishResult();
-  void Invalidate();
 
   const MetadataCoreConfig config_;
-  bool valid_{true};
   std::string text_;
-  const OrtxMetadata* metadata_{};
   std::optional<int> segment_gap_threshold_frames_;
   double seconds_per_frame_{};
   // Extensions supplies completed-word token indices; keep intervals until its watermark releases them.

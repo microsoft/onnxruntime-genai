@@ -158,12 +158,6 @@ class MetadataCoreStateTests : public testing::Test {
     config.model.subsampling_factor = 1;
     config.model.segment_separators = {"."};
     tokenizer = std::make_shared<Generators::Tokenizer>(config);
-    metadata_config = tokenizer->GetMetadataCoreConfig();
-    EXPECT_EQ(metadata_config.timestamps.level, Generators::Config::TimestampLevel::All);
-    EXPECT_EQ(metadata_config.timestamps.sample_rate, 100);
-    EXPECT_EQ(metadata_config.timestamps.hop_length, 10);
-    EXPECT_EQ(metadata_config.timestamps.subsampling_factor, 1);
-    EXPECT_EQ(metadata_config.timestamps.segment_separators, std::vector<std::string>{"."});
     tokens = tokenizer->Encode("Hello world.");
     ASSERT_GT(tokens.size(), 1U);
     model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
@@ -178,7 +172,6 @@ class MetadataCoreStateTests : public testing::Test {
   }
 
   std::shared_ptr<Generators::Tokenizer> tokenizer;
-  Generators::MetadataCoreConfig metadata_config;
   std::vector<int32_t> tokens;
   std::shared_ptr<Generators::Model> model;
   std::shared_ptr<Generators::GeneratorParams> params;
@@ -189,18 +182,16 @@ class MetadataCoreStateTests : public testing::Test {
 
 TEST_F(MetadataCoreStateTests, DecodeProcessesMetadataOncePerStep) {
   auto stream = tokenizer->CreateStream();
-  auto state = stream->CreateMetadataCoreState(metadata_config);
   auto plain = tokenizer->CreateStream();
-  EXPECT_THROW(state->Metadata(), std::runtime_error);
   std::string transcript;
   std::string words;
   std::string segments;
 
   for (size_t index = 0; index < tokens.size(); ++index) {
     const auto& expected = stream->DecodeWithMetadata({tokens[index], 1, interval});
-    EXPECT_EQ(state->Text(), plain->Decode(tokens[index]));
+    EXPECT_STREQ(expected.text, plain->Decode(tokens[index]).c_str());
     transcript += expected.text;
-    ASSERT_NE(state->Metadata().timestampMetadata, nullptr);
+    ASSERT_NE(expected.timestampMetadata, nullptr);
     for (size_t word_index = 0; word_index < expected.timestampMetadata->word_count; ++word_index) {
       const auto& word = expected.timestampMetadata->words[word_index];
       words += word.text;
@@ -232,11 +223,15 @@ TEST_F(MetadataCoreStateTests, DecodeProcessesMetadataOncePerStep) {
 
 TEST_F(MetadataCoreStateTests, ZeroAndSubFrameGapsSplitWordsEvenOnSharedFrames) {
   for (const double threshold : {0.0, 0.01}) {
-    auto config = metadata_config;
-    config.timestamps.segment_separators.clear();
-    config.timestamps.segment_gap_threshold_seconds = threshold;
-    auto stream = tokenizer->CreateStream();
-    stream->CreateMetadataCoreState(config);
+    Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
+    config.model.type = "nemotron_speech";
+    config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+    config.model.sample_rate = 100;
+    config.model.hop_length = 10;
+    config.model.subsampling_factor = 1;
+    config.model.segment_separators.clear();
+    config.model.segment_gap_threshold_seconds = threshold;
+    auto stream = std::make_shared<Generators::Tokenizer>(config)->CreateStream();
     std::vector<std::string> words;
     std::vector<std::string> segments;
     const auto collect = [&](const OgaTokenMetadataOutput& result) {
@@ -259,11 +254,15 @@ TEST_F(MetadataCoreStateTests, ZeroAndSubFrameGapsSplitWordsEvenOnSharedFrames) 
 }
 
 TEST_F(MetadataCoreStateTests, FrameGapCompletesPriorSegmentBeforeNextWord) {
-  auto config = metadata_config;
-  config.timestamps.segment_separators.clear();
-  config.timestamps.segment_gap_threshold_seconds = 0.3;  // Three frames at 100 Hz / 10 samples per frame.
-  auto stream = tokenizer->CreateStream();
-  stream->CreateMetadataCoreState(config);
+  Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
+  config.model.type = "nemotron_speech";
+  config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config.model.sample_rate = 100;
+  config.model.hop_length = 10;
+  config.model.subsampling_factor = 1;
+  config.model.segment_separators.clear();
+  config.model.segment_gap_threshold_seconds = 0.3;  // Three frames at 100 Hz / 10 samples per frame.
+  auto stream = std::make_shared<Generators::Tokenizer>(config)->CreateStream();
   std::vector<std::string> segments;
   std::vector<std::pair<int64_t, int64_t>> bounds;
   size_t completed_words = 0;
@@ -304,175 +303,74 @@ TEST_F(MetadataCoreStateTests, RepeatedTokenIdsKeepPositionSpecificIntervals) {
 }
 
 TEST_F(MetadataCoreStateTests, DisabledConsumersDoNotBlockOrEnableProducers) {
-  auto stream = tokenizer->CreateStream();
-  auto state = stream->CreateMetadataCoreState(Generators::MetadataCoreConfig{});
+  Generators::Config text_config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
+  auto disabled_tokenizer = std::make_shared<Generators::Tokenizer>(text_config);
+  auto stream = disabled_tokenizer->CreateStream();
   auto plain = tokenizer->CreateStream();
   auto enabled = tokenizer->CreateStream();
-  auto enabled_state = enabled->CreateMetadataCoreState(metadata_config);
-  EXPECT_FALSE(state->TimestampsEnabled());
   for (size_t index = 0; index < tokens.size(); ++index) {
-    stream->DecodeWithMetadata({tokens[index], 1, interval});
-    EXPECT_EQ(state->Text(), plain->Decode(tokens[index]));
-    EXPECT_EQ(state->Metadata().timestampMetadata, nullptr);
-    const auto* current_metadata = &state->Metadata();
-    const auto current_text = state->Text();
-    EXPECT_EQ(&state->Metadata(), current_metadata);
-    EXPECT_EQ(state->Text(), current_text);
-    EXPECT_FALSE(state->TimestampsEnabled());
-    enabled->DecodeWithMetadata({tokens[index], 1, interval});
-    EXPECT_NE(enabled_state->Metadata().timestampMetadata, nullptr);
+    const auto& result = stream->DecodeWithMetadata({tokens[index], 0, {}});
+    EXPECT_EQ(result.text, plain->Decode(tokens[index]));
+    EXPECT_EQ(result.timestampMetadata, nullptr);
+    EXPECT_NE(enabled->DecodeWithMetadata({tokens[index], 1, interval}).timestampMetadata, nullptr);
   }
-  stream->FinalizeMetadata();
-  EXPECT_EQ(state->Metadata().timestampMetadata, nullptr);
-  EXPECT_NO_THROW(stream->FinalizeMetadata());
+  EXPECT_EQ(stream->FinalizeMetadata().timestampMetadata, nullptr);
+  EXPECT_NE(enabled->FinalizeMetadata().timestampMetadata, nullptr);
 }
 
-TEST_F(MetadataCoreStateTests, StreamBindingResetAndDestructionInvalidateState) {
+TEST_F(MetadataCoreStateTests, ResetRebuildsMetadataFromTokenizerConfig) {
   auto stream = tokenizer->CreateStream();
-  auto state = stream->CreateMetadataCoreState(metadata_config);
   auto other = tokenizer->CreateStream();
-  auto other_state = other->CreateMetadataCoreState(metadata_config);
-  EXPECT_THROW(stream->CreateMetadataCoreState(metadata_config), std::runtime_error);
-  EXPECT_THROW(other_state->Metadata(), std::runtime_error);
+  EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 0, {}}), std::runtime_error);
+  const auto& first = stream->DecodeWithMetadata({tokens[0], 1, interval});
+  EXPECT_NE(first.timestampMetadata, nullptr);
   EXPECT_THROW(stream->Decode(tokens[0]), std::runtime_error);
-  stream->DecodeWithMetadata({tokens[0], 1, interval});
   stream->Reset();
-  EXPECT_THROW(state->Text(), std::runtime_error);
-  EXPECT_THROW(state->Metadata(), std::runtime_error);
-  EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 1, interval}), std::runtime_error);
-  auto replacement = stream->CreateMetadataCoreState(Generators::MetadataCoreConfig{});
-  EXPECT_NO_THROW(stream->DecodeWithMetadata({tokens[0], 1, interval}));
-  stream.reset();
-  EXPECT_THROW(replacement->Metadata(), std::runtime_error);
-  EXPECT_THROW(replacement->Text(), std::runtime_error);
-  EXPECT_NO_THROW(other->DecodeWithMetadata({tokens[0], 1, interval}));
-  EXPECT_EQ(other_state->Text(), tokenizer->Decode(std::span<const int32_t>{tokens.data(), 1}));
-}
-
-TEST_F(MetadataCoreStateTests, ConfigurationValidationAndSnapshots) {
-  auto stream = tokenizer->CreateStream();
-  Generators::MetadataCoreConfig config;
-  config.timestamps.level = Generators::Config::TimestampLevel::Word;
-  auto state = stream->CreateMetadataCoreState(config);
-  EXPECT_EQ(state->TimestampsEnabled(), true);
-  EXPECT_EQ(tokenizer->GetMetadataCoreConfig().timestamps.sample_rate, 100);
-  config.timestamps.level = Generators::Config::TimestampLevel::Off;
-  config.timestamps.sample_rate = 1;
-  config.timestamps.hop_length = 1;
-  config.timestamps.subsampling_factor = 10;
-  const char* keys[] = {"track_timestamp_metadata"};
-  const char* values[] = {"false"};
-  tokenizer->UpdateOptions(keys, values, 1);
-  EXPECT_TRUE(state->TimestampsEnabled());
-  stream->DecodeWithMetadata({tokens[0], 1, interval});
-  ASSERT_NE(state->Metadata().timestampMetadata, nullptr);
+  EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 0, {}}), std::runtime_error);
+  const auto& restored = stream->DecodeWithMetadata({tokens[0], 1, interval});
+  EXPECT_NE(restored.timestampMetadata, nullptr);
   const auto& final = stream->FinalizeMetadata();
-  ASSERT_NE(final.timestampMetadata, nullptr);
   ASSERT_EQ(final.timestampMetadata->word_count, 1U);
   EXPECT_DOUBLE_EQ(final.timestampMetadata->words[0].start_time, 0.4);
-  EXPECT_DOUBLE_EQ(final.timestampMetadata->words[0].stop_time, 0.5);
-  auto plain = tokenizer->CreateStream();
-  plain->Decode(tokens[0]);
-  EXPECT_THROW(plain->CreateMetadataCoreState(metadata_config), std::runtime_error);
+  EXPECT_NE(other->FinalizeMetadata().timestampMetadata, nullptr);
+  stream->Reset();
+  EXPECT_NO_THROW(stream->Decode(tokens[0]));
+  EXPECT_THROW(stream->FinalizeMetadata(), std::runtime_error);
+  stream->Reset();
+  EXPECT_NE(stream->FinalizeMetadata().timestampMetadata, nullptr);
 }
 
-TEST_F(MetadataCoreStateTests, ConfigurationOverlay) {
-  Generators::MetadataCoreConfig config;
-  Generators::OverlayMetadataCoreConfig(config, R"({"timestamps":{
-    "level":"all", "segment_separators":[".","!"], "segment_gap_threshold_seconds":0.31
-  }})");
-  EXPECT_EQ(config.timestamps.level, Generators::Config::TimestampLevel::All);
-  EXPECT_EQ(config.timestamps.segment_separators, (std::vector<std::string>{".", "!"}));
-  EXPECT_EQ(config.timestamps.segment_gap_threshold_seconds, 0.31);
-  auto stream = tokenizer->CreateStream();
-  auto state = stream->CreateMetadataCoreState(config);
-  EXPECT_EQ(state->TimestampsEnabled(), true);
-  Generators::OverlayMetadataCoreConfig(config, R"({"timestamps":{"level":"off","segment_separators":[],"segment_gap_threshold_seconds":null}})");
-  EXPECT_TRUE(state->TimestampsEnabled());
-  EXPECT_TRUE(config.timestamps.segment_separators.empty());
-  EXPECT_FALSE(config.timestamps.segment_gap_threshold_seconds.has_value());
-  EXPECT_THROW(Generators::OverlayMetadataCoreConfig(config, R"({"timestamps":{"segment_gap_threshold_seconds":0.2,"level":"invalid"}})"), std::runtime_error);
-  EXPECT_FALSE(config.timestamps.segment_gap_threshold_seconds.has_value());
-  EXPECT_THROW(Generators::OverlayMetadataCoreConfig(config, R"({"timestamps":{"segment_separators":[1]}})"), std::runtime_error);
-  EXPECT_THROW(Generators::OverlayMetadataCoreConfig(config, R"({"timestamps":{"segment_gap_threshold_seconds":-2}})"), std::runtime_error);
-  EXPECT_THROW(Generators::OverlayMetadataCoreConfig(config, R"({"timestamps":{"sample_rate":200}})"), std::runtime_error);
-  EXPECT_THROW(Generators::OverlayMetadataCoreConfig(config, R"({"timestamps":{"unknown":1}})"), std::runtime_error);
-}
-
-TEST_F(MetadataCoreStateTests, ExplicitGapSecondsRoundUsingModelTiming) {
-  auto stream = tokenizer->CreateStream();
-  Generators::MetadataCoreConfig config;
-  Generators::OverlayMetadataCoreConfig(config, R"({"timestamps":{"level":"segment","segment_gap_threshold_seconds":0.26}})");
-  auto state = stream->CreateMetadataCoreState(config);
-  EXPECT_TRUE(state->TimestampsEnabled());
-  stream->DecodeWithMetadata({tokens[0], 1, interval});
-  EXPECT_EQ(state->Metadata().timestampMetadata->word_count, 0U);
-  EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(config.timestamps.segment_gap_threshold_seconds,
-                                                     100, 10, 1),
-            3);
-}
-
-TEST_F(MetadataCoreStateTests, MissingModelTimingRejectsExplicitMetadata) {
+TEST_F(MetadataCoreStateTests, MissingModelTimingRejectsTimestamps) {
   Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
   config.model.type = "nemotron_speech";
   config.model.timestamp_level = Generators::Config::TimestampLevel::All;
   EXPECT_THROW({ Generators::Tokenizer invalid_tokenizer{config}; }, std::runtime_error);
-  config.model.timestamp_level = Generators::Config::TimestampLevel::Off;
-  auto missing_timing_tokenizer = std::make_shared<Generators::Tokenizer>(config);
-  auto stream = missing_timing_tokenizer->CreateStream();
-  Generators::MetadataCoreConfig requested;
-  Generators::OverlayMetadataCoreConfig(requested, R"({"timestamps":{"level":"all"}})");
-  EXPECT_THROW(stream->CreateMetadataCoreState(requested), std::runtime_error);
 }
 
-TEST_F(MetadataCoreStateTests, TokenizerConfigurationIsAnIndependentCopy) {
-  auto config = tokenizer->GetMetadataCoreConfig();
-  config.timestamps.level = Generators::Config::TimestampLevel::Off;
-  config.timestamps.sample_rate = 1;
-  config.timestamps.hop_length = 1;
-  config.timestamps.subsampling_factor = 10;
-  EXPECT_EQ(tokenizer->GetMetadataCoreConfig().timestamps.level, Generators::Config::TimestampLevel::All);
-  EXPECT_EQ(tokenizer->GetMetadataCoreConfig().timestamps.sample_rate, 100);
-  auto disabled_stream = tokenizer->CreateStream();
-  auto disabled = disabled_stream->CreateMetadataCoreState(config);
-  EXPECT_FALSE(disabled->TimestampsEnabled());
-  auto enabled_stream = tokenizer->CreateStream();
-  auto enabled = enabled_stream->CreateMetadataCoreStateUsingTokenizerConfig();
-  EXPECT_TRUE(enabled->TimestampsEnabled());
-  EXPECT_THROW(enabled_stream->CreateMetadataCoreStateUsingTokenizerConfig(), std::runtime_error);
-  for (const auto token : tokens) {
-    enabled_stream->DecodeWithMetadata({token, 1, interval});
-  }
-  const auto& result = enabled_stream->FinalizeMetadata();
-  ASSERT_GT(result.timestampMetadata->word_count, 0U);
-  for (size_t index = 0; index < result.timestampMetadata->word_count; ++index) {
-    const auto& word = result.timestampMetadata->words[index];
-    EXPECT_DOUBLE_EQ(word.start_time, word.start_frame * 0.1);
-    EXPECT_DOUBLE_EQ(word.stop_time, word.stop_frame * 0.1);
-  }
-
+TEST_F(MetadataCoreStateTests, DisabledTokenizerProducesTextWithoutTimestamps) {
   Generators::Config text_config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
   auto text_tokenizer = std::make_shared<Generators::Tokenizer>(text_config);
-  EXPECT_EQ(text_tokenizer->GetMetadataCoreConfig().timestamps.level, Generators::Config::TimestampLevel::Off);
   auto text_stream = text_tokenizer->CreateStream();
-  auto text_state = text_stream->CreateMetadataCoreStateUsingTokenizerConfig();
-  EXPECT_FALSE(text_state->TimestampsEnabled());
-  text_stream->DecodeWithMetadata({tokens[0], 1, interval});
-  EXPECT_EQ(text_state->Metadata().timestampMetadata, nullptr);
+  EXPECT_EQ(text_stream->DecodeWithMetadata({tokens[0], 1, interval}).timestampMetadata, nullptr);
   EXPECT_NO_THROW(text_stream->DecodeWithMetadata({tokens[1], 1, interval}));
 }
 
-TEST_F(MetadataCoreStateTests, GenericMetadataRequiresExplicitState) {
+TEST_F(MetadataCoreStateTests, MetadataDefaultsAndReset) {
   auto stream = tokenizer->CreateStream();
-  EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 1, interval}), std::runtime_error);
-  EXPECT_THROW(stream->FinalizeMetadata(), std::runtime_error);
-  EXPECT_NO_THROW(stream->CreateMetadataCoreStateUsingTokenizerConfig());
   EXPECT_NO_THROW(stream->DecodeWithMetadata({tokens[0], 1, interval}));
   EXPECT_NO_THROW(stream->FinalizeMetadata());
   stream->Reset();
-  EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 1, interval}), std::runtime_error);
-  EXPECT_THROW(stream->FinalizeMetadata(), std::runtime_error);
+  EXPECT_NO_THROW(stream->DecodeWithMetadata({tokens[0], 1, interval}));
+  stream->Reset();
   EXPECT_NO_THROW(stream->Decode(tokens[0]));
+  EXPECT_THROW(stream->DecodeWithMetadata({tokens[1], 1, interval}), std::runtime_error);
+  stream->Reset();
+  EXPECT_NE(stream->FinalizeMetadata().timestampMetadata, nullptr);
+  EXPECT_THROW(stream->Decode(tokens[0]), std::runtime_error);
+  Generators::Config text_config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
+  auto disabled_tokenizer = std::make_shared<Generators::Tokenizer>(text_config);
+  auto disabled_stream = disabled_tokenizer->CreateStream();
+  EXPECT_EQ(disabled_stream->FinalizeMetadata().timestampMetadata, nullptr);
 }
 
 TEST_F(MetadataCoreStateTests, GeneratorOmitsTimingWhenDisabled) {
@@ -482,10 +380,10 @@ TEST_F(MetadataCoreStateTests, GeneratorOmitsTimingWhenDisabled) {
   const auto records = generator->GetNextTokensWithMetadata();
   ASSERT_EQ(records.size(), tokens.size());
   auto plain = tokenizer->CreateStream();
-  auto disabled = tokenizer->CreateStream();
-  disabled->CreateMetadataCoreState(Generators::MetadataCoreConfig{});
+  Generators::Config text_config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
+  auto disabled_tokenizer = std::make_shared<Generators::Tokenizer>(text_config);
+  auto disabled = disabled_tokenizer->CreateStream();
   auto enabled = tokenizer->CreateStream();
-  enabled->CreateMetadataCoreState(metadata_config);
   for (size_t index = 0; index < records.size(); ++index) {
     const auto& token = records[index];
     EXPECT_EQ(token.token_id, tokens[index]);
@@ -507,7 +405,6 @@ TEST_F(MetadataCoreStateTests, GeneratorOmitsTimingWhenDisabled) {
 
 TEST_F(MetadataCoreStateTests, GeneratedMetadataPreservesMultiFrameIntervals) {
   auto stream = tokenizer->CreateStream();
-  stream->CreateMetadataCoreState(metadata_config);
   for (auto& timing : source->last_token_intervals_) timing.stop = 9;
   const auto emitted = generator->GetNextTokensWithMetadata();
   ASSERT_EQ(emitted.size(), tokens.size());
@@ -547,7 +444,6 @@ TEST_F(MetadataCoreStateTests, GeneratedMetadataPreservesMultiFrameIntervals) {
 
 TEST_F(MetadataCoreStateTests, RetainsGenerationTimingAfterGeneratorAdvances) {
   auto stream = tokenizer->CreateStream();
-  auto state = stream->CreateMetadataCoreState(metadata_config);
   const auto token = generator->GetNextTokensWithMetadata()[0];
   stream->DecodeWithMetadata(token);
   source->SetStep({}, 99);
@@ -564,9 +460,9 @@ TEST_F(MetadataCoreStateTests, EmptyFinalizationAndInputValidation) {
   const OgaTokenMetadataAcousticFrameInterval reversed_interval{4, 2};
   const OgaTokenMetadataAcousticFrameInterval valid_interval{0, 3};
   auto stream = tokenizer->CreateStream();
-  auto state = stream->CreateMetadataCoreState(metadata_config);
-  stream->FinalizeMetadata();
-  EXPECT_EQ(state->Metadata().timestampMetadata, nullptr);
+  const auto& empty = stream->FinalizeMetadata();
+  ASSERT_NE(empty.timestampMetadata, nullptr);
+  EXPECT_EQ(empty.timestampMetadata->word_count, 0U);
   EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 1, negative_interval}), std::runtime_error);
   EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 1, empty_interval}), std::runtime_error);
   EXPECT_THROW(stream->DecodeWithMetadata({tokens[0], 1, reversed_interval}), std::runtime_error);

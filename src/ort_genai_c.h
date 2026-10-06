@@ -88,9 +88,6 @@ typedef struct OgaTurnOptions OgaTurnOptions;
 typedef struct OgaTurnUsage OgaTurnUsage;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
-/** Mutable metadata options. A tokenizer stream copies them when it creates its metadata state. */
-typedef struct OgaTokenMetadataCoreConfig OgaTokenMetadataCoreConfig;
-
 /** Half-open [start, stop) interval in absolute acoustic frames. */
 typedef struct OgaTokenMetadataAcousticFrameInterval {
   int64_t start;
@@ -1110,24 +1107,8 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
-/** Create an owned metadata configuration with all features disabled. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenMetadataCoreConfig(OgaTokenMetadataCoreConfig** out);
-/** Apply a JSON overlay to the configuration. See docs/metadata_decode.md for settings. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenMetadataCoreConfigOverlay(OgaTokenMetadataCoreConfig*, const char* json);
-OGA_EXPORT void OGA_API_CALL OgaDestroyTokenMetadataCoreConfig(OgaTokenMetadataCoreConfig*);
-
-/** Explicitly create stream-owned metadata state using the tokenizer's model configuration.
- * Call before decoding and again after Reset. Fails if a state already exists or decoding has started.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig(OgaTokenizerStream*);
-
-/** Explicitly create stream-owned metadata state from copied per-stream settings.
- * Requires a non-null config. Must precede decoding; Reset permits reinitialization.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamCreateMetadataCoreState(OgaTokenizerStream*, const OgaTokenMetadataCoreConfig* config);
-
 /** Decode a generated token record. Enabled timestamps require a present, valid interval.
- * Requires explicit metadata state creation. Runs enabled post-processing before returning.
+ * Uses the tokenizer's model-derived metadata settings.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadata(OgaTokenizerStream*, const OgaTokenMetadataInput* token, const OgaTokenMetadataOutput** out);
 /** Flush enabled metadata processing without generating or injecting a token. */
