@@ -20,6 +20,8 @@ The standard `build.sh` and `build.bat` wrappers enable telemetry. For informati
 
 ONNX Runtime GenAI uses the cross-platform 1DS SDK (cpp_client_telemetry) to send ONNX Runtime GenAI trace events to Microsoft's telemetry backend over HTTPS. Based on user consent, this data is handled following GDPR and privacy regulations for anonymity and data access controls.
 
+When building the SDK from source, native SDK device-ID collection is disabled on Linux, macOS, and Windows. GenAI instead supplies a hash of a locally generated persistent identifier, not a hardware identifier. Android and iOS retain the SDK's platform device ID. Caller-supplied SDK packages control their own native device-ID collection settings.
+
 For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
 
 ### Disabling Telemetry
