@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <string>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -103,9 +104,92 @@ TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
   ApplyRuntimeProfileForSelectedDevice(config, device);
 
   EXPECT_EQ(device.state->memory_queries, 1u);
+  EXPECT_EQ(device.state->integrated_queries, 0u);
   EXPECT_EQ(device.state->device_id_queries, 1u);
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 64u);
   EXPECT_TRUE(config.runtime_profiles.empty());
+}
+
+TEST(ConfigTest, IntegratedAndDiscreteProfilesShareMemoryRangeWithoutAmbiguity) {
+  Config config;
+  OverlayConfig(config, R"({
+    "engine":{"dynamic_batching":{"num_blocks":32}},
+    "runtime_profiles":[
+      {"id":"integrated","eligibility":{"minimum_total_device_memory_bytes":100,
+                                        "is_integrated":true},
+       "overlay":{"engine":{"dynamic_batching":{"num_blocks":40}}}},
+      {"id":"discrete","eligibility":{"minimum_total_device_memory_bytes":100,
+                                      "is_integrated":false},
+       "overlay":{"engine":{"dynamic_batching":{"num_blocks":80}}}}
+    ]
+  })");
+
+  for (const auto [integrated, expected_blocks] : {std::pair{true, 40u}, std::pair{false, 80u}}) {
+    auto candidate = config;
+    CountingCudaDevice device;
+    device.state->total_memory_bytes = 100;
+    device.state->is_integrated = integrated;
+    ApplyRuntimeProfileForSelectedDevice(candidate, device);
+    EXPECT_EQ(*candidate.engine.dynamic_batching->num_blocks, expected_blocks);
+    EXPECT_EQ(device.state->integrated_queries, 1u);
+    EXPECT_TRUE(candidate.runtime_profiles.empty());
+  }
+
+  auto legacy_caller = config;
+  ApplyRuntimeProfile(legacy_caller, 100);
+  EXPECT_EQ(*legacy_caller.engine.dynamic_batching->num_blocks, 32u);
+}
+
+TEST(ConfigTest, IntegratedCapabilityFailureUsesBaseAndReportsError) {
+  Config config;
+  OverlayConfig(config, R"({
+    "engine":{"dynamic_batching":{"num_blocks":32}},
+    "runtime_profiles":[
+      {"id":"generic","eligibility":{"minimum_total_device_memory_bytes":100,
+                                      "maximum_total_device_memory_bytes":199},
+       "overlay":{"engine":{"dynamic_batching":{"num_blocks":60}}}},
+      {"id":"integrated","eligibility":{"minimum_total_device_memory_bytes":200,
+                                        "is_integrated":true},
+       "overlay":{"engine":{"dynamic_batching":{"num_blocks":40}}}}
+    ]
+  })");
+  CountingCudaDevice device;
+  device.state->total_memory_bytes = 100;
+  device.state->is_integrated = std::nullopt;
+  testing::internal::CaptureStderr();
+  ApplyRuntimeProfileForSelectedDevice(config, device);
+  const auto warning = testing::internal::GetCapturedStderr();
+  EXPECT_NE(warning.find("test integrated-device query failed"), std::string::npos);
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
+  EXPECT_TRUE(config.runtime_profiles.empty());
+  EXPECT_EQ(device.state->integrated_queries, 1u);
+}
+
+TEST(ConfigTest, IntegratedEligibilityRequiresBooleanAndDisjointRanges) {
+  for (const auto* value : {"0", "1", "\"true\"", "null"}) {
+    Config config;
+    const auto json = std::string{R"({"runtime_profiles":[{
+      "id":"invalid","eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":)"} +
+                      value + R"(},"overlay":{"search":{"chunk_size":1}}}]})";
+    EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << value;
+  }
+
+  for (const auto* other : {"true", "false"}) {
+    Config config;
+    const auto json = std::string{R"({"runtime_profiles":[
+      {"id":"generic","eligibility":{"minimum_total_device_memory_bytes":1,
+        "maximum_total_device_memory_bytes":10},"overlay":{"search":{"chunk_size":1}}},
+      {"id":"specific","eligibility":{"minimum_total_device_memory_bytes":10,
+        "is_integrated":)"} +
+                      other + R"(},"overlay":{"search":{"chunk_size":2}}}
+    ]})";
+    try {
+      OverlayConfig(config, json);
+      FAIL() << "Expected wildcard eligibility to overlap: " << other;
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("eligibility ranges overlap"), std::string::npos);
+    }
+  }
 }
 
 TEST(ConfigTest, RuntimeProfilesRejectAmbiguousCudaDeviceBeforeMemoryQuery) {
