@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include "telemetry/telemetry_string.h"
 #include "telemetry/telemetry_environment.h"
 #include "telemetry/telemetry_sampling.h"
 #include "telemetry/telemetry_io.h"
@@ -13,6 +14,20 @@
 
 namespace Generators::test {
 namespace {
+
+TEST(TelemetryStringTests, TrimsAndNormalizesBoundedAsciiInput) {
+  EXPECT_TRUE(TelemetryInternal::TrimAscii("").empty());
+  EXPECT_TRUE(TelemetryInternal::TrimAscii(" \t\n\r\f\v").empty());
+  EXPECT_EQ(TelemetryInternal::TrimAscii(" \t\nCPU Name\r\f\v"), "CPU Name");
+  EXPECT_EQ(TelemetryInternal::ToLowerAscii("CPU Name 123"), "cpu name 123");
+  const std::string at_limit(TelemetryInternal::kMaxProcessingBytes, 'A');
+  EXPECT_EQ(TelemetryInternal::TrimAscii(at_limit + "hidden"), at_limit);
+  EXPECT_TRUE(TelemetryInternal::TrimAscii(
+                  std::string(TelemetryInternal::kMaxProcessingBytes, ' ') + "hidden")
+                  .empty());
+  EXPECT_EQ(TelemetryInternal::ToLowerAscii(at_limit + "hidden"),
+            std::string(TelemetryInternal::kMaxProcessingBytes, 'a'));
+}
 
 TEST(TelemetryStringTests, BoundsAsciiAndAllUtf8Widths) {
   EXPECT_EQ(kMaxTelemetryStringLength, 1024u);

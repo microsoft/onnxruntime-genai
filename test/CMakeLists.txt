@@ -23,8 +23,6 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_p
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
-list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_environment_tests.cpp")
-list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -141,12 +139,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 add_executable(telemetry_helpers_tests
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_environment_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry_helpers_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry_environment_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry_redaction_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp"
   "${CMAKE_SOURCE_DIR}/src/models/env_utils.cpp")
 target_include_directories(telemetry_helpers_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/cpp
 )
 target_link_libraries(telemetry_helpers_tests PRIVATE GTest::gtest)
 set_target_properties(telemetry_helpers_tests PROPERTIES

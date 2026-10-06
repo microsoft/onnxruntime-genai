@@ -208,8 +208,8 @@ its explicit `OGA_EXPORT` exports, and CUDA add-on export policies are unchanged
 
 ELF links also localize definitions from all static archives with
 `--exclude-libs,ALL`, including GCC's implicitly linked `libstdc++_nonshared.a`
-compatibility archive on manylinux. Public APIs are compiled directly into the
-shared target or its object library, so this does not hide their definitions.
+compatibility archive on manylinux. Public APIs must remain in direct or OBJECT
+sources: placing them in STATIC archives would hide them despite the version script.
 
 With `ENABLE_TESTS=ON` on Linux or macOS, check that every public API declared in
 `src/ort_genai_c.h` is exported and no other symbols are exported:
@@ -223,7 +223,7 @@ The Linux x64 CPU and CUDA CI jobs run both `SharedLibraryExports` and
 `SharedLibraryArchiveRuntime`, which check strong/weak archive-symbol isolation
 and runtime calls through the public fixture API.
 Windows x64 CPU CI runs `TelemetryHelpersTests`,
-including the environment-read race regressions. Linux and macOS core release jobs also run
+including redaction and environment-read race regressions. Linux and macOS core release jobs also run
 the export checker on the installed library against its installed public header,
 even with `ENABLE_TESTS=OFF`; macOS checks the signed library.
 

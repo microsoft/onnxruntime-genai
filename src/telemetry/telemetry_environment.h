@@ -4,7 +4,6 @@
 #pragma once
 
 #include <array>
-#include <cctype>
 #include <string>
 #include <string_view>
 #include "../models/env_utils.h"
@@ -29,23 +28,6 @@ inline constexpr std::array<const char*, 14> kTelemetrySuppressionVariables = {
     "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",  // Azure DevOps
     "ORT_RUNNING_UNIT_TESTS",              // GenAI / ORT native test harness
 };
-
-inline constexpr size_t kMaxProcessingBytes = 64 * 1024;
-
-inline std::string_view TrimAscii(std::string_view s) {
-  s = s.substr(0, kMaxProcessingBytes);
-  size_t begin = 0;
-  size_t end = s.size();
-  while (begin < end && std::isspace(static_cast<unsigned char>(s[begin]))) ++begin;
-  while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1]))) --end;
-  return s.substr(begin, end - begin);
-}
-
-inline std::string ToLowerAscii(std::string_view s) {
-  std::string out{s.substr(0, kMaxProcessingBytes)};
-  for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return out;
-}
 
 // CI/test flags accept any nonempty value except 0/false/no/off, ignoring case and whitespace.
 inline bool IsTruthyValue(std::string_view value) {

@@ -8,6 +8,8 @@ function(ortgenai_configure_shared_library_exports target)
     set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${exports_list}")
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
     set(exports_map "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/exports.map")
+    # ELF hides archive definitions even when matched by the version script.
+    # Keep public APIs in direct or OBJECT sources, not STATIC archives.
     target_link_options(${target} PRIVATE
       "LINKER:--version-script,${exports_map}"
       "LINKER:--exclude-libs,ALL")

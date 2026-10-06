@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -79,5 +80,26 @@ template <typename Event>
 void SetTelemetryStringProperty(Event& event, const char* name, std::string_view value) {
   event.SetProperty(name, BoundTelemetryString(value));
 }
+
+namespace TelemetryInternal {
+
+inline constexpr size_t kMaxProcessingBytes = 64 * 1024;
+
+inline std::string_view TrimAscii(std::string_view s) {
+  s = s.substr(0, kMaxProcessingBytes);
+  size_t begin = 0;
+  size_t end = s.size();
+  while (begin < end && std::isspace(static_cast<unsigned char>(s[begin]))) ++begin;
+  while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1]))) --end;
+  return s.substr(begin, end - begin);
+}
+
+inline std::string ToLowerAscii(std::string_view s) {
+  std::string out{s.substr(0, kMaxProcessingBytes)};
+  for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return out;
+}
+
+}  // namespace TelemetryInternal
 
 }  // namespace Generators
