@@ -11,6 +11,8 @@
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
 
 #include "telemetry_environment.h"
+#include "telemetry_io.h"
+#include "../logging.h"
 
 #include <algorithm>
 #include <array>
@@ -64,6 +66,25 @@
 namespace Generators {
 
 namespace {
+
+void WarnOversizedTelemetryInput() {
+  if (g_log.enabled && g_log.warning) {
+    Log("warning", "Ignoring oversized or unstable telemetry environment/path input");
+  }
+}
+
+std::string ReadTelemetryEnvironment(const char* name) {
+  const auto value = GetEnv(name, kMaxTelemetryInputBytes);
+  if (!value) {
+    WarnOversizedTelemetryInput();
+    return {};
+  }
+  return *value;
+}
+
+#if defined(__linux__) || defined(__ANDROID__)
+std::string ReadBoundedFile(const char* path);
+#endif
 
 // Generate a random v4 UUID string.
 std::string GenerateUuidV4() {
@@ -155,7 +176,7 @@ std::string GetCpuModel() {
         return {};
       }
 
-      for (;;) {
+      for (int attempt = 0; attempt < 3; ++attempt) {
         std::string value(size, '\0');
         DWORD bytes_read = size;
         type = 0;
@@ -175,8 +196,9 @@ std::string GetCpuModel() {
         while (!value.empty() && value.back() == '\0') {
           value.pop_back();
         }
-        return value;
+        return BoundTelemetryString(value);
       }
+      return {};
     };
 
     const std::string processor_name = read_processor_name();
@@ -190,39 +212,21 @@ std::string GetCpuModel() {
   char buf[256]{};
   size_t len = sizeof(buf);
   if (sysctlbyname("machdep.cpu.brand_string", buf, &len, nullptr, 0) == 0) {
-    return std::string(buf, len > 0 ? len - 1 : 0);
+    return BoundTelemetryString(std::string_view(buf, len > 0 ? len - 1 : 0));
   }
   return "unknown";
 #else
-  std::ifstream ifs("/proc/cpuinfo");
-  std::string line;
-  while (std::getline(ifs, line)) {
-    if (line.find("model name") == 0) {
-      auto pos = line.find(':');
-      if (pos != std::string::npos) {
-        auto result = line.substr(pos + 1);
-        // Trim leading whitespace
-        auto start = result.find_first_not_of(" \t");
-        return start != std::string::npos ? result.substr(start) : result;
-      }
-    }
-  }
-  return "unknown";
+  return TelemetryInternal::CpuModelFromTelemetryInput(ReadBoundedFile("/proc/cpuinfo"));
 #endif
 }
 
 #if defined(__linux__) || defined(__ANDROID__)
 
-constexpr size_t kMaxHostEvidenceBytes = 16 * 1024;
-
 std::string ReadBoundedFile(const char* path) {
   std::ifstream input(path, std::ios::binary);
   if (!input) return {};
 
-  std::string contents(kMaxHostEvidenceBytes, '\0');
-  input.read(contents.data(), static_cast<std::streamsize>(contents.size()));
-  contents.resize(static_cast<size_t>(input.gcount()));
-  return contents;
+  return TelemetryInternal::ReadTelemetryInput(input);
 }
 
 bool FileExists(const char* path) {
@@ -237,14 +241,14 @@ TelemetryInternal::HostEnvironmentInfo GetHostEnvironmentInfo() {
 #if defined(__linux__) || defined(__ANDROID__)
   evidence.docker_marker = FileExists("/.dockerenv");
   evidence.podman_marker = FileExists("/run/.containerenv");
-  evidence.kubernetes = !TelemetryInternal::GetTelemetryEnv("KUBERNETES_SERVICE_HOST").empty();
-  evidence.aws_ecs = !TelemetryInternal::GetTelemetryEnv("ECS_CONTAINER_METADATA_URI").empty() ||
-                     !TelemetryInternal::GetTelemetryEnv("ECS_CONTAINER_METADATA_URI_V4").empty();
+  evidence.kubernetes = !ReadTelemetryEnvironment("KUBERNETES_SERVICE_HOST").empty();
+  evidence.aws_ecs = !ReadTelemetryEnvironment("ECS_CONTAINER_METADATA_URI").empty() ||
+                     !ReadTelemetryEnvironment("ECS_CONTAINER_METADATA_URI_V4").empty();
   evidence.generic_container =
-      TelemetryInternal::IsCiValueTruthy(
-          TelemetryInternal::GetTelemetryEnv("DOTNET_RUNNING_IN_CONTAINER"));
+      TelemetryInternal::IsTruthyValue(
+          ReadTelemetryEnvironment("DOTNET_RUNNING_IN_CONTAINER"));
   evidence.systemd_container =
-      ReadBoundedFile("/run/systemd/container") + TelemetryInternal::GetTelemetryEnv("container");
+      ReadBoundedFile("/run/systemd/container") + ReadTelemetryEnvironment("container");
   evidence.cgroup =
       ReadBoundedFile("/proc/1/cgroup") + ReadBoundedFile("/proc/self/cgroup");
   evidence.cpu_info = ReadBoundedFile("/proc/cpuinfo");
@@ -253,12 +257,12 @@ TelemetryInternal::HostEnvironmentInfo GetHostEnvironmentInfo() {
                  ReadBoundedFile("/sys/class/dmi/id/product_name") +
                  ReadBoundedFile("/sys/class/dmi/id/board_vendor");
 #if defined(__ANDROID__)
-  const std::string android_properties = ReadBoundedFile("/system/build.prop");
+  const std::string android_properties =
+      TelemetryInternal::ToLowerAscii(ReadBoundedFile("/system/build.prop"));
   evidence.android_emulator =
-      TelemetryInternal::ContainsAscii(android_properties, "ro.kernel.qemu=1") ||
-      TelemetryInternal::ContainsAscii(android_properties, "ro.boot.qemu=1") ||
-      TelemetryInternal::ContainsAscii(android_properties,
-                                       "ro.product.manufacturer=genymotion");
+      android_properties.find("ro.kernel.qemu=1") != std::string::npos ||
+      android_properties.find("ro.boot.qemu=1") != std::string::npos ||
+      android_properties.find("ro.product.manufacturer=genymotion") != std::string::npos;
 #endif
 #elif defined(__APPLE__) && !TARGET_OS_IPHONE
   int is_virtual_machine = 0;
@@ -278,22 +282,22 @@ TelemetryInternal::HostEnvironmentInfo GetHostEnvironmentInfo() {
 // rather than writing to a predictable world-writable temp path. Never throws.
 std::filesystem::path GetDeviceIdStorageDir() {
 #if defined(_WIN32)
-  const char* base = std::getenv("LOCALAPPDATA");
-  if (!base) return {};
+  const auto base = ReadTelemetryEnvironment("LOCALAPPDATA");
+  if (base.empty()) return {};
   return std::filesystem::path(base) / "Microsoft" / "DeveloperTools" / ".onnxruntime";
 #else
 #if !defined(__APPLE__)
   // XDG requires absolute paths. Ignore relative values so telemetry state is never written below
   // the process working directory.
-  if (const char* xdg = std::getenv("XDG_CACHE_HOME");
-      xdg != nullptr && std::filesystem::path(xdg).is_absolute()) {
+  if (const auto xdg = ReadTelemetryEnvironment("XDG_CACHE_HOME");
+      !xdg.empty() && std::filesystem::path(xdg).is_absolute()) {
     return std::filesystem::path(xdg) / "Microsoft" / "DeveloperTools" / ".onnxruntime";
   }
 #endif
 
   std::filesystem::path home;
-  if (const char* h = std::getenv("HOME");
-      h != nullptr && std::filesystem::path(h).is_absolute()) {
+  if (const auto h = ReadTelemetryEnvironment("HOME");
+      !h.empty() && std::filesystem::path(h).is_absolute()) {
     home = h;
   } else {
     struct passwd pwd{};
@@ -305,9 +309,13 @@ std::filesystem::path GetDeviceIdStorageDir() {
         sc > 0 ? std::min(static_cast<size_t>(sc), kMaxPwBufferSize) : kDefaultPwBufferSize;
     std::vector<char> buf(pw_buffer_size);
     if (getpwuid_r(getuid(), &pwd, buf.data(), buf.size(), &result) == 0 &&
-        result != nullptr && result->pw_dir != nullptr &&
-        std::filesystem::path(result->pw_dir).is_absolute()) {
-      home = result->pw_dir;
+        result != nullptr && result->pw_dir != nullptr) {
+      const auto directory = BoundedTelemetryCString(result->pw_dir);
+      if (directory.size() > kMaxTelemetryInputBytes) {
+        WarnOversizedTelemetryInput();
+      } else if (std::filesystem::path(directory).is_absolute()) {
+        home = directory;
+      }
     }
   }
   if (home.empty()) return {};
@@ -384,6 +392,7 @@ class ScopedDeviceIdMutex {
 
     DWORD size = 0;
     GetTokenInformation(token_handle.Get(), TokenUser, nullptr, 0, &size);
+    if (size < sizeof(TOKEN_USER) || size > sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE) return;
     std::vector<unsigned char> token_info(size);
     if (size == 0 ||
         !GetTokenInformation(token_handle.Get(), TokenUser, token_info.data(), size, &size)) {
@@ -427,6 +436,16 @@ class ScopedDeviceIdMutex {
   bool acquired_{};
 };
 
+enum class RegistryReadResult { Missing,
+                                Valid,
+                                Invalid,
+                                Failed };
+
+struct RegistryRead {
+  RegistryReadResult result;
+  std::string value;
+};
+
 // Read (or create) the persistent device id in the Windows registry at
 // HKCU\SOFTWARE\Microsoft\DeveloperTools\.onnxruntime : deviceid (REG_SZ), matching Olive and the
 // wider Microsoft AI dev-tools family so a machine reports one shared device id. HKCU is per-user;
@@ -435,51 +454,64 @@ std::string GetOrCreateWindowsDeviceId(DeviceIdStatus& status) {
   static constexpr const char* kSubKey = "SOFTWARE\\Microsoft\\DeveloperTools\\.onnxruntime";
   static constexpr const char* kValueName = "deviceid";
 
-  bool corrupted = false;  // a value was present but not a valid UUID
-  const auto read_existing = [&]() -> std::string {
+  const auto read_existing = [&]() -> RegistryRead {
     HKEY key{};
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, kSubKey, 0, KEY_READ | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS) {
-      char buf[256]{};
-      DWORD type = 0;
-      DWORD size = sizeof(buf);
-      const LSTATUS query =
-          RegQueryValueExA(key, kValueName, nullptr, &type, reinterpret_cast<LPBYTE>(buf), &size);
-      RegCloseKey(key);
-      if (query == ERROR_SUCCESS && type == REG_SZ && size > 0) {
-        // A REG_SZ value is not guaranteed to include its terminating null within `size`.
-        buf[(size < sizeof(buf)) ? size : (sizeof(buf) - 1)] = '\0';
-        std::string existing(buf);
-        while (!existing.empty() && (existing.back() == '\0' || existing.back() == '\r' ||
-                                     existing.back() == '\n' || existing.back() == ' ')) {
-          existing.pop_back();
-        }
-        if (IsValidUuid(existing)) return existing;
-        corrupted = true;  // present but invalid -> regenerate
-      }
-    }
-    return {};
+    const LSTATUS open_status =
+        RegOpenKeyExA(HKEY_CURRENT_USER, kSubKey, 0, KEY_READ | KEY_WOW64_64KEY, &key);
+    if (open_status == ERROR_FILE_NOT_FOUND) return {RegistryReadResult::Missing, {}};
+    if (open_status != ERROR_SUCCESS) return {RegistryReadResult::Failed, {}};
+
+    std::array<char, 256> buffer{};
+    DWORD type = 0;
+    DWORD size = static_cast<DWORD>(buffer.size());
+    const LSTATUS query =
+        RegQueryValueExA(key, kValueName, nullptr, &type, reinterpret_cast<LPBYTE>(buffer.data()), &size);
+    RegCloseKey(key);
+    if (query == ERROR_FILE_NOT_FOUND) return {RegistryReadResult::Missing, {}};
+    if (query == ERROR_MORE_DATA) return {RegistryReadResult::Invalid, {}};
+    if (query != ERROR_SUCCESS) return {RegistryReadResult::Failed, {}};
+    if (type != REG_SZ || size == 0 || size > buffer.size()) return {RegistryReadResult::Invalid, {}};
+
+    size_t length = size;
+    if (buffer[length - 1] == '\0') --length;
+    const std::string_view value{buffer.data(), length};
+    if (value.find('\0') != std::string_view::npos) return {RegistryReadResult::Invalid, {}};
+    std::string uuid{TelemetryInternal::TrimAscii(value)};
+    return {IsValidUuid(uuid) ? RegistryReadResult::Valid : RegistryReadResult::Invalid,
+            std::move(uuid)};
   };
 
-  if (std::string existing = read_existing(); !existing.empty()) {
+  RegistryRead existing = read_existing();
+  if (existing.result == RegistryReadResult::Valid) {
     status = DeviceIdStatus::Existing;
-    return existing;
+    return std::move(existing.value);
   }
+  if (existing.result == RegistryReadResult::Failed) {
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
+  }
+  const bool was_corrupted = existing.result == RegistryReadResult::Invalid;
 
   ScopedDeviceIdMutex mutex;
   if (!mutex) {
-    if (std::string existing = read_existing(); !existing.empty()) {
+    existing = read_existing();
+    if (existing.result == RegistryReadResult::Valid) {
       status = DeviceIdStatus::Existing;
-      return existing;
+      return std::move(existing.value);
     }
     status = DeviceIdStatus::Failed;
     return GenerateUuidV4();
   }
 
   // Another process may have published the value while this process waited.
-  corrupted = false;
-  if (std::string existing = read_existing(); !existing.empty()) {
+  existing = read_existing();
+  if (existing.result == RegistryReadResult::Valid) {
     status = DeviceIdStatus::Existing;
-    return existing;
+    return std::move(existing.value);
+  }
+  if (existing.result == RegistryReadResult::Failed) {
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
   }
 
   std::string uuid = GenerateUuidV4();
@@ -494,7 +526,10 @@ std::string GetOrCreateWindowsDeviceId(DeviceIdStatus& status) {
   }
   // Corrupted (invalid-and-regenerated) is preserved over New even after a successful rewrite so
   // callers can still observe that the stored id had to be replaced.
-  status = !wrote ? DeviceIdStatus::Failed : (corrupted ? DeviceIdStatus::Corrupted : DeviceIdStatus::New);
+  status = !wrote ? DeviceIdStatus::Failed
+                  : (was_corrupted || existing.result == RegistryReadResult::Invalid
+                         ? DeviceIdStatus::Corrupted
+                         : DeviceIdStatus::New);
   return uuid;
 }
 #endif  // _WIN32
@@ -668,15 +703,6 @@ struct DeviceIdFileRead {
   std::string uuid;
 };
 
-void TrimAsciiWhitespace(std::string& value) {
-  value.erase(std::find_if_not(value.rbegin(), value.rend(),
-                               [](unsigned char c) { return std::isspace(c); })
-                  .base(),
-              value.end());
-  value.erase(value.begin(), std::find_if_not(value.begin(), value.end(),
-                                              [](unsigned char c) { return std::isspace(c); }));
-}
-
 DeviceIdFileRead ReadDeviceIdFileNoFollow(int directory_fd, const char* file_name) {
   int flags = O_RDONLY;
 #ifdef O_NOFOLLOW
@@ -718,8 +744,7 @@ DeviceIdFileRead ReadDeviceIdFileNoFollow(int directory_fd, const char* file_nam
   if (!read_ok) return {DeviceIdReadResult::Failed, {}};
   if (total == buffer.size()) return {DeviceIdReadResult::Invalid, {}};
 
-  std::string uuid(buffer.data(), total);
-  TrimAsciiWhitespace(uuid);
+  std::string uuid{TelemetryInternal::TrimAscii(std::string_view{buffer.data(), total})};
   return {IsValidUuid(uuid) ? DeviceIdReadResult::Valid : DeviceIdReadResult::Invalid,
           std::move(uuid)};
 }

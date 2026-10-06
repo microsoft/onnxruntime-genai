@@ -321,6 +321,11 @@ struct Request : std::enable_shared_from_this<Request>,
   // SetDraftTokens.
   void SetDraftTokenDistributions(std::span<const TargetTokenSelection> distributions);
 
+  // Stages drafts the caller already drew, with the distribution each was drawn from, for
+  // probability-ratio verification.
+  void SetSampledDraftTokens(std::span<const int32_t> tokens,
+                             std::span<const TargetTokenSelection> distributions);
+
   /**
    * @brief Draft tokens proposed for the next step but not yet sent through the model.
    */

@@ -181,6 +181,30 @@ def test_structured_target_overrides_legacy_alias():
     assert effective.target_options["quant_config"]["weights"]["block_size"] == 128
 
 
+@pytest.mark.parametrize("fuse_qkv", [False, True])
+def test_target_qkv_fusion_maps_to_legacy_option(fuse_qkv):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"optimizations": {"fuse_qkv": fuse_qkv}},
+    )
+
+    assert effective.extra_options["fuse_qkv"] is fuse_qkv
+
+
+@pytest.mark.parametrize("legacy_option", ["fuse_qkv", "disable_qkv_fusion"])
+def test_structured_target_qkv_fusion_overrides_legacy_option(legacy_option):
+    with pytest.warns(UserWarning, match=f"fuse_qkv overrides legacy extra_options.{legacy_option}"):
+        effective = normalize_builder_config(
+            "int4",
+            "cuda",
+            {legacy_option: True},
+            target_options={"optimizations": {"fuse_qkv": False}},
+        )
+
+    assert effective.extra_options["fuse_qkv"] is False
+
+
 @pytest.mark.parametrize(
     "legacy_options",
     [
@@ -811,6 +835,50 @@ def test_runtime_adds_config_only_profile():
     assert updated["runtime_profiles"] == [profile]
     assert updated["model"]["decoder"]["filename"] == "model.onnx"
     assert updated["engine"]["dynamic_batching"]["num_blocks"] == 800
+
+
+def test_runtime_profiles_accept_disjoint_integrated_and_discrete_conditions():
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"num_blocks": 32}}}
+    profiles = [
+        {
+            "id": str(integrated),
+            "eligibility": {"minimum_total_device_memory_bytes": 0, "is_integrated": integrated},
+            "overlay": {"engine": {"dynamic_batching": {"num_blocks": blocks}}},
+        }
+        for integrated, blocks in [(True, 40), (False, 80)]
+    ]
+    assert apply_runtime_config(generated, {"runtime_profiles": profiles})["runtime_profiles"] == profiles
+
+
+@pytest.mark.parametrize("invalid", [0, 1, "true", None])
+def test_runtime_profiles_require_boolean_integrated_condition(invalid):
+    generated = {"model": {"decoder": {}}}
+    profile = {
+        "id": "invalid",
+        "eligibility": {"minimum_total_device_memory_bytes": 0, "is_integrated": invalid},
+        "overlay": {"search": {"chunk_size": 1}},
+    }
+    with pytest.raises(ValueError, match="is_integrated must be a boolean"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+@pytest.mark.parametrize("first,second", [(None, True), (False, False), (True, True)])
+def test_runtime_profiles_reject_overlapping_device_conditions(first, second):
+    generated = {"model": {"decoder": {}}}
+    profiles = [
+        {
+            "id": str(index),
+            "eligibility": {
+                "minimum_total_device_memory_bytes": minimum,
+                "maximum_total_device_memory_bytes": 10,
+                **({"is_integrated": value} if value is not None else {}),
+            },
+            "overlay": {"search": {"chunk_size": index + 1}},
+        }
+        for index, (minimum, value) in enumerate([(1, first), (10, second)])
+    ]
+    with pytest.raises(ValueError, match="eligibility ranges overlap"):
+        apply_runtime_config(generated, {"runtime_profiles": profiles})
 
 
 @pytest.mark.parametrize("in_profile", [False, True])

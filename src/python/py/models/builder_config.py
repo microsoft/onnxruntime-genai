@@ -377,10 +377,14 @@ def flatten_target_options(
             flattened[legacy_key] = kv_cache[field_name]
 
     optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up"}, "target_options.optimizations")
+    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "target_options.optimizations")
     if "fuse_mlp_gate_up" in optimizations:
         warn_structured_override(legacy_options, "fuse_mlp_gate_up", "target_options.optimizations.fuse_mlp_gate_up")
         flattened["fuse_mlp_gate_up"] = optimizations["fuse_mlp_gate_up"]
+    if "fuse_qkv" in optimizations:
+        warn_structured_override(legacy_options, "fuse_qkv", "target_options.optimizations.fuse_qkv")
+        warn_structured_override(legacy_options, "disable_qkv_fusion", "target_options.optimizations.fuse_qkv")
+        flattened["fuse_qkv"] = optimizations["fuse_qkv"]
 
     return flattened, quant_config, effective_precision
 
@@ -1063,7 +1067,7 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
             raise ValueError(f"{path}.eligibility must be an object")
         check_fields(
             eligibility,
-            {"minimum_total_device_memory_bytes", "maximum_total_device_memory_bytes"},
+            {"minimum_total_device_memory_bytes", "maximum_total_device_memory_bytes", "is_integrated"},
             f"{path}.eligibility",
         )
         minimum = eligibility.get("minimum_total_device_memory_bytes")
@@ -1076,7 +1080,10 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
                 raise ValueError(f"{path}.eligibility.{field_name} must be a non-negative integer")
         if maximum < minimum:
             raise ValueError(f"{path}.eligibility maximum must not be below minimum")
-        ranges.append((minimum, maximum, profile_id))
+        integrated = eligibility.get("is_integrated")
+        if "is_integrated" in eligibility and not isinstance(integrated, bool):
+            raise ValueError(f"{path}.eligibility.is_integrated must be a boolean")
+        ranges.append((minimum, maximum, integrated, profile_id))
 
         overlay = profile.get("overlay")
         if not isinstance(overlay, dict):
@@ -1127,9 +1134,13 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
         if not (decoder or dynamic_batching or search or speculative):
             raise ValueError(f"{path}.overlay must contain at least one overlay field")
 
-    for index, (minimum, maximum, profile_id) in enumerate(ranges):
-        for other_minimum, other_maximum, other_id in ranges[index + 1 :]:
-            if minimum <= other_maximum and other_minimum <= maximum:
+    for index, (minimum, maximum, integrated, profile_id) in enumerate(ranges):
+        for other_minimum, other_maximum, other_integrated, other_id in ranges[index + 1 :]:
+            if (
+                minimum <= other_maximum
+                and other_minimum <= maximum
+                and (integrated is None or other_integrated is None or integrated == other_integrated)
+            ):
                 raise ValueError(f"runtime profile eligibility ranges overlap: {profile_id!r} and {other_id!r}")
 
 

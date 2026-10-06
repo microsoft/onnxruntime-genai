@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdarg>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <system_error>
@@ -42,6 +43,10 @@ namespace {
 // cudaFreeHost also waits for the device, so small mirrors are recycled instead. A mirror released
 // while a host-to-device copy from it may still be queued is only reused once an event recorded
 // behind that copy has completed.
+//
+// Release never waits for the device. A mirror that does not fit under the retention limits is
+// parked in an overflow list, where Acquire can still reuse it once its copy completes. Overflow
+// mirrors are freed only while the stream is idle, because cudaFreeHost waits for queued work.
 class PinnedHostPool {
  public:
   static constexpr size_t kMinBytes = 256;
@@ -66,17 +71,17 @@ class PinnedHostPool {
       std::lock_guard<std::mutex> lock{mutex_};
       auto& entries = free_[cls];
       for (size_t i = entries.size(); i-- > 0;) {
-        Entry entry = entries[i];
-        if (entry.event) {
-          const cudaError_t status = ::cudaEventQuery(entry.event);
-          if (status == cudaErrorNotReady)
-            continue;
-          CUDA_CHECK(status);
-          events_.push_back(entry.event);
-        }
+        if (!CopyCompletedLocked(entries[i])) continue;
+        uint8_t* p = entries[i].p;
         entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(i));
         retained_bytes_ -= capacity;
-        return entry.p;
+        return p;
+      }
+      for (size_t i = overflow_.size(); i-- > 0;) {
+        if (overflow_[i].capacity != capacity || !CopyCompletedLocked(overflow_[i])) continue;
+        uint8_t* p = overflow_[i].p;
+        overflow_.erase(overflow_.begin() + static_cast<std::ptrdiff_t>(i));
+        return p;
       }
     }
     void* p{};
@@ -95,36 +100,99 @@ class PinnedHostPool {
         return;
       }
     }
+    bool has_overflow = false;
     {
       std::lock_guard<std::mutex> lock{mutex_};
-      auto& entries = free_[ClassOf(capacity)];
-      if (entries.size() < kMaxFreePerClass && retained_bytes_ + capacity <= kMaxRetainedBytes) {
-        try {
-          entries.push_back(Entry{p, event});
+      try {
+        const Entry entry{p, capacity, event};
+        if (FitsLocked(capacity)) {
+          free_[ClassOf(capacity)].push_back(entry);
           retained_bytes_ += capacity;
-          return;
-        } catch (...) {
+        } else {
+          overflow_.push_back(entry);
         }
+        has_overflow = !overflow_.empty();
+        p = nullptr;
+      } catch (...) {
       }
     }
-    // Not retained. Free outside the lock because these calls wait for the device.
-    if (event) {
-      ::cudaEventSynchronize(event);
-      ReturnEvent(event);
+    if (p) {
+      // No memory to track the mirror: wait for its copy and free it now.
+      if (event) {
+        ::cudaEventSynchronize(event);
+        ReturnEvent(event);
+      }
+      ::cudaFreeHost(p);
+      return;
     }
-    ::cudaFreeHost(p);
+    if (has_overflow) TrimOverflow();
   }
 
  private:
   struct Entry {
     uint8_t* p;
-    cudaEvent_t event;  // null when no copy from the buffer was outstanding at release
+    size_t capacity;
+    cudaEvent_t event;  // null once no copy from the buffer can be outstanding
   };
 
   static size_t ClassOf(size_t bytes) {
     size_t cls = 0;
     while ((kMinBytes << cls) < bytes) ++cls;
     return cls;
+  }
+
+  bool FitsLocked(size_t capacity) const {
+    return free_[ClassOf(capacity)].size() < kMaxFreePerClass &&
+           retained_bytes_ + capacity <= kMaxRetainedBytes;
+  }
+
+  bool CopyCompletedLocked(Entry& entry) {
+    if (!entry.event) return true;
+    const cudaError_t status = ::cudaEventQuery(entry.event);
+    if (status == cudaErrorNotReady) return false;
+    CUDA_CHECK(status);
+    events_.push_back(entry.event);
+    entry.event = nullptr;
+    return true;
+  }
+
+  // Moves overflow mirrors whose copies have completed under the retention limits, and frees the
+  // rest only while the stream is idle so that cudaFreeHost has no queued work to wait for.
+  void TrimOverflow() noexcept {
+    cudaStream_t stream = GetStream();
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    const bool idle = ::cudaStreamIsCapturing(stream, &capture) == cudaSuccess &&
+                      capture == cudaStreamCaptureStatusNone && ::cudaStreamQuery(stream) == cudaSuccess;
+    for (;;) {
+      uint8_t* victim = nullptr;
+      {
+        std::lock_guard<std::mutex> lock{mutex_};
+        for (size_t i = overflow_.size(); i-- > 0 && !victim;) {
+          Entry& entry = overflow_[i];
+          // A query error leaves the entry for Acquire, which reports it.
+          if (entry.event) {
+            if (::cudaEventQuery(entry.event) != cudaSuccess) continue;
+            ReturnEventLocked(entry.event);
+            entry.event = nullptr;
+          }
+          if (FitsLocked(entry.capacity)) {
+            try {
+              free_[ClassOf(entry.capacity)].push_back(entry);
+              retained_bytes_ += entry.capacity;
+              overflow_.erase(overflow_.begin() + static_cast<std::ptrdiff_t>(i));
+              continue;
+            } catch (...) {
+            }
+          }
+          if (idle) {
+            victim = entry.p;
+            overflow_.erase(overflow_.begin() + static_cast<std::ptrdiff_t>(i));
+          }
+        }
+      }
+      if (!victim) return;
+      ::cudaFreeHost(victim);
+    }
   }
 
   cudaEvent_t TakeEvent() noexcept {
@@ -142,6 +210,10 @@ class PinnedHostPool {
 
   void ReturnEvent(cudaEvent_t event) noexcept {
     std::lock_guard<std::mutex> lock{mutex_};
+    ReturnEventLocked(event);
+  }
+
+  void ReturnEventLocked(cudaEvent_t event) noexcept {
     try {
       events_.push_back(event);
     } catch (...) {
@@ -151,6 +223,7 @@ class PinnedHostPool {
 
   std::mutex mutex_;
   std::vector<Entry> free_[kClasses];
+  std::vector<Entry> overflow_;  // released past the retention limits; not counted in them
   std::vector<cudaEvent_t> events_;
   size_t retained_bytes_{};
 };
@@ -191,16 +264,33 @@ struct GpuMemory final : DeviceBuffer {
     }
   }
 
+  // Copies up to this size run as kernels that read or write the pinned mirror in place (see
+  // cuda::LaunchCopyBytes); larger ones use the copy engine.
+  static constexpr size_t kKernelCopyMaxBytes = size_t{256} << 10;
+
   void CopyDeviceToCpu() override {
     AllocateCpu();
-    CUDA_CHECK(::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream()));
+    if (size_in_bytes_ <= kKernelCopyMaxBytes) {
+      cuda::LaunchCopyBytes(p_cpu_, p_device_, size_in_bytes_, GetStream());
+    } else {
+      CUDA_CHECK(::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream()));
+    }
     CUDA_CHECK(::cudaStreamSynchronize(GetStream()));
     copy_to_device_pending_ = false;
   }
 
   void CopyCpuToDevice() override {
     assert(p_cpu_);
-    CUDA_CHECK(::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream()));
+    if (size_in_bytes_ <= cuda::kMaxStoreBytes) {
+      // The launch captures the bytes, so the mirror is free again as soon as this returns.
+      cuda::LaunchStoreBytes(p_device_, p_cpu_, size_in_bytes_, GetStream());
+      return;
+    }
+    if (size_in_bytes_ <= kKernelCopyMaxBytes) {
+      cuda::LaunchCopyBytes(p_device_, p_cpu_, size_in_bytes_, GetStream());
+    } else {
+      CUDA_CHECK(::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream()));
+    }
     copy_to_device_pending_ = true;
   }
 
@@ -210,15 +300,24 @@ struct GpuMemory final : DeviceBuffer {
   }
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
-    if (source.GetType() == device_label)
-      CUDA_CHECK(::cudaMemcpyAsync(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes,
-                                   ::cudaMemcpyDeviceToDevice, GetStream()));
-    else
+    if (source.GetType() == device_label) {
+      if (size_in_bytes <= kKernelCopyMaxBytes) {
+        cuda::LaunchCopyBytes(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes, GetStream());
+      } else {
+        CUDA_CHECK(::cudaMemcpyAsync(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes,
+                                     ::cudaMemcpyDeviceToDevice, GetStream()));
+      }
+    } else {
       gp_genai->CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
+    }
   }
 
   void Zero() override {
-    CUDA_CHECK(::cudaMemsetAsync(p_device_, 0, size_in_bytes_, GetStream()));
+    if (size_in_bytes_ <= kKernelCopyMaxBytes) {
+      cuda::LaunchZeroBytes(p_device_, size_in_bytes_, GetStream());
+    } else {
+      CUDA_CHECK(::cudaMemsetAsync(p_device_, 0, size_in_bytes_, GetStream()));
+    }
   }
 
   bool owned_;             // If we own the memory, we delete it on destruction
@@ -689,13 +788,13 @@ struct CudaInterfaceImplBase : DeviceInterface {
     cudaStream_t stream = GetStream();
 
     // Copy only the small per-row top-1 indices back to the host (strided -> contiguous), then sync.
+    // A kernel writes the mapped pinned buffer directly, so the read-back stays on the compute engine.
     if (!argmax_host_ || argmax_host_count_ < static_cast<size_t>(num_rows)) {
       argmax_host_ = CudaMallocHostArray<int32_t>(num_rows);
       argmax_host_count_ = num_rows;
     }
-    CUDA_CHECK(cudaMemcpy2DAsync(argmax_host_.get(), sizeof(int32_t),
-                                 topk_data_->topk_indices, static_cast<size_t>(topk_data_->topk_stride) * sizeof(int32_t),
-                                 sizeof(int32_t), num_rows, cudaMemcpyDeviceToHost, stream));
+    cuda::LaunchGatherStridedInt32(topk_data_->topk_indices, topk_data_->topk_stride, argmax_host_.get(),
+                                   num_rows, stream);
     CUDA_CHECK(cudaStreamSynchronize(stream));
     std::memcpy(out_tokens, argmax_host_.get(), static_cast<size_t>(num_rows) * sizeof(int32_t));
     return true;
@@ -708,10 +807,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
         !RunArgMax(logits, logits_type, num_rows, vocab_size))
       return false;
 
-    CUDA_CHECK(cudaMemcpy2DAsync(out_tokens.Span().data(), sizeof(int32_t),
-                                 topk_data_->topk_indices,
-                                 static_cast<size_t>(topk_data_->topk_stride) * sizeof(int32_t),
-                                 sizeof(int32_t), num_rows, cudaMemcpyDeviceToDevice, GetStream()));
+    cuda::LaunchGatherStridedInt32(topk_data_->topk_indices, topk_data_->topk_stride,
+                                   out_tokens.Span().data(), num_rows, GetStream());
     return true;
   }
 
@@ -732,15 +829,40 @@ struct CudaInterfaceImplBase : DeviceInterface {
     std::scoped_lock lock{state_update_replay_mutex_};
     cudaStream_t stream = GetStream();
     if (state_update_replay_capacity_ < count) {
+      // An earlier replay launched without waiting may still read the buffer being replaced.
+      if (state_update_replay_descriptors_) CUDA_CHECK(cudaStreamSynchronize(stream));
       state_update_replay_descriptors_ = CudaMallocArray<StateUpdateReplayDesc>(count);
       state_update_replay_capacity_ = count;
     }
-    CUDA_CHECK(cudaMemcpyAsync(state_update_replay_descriptors_.get(), descriptors,
-                               count * sizeof(StateUpdateReplayDesc), cudaMemcpyHostToDevice,
-                               stream));
-    cuda::LaunchReplayStateUpdates(
-        state_update_replay_descriptors_.get(), static_cast<int>(count), stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    // Gated-delta-net descriptors the fast kernel can take go first; the rest keep the generic one.
+    const auto fast = [](const StateUpdateReplayDesc& d) {
+      return d.kind == StateUpdateReplayKind::GatedDeltaNet && d.element_size == sizeof(float) &&
+             d.kept_count <= static_cast<uint32_t>(cuda::kMaxFastReplayTransitions) &&
+             d.key_width % 4 == 0 && d.key_width <= static_cast<uint64_t>(cuda::kMaxFastReplayKeyWidth) &&
+             d.channel_count * d.state_width <= static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
+             (reinterpret_cast<uintptr_t>(d.source_state) & 0xF) == 0 &&
+             (reinterpret_cast<uintptr_t>(d.destination_state) & 0xF) == 0;
+    };
+    ordered_replay_descriptors_.assign(descriptors, descriptors + count);
+    const auto generic_begin = std::stable_partition(
+        ordered_replay_descriptors_.begin(), ordered_replay_descriptors_.end(), fast);
+    const int fast_count = static_cast<int>(generic_begin - ordered_replay_descriptors_.begin());
+    int fast_blocks = 0;
+    for (auto it = ordered_replay_descriptors_.begin(); it != generic_begin; ++it) {
+      fast_blocks = std::max(fast_blocks, cuda::ReplayGatedDeltaNetBlocks(static_cast<int>(it->channel_count),
+                                                                          static_cast<int>(it->state_width)));
+    }
+    // The descriptors travel as kernel arguments, so the caller's array may be released right away,
+    // and the device buffer is only reused behind this launch on the same stream. Nothing here waits
+    // for the device.
+    const auto* bytes = reinterpret_cast<const uint8_t*>(ordered_replay_descriptors_.data());
+    const size_t total = count * sizeof(StateUpdateReplayDesc);
+    for (size_t offset = 0; offset < total; offset += cuda::kMaxStoreBytes) {
+      cuda::LaunchStoreBytes(reinterpret_cast<uint8_t*>(state_update_replay_descriptors_.get()) + offset,
+                             bytes + offset, std::min(cuda::kMaxStoreBytes, total - offset), stream);
+    }
+    cuda::LaunchReplayStateUpdates(state_update_replay_descriptors_.get(), fast_count,
+                                   static_cast<int>(count) - fast_count, fast_blocks, stream);
   }
 
   bool TopKScores(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size,
@@ -859,10 +981,20 @@ struct CudaInterfaceImplBase : DeviceInterface {
   std::mutex state_update_replay_mutex_;
   cuda_unique_ptr<StateUpdateReplayDesc> state_update_replay_descriptors_;
   size_t state_update_replay_capacity_{0};
+  std::vector<StateUpdateReplayDesc> ordered_replay_descriptors_;  // host scratch, fast kernel first
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::CUDA; }
+  std::optional<bool> GetIsIntegrated(std::string& error) override {
+    int integrated{};
+    const auto result = cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, 0);
+    if (result != cudaSuccess) {
+      error = cudaGetErrorString(result);
+      return std::nullopt;
+    }
+    return integrated != 0;
+  }
   int GetDeviceId(const ProviderOptions*) override {
     int device_id{};
     CUDA_CHECK(cudaGetDevice(&device_id));
@@ -870,6 +1002,9 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
   }
   bool SupportsOffsetTensorViews() const override { return true; }
   bool SupportsTransactionalFixedState() const override { return true; }
+  bool RecyclesHostMirrorsAfterUpload(size_t bytes) const override {
+    return PinnedHostPool::Pooled(bytes);
+  }
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& search,
                                    int max_length) const override {

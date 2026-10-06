@@ -232,15 +232,18 @@ def test_engine_run_releases_gil(model):
     try:
         # Only count progress during Run, not after it returns or during a periodic GIL switch.
         sys.setswitchinterval(10.0)
+        deadline = time.monotonic() + 5.0
         allow_worker.set()
-        for _ in range(32):
-            if not engine.has_pending_requests() or worker_progressed.is_set():
-                break
+        # Releasing the GIL does not guarantee that the OS schedules the worker during one
+        # short Run call. Keep offering native calls without a Python wait or thread switch.
+        while True:
             native_run_active = True
             try:
                 engine.run(event_buffer)
             finally:
                 native_run_active = False
+            if worker_progressed.is_set() or time.monotonic() >= deadline:
+                break
         assert worker_progressed.is_set()
     finally:
         stop_worker.set()

@@ -23,7 +23,8 @@ static_assert(kCriticalEventSampleRatePercent >= 0.0 &&
 
 inline uint64_t HashSamplingKey(std::string_view app_session_guid, uint32_t session_id) {
   uint64_t hash = 14695981039346656037ULL;
-  for (const unsigned char c : app_session_guid) {
+  // Process GUIDs are 36 bytes; ignore appended data to bound work without changing their hashes.
+  for (const unsigned char c : app_session_guid.substr(0, 36)) {
     hash ^= c;
     hash *= 1099511628211ULL;
   }

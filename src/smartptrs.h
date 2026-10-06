@@ -217,7 +217,7 @@ static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 6;
+inline constexpr uint32_t kDeviceInterfaceVersion = 8;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -277,6 +277,10 @@ struct DeviceInterface {
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const float* /*cross_qk_buffer_data*/, float* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const Ort::Float16_t* /*cross_qk_buffer_data*/, Ort::Float16_t* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void GetAvailableMemory(size_t& /* free_bytes */, size_t& /* total_bytes */) { assert(false); }
+  virtual std::optional<bool> GetIsIntegrated(std::string& error) {
+    error = "CUDA integrated-device detection is unavailable";
+    return std::nullopt;
+  }
 
   // Allow each EP to shape the trivial init-session ProviderOptions used by EnsureDeviceOrtInit.
   // The default does nothing; EPs that need global singletons configured (e.g. WebGPU) or
@@ -348,6 +352,8 @@ struct DeviceInterface {
     return CreateStandardPositionInputs(state, sequence_lengths, attention_mask_name);
   }
 #endif
+  // Enqueues the compact fixed-state replay. It must be ordered before any later device work that
+  // reads the destination states, and `descs` may be released as soon as the call returns.
   virtual void ReplayStateUpdates(const StateUpdateReplayDesc* /*descs*/, size_t /*count*/) {
     throw std::logic_error("Device does not support compact fixed-state replay.");
   }
@@ -358,6 +364,11 @@ struct DeviceInterface {
   // to complete fixed-state device work before FixedStatePool publishes a bank flip.
   // Keep last for vtable ABI stability.
   virtual bool SupportsTransactionalFixedState() const { return false; }
+  // True when a `bytes`-sized host mirror of this device's buffers returns to a pool that hands it
+  // out again only after its pending host-to-device copy completes. Dropping such a mirror right
+  // after an upload never waits for the device, so a caller can take a fresh mirror per upload
+  // instead of synchronizing before it reuses one. Keep last for vtable ABI stability.
+  virtual bool RecyclesHostMirrorsAfterUpload(size_t /*bytes*/) const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

@@ -647,8 +647,10 @@ struct CountingCudaDeviceState {
   size_t device_to_host_copies{};
   size_t synchronize_calls{};
   size_t memory_queries{};
+  size_t integrated_queries{};
   size_t device_id_queries{};
   size_t total_memory_bytes{};
+  std::optional<bool> is_integrated{false};
   int device_id{};
   bool fail_memory_query{};
   std::vector<int> argmax_rows;
@@ -719,6 +721,13 @@ struct CountingCudaDevice final : DeviceInterface {
     }
     free_bytes = state->total_memory_bytes;
     total_bytes = state->total_memory_bytes;
+  }
+  std::optional<bool> GetIsIntegrated(std::string& error) override {
+    ++state->integrated_queries;
+    if (!state->is_integrated) {
+      error = "test integrated-device query failed";
+    }
+    return state->is_integrated;
   }
 
   bool ArgMaxDevice(const void* logits, ONNXTensorElementDataType logits_type,

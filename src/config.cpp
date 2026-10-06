@@ -1243,7 +1243,22 @@ struct Dflash2_Element : JSON::Element {
     } else if (name == "sliding_window") {
       v_.sliding_window = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "independent_sampling") {
-      v_.independent_sampling = JSON::Get<bool>(value);
+      independent_sampling_ = JSON::Get<bool>(value);
+    } else if (name == "sampled_proposal") {
+      using Proposal = Config::Model::Dflash2::SampledProposal;
+      const auto proposal = JSON::Get<std::string_view>(value);
+      if (proposal == "none") {
+        sampled_proposal_ = Proposal::None;
+      } else if (proposal == "greedy_path") {
+        sampled_proposal_ = Proposal::GreedyPath;
+      } else if (proposal == "independent") {
+        sampled_proposal_ = Proposal::Independent;
+      } else if (proposal == "lattice") {
+        sampled_proposal_ = Proposal::Lattice;
+      } else {
+        throw std::out_of_range(
+            "sampled_proposal must be one of none, greedy_path, independent, lattice");
+      }
     } else if (name == "sampling_temperature") {
       const double sampling_temperature = JSON::Get<double>(value);
       if (!std::isfinite(sampling_temperature) || sampling_temperature <= 0.0 ||
@@ -1301,8 +1316,32 @@ struct Dflash2_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  // Resolved once the section is complete so the result does not depend on key order.
+  void OnComplete(bool /*empty*/) override {
+    using Proposal = Config::Model::Dflash2::SampledProposal;
+    const auto sampled_proposal = std::exchange(sampled_proposal_, std::nullopt);
+    const auto independent_sampling = std::exchange(independent_sampling_, std::nullopt);
+    if (sampled_proposal) {
+      if (independent_sampling &&
+          *independent_sampling != (*sampled_proposal == Proposal::Independent)) {
+        throw std::out_of_range(
+            "independent_sampling conflicts with sampled_proposal; set only sampled_proposal");
+      }
+      v_.sampled_proposal = *sampled_proposal;
+    } else if (independent_sampling) {
+      if (*independent_sampling) {
+        v_.sampled_proposal = Proposal::Independent;
+      } else if (v_.sampled_proposal == Proposal::Independent) {
+        v_.sampled_proposal = Proposal::Lattice;
+      }
+    }
+    v_.independent_sampling = v_.sampled_proposal == Proposal::Independent;
+  }
+
  private:
   Config::Model::Dflash2& v_;
+  std::optional<Config::Model::Dflash2::SampledProposal> sampled_proposal_;
+  std::optional<bool> independent_sampling_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
   Dflash2Inputs_Element inputs_{v_.inputs};
@@ -2573,6 +2612,8 @@ struct RuntimeProfileEligibility_Element : JSON::Element {
       v_.minimum_total_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
     } else if (name == "maximum_total_device_memory_bytes") {
       v_.maximum_total_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "is_integrated") {
+      v_.is_integrated = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2787,6 +2828,31 @@ void ValidateConfigPath(const std::string& path, std::string_view context = {}) 
 
 }  // namespace
 
+template <typename T>
+bool ExactConditionsIntersect(const std::optional<T>& first, const std::optional<T>& second) {
+  return !first || !second || *first == *second;
+}
+
+bool EligibilitiesIntersect(const Config::RuntimeProfile::Eligibility& a,
+                            const Config::RuntimeProfile::Eligibility& b) {
+  const uint64_t a_maximum = a.maximum_total_device_memory_bytes.value_or(
+      std::numeric_limits<uint64_t>::max());
+  const uint64_t b_maximum = b.maximum_total_device_memory_bytes.value_or(
+      std::numeric_limits<uint64_t>::max());
+  return *a.minimum_total_device_memory_bytes <= b_maximum &&
+         *b.minimum_total_device_memory_bytes <= a_maximum &&
+         ExactConditionsIntersect(a.is_integrated, b.is_integrated);
+}
+
+bool MatchesEligibility(const Config::RuntimeProfile::Eligibility& eligibility,
+                        const RuntimeProfileDeviceFacts& device) {
+  return device.total_device_memory_bytes >= *eligibility.minimum_total_device_memory_bytes &&
+         (!eligibility.maximum_total_device_memory_bytes ||
+          device.total_device_memory_bytes <= *eligibility.maximum_total_device_memory_bytes) &&
+         (!eligibility.is_integrated ||
+          (device.is_integrated && *device.is_integrated == *eligibility.is_integrated));
+}
+
 void ValidateRuntimeProfiles(const Config& config) {
   std::unordered_set<std::string> ids;
   for (const auto& profile : config.runtime_profiles) {
@@ -2826,15 +2892,9 @@ void ValidateRuntimeProfiles(const Config& config) {
 
   for (size_t first = 0; first < config.runtime_profiles.size(); ++first) {
     const auto& a = config.runtime_profiles[first];
-    const uint64_t a_minimum = *a.eligibility.minimum_total_device_memory_bytes;
-    const uint64_t a_maximum = a.eligibility.maximum_total_device_memory_bytes.value_or(
-        std::numeric_limits<uint64_t>::max());
     for (size_t second = first + 1; second < config.runtime_profiles.size(); ++second) {
       const auto& b = config.runtime_profiles[second];
-      const uint64_t b_minimum = *b.eligibility.minimum_total_device_memory_bytes;
-      const uint64_t b_maximum = b.eligibility.maximum_total_device_memory_bytes.value_or(
-          std::numeric_limits<uint64_t>::max());
-      if (a_minimum <= b_maximum && b_minimum <= a_maximum) {
+      if (EligibilitiesIntersect(a.eligibility, b.eligibility)) {
         throw std::runtime_error("runtime profile eligibility ranges overlap: '" +
                                  a.id + "' and '" + b.id + "'");
       }
@@ -3182,14 +3242,11 @@ void OverlayConfig(Config& config, std::string_view json) {
   std::swap(config, candidate);
 }
 
-void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
+void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   ValidateRuntimeProfiles(config);
   const Config::RuntimeProfile* selected = nullptr;
   for (const auto& profile : config.runtime_profiles) {
-    const auto minimum = *profile.eligibility.minimum_total_device_memory_bytes;
-    const auto maximum = profile.eligibility.maximum_total_device_memory_bytes;
-    if (total_device_memory_bytes < minimum ||
-        (maximum && total_device_memory_bytes > *maximum)) {
+    if (!MatchesEligibility(profile.eligibility, device)) {
       continue;
     }
     if (selected) {
@@ -3227,6 +3284,10 @@ void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
   if (selected->overlay.speculative.max_draft_tokens) {
     WarnOnClampedDraftWidth(config);
   }
+}
+
+void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{total_device_memory_bytes, std::nullopt});
 }
 
 fs::path Config::ResolvePath(std::string_view value) const {

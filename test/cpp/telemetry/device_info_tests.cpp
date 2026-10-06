@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -14,35 +15,15 @@
 
 #include "telemetry/device_info.h"
 #include "telemetry/sha256.h"
+#include "telemetry/telemetry_string.h"
 #include "telemetry_test_environment.h"
+#include "scoped-environment-variable.h"
 
 namespace {
 
 namespace fs = std::filesystem;
 
-class ScopedEnvironmentVariable {
- public:
-  ScopedEnvironmentVariable(const char* name, std::optional<std::string> value) : name_(name) {
-    if (const char* existing = std::getenv(name); existing != nullptr) {
-      original_value_ = existing;
-    }
-    Set(value);
-  }
-
-  ~ScopedEnvironmentVariable() { Set(original_value_); }
-
- private:
-  void Set(const std::optional<std::string>& value) const {
-    if (value.has_value()) {
-      setenv(name_.c_str(), value->c_str(), 1);
-    } else {
-      unsetenv(name_.c_str());
-    }
-  }
-
-  std::string name_;
-  std::optional<std::string> original_value_;
-};
+using Generators::test::ScopedEnvironmentVariable;
 
 class ScopedTestDirectory {
  public:
@@ -82,6 +63,16 @@ TEST(TelemetryDeviceInfoTest, IgnoresRelativeXdgCacheHome) {
   ScopedEnvironmentVariable home{"HOME", home_path.string()};
   ScopedEnvironmentVariable xdg_cache_home{"XDG_CACHE_HOME", "relative-cache"};
 
+  EXPECT_EQ(Generators::GetTelemetryStorageDir(),
+            home_path / ".cache" / "Microsoft" / "DeveloperTools" / ".onnxruntime");
+}
+
+TEST(TelemetryDeviceInfoTest, RejectsOversizedXdgCacheHomeWithoutTruncating) {
+  ScopedTestDirectory test_dir{"oversized_xdg"};
+  const fs::path home_path = test_dir.Path() / "home";
+  ScopedEnvironmentVariable home{"HOME", home_path.string()};
+  ScopedEnvironmentVariable xdg_cache_home{
+      "XDG_CACHE_HOME", "/" + std::string(Generators::kMaxTelemetryInputBytes, 'x')};
   EXPECT_EQ(Generators::GetTelemetryStorageDir(),
             home_path / ".cache" / "Microsoft" / "DeveloperTools" / ".onnxruntime");
 }
@@ -151,6 +142,35 @@ TEST(TelemetryDeviceInfoDeathTest, RepairsCorruptedFile) {
   input >> persisted;
   EXPECT_EQ(persisted.size(), 36u);
   EXPECT_NE(persisted, "corrupted");
+}
+
+TEST(TelemetryDeviceInfoDeathTest, PreservesWhitespaceWrappedDeviceId) {
+  ScopedTestDirectory test_dir{"whitespace"};
+  const fs::path home_path = test_dir.Path() / "home";
+  ScopedEnvironmentVariable home{"HOME", home_path.string()};
+  ScopedEnvironmentVariable xdg_cache_home{"XDG_CACHE_HOME", std::nullopt};
+
+#if defined(__APPLE__)
+  const fs::path storage_dir =
+      home_path / "Library" / "Application Support" / "Microsoft" / "DeveloperTools" / ".onnxruntime";
+#else
+  const fs::path storage_dir =
+      home_path / ".cache" / "Microsoft" / "DeveloperTools" / ".onnxruntime";
+#endif
+  fs::create_directories(storage_dir);
+  const std::string stored = " \t11111111-2222-4333-8444-555555555555\r\n ";
+  std::ofstream(storage_dir / "deviceid") << stored;
+  EXPECT_EXIT(
+      {
+        std::_Exit(Generators::GetDeviceInfo().device_id_status == "Existing"
+                       ? EXIT_SUCCESS
+                       : EXIT_FAILURE);
+      },
+      ::testing::ExitedWithCode(EXIT_SUCCESS), "");
+
+  std::ifstream input(storage_dir / "deviceid", std::ios::binary);
+  const std::string persisted{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+  EXPECT_EQ(persisted, stored);
 }
 
 }  // namespace
