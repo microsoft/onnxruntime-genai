@@ -119,6 +119,26 @@ if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check-shared-library-exports.cmake")
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_library(export_isolation_dependency STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-isolation/dependency.cpp")
+  set_target_properties(export_isolation_dependency PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  add_library(export_isolation_fixture SHARED
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-isolation/fixture.cpp")
+  target_link_libraries(export_isolation_fixture PRIVATE export_isolation_dependency)
+  ortgenai_configure_shared_library_exports(export_isolation_fixture)
+  add_test(NAME SharedLibraryArchiveExports
+    COMMAND ${CMAKE_COMMAND}
+      "-DLIBRARY=$<TARGET_FILE:export_isolation_fixture>"
+      "-DNM=${CMAKE_NM}"
+      "-DAPI_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-isolation/fixture.h"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check-shared-library-exports.cmake")
+  add_executable(export_isolation_runtime
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-isolation/runtime.cpp")
+  target_link_libraries(export_isolation_runtime PRIVATE export_isolation_fixture)
+  add_test(NAME SharedLibraryArchiveRuntime COMMAND export_isolation_runtime)
+endif()
+
 add_executable(telemetry_helpers_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp"

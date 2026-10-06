@@ -174,6 +174,6 @@ jobs:
           export ORTGENAI_LOG_ORT_LIB=1
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/ort/lib
           ctest --test-dir build/cpu/Release --build-config Release --output-on-failure --no-tests=error \
-            -R '^(SharedLibraryExports|TelemetryHelpersTests)$'
+            -R '^(SharedLibraryExports|SharedLibraryArchiveExports|SharedLibraryArchiveRuntime|TelemetryHelpersTests)$'
           ./build/cpu/Release/unit_tests
           ./build/cpu/Release/engine_unit_tests

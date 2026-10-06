@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -48,20 +49,33 @@ class ScopedRegistryOverride {
   void DenyReads() {
     ASSERT_EQ(RegOpenKeyExA(HKEY_CURRENT_USER, kDeviceIdRegistryKey, 0, KEY_ALL_ACCESS, &protected_key_),
               ERROR_SUCCESS);
+    DWORD size = 0;
+    ASSERT_EQ(RegGetKeySecurity(protected_key_, DACL_SECURITY_INFORMATION, nullptr, &size),
+              ERROR_INSUFFICIENT_BUFFER);
+    original_security_.resize(size);
+    ASSERT_EQ(RegGetKeySecurity(protected_key_, DACL_SECURITY_INFORMATION, original_security_.data(), &size),
+              ERROR_SUCCESS);
     ACL acl{};
     SECURITY_DESCRIPTOR descriptor{};
     ASSERT_TRUE(InitializeAcl(&acl, sizeof(acl), ACL_REVISION));
     ASSERT_TRUE(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
     ASSERT_TRUE(SetSecurityDescriptorDacl(&descriptor, TRUE, &acl, FALSE));
     ASSERT_EQ(RegSetKeySecurity(protected_key_, DACL_SECURITY_INFORMATION, &descriptor), ERROR_SUCCESS);
+    permissions_changed_ = true;
   }
 
   void RestoreReads() {
     if (protected_key_ == nullptr) return;
-    SECURITY_DESCRIPTOR descriptor{};
-    ASSERT_TRUE(InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION));
-    ASSERT_TRUE(SetSecurityDescriptorDacl(&descriptor, TRUE, nullptr, FALSE));
-    EXPECT_EQ(RegSetKeySecurity(protected_key_, DACL_SECURITY_INFORMATION, &descriptor), ERROR_SUCCESS);
+    if (permissions_changed_) {
+      EXPECT_EQ(RegSetKeySecurity(protected_key_, DACL_SECURITY_INFORMATION, original_security_.data()),
+                ERROR_SUCCESS);
+      std::vector<unsigned char> restored_security(original_security_.size());
+      DWORD size = static_cast<DWORD>(restored_security.size());
+      EXPECT_EQ(RegGetKeySecurity(protected_key_, DACL_SECURITY_INFORMATION, restored_security.data(), &size),
+                ERROR_SUCCESS);
+      EXPECT_EQ(restored_security, original_security_);
+      permissions_changed_ = false;
+    }
     EXPECT_EQ(RegCloseKey(protected_key_), ERROR_SUCCESS);
     protected_key_ = nullptr;
   }
@@ -99,6 +113,8 @@ class ScopedRegistryOverride {
   std::string path_;
   HKEY key_{};
   HKEY protected_key_{};
+  std::vector<unsigned char> original_security_;
+  bool permissions_changed_{};
 };
 
 bool IsUuid(std::string_view value) {
