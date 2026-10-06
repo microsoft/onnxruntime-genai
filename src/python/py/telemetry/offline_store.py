@@ -162,9 +162,7 @@ class OfflineEventStore:
         """Return up to ``max_count`` oldest events as (id, payload) pairs."""
         return self.get_batch_for_upload(max_count) or []
 
-    def get_batch_for_upload(
-        self, max_count: int, deadline: float | None = None
-    ) -> list[tuple[int, bytes]] | None:
+    def get_batch_for_upload(self, max_count: int, deadline: float | None = None) -> list[tuple[int, bytes]] | None:
         """Return an uploadable batch, or None when local storage failed."""
         with self._lock:
             if self._conn is None:
@@ -180,9 +178,7 @@ class OfflineEventStore:
             except Exception:
                 return None
 
-    def get_acknowledged_ids(
-        self, max_count: int, deadline: float | None = None
-    ) -> list[int] | None:
+    def get_acknowledged_ids(self, max_count: int, deadline: float | None = None) -> list[int] | None:
         """Return terminally handled rows that only need local deletion."""
         with self._lock:
             if self._conn is None:

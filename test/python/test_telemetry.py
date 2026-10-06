@@ -338,10 +338,13 @@ class TestOptOut(_HermeticTelemetryTestCase):
             release_heartbeat.wait(5)
             return {}
 
-        with patch(
-            "telemetry.telemetry.get_system_info",
-            side_effect=get_system_info,
-        ), patch("telemetry.telemetry.EventUploader.start"):
+        with (
+            patch(
+                "telemetry.telemetry.get_system_info",
+                side_effect=get_system_info,
+            ),
+            patch("telemetry.telemetry.EventUploader.start"),
+        ):
             telemetry = GenAITelemetry()
             db_path = telemetry._store.db_path
             telemetry.disable_telemetry()
@@ -948,9 +951,7 @@ class TestPathRedaction(unittest.TestCase):
             "[path]",
         )
         self.assertEqual(
-            scrub_string_for_telemetry(
-                "failed src=/home/alice/model.onnx,url=https://huggingface.co/microsoft/phi-3"
-            ),
+            scrub_string_for_telemetry("failed src=/home/alice/model.onnx,url=https://huggingface.co/microsoft/phi-3"),
             "failed src=[path]",
         )
         self.assertEqual(
@@ -1337,10 +1338,7 @@ class TestPathRedaction(unittest.TestCase):
         )
         telemetry.log_error("FileNotFoundError", "missing /Bob_resume.pdf")
 
-        payloads = [
-            json.loads(call.args[0])["data"]
-            for call in telemetry._store.store.call_args_list
-        ]
+        payloads = [json.loads(call.args[0])["data"] for call in telemetry._store.store.call_args_list]
         self.assertEqual(payloads[0]["message"], "missing [path]")
         self.assertEqual(payloads[0]["assignment"], "file=[path]")
         self.assertEqual(payloads[0]["parenthesized"], "missing([path]")
@@ -1488,9 +1486,7 @@ class TestDeviceId(unittest.TestCase):
         ):
             with self.subTest(stored_value=stored_value):
                 device_id_path.write_text(stored_value, encoding="utf-8")
-                deviceid._device_id_state.update(
-                    {"device_id": None, "status": deviceid.DeviceIdStatus.NEW}
-                )
+                deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
 
                 repaired = deviceid.get_device_id()
 
@@ -1574,11 +1570,7 @@ class TestDeviceId(unittest.TestCase):
             self.assertTrue(path.is_absolute())
             self.assertEqual(
                 path,
-                Path(self._tmpdir.name)
-                / ".cache"
-                / "Microsoft"
-                / "DeveloperTools"
-                / ".onnxruntime",
+                Path(self._tmpdir.name) / ".cache" / "Microsoft" / "DeveloperTools" / ".onnxruntime",
             )
         finally:
             self._get_telemetry_base_dir.cache_clear()
@@ -1704,13 +1696,7 @@ class TestDeviceId(unittest.TestCase):
             return results[0]
 
         run_processes()
-        device_id_path = (
-            Path(self._tmpdir.name)
-            / "Microsoft"
-            / "DeveloperTools"
-            / ".onnxruntime"
-            / "deviceid"
-        )
+        device_id_path = Path(self._tmpdir.name) / "Microsoft" / "DeveloperTools" / ".onnxruntime" / "deviceid"
         device_id_path.write_text("corrupted", encoding="utf-8")
         repaired_id = run_processes()
         self.assertEqual(device_id_path.read_text(encoding="utf-8"), repaired_id)
@@ -2351,10 +2337,7 @@ class TestOfflineEventStore(unittest.TestCase):
         s = self._new_store()
         s.store(b'{"a":1}')
         row_id = s.get_batch(1)[0][0]
-        s._conn.execute(
-            "CREATE TRIGGER fail_delete BEFORE DELETE ON events "
-            "BEGIN SELECT RAISE(FAIL, 'blocked'); END"
-        )
+        s._conn.execute("CREATE TRIGGER fail_delete BEFORE DELETE ON events BEGIN SELECT RAISE(FAIL, 'blocked'); END")
         s._conn.commit()
 
         self.assertFalse(s.delete([row_id]))

@@ -99,22 +99,18 @@ def _is_ascii_alnum(char: str) -> bool:
 def _is_secret_key(key: str) -> bool:
     folded = _ascii_lower(key)
     return folded in _SECRET_KEYS or any(
-        len(folded) > len(suffix) and folded.endswith(suffix)
-        for suffix in _SECRET_SUFFIXES
+        len(folded) > len(suffix) and folded.endswith(suffix) for suffix in _SECRET_SUFFIXES
     )
 
 
 def _find_url_anchor(value: str) -> int | None:
     for index, char in enumerate(value):
         if not _is_ascii_alpha(char) or (
-            index > 0
-            and (_is_ascii_alnum(value[index - 1]) or value[index - 1] in "+-.")
+            index > 0 and (_is_ascii_alnum(value[index - 1]) or value[index - 1] in "+-.")
         ):
             continue
         end = index + 1
-        while end < len(value) and (
-            _is_ascii_alnum(value[end]) or value[end] in "+-."
-        ):
+        while end < len(value) and (_is_ascii_alnum(value[end]) or value[end] in "+-."):
             end += 1
         if value.startswith("://", end):
             return index
@@ -123,16 +119,12 @@ def _find_url_anchor(value: str) -> int | None:
 
 def _secret_key_end(value: str, key_start: int) -> int:
     key_end = key_start + 1
-    while key_end < len(value) and (
-        _is_ascii_alnum(value[key_end]) or value[key_end] in "_-."
-    ):
+    while key_end < len(value) and (_is_ascii_alnum(value[key_end]) or value[key_end] in "_-."):
         key_end += 1
     return key_end
 
 
-def _secret_value_start(
-    value: str, key_start: int, cli_option: bool, key_end: int | None = None
-) -> int | None:
+def _secret_value_start(value: str, key_start: int, cli_option: bool, key_end: int | None = None) -> int | None:
     key_end = _secret_key_end(value, key_start) if key_end is None else key_end
     if not _is_secret_key(value[key_start:key_end]):
         return None
@@ -147,9 +139,7 @@ def _secret_value_start(
     delimited_cli_value = False
     if cli_option and not assignment:
         separator = key_end
-        while separator < len(value) and (
-            value[separator] in _ASCII_WHITESPACE or value[separator] in "\"',[](){}"
-        ):
+        while separator < len(value) and (value[separator] in _ASCII_WHITESPACE or value[separator] in "\"',[](){}"):
             if value[separator] in "\"',[](){}":
                 delimited_cli_value = True
             separator += 1
@@ -165,10 +155,7 @@ def _secret_value_start(
     value_start = separator + 1 if assignment else separator
     while value_start < len(value) and value[value_start] in _ASCII_WHITESPACE:
         value_start += 1
-    if (
-        value_start < len(value)
-        and value[value_start] not in "&;\r\n"
-    ):
+    if value_start < len(value) and value[value_start] not in "&;\r\n":
         return value_start
     return None
 
@@ -178,9 +165,7 @@ def _find_secret_value_anchor(value: str) -> int | None:
     index = 0
     while index < len(value):
         char = value[index]
-        if not _is_ascii_alpha(char) or (
-            index > 0 and value[index - 1] not in boundaries
-        ):
+        if not _is_ascii_alpha(char) or (index > 0 and value[index - 1] not in boundaries):
             index += 1
             continue
         key_end = _secret_key_end(value, index)
@@ -196,7 +181,7 @@ def _find_secret_value_anchor(value: str) -> int | None:
 
 
 def _find_credential_anchor(value: str) -> int | None:
-    userinfo_terminators = _ASCII_WHITESPACE + "\"\\/?#[]{}"
+    userinfo_terminators = _ASCII_WHITESPACE + '"\\/?#[]{}'
     authority_terminators = _ASCII_WHITESPACE + "\"')},;/?#"
     token_start = 0
     colon = None
@@ -254,11 +239,7 @@ def _find_path_anchor(value: str):
             return 0
         if (
             char == "."
-            and (
-                index == 0
-                or value[index - 1].isspace()
-                or value[index - 1] in "\"'=([{,;:"
-            )
+            and (index == 0 or value[index - 1].isspace() or value[index - 1] in "\"'=([{,;:")
             and (
                 value.startswith("./", index)
                 or value.startswith("../", index)
@@ -303,10 +284,7 @@ def _find_path_anchor(value: str):
                 index + 1 < len(value)
                 and value[index + 1] not in "/\r\n \t"
                 and value[index - 1] in "\"' \t=([{,;"
-                and (
-                    not _is_ascii_alpha(value[index + 1])
-                    or _secret_value_start(value, index + 1, True) is None
-                )
+                and (not _is_ascii_alpha(value[index + 1]) or _secret_value_start(value, index + 1, True) is None)
             ):
                 return index
             if not slash_token_analyzed:
@@ -342,7 +320,7 @@ def _find_redaction_anchor(value: str) -> int | None:
 
 def _find_truncated_sensitive_token_anchor(value: str, next_char: str) -> int | None:
     token_start = len(value)
-    while token_start > 0 and value[token_start - 1] not in _ASCII_WHITESPACE + "\"":
+    while token_start > 0 and value[token_start - 1] not in _ASCII_WHITESPACE + '"':
         token_start -= 1
     token = value[token_start:]
     continues_path = bool(token) and next_char in "/\\"
@@ -350,27 +328,16 @@ def _find_truncated_sensitive_token_anchor(value: str, next_char: str) -> int | 
     if continues_path and not contains_path_separator:
         previous_end = token_start
         while previous_end > 0:
-            while (
-                previous_end > 0
-                and value[previous_end - 1] in _ASCII_WHITESPACE + "\""
-            ):
+            while previous_end > 0 and value[previous_end - 1] in _ASCII_WHITESPACE + '"':
                 previous_end -= 1
             previous_start = previous_end
-            while (
-                previous_start > 0
-                and value[previous_start - 1] not in _ASCII_WHITESPACE + "\""
-            ):
+            while previous_start > 0 and value[previous_start - 1] not in _ASCII_WHITESPACE + '"':
                 previous_start -= 1
             previous = value[previous_start:previous_end]
             if "/" in previous or "\\" in previous:
                 return previous_start
             previous_end = previous_start
-    if (
-        continues_path
-        or (bool(token) and next_char == ":")
-        or ":" in token
-        or contains_path_separator
-    ):
+    if continues_path or (bool(token) and next_char == ":") or ":" in token or contains_path_separator:
         return token_start
     return None
 
@@ -442,9 +409,7 @@ def scrub_value_for_telemetry(value):
                     safe_key = f"[unsupported:{type(key).__name__}]"
             if safe_key:
                 safe_child = (
-                    "[path]"
-                    if isinstance(key, str) and _is_secret_key(key)
-                    else scrub_value_for_telemetry(child)
+                    "[path]" if isinstance(key, str) and _is_secret_key(key) else scrub_value_for_telemetry(child)
                 )
                 entries.append((safe_key, safe_child))
         return dict(sorted(entries, key=lambda entry: entry[0]))

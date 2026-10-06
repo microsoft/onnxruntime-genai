@@ -385,12 +385,7 @@ class GenAITelemetry:
             pass
         finally:
             with self._lock:
-                if (
-                    not released
-                    and self._enabled
-                    and not self._telemetry_disabled
-                    and self._store is not None
-                ):
+                if not released and self._enabled and not self._telemetry_disabled and self._store is not None:
                     released = self._store.release(row_id)
                 if released and self._uploader is not None:
                     self._uploader.request_drain()

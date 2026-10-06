@@ -46,8 +46,7 @@ def _is_valid_device_id(value: str) -> bool:
         return False
     hyphens = {8, 13, 18, 23}
     return all(
-        char == "-" if index in hyphens else char.lower() in "0123456789abcdef"
-        for index, char in enumerate(value)
+        char == "-" if index in hyphens else char.lower() in "0123456789abcdef" for index, char in enumerate(value)
     )
 
 
@@ -292,6 +291,7 @@ def get_device_id() -> str:
         macOS: ~/Library/Application Support/Microsoft/DeveloperTools/.onnxruntime/deviceid
         Windows: HKEY_CURRENT_USER\SOFTWARE\Microsoft\DeveloperTools\.onnxruntime\deviceid
     """
+
     def failed_fallback() -> str:
         generated = str(uuid.uuid4()).lower()
         _device_id_state.update({"status": DeviceIdStatus.FAILED, "device_id": generated})

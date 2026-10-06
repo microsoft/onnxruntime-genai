@@ -130,7 +130,9 @@ def main():
     # Download graph-capture models for supported EPs (with device availability checks handled in is_model_excluded)
     graph_capture_model_paths = []
     for ep in eps_to_build:
-        graph_capture_model_paths += download_models(os.path.abspath(args.test_models), "int4", ep, log, enable_graph_capture=True)
+        graph_capture_model_paths += download_models(
+            os.path.abspath(args.test_models), "int4", ep, log, enable_graph_capture=True
+        )
 
     # Run ONNX Runtime GenAI tests
     run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
