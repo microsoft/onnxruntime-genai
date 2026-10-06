@@ -242,6 +242,12 @@ class RegionBodyProcessor final : public ConstrainedLogitsProcessor {
   std::array<uint32_t, 1> mask_{};
 };
 
+void InstallRegionProcessor(Request& request, Model& model) {
+  auto region = std::make_unique<DelimitedGuidanceLogitsProcessor>(
+      std::make_unique<RegionBodyProcessor>(), *model.p_device_, 32, std::vector<int32_t>{5}, 10, 11);
+  RequestGuidanceTestAccess::Install(request, std::move(region));
+}
+
 TEST_F(GuidanceProcessorTest, DelimitedBodyMasksOnlyBetweenCommittedMarkersAndResetsForAdjacentCalls) {
   DelimitedGuidanceLogitsProcessor region{
       std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, {5}, 10, 11};
@@ -299,8 +305,7 @@ TEST_F(GuidanceProcessorTest, DelimitedRequestTruncatesDraftsBeforeAnOpeningMark
   request->Schedule();
   request->GenerateNextTokens(LogitsForToken(*model_, 9));
   ASSERT_TRUE(request->CompleteGeneration().token_appended);
-  RequestGuidanceTestAccess::Install(*request, std::make_unique<DelimitedGuidanceLogitsProcessor>(
-      std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, std::vector<int32_t>{5}, 10, 11));
+  InstallRegionProcessor(*request, *model_);
 
   ASSERT_EQ(request->DraftTokenValidationError(), nullptr);
   request->SetDraftTokens(std::array<int32_t, 3>{7, 10, 8});
@@ -314,8 +319,7 @@ TEST_F(GuidanceProcessorTest, DelimitedDraftVerificationCommitsOpenerBeforeMaski
   engine_.executor->SetForcedToken(9);
   auto request = NewAssignedRequest(/*max_length_beyond_prompt=*/12);
   ASSERT_EQ(RunOne(*engine_.engine).token, 9);
-  RequestGuidanceTestAccess::Install(*request, std::make_unique<DelimitedGuidanceLogitsProcessor>(
-      std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, std::vector<int32_t>{5}, 10, 11));
+  InstallRegionProcessor(*request, *model_);
 
   request->SetDraftTokens(std::array<int32_t, 3>{7, 10, 8});
   ASSERT_EQ(request->PendingDraftTokenCount(), 1u);
@@ -342,8 +346,7 @@ TEST_F(GuidanceProcessorTest, DelimitedDraftTruncationUsesOnlyTokensBeforeMarker
   request->Schedule();
   request->GenerateNextTokens(LogitsForToken(*model_, 9));
   ASSERT_TRUE(request->CompleteGeneration().token_appended);
-  RequestGuidanceTestAccess::Install(*request, std::make_unique<DelimitedGuidanceLogitsProcessor>(
-      std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, std::vector<int32_t>{5}, 10, 11));
+  InstallRegionProcessor(*request, *model_);
 
   EXPECT_NO_THROW(request->SetDraftTokens(std::array<int32_t, 3>{7, 10, 8}));
   EXPECT_EQ(request->PendingDraftTokenCount(), 1u);
@@ -364,8 +367,7 @@ TEST_F(GuidanceProcessorTest, DelimitedSampledDraftRoutesKeepDistributionsAligne
     options.seed = 1234;
     request->BeginTurn(Prompt(), options);
     ASSERT_EQ(RunOne(*engine.engine).token, 9);
-    RequestGuidanceTestAccess::Install(*request, std::make_unique<DelimitedGuidanceLogitsProcessor>(
-        std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, std::vector<int32_t>{5}, 10, 11));
+    InstallRegionProcessor(*request, *model_);
 
     std::array<TargetTokenSelection, 3> distributions;
     for (size_t i = 0; i < distributions.size(); ++i) {
@@ -389,11 +391,11 @@ TEST_F(GuidanceProcessorTest, DelimitedSampledDraftRoutesKeepDistributionsAligne
 
 TEST_F(GuidanceProcessorTest, DelimitedBodyMasksEveryEosAndRejectsAnyEosAsMarker) {
   EXPECT_THROW((DelimitedGuidanceLogitsProcessor{
-      std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, {5, 6}, 6, 11}),
-      std::invalid_argument);
+                   std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, {5, 6}, 6, 11}),
+               std::invalid_argument);
   EXPECT_THROW((DelimitedGuidanceLogitsProcessor{
-      std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, {5, 6}, 10, 6}),
-      std::invalid_argument);
+                   std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, {5, 6}, 10, 6}),
+               std::invalid_argument);
   DelimitedGuidanceLogitsProcessor region{
       std::make_unique<RegionBodyProcessor>(true), *model_->p_device_, 32, {5, 6}, 10, 11};
   int32_t open = 10;
@@ -407,8 +409,7 @@ TEST_F(GuidanceProcessorTest, DelimitedBodyMasksEveryEosAndRejectsAnyEosAsMarker
 TEST_F(GuidanceProcessorTest, DelimitedRequestRestoresModeOnRollbackAndPermitsDraftingAfterClose) {
   auto request = NewAssignedRequest(/*max_length_beyond_prompt=*/12);
   request->Schedule();
-  RequestGuidanceTestAccess::Install(*request, std::make_unique<DelimitedGuidanceLogitsProcessor>(
-      std::make_unique<RegionBodyProcessor>(), *model_->p_device_, 32, std::vector<int32_t>{5}, 10, 11));
+  InstallRegionProcessor(*request, *model_);
   auto* region = static_cast<DelimitedGuidanceLogitsProcessor*>(RequestGuidanceTestAccess::Get(*request));
 
   RequestStepPlan plan;

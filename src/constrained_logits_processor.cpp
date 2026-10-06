@@ -458,17 +458,19 @@ std::shared_ptr<const GuidanceGrammarAsset> GetGrammarAsset(
 DelimitedGuidanceLogitsProcessor::DelimitedGuidanceLogitsProcessor(
     std::unique_ptr<ConstrainedLogitsProcessor> body, DeviceInterface& device,
     size_t vocab_size, std::vector<int32_t> eos_tokens, int32_t opening_token, int32_t closing_token)
-    : body_(std::move(body)), device_(&device), vocab_size_(vocab_size),
-      eos_tokens_(std::move(eos_tokens)), opening_token_(opening_token), closing_token_(closing_token) {
+    : body_(std::move(body)), device_(&device), vocab_size_(vocab_size), eos_tokens_(std::move(eos_tokens)) {
+  opening_token_ = opening_token;
+  closing_token_ = closing_token;
+  const auto invalid_eos = [this](int32_t eos) {
+    return eos < 0 || static_cast<size_t>(eos) >= vocab_size_ ||
+           eos == opening_token_ || eos == closing_token_;
+  };
   if (!body_ || opening_token_ < 0 || closing_token_ < 0 ||
       opening_token_ == closing_token_ ||
       static_cast<size_t>(opening_token_) >= vocab_size_ ||
       static_cast<size_t>(closing_token_) >= vocab_size_ ||
       eos_tokens_.empty() ||
-      std::any_of(eos_tokens_.begin(), eos_tokens_.end(), [&](int32_t eos) {
-        return eos < 0 || static_cast<size_t>(eos) >= vocab_size_ ||
-               opening_token_ == eos || closing_token_ == eos;
-      })) {
+      std::any_of(eos_tokens_.begin(), eos_tokens_.end(), invalid_eos)) {
     throw std::invalid_argument("Delimited guidance requires distinct in-vocabulary non-EOS markers.");
   }
 }
