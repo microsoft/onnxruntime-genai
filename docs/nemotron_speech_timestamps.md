@@ -119,7 +119,9 @@ Copy native records before the next stream call. C# and Python bindings perform 
 automatically.
 
 Word and segment collections are nested under `timestampMetadata` in C/C++,
-`TokenMetadataTimestamp` in C#, and `timestamp_metadata` in Python. They are per-call event lists,
+`TokenMetadataTimestamp` in C#, and `TokenMetadataOutput.timestamp_metadata` in Python.
+Python exposes typed `TokenMetadataTimestampRecord` entries rather than dictionaries.
+They are per-call event lists,
 not cumulative history. Each list is
 empty when that call completes no records, and it may contain multiple records when one decoded
 token spans multiple word or segment boundaries. Callers retain any history they need.

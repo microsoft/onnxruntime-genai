@@ -79,8 +79,10 @@ data contains `words`/`word_count` and `segments`/`segment_count`, with text, fr
 and second intervals in each record. No per-field native getter calls are required.
 The C entry points are `OgaTokenizerStreamDecodeWithMetadata` and
 `OgaTokenizerStreamFinalizeMetadata`. C# returns `TokenMetadataOutput` with `Text` and nullable
-`TokenMetadataTimestamp`; Python returns `text` and `timestamp_metadata` (None when disabled).
-Words and segments are nested under the timestamp field.
+`TokenMetadataTimestamp`. Python returns an owned `TokenMetadataOutput` with `.text` and
+`.timestamp_metadata` (None when disabled); the timestamp object contains `.words` and
+`.segments` lists of `TokenMetadataTimestampRecord` objects. Words and segments remain
+nested under the timestamp field in both bindings.
 
 `Tokenizer` stores internal model-derived metadata settings, including timestamp
 level, frame duration, and segment rules. Each stream automatically copies those
