@@ -227,13 +227,6 @@ including the environment-read race regressions. Linux and macOS core release jo
 the export checker on the installed library against its installed public header,
 even with `ENABLE_TESTS=OFF`; macOS checks the signed library.
 
-Environment tests cover the shared internal `GetEnv` helper. Its default budget is
-32,766 bytes on every platform: unset/empty values return an empty string, while
-oversized, unreadable, or unstable reads throw. The bounded overload
-`GetEnv(name, max_bytes)` returns `std::nullopt` for rejected reads instead.
-Telemetry uses that overload with a 16 KiB budget to preserve fail-closed
-suppression without treating rejected values as unset or empty.
-
 ### Python tests (pytest)
 
 Install the Python test dependencies and the wheel produced by your build:
