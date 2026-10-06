@@ -212,7 +212,9 @@ compatibility archive on manylinux. Public APIs must remain in direct or OBJECT
 sources: placing them in STATIC archives would hide them despite the version script.
 
 With `ENABLE_TESTS=ON` on Linux or macOS, check that every public API declared in
-`src/ort_genai_c.h` is exported and no other symbols are exported:
+`src/ort_genai_c.h` is exported and no other symbols are exported. The ELF checker
+inspects externally visible definitions only; local symbols left in the dynamic
+symbol table by GCC toolset compatibility objects are not exports:
 
 ```bash
 ctest --test-dir build/Linux/Release -R '^SharedLibraryExports$' --output-on-failure

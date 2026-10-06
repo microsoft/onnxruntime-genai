@@ -4,7 +4,8 @@
 if(APPLE_EXPORTS)
   set(nm_args -g -U -j)
 else()
-  set(nm_args --dynamic --defined-only --format=posix)
+  # GCC toolset compatibility objects can leave local symbols in .dynsym.
+  set(nm_args --dynamic --defined-only --extern-only --format=posix)
 endif()
 execute_process(
   COMMAND "${NM}" ${nm_args} "${LIBRARY}"
