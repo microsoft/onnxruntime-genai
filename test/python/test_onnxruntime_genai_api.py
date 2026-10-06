@@ -89,16 +89,21 @@ def test_tokenizer_stream_timestamp_initialization(test_data_path):
     tokenizer = og.Tokenizer(config)
     stream = tokenizer.create_stream()
     result = stream.finalize_metadata()
-    assert result["timestamp_metadata"] == {"words": [], "segments": []}
+    assert isinstance(result, og.TokenMetadataOutput)
+    assert result.text == ""
+    assert isinstance(result.timestamp_metadata, og.TokenMetadataTimestamp)
+    assert result.timestamp_metadata.words == []
+    assert result.timestamp_metadata.segments == []
     stream.reset()
-    assert stream.finalize_metadata()["timestamp_metadata"] == {"words": [], "segments": []}
+    assert stream.finalize_metadata().timestamp_metadata.words == []
 
     stream.reset()
     assert stream.decode(0) is not None
     with pytest.raises(RuntimeError, match="Cannot mix text and metadata"):
         stream.finalize_metadata()
     stream.reset()
-    assert stream.finalize_metadata()["timestamp_metadata"] == {"words": [], "segments": []}
+    assert stream.finalize_metadata().timestamp_metadata.segments == []
+    assert result.timestamp_metadata.words == []
 
 
 def test_tokenizer_generic_metadata_from_generator(test_data_path):
@@ -124,12 +129,13 @@ def test_tokenizer_generic_metadata_from_generator(test_data_path):
     assert token.token_acoustic_frame_interval is None
     result = stream.decode_with_metadata(token)
     plain = tokenizer.create_stream()
-    assert result["text"] == plain.decode(int(generator.get_next_tokens()[0]))
-    assert result["timestamp_metadata"] is None
-    assert stream.finalize_metadata()["timestamp_metadata"] is None
-    assert result["text"] == tokenizer.create_stream().decode(int(generator.get_next_tokens()[0]))
+    assert isinstance(result, og.TokenMetadataOutput)
+    assert result.text == plain.decode(int(generator.get_next_tokens()[0]))
+    assert result.timestamp_metadata is None
+    assert stream.finalize_metadata().timestamp_metadata is None
+    assert result.text == tokenizer.create_stream().decode(int(generator.get_next_tokens()[0]))
     stream.reset()
-    assert stream.decode_with_metadata(token)["timestamp_metadata"] is None
+    assert stream.decode_with_metadata(token).timestamp_metadata is None
     generator.generate_next_token()
     generator.get_next_tokens_with_metadata()
     del generator
@@ -137,8 +143,8 @@ def test_tokenizer_generic_metadata_from_generator(test_data_path):
     assert token.token_id == token_id
     assert token.token_acoustic_frame_interval is None
     stream.reset()
-    assert stream.decode_with_metadata(token)["text"] == result["text"]
-    assert stream.finalize_metadata()["timestamp_metadata"] is None
+    assert stream.decode_with_metadata(token).text == result.text
+    assert stream.finalize_metadata().timestamp_metadata is None
 
 
 def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):
