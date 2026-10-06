@@ -122,6 +122,7 @@ def test_exported_packages_cpu_cuda_parity(provider):
     if not root_value:
         pytest.skip("set ORT_GENAI_NON_GENERATIVE_TEST_ROOT to exported packages")
     root = Path(root_value)
+
     def config(package):
         value = og.Config(str(package))
         if provider:
@@ -143,3 +144,24 @@ def test_exported_packages_cpu_cuda_parity(provider):
     decision = og.NonGenerativeSession(config(root / "kev-4b-fp32"))
     first = decision.run(kev_request)
     assert decision.run(kev_request) == first
+    if provider is None:
+        grouped_request = json.loads(json.dumps(kev_request))
+        original_questions = list(grouped_request["questions"].items())
+        while len(grouped_request["questions"]) < 5:
+            for key, question in original_questions:
+                grouped_request["questions"][
+                    f"{key}_{len(grouped_request['questions'])}"
+                ] = question
+                if len(grouped_request["questions"]) == 5:
+                    break
+        grouped_answers = decision.run(grouped_request)["answers"]
+        individual_answers = {}
+        for key, question in grouped_request["questions"].items():
+            result = decision.run(
+                {
+                    "state": grouped_request["state"],
+                    "questions": {key: question},
+                }
+            )
+            individual_answers.update(result["answers"])
+        assert grouped_answers == individual_answers
