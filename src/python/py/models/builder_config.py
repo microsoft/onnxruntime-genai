@@ -1067,7 +1067,7 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
             raise ValueError(f"{path}.eligibility must be an object")
         check_fields(
             eligibility,
-            {"minimum_total_device_memory_bytes", "maximum_total_device_memory_bytes"},
+            {"minimum_total_device_memory_bytes", "maximum_total_device_memory_bytes", "is_integrated"},
             f"{path}.eligibility",
         )
         minimum = eligibility.get("minimum_total_device_memory_bytes")
@@ -1080,7 +1080,10 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
                 raise ValueError(f"{path}.eligibility.{field_name} must be a non-negative integer")
         if maximum < minimum:
             raise ValueError(f"{path}.eligibility maximum must not be below minimum")
-        ranges.append((minimum, maximum, profile_id))
+        integrated = eligibility.get("is_integrated")
+        if "is_integrated" in eligibility and not isinstance(integrated, bool):
+            raise ValueError(f"{path}.eligibility.is_integrated must be a boolean")
+        ranges.append((minimum, maximum, integrated, profile_id))
 
         overlay = profile.get("overlay")
         if not isinstance(overlay, dict):
@@ -1131,9 +1134,13 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
         if not (decoder or dynamic_batching or search or speculative):
             raise ValueError(f"{path}.overlay must contain at least one overlay field")
 
-    for index, (minimum, maximum, profile_id) in enumerate(ranges):
-        for other_minimum, other_maximum, other_id in ranges[index + 1 :]:
-            if minimum <= other_maximum and other_minimum <= maximum:
+    for index, (minimum, maximum, integrated, profile_id) in enumerate(ranges):
+        for other_minimum, other_maximum, other_integrated, other_id in ranges[index + 1 :]:
+            if (
+                minimum <= other_maximum
+                and other_minimum <= maximum
+                and (integrated is None or other_integrated is None or integrated == other_integrated)
+            ):
                 raise ValueError(f"runtime profile eligibility ranges overlap: {profile_id!r} and {other_id!r}")
 
 

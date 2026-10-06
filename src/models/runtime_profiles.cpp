@@ -5,6 +5,9 @@
 
 #include "smartptrs.h"
 
+#include <algorithm>
+#include <iostream>
+
 namespace Generators {
 
 void ApplyRuntimeProfileForSelectedDevice(Config& config, DeviceInterface& device) {
@@ -34,7 +37,20 @@ void ApplyRuntimeProfileForSelectedDevice(Config& config, DeviceInterface& devic
   size_t available_device_memory_bytes{};
   size_t total_device_memory_bytes{};
   device.GetAvailableMemory(available_device_memory_bytes, total_device_memory_bytes);
-  ApplyRuntimeProfile(config, total_device_memory_bytes);
+  std::optional<bool> is_integrated;
+  if (std::any_of(config.runtime_profiles.begin(), config.runtime_profiles.end(), [](const auto& profile) {
+        return profile.eligibility.is_integrated.has_value();
+      })) {
+    std::string error;
+    is_integrated = device.GetIsIntegrated(error);
+    if (!is_integrated) {
+      std::cerr << "Warning: runtime profile integrated-device detection failed: " << error
+                << "; using base configuration\n";
+      config.runtime_profiles.clear();
+      return;
+    }
+  }
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{total_device_memory_bytes, is_integrated});
   config.runtime_profiles.clear();
 }
 

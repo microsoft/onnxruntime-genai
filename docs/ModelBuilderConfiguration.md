@@ -450,6 +450,16 @@ parser, `max_batch_size` cannot exceed 256, and batching overrides require an
 exported dynamic-batching configuration. Draft-token overrides are checked
 against the same exported drafter/state capacity as ordinary runtime overlays.
 
+Profile `eligibility` combines its required inclusive total-device-memory range
+with optional `is_integrated: true|false`. Omitted `is_integrated` matches either
+device type. Equal memory ranges may use separate integrated and discrete profiles;
+a generic profile must not overlap either one. The builder checks the same
+ambiguity rules as the C++ loader and rejects non-boolean `is_integrated` values.
+Further typed conditions belong in this existing eligibility object, with matching
+and intersection validation added on both sides. On an integrated device, select
+conservative `num_blocks` using measured peak OS-memory headroom: this predicate
+alone does not account for memory shared with the CPU.
+
 With a CUDA-enabled GenAI build and ORT built with INT4 KV-cache support, this
 integration test assembles a temporary shared-weight package, selects each
 INT4/INT8 profile, creates an Engine, and performs a short decode:

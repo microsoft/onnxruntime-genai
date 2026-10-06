@@ -191,8 +191,8 @@ auto model_ov = OgaModel::Create(*config);
 
 ## Runtime profiles
 
-The selected variant's `genai_config.json` may contain typed runtime profiles for CUDA GPU memory
-classes. Base `engine.dynamic_batching` values must remain safe for the minimum supported device;
+The selected variant's `genai_config.json` may contain typed runtime profiles for CUDA devices.
+Base `engine.dynamic_batching` values must remain safe for the minimum supported device;
 profiles are optional tuning upgrades applied once during Model creation, after provider/device
 resolution and before Engine allocation.
 
@@ -243,9 +243,17 @@ GPU's memory while loading its graph on another GPU.
 }
 ```
 
-Profile IDs must be non-empty and unique. Every profile requires a minimum total-memory value;
-the maximum is optional and inclusive. Ranges must be valid and non-overlapping. Zero matches uses
-the base settings. `overlay` is typed and may contain any subset of these fields:
+Profile IDs must be non-empty and unique. Every profile requires a minimum total-memory value
+(`0` is valid); the maximum is optional and inclusive. The optional `eligibility.is_integrated`
+boolean matches a GPU integrated with host memory when true, or a discrete GPU when false.
+Omitting it matches either. Eligibility fields are combined with AND; future typed conditions
+extend the same object. Overlapping memory ranges are allowed only when one profile explicitly
+requires integrated and the other explicitly requires discrete. A profile without the boolean
+overlaps both device types and cannot share a memory range with either. No match uses the base
+settings. For example, two profiles may share the same memory range with
+`"eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":true}` and
+`"eligibility":{"minimum_total_device_memory_bytes":0,"is_integrated":false}`.
+`overlay` is typed and may contain any subset of these fields:
 
 - `model.decoder.filename`
 - `engine.dynamic_batching.num_blocks`
@@ -265,10 +273,13 @@ cache and model context. A caller may explicitly choose a `max_session_tokens` v
 default but not above that capability when it is nonzero. A zero capability means the cache-backed
 ceiling is unavailable and preserves the `search.max_length` default and ceiling.
 
-Selection uses total device memory from the primary CUDA interface selected by the normal provider
-append path. The query intentionally uses the existing device-ID-agnostic interface for the current
-single-discrete-GPU scope. Distinguishing CUDA device ordinals on heterogeneous multi-GPU machines
-is deferred to a future interface change. Actual model and Engine allocation remains the
+Selection uses CUDA-reported total device memory from the primary CUDA interface selected by the
+normal provider append path, and queries integrated status only if a profile requires it.
+If that capability cannot be queried, the base settings are used with a warning; existing
+memory-only profiles do not need the new query. Device ordinal selection remains restricted to
+visible CUDA device 0. `is_integrated` identifies memory topology; it does not estimate safe
+capacity on a shared CPU/GPU memory pool. Authors must choose conservative blocks and verify
+peak OS-memory headroom on the target hardware. Actual model and Engine allocation remains the
 authoritative fit check; profiles do not add a separate free-memory gate.
 
 ## Authoring notes
