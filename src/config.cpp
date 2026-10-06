@@ -2612,6 +2612,10 @@ struct RuntimeProfileEligibility_Element : JSON::Element {
       v_.minimum_total_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
     } else if (name == "maximum_total_device_memory_bytes") {
       v_.maximum_total_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "minimum_free_device_memory_bytes") {
+      v_.minimum_free_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "maximum_free_device_memory_bytes") {
+      v_.maximum_free_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
     } else if (name == "is_integrated") {
       v_.is_integrated = JSON::Get<bool>(value);
     } else {
@@ -2835,12 +2839,20 @@ bool ExactConditionsIntersect(const std::optional<T>& first, const std::optional
 
 bool EligibilitiesIntersect(const Config::RuntimeProfile::Eligibility& a,
                             const Config::RuntimeProfile::Eligibility& b) {
-  const uint64_t a_maximum = a.maximum_total_device_memory_bytes.value_or(
-      std::numeric_limits<uint64_t>::max());
-  const uint64_t b_maximum = b.maximum_total_device_memory_bytes.value_or(
-      std::numeric_limits<uint64_t>::max());
-  return *a.minimum_total_device_memory_bytes <= b_maximum &&
-         *b.minimum_total_device_memory_bytes <= a_maximum &&
+  const auto minimum_total = std::max(*a.minimum_total_device_memory_bytes,
+                                      *b.minimum_total_device_memory_bytes);
+  const auto maximum_total = std::min(a.maximum_total_device_memory_bytes.value_or(
+                                          std::numeric_limits<uint64_t>::max()),
+                                      b.maximum_total_device_memory_bytes.value_or(
+                                          std::numeric_limits<uint64_t>::max()));
+  const auto minimum_free = std::max(a.minimum_free_device_memory_bytes.value_or(0),
+                                     b.minimum_free_device_memory_bytes.value_or(0));
+  const auto maximum_free = std::min(a.maximum_free_device_memory_bytes.value_or(
+                                         std::numeric_limits<uint64_t>::max()),
+                                     b.maximum_free_device_memory_bytes.value_or(
+                                         std::numeric_limits<uint64_t>::max()));
+  return minimum_total <= maximum_total && minimum_free <= maximum_free &&
+         minimum_free <= maximum_total &&
          ExactConditionsIntersect(a.is_integrated, b.is_integrated);
 }
 
@@ -2849,6 +2861,12 @@ bool MatchesEligibility(const Config::RuntimeProfile::Eligibility& eligibility,
   return device.total_device_memory_bytes >= *eligibility.minimum_total_device_memory_bytes &&
          (!eligibility.maximum_total_device_memory_bytes ||
           device.total_device_memory_bytes <= *eligibility.maximum_total_device_memory_bytes) &&
+         (!eligibility.minimum_free_device_memory_bytes ||
+          (device.free_device_memory_bytes &&
+           *device.free_device_memory_bytes >= *eligibility.minimum_free_device_memory_bytes)) &&
+         (!eligibility.maximum_free_device_memory_bytes ||
+          (device.free_device_memory_bytes &&
+           *device.free_device_memory_bytes <= *eligibility.maximum_free_device_memory_bytes)) &&
          (!eligibility.is_integrated ||
           (device.is_integrated && *device.is_integrated == *eligibility.is_integrated));
 }
@@ -2871,6 +2889,19 @@ void ValidateRuntimeProfiles(const Config& config) {
             *profile.eligibility.minimum_total_device_memory_bytes) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' has maximum_total_device_memory_bytes below its minimum");
+    }
+    if (profile.eligibility.maximum_free_device_memory_bytes &&
+        *profile.eligibility.maximum_free_device_memory_bytes <
+            profile.eligibility.minimum_free_device_memory_bytes.value_or(0)) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' has maximum_free_device_memory_bytes below its minimum");
+    }
+    if (profile.eligibility.minimum_free_device_memory_bytes &&
+        profile.eligibility.maximum_total_device_memory_bytes &&
+        *profile.eligibility.minimum_free_device_memory_bytes >
+            *profile.eligibility.maximum_total_device_memory_bytes) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' requires more free device memory than its maximum total");
     }
     const auto& batching = profile.overlay.dynamic_batching;
     const auto& search = profile.overlay.search;
@@ -3242,6 +3273,22 @@ void OverlayConfig(Config& config, std::string_view json) {
   std::swap(config, candidate);
 }
 
+void LogRuntimeProfileSelection(std::string_view profile_id, const RuntimeProfileDeviceFacts& device) {
+  if (!g_log.enabled) return;
+
+  auto& stream = Log("info");
+  stream << "Runtime profile: " << profile_id
+         << " (total_device_memory_bytes=" << device.total_device_memory_bytes
+         << ", free_device_memory_bytes=";
+  if (device.free_device_memory_bytes) {
+    stream << *device.free_device_memory_bytes;
+  } else {
+    stream << "unknown";
+  }
+  stream << ", is_integrated=" << (device.is_integrated ? (*device.is_integrated ? "true" : "false") : "unknown")
+         << ')' << std::endl;
+}
+
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   ValidateRuntimeProfiles(config);
   const Config::RuntimeProfile* selected = nullptr;
@@ -3250,12 +3297,15 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
       continue;
     }
     if (selected) {
-      throw std::runtime_error("multiple runtime profiles match total device memory: '" +
+      throw std::runtime_error("multiple runtime profiles match device eligibility: '" +
                                selected->id + "' and '" + profile.id + "'");
     }
     selected = &profile;
   }
   if (!selected) {
+    if (!config.runtime_profiles.empty()) {
+      LogRuntimeProfileSelection("base config", device);
+    }
     return;
   }
   const auto& batching = selected->overlay.dynamic_batching;
@@ -3284,6 +3334,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   if (selected->overlay.speculative.max_draft_tokens) {
     WarnOnClampedDraftWidth(config);
   }
+  LogRuntimeProfileSelection(selected->id, device);
 }
 
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
