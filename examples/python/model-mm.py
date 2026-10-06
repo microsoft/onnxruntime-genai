@@ -9,6 +9,7 @@ import onnxruntime_genai as og
 from common import (
     apply_chat_template,
     get_config,
+    get_default_user_prompt,
     get_ep_args,
     get_generator_params_args,
     get_guidance,
@@ -24,6 +25,8 @@ from common import (
 
 
 def main(args):
+    if args.user_prompt is None:
+        args.user_prompt = get_default_user_prompt(args.model_path, "What color is the sky?")
     if args.debug:
         set_logger()
     register_ep(args.execution_provider, args.ep_path, args.use_winml)
@@ -100,6 +103,7 @@ def main(args):
 
         # Initialize generator params
         params = og.GeneratorParams(model)
+        search_options.setdefault("max_length", min(7680, params.get_search_options()["max_length"]))
         params.set_search_options(**search_options)
         if args.verbose:
             print(f"GeneratorParams created: {search_options}")
@@ -227,7 +231,7 @@ if __name__ == "__main__":
         help="System prompt to use for the model.",
     )
     parser.add_argument(
-        "-up", "--user_prompt", type=str, default="What color is the sky?", help="User prompt to use for the model."
+        "-up", "--user_prompt", type=str, default=None, help="User prompt. Defaults to the package prompt when omitted."
     )
     parser.add_argument(
         "--image_paths",
@@ -258,5 +262,4 @@ if __name__ == "__main__":
     get_guidance_args(parser)
 
     args = parser.parse_args()
-    args.max_length = args.max_length if hasattr(args, "max_length") else 7680
     main(args)

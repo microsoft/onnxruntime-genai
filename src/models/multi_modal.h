@@ -24,6 +24,8 @@
 namespace Generators {
 
 struct MultiModalLanguageModel : Model {
+  static std::shared_ptr<Model> Create(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
+
   MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
   MultiModalLanguageModel(const MultiModalLanguageModel&) = delete;
   MultiModalLanguageModel& operator=(const MultiModalLanguageModel&) = delete;
