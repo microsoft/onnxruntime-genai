@@ -50,7 +50,7 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
   // session. Exports commonly ship an audio encoder alongside the vision one, so a config
   // reaching here may well declare a speech model that this path cannot host.
   //
-  // Binding is not the hazard: AppendEmbeddingFeatureInputs hands any unfilled modality an
+  // Binding is not the hazard: InitializeFeatureInputs hands any unfilled modality an
   // empty [0, hidden] tensor, so the in-graph merge is a no-op and the declared-but-unused
   // audio encoder changes no result. The hazard is the multimodal processor, which enables
   // audio whenever speech.config_filename and speech.filename are both set, then resolves
@@ -61,10 +61,8 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
   // Rejecting the model instead would make the common vision-plus-audio export unusable on
   // this path for text and image prompts, which are the only things a chunked NPU decoder
   // serves today.
-  if (!config_->model.speech.filename.empty()) {
-    config_->model.speech.filename.clear();
-    config_->model.speech.config_filename.clear();
-  }
+  config_->model.speech.filename.clear();
+  config_->model.speech.config_filename.clear();
 
   if (config_->model.vision.pipeline.empty()) {
     // No three-stage vision pipeline configured. Models such as Gemma-4 export the
@@ -396,11 +394,11 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   }
   OrtValue* pixel_values = find_extra_input(pixel_name);
   const auto pixel_shape = pixel_values->GetTensorTypeAndShapeInfo()->GetShape();
+  // Gemma's rank-three layout has an image axis; rank-two layouts have a patch axis instead.
   const int64_t num_images = pixel_shape.size() == 3 ? pixel_shape[0] : 1;
 
   // Every input the processor produced per image has to be sliced in step with pixel_values,
-  // not just the ones this model family happens to name. Routing here is by capability, so
-  // the session may declare inputs beyond pixel_values and pixel_position_ids, such as an
+  // not just pixel_values and pixel_position_ids. The session may declare inputs such as an
   // attention mask or spatial shapes. Leaving those at the full batch while pixel_values is
   // sliced to one image would feed the encoder mismatched batches. Select by leading
   // dimension, which is what makes an input per image.

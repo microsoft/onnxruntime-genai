@@ -560,6 +560,11 @@ def _write_pipelined_gemma4(
     config["model"]["eos_token_id"] = [1]
     config["model"]["image_token_id"] = GEMMA4_IMAGE_TOKEN_ID
     config["search"]["past_present_share_buffer"] = False
+    vision = config["model"]["vision"]
+    vision["filename"] = "dummy_vision.onnx"
+    vision.pop("pipeline", None)
+    vision["inputs"] = {"pixel_values": "pixel_values", "pixel_position_ids": "pixel_position_ids"}
+    vision["outputs"] = {"image_features": "image_features"}
     _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx")
     _create_dynamic_embedding_model(
         onnx,
@@ -602,6 +607,29 @@ def _write_pipelined_gemma4(
         config["model"][key] = value
     config_path.write_text(json.dumps(config), encoding="utf-8")
     return config_path
+
+
+def test_pipelined_gemma4_fixture_selects_dummy_vision_graph(test_data_path, tmp_path):
+    """Inherited vision graph settings must not change what the pipeline fixture executes."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = tmp_path / "source"
+    shutil.copytree(_get_gemma4_model_path(test_data_path), source_model_path)
+    source_config_path = source_model_path / "genai_config.json"
+    source_config = json.loads(source_config_path.read_text(encoding="utf-8"))
+    source_config["model"]["vision"].update(
+        filename="other_vision.onnx",
+        pipeline=[{"other": {"filename": "other_vision.onnx"}}],
+        inputs={"pixel_values": "other_pixels"},
+        outputs={"image_features": "other_features"},
+    )
+    source_config_path.write_text(json.dumps(source_config), encoding="utf-8")
+
+    config_path = _write_pipelined_gemma4(onnx, source_model_path, tmp_path / "pipeline")
+    vision = json.loads(config_path.read_text(encoding="utf-8"))["model"]["vision"]
+    assert vision["filename"] == "dummy_vision.onnx"
+    assert not vision.get("pipeline")
+    assert vision["inputs"] == {"pixel_values": "pixel_values", "pixel_position_ids": "pixel_position_ids"}
+    assert vision["outputs"] == {"image_features": "image_features"}
 
 
 @pytest.mark.parametrize(
@@ -776,7 +804,15 @@ def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(test_dat
         generator.set_inputs(inputs)
 
 
-def test_gemma4_pipelined_decoder_disables_declared_speech_encoder(test_data_path, tmp_path):
+@pytest.mark.parametrize(
+    "speech",
+    [
+        {"filename": "dummy_speech.onnx", "config_filename": "audio_feature_extraction.json"},
+        {"filename": "dummy_speech.onnx", "config_filename": ""},
+        {"filename": "", "config_filename": "audio_feature_extraction.json"},
+    ],
+)
+def test_gemma4_pipelined_decoder_disables_declared_speech_encoder(test_data_path, tmp_path, speech):
     """A pipelined decoder has no speech session, so a declared one is disabled, not rejected.
 
     Gemma 4 exports ship an audio encoder beside the vision encoder, so this config shape is
@@ -789,12 +825,18 @@ def test_gemma4_pipelined_decoder_disables_declared_speech_encoder(test_data_pat
     onnx = pytest.importorskip("onnx")
     source_model_path = Path(_get_gemma4_model_path(test_data_path))
     model_path = tmp_path / "gemma4-pipeline-speech"
-    speech = {"filename": "dummy_speech.onnx", "config_filename": "audio_feature_extraction.json"}
     _write_pipelined_gemma4(onnx, source_model_path, model_path, speech=speech)
 
     model = og.Model(os.fspath(model_path))
     processor = model.create_multimodal_processor()
     assert processor is not None
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=32)
+    generator = og.Generator(model, params)
+    generator.set_inputs(processor("Hello"))
+    generator.generate_next_token()
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [0]
 
 
 # Standalone runner functionality
