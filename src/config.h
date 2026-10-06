@@ -870,6 +870,7 @@ void OverlayConfig(Config& config, std::string_view json);
 struct RuntimeProfileDeviceFacts {
   uint64_t total_device_memory_bytes{};
   std::optional<bool> is_integrated;
+  // Unset means unknown: profiles with free-memory bounds do not match.
   std::optional<uint64_t> free_device_memory_bytes;
 };
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);

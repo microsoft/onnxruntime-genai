@@ -3273,6 +3273,22 @@ void OverlayConfig(Config& config, std::string_view json) {
   std::swap(config, candidate);
 }
 
+void LogRuntimeProfileSelection(std::string_view profile_id, const RuntimeProfileDeviceFacts& device) {
+  if (!g_log.enabled) return;
+
+  auto& stream = Log("info");
+  stream << "Runtime profile: " << profile_id
+         << " (total_device_memory_bytes=" << device.total_device_memory_bytes
+         << ", free_device_memory_bytes=";
+  if (device.free_device_memory_bytes) {
+    stream << *device.free_device_memory_bytes;
+  } else {
+    stream << "unknown";
+  }
+  stream << ", is_integrated=" << (device.is_integrated ? (*device.is_integrated ? "true" : "false") : "unknown")
+         << ')' << std::endl;
+}
+
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   ValidateRuntimeProfiles(config);
   const Config::RuntimeProfile* selected = nullptr;
@@ -3287,6 +3303,9 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     selected = &profile;
   }
   if (!selected) {
+    if (!config.runtime_profiles.empty()) {
+      LogRuntimeProfileSelection("base config", device);
+    }
     return;
   }
   const auto& batching = selected->overlay.dynamic_batching;
@@ -3315,6 +3334,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   if (selected->overlay.speculative.max_draft_tokens) {
     WarnOnClampedDraftWidth(config);
   }
+  LogRuntimeProfileSelection(selected->id, device);
 }
 
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {

@@ -288,6 +288,9 @@ allocation; it may change after selection and does not represent free OS memory 
 CPU/GPU memory pool. `is_integrated` identifies memory topology, not safe capacity. Authors must
 choose conservative blocks and verify peak OS-memory headroom on the target hardware. Actual
 model and Engine allocation remains the authoritative fit check, not the free-memory threshold.
+When GenAI logging is enabled, Model creation reports the chosen profile (or base configuration)
+and the total/free device memory and integrated status used for selection. An unknown free-memory
+value does not match a profile with free-memory bounds.
 
 ## Authoring notes
 

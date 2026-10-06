@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <string>
+#include <tuple>
 #include <utility>
 
 #include <gtest/gtest.h>
@@ -286,6 +287,68 @@ TEST(ConfigTest, FreeMemoryEligibilityRejectsInvalidAndUnreachableRanges) {
       "maximum_free_device_memory_bytes":0},"overlay":{"search":{"chunk_size":1}}}]})");
   ApplyRuntimeProfile(zero_free, RuntimeProfileDeviceFacts{100, false, 0});
   EXPECT_EQ(zero_free.search.chunk_size, 1u);
+}
+
+TEST(ConfigTest, FreeMemoryAndIntegratedConditionsMatchTogether) {
+  Config config;
+  OverlayConfig(config, R"({
+    "engine":{"dynamic_batching":{"num_blocks":32}},
+    "runtime_profiles":[{
+      "id":"shared-with-headroom","eligibility":{
+        "minimum_total_device_memory_bytes":100,"maximum_total_device_memory_bytes":200,
+        "minimum_free_device_memory_bytes":40,"maximum_free_device_memory_bytes":80,
+        "is_integrated":true},
+      "overlay":{"engine":{"dynamic_batching":{"num_blocks":64}}}
+    }]
+  })");
+
+  for (const auto [integrated, free_bytes, expected_blocks] : {
+           std::tuple{true, 39u, 32u}, std::tuple{true, 40u, 64u},
+           std::tuple{true, 80u, 64u}, std::tuple{true, 81u, 32u},
+           std::tuple{false, 40u, 32u}}) {
+    auto candidate = config;
+    CountingCudaDevice device;
+    device.state->total_memory_bytes = 200;
+    device.state->free_memory_bytes = free_bytes;
+    device.state->is_integrated = integrated;
+    ApplyRuntimeProfileForSelectedDevice(candidate, device);
+    EXPECT_EQ(*candidate.engine.dynamic_batching->num_blocks, expected_blocks);
+    EXPECT_EQ(device.state->integrated_queries, 1u);
+  }
+}
+
+TEST(ConfigTest, RuntimeProfileLogsSelectedAndBaseWithObservedFacts) {
+  Config config;
+  OverlayConfig(config, R"({
+    "engine":{"dynamic_batching":{"num_blocks":32}},
+    "runtime_profiles":[{
+      "id":"headroom","eligibility":{"minimum_total_device_memory_bytes":100,
+        "minimum_free_device_memory_bytes":40},
+      "overlay":{"engine":{"dynamic_batching":{"num_blocks":64}}}
+    }]
+  })");
+  const auto previous_logging = g_log.enabled;
+  SetLogBool("enabled", true);
+
+  auto selected = config;
+  testing::internal::CaptureStderr();
+  ApplyRuntimeProfile(selected, RuntimeProfileDeviceFacts{100, false, 40});
+  const auto selected_log = testing::internal::GetCapturedStderr();
+  EXPECT_NE(selected_log.find("Runtime profile: headroom"), std::string::npos);
+  EXPECT_NE(selected_log.find("total_device_memory_bytes=100"), std::string::npos);
+  EXPECT_NE(selected_log.find("free_device_memory_bytes=40"), std::string::npos);
+  EXPECT_NE(selected_log.find("is_integrated=false"), std::string::npos);
+  EXPECT_EQ(selected_log.find("Runtime profile:"), selected_log.rfind("Runtime profile:"));
+
+  testing::internal::CaptureStderr();
+  ApplyRuntimeProfile(config, 100);
+  const auto base_log = testing::internal::GetCapturedStderr();
+  SetLogBool("enabled", previous_logging);
+  EXPECT_NE(base_log.find("Runtime profile: base config"), std::string::npos);
+  EXPECT_NE(base_log.find("total_device_memory_bytes=100"), std::string::npos);
+  EXPECT_NE(base_log.find("free_device_memory_bytes=unknown"), std::string::npos);
+  EXPECT_NE(base_log.find("is_integrated=unknown"), std::string::npos);
+  EXPECT_EQ(base_log.find("Runtime profile:"), base_log.rfind("Runtime profile:"));
 }
 
 TEST(ConfigTest, RuntimeProfilesRejectAmbiguousCudaDeviceBeforeMemoryQuery) {
