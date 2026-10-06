@@ -114,9 +114,13 @@ def test_python_session_is_thin_native_dict_adapter(runtime):
     os.getenv("ORT_GENAI_RUN_NON_GENERATIVE_INTEGRATION") != "1",
     reason="requires opt-in multi-gigabyte model packages",
 )
-@pytest.mark.parametrize("provider", [None, "cuda"])
+@pytest.mark.parametrize("provider", [None, "cuda", "CUDA"])
 def test_exported_packages_cpu_cuda_parity(provider):
-    if provider == "cuda" and os.getenv("ORT_GENAI_RUN_NON_GENERATIVE_CUDA") != "1":
+    if (
+        provider is not None
+        and provider.lower() == "cuda"
+        and os.getenv("ORT_GENAI_RUN_NON_GENERATIVE_CUDA") != "1"
+    ):
         pytest.skip("set ORT_GENAI_RUN_NON_GENERATIVE_CUDA=1 for CUDA")
     root_value = os.getenv("ORT_GENAI_NON_GENERATIVE_TEST_ROOT")
     if not root_value:

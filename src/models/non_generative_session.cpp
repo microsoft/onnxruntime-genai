@@ -1917,7 +1917,8 @@ struct NativeDecisionSession {
   bool flat{};
   OgaModelResult Decide(const OgaStructuredRequest& request);
   OgaModelResult DecideImpl(const OgaStructuredRequest& request,
-                            bool allow_cpu_grouping);
+                            bool allow_cpu_grouping,
+                            CachedKevPrefix* request_prefix = nullptr);
 };
 
 OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request) {
@@ -1926,7 +1927,8 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
 }
 
 OgaModelResult NativeDecisionSession::DecideImpl(
-    const OgaStructuredRequest& request, bool allow_cpu_grouping) {
+    const OgaStructuredRequest& request, bool allow_cpu_grouping,
+    CachedKevPrefix* request_prefix) {
   if (request.questions.empty()) throw std::invalid_argument("questions must be non-empty");
   if (request.temperature != 1.0f)
     throw std::invalid_argument(
@@ -1957,21 +1959,25 @@ OgaModelResult NativeDecisionSession::DecideImpl(
           rank < short_count ? short_request : long_request;
       destination.questions.push_back(request.questions[order[rank]]);
     }
-    auto short_result = DecideImpl(short_request, false);
-    auto long_result = DecideImpl(long_request, false);
-    std::unordered_map<std::string, OgaAnswer> answers;
-    for (auto& [id, answer] : short_result.answers)
-      answers.emplace(std::move(id), std::move(answer));
-    for (auto& [id, answer] : long_result.answers)
-      answers.emplace(std::move(id), std::move(answer));
+    CachedKevPrefix grouped_prefix;
+    auto short_result = DecideImpl(short_request, false, &grouped_prefix);
+    auto long_result = DecideImpl(long_request, false, &grouped_prefix);
+    std::vector<std::optional<OgaAnswer>> answers(request.questions.size());
+    for (size_t rank = 0; rank < short_result.answers.size(); ++rank)
+      answers[order[rank]] =
+          std::move(short_result.answers[rank].second);
+    for (size_t rank = 0; rank < long_result.answers.size(); ++rank)
+      answers[order[short_count + rank]] =
+          std::move(long_result.answers[rank].second);
     OgaModelResult result{"kev", {}};
     result.answers.reserve(request.questions.size());
-    for (const auto& [id, _] : request.questions) {
-      const auto found = answers.find(id);
-      if (found == answers.end())
+    for (size_t index = 0; index < request.questions.size(); ++index) {
+      if (!answers[index])
         throw std::runtime_error(
-            "grouped KEV result is missing answer: " + id);
-      result.answers.emplace_back(id, std::move(found->second));
+            "grouped KEV result is missing answer at index " +
+            std::to_string(index));
+      result.answers.emplace_back(
+          request.questions[index].first, std::move(*answers[index]));
     }
     return result;
   }
@@ -2084,8 +2090,9 @@ OgaModelResult NativeDecisionSession::DecideImpl(
     prefix_key.append(
         reinterpret_cast<const char*>(state_value.tokens.data()),
         state_value.tokens.size() * sizeof(state_value.tokens.front()));
-    CachedKevPrefix prefix;
-    if (!prefix_cache.Get(prefix_key, prefix)) {
+    CachedKevPrefix local_prefix;
+    auto& prefix = request_prefix ? *request_prefix : local_prefix;
+    if (prefix.states.empty() && !prefix_cache.Get(prefix_key, prefix)) {
       TokenBatch prefix_batch;
       prefix_batch.rows = 1;
       prefix_batch.width = state_value.tokens.size();
