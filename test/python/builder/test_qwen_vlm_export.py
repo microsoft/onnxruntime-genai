@@ -32,7 +32,7 @@ def test_embedding_matches_placeholder_replacement(tmp_path, monkeypatch, ids):
     builder = Qwen35VLMModel(
         config, {"embed_tokens.weight": weight}, ir.DataType.FLOAT, "embedding.onnx", str(tmp_path)
     )
-    builder.make_embedding()
+    builder.make_embedding_graph()
     ids = np.asarray(ids, dtype=np.int64)
     mask = ids == config.image_token_id
     features = np.arange(mask.sum() * 8, dtype=np.float32).reshape(-1, 8) + 1000

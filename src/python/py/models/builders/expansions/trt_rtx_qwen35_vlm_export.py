@@ -142,9 +142,14 @@ def maybe_load_qwen35_config(
     return load_qwen35_config(model_name_or_path, token=token, cache_dir=cache_dir)
 
 
-class Qwen35VLMModel(Model):
+class Qwen35VLMModel:
     """Build auxiliary graphs with the same IR and serialization as the decoder."""
 
+    # Auxiliary graphs reuse IR helpers without the decoder initialization contract.
+    make_node = Model.make_node
+    make_value = Model.make_value
+    make_initializer = Model.make_initializer
+    save_model = Model.save_model
     constant = TRT_RTX.make_expansion_constant
 
     def __init__(self, config, state_dict, io_dtype, filename, out_dir):
@@ -197,7 +202,7 @@ class Qwen35VLMModel(Model):
             stash_type=1,
         )
 
-    def make_embedding(self):
+    def make_embedding_graph(self):
         config = self.config
         hidden_size = config.text_config.hidden_size
         ids = self.input("input_ids", ir.DataType.INT64, ["batch_size", "sequence_length"])
@@ -581,7 +586,7 @@ def export_qwen35_vlm_components(
     embedding = Qwen35VLMModel(
         config, {"embed_tokens.weight": state_dict["embed_tokens.weight"]}, io_dtype, "embedding.onnx", out_dir
     )
-    embedding.make_embedding()
+    embedding.make_embedding_graph()
     embedding.save_model(out_dir)
     print("Exporting Qwen3.5 vision.onnx...")
     visual_state = {name[len("visual.") :]: tensor for name, tensor in state_dict.items() if name.startswith("visual.")}
