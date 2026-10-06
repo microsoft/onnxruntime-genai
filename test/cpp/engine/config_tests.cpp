@@ -180,7 +180,8 @@ TEST(ConfigTest, IntegratedEligibilityRequiresBooleanAndDisjointRanges) {
       {"id":"generic","eligibility":{"minimum_total_device_memory_bytes":1,
         "maximum_total_device_memory_bytes":10},"overlay":{"search":{"chunk_size":1}}},
       {"id":"specific","eligibility":{"minimum_total_device_memory_bytes":10,
-        "is_integrated":)"} + other + R"(},"overlay":{"search":{"chunk_size":2}}}
+        "is_integrated":)"} +
+                      other + R"(},"overlay":{"search":{"chunk_size":2}}}
     ]})";
     try {
       OverlayConfig(config, json);
