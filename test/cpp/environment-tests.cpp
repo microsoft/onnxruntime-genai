@@ -78,6 +78,51 @@ TEST(EnvironmentTests, GetEnvPreservesStringAndBooleanSemantics) {
   EXPECT_EQ(GetEnv("ORTGENAI_TEST_ENV"), large);
 }
 
+#ifdef _WIN32
+TEST(EnvironmentTests, ReaderFailsClosedWhenValueDisappearsOrBecomesEmpty) {
+  ScopedEnvironmentVariable variable{"ORTGENAI_TEST_ENV_RACE", "true"};
+  for (const std::optional<std::string>& replacement :
+       std::array<std::optional<std::string>, 2>{std::nullopt, std::string{}}) {
+    variable.Set("true");
+    int reads = 0;
+    const auto value = EnvironmentInternal::ReadWindowsEnvironmentVariable(
+        "ORTGENAI_TEST_ENV_RACE", kMaxTelemetryInputBytes,
+        [&](const char* name, char* buffer, DWORD size) {
+          if (++reads == 2) variable.Set(replacement);
+          return ::GetEnvironmentVariableA(name, buffer, size);
+        });
+    EXPECT_FALSE(value);
+    EXPECT_EQ(reads, 2);
+  }
+}
+
+TEST(EnvironmentTests, ReaderRetriesGrowingValuesAndRejectsUnstableOrOversizedValues) {
+  ScopedEnvironmentVariable variable{"ORTGENAI_TEST_ENV_RACE", "x"};
+  int reads = 0;
+  const auto value = EnvironmentInternal::ReadWindowsEnvironmentVariable(
+      "ORTGENAI_TEST_ENV_RACE", 4,
+      [&](const char* name, char* buffer, DWORD size) {
+        if (++reads == 2) variable.Set("true");
+        return ::GetEnvironmentVariableA(name, buffer, size);
+      });
+  EXPECT_EQ(value, "true");
+  EXPECT_EQ(reads, 3);
+
+  for (const size_t max_bytes : {2u, 1024u}) {
+    variable.Set("x");
+    reads = 0;
+    const auto unstable = EnvironmentInternal::ReadWindowsEnvironmentVariable(
+        "ORTGENAI_TEST_ENV_RACE", max_bytes,
+        [&](const char* name, char* buffer, DWORD size) {
+          if (++reads > 1) variable.Set(std::string(size + 1, 'x'));
+          return ::GetEnvironmentVariableA(name, buffer, size);
+        });
+    EXPECT_FALSE(unstable);
+    EXPECT_EQ(reads, max_bytes == 2 ? 2 : 4);
+  }
+}
+#endif
+
 TEST(EnvironmentTests, ScopedVariableRestoresUnsetEmptyAndPopulatedValues) {
   ScopedEnvironmentVariable original{"ORTGENAI_TEST_ENV_RESTORE", std::nullopt};
   for (const std::optional<std::string>& value :

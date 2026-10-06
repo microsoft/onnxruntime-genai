@@ -123,6 +123,12 @@ steps:
         done
       fi
 
+      /usr/bin/cmake \
+        -DLIBRARY=/ort_genai_src/install/lib/libonnxruntime-genai.so \
+        -DNM=/usr/bin/nm \
+        -DAPI_HEADER=/ort_genai_src/install/include/ort_genai_c.h \
+        -P test/cmake/check-shared-library-exports.cmake
+
       # Probe: configuring + building the committed consumer against the exported
       # package is the real proof that find_package(onnxruntime-genai) is
       # consumable. A broken export fails here rather than in a later SDK job.

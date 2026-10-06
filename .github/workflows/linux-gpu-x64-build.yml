@@ -233,6 +233,8 @@ jobs:
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
               export ORTGENAI_LOG_ORT_LIB=1 && \
               export LD_LIBRARY_PATH=/ort_genai_src/ort/lib:/ort_genai_src/ort/ep:/ort_genai_src/build/cuda/Release/:\${LD_LIBRARY_PATH} && \
+              /usr/bin/ctest --test-dir build/cuda/Release --build-config Release --output-on-failure --no-tests=error \
+                -R '^(SharedLibraryExports|TelemetryHelpersTests)$' && \
               /ort_genai_src/build/cuda/Release/unit_tests --ep_dir /ort_genai_src/ort/ep && \
               /ort_genai_src/build/cuda/Release/reinit_tests --ep_dir /ort_genai_src/ort/ep && \
               /ort_genai_src/build/cuda/Release/engine_unit_tests --ep_dir /ort_genai_src/ort/ep"

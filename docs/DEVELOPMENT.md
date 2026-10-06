@@ -213,6 +213,12 @@ With `ENABLE_TESTS=ON` on Linux or macOS, check that every public API declared i
 ctest --test-dir build/Linux/Release -R '^SharedLibraryExports$' --output-on-failure
 ```
 
+The Linux x64 CPU and CUDA CI jobs run both `SharedLibraryExports` and
+`TelemetryHelpersTests` explicitly. Windows x64 CPU CI runs `TelemetryHelpersTests`,
+including the environment-read race regressions. Linux and macOS core release jobs also run
+the export checker on the installed library against its installed public header,
+even with `ENABLE_TESTS=OFF`; macOS checks the signed library.
+
 ### Python tests (pytest)
 
 Install the Python test dependencies and the wheel produced by your build:
