@@ -593,10 +593,13 @@ token budget. The proposal width an automatic drafter aims for is model/Engine c
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
-proposals remain deterministic. A turn that enables guidance, a `repetition_penalty` other than 1,
-no-repeat-ngram processing, or a not-yet-met minimum generated token count is not draft-eligible,
-because the verification rows do not reproduce those logits processors. Eligibility is per turn: the
-next turn that drops those options can draft again. Passing an empty sequence clears a pending
+proposals remain deterministic. Whole-turn guidance, a `repetition_penalty` other than 1,
+no-repeat-ngram processing, or a not-yet-met minimum generated token count makes a turn
+ineligible for drafts, because the verification rows do not reproduce those logits processors.
+Delimited guidance permits drafts outside its constrained regions: proposals stop before the
+opening marker, drafts pause inside the region, and resume after the closing marker. Automatic
+MTP drafting remains disabled throughout a delimited turn. Eligibility is per turn: the next turn
+that drops an ineligible option can draft again. Passing an empty sequence clears a pending
 proposal.
 
 For a decode with K scheduled drafts, the packed input is the request's one unprocessed token

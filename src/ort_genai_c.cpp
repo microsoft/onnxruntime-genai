@@ -1985,8 +1985,46 @@ OgaResult* OgaTurnOptionsSetGuidance(
         "guidance_type and guidance_data must both be non-empty. Use "
         "OgaTurnOptionsClearGuidance for an unguided turn.");
   }
+  if (options->delimited_guidance) {
+    throw std::runtime_error(
+        "Whole-turn guidance conflicts with delimited guidance. Use "
+        "OgaTurnOptionsClearGuidance before changing guidance modes.");
+  }
   options->guidance_type = guidance_type;
   options->guidance_data = guidance_data;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnOptionsSetDelimitedGuidance(
+    OgaTurnOptions* options, int32_t opening_token,
+    int32_t closing_token, const char* grammar) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  if (!grammar) {
+    throw std::runtime_error("grammar must not be null.");
+  }
+  options->ValidateOwnerThread();
+  if (opening_token < 0 || closing_token < 0 || opening_token == closing_token) {
+    throw std::runtime_error(
+        "opening_token and closing_token must be distinct nonnegative token IDs.");
+  }
+  if (!Generators::ValidateGuidanceRequest("lark_grammar", grammar)) {
+    throw std::runtime_error("grammar must not be empty.");
+  }
+  if (!options->guidance_type.empty() || !options->guidance_data.empty()) {
+    throw std::runtime_error(
+        "Delimited guidance conflicts with whole-turn guidance. Use "
+        "OgaTurnOptionsClearGuidance before changing guidance modes.");
+  }
+
+  // Allocate before replacing the old value so an invalid or failed update is atomic.
+  std::optional<Generators::TurnOptions::DelimitedGuidance> next{
+      Generators::TurnOptions::DelimitedGuidance{
+          opening_token, closing_token, grammar}};
+  options->delimited_guidance.swap(next);
   return nullptr;
   OGA_CATCH
 }
@@ -1999,6 +2037,7 @@ OgaResult* OgaTurnOptionsClearGuidance(OgaTurnOptions* options) {
   options->ValidateOwnerThread();
   options->guidance_type.clear();
   options->guidance_data.clear();
+  options->delimited_guidance.reset();
   return nullptr;
   OGA_CATCH
 }
