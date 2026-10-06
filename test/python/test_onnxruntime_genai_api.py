@@ -88,31 +88,16 @@ def test_tokenizer_stream_timestamp_initialization(test_data_path):
     }}))
     tokenizer = og.Tokenizer(config)
     stream = tokenizer.create_stream()
-    with pytest.raises(RuntimeError, match="Create metadata state"):
-        stream.finalize_metadata()
-    stream.create_metadata_core_state_using_tokenizer_config()
     result = stream.finalize_metadata()
     assert result["timestamp_metadata"] == {"words": [], "segments": []}
-    with pytest.raises(RuntimeError):
-        stream.create_metadata_core_state_using_tokenizer_config()
     stream.reset()
-    with pytest.raises(RuntimeError, match="Create metadata state"):
-        stream.finalize_metadata()
+    assert stream.finalize_metadata()["timestamp_metadata"] == {"words": [], "segments": []}
 
-    metadata_config = og.TokenMetadataCoreConfig()
-    stream.create_metadata_core_state(metadata_config)
-    assert stream.finalize_metadata()["timestamp_metadata"] is None
-    assert result["timestamp_metadata"] == {"words": [], "segments": []}
     stream.reset()
-    metadata_config.overlay(json.dumps({"timestamps": {
-        "level": "all", "segment_separators": ["."],
-        "segment_gap_threshold_seconds": 0.26,
-    }}))
-    with pytest.raises(RuntimeError):
-        metadata_config.overlay('{"timestamps":{"level":"invalid"}}')
-    stream.create_metadata_core_state(metadata_config)
-    metadata_config.overlay('{"timestamps":{"level":"off"}}')
-    del metadata_config
+    assert stream.decode(0) is not None
+    with pytest.raises(RuntimeError, match="Cannot mix text and metadata"):
+        stream.finalize_metadata()
+    stream.reset()
     assert stream.finalize_metadata()["timestamp_metadata"] == {"words": [], "segments": []}
 
 
@@ -137,9 +122,6 @@ def test_tokenizer_generic_metadata_from_generator(test_data_path):
     token_id = int(generator.get_next_tokens()[0])
     assert token.token_id == token_id
     assert token.token_acoustic_frame_interval is None
-    with pytest.raises(RuntimeError, match="Create metadata state"):
-        stream.decode_with_metadata(token)
-    stream.create_metadata_core_state(og.TokenMetadataCoreConfig())
     result = stream.decode_with_metadata(token)
     plain = tokenizer.create_stream()
     assert result["text"] == plain.decode(int(generator.get_next_tokens()[0]))
@@ -147,25 +129,16 @@ def test_tokenizer_generic_metadata_from_generator(test_data_path):
     assert stream.finalize_metadata()["timestamp_metadata"] is None
     assert result["text"] == tokenizer.create_stream().decode(int(generator.get_next_tokens()[0]))
     stream.reset()
-    with pytest.raises(RuntimeError, match="Create metadata state"):
-        stream.decode_with_metadata(token)
+    assert stream.decode_with_metadata(token)["timestamp_metadata"] is None
     generator.generate_next_token()
     generator.get_next_tokens_with_metadata()
     del generator
     del tokens
     assert token.token_id == token_id
     assert token.token_acoustic_frame_interval is None
-    stream.create_metadata_core_state(og.TokenMetadataCoreConfig())
-    assert stream.decode_with_metadata(token)["text"] == result["text"]
     stream.reset()
-    config = og.TokenMetadataCoreConfig()
-    config.overlay(json.dumps({"timestamps": {
-        "level": "all",
-    }}))
-    stream.create_metadata_core_state(config)
-    with pytest.raises(RuntimeError, match="require generation timing"):
-        stream.decode_with_metadata(token)
-    assert stream.finalize_metadata()["timestamp_metadata"]["words"] == []
+    assert stream.decode_with_metadata(token)["text"] == result["text"]
+    assert stream.finalize_metadata()["timestamp_metadata"] is None
 
 
 def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):

@@ -527,10 +527,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            pybind11::arg("enable_ff_tokens") = false)
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
-  pybind11::class_<OgaTokenMetadataCoreConfig>(m, "TokenMetadataCoreConfig", "Metadata options copied when a tokenizer stream creates its state.")
-      .def(pybind11::init([]() { return OgaTokenMetadataCoreConfig::Create(); }))
-      .def("overlay", &OgaTokenMetadataCoreConfig::Overlay);
-
   pybind11::class_<OgaTokenMetadataInput>(m, "TokenMetadataInput", "Emitted token with an optional acoustic interval stored by value.")
       .def_readonly("token_id", &OgaTokenMetadataInput::token_id)
       .def_property_readonly("token_acoustic_frame_interval", [](const OgaTokenMetadataInput& token) -> std::optional<std::pair<int64_t, int64_t>> {
@@ -539,8 +535,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       });
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
-      .def("create_metadata_core_state_using_tokenizer_config", &OgaTokenizerStream::CreateMetadataCoreStateUsingTokenizerConfig)
-      .def("create_metadata_core_state", &OgaTokenizerStream::CreateMetadataCoreState, pybind11::arg("config"))
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); })
       .def("decode_with_metadata", [](OgaTokenizerStream& stream, const OgaTokenMetadataInput& token) { return ToMetadata(stream.DecodeWithMetadata(token)); }, pybind11::arg("token"))
       .def("finalize_metadata", [](OgaTokenizerStream& stream) { return ToMetadata(stream.FinalizeMetadata()); })

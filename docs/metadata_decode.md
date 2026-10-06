@@ -1,12 +1,12 @@
 # Metadata Decoding
 
-`TokenizerStream` owns the Extensions decoder cache. It creates and retains one
-`MetadataCoreState` per stream; the caller receives a shared handle. These are
-internal C++ interfaces. Public C/C++/C#/Python bindings expose generic decode and
-finalize operations returning typed metadata. The state handle remains internal.
+`TokenizerStream` owns the Extensions decoder cache and its private
+`MetadataCoreState`. Public C/C++/C#/Python bindings expose decode and finalize
+operations returning typed metadata, never a state handle.
 
-For plain text (`timestamp_level: "off"`), the stream needs no metadata state. The
-generator returns token IDs; decode and append each incremental text fragment:
+For plain text (including when a timestamp-configured tokenizer is used for text
+only), the generator returns token IDs; decode and append each incremental text
+fragment. A stream that selects text decoding drops its unused default metadata state:
 
 ```cpp
 auto stream = OgaTokenizerStream::Create(*tokenizer);
@@ -18,14 +18,14 @@ while (!generator->IsDone()) {
 }
 ```
 
-For timestamps (`word`, `segment`, or `all`), initialize metadata state *before*
-decoding. The generator returns each ID with an acoustic frame interval; Extensions
+For timestamps (`word`, `segment`, or `all`), the stream initializes metadata state
+from the tokenizer configuration when created. The generator returns each ID with
+an acoustic frame interval; Extensions
 returns decoded text and completed word token spans. The stream joins the spans
 to buffered intervals and returns word/segment events:
 
 ```cpp
 auto stream = OgaTokenizerStream::Create(*tokenizer);
-stream->CreateMetadataCoreStateUsingTokenizerConfig();
 while (!generator->IsDone()) {
   generator->GenerateNextToken();
   const auto tokens = generator->GetNextTokensWithMetadata();
@@ -82,27 +82,22 @@ The C entry points are `OgaTokenizerStreamDecodeWithMetadata` and
 `TokenMetadataTimestamp`; Python returns `text` and `timestamp_metadata` (None when disabled).
 Words and segments are nested under the timestamp field.
 
-`Tokenizer` stores an internal `MetadataCoreConfig` with timestamp settings nested under
-`timestamps`, leaving room for future feature configurations.
-`CreateMetadataCoreStateUsingTokenizerConfig()` explicitly copies that tokenizer
-configuration into a new state. For overrides, `CreateMetadataCoreState(config)`
-still requires an argument; it has no default argument or no-argument overload.
-`Tokenizer::GetMetadataCoreConfig()` returns an independent copy of the model-derived
-settings, including timestamp level, frame duration parameters, and segment settings.
-Callers may modify this copy without affecting the tokenizer or other streams, or
-supply a manually populated internal config. Passing an all-disabled config
-disables all consumers. The tokenizer-config factory also leaves consumers disabled
-when they are disabled in the tokenizer configuration.
+`Tokenizer` stores internal model-derived metadata settings, including timestamp
+level, frame duration, and segment rules. Each stream automatically copies those
+settings when metadata is enabled. Configure them on the model before creating the
+tokenizer; the stream has no public metadata-state creation or override methods.
+When all features are disabled, metadata state is created only if metadata
+decoding or finalization is requested.
 `Tokenizer::UpdateOptions()` forwards Extensions string options; it does not
 change these GenAI model-derived settings. Per-cache producer configuration is
-determined by the config passed to the factory.
+determined by the tokenizer configuration.
 Enabled timestamps require a positive sample rate, hop length, and subsampling
 factor. Configuration is copied into the state and stays fixed until reset.
 
-Creation configures the stream's Extensions cache through
+Metadata state creation configures the stream's Extensions cache through
 `OrtxSetDetokenizerCacheMetadataConfig`. This overrides shared tokenizer metadata
-options only for that cache. Streams sharing a tokenizer may select different
-features without toggling shared options. Disabled timestamps do not buffer
+options only for that cache. Streams sharing a tokenizer have independent
+accumulators and decoder caches. Disabled timestamps do not buffer
 token intervals or accumulate words and segments, return a null
 `timestampMetadata`, and impose no timing requirement.
 
@@ -121,8 +116,7 @@ Decode validates the selected token and timing before advancing Extensions, then
 `MetadataCoreState` buffers the token interval, matches completed-word token spans
 to their first and last intervals, and directly publishes per-call word/segment
 records. It retains intervals until Extensions' pending-token watermark releases
-them; unfinished segments persist between calls. The stream still owns the state,
-even if an internal caller retains its shared handle. When timestamp production is enabled,
+them; unfinished segments persist between calls. When timestamp production is enabled,
 the generator getter checks that model-produced interval counts match emitted token
 counts and pairs them by position; missing intervals are an error. IDs can repeat
 and cannot be used to look up timing.
@@ -139,80 +133,54 @@ a token. Decoding may resume after finalization; use reset for an independent se
 
 ## Ownership and Lifecycle
 
-Text and calculated timestamp records are GenAI-owned. `Metadata()` exposes a
-read-only borrowed Extensions result for the current step, not an independently
-owned snapshot. Do not retain its pointers across decoding, finalization, or reset.
-Copy any output that must survive the next step. Reads and operations on the same
-stream/state require external serialization.
+Text and calculated timestamp records are GenAI-owned. Native result pointers are
+borrowed from the stream: do not retain them across decoding, finalization, reset,
+or destruction. Copy any output that must survive the next operation. Reads and
+operations on the same stream require external serialization.
 
-A state cannot be used with another stream. Creating a second active state or
-mixing text-only and metadata decoding requires `Reset()`. Reset may deliberately
-discard pending work, recreates the decoder cache, and invalidates old state
-handles. Stream destruction also invalidates them, even if a caller retains a
-shared handle. State methods accessing decode results then throw instead of
-dereferencing released cache storage.
+Each stream has independent state. Mixing text-only and metadata decoding requires
+`Reset()`, which discards pending work, recreates the decoder cache and restores
+fresh model-derived metadata state if enabled. Destruction releases that state.
 
-Generic decode and finalization require explicit state creation, even for an empty
-stream. Neither creates state implicitly. Disabled features return null data, while
-ordinary decoded text remains available. After `Reset()`, initialize again.
+Metadata decode and finalization use the stream's model-derived state automatically.
+If all features are off, they create a disabled state on first use. Disabled features
+return null data, while ordinary decoded text remains available. `Reset()` restores
+the tokenizer defaults. The first decode or
+metadata finalization chooses a mode; switching modes afterward requires another reset.
 
 Public native `OgaTokenMetadataOutput` and all nested pointers are stream-owned until the next
 decode/finalize/reset or destruction. Python and C# copy them into owned snapshots.
 The C-compatible field layouts are the contract; use compatible headers and native
 packages. Never free borrowed result pointers.
 
-## Public Binding Initialization
+## Configuration and Public Bindings
 
-In C++ and C#, call `stream.CreateMetadataCoreStateUsingTokenizerConfig()` before
-the first metadata decode. In Python use
-`stream.create_metadata_core_state_using_tokenizer_config()`. The C entry point is
-`OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig`. These create state
-owned by the stream, rather than returning the internal shared state handle.
-
-For explicit settings, use `CreateMetadataCoreState(config)` in C++/C#,
-`create_metadata_core_state(config)` in Python, or
-`OgaTokenizerStreamCreateMetadataCoreState` in C. C/C++ use `OgaTokenMetadataCoreConfig`;
-Python/C# expose `TokenMetadataCoreConfig`. Like the existing `Config`, this owns an
-opaque native handle and accepts JSON overlays. No managed/native config struct
-mirrors or per-field setters are needed.
+In C/C++/C#/Python, configure the model, create a tokenizer and a tokenizer stream,
+then call metadata decode directly. Model-enabled features are initialized on stream
+creation and restored on reset. Neither the state nor its configuration is exposed
+through the stream's public API.
 
 ```csharp
-using var config = new TokenMetadataCoreConfig();
-config.Overlay(@"{
-  ""timestamps"": {
-    ""level"": ""all"",
-    ""segment_separators"": [""."", ""!"", ""?""],
-    ""segment_gap_threshold_seconds"": 0.26
-  }
-}");
-stream.CreateMetadataCoreState(config);
+using var config = new Config(modelPath);
+config.Overlay(@"{""model"":{""timestamp_level"":""all"",
+  ""segment_separators"":[""."",""!"",""?""],
+  ""segment_gap_threshold_seconds"":0.26}}");
+using var tokenizer = new Tokenizer(config);
+using var stream = tokenizer.CreateStream();
 ```
 
 The tokenizer reads `sample_rate`, `hop_length`, and `subsampling_factor` from
-`model` in the package's `genai_config.json`; do not repeat these fields in the
-metadata overlay. Levels are `off`, `word`, `segment`, and `all`; the default is
-`off`. The optional gap is specified in non-negative seconds (or `null` to disable
-it), then rounded to the nearest acoustic frame using the model's frame duration.
+`model` in the package's `genai_config.json`. Levels are `off`, `word`, `segment`,
+and `all`; the default is `off`. The optional gap is specified in non-negative
+seconds (or `null` to disable it), then rounded to the nearest acoustic frame.
 Zero and positive gaps below half a frame split each word into its own segment.
-Separators default to an empty list for an explicit config. A model that requests
-timestamps without positive timing values, or an explicit metadata state that
-enables them without those values, fails rather than silently disabling timestamps.
-
-Overlays preserve omitted fields and replace supplied separator arrays; failed
-parsing leaves the config unchanged. Strings are decoded by the native JSON parser.
-The stream copies settings at creation, so later overlays or disposal of the config
-do not affect it. An all-disabled config returns text with null timestamp metadata.
-
-In C, use `OgaCreateTokenMetadataCoreConfig`, `OgaTokenMetadataCoreConfigOverlay`, and
-`OgaDestroyTokenMetadataCoreConfig`. C++ uses `OgaTokenMetadataCoreConfig::Create()` and
-`config->Overlay(json)`, with `unique_ptr` ownership. Python uses
-`og.TokenMetadataCoreConfig()` and `config.overlay(json)` with automatic ownership.
-The native result metadata remains a directly readable typed structure; only the
-configuration uses an opaque handle.
+The model's default separators are `.`, `?`, and `!`. A model that requests timestamps
+without positive timing values fails rather than silently disabling timestamps.
+The native result metadata remains a directly readable typed structure.
 
 ## Adding a Feature
 
-Add typed settings to `MetadataCoreConfig`, configure the corresponding Extensions
+Add model-derived settings to the stream's internal metadata configuration, configure the corresponding Extensions
 producer per cache, and process its per-step data in `MetadataCoreState` (or an owned
 helper). Keep unfinished work across calls and clear only completed per-call outputs
 at the start of each decode/finalize operation. Validate inputs before advancing

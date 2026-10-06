@@ -33,8 +33,6 @@ struct TokenizerStream : LeakChecked<TokenizerStream> {
   TokenizerStream(const TokenizerStream&) = delete;
   TokenizerStream& operator=(const TokenizerStream&) = delete;
 
-  std::shared_ptr<MetadataCoreState> CreateMetadataCoreState(const MetadataCoreConfig& config);
-  std::shared_ptr<MetadataCoreState> CreateMetadataCoreStateUsingTokenizerConfig();
   const OgaTokenMetadataOutput& DecodeWithMetadata(const OgaTokenMetadataInput& token);
   const OgaTokenMetadataOutput& FinalizeMetadata();
 
@@ -42,11 +40,13 @@ struct TokenizerStream : LeakChecked<TokenizerStream> {
   void Reset();
 
  private:
+  void InitializeDefaultMetadataState();
+  void EnsureMetadataState();
   std::shared_ptr<const Tokenizer> tokenizer_;
   OrtxPtr<OrtxObject> cache_;
   std::string chunk_;
   DecodeMode decode_mode_{DecodeMode::Unset};
-  std::shared_ptr<MetadataCoreState> metadata_state_;
+  std::unique_ptr<MetadataCoreState> metadata_state_;
 };
 
 // Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model.
@@ -56,7 +56,6 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   Tokenizer(const Config& config);
 
   std::unique_ptr<TokenizerStream> CreateStream() const;
-  MetadataCoreConfig GetMetadataCoreConfig() const;
 
   void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options);
   std::vector<int32_t> Encode(const char* text) const;

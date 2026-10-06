@@ -381,21 +381,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                               out IntPtr /* const char** */ outStr);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaCreateTokenMetadataCoreConfig(out IntPtr config);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenMetadataCoreConfigOverlay(IntPtr config, byte[] json);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern void OgaDestroyTokenMetadataCoreConfig(IntPtr config);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig(IntPtr tokenizerStream);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenizerStreamCreateMetadataCoreState(IntPtr tokenizerStream, IntPtr config);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaTokenizerStreamDecodeWithMetadata(IntPtr tokenizerStream, in NativeTokenMetadataInput token, out IntPtr result);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
