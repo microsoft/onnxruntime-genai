@@ -135,87 +135,132 @@ Qwen2_5_VL_PipelineState::Qwen2_5_VL_PipelineState(const Qwen2_5_VL_PipelineMode
                                                    DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)
     : DecoderOnlyPipelineState(model, sequence_lengths, params), vl_model_{model} {
+  InitializeFeatureInputs();
 }
 
 void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  // Vision must run before binding, because the embedding graph may declare
-  // image_features as a real input and binding happens by name at Add() time.
   RunVision(extra_inputs);
-
-  if (features_bound_) {
-    // Already bound once. Mutating owned_extra_inputs_ now would move the strings whose
-    // c_str() the state already holds, so forward the caller's vector untouched instead.
-    DecoderOnlyPipelineState::SetExtraInputs(extra_inputs);
-    return;
-  }
-
-  // ExtraInputs::Add stores name.c_str() and the raw tensor pointer, so the vector it reads
-  // from must outlive this state and must not grow afterwards. Build it fully, bind once,
-  // then leave it alone.
-  owned_extra_inputs_ = extra_inputs;
-  AppendEmbeddingFeatureInputs(owned_extra_inputs_);
-  DecoderOnlyPipelineState::SetExtraInputs(owned_extra_inputs_);
+  DecoderOnlyPipelineState::SetExtraInputs(extra_inputs);
 }
 
 DeviceSpan<float> Qwen2_5_VL_PipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                 DeviceSpan<int32_t> next_indices) {
-  EnsureFeatureInputsBound();
+  if (next_tokens.size() > 1) image_feature_offset_ = 0;
   return DecoderOnlyPipelineState::Run(total_length, next_tokens, next_indices);
 }
 
-// Text only requests never call SetExtraInputs, so bind the empty features here instead.
-void Qwen2_5_VL_PipelineState::EnsureFeatureInputsBound() {
-  if (features_bound_) return;
-
-  AppendEmbeddingFeatureInputs(owned_extra_inputs_);
-  if (!owned_extra_inputs_.empty()) {
-    DecoderOnlyPipelineState::SetExtraInputs(owned_extra_inputs_);
-  }
-}
-
-void Qwen2_5_VL_PipelineState::AppendEmbeddingFeatureInputs(std::vector<ExtraInput>& inputs) {
-  if (features_bound_) return;
+void Qwen2_5_VL_PipelineState::InitializeFeatureInputs() {
   const auto& image_name = vl_model_.config_->model.embedding.inputs.image_features;
   const auto& audio_name = vl_model_.config_->model.embedding.inputs.audio_features;
 
-  auto already_bound = [&inputs](const std::string& name) {
-    return std::any_of(inputs.begin(), inputs.end(),
-                       [&name](const ExtraInput& input) { return input.name == name; });
+  auto add = [&](const std::string& name, size_t& index, std::unique_ptr<OrtValue>& value) {
+    if (name.empty() || !vl_model_.session_info_.HasInput(name)) return;
+    value = CreateEmptyFeatureInput(name);
+    index = inputs_.size();
+    input_names_.push_back(name.c_str());
+    inputs_.push_back(value.get());
   };
 
-  auto mem_info = OrtMemoryInfo::Create("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
+  add(image_name, image_feature_input_index_, image_feature_input_);
+  embedding_merges_features_ = image_feature_input_index_ != SIZE_MAX;
+  add(audio_name, audio_feature_input_index_, audio_feature_input_);
+}
 
-  auto add = [&](const std::string& name, bool use_vision_output) -> bool {
-    if (name.empty() || already_bound(name) || !vl_model_.session_info_.HasInput(name)) return false;
+std::unique_ptr<OrtValue> Qwen2_5_VL_PipelineState::CreateEmptyFeatureInput(const std::string& name) const {
+  const auto declared = vl_model_.session_info_.GetInputShape(name);
+  if (declared.size() != 2 && declared.size() != 3) {
+    throw std::runtime_error("Embedding feature input '" + name + "' must have rank 2 or 3");
+  }
+  const int64_t hidden = declared.back() > 0 ? declared.back() : vl_model_.config_->model.decoder.hidden_size;
+  std::vector<int64_t> shape;
+  if (declared.size() == 3) {
+    shape.push_back(declared[0] > 0 ? declared[0] : 1);
+  }
+  shape.push_back(0);
+  shape.push_back(hidden);
+  return OrtValue::CreateTensor(vl_model_.allocator_cpu_, shape,
+                                vl_model_.session_info_.GetInputDataType(name));
+}
 
-    std::unique_ptr<OrtValue> value;
-    if (use_vision_output && image_features_value_) {
-      // Wrap the encoder output in place; the backing storage is owned by this state.
-      const auto info = image_features_value_->GetTensorTypeAndShapeInfo();
-      const auto shape = info->GetShape();
-      std::span<float> data(image_features_value_->GetTensorMutableData<float>(), info->GetElementCount());
-      value = OrtValue::CreateTensor<float>(*mem_info, data, std::span<const int64_t>(shape));
-    } else {
-      // No features for this modality: hand the graph an empty [0, hidden] tensor so the
-      // in-graph merge is a no-op, matching what MultiModalLanguageModel does.
-      auto declared = vl_model_.session_info_.GetInputShape(name);
-      const int64_t hidden = declared.empty() ? 0 : declared.back();
-      const std::vector<int64_t> shape{0, hidden};
-      value = OrtValue::CreateTensor(vl_model_.allocator_cpu_, shape,
-                                     ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    }
+void Qwen2_5_VL_PipelineState::OnStageStart(size_t stage_id) {
+  if (!embedding_merges_features_) return;
+  const auto& image_name = vl_model_.config_->model.embedding.inputs.image_features;
+  const auto& stage_inputs = vl_model_.config_->model.decoder.pipeline[stage_id].inputs;
+  if (std::find(stage_inputs.begin(), stage_inputs.end(), image_name) == stage_inputs.end()) return;
+  UpdateImageFeatureInput();
+}
 
-    auto tensor = std::make_shared<Tensor>(std::move(value));
-    inputs.push_back(ExtraInput{name, tensor});
-    return true;
-  };
+void Qwen2_5_VL_PipelineState::UpdateImageFeatureInput() {
+  const auto& image_name = vl_model_.config_->model.embedding.inputs.image_features;
+  if (!first_run_ || !image_features_value_) {
+    image_feature_cast_.reset();
+    image_feature_input_ = CreateEmptyFeatureInput(image_name);
+    inputs_[image_feature_input_index_] = image_feature_input_.get();
+    return;
+  }
+  auto input_ids_info = input_ids_->Get()->GetTensorTypeAndShapeInfo();
+  const auto input_ids_count = input_ids_info->GetElementCount();
+  const int32_t* input_ids = input_ids_->Get()->GetTensorData<int32_t>();
+  const int32_t image_token_id = GetImageTokenId();
 
-  // Only the image binding may suppress injection. An embedding graph that declares
-  // audio_features but not image_features still needs the vision rows injected, so letting
-  // the audio binding set this would silently drop the image.
-  embedding_merges_features_ = add(image_name, /*use_vision_output=*/true);
-  add(audio_name, /*use_vision_output=*/false);
-  features_bound_ = true;
+  size_t feature_count = 0;
+  for (size_t i = 0; i < input_ids_count; ++i) {
+    if (input_ids[i] == image_token_id) ++feature_count;
+  }
+
+  if (feature_count == 0) {
+    image_feature_cast_.reset();
+    image_feature_input_ = CreateEmptyFeatureInput(image_name);
+    inputs_[image_feature_input_index_] = image_feature_input_.get();
+    return;
+  }
+
+  const auto source_info = image_features_value_->GetTensorTypeAndShapeInfo();
+  const auto source_shape = SqueezeToRank2(source_info->GetShape());
+  const size_t available_features = static_cast<size_t>(source_shape[0]);
+  if (image_feature_offset_ + feature_count > available_features) {
+    throw std::runtime_error("Embedding feature input requires more image rows than the vision encoder produced");
+  }
+
+  const int64_t hidden = source_shape[1];
+  const auto declared = vl_model_.session_info_.GetInputShape(image_name);
+  std::vector<int64_t> shape;
+  if (declared.size() == 3) shape.push_back(declared[0] > 0 ? declared[0] : 1);
+  shape.push_back(static_cast<int64_t>(feature_count));
+  shape.push_back(hidden);
+
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+  float* source = image_features_value_->GetTensorMutableData<float>() + image_feature_offset_ * hidden;
+  const std::vector<int64_t> rank2_shape{static_cast<int64_t>(feature_count), hidden};
+  auto source_view = OrtValue::CreateTensor<float>(
+      *mem_info, std::span<float>(source, feature_count * hidden), rank2_shape);
+  const auto target_type = vl_model_.session_info_.GetInputDataType(image_name);
+  if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    image_feature_cast_.reset();
+    image_feature_input_ = OrtValue::CreateTensor(
+        *mem_info, source, feature_count * hidden * sizeof(float), shape, target_type);
+  } else {
+    Cast(*source_view, image_feature_cast_, *GetDeviceInterface(DeviceType::CPU), target_type);
+    image_feature_input_ = OrtValue::CreateTensor(
+        *mem_info, image_feature_cast_->GetTensorMutableRawData(),
+        feature_count * hidden * Ort::SizeOf(target_type), shape, target_type);
+  }
+  inputs_[image_feature_input_index_] = image_feature_input_.get();
+  image_feature_offset_ += feature_count;
+}
+
+int32_t Qwen2_5_VL_PipelineState::GetImageTokenId() const {
+  const int32_t image_token_id = static_cast<int32_t>(vl_model_.config_->model.image_token_id);
+  if (image_token_id != 0) return image_token_id;
+
+  const auto& model_type = vl_model_.config_->model.type;
+  // Preserve the token ID used by legacy Qwen configs that omit this field.
+  if (model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_vl") {
+    constexpr int32_t kQwenVLImageTokenId = 151655;
+    return kQwenVLImageTokenId;
+  }
+
+  throw std::runtime_error("model.image_token_id is not set in genai_config.json");
 }
 
 void Qwen2_5_VL_PipelineState::RunVision(const std::vector<ExtraInput>& extra_inputs) {
@@ -392,8 +437,11 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   const char* output_name_ptrs[] = {output_names[output_index].c_str()};
 
   auto run_encoder = [&]() {
+    if (vl_model_.config_->model.vision.run_options.has_value()) {
+      State::SetRunOptions(vl_model_.config_->model.vision.run_options.value());
+    }
     OrtValue* raw_output = nullptr;
-    vl_model_.vision_session_->Run(nullptr, input_name_ptrs.data(), input_values.data(),
+    vl_model_.vision_session_->Run(run_options_.get(), input_name_ptrs.data(), input_values.data(),
                                    input_name_ptrs.size(), output_name_ptrs, &raw_output, 1);
     std::unique_ptr<OrtValue> owned(raw_output);
     if (owned->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
@@ -487,20 +535,7 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
 
   auto vision_shape = image_features_value_->GetTensorTypeAndShapeInfo()->GetShape();
 
-  // model.image_token_id is the general contract, but no builder emitted it until recently:
-  // only builders/mistral.py assigns it. Configs for the three model types that reached this
-  // code before relied on a hardcoded 151655, so keep that value for exactly those types
-  // rather than fail a config that used to work. Everything else must set the field.
-  int32_t image_token_id = static_cast<int32_t>(vl_model_.config_->model.image_token_id);
-  if (image_token_id == 0) {
-    const auto& model_type = vl_model_.config_->model.type;
-    if (model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_vl") {
-      constexpr int32_t kQwenVLImageTokenId = 151655;
-      image_token_id = kQwenVLImageTokenId;
-    } else {
-      throw std::runtime_error("Vision embedding injection: model.image_token_id is not set in genai_config.json");
-    }
-  }
+  const int32_t image_token_id = GetImageTokenId();
 
   if (!input_ids_ || !input_ids_->Get()) {
     throw std::runtime_error("Vision embedding injection: input_ids not available");

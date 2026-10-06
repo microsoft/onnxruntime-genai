@@ -27,6 +27,8 @@ logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s",
 log = logging.getLogger("gemma4-tests")
 
 GEMMA4_MODEL_NAME = "gemma4"
+GEMMA4_IMAGE_TOKEN = "<|image|>"
+GEMMA4_IMAGE_TOKEN_ID = 256001
 
 
 def _get_gemma4_model_path(test_data_path):
@@ -65,6 +67,25 @@ def _get_test_media_path(test_data_path, relative_path):
     return Path(test_data_path).parent / relative_path
 
 
+def _register_gemma4_image_token(model_path):
+    """Register the processor's image soft token in the compact test tokenizer."""
+    tokenizer_path = model_path / "tokenizer.json"
+    tokenizer = json.loads(tokenizer_path.read_text(encoding="utf-8"))
+    tokenizer["added_tokens"].append(
+        {
+            "id": GEMMA4_IMAGE_TOKEN_ID,
+            "content": GEMMA4_IMAGE_TOKEN,
+            "single_word": False,
+            "lstrip": False,
+            "rstrip": False,
+            "normalized": False,
+            "special": True,
+        }
+    )
+    tokenizer["model"]["vocab"][GEMMA4_IMAGE_TOKEN] = GEMMA4_IMAGE_TOKEN_ID
+    tokenizer_path.write_text(json.dumps(tokenizer), encoding="utf-8")
+
+
 def _create_static_batch_vision_model(onnx, output_path):
     """Create a static-B=1 vision model that removes padding and pools 3x3 patches."""
     helper = onnx.helper
@@ -101,12 +122,24 @@ def _create_static_batch_vision_model(onnx, output_path):
     onnx.save(model, output_path)
 
 
-def _create_dynamic_embedding_model(onnx, output_path):
-    """Create an embedding fixture whose output follows the input prompt shape."""
+def _create_dynamic_embedding_model(
+    onnx,
+    output_path,
+    image_token_id,
+    *,
+    feature_type=None,
+    feature_rank=2,
+    consume_features=True,
+):
+    """Create an embedding fixture that places image features at image-token positions."""
     helper = onnx.helper
     tensor_proto = onnx.TensorProto
+    feature_type = feature_type or tensor_proto.FLOAT
     input_ids = helper.make_tensor_value_info("input_ids", tensor_proto.INT32, ["batch_size", "sequence_length"])
-    image_features = helper.make_tensor_value_info("image_features", tensor_proto.FLOAT, ["num_image_tokens", 2048])
+    feature_shape = ["num_image_tokens", "hidden_size"]
+    if feature_rank == 3:
+        feature_shape.insert(0, 1)
+    image_features = helper.make_tensor_value_info("image_features", feature_type, feature_shape)
     inputs_embeds = helper.make_tensor_value_info(
         "inputs_embeds", tensor_proto.FLOAT, ["batch_size", "sequence_length", 2048]
     )
@@ -120,16 +153,44 @@ def _create_dynamic_embedding_model(onnx, output_path):
             value=onnx.numpy_helper.from_array(np.array([0], dtype=np.float32)),
         ),
     ]
-    initializers = [onnx.numpy_helper.from_array(np.array([2048], dtype=np.int64), "hidden_size")]
-    graph = helper.make_graph(
-        nodes, "gemma4_dynamic_embedding", [input_ids, image_features], [inputs_embeds], initializers
-    )
+    graph_inputs = [input_ids]
+    initializers = [
+        onnx.numpy_helper.from_array(np.array([2048], dtype=np.int64), "hidden_size"),
+        onnx.numpy_helper.from_array(np.array(image_token_id, dtype=np.int32), "image_token_id"),
+        onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "squeeze_axis"),
+    ]
+    if consume_features:
+        graph_inputs.append(image_features)
+        nodes.extend(
+            [
+                helper.make_node("Equal", ["input_ids", "image_token_id"], ["image_mask"]),
+                helper.make_node("NonZero", ["image_mask"], ["image_indices_transposed"]),
+                helper.make_node("Transpose", ["image_indices_transposed"], ["image_indices"], perm=[1, 0]),
+            ]
+        )
+        features_for_scatter = "image_features"
+        if feature_rank == 3:
+            nodes.append(helper.make_node("Squeeze", [features_for_scatter, "squeeze_axis"], ["rank2_image_features"]))
+            features_for_scatter = "rank2_image_features"
+        if feature_type != tensor_proto.FLOAT:
+            nodes.append(
+                helper.make_node("Cast", [features_for_scatter], ["float_image_features"], to=tensor_proto.FLOAT)
+            )
+            features_for_scatter = "float_image_features"
+        nodes.append(
+            helper.make_node(
+                "ScatterND", ["inputs_embeds_empty", "image_indices", features_for_scatter], ["inputs_embeds"]
+            )
+        )
+        nodes[2].output[0] = "inputs_embeds_empty"
+
+    graph = helper.make_graph(nodes, "gemma4_dynamic_embedding", graph_inputs, [inputs_embeds], initializers)
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7)
     onnx.save(model, output_path)
 
 
-def _create_dynamic_decoder_model(onnx, output_path):
-    """Create a compact decoder fixture with prompt-sized outputs."""
+def _create_dynamic_decoder_model(onnx, output_path, *, with_kv_cache=True):
+    """Create a compact decoder whose sampled token reveals whether features were merged."""
     helper = onnx.helper
     tensor_proto = onnx.TensorProto
     inputs = [
@@ -155,13 +216,25 @@ def _create_dynamic_decoder_model(onnx, output_path):
     nodes = [
         helper.make_node("Shape", ["inputs_embeds"], ["embeds_shape"]),
         helper.make_node("Slice", ["embeds_shape", "zero_index", "two_index"], ["batch_sequence_shape"]),
-        helper.make_node("Concat", ["batch_sequence_shape", "vocab_size"], ["logits_shape"], axis=0),
+        helper.make_node("Mul", ["inputs_embeds", "inputs_embeds"], ["squared_embeds"]),
+        helper.make_node("ReduceSum", ["squared_embeds", "reduce_axes"], ["feature_score"], keepdims=1),
+        helper.make_node("Concat", ["batch_sequence_shape", "one_index"], ["score_shape"], axis=0),
+        helper.make_node("Expand", ["feature_score", "score_shape"], ["expanded_feature_score"]),
+        helper.make_node("Concat", ["batch_sequence_shape", "two_index"], ["prefix_shape"], axis=0),
         helper.make_node(
             "ConstantOfShape",
-            ["logits_shape"],
-            ["logits"],
+            ["prefix_shape"],
+            ["logits_prefix"],
             value=onnx.numpy_helper.from_array(np.array([0], dtype=np.float32)),
         ),
+        helper.make_node("Concat", ["batch_sequence_shape", "five_index"], ["suffix_shape"], axis=0),
+        helper.make_node(
+            "ConstantOfShape",
+            ["suffix_shape"],
+            ["logits_suffix"],
+            value=onnx.numpy_helper.from_array(np.array([0], dtype=np.float32)),
+        ),
+        helper.make_node("Concat", ["logits_prefix", "expanded_feature_score", "logits_suffix"], ["logits"], axis=2),
         helper.make_node("Shape", ["attention_mask"], ["mask_shape"]),
         helper.make_node("Slice", ["mask_shape", "zero_index", "one_index"], ["batch_dim"]),
         helper.make_node("Slice", ["mask_shape", "one_index", "two_index"], ["total_sequence_dim"]),
@@ -180,10 +253,16 @@ def _create_dynamic_decoder_model(onnx, output_path):
         onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "zero_index"),
         onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), "one_index"),
         onnx.numpy_helper.from_array(np.array([2], dtype=np.int64), "two_index"),
-        onnx.numpy_helper.from_array(np.array([8], dtype=np.int64), "vocab_size"),
+        onnx.numpy_helper.from_array(np.array([5], dtype=np.int64), "five_index"),
+        onnx.numpy_helper.from_array(np.array([1, 2], dtype=np.int64), "reduce_axes"),
         onnx.numpy_helper.from_array(np.array([4], dtype=np.int64), "num_heads"),
         onnx.numpy_helper.from_array(np.array([256], dtype=np.int64), "head_size"),
     ]
+    if not with_kv_cache:
+        inputs = inputs[:3]
+        outputs = outputs[:1]
+        nodes = nodes[:-6]
+        initializers = initializers[:-2]
     graph = helper.make_graph(nodes, "gemma4_dynamic_decoder", inputs, outputs, initializers)
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7)
     onnx.save(model, output_path)
@@ -221,7 +300,7 @@ def test_gemma4_vision_basic(test_data_path, relative_image_path):
         pytest.skip(f"Test image not found at {image_path}")
     images = og.Images.open(image_path)
 
-    inputs = processor("<|image|>Describe this image", images=images)
+    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}Describe this image", images=images)
 
     assert inputs is not None
     assert "pixel_values" in inputs
@@ -244,7 +323,7 @@ def test_gemma4_vision_load_from_bytes(test_data_path, relative_image_path):
     with open(image_path, "rb") as f:
         images = og.Images.open_bytes(f.read())
 
-    inputs = processor("<|image|>What is shown in this image?", images=images)
+    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}What is shown in this image?", images=images)
 
     assert inputs is not None
     assert "pixel_values" in inputs
@@ -264,7 +343,7 @@ def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
             pytest.skip(f"Test image not found at {p}")
     images = og.Images.open(*image_paths)
 
-    inputs = processor("<|image|><|image|>Compare these images", images=images)
+    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}{GEMMA4_IMAGE_TOKEN}Compare these images", images=images)
 
     assert inputs is not None
     assert "pixel_values" in inputs
@@ -299,23 +378,25 @@ def test_gemma4_static_batch_vision_executes_multiple_images(test_data_path, tmp
     source_model_path = Path(_get_gemma4_model_path(test_data_path))
     model_path = tmp_path / "gemma4"
     shutil.copytree(source_model_path, model_path)
+    _register_gemma4_image_token(model_path)
 
     config_path = model_path / "genai_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["model"]["speech"] = {"filename": "", "config_filename": ""}
     config["model"]["vocab_size"] = 8
     config["model"]["eos_token_id"] = [1]
+    config["model"]["image_token_id"] = GEMMA4_IMAGE_TOKEN_ID
     config["search"]["past_present_share_buffer"] = False
     config_path.write_text(json.dumps(config), encoding="utf-8")
     _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx")
-    _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx")
+    _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx", config["model"]["image_token_id"])
     _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")
 
     model = og.Model(os.fspath(model_path))
     processor = model.create_multimodal_processor()
     image_paths = [os.fspath(_get_test_media_path(test_data_path, path)) for path in relative_image_paths]
     images = og.Images.open(*image_paths)
-    inputs = processor("<|image|><|image|>Compare these images", images=images)
+    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}{GEMMA4_IMAGE_TOKEN}Compare these images", images=images)
     image_token_counts = _to_numpy(inputs["num_image_tokens"])
     assert image_token_counts[0] != image_token_counts[1]
 
@@ -335,7 +416,7 @@ def test_gemma4_processor_creates_token_type_ids(test_data_path, relative_image_
         pytest.skip(f"Test image not found at {image_path}")
     images = og.Images.open(image_path)
 
-    inputs = processor("<|image|>Describe this image", images=images)
+    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}Describe this image", images=images)
 
     assert inputs is not None
     assert "token_type_ids" in inputs
@@ -454,23 +535,41 @@ def test_gemma4_audio_preprocessing(test_data_path, relative_audio_path):
     assert audio_sizes[0] > 0, f"audio_sizes should be positive, got {audio_sizes[0]}"
 
 
-def _write_pipelined_gemma4(onnx, source_model_path, model_path, **config_overrides):
+def _write_pipelined_gemma4(
+    onnx,
+    source_model_path,
+    model_path,
+    *,
+    feature_type=None,
+    feature_rank=2,
+    consume_features=True,
+    with_kv_cache=True,
+    **config_overrides,
+):
     """Copy the Gemma4 fixture and rewrite it as a pipelined decoder.
 
     A pipelined decoder is what routes the config to Qwen2_5_VL_PipelineModel, which runs the
     vision encoder as a single session instead of the three-stage Qwen vision pipeline.
     """
     shutil.copytree(source_model_path, model_path)
-    _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx")
-    _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx")
-    _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")
-
+    _register_gemma4_image_token(model_path)
     config_path = model_path / "genai_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["model"]["speech"] = {"filename": "", "config_filename": ""}
     config["model"]["vocab_size"] = 8
     config["model"]["eos_token_id"] = [1]
+    config["model"]["image_token_id"] = GEMMA4_IMAGE_TOKEN_ID
     config["search"]["past_present_share_buffer"] = False
+    _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx")
+    _create_dynamic_embedding_model(
+        onnx,
+        model_path / "dummy_embedding.onnx",
+        config["model"]["image_token_id"],
+        feature_type=feature_type,
+        feature_rank=feature_rank,
+        consume_features=consume_features,
+    )
+    _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx", with_kv_cache=with_kv_cache)
 
     decoder = config["model"]["decoder"]
     decoder.pop("filename", None)
@@ -478,7 +577,7 @@ def _write_pipelined_gemma4(onnx, source_model_path, model_path, **config_overri
         {
             "embedding": {
                 "filename": "dummy_embedding.onnx",
-                "inputs": ["input_ids", "image_features"],
+                "inputs": ["input_ids", *(["image_features"] if consume_features else [])],
                 "outputs": ["inputs_embeds"],
             },
             "text": {
@@ -494,6 +593,10 @@ def _write_pipelined_gemma4(onnx, source_model_path, model_path, **config_overri
             },
         }
     ]
+    if not with_kv_cache:
+        text_stage = decoder["pipeline"][0]["text"]
+        text_stage["inputs"] = text_stage["inputs"][:3]
+        text_stage["outputs"] = ["logits"]
 
     for key, value in config_overrides.items():
         config["model"][key] = value
@@ -505,7 +608,11 @@ def _write_pipelined_gemma4(onnx, source_model_path, model_path, **config_overri
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
 )
-def test_gemma4_pipelined_decoder_runs_single_session_vision(test_data_path, tmp_path, relative_image_paths):
+@pytest.mark.parametrize("feature_rank,feature_dtype", [(2, "float32"), (3, "float16")])
+@pytest.mark.parametrize("window_size", [None, 64])
+def test_gemma4_pipelined_decoder_runs_single_session_vision(
+    test_data_path, tmp_path, relative_image_paths, feature_rank, feature_dtype, window_size
+):
     """A pipelined Gemma4 decoder must still encode every image and bind the features.
 
     Covers Qwen2_5_VL_PipelineState::RunSingleSessionVision: the vision graph has a static
@@ -515,7 +622,21 @@ def test_gemma4_pipelined_decoder_runs_single_session_vision(test_data_path, tmp
     onnx = pytest.importorskip("onnx")
     source_model_path = Path(_get_gemma4_model_path(test_data_path))
     model_path = tmp_path / "gemma4-pipeline"
-    _write_pipelined_gemma4(onnx, source_model_path, model_path)
+    config_path = _write_pipelined_gemma4(
+        onnx,
+        source_model_path,
+        model_path,
+        feature_type=onnx.TensorProto.FLOAT16 if feature_dtype == "float16" else onnx.TensorProto.FLOAT,
+        feature_rank=feature_rank,
+        with_kv_cache=window_size is None,
+    )
+    if window_size is not None:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["model"]["decoder"]["sliding_window"] = {
+            "window_size": window_size,
+            "slide_key_value_cache": False,
+        }
+        config_path.write_text(json.dumps(config), encoding="utf-8")
 
     model = og.Model(os.fspath(model_path))
     processor = model.create_multimodal_processor()
@@ -524,7 +645,7 @@ def test_gemma4_pipelined_decoder_runs_single_session_vision(test_data_path, tmp
         if not os.path.exists(p):
             pytest.skip(f"Test image not found at {p}")
     images = og.Images.open(*image_paths)
-    inputs = processor("<|image|><|image|>Compare these images", images=images)
+    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}{GEMMA4_IMAGE_TOKEN}Compare these images", images=images)
 
     image_token_counts = _to_numpy(inputs["num_image_tokens"])
     assert image_token_counts[0] != image_token_counts[1], "fixture images must differ in token count"
@@ -532,12 +653,94 @@ def test_gemma4_pipelined_decoder_runs_single_session_vision(test_data_path, tmp
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=4096)
     generator = og.Generator(model, params)
-    # set_inputs drives SetExtraInputs -> RunVision -> RunSingleSessionVision. Reaching the
-    # next token without throwing means every image was encoded and the concatenated
-    # features matched the image token count the embedding stage expected.
+    generator.set_inputs(inputs)
+    pixel_values = _to_numpy(inputs["pixel_values"])
+    positions = _to_numpy(inputs["pixel_position_ids"])
+    expected_features = []
+    for pixels, image_positions in zip(pixel_values, positions, strict=True):
+        valid = image_positions[:, 0] > -1
+        expected_features.append(np.pad(pixels[valid][::9], ((0, 0), (0, 1280))))
+    expected_features = np.concatenate(expected_features).astype(feature_dtype).astype(np.float32)
+    ids = _to_numpy(inputs["input_ids"])
+    image_mask = ids == GEMMA4_IMAGE_TOKEN_ID
+    assert np.count_nonzero(image_mask) == int(image_token_counts.sum())
+    expected_embeds = np.zeros((*ids.shape, 2048), dtype=np.float32)
+    expected_embeds[image_mask] = expected_features
+    if window_size is not None:
+        padding = (-ids.shape[1]) % window_size
+        expected_embeds = np.pad(expected_embeds, ((0, 0), (padding, 0), (0, 0)))[:, -window_size:]
+    np.testing.assert_allclose(
+        generator.get_output("inputs_embeds"),
+        expected_embeds,
+        rtol=1e-3 if feature_dtype == "float16" else 0,
+        atol=0,
+    )
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [2]
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [0]
+    np.testing.assert_array_equal(generator.get_output("inputs_embeds"), np.zeros((1, 1, 2048)))
+
+
+def test_pipelined_mistral3_is_rejected_before_using_qwen_vision(test_data_path, tmp_path):
+    """Pixtral's rank-four, per-image cropping contract must not enter the Qwen pipeline."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "mistral3-pipeline"
+    _write_pipelined_gemma4(onnx, source_model_path, model_path, type="mistral3")
+    with pytest.raises(RuntimeError, match="Pipelined decoder is not supported for model type 'mistral3'"):
+        og.Model(os.fspath(model_path))
+
+
+def test_gemma4_pipelined_text_only_uses_rank3_float16_empty_features(test_data_path, tmp_path):
+    """Text decode must receive a correctly ranked and typed empty feature tensor."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4-text-only"
+    _write_pipelined_gemma4(
+        onnx,
+        source_model_path,
+        model_path,
+        feature_type=onnx.TensorProto.FLOAT16,
+        feature_rank=3,
+    )
+
+    model = og.Model(os.fspath(model_path))
+    inputs = model.create_multimodal_processor()("Hello")
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=32)
+    generator = og.Generator(model, params)
     generator.set_inputs(inputs)
     generator.generate_next_token()
-    assert len(generator.get_next_tokens()) == 1
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [0]
+
+
+@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+def test_gemma4_pipelined_decoder_injects_features_when_embedding_has_no_feature_input(
+    test_data_path, tmp_path, relative_image_path
+):
+    """Exports without image_features must retain post-embedding feature injection."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4-injection"
+    _write_pipelined_gemma4(onnx, source_model_path, model_path, consume_features=False)
+
+    image_path = os.fspath(_get_test_media_path(test_data_path, relative_image_path))
+    if not os.path.exists(image_path):
+        pytest.skip(f"Test image not found at {image_path}")
+    model = og.Model(os.fspath(model_path))
+    inputs = model.create_multimodal_processor()(
+        f"{GEMMA4_IMAGE_TOKEN}Describe this image", images=og.Images.open(image_path)
+    )
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [2]
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [0]
 
 
 def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(test_data_path, tmp_path):
@@ -564,7 +767,7 @@ def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(test_dat
 
     model = og.Model(os.fspath(model_path))
     processor = model.create_multimodal_processor()
-    inputs = processor("<|image|>Describe this image", images=og.Images.open(image_path))
+    inputs = processor(f"{GEMMA4_IMAGE_TOKEN}Describe this image", images=og.Images.open(image_path))
 
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=4096)

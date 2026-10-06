@@ -66,6 +66,7 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
                         DeviceSpan<int32_t> next_indices) override;
 
  protected:
+  void OnStageStart(size_t stage_id) override;
   void OnStageComplete(size_t stage_id) override;
 
  private:
@@ -77,13 +78,16 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
   // Runs whichever vision path this model was configured with, at most once.
   void RunVision(const std::vector<ExtraInput>& extra_inputs);
 
-  // Binds image_features/audio_features for embedding graphs that declare them as real inputs.
-  // Exports that fold the features away are left untouched.
-  void AppendEmbeddingFeatureInputs(std::vector<ExtraInput>& inputs);
+  // Registers image_features/audio_features as managed pipeline inputs.
+  void InitializeFeatureInputs();
 
-  // Text-only prompts never call SetExtraInputs, so the declared feature inputs would
-  // otherwise go unbound. Binds them once, on whichever path reaches the model first.
-  void EnsureFeatureInputsBound();
+  // Selects the image feature rows belonging to the embedding stage's current token window.
+  void UpdateImageFeatureInput();
+
+  // Creates an empty feature tensor matching the embedding input's rank, width, and dtype.
+  std::unique_ptr<OrtValue> CreateEmptyFeatureInput(const std::string& name) const;
+
+  int32_t GetImageTokenId() const;
 
   const Qwen2_5_VL_PipelineModel& vl_model_;
   bool vision_ran_{false};
@@ -92,10 +96,13 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
   std::unique_ptr<OrtValue> vision_output_owner_;  // keeps the encoder's output alive when
                                                    // image_features_value_ is a reshaped view of it
   size_t image_embed_consumed_{0};                 // Track how many vision embeddings we've injected
-  std::vector<ExtraInput> owned_extra_inputs_;     // ExtraInputs::Add borrows the name and tensor pointers,
-                                                   // so the vector it reads from must outlive this state
   bool embedding_merges_features_{false};          // embedding graph does the merge, so skip injection
-  bool features_bound_{false};                     // guards against binding the same name twice
+  size_t image_feature_input_index_{SIZE_MAX};
+  size_t audio_feature_input_index_{SIZE_MAX};
+  size_t image_feature_offset_{0};
+  std::unique_ptr<OrtValue> image_feature_input_;
+  std::unique_ptr<OrtValue> image_feature_cast_;
+  std::unique_ptr<OrtValue> audio_feature_input_;
 };
 
 }  // namespace Generators

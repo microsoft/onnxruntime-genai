@@ -937,14 +937,16 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
-  // A multimodal model whose decoder is split into a pipeline (e.g. chunked for an NPU) needs
-  // both the encoders and the staged decoder, and no other model class consumes
-  // decoder.pipeline. Gate on that capability rather than on a list of model names, so any
-  // such model is routed here. Qwen2_5_VL_PipelineModel's constructor disables the one
-  // modality it cannot host, a speech encoder declared alongside a decoder pipeline.
-  if ((ModelType::IsVLM(config->model.type) || ModelType::IsMMM(config->model.type)) &&
+  // Only route model families whose vision contracts are implemented by this pipeline state.
+  // Other VLMs, such as Pixtral, require family-specific image cropping and metadata handling.
+  if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" ||
+       config->model.type == "qwen3_vl" || config->model.type == "gemma4") &&
       !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
+  if (!config->model.decoder.pipeline.empty() &&
+      (ModelType::IsVLM(config->model.type) || ModelType::IsMMM(config->model.type))) {
+    throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
+  }
   if (ModelType::IsLFM2(config->model.type))
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
