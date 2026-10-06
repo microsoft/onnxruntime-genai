@@ -143,9 +143,13 @@ def test_python_cache_controls(runtime, session_name):
     os.getenv("ORT_GENAI_RUN_NON_GENERATIVE_INTEGRATION") != "1",
     reason="requires opt-in multi-gigabyte model packages",
 )
-@pytest.mark.parametrize("provider", [None, "cuda"])
+@pytest.mark.parametrize("provider", [None, "cuda", "CUDA"])
 def test_exported_packages_cpu_cuda_parity(provider):
-    if provider == "cuda" and os.getenv("ORT_GENAI_RUN_NON_GENERATIVE_CUDA") != "1":
+    if (
+        provider is not None
+        and provider.lower() == "cuda"
+        and os.getenv("ORT_GENAI_RUN_NON_GENERATIVE_CUDA") != "1"
+    ):
         pytest.skip("set ORT_GENAI_RUN_NON_GENERATIVE_CUDA=1 for CUDA")
     root_value = os.getenv("ORT_GENAI_NON_GENERATIVE_TEST_ROOT")
     if not root_value:
@@ -212,6 +216,17 @@ def test_exported_packages_cpu_cuda_parity(provider):
                 )
             )
         assert grouped_answers == individual_answers
+        uncached_prefix = og.DecisionSession(
+            root / "kev-4b-fp32",
+            prefix_reuse=True,
+            prefix_cache_capacity=0,
+            prefix_cache_capacity_bytes=0,
+        )
+        assert uncached_prefix.decide(grouped_request) == individual_answers
+        uncached_stats = uncached_prefix.prefix_cache_stats
+        assert uncached_stats["prefix_runs"] == 1
+        assert uncached_stats["branch_runs"] == 2
+        assert uncached_stats["hits"] == 0
     print(
         {
             "provider": provider or "cpu",

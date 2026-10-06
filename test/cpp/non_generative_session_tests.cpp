@@ -50,6 +50,25 @@ TEST(NonGenerativeSessionTest, RealPackagesRunWhenConfigured) {
   EXPECT_GE(ranking.CacheStats().hits, 3u);
   EXPECT_GT(decision.CacheStats().hits, 0u);
 
+  if (providers.empty()) {
+    OgaStructuredRequest duplicate_ids;
+    duplicate_ids.state =
+        OgaStructuredValue::Object{{"weather", "heavy rain"}};
+    for (size_t index = 0; index < 4; ++index)
+      duplicate_ids.questions.emplace_back(
+          "duplicate",
+          OgaQuestion{
+              "noul",
+              "Question " + std::to_string(index),
+              {}});
+    const auto duplicate_result = decision.Decide(duplicate_ids);
+    ASSERT_EQ(duplicate_result.answers.size(), 4u);
+    for (const auto& [id, answer] : duplicate_result.answers) {
+      EXPECT_EQ(id, "duplicate");
+      EXPECT_TRUE(answer.noul.has_value());
+    }
+  }
+
   RankingSession isolated((root / "clm-v0.1-8b-fp32").string(), providers);
   EXPECT_EQ(isolated.CacheStats().hits, 0u);
   ranking.ClearCache();
