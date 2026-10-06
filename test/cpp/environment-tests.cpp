@@ -34,16 +34,16 @@ TEST(EnvironmentTests, TruthyValueTruthTable) {
 
 TEST(EnvironmentTests, ReaderRejectsOversizedValuesWithoutTruncating) {
   ScopedEnvironmentVariable variable{"ORTGENAI_TEST_BOUNDED_ENV", std::nullopt};
-  EXPECT_EQ(ReadEnvironmentVariable("ORTGENAI_TEST_BOUNDED_ENV", 0), std::string{});
+  EXPECT_EQ(GetEnv("ORTGENAI_TEST_BOUNDED_ENV", 0), std::string{});
   for (const size_t size : {0u, 1024u, 16383u, 16384u}) {
     const std::string value(size, 'x');
     variable.Set(value);
-    EXPECT_EQ(ReadEnvironmentVariable("ORTGENAI_TEST_BOUNDED_ENV", kMaxTelemetryInputBytes), value);
+    EXPECT_EQ(GetEnv("ORTGENAI_TEST_BOUNDED_ENV", kMaxTelemetryInputBytes), value);
   }
   variable.Set(std::string(kMaxTelemetryInputBytes + 1, 'x'));
-  EXPECT_FALSE(ReadEnvironmentVariable("ORTGENAI_TEST_BOUNDED_ENV", kMaxTelemetryInputBytes));
+  EXPECT_FALSE(GetEnv("ORTGENAI_TEST_BOUNDED_ENV", kMaxTelemetryInputBytes));
   variable.Set("x");
-  EXPECT_FALSE(ReadEnvironmentVariable("ORTGENAI_TEST_BOUNDED_ENV", 0));
+  EXPECT_FALSE(GetEnv("ORTGENAI_TEST_BOUNDED_ENV", 0));
 }
 
 TEST(EnvironmentTests, GetEnvPreservesStringAndBooleanSemantics) {
@@ -78,18 +78,51 @@ TEST(EnvironmentTests, GetEnvPreservesStringAndBooleanSemantics) {
   EXPECT_EQ(GetEnv("ORTGENAI_TEST_ENV"), large);
 }
 
+TEST(EnvironmentTests, DefaultGetEnvAcceptsValuesAtItsLimit) {
+  ScopedEnvironmentVariable variable{"ORTGENAI_TEST_ENV_LIMIT", std::nullopt};
+  for (const size_t size : {kMaxEnvironmentVariableBytes - 1, kMaxEnvironmentVariableBytes}) {
+    const std::string value(size, 'x');
+    variable.Set(value);
+    EXPECT_EQ(GetEnv("ORTGENAI_TEST_ENV_LIMIT"), value);
+  }
+}
+
+#ifndef _WIN32
+// Windows itself rejects oversized ASCII values before GetEnv can read them.
+TEST(EnvironmentTests, DefaultGetEnvRejectsOversizedValuesExplicitly) {
+  ScopedEnvironmentVariable variable{"ORTGENAI_TEST_ENV_LIMIT",
+                                     std::string(kMaxEnvironmentVariableBytes + 1, 'x')};
+  EXPECT_THROW(GetEnv("ORTGENAI_TEST_ENV_LIMIT"), std::runtime_error);
+  bool value = true;
+  EXPECT_THROW(GetEnv("ORTGENAI_TEST_ENV_LIMIT", value), std::runtime_error);
+  EXPECT_TRUE(value);
+}
+#endif
+
 #ifdef _WIN32
+TEST(EnvironmentTests, ReaderRejectsDefaultOverflowFromSizeQuery) {
+  int reads = 0;
+  const auto value = EnvInternal::GetWindowsEnv(
+      "ORTGENAI_TEST_ENV_LIMIT", kMaxEnvironmentVariableBytes,
+      [&](const char*, char*, DWORD) -> std::optional<DWORD> {
+        ++reads;
+        return DWORD{kMaxEnvironmentVariableBytes + 2};
+      });
+  EXPECT_FALSE(value);
+  EXPECT_EQ(reads, 1);
+}
+
 TEST(EnvironmentTests, ReaderFailsClosedWhenValueDisappearsOrBecomesEmpty) {
   ScopedEnvironmentVariable variable{"ORTGENAI_TEST_ENV_RACE", "true"};
   for (const std::optional<std::string>& replacement :
        std::array<std::optional<std::string>, 2>{std::nullopt, std::string{}}) {
     variable.Set("true");
     int reads = 0;
-    const auto value = EnvironmentInternal::ReadWindowsEnvironmentVariable(
+    const auto value = EnvInternal::GetWindowsEnv(
         "ORTGENAI_TEST_ENV_RACE", kMaxTelemetryInputBytes,
         [&](const char* name, char* buffer, DWORD size) {
           if (++reads == 2) variable.Set(replacement);
-          return ::GetEnvironmentVariableA(name, buffer, size);
+          return std::optional<DWORD>{::GetEnvironmentVariableA(name, buffer, size)};
         });
     EXPECT_FALSE(value);
     EXPECT_EQ(reads, 2);
@@ -99,11 +132,11 @@ TEST(EnvironmentTests, ReaderFailsClosedWhenValueDisappearsOrBecomesEmpty) {
 TEST(EnvironmentTests, ReaderRetriesGrowingValuesAndRejectsUnstableOrOversizedValues) {
   ScopedEnvironmentVariable variable{"ORTGENAI_TEST_ENV_RACE", "x"};
   int reads = 0;
-  const auto value = EnvironmentInternal::ReadWindowsEnvironmentVariable(
+  const auto value = EnvInternal::GetWindowsEnv(
       "ORTGENAI_TEST_ENV_RACE", 4,
       [&](const char* name, char* buffer, DWORD size) {
         if (++reads == 2) variable.Set("true");
-        return ::GetEnvironmentVariableA(name, buffer, size);
+        return std::optional<DWORD>{::GetEnvironmentVariableA(name, buffer, size)};
       });
   EXPECT_EQ(value, "true");
   EXPECT_EQ(reads, 3);
@@ -111,14 +144,28 @@ TEST(EnvironmentTests, ReaderRetriesGrowingValuesAndRejectsUnstableOrOversizedVa
   for (const size_t max_bytes : {2u, 1024u}) {
     variable.Set("x");
     reads = 0;
-    const auto unstable = EnvironmentInternal::ReadWindowsEnvironmentVariable(
+    const auto unstable = EnvInternal::GetWindowsEnv(
         "ORTGENAI_TEST_ENV_RACE", max_bytes,
         [&](const char* name, char* buffer, DWORD size) {
           if (++reads > 1) variable.Set(std::string(size + 1, 'x'));
-          return ::GetEnvironmentVariableA(name, buffer, size);
+          return std::optional<DWORD>{::GetEnvironmentVariableA(name, buffer, size)};
         });
     EXPECT_FALSE(unstable);
     EXPECT_EQ(reads, max_bytes == 2 ? 2 : 4);
+  }
+}
+
+TEST(EnvironmentTests, ReaderFailsClosedOnWindowsApiErrors) {
+  for (const bool fail_query : {false, true}) {
+    int reads = 0;
+    const auto value = EnvInternal::GetWindowsEnv(
+        "ORTGENAI_TEST_ENV_ERROR", kMaxEnvironmentVariableBytes,
+        [&](const char*, char*, DWORD) -> std::optional<DWORD> {
+          if (++reads == 1 && !fail_query) return 5;
+          return std::nullopt;
+        });
+    EXPECT_FALSE(value);
+    EXPECT_EQ(reads, fail_query ? 1 : 2);
   }
 }
 #endif
@@ -130,9 +177,9 @@ TEST(EnvironmentTests, ScopedVariableRestoresUnsetEmptyAndPopulatedValues) {
     original.Set(value);
     {
       ScopedEnvironmentVariable temporary{"ORTGENAI_TEST_ENV_RESTORE", "temporary"};
-      EXPECT_EQ(ReadEnvironmentVariable("ORTGENAI_TEST_ENV_RESTORE", 1024), "temporary");
+      EXPECT_EQ(GetEnv("ORTGENAI_TEST_ENV_RESTORE", 1024), "temporary");
     }
-    EXPECT_EQ(ReadEnvironmentVariable("ORTGENAI_TEST_ENV_RESTORE", 1024), value.value_or(std::string{}));
+    EXPECT_EQ(GetEnv("ORTGENAI_TEST_ENV_RESTORE", 1024), value.value_or(std::string{}));
 #ifdef _WIN32
     ::SetLastError(ERROR_SUCCESS);
     const DWORD size = ::GetEnvironmentVariableA("ORTGENAI_TEST_ENV_RESTORE", nullptr, 0);

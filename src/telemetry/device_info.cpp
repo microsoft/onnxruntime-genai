@@ -75,7 +75,7 @@ void WarnOversizedTelemetryInput() {
 }
 
 std::string ReadTelemetryEnvironment(const char* name) {
-  const auto value = ReadEnvironmentVariable(name, kMaxTelemetryInputBytes);
+  const auto value = GetEnv(name, kMaxTelemetryInputBytes);
   if (!value) {
     WarnOversizedTelemetryInput();
     return {};
@@ -226,7 +226,7 @@ std::string GetCpuModel() {
   char buf[256]{};
   size_t len = sizeof(buf);
   if (sysctlbyname("machdep.cpu.brand_string", buf, &len, nullptr, 0) == 0) {
-    return std::string(buf, len > 0 ? len - 1 : 0);
+    return BoundTelemetryString(std::string_view(buf, len > 0 ? len - 1 : 0));
   }
   return "unknown";
 #else
@@ -936,7 +936,7 @@ const DeviceInfo& GetDeviceInfo() {
     di.os_architecture = GetOsArchitecture();
     di.processor_count = GetProcessorCount();
     di.total_memory_mb = GetTotalMemoryMB();
-    di.cpu_model = BoundTelemetryString(GetCpuModel());
+    di.cpu_model = GetCpuModel();
     const auto host_environment = GetHostEnvironmentInfo();
     di.is_container = host_environment.is_container;
     di.is_virtual_machine = host_environment.is_virtual_machine;

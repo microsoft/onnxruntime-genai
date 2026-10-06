@@ -23,6 +23,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_p
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_environment_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
@@ -141,6 +142,7 @@ endif()
 
 add_executable(telemetry_helpers_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_environment_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp"
   "${CMAKE_SOURCE_DIR}/src/models/env_utils.cpp")
 target_include_directories(telemetry_helpers_tests PRIVATE

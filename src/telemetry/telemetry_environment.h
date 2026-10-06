@@ -7,7 +7,7 @@
 #include <cctype>
 #include <string>
 #include <string_view>
-#include "../environment.h"
+#include "../models/env_utils.h"
 #include "telemetry_string.h"
 
 namespace Generators::TelemetryInternal {
@@ -205,10 +205,10 @@ inline HostEnvironmentInfo ClassifyHostEnvironment(const HostEnvironmentEvidence
 // Rejected reads fail closed so an unreadable suppression flag never enables collection.
 inline bool ShouldSuppressTelemetryFromEnvironment() {
   for (const char* name : kTelemetrySuppressionVariables) {
-    const auto value = ReadEnvironmentVariable(name, kMaxTelemetryInputBytes);
+    const auto value = GetEnv(name, kMaxTelemetryInputBytes);
     if (!value || IsTruthyValue(*value)) return true;
   }
-  const auto input = ReadEnvironmentVariable("ORT_DISABLE_TELEMETRY", kMaxTelemetryInputBytes);
+  const auto input = GetEnv("ORT_DISABLE_TELEMETRY", kMaxTelemetryInputBytes);
   if (!input) return true;
   const std::string value = ToLowerAscii(TrimAscii(*input));
   return value == "1" || value == "true" || value == "yes" || value == "on" || value == "y";

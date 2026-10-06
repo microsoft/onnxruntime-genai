@@ -110,7 +110,7 @@ bool PrepareSampledEvent(MAT::EventProperties& event, std::string_view app_sessi
 
 #if defined(__linux__) && !defined(__ANDROID__)
 std::string GetCertificateAuthorityBundlePath() {
-  const auto ssl_cert_file = ReadEnvironmentVariable("SSL_CERT_FILE", kMaxTelemetryInputBytes);
+  const auto ssl_cert_file = GetEnv("SSL_CERT_FILE", kMaxTelemetryInputBytes);
   if (!ssl_cert_file) {
     if (g_log.enabled && g_log.warning) {
       Log("warning", "Ignoring oversized or unstable telemetry SSL_CERT_FILE");
