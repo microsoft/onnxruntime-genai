@@ -496,15 +496,17 @@ def test_gemma4_fixed_patch_vision_pads_multiple_images(test_data_path, tmp_path
 
     model_path = tmp_path / "gemma4"
     shutil.copytree(source_model_path, model_path)
+    _register_gemma4_image_token(model_path)
     config_path = model_path / "genai_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["model"]["speech"] = {"filename": "", "config_filename": ""}
     config["model"]["vocab_size"] = 8
     config["model"]["eos_token_id"] = [1]
+    config["model"]["image_token_id"] = GEMMA4_IMAGE_TOKEN_ID
     config["search"]["past_present_share_buffer"] = False
     config_path.write_text(json.dumps(config), encoding="utf-8")
     _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx", fixed_num_patches)
-    _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx")
+    _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx", config["model"]["image_token_id"])
     _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")
 
     model = og.Model(os.fspath(model_path))
