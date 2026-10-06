@@ -165,7 +165,7 @@ jobs:
       - name: Run tests
         run: |
           copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
-          ctest --test-dir $env:binaryDir --build-config Release --output-on-failure --no-tests=error -R '^TelemetryHelpersTests$'
+          ctest --test-dir $env:binaryDir --build-config Release --output-on-failure --no-tests=error -R '^(TelemetryHelpersTests|TelemetryDeviceInfoTests)$'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\$env:binaryDir\Release\unit_tests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

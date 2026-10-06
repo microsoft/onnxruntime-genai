@@ -204,9 +204,14 @@ if (NOT MSVC)
 endif()
 add_test(NAME CpuCastTests COMMAND cpu_cast_tests)
 
-if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+if (ENABLE_TELEMETRY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  if (WIN32)
+    set(telemetry_device_info_test_source "device-info-windows-tests.cpp")
+  else()
+    set(telemetry_device_info_test_source "device_info_tests.cpp")
+  endif()
   add_executable(telemetry_device_info_tests
-    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/device_info_tests.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/${telemetry_device_info_test_source}")
   target_include_directories(telemetry_device_info_tests PRIVATE
     ${ORT_HEADER_DIR}
     ${onnxruntime_extensions_SOURCE_DIR}/shared/api
@@ -217,6 +222,9 @@ if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STR
     onnxruntime-genai-obj
     GTest::gtest
   )
+  if (WIN32)
+    target_link_libraries(telemetry_device_info_tests PRIVATE advapi32)
+  endif()
   add_dependencies(telemetry_device_info_tests onnxruntime-genai)
   set_target_properties(telemetry_device_info_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"

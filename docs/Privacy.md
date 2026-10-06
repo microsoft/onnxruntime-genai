@@ -35,3 +35,8 @@ case-insensitive: any nonempty value other than `0`, `false`, `no`, or `off` sup
 The explicit `ORT_DISABLE_TELEMETRY` opt-out accepts only `1`, `true`, `yes`, `on`, or `y`.
 Environment values exceeding 16 KiB or failing bounded reads suppress collection when used as
 suppression flags; filesystem-path values are rejected rather than truncated.
+
+Windows device identifiers are read into a fixed 256-byte registry buffer and validated as UUIDs.
+Oversized values, wrong registry types, and embedded NULs are repaired under the shared per-user
+mutex. Unreadable registry values report `Failed` and use an in-memory identifier without overwriting
+persisted state; successful corruption repairs report `Corrupted`.

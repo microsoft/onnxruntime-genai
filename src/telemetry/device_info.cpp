@@ -450,6 +450,16 @@ class ScopedDeviceIdMutex {
   bool acquired_{};
 };
 
+enum class RegistryReadResult { Missing,
+                                Valid,
+                                Invalid,
+                                Failed };
+
+struct RegistryRead {
+  RegistryReadResult result;
+  std::string value;
+};
+
 // Read (or create) the persistent device id in the Windows registry at
 // HKCU\SOFTWARE\Microsoft\DeveloperTools\.onnxruntime : deviceid (REG_SZ), matching Olive and the
 // wider Microsoft AI dev-tools family so a machine reports one shared device id. HKCU is per-user;
@@ -458,51 +468,64 @@ std::string GetOrCreateWindowsDeviceId(DeviceIdStatus& status) {
   static constexpr const char* kSubKey = "SOFTWARE\\Microsoft\\DeveloperTools\\.onnxruntime";
   static constexpr const char* kValueName = "deviceid";
 
-  bool corrupted = false;  // a value was present but not a valid UUID
-  const auto read_existing = [&]() -> std::string {
+  const auto read_existing = [&]() -> RegistryRead {
     HKEY key{};
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, kSubKey, 0, KEY_READ | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS) {
-      char buf[256]{};
-      DWORD type = 0;
-      DWORD size = sizeof(buf);
-      const LSTATUS query =
-          RegQueryValueExA(key, kValueName, nullptr, &type, reinterpret_cast<LPBYTE>(buf), &size);
-      RegCloseKey(key);
-      if (query == ERROR_SUCCESS && type == REG_SZ && size > 0) {
-        // A REG_SZ value is not guaranteed to include its terminating null within `size`.
-        buf[(size < sizeof(buf)) ? size : (sizeof(buf) - 1)] = '\0';
-        std::string existing(buf);
-        while (!existing.empty() && (existing.back() == '\0' || existing.back() == '\r' ||
-                                     existing.back() == '\n' || existing.back() == ' ')) {
-          existing.pop_back();
-        }
-        if (IsValidUuid(existing)) return existing;
-        corrupted = true;  // present but invalid -> regenerate
-      }
-    }
-    return {};
+    const LSTATUS open_status =
+        RegOpenKeyExA(HKEY_CURRENT_USER, kSubKey, 0, KEY_READ | KEY_WOW64_64KEY, &key);
+    if (open_status == ERROR_FILE_NOT_FOUND) return {RegistryReadResult::Missing, {}};
+    if (open_status != ERROR_SUCCESS) return {RegistryReadResult::Failed, {}};
+
+    std::array<char, 256> buffer{};
+    DWORD type = 0;
+    DWORD size = static_cast<DWORD>(buffer.size());
+    const LSTATUS query =
+        RegQueryValueExA(key, kValueName, nullptr, &type, reinterpret_cast<LPBYTE>(buffer.data()), &size);
+    RegCloseKey(key);
+    if (query == ERROR_FILE_NOT_FOUND) return {RegistryReadResult::Missing, {}};
+    if (query == ERROR_MORE_DATA) return {RegistryReadResult::Invalid, {}};
+    if (query != ERROR_SUCCESS) return {RegistryReadResult::Failed, {}};
+    if (type != REG_SZ || size == 0 || size > buffer.size()) return {RegistryReadResult::Invalid, {}};
+
+    size_t length = size;
+    if (buffer[length - 1] == '\0') --length;
+    const std::string_view value{buffer.data(), length};
+    if (value.find('\0') != std::string_view::npos) return {RegistryReadResult::Invalid, {}};
+    std::string uuid{TelemetryInternal::TrimAscii(value)};
+    return {IsValidUuid(uuid) ? RegistryReadResult::Valid : RegistryReadResult::Invalid,
+            std::move(uuid)};
   };
 
-  if (std::string existing = read_existing(); !existing.empty()) {
+  RegistryRead existing = read_existing();
+  if (existing.result == RegistryReadResult::Valid) {
     status = DeviceIdStatus::Existing;
-    return existing;
+    return std::move(existing.value);
   }
+  if (existing.result == RegistryReadResult::Failed) {
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
+  }
+  const bool was_corrupted = existing.result == RegistryReadResult::Invalid;
 
   ScopedDeviceIdMutex mutex;
   if (!mutex) {
-    if (std::string existing = read_existing(); !existing.empty()) {
+    existing = read_existing();
+    if (existing.result == RegistryReadResult::Valid) {
       status = DeviceIdStatus::Existing;
-      return existing;
+      return std::move(existing.value);
     }
     status = DeviceIdStatus::Failed;
     return GenerateUuidV4();
   }
 
   // Another process may have published the value while this process waited.
-  corrupted = false;
-  if (std::string existing = read_existing(); !existing.empty()) {
+  existing = read_existing();
+  if (existing.result == RegistryReadResult::Valid) {
     status = DeviceIdStatus::Existing;
-    return existing;
+    return std::move(existing.value);
+  }
+  if (existing.result == RegistryReadResult::Failed) {
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
   }
 
   std::string uuid = GenerateUuidV4();
@@ -517,7 +540,10 @@ std::string GetOrCreateWindowsDeviceId(DeviceIdStatus& status) {
   }
   // Corrupted (invalid-and-regenerated) is preserved over New even after a successful rewrite so
   // callers can still observe that the stored id had to be replaced.
-  status = !wrote ? DeviceIdStatus::Failed : (corrupted ? DeviceIdStatus::Corrupted : DeviceIdStatus::New);
+  status = !wrote ? DeviceIdStatus::Failed
+                  : (was_corrupted || existing.result == RegistryReadResult::Invalid
+                         ? DeviceIdStatus::Corrupted
+                         : DeviceIdStatus::New);
   return uuid;
 }
 #endif  // _WIN32
