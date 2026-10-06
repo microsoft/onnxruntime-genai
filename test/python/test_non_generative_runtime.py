@@ -153,6 +153,21 @@ def test_exported_packages_cpu_cuda_parity(provider):
     root = Path(root_value)
     kwargs = {"providers": [provider]} if provider else {}
     clm_request = json.loads((root / "clm-request.json").read_text())
+    if "questions" not in clm_request:
+        clm_request = {
+            "state": clm_request.get("state", clm_request.get("context")),
+            "questions": {
+                "rank": {
+                    "type": "choice",
+                    "instructions": clm_request["question"],
+                    "criteria": {
+                        str(index): answer
+                        for index, answer in enumerate(clm_request["answers"])
+                    },
+                }
+            },
+            "temperature": clm_request.get("temperature", 1.0),
+        }
     kev_request = json.loads((root / "kev-request.json").read_text())
     assert og.RankingSession(root / "clm-v0.1-8b-fp32", **kwargs).rank(clm_request)
     full = og.DecisionSession(root / "kev-4b-fp32", prefix_reuse=False, **kwargs)
@@ -170,6 +185,33 @@ def test_exported_packages_cpu_cuda_parity(provider):
     stats = optimized.prefix_cache_stats
     assert stats["prefix_runs"] == 1
     assert stats["hits"] == 1
+    if provider is None:
+        grouped_request = json.loads(json.dumps(kev_request))
+        original_questions = list(grouped_request["questions"].items())
+        while len(grouped_request["questions"]) < 5:
+            for key, question in original_questions:
+                grouped_request["questions"][
+                    f"{key}_{len(grouped_request['questions'])}"
+                ] = question
+                if len(grouped_request["questions"]) == 5:
+                    break
+        grouped_answers = og.DecisionSession(
+            root / "kev-4b-fp32", prefix_reuse=True
+        ).decide(grouped_request)
+        individual_answers = {}
+        individual = og.DecisionSession(
+            root / "kev-4b-fp32", prefix_reuse=True
+        )
+        for key, question in grouped_request["questions"].items():
+            individual_answers.update(
+                individual.decide(
+                    {
+                        "state": grouped_request["state"],
+                        "questions": {key: question},
+                    }
+                )
+            )
+        assert grouped_answers == individual_answers
     print(
         {
             "provider": provider or "cpu",

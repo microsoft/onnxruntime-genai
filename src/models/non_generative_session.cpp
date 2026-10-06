@@ -1373,6 +1373,8 @@ struct NativeDecisionSession {
   bool flat{};
   OgaModelResult Run(const OgaStructuredRequest& request) { return Decide(request); }
   OgaModelResult Decide(const OgaStructuredRequest& request);
+  OgaModelResult DecideImpl(const OgaStructuredRequest& request,
+                            bool allow_cpu_grouping);
   void SetCacheCapacity(size_t entries, size_t bytes) {
     std::lock_guard lock(operation_mutex);
     cache.SetCapacity(entries, bytes);
@@ -1421,7 +1423,56 @@ struct NativeDecisionSession {
 
 OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request) {
   std::lock_guard operation_lock(operation_mutex);
+  return DecideImpl(request, true);
+}
+
+OgaModelResult NativeDecisionSession::DecideImpl(
+    const OgaStructuredRequest& request, bool allow_cpu_grouping) {
   if (request.questions.empty()) throw std::invalid_argument("questions must be non-empty");
+  if (allow_cpu_grouping && !UsesCuda(providers) &&
+      request.questions.size() >= 4) {
+    std::vector<size_t> order(request.questions.size());
+    std::iota(order.begin(), order.end(), size_t{});
+    std::stable_sort(
+        order.begin(), order.end(),
+        [&](size_t left, size_t right) {
+          const auto cost = [&](size_t index) {
+            const auto& question = request.questions[index].second;
+            auto size = RenderKev(question.instructions).size();
+            const auto candidates = KevCandidates(question);
+            for (const auto& text : candidates.texts) size += text.size();
+            return size;
+          };
+          return cost(left) < cost(right);
+        });
+    const auto short_count = order.size() / 2;
+    OgaStructuredRequest short_request{
+        request.state, {}, request.temperature};
+    OgaStructuredRequest long_request{
+        request.state, {}, request.temperature};
+    for (size_t rank = 0; rank < order.size(); ++rank) {
+      auto& destination =
+          rank < short_count ? short_request : long_request;
+      destination.questions.push_back(request.questions[order[rank]]);
+    }
+    auto short_result = DecideImpl(short_request, false);
+    auto long_result = DecideImpl(long_request, false);
+    std::unordered_map<std::string, OgaAnswer> answers;
+    for (auto& [id, answer] : short_result.answers)
+      answers.emplace(std::move(id), std::move(answer));
+    for (auto& [id, answer] : long_result.answers)
+      answers.emplace(std::move(id), std::move(answer));
+    OgaModelResult result{"kev", {}};
+    result.answers.reserve(request.questions.size());
+    for (const auto& [id, _] : request.questions) {
+      const auto found = answers.find(id);
+      if (found == answers.end())
+        throw std::runtime_error(
+            "grouped KEV result is missing answer: " + id);
+      result.answers.emplace_back(id, std::move(found->second));
+    }
+    return result;
+  }
   auto encode = [&](std::string text) {
     static const std::regex delimiter(R"(<\|([A-Za-z0-9_]+)\|>)");
     text = std::regex_replace(text, delimiter, "<¦$1¦>");
