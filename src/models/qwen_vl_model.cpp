@@ -443,11 +443,41 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   const bool split_vision = vl_model_.vision_projector_session_ != nullptr;
   const auto projector_input_names = split_vision ? vl_model_.vision_projector_session_->GetInputNames()
                                                   : std::vector<std::string>{};
-  if (split_vision && (output_names.size() != 1 ||
-                       std::find(projector_input_names.begin(), projector_input_names.end(),
-                                 output_names[0]) == projector_input_names.end())) {
+  const auto encoder_output = std::find(projector_input_names.begin(), projector_input_names.end(),
+                                        output_names[0]);
+  if (split_vision && (output_names.size() != 1 || encoder_output == projector_input_names.end())) {
     throw std::runtime_error("Gemma 4 vision projector must consume the encoder's single output");
   }
+  std::vector<const char*> projector_names;
+  std::vector<const OrtValue*> projector_values;
+  std::vector<OrtValue*> projector_source_values;
+  std::vector<size_t> projector_batched_indices;
+  if (split_vision) {
+    projector_names.reserve(projector_input_names.size());
+    projector_values.reserve(projector_input_names.size());
+    projector_source_values.reserve(projector_input_names.size());
+    for (const auto& name : projector_input_names) {
+      projector_names.push_back(name.c_str());
+      OrtValue* value = nullptr;
+      if (name != output_names[0]) {
+        value = find_extra_input(name);
+        if (!value) {
+          throw std::runtime_error("Vision projector: required input '" + name +
+                                   "' was not produced by the processor or encoder");
+        }
+      }
+      projector_values.push_back(value);
+      projector_source_values.push_back(value);
+      if (num_images > 1 && value) {
+        const auto shape = value->GetTensorTypeAndShapeInfo()->GetShape();
+        if (shape.size() >= 2 && shape[0] == num_images) {
+          projector_batched_indices.push_back(projector_source_values.size() - 1);
+        }
+      }
+    }
+  }
+  const auto encoder_output_index = static_cast<size_t>(
+      std::distance(projector_input_names.begin(), encoder_output));
   const auto final_output_names = split_vision ? vl_model_.vision_projector_session_->GetOutputNames()
                                                 : output_names;
   // Fall back to the first output only when the config names no output at all. A name that
@@ -500,23 +530,7 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
                                    input_name_ptrs.size(), encoder_output_name, &raw_output, 1);
     std::unique_ptr<OrtValue> owned(raw_output);
     if (split_vision) {
-      std::vector<const char*> projector_names;
-      std::vector<const OrtValue*> projector_values;
-      projector_names.reserve(projector_input_names.size());
-      projector_values.reserve(projector_input_names.size());
-      for (const auto& name : projector_input_names) {
-        projector_names.push_back(name.c_str());
-        if (name == output_names[0]) {
-          projector_values.push_back(owned.get());
-        } else {
-          const auto found = std::find(input_names.begin(), input_names.end(), name);
-          if (found == input_names.end()) {
-            throw std::runtime_error("Vision projector: required input '" + name +
-                                     "' was not produced by the processor or encoder");
-          }
-          projector_values.push_back(input_values[static_cast<size_t>(std::distance(input_names.begin(), found))]);
-        }
-      }
+      projector_values[encoder_output_index] = owned.get();
       raw_output = nullptr;
       vl_model_.vision_projector_session_->Run(projector_options.get(), projector_names.data(),
                                                 projector_values.data(), projector_names.size(),
@@ -550,6 +564,10 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
       for (size_t index : batched_indices) {
         slices.push_back(SliceLeadingImage(*source_values[index], image));
         input_values[index] = slices.back().get();
+      }
+      for (size_t index : projector_batched_indices) {
+        slices.push_back(SliceLeadingImage(*projector_source_values[index], image));
+        projector_values[index] = slices.back().get();
       }
 
       auto features = run_encoder();

@@ -133,7 +133,7 @@ def _create_static_batch_vision_pipeline(onnx, encoder_path, projector_path, num
     encoder_graph = helper.make_graph(
         [helper.make_node("Identity", ["pixel_values"], ["vision_features"])],
         "gemma4_vision_encoder",
-        [pixel_values, position_ids],
+        [pixel_values],
         [vision_features],
     )
     encoder = helper.make_model(encoder_graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7)
@@ -967,7 +967,7 @@ def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fi
         {
             "encoder": {
                 "filename": "dummy_vision_encoder.onnx",
-                "inputs": ["pixel_values", "pixel_position_ids"],
+                "inputs": ["pixel_values"],
                 "outputs": ["vision_features"],
                 "session_options": {"provider_options": []},
             },
@@ -996,6 +996,18 @@ def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fi
     params.set_search_options(max_length=4096)
     generator = og.Generator(model, params)
     generator.set_inputs(inputs)
+    pixel_values = _to_numpy(inputs["pixel_values"])
+    positions = _to_numpy(inputs["pixel_position_ids"])
+    expected_features = np.concatenate(
+        [
+            np.pad(pixels[image_positions[:, 0] > -1][::9], ((0, 0), (0, 1280)))
+            for pixels, image_positions in zip(pixel_values, positions, strict=True)
+        ]
+    )
+    ids = _to_numpy(inputs["input_ids"])
+    expected_embeds = np.zeros((*ids.shape, 2048), dtype=np.float32)
+    expected_embeds[ids == GEMMA4_IMAGE_TOKEN_ID] = expected_features
+    np.testing.assert_array_equal(generator.get_output("inputs_embeds"), expected_embeds)
     generator.generate_next_token()
     assert len(generator.get_next_tokens()) == 1
 
