@@ -21,7 +21,7 @@ DecoderModel::DecoderModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
 }
 
 std::unique_ptr<State> DecoderModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
-                                                     const GeneratorParams& params) const {
+                                                 const GeneratorParams& params) const {
   if (cpu_embedding_) {
     throw std::runtime_error("Decoder-only CPU embedding requires Engine rather than Generator.");
   }
