@@ -186,6 +186,11 @@ struct PinnedMemory final : DeviceBuffer {
 struct InterfaceImpl : DeviceInterface {
   DeviceType GetType() const override { return DeviceType::AMDGPU; }
 
+  // Defensively force encoder capture off by default on AMDGPU: captured-graph replay of the
+  // encoder's control-flow graph is unproven on this backend, so err on the safe side rather than
+  // assume it works. Not a confirmed limitation. The decoder's default-on capture is unaffected.
+  bool DisablesEncoderGraphCapture() const override { return true; }
+
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     Ort::api = &api;
     assert(!ort_allocator_);
@@ -236,9 +241,8 @@ struct InterfaceImpl : DeviceInterface {
     if (user_options)
       ep_devices = ApplyDeviceFiltering(*user_options, ep_devices);
     if (!ep_devices.empty()) {
-      if (const OrtMemoryInfo* mi =
-              Ort::api->EpDevice_MemoryInfo(ep_devices.front(), OrtDeviceMemoryType_DEFAULT))
-        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &device_id_));
+      if (const OrtMemoryInfo* mi = ep_devices.front()->GetMemoryInfo(OrtDeviceMemoryType_DEFAULT))
+        device_id_ = mi->GetDeviceId();
     }
     return device_id_;
   }
@@ -251,12 +255,10 @@ struct InterfaceImpl : DeviceInterface {
       return;
     try {
       for (const OrtEpDevice* ep_device : FindRegisteredEpDevices(kAMDGPUExecutionProviderName)) {
-        const OrtMemoryInfo* mi =
-            Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE);
+        const OrtMemoryInfo* mi = ep_device->GetMemoryInfo(OrtDeviceMemoryType_HOST_ACCESSIBLE);
         if (!mi)
           continue;
-        int host_device_id = 0;
-        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &host_device_id));
+        int host_device_id = mi->GetDeviceId();
         if (host_device_id == device_id) {
           ort_pinned_allocator_ = GetOrtEnv().GetSharedAllocator(*mi);
           break;

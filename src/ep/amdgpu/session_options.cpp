@@ -123,8 +123,12 @@ void ReleaseOwnedUmbrellaEp(OrtEnv& env, bool& owns_registration) {
   // drop the device until these are gone. Must run while the EP device is still registered.
   // Best-effort: ReleaseSharedAllocator is a no-op when no matching shared allocator exists.
   const auto release_shared = [&env](const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type) {
-    if (OrtStatus* status = Ort::api->ReleaseSharedAllocator(&env, ep_device, mem_type))
-      Ort::api->ReleaseStatus(status);
+    try {
+      env.ReleaseSharedAllocator(ep_device, mem_type);
+    } catch (...) {
+      // Best-effort: a no-op when no matching shared allocator exists; a genuine failure here is
+      // non-fatal during teardown, so swallow it and continue releasing the remaining allocators.
+    }
   };
   try {
     for (const OrtEpDevice* ep_device : env.GetEpDevices()) {
@@ -194,8 +198,8 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
     int requested_device_id = amdgpu_allocator.device_id_;
     if (!requested_devices.empty()) {
       if (const OrtMemoryInfo* memory_info =
-              Ort::api->EpDevice_MemoryInfo(requested_devices.front(), OrtDeviceMemoryType_DEFAULT)) {
-        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(memory_info, &requested_device_id));
+              requested_devices.front()->GetMemoryInfo(OrtDeviceMemoryType_DEFAULT)) {
+        requested_device_id = memory_info->GetDeviceId();
       }
     }
     if (requested_device_id != amdgpu_allocator.device_id_) {
