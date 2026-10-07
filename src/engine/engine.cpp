@@ -410,6 +410,14 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
                                     kMaxDraftTokensPerStep + 1);
     };
     graph_buffer_reserved_bytes = reserve_for(model) + reserve_for(mtp_model);
+    if (mtp_model) {
+      const size_t bank_bytes = FixedStatePool::StateBankBytes(
+          *mtp_model, model->config_->engine.dynamic_batching->max_batch_size);
+      if (bank_bytes > (std::numeric_limits<size_t>::max() - graph_buffer_reserved_bytes) / 2) {
+        throw std::runtime_error("MTP scratch state memory bytes overflow size_t.");
+      }
+      graph_buffer_reserved_bytes += 2 * bank_bytes;
+    }
   }
   if (graph_buffer_reserved_bytes >
       std::numeric_limits<size_t>::max() - dflash2_reserved_memory_bytes) {
@@ -930,6 +938,12 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     pending_device_requests.reserve(max_draft_tokens - 1);
     std::vector<std::unique_ptr<Tensor>> pending_device_inputs;
     pending_device_inputs.reserve(max_draft_tokens - 1);
+    struct ChainFixedState {
+      std::vector<FixedStateSlotHandle> handles;
+      std::vector<FixedStateBinding> bindings;
+    };
+    std::vector<ChainFixedState> pending_fixed_states;
+    pending_fixed_states.reserve(max_draft_tokens - 1);
 
     for (size_t draft_index = 1; !active_feed_indices.empty(); ++draft_index) {
       StepPlan chain_plan;
@@ -975,8 +989,100 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
           chain_plan, mtp_model_, nullptr, nullptr);
       ExecutionContext chain_context{&chain_plan};
       chain_context.cache_reservation = step->reservation->PagedReservation();
-      chain_context.fixed_state_slots = step->reservation->FixedStateSlots();
-      chain_context.fixed_state_bindings = step->reservation->FixedStateBindings();
+      const auto source_bindings = pending_fixed_states.empty()
+                                       ? step->reservation->FixedStateBindings()
+                                       : std::span<const FixedStateBinding>{pending_fixed_states.back().bindings};
+      pending_fixed_states.emplace_back();
+      auto& chain_state = pending_fixed_states.back();
+      const auto reserved_handles = step->reservation->FixedStateSlots();
+      if (!reserved_handles.empty()) {
+        for (const size_t feed_index : active_feed_indices) {
+          chain_state.handles.push_back(reserved_handles[feed_index]);
+        }
+      }
+      const size_t input_bank = (draft_index - 1) % 2;
+      size_t binding_index = 0;
+      const bool initialize_buffers = mtp_chain_state_.buffers.empty();
+      std::vector<MtpChainState::Banks> new_buffers;
+      std::vector<MtpChainState::Banks> new_views;
+      auto& buffers = initialize_buffers ? new_buffers : mtp_chain_state_.buffers;
+      auto& cached_views = mtp_chain_state_.views[active_feed_indices.size()];
+      const bool initialize_views = cached_views.empty();
+      auto& views = initialize_views ? new_views : cached_views;
+      if ((!initialize_buffers && buffers.size() != source_bindings.size()) ||
+          (!initialize_views && views.size() != source_bindings.size())) {
+        throw std::logic_error("Chained MTP fixed state binding count changed.");
+      }
+      for (const auto& binding : source_bindings) {
+        const auto info = binding.output->GetTensorTypeAndShapeInfo();
+        auto shape = info->GetShape();
+        if (shape.empty() || shape.front() <= 0) {
+          throw std::logic_error("Chained MTP fixed state requires a nonempty batch dimension.");
+        }
+        auto source = ByteWrapTensor(*mtp_model_->p_device_inputs_, *binding.output);
+        const size_t source_rows = static_cast<size_t>(shape.front());
+        const size_t row_bytes = source.size() / source_rows;
+        if (initialize_buffers) {
+          const size_t capacity = mtp_cache_manager_->MaxBatchSize();
+          shape.front() = static_cast<int64_t>(capacity);
+          MtpChainState::Banks banks;
+          for (auto& bank : banks) {
+            bank = OrtValue::CreateTensor(mtp_model_->p_device_inputs_->GetAllocator(),
+                                          shape, info->GetElementType());
+          }
+          buffers.push_back(std::move(banks));
+        }
+        const auto& banks = buffers[binding_index];
+        const auto bank_info = banks.front()->GetTensorTypeAndShapeInfo();
+        const auto bank_shape = bank_info->GetShape();
+        if (bank_info->GetElementType() != info->GetElementType() ||
+            bank_shape.size() != shape.size() ||
+            !std::equal(shape.begin() + 1, shape.end(), bank_shape.begin() + 1) ||
+            active_feed_indices.size() > static_cast<size_t>(bank_shape.front())) {
+          throw std::logic_error("Chained MTP fixed state exceeds its persistent layout.");
+        }
+        if (initialize_views) {
+          shape.front() = static_cast<int64_t>(active_feed_indices.size());
+          MtpChainState::Banks row_views;
+          for (size_t bank = 0; bank < banks.size(); ++bank) {
+            row_views[bank] = OrtValue::CreateTensor(
+                banks[bank]->GetTensorMemoryInfo(), banks[bank]->GetTensorMutableData<void>(),
+                row_bytes * active_feed_indices.size(), shape, info->GetElementType());
+          }
+          views.push_back(std::move(row_views));
+        }
+        auto* input = views[binding_index][input_bank].get();
+        auto* output = views[binding_index][input_bank ^ 1].get();
+        auto destination = ByteWrapTensor(*mtp_model_->p_device_inputs_, *input);
+        for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+          const size_t source_row = previous_stage_rows[active_feed_indices[row]];
+          if (source_row >= source_rows) {
+            throw std::logic_error("Chained MTP fixed state row is out of range.");
+          }
+          if (binding.output != input) {
+            destination.subspan(row * row_bytes, row_bytes)
+                .CopyFrom(source.subspan(source_row * row_bytes, row_bytes));
+          } else if (source_row != row) {
+            throw std::logic_error("Chained MTP aliased rows must retain their order.");
+          }
+        }
+        auto chain_binding = binding;
+        chain_binding.input = input;
+        chain_binding.output = output;
+        chain_state.bindings.push_back(chain_binding);
+        ++binding_index;
+      }
+      if (initialize_buffers) {
+        mtp_chain_state_.buffers = std::move(new_buffers);
+      }
+      if (initialize_views) {
+        cached_views = std::move(new_views);
+      }
+      chain_context.fixed_state_slots = chain_state.handles;
+      chain_context.fixed_state_bindings = chain_state.bindings;
+      if (!chain_state.bindings.empty()) {
+        chain_context.fixed_state_binding_domain = input_bank + 1;
+      }
       chain_context.fixed_state_staging_bytes = step->reservation->FixedStateStagingBytes();
       if (auto* fixed_reservation = step->reservation->FixedReservation()) {
         chain_context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();

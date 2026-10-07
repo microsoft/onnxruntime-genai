@@ -3040,6 +3040,97 @@ TEST_F(EngineRunTest, MtpUsesExportedHiddenStateWidth) {
   EXPECT_GT(engine.mtp_executor->decode_calls, 0);
 }
 
+TEST_F(EngineRunTest, MtpChainCarriesFixedStateWithoutOverwritingCommitState) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
+  const std::array<int64_t, 2> shape{1, 1};
+  auto input = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                     shape, Ort::TypeToTensorType<float>);
+  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                      shape, Ort::TypeToTensorType<float>);
+  input->GetTensorMutableData<float>()[0] = 0.0f;
+  output->GetTensorMutableData<float>()[0] = -1.0f;
+  FixedStateBinding binding{};
+  binding.input = input.get();
+  binding.output = output.get();
+  engine.mtp_cache->SetFixedStateBindings({binding});
+  std::vector<float> observed_inputs;
+  std::vector<const OrtValue*> chain_inputs;
+  std::vector<const OrtValue*> chain_outputs;
+  std::vector<size_t> chain_domains;
+  engine.mtp_executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_EQ(context.fixed_state_bindings.size(), 1u);
+    const auto& current = context.fixed_state_bindings.front();
+    if (context.fixed_state_binding_domain != 0) {
+      ASSERT_NE(context.plan, nullptr);
+      EXPECT_TRUE(context.plan->graph_capture_eligible);
+      chain_inputs.push_back(current.input);
+      chain_outputs.push_back(current.output);
+      chain_domains.push_back(context.fixed_state_binding_domain);
+    }
+    observed_inputs.push_back(current.input->GetTensorData<float>()[0]);
+    current.output->GetTensorMutableData<float>()[0] =
+        static_cast<float>(observed_inputs.size());
+  });
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(request->PendingDraftTokenCount(), 3u);
+  EXPECT_EQ(observed_inputs, (std::vector<float>{0.0f, 1.0f, 2.0f}));
+  EXPECT_EQ(input->GetTensorData<float>()[0], 0.0f);
+  EXPECT_EQ(output->GetTensorData<float>()[0], 1.0f);
+  ASSERT_EQ(chain_inputs.size(), 2u);
+  EXPECT_EQ(chain_outputs[0], chain_inputs[1]);
+  EXPECT_EQ(chain_outputs[1], chain_inputs[0]);
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(chain_inputs.size(), 4u);
+  EXPECT_EQ(chain_inputs[0], chain_inputs[2]);
+  EXPECT_EQ(chain_inputs[1], chain_inputs[3]);
+  EXPECT_EQ(chain_outputs[0], chain_outputs[2]);
+  EXPECT_EQ(chain_outputs[1], chain_outputs[3]);
+  EXPECT_EQ(chain_domains, (std::vector<size_t>{1, 2, 1, 2}));
+}
+
+TEST_F(EngineRunTest, MtpChainSelectsFixedStateRowsForDifferentDraftWidths) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
+  const std::array<int64_t, 2> shape{2, 1};
+  auto input = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                     shape, Ort::TypeToTensorType<float>);
+  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                      shape, Ort::TypeToTensorType<float>);
+  input->GetTensorMutableData<float>()[0] = 10.0f;
+  input->GetTensorMutableData<float>()[1] = 20.0f;
+  FixedStateBinding binding{};
+  binding.input = input.get();
+  binding.output = output.get();
+  engine.mtp_cache->SetFixedStateBindings({binding});
+  std::vector<std::vector<float>> observed_inputs;
+  engine.mtp_executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_EQ(context.fixed_state_bindings.size(), 1u);
+    const auto& current = context.fixed_state_bindings.front();
+    const size_t rows = current.input->GetTensorTypeAndShapeInfo()->GetElementCount();
+    const auto* values = current.input->GetTensorData<float>();
+    observed_inputs.emplace_back(values, values + rows);
+    for (size_t row = 0; row < rows; ++row) {
+      current.output->GetTensorMutableData<float>()[row] = values[row] + 1.0f;
+    }
+  });
+  TurnOptions short_turn;
+  short_turn.max_generated_tokens = 4;
+  auto first = CreateRequestWithPrompt(engine.engine, Prompt(10), short_turn);
+  auto second = CreateRequestWithPrompt(engine.engine, Prompt(20));
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(first->PendingDraftTokenCount(), 2u);
+  ASSERT_EQ(second->PendingDraftTokenCount(), 3u);
+  EXPECT_EQ(observed_inputs, (std::vector<std::vector<float>>{{10.0f, 20.0f}, {11.0f, 21.0f}, {22.0f}}));
+  EXPECT_EQ(output->GetTensorData<float>()[0], 11.0f);
+  EXPECT_EQ(output->GetTensorData<float>()[1], 21.0f);
+}
+
 TEST_F(EngineRunTest, PersistentMtpFailureKeepsTheRequestAdvancing) {
   model_ = LoadSyntheticPagedMtpModel();
   const int32_t eos = EosToken(*model_);

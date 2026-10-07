@@ -243,6 +243,14 @@ TEST_F(FixedStatePoolTest, UsesManifestBindingOrderAndSessionGeometry) {
   EXPECT_EQ(reservation.TargetTokens()[0], 1u);
 }
 
+TEST_F(FixedStatePoolTest, StateBankBytesPricesPersistentMtpScratchWithoutAllocating) {
+  EXPECT_EQ(FixedStatePool::StateBankBytes(*model_, 1), 112u);
+  EXPECT_EQ(FixedStatePool::StateBankBytes(*model_, 4), 448u);
+  EXPECT_EQ(FixedStatePool::StateBankBytes(*model_, 0), 0u);
+  EXPECT_THROW(FixedStatePool::StateBankBytes(*model_, std::numeric_limits<size_t>::max()),
+               std::runtime_error);
+}
+
 TEST_F(FixedStatePoolTest, ReusesPreallocatedStagingAcrossReservationBatchSizes) {
   auto pool = MakePool(2);
   std::vector<void*> input_addresses;

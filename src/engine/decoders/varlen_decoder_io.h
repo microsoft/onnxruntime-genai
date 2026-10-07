@@ -74,7 +74,8 @@ size_t VarlenGraphBufferBytes(const Model& model, size_t position_planes,
 // zero for models without fixed decoder state.
 std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
                                                       size_t block_table_columns,
-                                                      size_t state_binding_key);
+                                                      size_t state_binding_key,
+                                                      size_t state_binding_domain = 0);
 
 /**
  * @struct VarlenGraphBuffers
@@ -98,9 +99,10 @@ struct VarlenGraphBuffers {
 
   // Annotation id for a decode step of this shape, or -1 when it cannot be captured.
   int GraphId(size_t batch_size, size_t tokens_per_request, size_t block_table_columns,
-              size_t state_binding_key) {
+          size_t state_binding_key, size_t state_binding_domain = 0) {
     const auto key =
-        DecodeGraphKey(batch_size, tokens_per_request, block_table_columns, state_binding_key);
+      DecodeGraphKey(batch_size, tokens_per_request, block_table_columns, state_binding_key,
+               state_binding_domain);
     return key ? graph_ids.Id(*key) : -1;
   }
 

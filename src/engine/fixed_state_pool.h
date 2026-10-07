@@ -233,6 +233,7 @@ class FixedStateReservation {
 
 class FixedStatePool {
  public:
+  static size_t StateBankBytes(const Model& model, size_t capacity);
   FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
                  size_t prefix_checkpoint_capacity = 0);
   ~FixedStatePool();

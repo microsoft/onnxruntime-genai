@@ -9,6 +9,8 @@
 #include "../decoding/speculative_stats.h"
 #include "../dflash2_drafter.h"
 
+#include <array>
+#include <map>
 #include <random>
 #include <thread>
 #include <utility>
@@ -295,6 +297,11 @@ struct Engine : std::enable_shared_from_this<Engine>,
   // the Engine so both cache pools share one memory budget; draft orchestration is added separately.
   std::shared_ptr<DecoderOnly_Model> mtp_model_;
   std::shared_ptr<CacheManager> mtp_cache_manager_;
+  struct MtpChainState {
+    using Banks = std::array<std::unique_ptr<OrtValue>, 2>;
+    std::vector<Banks> buffers;
+    std::map<size_t, std::vector<Banks>> views;
+  } mtp_chain_state_;
   std::unique_ptr<ModelExecutor> mtp_model_executor_;
   std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;
   size_t mtp_consecutive_failures_{};

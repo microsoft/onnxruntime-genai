@@ -488,7 +488,8 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position
 
 std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
                                                       size_t block_table_columns,
-                                                      size_t state_binding_key) {
+                                                      size_t state_binding_key,
+                                                      size_t state_binding_domain) {
   if (batch_size == 0 || tokens_per_request == 0 || block_table_columns == 0) {
     return std::nullopt;
   }
@@ -500,7 +501,8 @@ std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t 
   while ((size_t{1} << columns_bucket) < block_table_columns) {
     ++columns_bucket;
   }
-  return GraphAnnotationIds::Key{batch_size, tokens_per_request, columns_bucket, state_binding_key};
+  return GraphAnnotationIds::Key{batch_size, tokens_per_request, columns_bucket, state_binding_key,
+                                  state_binding_domain};
 }
 
 VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,

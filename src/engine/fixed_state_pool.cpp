@@ -590,6 +590,36 @@ void FixedStateReservation::Discard() {
   pool_->Discard(*this);
 }
 
+size_t FixedStatePool::StateBankBytes(const Model& model, size_t capacity) {
+  const auto& decoder = model.config_->model.decoder;
+  const ModelStateManifest manifest{decoder};
+  size_t bytes = 0;
+  for (const auto& group : manifest.StateGroups()) {
+    if (group.kind != StateGroupKind::FixedConv &&
+        group.kind != StateGroupKind::FixedRecurrent &&
+        group.kind != StateGroupKind::FixedPle &&
+        group.kind != StateGroupKind::FixedIndexer) {
+      continue;
+    }
+    for (const auto& binding : FixedStateTemplates(decoder, group.kind)) {
+      for (const int layer_id : group.layer_ids) {
+        const auto input = ExpandBinding(*binding.input, layer_id);
+        const auto output = ExpandBinding(*binding.output, layer_id);
+        const auto type = model.session_info_.GetInputDataType(input);
+        const auto geometry = ValidateFixedStateGeometry(
+            input, type, model.session_info_.GetInputShape(input),
+            output, model.session_info_.GetOutputDataType(output),
+            model.session_info_.GetOutputShape(output));
+        const size_t row_bytes = CheckedMultiply(geometry.row_element_count,
+                                                 Ort::SizeOf(type), "row size");
+        bytes = CheckedAdd(bytes, CheckedMultiply(capacity, row_bytes, "bank size"),
+                            "bank size");
+      }
+    }
+  }
+  return bytes;
+}
+
 FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
                                size_t prefix_checkpoint_capacity)
     : impl_{std::make_unique<Impl>(std::move(model), capacity,

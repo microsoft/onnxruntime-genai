@@ -329,6 +329,24 @@ TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {
   EXPECT_EQ(ids.size(), 5u);
 }
 
+TEST(VarlenDecoderIOTest, GraphIdSeparatesMtpScratchBanksFromCommittedState) {
+  GraphAnnotationIds ids;
+  const auto committed = DecodeGraphKey(1, 1, 8, 3);
+  const auto first_bank = DecodeGraphKey(1, 1, 8, 3, 1);
+  const auto second_bank = DecodeGraphKey(1, 1, 8, 3, 2);
+  ASSERT_TRUE(committed.has_value());
+  ASSERT_TRUE(first_bank.has_value());
+  ASSERT_TRUE(second_bank.has_value());
+  const int committed_id = ids.Id(*committed);
+  const int first_id = ids.Id(*first_bank);
+  const int second_id = ids.Id(*second_bank);
+  EXPECT_NE(committed_id, first_id);
+  EXPECT_NE(committed_id, second_id);
+  EXPECT_NE(first_id, second_id);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, 3, 1)), first_id);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, 3, 2)), second_id);
+}
+
 TEST(VarlenDecoderIOTest, GraphIdIsStableForARepeatedShape) {
   GraphAnnotationIds ids;
   const auto key = DecodeGraphKey(/*batch_size=*/2, /*tokens_per_request=*/8,

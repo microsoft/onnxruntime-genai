@@ -112,7 +112,8 @@ void SimpleDecoder::LogGraphDecision(size_t batch_size, size_t tokens_per_reques
   auto& stream = Log("graph_capture");
   stream << "decode batch=" << batch_size << " tokens_per_request=" << tokens_per_request
          << " block_table_columns=" << context.block_table_columns
-         << " state_binding=" << context.fixed_state_binding_key << " -> ";
+         << " state_binding=" << context.fixed_state_binding_key
+         << " state_domain=" << context.fixed_state_binding_domain << " -> ";
   switch (fallback) {
     case GraphFallback::kCaptured:
       stream << "graph id " << annotation_id;
@@ -161,7 +162,8 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
   } else {
     annotation_id = graph_buffers_->GraphId(scheduled_requests.size(), tokens_per_request,
                                             context.block_table_columns,
-                                            context.fixed_state_binding_key);
+                                            context.fixed_state_binding_key,
+                                            context.fixed_state_binding_domain);
     if (annotation_id <= 0) {
       fallback = GraphFallback::kUncapturableShape;
     }
