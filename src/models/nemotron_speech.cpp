@@ -96,9 +96,6 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   blank_penalty = config.search.blank_penalty;
   timestamp_level = config.model.timestamp_level;
 
-  ValidateTimestampConfiguration(config.model);
-  if (TimestampsEnabled()) (void)GetSegmentGapThresholdFrames(config.model);
-
   // Vocab size from top-level config
   vocab_size = config.model.vocab_size;
 
