@@ -809,10 +809,12 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             "temperature",
             "top_k",
             "top_p",
+            "whisper_max_initial_timestamp_index",
+            "whisper_timestamps",
         },
         "runtime_config.search",
     )
-    boolean_search_fields = {"do_sample", "early_stopping", "past_present_share_buffer"}
+    boolean_search_fields = {"do_sample", "early_stopping", "past_present_share_buffer", "whisper_timestamps"}
     integer_search_bounds = {
         "min_length": (0, 2_147_483_647),
         "max_length": (1, 2_147_483_647),
@@ -823,6 +825,7 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         "no_repeat_ngram_size": (0, 2_147_483_647),
         "random_seed": (-1, 2_147_483_647),
         "chunk_size": (1, None),
+        "whisper_max_initial_timestamp_index": (-1, 2_147_483_647),
     }
     numeric_search_bounds = {
         "top_p": (0, 1, False),

@@ -187,6 +187,54 @@ Java_ai_onnxruntime_genai_Tokenizer_tokenizerGetEorTokenId(JNIEnv* env, jobject 
   return static_cast<jint>(token_id);
 }
 
+JNIEXPORT jboolean JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_tokenizerHasTimestampTokens(JNIEnv* env, jobject thiz, jlong tokenizer_handle) {
+  const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);
+  bool has_timestamps = false;
+
+  if (ThrowIfError(env, OgaTokenizerHasTimestampTokens(tokenizer, &has_timestamps))) {
+    return JNI_FALSE;
+  }
+
+  return has_timestamps ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_tokenizerGetTimestampBeginTokenId(JNIEnv* env, jobject thiz, jlong tokenizer_handle) {
+  const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);
+  int32_t token_id = 0;
+
+  if (ThrowIfError(env, OgaTokenizerGetTimestampBeginTokenId(tokenizer, &token_id))) {
+    return 0;
+  }
+
+  return static_cast<jint>(token_id);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_tokenizerIsTimestampToken(JNIEnv* env, jobject thiz, jlong tokenizer_handle, jint token_id) {
+  const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);
+  bool is_timestamp = false;
+
+  if (ThrowIfError(env, OgaTokenizerIsTimestampToken(tokenizer, token_id, &is_timestamp))) {
+    return JNI_FALSE;
+  }
+
+  return is_timestamp ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_tokenizerTimestampToSeconds(JNIEnv* env, jobject thiz, jlong tokenizer_handle, jint token_id) {
+  const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);
+  double seconds = 0.0;
+
+  if (ThrowIfError(env, OgaTokenizerTimestampToSeconds(tokenizer, token_id, &seconds))) {
+    return 0.0;
+  }
+
+  return static_cast<jdouble>(seconds);
+}
+
 JNIEXPORT jintArray JNICALL
 Java_ai_onnxruntime_genai_Tokenizer_tokenizerGetEosTokenIds(JNIEnv* env, jobject thiz, jlong tokenizer_handle) {
   const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);

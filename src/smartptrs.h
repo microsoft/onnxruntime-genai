@@ -217,7 +217,7 @@ static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 9;
+inline constexpr uint32_t kDeviceInterfaceVersion = 11;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -369,6 +369,18 @@ struct DeviceInterface {
   // after an upload never waits for the device, so a caller can take a fresh mirror per upload
   // instead of synchronizing before it reuses one. Keep last for vtable ABI stability.
   virtual bool RecyclesHostMirrorsAfterUpload(size_t /*bytes*/) const { return false; }
+  // Applies Whisper timestamp decoding rules to fp32 logits in place without copying the
+  // vocabulary to the host. `sequences` is laid out as [batch_beam_size, max_length].
+  // Keep last for vtable ABI stability.
+  virtual bool ApplyWhisperTimestampRules(float* /*logits*/, const int32_t* /*sequences*/,
+                                          const bool* /*sequence_done*/,
+                                          int /*batch_beam_size*/, int /*vocab_size*/,
+                                          int /*max_length*/, int /*current_length*/,
+                                          int /*sample_begin*/, int /*timestamp_begin*/,
+                                          int /*eot_token*/, int /*no_timestamps_token*/,
+                                          int /*max_initial_timestamp_index*/) {
+    return false;
+  }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

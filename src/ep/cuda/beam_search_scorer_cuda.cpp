@@ -49,7 +49,8 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters, 
 void BeamSearchScorer_Cuda::Process(Sequences& sequences,
                                     std::span<const float> next_scores,
                                     std::span<const int32_t> next_tokens,
-                                    std::span<const int32_t> next_indices) {
+                                    std::span<const int32_t> next_indices,
+                                    std::span<bool> sequence_done) {
   cuda::LaunchBeamSearchScorer_Process(*state_cpu_,
                                        *state_gpu_,
                                        eos_tokens_,
@@ -64,6 +65,7 @@ void BeamSearchScorer_Cuda::Process(Sequences& sequences,
                                        next_tokens,
                                        next_indices,
                                        stream_);
+  cuda::LaunchExpandBatchDone(beam_hyps_, sequence_done, state_cpu_->num_beams_, stream_);
   CUDA_CHECK(cudaEventRecord(event_process_complete_, stream_));
 
   cuda::LaunchBeamSearchScorer_AppendNextTokenToSequences(*state_cpu_,

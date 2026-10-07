@@ -421,6 +421,30 @@ struct OgaTokenizer : OgaAbstract {
     return token_id;
   }
 
+  bool HasTimestampTokens() const {
+    bool has_timestamps;
+    OgaCheckResult(OgaTokenizerHasTimestampTokens(this, &has_timestamps));
+    return has_timestamps;
+  }
+
+  int32_t GetTimestampBeginTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetTimestampBeginTokenId(this, &token_id));
+    return token_id;
+  }
+
+  bool IsTimestampToken(int32_t token_id) const {
+    bool is_timestamp;
+    OgaCheckResult(OgaTokenizerIsTimestampToken(this, token_id, &is_timestamp));
+    return is_timestamp;
+  }
+
+  double TimestampToSeconds(int32_t token_id) const {
+    double seconds;
+    OgaCheckResult(OgaTokenizerTimestampToSeconds(this, token_id, &seconds));
+    return seconds;
+  }
+
   void Encode(const char* str, OgaSequences& sequences) const {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }

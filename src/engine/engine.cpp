@@ -185,6 +185,10 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
       make_step_error_{dependencies.make_step_error
                            ? dependencies.make_step_error
                            : MakeEngineStepError} {
+  if (model_->config_->search.whisper_timestamps) {
+    throw std::runtime_error(
+        "whisper_timestamps is not supported by the continuous batching Engine");
+  }
   // Fail fast on a missing collaborator rather than crashing later on first use.
   if (!cache_manager_) {
     throw std::runtime_error("Engine requires a non-null cache manager.");

@@ -1117,6 +1117,34 @@ OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer,
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerHasTimestampTokens(const OgaTokenizer* tokenizer, bool* out) {
+  OGA_TRY
+  *out = tokenizer->HasTimestampTokens();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetTimestampBeginTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetTimestampBeginTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerIsTimestampToken(const OgaTokenizer* tokenizer, int32_t token_id, bool* out) {
+  OGA_TRY
+  *out = tokenizer->IsTimestampToken(token_id);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerTimestampToSeconds(const OgaTokenizer* tokenizer, int32_t token_id, double* out) {
+  OGA_TRY
+  *out = tokenizer->TimestampToSeconds(token_id);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences) {
   OGA_TRY
   sequences->emplace_back(tokenizer->Encode(str));

@@ -74,6 +74,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
         private static string _tinyRandomGpt2ModelPath => _lazyTinyRandomGpt2ModelPath.Value;
 
+        private static Lazy<string> _lazyWhisperModelPath = new Lazy<string>(() =>
+        {
+            string modelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                            "models", "whisper");
+            return Directory.Exists(modelPath) ? modelPath : null;
+        });
+
+        private static string _whisperModelPath => _lazyWhisperModelPath.Value;
+
         private static Lazy<string> _lazyAdaptersPath = new Lazy<string>(() =>
         {
             string modelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
@@ -605,6 +614,26 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
             using var sequences = tokenizerFromConfig.Encode(str);
             Assert.Equal(str, tokenizerFromPath.Decode(sequences[0]));
+        }
+
+        [Fact(DisplayName = "TestWhisperTimestampTokenizerAPI")]
+        public void TestWhisperTimestampTokenizerAPI()
+        {
+            using var tokenizer = new Tokenizer(_whisperModelPath);
+
+            Assert.True(tokenizer.HasTimestampTokens());
+            Assert.Equal(50364, tokenizer.GetTimestampBeginTokenId());
+            Assert.False(tokenizer.IsTimestampToken(50363));
+            Assert.True(tokenizer.IsTimestampToken(50364));
+            Assert.True(tokenizer.IsTimestampToken(51864));
+            Assert.False(tokenizer.IsTimestampToken(51865));
+            Assert.Equal(0.7, tokenizer.TimestampToSeconds(50399));
+            Assert.Equal("", tokenizer.Decode(new int[] { 50364 }));
+            Assert.Throws<OnnxRuntimeGenAIException>(() => tokenizer.TimestampToSeconds(51865));
+
+            using var tokenizerWithoutTimestamps = new Tokenizer(_tinyRandomGpt2ModelPath);
+            Assert.False(tokenizerWithoutTimestamps.HasTimestampTokens());
+            Assert.Throws<OnnxRuntimeGenAIException>(() => tokenizerWithoutTimestamps.GetTimestampBeginTokenId());
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]

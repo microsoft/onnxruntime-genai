@@ -54,6 +54,10 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   int32_t GetBosTokenId() const { return bos_token_id_; }
   const std::vector<int32_t>& GetEosTokenIds() const { return eos_token_id_; }
   int32_t GetPadTokenId() const { return pad_token_id_; }
+  bool HasTimestampTokens() const { return timestamp_begin_token_id_.has_value(); }
+  bool IsTimestampToken(int32_t token) const;
+  int32_t GetTimestampBeginTokenId() const;
+  double TimestampToSeconds(int32_t token) const;
 
   int32_t GetBotTokenId() const;
   int32_t GetEotTokenId() const;
@@ -70,6 +74,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::optional<int32_t> eot_token_id_;
   std::optional<int32_t> bor_token_id_;
   std::optional<int32_t> eor_token_id_;
+  std::optional<int32_t> timestamp_begin_token_id_;
+  int32_t vocab_size_;
 };
 
 }  // namespace Generators

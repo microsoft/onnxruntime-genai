@@ -185,6 +185,58 @@ public class Tokenizer implements AutoCloseable {
     return tokenizerGetEorTokenId(nativeHandle);
   }
 
+  /** Returns whether Whisper timestamp metadata is available. */
+  public boolean hasTimestampTokens() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenizerHasTimestampTokens(nativeHandle);
+  }
+
+  /**
+   * Gets the first Whisper timestamp token ID.
+   *
+   * @return The first timestamp token ID.
+   * @throws GenAIException If timestamp metadata is unavailable or the native API call fails.
+   */
+  public int getTimestampBeginTokenId() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenizerGetTimestampBeginTokenId(nativeHandle);
+  }
+
+  /**
+   * Returns whether a token is a Whisper timestamp token.
+   *
+   * @param tokenId The token ID to classify.
+   * @return Whether the token is in the timestamp token range.
+   */
+  public boolean isTimestampToken(int tokenId) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenizerIsTimestampToken(nativeHandle, tokenId);
+  }
+
+  /**
+   * Converts a Whisper timestamp token to seconds relative to the current audio window.
+   *
+   * @param tokenId The timestamp token ID to convert.
+   * @return The timestamp in seconds relative to the current audio window.
+   * @throws GenAIException If the token is not a timestamp token or the native API call fails.
+   */
+  public double timestampToSeconds(int tokenId) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenizerTimestampToSeconds(nativeHandle, tokenId);
+  }
+
   /**
    * Gets the end of sentence token IDs.
    *
@@ -318,6 +370,16 @@ public class Tokenizer implements AutoCloseable {
   private native int tokenizerGetBorTokenId(long tokenizerHandle) throws GenAIException;
 
   private native int tokenizerGetEorTokenId(long tokenizerHandle) throws GenAIException;
+
+  private native boolean tokenizerHasTimestampTokens(long tokenizerHandle) throws GenAIException;
+
+  private native int tokenizerGetTimestampBeginTokenId(long tokenizerHandle) throws GenAIException;
+
+  private native boolean tokenizerIsTimestampToken(long tokenizerHandle, int tokenId)
+      throws GenAIException;
+
+  private native double tokenizerTimestampToSeconds(long tokenizerHandle, int tokenId)
+      throws GenAIException;
 
   private native int tokenizerToTokenId(long tokenizerHandle, String str) throws GenAIException;
 

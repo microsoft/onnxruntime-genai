@@ -187,6 +187,42 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return eorTokenId;
         }
 
+        /// <summary>
+        /// Returns whether Whisper timestamp metadata is available.
+        /// </summary>
+        public bool HasTimestampTokens()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerHasTimestampTokens(_tokenizerHandle, out bool hasTimestamps));
+            return hasTimestamps;
+        }
+
+        /// <summary>
+        /// Returns the first Whisper timestamp token ID. Throws if timestamp metadata is unavailable.
+        /// </summary>
+        public int GetTimestampBeginTokenId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerGetTimestampBeginTokenId(_tokenizerHandle, out int tokenId));
+            return tokenId;
+        }
+
+        /// <summary>
+        /// Returns whether the token ID is a Whisper timestamp token.
+        /// </summary>
+        public bool IsTimestampToken(int tokenId)
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerIsTimestampToken(_tokenizerHandle, tokenId, out bool isTimestamp));
+            return isTimestamp;
+        }
+
+        /// <summary>
+        /// Converts a Whisper timestamp token to seconds relative to the current audio window.
+        /// </summary>
+        public double TimestampToSeconds(int tokenId)
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerTimestampToSeconds(_tokenizerHandle, tokenId, out double seconds));
+            return seconds;
+        }
+
         public TokenizerStream CreateStream()
         {
             IntPtr tokenizerStreamHandle = IntPtr.Zero;
