@@ -18,9 +18,9 @@ To benchmark a locally built plugin EP, pass its shared library path:
 .\model_benchmark.exe -i C:\models\my-model -e webgpu --ep_library_path C:\ort\onnxruntime_providers_webgpu.dll -l 128 -g 128 -w 2 -r 5 --use_random_tokens --reuse_generator
 ```
 
-`--ep_path` is an alias for `--ep_library_path`. The library is registered on GenAI's environment before
-model creation and remains loaded until shutdown. Use compatible ONNX Runtime and GenAI libraries,
-and make the plugin's dependencies available to the OS loader.
+The library is registered on GenAI's environment before model creation and remains loaded until
+shutdown. Use compatible ONNX Runtime and GenAI libraries, and make the plugin's dependencies
+available to the OS loader.
 
 The default `-e follow_config` preserves the providers selected in `genai_config.json`. An explicit
 `-e` selects the decoder provider while preserving its configured options, including graph capture.

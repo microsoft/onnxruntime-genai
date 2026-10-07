@@ -32,7 +32,7 @@ namespace {
     << "    -e,--execution_provider <provider>\n"
     << "      Execution provider to use: follow_config, cpu, cuda, dml, NvTensorRtRtx, AMDGPU, webgpu.\n"
     << "      With --ep_library_path, a custom provider name is also accepted. Default: " << defaults.execution_provider << "\n"
-    << "    --ep_library_path,--ep_path <path>\n"
+    << "    --ep_library_path <path>\n"
     << "      Register a plugin EP DLL/SO before loading the model. Provider options from\n"
     << "      genai_config.json are preserved. Without -e, use the providers in that file.\n"
     << "    -b,--batch_size <number>\n"
@@ -146,7 +146,7 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.model_path = next_arg(i);
       } else if (arg == "-e" || arg == "--execution_provider") {
         opts.execution_provider = next_arg(i);
-      } else if (arg == "--ep_library_path" || arg == "--ep_path") {
+      } else if (arg == "--ep_library_path") {
         opts.ep_library_path = next_arg(i);
         if (opts.ep_library_path.empty()) {
           throw std::runtime_error("Plugin EP library path must not be empty.");
