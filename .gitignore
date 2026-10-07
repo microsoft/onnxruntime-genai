@@ -45,6 +45,9 @@ examples/csharp/ModelChat/models
 !test/models/pipeline-model/*.json
 !test/models/qwen2-5-vl/*
 !test/models/qwen3-5/*
+!/test/models/qwen-position-inputs/
+!test/models/qwen-position-inputs/int32.onnx
+!test/models/qwen-position-inputs/int64.onnx
 !test/models/qwen3-vl/*
 !test/models/whisper/*
 
