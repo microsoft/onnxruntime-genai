@@ -3440,6 +3440,7 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   // Validate all config-specified filenames/paths after parsing so downstream loaders
   // (model/processor/adapter creation) can rely on them being safe.
   ValidateModelPaths(*this);
+  
   ValidateTimestampConfiguration(model);
 
   WarnOnClampedDraftWidth(*this);
