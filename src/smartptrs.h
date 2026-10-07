@@ -217,7 +217,7 @@ static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 8;
+inline constexpr uint32_t kDeviceInterfaceVersion = 9;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -277,6 +277,10 @@ struct DeviceInterface {
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const float* /*cross_qk_buffer_data*/, float* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const Ort::Float16_t* /*cross_qk_buffer_data*/, Ort::Float16_t* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void GetAvailableMemory(size_t& /* free_bytes */, size_t& /* total_bytes */) { assert(false); }
+  virtual std::optional<bool> GetIsIntegrated(std::string& error) {
+    error = "CUDA integrated-device detection is unavailable";
+    return std::nullopt;
+  }
 
   // Allow each EP to shape the trivial init-session ProviderOptions used by EnsureDeviceOrtInit.
   // The default does nothing; EPs that need global singletons configured (e.g. WebGPU) or

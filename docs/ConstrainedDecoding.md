@@ -25,3 +25,17 @@ Builds created without guidance support reject a request that supplies guidance 
 generating unconstrained output. Configure the build with `USE_GUIDANCE=ON` (or the corresponding
 build-script option) before enabling guidance in `GeneratorParams` (classic Generator) or in
 `OgaTurnOptions` (Engine, where guidance is scoped to one turn).
+
+For Engine turns that mix free text with structured tool calls,
+`OgaTurnOptionsSetDelimitedGuidance(options, opening_token, closing_token, lark_body_grammar)`
+constrains only the body between two distinct, authoritative token IDs. The opening marker must
+be committed before the grammar activates; the closing marker is allowed only when the body
+grammar accepts its end. Text before and after the region remains unconstrained, including
+reasoning text. The grammar describes the body, not either marker. Validate generated content
+at the application layer before executing a tool.
+
+Delimited guidance requires dynamic batching and cannot be combined with whole-turn guidance.
+`OgaTurnOptionsClearGuidance` or `OgaTurnOptionsReset` clears either mode. Ordinary whole-turn
+guidance disables speculative drafts; delimited guidance permits drafts outside its region,
+truncates proposals before an opening marker, and suspends drafting inside the region. Automatic
+MTP drafting is unavailable for delimited turns.
