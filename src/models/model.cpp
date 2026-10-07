@@ -937,11 +937,11 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
-  if (ModelType::IsPipe(config->model.type, /*multimodal=*/true) && !config->model.decoder.pipeline.empty())
-    return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   if (!config->model.decoder.pipeline.empty() &&
       (ModelType::IsVLM(config->model.type) || ModelType::IsMMM(config->model.type))) {
-    throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
+    if (!ModelType::IsPipe(config->model.type))
+      throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
+    return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   }
   if (ModelType::IsLFM2(config->model.type))
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
@@ -961,8 +961,6 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
-  if (ModelType::IsPipe(config->model.type))
-    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (ModelType::IsMMM(config->model.type)) {
     // Auto-detect speech support: require both the speech ONNX model filename
     // and the preprocessing config to be present. If only one is set, throw
@@ -981,6 +979,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     }
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
   }
+  if (ModelType::IsPipe(config->model.type))
+    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (config->model.type == "marian-ssru")
     return std::make_shared<MarianModel>(std::move(config), ort_env);
 

@@ -808,7 +808,9 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
-  if (ModelType::IsLLM(model_->config_->model.type) || ModelType::IsPipe(model_->config_->model.type)) {
+  const auto& model_type = model_->config_->model.type;
+  if (ModelType::IsLLM(model_type) ||
+      (ModelType::IsPipe(model_type) && !ModelType::IsVLM(model_type) && !ModelType::IsMMM(model_type))) {
     throw std::runtime_error("Please use generator.AppendTokens for " + model_->config_->model.type + ". SetInputs is not supported for this model type.");
   }
 

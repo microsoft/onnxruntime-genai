@@ -720,6 +720,34 @@ def test_pipelined_mistral3_is_rejected_before_using_qwen_vision(test_data_path,
         og.Model(os.fspath(model_path))
 
 
+def test_text_only_pipelined_decoder_requires_append_tokens(test_data_path, tmp_path):
+    """Text pipelines must not load a vision session or accept multimodal SetInputs."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    inputs = og.Model(os.fspath(source_model_path)).create_multimodal_processor()("Hello")
+    model_path = tmp_path / "text-pipeline"
+    _write_pipelined_gemma4(
+        onnx,
+        source_model_path,
+        model_path,
+        consume_features=False,
+        type="decoder-pipeline",
+        vision={"filename": "nonexistent_vision.onnx"},
+    )
+
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=32)
+    generator = og.Generator(model, params)
+    with pytest.raises(RuntimeError, match="Please use generator.AppendTokens for decoder-pipeline"):
+        generator.set_inputs(inputs)
+    generator.append_tokens(np.array([0, 2], dtype=np.int32))
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [0]
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [0]
+
+
 def test_gemma4_pipelined_text_only_uses_rank3_float16_empty_features(test_data_path, tmp_path):
     """Text decode must receive a correctly ranked and typed empty feature tensor."""
     onnx = pytest.importorskip("onnx")
