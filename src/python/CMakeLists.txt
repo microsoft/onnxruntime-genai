@@ -157,8 +157,7 @@ if(BUILD_WHEEL)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_TARGET_NAME}/__init__.py @ONLY)
 
   # Copy over any additional python files
-  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/
-    REGEX "/models/gemma[^/]+/" EXCLUDE)
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/package_description.md" DESTINATION ${WHEEL_FILES_DIR}/)
   file(COPY "${REPO_ROOT}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${REPO_ROOT}/LICENSE" DESTINATION ${WHEEL_TARGET_NAME}/)
