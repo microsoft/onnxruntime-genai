@@ -21,7 +21,7 @@ ExecutionFailureKind ClassifyOrtExecutionFailure(std::string_view message) {
 }
 
 std::unique_ptr<Decoder> CreateDecoder(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager) {
-  if (auto decoder_only_model = std::dynamic_pointer_cast<DecoderOnlyModel>(model)) {
+  if (auto decoder_only_model = std::dynamic_pointer_cast<DecoderModel>(model)) {
     return std::make_unique<SimpleDecoder>(decoder_only_model, cache_manager);
   }
 

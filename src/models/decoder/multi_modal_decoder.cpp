@@ -7,7 +7,7 @@
 
 namespace Generators {
 
-DecoderOnlyModel::DecoderOnlyModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
+DecoderModel::DecoderModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_decoder_);
@@ -20,7 +20,7 @@ DecoderOnlyModel::DecoderOnlyModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   }
 }
 
-std::unique_ptr<State> DecoderOnlyModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
+std::unique_ptr<State> DecoderModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
                                                      const GeneratorParams& params) const {
   if (cpu_embedding_) {
     throw std::runtime_error("Decoder-only CPU embedding requires Engine rather than Generator.");
@@ -37,7 +37,7 @@ DecoderState::DecoderState(const GeneratorParams& params, const Model& model, Or
       kv_cache_{model.p_device_kvcache_->CreateKeyValueCache(*this)},
       recurrent_state_{CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)} {}
 
-DecoderState::DecoderState(const DecoderOnlyModel& model, DeviceSpan<int32_t> sequence_lengths,
+DecoderState::DecoderState(const DecoderModel& model, DeviceSpan<int32_t> sequence_lengths,
                            const GeneratorParams& params)
     : DecoderState{params, model, *model.session_decoder_, sequence_lengths} {
   input_ids_ = std::make_unique<DefaultInputIDs>(*this);

@@ -253,7 +253,7 @@ re-anchoring. K=1 and applicable boundary cases use the explicit path.
 
 ## Base speculative decoding
 
-`SpeculativeDecodingModel` composes two `DecoderOnlyModel` instances under one public model. Prefill
+`SpeculativeDecodingModel` composes two `DecoderModel` instances under one public model. Prefill
 runs both children and stores the draft's next-token logits. Target and draft configurations are
 cloned independently so each child owns its own session and state.
 

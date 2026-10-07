@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 // Qwen VL Vision pipeline implementation.
 
-#include "models/vision/qwen_vl_vision.h"
+#include "models/qnn/qwen_vl_vision.h"
 #include "generator/generators.h"
 
 #include <fstream>

@@ -18,8 +18,8 @@ namespace Generators {
 
 struct MultiModalLanguageModel;
 
-struct DecoderOnlyModel : Model {
-  DecoderOnlyModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
+struct DecoderModel : Model {
+  DecoderModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params) const override;
 
@@ -28,7 +28,7 @@ struct DecoderOnlyModel : Model {
 };
 
 struct DecoderState : State {
-  DecoderState(const DecoderOnlyModel& model, DeviceSpan<int32_t> sequence_lengths,
+  DecoderState(const DecoderModel& model, DeviceSpan<int32_t> sequence_lengths,
                const GeneratorParams& params);
   DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths,
                const GeneratorParams& params);

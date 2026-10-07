@@ -835,7 +835,7 @@ inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
   executor->EnableHiddenStatesOutput(model->config_->model.decoder.hidden_size);
   auto* executor_observer = executor.get();
 
-  auto mtp_model = std::make_shared<DecoderOnlyModel>(
+  auto mtp_model = std::make_shared<DecoderModel>(
       CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
   auto mtp_cache = std::make_shared<RecordingCacheManager>(
       mtp_model, /*capacity=*/8);
