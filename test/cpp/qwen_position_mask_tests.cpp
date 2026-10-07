@@ -50,7 +50,8 @@ void CheckMaskAndPositions(bool capture, const char* model_type = "qwen3_5_moe_t
   auto mask = [&] { return state.GetInput("attention_mask"); };
   auto check = [&](std::vector<T> expected, int64_t width) {
     EXPECT_EQ(mask()->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{2, width}));
-    EXPECT_EQ(std::vector<T>(mask()->GetTensorData<T>(), mask()->GetTensorData<T>() + expected.size()), expected);
+    const auto* mask_data = mask()->template GetTensorData<T>();
+    EXPECT_EQ(std::vector<T>(mask_data, mask_data + expected.size()), expected);
   };
   const void* mask_address = mask()->GetTensorRawData();
   if (capture)
