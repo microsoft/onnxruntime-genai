@@ -466,28 +466,41 @@ DeviceSpan<float> NemotronSpeechState::Run(int /*total_length*/,
       "Use Generator::GenerateNextToken() with set_inputs.");
 }
 
-void NemotronSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  bool received_audio = false;
-  bool received_chunk_origin = false;
+int64_t GetNemotronChunkStartSample(const std::vector<ExtraInput>& extra_inputs) {
   for (const auto& input : extra_inputs) {
-    if (input.name == Config::Defaults::AudioFeaturesName || input.name == nemotron_config_.enc_in_audio) {
-      received_audio = true;
-      current_mel_ = input.tensor;
-      need_encoder_run_ = true;
-      chunk_done_ = false;
-    } else if (input.name == AbsoluteTimestampChunkStartSampleName) {
-      received_chunk_origin = true;
+    if (input.name == "chunk_start_sample") {
+      if (!input.tensor || !input.tensor->ort_tensor_) {
+        throw std::runtime_error("Nemotron chunk_start_sample must be a scalar int64 tensor");
+      }
       const auto& origin = *input.tensor->ort_tensor_;
       const auto info = origin.GetTensorTypeAndShapeInfo();
       if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 || info->GetElementCount() != 1) {
-        throw std::runtime_error("Nemotron timestamp chunk origin must be a scalar int64 tensor");
+        throw std::runtime_error("Nemotron chunk_start_sample must be a scalar int64 tensor");
       }
-      chunk_start_sample_ = *origin.GetTensorData<int64_t>();
+      const auto start_sample = *origin.GetTensorData<int64_t>();
+      if (start_sample < 0) {
+        throw std::runtime_error("Nemotron chunk_start_sample must be non-negative");
+      }
+      return start_sample;
     }
   }
-  if (timestamps_enabled_ && received_audio && !received_chunk_origin) {
-    throw std::runtime_error("Nemotron timestamp-enabled audio input is missing its absolute chunk origin");
+  throw std::runtime_error("Nemotron timestamp-enabled audio input is missing chunk_start_sample");
+}
+
+void NemotronSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  std::shared_ptr<Tensor> mel;
+  for (const auto& input : extra_inputs) {
+    if (input.name == Config::Defaults::AudioFeaturesName || input.name == nemotron_config_.enc_in_audio) {
+      mel = input.tensor;
+    }
   }
+  if (!mel) return;
+  if (timestamps_enabled_) {
+    chunk_start_sample_ = GetNemotronChunkStartSample(extra_inputs);
+  }
+  current_mel_ = std::move(mel);
+  need_encoder_run_ = true;
+  chunk_done_ = false;
 }
 
 OrtValue* NemotronSpeechState::GetInput(const char* name) {

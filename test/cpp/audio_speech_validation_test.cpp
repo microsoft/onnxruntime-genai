@@ -3,12 +3,17 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <string>
 
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/nemotron_streaming_processor.h"
 #include "models/whisper.h"
 
 namespace {
@@ -102,6 +107,135 @@ TEST(AudioSpeechValidationTests, NemotronGlobalFrameUsesAbsoluteSampleOrigin) {
   EXPECT_THROW(Generators::GetNemotronGlobalFrame(-1, 0, 160, 8), std::runtime_error);
 }
 
+TEST(AudioSpeechValidationTests, NemotronChunkOriginKeyMatchesConsumer) {
+  auto& allocator = Generators::GetDeviceInterface(Generators::DeviceType::CPU)->GetAllocator();
+  auto features = std::make_shared<Generators::Tensor>(
+      OrtValue::CreateTensor<float>(allocator, std::array<int64_t, 1>{1}));
+  Generators::NamedTensors tensors;
+  tensors.emplace(std::string(Generators::Config::Defaults::AudioFeaturesName), features);
+  Generators::AddTimestampChunkOrigin(tensors, 8960);
+  ASSERT_EQ(tensors.size(), 2U);
+  ASSERT_NE(tensors.find("chunk_start_sample"), tensors.end());
+
+  const auto as_extra_inputs = [](const Generators::NamedTensors& named_tensors) {
+    std::vector<Generators::ExtraInput> inputs;
+    for (const auto& [name, tensor] : named_tensors) inputs.push_back({name, tensor});
+    return inputs;
+  };
+  EXPECT_EQ(Generators::GetNemotronChunkStartSample(as_extra_inputs(tensors)), 8960);
+
+  auto renamed = tensors;
+  auto origin = renamed.at("chunk_start_sample");
+  renamed.erase("chunk_start_sample");
+  renamed.emplace("renamed_chunk_start_sample", origin);
+  const auto error = GetExceptionMessage([&] {
+    (void)Generators::GetNemotronChunkStartSample(as_extra_inputs(renamed));
+  });
+  EXPECT_NE(error.find("missing chunk_start_sample"), std::string::npos);
+  renamed.erase("renamed_chunk_start_sample");
+  EXPECT_THROW(Generators::GetNemotronChunkStartSample(as_extra_inputs(renamed)), std::runtime_error);
+
+  auto wrong_type = std::make_shared<Generators::Tensor>(
+      OrtValue::CreateTensor<float>(allocator, std::array<int64_t, 1>{1}));
+  tensors.at("chunk_start_sample") = wrong_type;
+  EXPECT_THROW(Generators::GetNemotronChunkStartSample(as_extra_inputs(tensors)), std::runtime_error);
+
+  auto wrong_count = std::make_shared<Generators::Tensor>(
+      OrtValue::CreateTensor<int64_t>(allocator, std::array<int64_t, 1>{2}));
+  tensors.at("chunk_start_sample") = wrong_count;
+  EXPECT_THROW(Generators::GetNemotronChunkStartSample(as_extra_inputs(tensors)), std::runtime_error);
+
+  auto negative = OrtValue::CreateTensor<int64_t>(allocator, std::array<int64_t, 1>{1});
+  *negative->GetTensorMutableData<int64_t>() = -1;
+  tensors.at("chunk_start_sample") = std::make_shared<Generators::Tensor>(std::move(negative));
+  EXPECT_THROW(Generators::GetNemotronChunkStartSample(as_extra_inputs(tensors)), std::runtime_error);
+}
+
+TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
+  const char* model_override = std::getenv("NEMOTRON_STREAMING_MODEL_PATH");
+  const auto model_path = model_override ? fs::path{model_override} : fs::path{MODEL_PATH "nemotron-speech-streaming"};
+  if (!fs::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path.string();
+
+  auto config = std::make_unique<Generators::Config>(model_path, "");
+  config->model.timestamp_level = Generators::Config::TimestampLevel::All;
+  const auto chunk_samples = static_cast<size_t>(config->model.chunk_samples);
+  ASSERT_GT(chunk_samples, 1U);
+  // The downloaded CUDA export uses standard ONNX operators; run this metadata test on CPU too.
+  config->model.encoder.session_options->provider_options.clear();
+  config->model.encoder.session_options->providers.clear();
+  config->model.decoder.session_options.provider_options.clear();
+  config->model.decoder.session_options.providers.clear();
+  config->model.joiner.session_options->provider_options.clear();
+  config->model.joiner.session_options->providers.clear();
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), std::move(config));
+  Generators::NemotronStreamingProcessor processor{*model};
+  processor.SetOption("use_vad", "false");
+
+  std::vector<float> silence(chunk_samples, 0.0f);
+  for (int64_t chunk = 0; chunk < 2; ++chunk) {
+    auto inputs = processor.Process(silence.data(), silence.size());
+    ASSERT_NE(inputs, nullptr);
+    ASSERT_EQ(inputs->size(), 2U);
+    EXPECT_NE(inputs->find(std::string(Generators::Config::Defaults::AudioFeaturesName)), inputs->end());
+    const auto& origin = inputs->at("chunk_start_sample");
+    EXPECT_EQ(origin->GetType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    EXPECT_EQ(origin->GetElementCount(), 1U);
+    EXPECT_EQ(*origin->GetData<int64_t>(), chunk * static_cast<int64_t>(chunk_samples));
+  }
+
+  processor.Process(silence.data(), chunk_samples / 2);
+  auto tail = processor.Flush();
+  ASSERT_NE(tail, nullptr);
+  ASSERT_EQ(tail->size(), 2U);
+  const auto& features = tail->at(std::string(Generators::Config::Defaults::AudioFeaturesName));
+  const auto& origin = tail->at("chunk_start_sample");
+  EXPECT_EQ(*origin->GetData<int64_t>(), 2 * static_cast<int64_t>(chunk_samples));
+
+  auto params = std::make_shared<Generators::GeneratorParams>(*model);
+  auto& nemotron_model = dynamic_cast<Generators::NemotronSpeechModel&>(*model);
+  Generators::NemotronSpeechState state{nemotron_model, *params};
+  const std::string audio_name{Generators::Config::Defaults::AudioFeaturesName};
+  const auto missing_origin = GetExceptionMessage([&] {
+    state.SetExtraInputs({{audio_name, features}});
+  });
+  EXPECT_NE(missing_origin.find("chunk_start_sample"), std::string::npos);
+  auto invalid_value = OrtValue::CreateTensor<int64_t>(model->allocator_cpu_, std::array<int64_t, 1>{1});
+  *invalid_value->GetTensorMutableData<int64_t>() = -1;
+  auto invalid_origin = std::make_shared<Generators::Tensor>(std::move(invalid_value));
+  EXPECT_THROW(state.SetExtraInputs({{audio_name, features}, {"chunk_start_sample", invalid_origin}}),
+               std::runtime_error);
+  EXPECT_NO_THROW(state.SetExtraInputs({{audio_name, features}, {"chunk_start_sample", origin}}));
+
+  auto renamed = *tail;
+  renamed.erase("chunk_start_sample");
+  renamed.emplace("renamed_chunk_start_sample", origin);
+  Generators::Generator mismatched_generator{*model, *params};
+  const auto mismatch = GetExceptionMessage([&] { mismatched_generator.SetInputs(renamed); });
+  EXPECT_NE(mismatch.find("chunk_start_sample"), std::string::npos);
+
+  Generators::Generator generator{*model, *params};
+  generator.SetInputs(*tail);
+  ASSERT_FALSE(generator.IsDone());
+  generator.GenerateNextToken();
+  for (const auto& token : generator.GetNextTokensWithMetadata()) {
+    EXPECT_EQ(token.has_token_acoustic_frame_interval, 1);
+    EXPECT_GE(token.token_acoustic_frame_interval.start,
+              2 * static_cast<int64_t>(chunk_samples) /
+                  (model->config_->model.hop_length * model->config_->model.subsampling_factor));
+  }
+
+  Generators::NemotronStreamingProcessor vad_processor{*model};
+  vad_processor.SetOption("silence_duration_ms", "1");
+  vad_processor.SetOption("prefix_padding_ms", "1");
+  EXPECT_EQ(vad_processor.Process(silence.data(), silence.size()), nullptr);
+  vad_processor.SetOption("use_vad", "false");
+  auto after_silence = vad_processor.Process(silence.data(), silence.size());
+  ASSERT_NE(after_silence, nullptr);
+  EXPECT_EQ(*after_silence->at("chunk_start_sample")->GetData<int64_t>(),
+            static_cast<int64_t>(chunk_samples));
+}
+
 TEST(AudioSpeechValidationTests, NemotronTimestampsRejectMissingFrameDurationParameters) {
   Generators::Config config;
   config.model.type = "nemotron_speech";
@@ -137,6 +271,10 @@ class MetadataCoreStateTests : public testing::Test {
     using TransducerState::last_token_intervals_;
     using TransducerState::TransducerState;
     void SetTimestampsEnabled(bool enabled) { timestamps_enabled_ = enabled; }
+    void SetExtraInputs(const std::vector<Generators::ExtraInput>& inputs) override {
+      received_inputs = inputs;
+    }
+    std::vector<Generators::ExtraInput> received_inputs;
     Generators::DeviceSpan<float> Run(int, Generators::DeviceSpan<int32_t>&, Generators::DeviceSpan<int32_t>) override {
       throw std::runtime_error("Synthetic metadata test does not run inference");
     }
@@ -179,6 +317,28 @@ class MetadataCoreStateTests : public testing::Test {
   TestTransducerState* source{};
   const OgaTokenMetadataAcousticFrameInterval interval{4, 5};
 };
+
+TEST_F(MetadataCoreStateTests, ChunkStartSampleSurvivesGeneratorInputHandoff) {
+  auto features = std::make_shared<Generators::Tensor>(
+      OrtValue::CreateTensor<float>(model->allocator_cpu_, std::array<int64_t, 1>{1}));
+  auto origin_value = OrtValue::CreateTensor<int64_t>(model->allocator_cpu_, std::array<int64_t, 1>{1});
+  *origin_value->GetTensorMutableData<int64_t>() = 25600;
+  auto origin = std::make_shared<Generators::Tensor>(std::move(origin_value));
+  Generators::NamedTensors inputs;
+  inputs.emplace(std::string(Generators::Config::Defaults::AudioFeaturesName), features);
+  inputs.emplace("chunk_start_sample", origin);
+  model->config_->model.type = "nemotron_speech";
+
+  generator->SetInputs(inputs);
+  ASSERT_EQ(source->received_inputs.size(), 2U);
+  const auto origin_input = std::find_if(source->received_inputs.begin(), source->received_inputs.end(),
+                                        [](const Generators::ExtraInput& input) {
+                                          return input.name == "chunk_start_sample";
+                                        });
+  ASSERT_NE(origin_input, source->received_inputs.end());
+  EXPECT_EQ(origin_input->tensor, origin);
+  EXPECT_EQ(*origin_input->tensor->GetData<int64_t>(), 25600);
+}
 
 TEST_F(MetadataCoreStateTests, DecodeProcessesMetadataOncePerStep) {
   auto stream = tokenizer->CreateStream();
