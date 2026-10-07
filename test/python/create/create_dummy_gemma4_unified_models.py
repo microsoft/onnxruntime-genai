@@ -58,7 +58,11 @@ def _create_unified_vision_model(out_path: Path) -> None:
         h.make_node("NonZero", ["valid"], ["indices_t"]),
         h.make_node("Transpose", ["indices_t"], ["indices"], perm=[1, 0]),
         h.make_node("GatherND", ["pixel_values", "indices"], ["patches"]),
-        h.make_node("ReduceMean", ["patches"], ["means"], axes=[1], keepdims=1),
+        h.make_node("Cast", ["patches"], ["patches_double"], to=t.DOUBLE),
+        h.make_node(
+            "ReduceMean", ["patches_double"], ["means_double"], axes=[1], keepdims=1
+        ),
+        h.make_node("Cast", ["means_double"], ["means"], to=t.FLOAT),
         h.make_node("Shape", ["means"], ["mean_shape"]),
         h.make_node("Gather", ["mean_shape", "first_axis"], ["token_count"], axis=0),
         h.make_node(
@@ -194,7 +198,13 @@ def create_model(source_dir: Path, output_dir: Path) -> None:
     audio_config = {
         "feature_extraction": {
             "sequence": [
-                {"operation": {"name": "audio_decoder", "type": "AudioDecoder"}},
+                {
+                    "operation": {
+                        "name": "audio_decoder",
+                        "type": "AudioDecoder",
+                        "attrs": {"max_samples": 0},
+                    }
+                },
                 {
                     "operation": {
                         "name": "gemma4_audio",

@@ -335,7 +335,11 @@ def test_gemma4_unified_modality_sessions_generate(
         )
         features = session.run(None, feed)[0]
         valid = np.all(feed["pixel_position_ids"][0] >= 0, axis=-1)
-        expected = feed["pixel_values"][0, valid].mean(axis=1, keepdims=True)
+        expected = (
+            feed["pixel_values"][0, valid]
+            .mean(axis=1, keepdims=True, dtype=np.float64)
+            .astype(np.float32)
+        )
         np.testing.assert_allclose(
             features, np.broadcast_to(expected, features.shape), rtol=1e-5, atol=1e-6
         )
