@@ -47,7 +47,7 @@ bool ProviderConfigurationMatches(const Config::SessionOptions& target_options,
   return true;
 }
 
-int64_t GetLogitsVocabSize(const DecoderOnly_Model& model, const char* model_role) {
+int64_t GetLogitsVocabSize(const DecoderModel& model, const char* model_role) {
   const auto& logits_name = model.config_->model.decoder.outputs.logits;
   if (!model.session_info_.HasOutput(logits_name))
     throw std::runtime_error(
@@ -69,8 +69,8 @@ int64_t GetLogitsVocabSize(const DecoderOnly_Model& model, const char* model_rol
   return vocab_size;
 }
 
-void ValidateLogitsDimensionsMatch(const DecoderOnly_Model& target,
-                                   const DecoderOnly_Model& draft) {
+void ValidateLogitsDimensionsMatch(const DecoderModel& target,
+                                   const DecoderModel& draft) {
   const int64_t target_vocab_size = GetLogitsVocabSize(target, "Target");
   const int64_t draft_vocab_size = GetLogitsVocabSize(draft, "Draft");
   if (target_vocab_size != draft_vocab_size)
@@ -135,8 +135,8 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
         "Speculative decoding does not support LFM2 (hybrid SSM/attention) models in this release; "
         "their rolling convolution state cannot be rewound.");
 
-  target_model_ = std::make_shared<DecoderOnly_Model>(CloneConfigForTarget(*config_), ort_env);
-  draft_model_ = std::make_shared<DecoderOnly_Model>(
+  target_model_ = std::make_shared<DecoderModel>(CloneConfigForTarget(*config_), ort_env);
+  draft_model_ = std::make_shared<DecoderModel>(
       CloneConfigForDraft(*config_, draft_config), ort_env);
   ValidateLogitsDimensionsMatch(*target_model_, *draft_model_);
   session_info_.Add(*target_model_->session_decoder_);

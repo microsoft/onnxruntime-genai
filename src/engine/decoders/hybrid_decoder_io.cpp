@@ -7,7 +7,7 @@
 
 namespace Generators {
 
-HybridDecoderIO::HybridDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
+HybridDecoderIO::HybridDecoderIO(std::shared_ptr<DecoderModel> model,
                                  ScheduledRequests& scheduled_requests,
                                  std::shared_ptr<CacheManager> cache_manager,
                                  const ExecutionContext& execution_context,

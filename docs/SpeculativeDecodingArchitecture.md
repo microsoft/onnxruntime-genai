@@ -253,7 +253,7 @@ re-anchoring. K=1 and applicable boundary cases use the explicit path.
 
 ## Base speculative decoding
 
-`SpeculativeDecodingModel` composes two `DecoderOnly_Model` instances under one public model. Prefill
+`SpeculativeDecodingModel` composes two `DecoderModel` instances under one public model. Prefill
 runs both children and stores the draft's next-token logits. Target and draft configurations are
 cloned independently so each child owns its own session and state.
 
@@ -427,7 +427,7 @@ speculative counters such as rounds, accepted tokens, adaptive moves, or cooldow
 
 ## Target logits and cache requirements
 
-Verification needs one target distribution per proposal position. `DecoderOnly_State::RunUnchunked`
+Verification needs one target distribution per proposal position. `DecoderState::RunUnchunked`
 bypasses prefill chunking for the verification input because chunked prefill can expose only the
 final chunk's logits. This is a correctness requirement, not a general recommendation to disable
 prefill chunking. If the output still contains only the final row, base speculative decoding

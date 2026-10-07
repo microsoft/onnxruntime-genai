@@ -2,68 +2,13 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
-#include "gemma4_vision_state.h"
 #include "multi_modal.h"
-#include "models/io/default_position_inputs.h"
-#include "models/io/qwen_vl_position_inputs.h"
-#include "pixtral_vision_state.h"
-#include "qwen_vl_state.h"
+#include "models/io/lfm2_audio_output.h"
+
 #include <algorithm>
-#include <numeric>
+#include <cstring>
 
 namespace Generators {
-
-namespace {
-
-int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) {
-  for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == Config::Defaults::NumImageTokens) {
-      assert(extra_inputs[i].tensor->ort_tensor_);
-      const int64_t* num_image_tokens_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>();
-      return std::accumulate(num_image_tokens_data,
-                             num_image_tokens_data + extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount(),
-                             0LL);
-    }
-  }
-
-  return 0;
-}
-
-int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs,
-                          const std::string& audio_sizes_name) {
-  for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == audio_sizes_name) {
-      assert(extra_inputs[i].tensor->ort_tensor_);
-      auto type_and_shape_info = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
-      const auto element_count = type_and_shape_info->GetElementCount();
-      if (type_and_shape_info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-        const int64_t* audio_sizes_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>();
-        return std::accumulate(audio_sizes_data, audio_sizes_data + element_count, 0LL);
-      } else {
-        throw std::runtime_error("Unsupported data type " + std::to_string(static_cast<int64_t>(type_and_shape_info->GetElementType())) + " for audio_sizes tensor. Only int64 is supported.");
-      }
-    }
-  }
-
-  return 0;
-}
-
-int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
-  for (const auto& input : extra_inputs) {
-    if (input.name == Config::Defaults::PixelValuesName) {
-      assert(input.tensor->ort_tensor_);
-      const auto shape = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
-      if (shape.size() >= 3) {
-        return shape.front();
-      }
-      break;
-    }
-  }
-
-  return GetQwenImageCount(extra_inputs);
-}
-
-}  // namespace
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
@@ -122,426 +67,6 @@ std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> 
   return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
 }
 
-VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params)
-    : State{params, model, model.vision_device_},
-      model_{model} {}
-
-void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens) {
-  num_image_tokens_ = num_image_tokens;
-  num_images_ = num_images;
-
-  image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,  // Optional model input
-                                                         model_.config_->model.vision.outputs.image_features,
-                                                         num_images_, num_image_tokens_);
-  image_features_->Add();
-  extra_inputs_.Add(extra_inputs, model_.vision_session_->GetInputNames());
-}
-
-DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  if (model_.config_->model.vision.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.vision.run_options.value());
-  }
-
-  State::Run(*model_.vision_session_);
-  return {};
-}
-
-std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
-  if (ModelType::IsQwenVLFamily(model.config_->model.type)) {
-    return std::make_unique<QwenVisionState>(model, params);
-  }
-  if (model.config_->model.type == "gemma4") {
-    return std::make_unique<Gemma4VisionState>(model, params);
-  }
-  if (ModelType::IsPixtralFamily(model.config_->model.type)) {
-    return std::make_unique<PixtralVisionState>(model, params);
-  }
-  return std::make_unique<VisionState>(model, params);
-}
-
-SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params)
-    : State{params, model, model.speech_device_},
-      model_{model} {}
-
-void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
-  num_audio_tokens_ = num_audio_tokens;
-
-  // Allocate 3D [batch, num_audio_tokens, hidden_size] matching the speech ONNX model's
-  // output rank. Will be reshaped to 2D before passing to the embedding model.
-  audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,
-                                                         model_.config_->model.speech.outputs.audio_features,
-                                                         params_->BatchBeamSize(), num_audio_tokens_);
-  audio_features_->Add();
-  extra_inputs_.Add(extra_inputs, model_.speech_session_->GetInputNames());
-}
-
-DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  if (model_.config_->model.speech.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.speech.run_options.value());
-  }
-  State::Run(*model_.speech_session_);
-  return {};
-}
-
-void Lfm2AudioSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
-  // The feature buffer is one sequence wide, so beams would fail as a shape mismatch inside the
-  // encoder. The reference decodes greedily.
-  if (params_->search.num_beams > 1) {
-    throw std::runtime_error("Lfm2AudioSpeechState: beam search is not supported for lfm2_audio; got num_beams " +
-                             std::to_string(params_->search.num_beams) + ". Set num_beams to 1.");
-  }
-
-  SpeechState::SetExtraInputs(extra_inputs, num_audio_tokens);
-
-  // audio_sizes holds the decoder tokens each clip contributes; its sum is num_audio_tokens.
-  tokens_per_clip_.clear();
-  for (const auto& input : extra_inputs) {
-    if (input.name == model_.config_->model.speech.inputs.audio_sizes) {
-      const auto info = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
-      const int64_t* sizes = input.tensor->ort_tensor_->GetTensorData<int64_t>();
-      tokens_per_clip_.assign(sizes, sizes + info->GetElementCount());
-      break;
-    }
-  }
-}
-
-Lfm2AudioSpeechState::SpeechBindings Lfm2AudioSpeechState::ResolveBindings() const {
-  SpeechBindings bindings;
-  bindings.mel_index = FindInput(model_.config_->model.speech.inputs.audio_embeds);
-  bindings.lengths_index = FindInput(model_.config_->model.speech.inputs.audio_lengths);
-  bindings.features_index = FindOutput(model_.config_->model.speech.outputs.audio_features);
-
-  const auto mel_info = inputs_[bindings.mel_index]->GetTensorTypeAndShapeInfo();
-  const auto mel_shape = mel_info->GetShape();  // [num_clips, longest_clip, num_mels]
-  if (mel_shape.size() != 3) {
-    throw std::runtime_error("Lfm2AudioSpeechState: expected a 3D [num_clips, num_frames, num_mels] mel tensor, got rank " +
-                             std::to_string(mel_shape.size()) + ".");
-  }
-  bindings.num_clips = mel_shape[0];
-  bindings.longest_clip = mel_shape[1];
-  bindings.num_mels = mel_shape[2];
-  bindings.mel_type = mel_info->GetElementType();
-
-  if (bindings.num_clips != static_cast<int64_t>(tokens_per_clip_.size())) {
-    throw std::runtime_error("Lfm2AudioSpeechState: the mel tensor holds " + std::to_string(bindings.num_clips) +
-                             " clips but audio_sizes has " + std::to_string(tokens_per_clip_.size()) + " entries.");
-  }
-  const auto lengths_info = inputs_[bindings.lengths_index]->GetTensorTypeAndShapeInfo();
-  if (static_cast<int64_t>(lengths_info->GetElementCount()) != bindings.num_clips) {
-    throw std::runtime_error("Lfm2AudioSpeechState: the mel tensor holds " + std::to_string(bindings.num_clips) +
-                             " clips but " + model_.config_->model.speech.inputs.audio_lengths + " has " +
-                             std::to_string(lengths_info->GetElementCount()) + " entries.");
-  }
-
-  const auto features_info = outputs_[bindings.features_index]->GetTensorTypeAndShapeInfo();
-  const auto features_shape = features_info->GetShape();  // [1, num_audio_tokens, hidden_size]
-  bindings.features_type = features_info->GetElementType();
-  bindings.hidden_size = features_shape.back();
-  return bindings;
-}
-
-std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bindings, int64_t index,
-                                                        int64_t num_frames) {
-  const size_t mel_element_size = Ort::SizeOf(bindings.mel_type);
-  const size_t clip_stride = static_cast<size_t>(bindings.longest_clip * bindings.num_mels) * mel_element_size;
-  const auto* mel_data = static_cast<const uint8_t*>(inputs_[bindings.mel_index]->GetTensorRawData());
-
-  auto clip_mel = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(),
-                                         std::vector<int64_t>{1, num_frames, bindings.num_mels}, bindings.mel_type);
-  std::memcpy(clip_mel->GetTensorMutableRawData(), mel_data + static_cast<size_t>(index) * clip_stride,
-              static_cast<size_t>(num_frames * bindings.num_mels) * mel_element_size);
-
-  auto clip_length = OrtValue::CreateTensor<int64_t>(Ort::Allocator::GetWithDefaultOptions(), std::vector<int64_t>{1});
-  clip_length->GetTensorMutableData<int64_t>()[0] = num_frames;
-
-  auto clip_features = OrtValue::CreateTensor(
-      p_session_device_->GetAllocator(),
-      std::vector<int64_t>{1, tokens_per_clip_[static_cast<size_t>(index)], bindings.hidden_size},
-      bindings.features_type);
-
-  OrtValue* mel_batch = inputs_[bindings.mel_index];
-  OrtValue* lengths = inputs_[bindings.lengths_index];
-  OrtValue* features = outputs_[bindings.features_index];
-  inputs_[bindings.mel_index] = clip_mel.get();
-  inputs_[bindings.lengths_index] = clip_length.get();
-  outputs_[bindings.features_index] = clip_features.get();
-  State::Run(*model_.speech_session_);
-  inputs_[bindings.mel_index] = mel_batch;
-  inputs_[bindings.lengths_index] = lengths;
-  outputs_[bindings.features_index] = features;
-
-  return clip_features;
-}
-
-DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  if (model_.config_->model.speech.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.speech.run_options.value());
-  }
-  // A single clip fills the whole mel tensor and the whole feature buffer; run it as it stands.
-  if (tokens_per_clip_.size() <= 1) {
-    State::Run(*model_.speech_session_);
-    return {};
-  }
-
-  const SpeechBindings bindings = ResolveBindings();
-  const int64_t* frames_per_clip = inputs_[bindings.lengths_index]->GetTensorData<int64_t>();
-  auto features_bytes = ByteWrapTensor(*p_session_device_, *outputs_[bindings.features_index]);
-  const size_t feature_row_bytes = static_cast<size_t>(bindings.hidden_size) * Ort::SizeOf(bindings.features_type);
-  size_t destination = 0;
-
-  // The published encoder export is traced for one clip (its subsampling mask cannot broadcast over
-  // a batch), so run it once per clip on that clip's own frames — which also keeps the padding out
-  // of the encoder entirely — and concatenate the results in clip order.
-  for (int64_t clip = 0; clip < bindings.num_clips; ++clip) {
-    const int64_t num_frames = frames_per_clip[clip];
-    if (num_frames <= 0 || num_frames > bindings.longest_clip) {
-      throw std::runtime_error("Lfm2AudioSpeechState: clip " + std::to_string(clip) + " reports " +
-                               std::to_string(num_frames) + " mel frames, outside the 1.." +
-                               std::to_string(bindings.longest_clip) + " the mel tensor holds.");
-    }
-
-    auto clip_features = RunClip(bindings, clip, num_frames);
-    const size_t clip_bytes = static_cast<size_t>(tokens_per_clip_[static_cast<size_t>(clip)]) * feature_row_bytes;
-    features_bytes.subspan(destination, clip_bytes).CopyFrom(ByteWrapTensor(*p_session_device_, *clip_features));
-    destination += clip_bytes;
-  }
-  return {};
-}
-
-size_t Lfm2AudioSpeechState::FindInput(const std::string& name) const {
-  for (size_t i = 0; i < input_names_.size(); ++i) {
-    if (name == input_names_[i]) return i;
-  }
-  throw std::runtime_error("Lfm2AudioSpeechState: speech input \"" + name + "\" is not bound.");
-}
-
-size_t Lfm2AudioSpeechState::FindOutput(const std::string& name) const {
-  for (size_t i = 0; i < output_names_.size(); ++i) {
-    if (name == output_names_[i]) return i;
-  }
-  throw std::runtime_error("Lfm2AudioSpeechState: speech output \"" + name + "\" is not bound.");
-}
-
-std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
-  if (model.config_->model.type == "lfm2_audio") {
-    return std::make_unique<Lfm2AudioSpeechState>(model, params);
-  }
-  return std::make_unique<SpeechState>(model, params);
-}
-
-EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params)
-    : State{params, model, model.embedding_device_},
-      model_{model} {
-  input_ids_.Add();
-  inputs_embeds_.Add();
-
-  // Gemma4: embedding model produces per_layer_inputs alongside inputs_embeds
-  if (!model_.config_->model.embedding.outputs.per_layer_inputs.empty()) {
-    auto shape = model_.session_info_.GetOutputShape(model_.config_->model.embedding.outputs.per_layer_inputs);
-    int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
-    per_layer_inputs_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Output,
-                                                     model_.config_->model.embedding.outputs.per_layer_inputs, per_layer_dim);
-    per_layer_inputs_->Add();
-  }
-}
-
-void EmbeddingState::SetExtraInputs(const int64_t num_images, const int64_t num_image_tokens, const int64_t num_audio_tokens) {
-  num_image_tokens_ = num_image_tokens;
-  num_audio_tokens_ = num_audio_tokens;
-
-  if (model_.vision_session_) {
-    image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,  // Optional model input
-                                                           model_.config_->model.embedding.inputs.image_features,
-                                                           num_images, num_image_tokens_);
-    image_features_->Add();
-  }
-  if (model_.speech_session_) {
-    audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,  // Optional model input
-                                                           model_.config_->model.embedding.inputs.audio_features,
-                                                           -1, num_audio_tokens_);
-    audio_features_->Add();
-  } else if (model_.session_info_.HasInput(model_.config_->model.embedding.inputs.audio_features)) {
-    // No speech session, but embedding model requires audio_features — provide empty tensor with shape (0, hidden_size)
-    audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,
-                                                           model_.config_->model.embedding.inputs.audio_features,
-                                                           -1, 0);
-    audio_features_->Add();
-    // Pre-allocate an empty tensor since there's no speech session to provide one via ReuseFeaturesBuffer
-    audio_features_->AllocateEmptyFeatures();
-  }
-}
-
-void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
-  input_ids_.Update(next_tokens);
-  if (model_.vision_session_) image_features_->Update(is_prompt);
-  if (audio_features_) audio_features_->Update(is_prompt);
-}
-
-DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  if (model_.config_->model.embedding.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.embedding.run_options.value());
-  }
-  State::Run(*model_.embedding_session_);
-
-  // No-ops unless the decoder's buffers are on a device this session cannot write; then the
-  // outputs went to staging buffers that must be copied across.
-  inputs_embeds_.CopyToConsumer();
-  if (per_layer_inputs_) per_layer_inputs_->CopyToConsumer();
-
-  return {};
-}
-
-DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
-    : State{params, model},
-      model_{model},
-      position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
-      kv_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
-      recurrent_state_{CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)} {
-  inputs_embeds_.Add();
-
-  // Gemma4: decoder accepts per_layer_inputs from the embedding model
-  if (!model_.config_->model.decoder.inputs.per_layer_inputs.empty()) {
-    auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.per_layer_inputs);
-    int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
-    per_layer_inputs_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Input,
-                                                     model_.config_->model.decoder.inputs.per_layer_inputs, per_layer_dim);
-    per_layer_inputs_->Add();
-  }
-
-  // Some multimodal decoders (e.g., Gemma4) require input_ids alongside inputs_embeds.
-  // Use a decoder-only SessionInfo to avoid false positives: the combined session_info_
-  // includes embedding session inputs (which always has input_ids), causing this check
-  // to incorrectly fire for models like mistral3 whose decoder has no input_ids input.
-  {
-    SessionInfo decoder_only_info;
-    decoder_only_info.Add(*model_.decoder_session_);
-    if (decoder_only_info.HasInput(model_.config_->model.decoder.inputs.input_ids)) {
-      decoder_input_ids_ = std::make_unique<DefaultInputIDs>(*this);
-      decoder_input_ids_->Add();
-    }
-  }
-
-  position_inputs_->Add();
-  logits_.Add();
-  if (kv_cache_)
-    kv_cache_->Add();
-  if (recurrent_state_)
-    recurrent_state_->Add();
-}
-
-DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
-
-  const int seq_len = static_cast<int>(inputs_embeds_.GetShape()[1]);
-  const bool graph_capture_this_run = params_->use_graph_capture && seq_len == 1;
-  const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
-
-  const int graph_id = seq_len * 2 + graph_capture_variant;
-  if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
-    recurrent_state_->SaveForGraphCapture();
-    State::Run(*model_.decoder_session_, true, seq_len, graph_capture_variant);
-    recurrent_state_->RestoreAfterGraphCapture(graph_id);
-  }
-  State::Run(*model_.decoder_session_, graph_capture_this_run, seq_len, graph_capture_variant);
-  return logits_.Get();
-}
-
-bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {
-  // Chunking slices the pre-computed embeddings along the sequence dimension, which is only
-  // contiguous for a single sequence. Continuous decoding of position ids/attention mask in
-  // DefaultPositionInputs is likewise restricted to a batch-beam size of one.
-  if (params_->BatchBeamSize() != 1)
-    return false;
-
-  // DefaultPositionInputs produces position ids sequentially, so chunking is always safe.
-  if (dynamic_cast<const DefaultPositionInputs*>(position_inputs_.get()) != nullptr)
-    return true;
-
-  // Qwen-VL's 3D mRoPE position ids diverge from sequential positions only when vision/audio
-  // content shifts the rope deltas. A text-only prompt reduces to sequential positions, so
-  // chunking is safe; with multimodal content the ids must be produced in a single full pass.
-  if (dynamic_cast<const Qwen2VLPositionInputs*>(position_inputs_.get()) != nullptr)
-    return !has_multimodal_content;
-
-  // Any other position-input type (e.g. WindowedPositionInputs) keeps the conservative
-  // single-pass prefill behavior.
-  return false;
-}
-
-void DecoderState::PrepareEmbeddingsForPrefill(size_t new_length) {
-  // Allocate the embeddings buffers for the whole prompt. The embedding model writes into these
-  // buffers in one run; the decoder then consumes them chunk by chunk.
-  inputs_embeds_.UpdateSequenceLength(new_length);
-  if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
-}
-
-DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, DeviceSpan<int32_t>& next_tokens,
-                                                       DeviceSpan<int32_t> next_indices, size_t chunk_size) {
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
-
-  const size_t num_tokens = next_tokens.size();
-  size_t processed_tokens = 0;
-  int length = current_length - static_cast<int>(num_tokens);
-
-  while (processed_tokens < num_tokens) {
-    const size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
-    auto chunk_tokens = next_tokens.subspan(processed_tokens, current_chunk_size);
-    length += static_cast<int>(current_chunk_size);
-
-    if (decoder_input_ids_) decoder_input_ids_->Update(chunk_tokens);
-    position_inputs_->Update(chunk_tokens, length, static_cast<int>(current_chunk_size));
-    kv_cache_->Update(next_indices, length);
-    if (recurrent_state_)
-      recurrent_state_->Update();
-    logits_.Update(chunk_tokens, current_chunk_size);
-
-    // Feed only this chunk's slice of the pre-computed embeddings to the decoder.
-    inputs_embeds_.UseChunkView(processed_tokens, current_chunk_size);
-    if (per_layer_inputs_) per_layer_inputs_->UseChunkView(processed_tokens, current_chunk_size);
-
-    // Graph capture is disabled during prefill chunking.
-    State::Run(*model_.decoder_session_, /*graph_capture_this_run=*/false);
-
-    processed_tokens += current_chunk_size;
-  }
-
-  inputs_embeds_.RestoreFullView();
-  if (per_layer_inputs_) per_layer_inputs_->RestoreFullView();
-
-  // Logits of the last chunk contain the logits for the last prompt token.
-  return logits_.Get();
-}
-
-void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
-  int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
-  size_t new_length = next_tokens.size() / batch_size;
-  if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
-  position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
-  if (kv_cache_)
-    kv_cache_->Update(beam_indices, total_length);
-  if (recurrent_state_)
-    recurrent_state_->Update();
-  logits_.Update(next_tokens, new_length);
-  inputs_embeds_.UpdateSequenceLength(new_length);
-  if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
-}
-
-// Overload for pipeline to call
-void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices, size_t new_length) {
-  if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
-  if (kv_cache_)
-    kv_cache_->Update(beam_indices, total_length);
-  if (recurrent_state_)
-    recurrent_state_->Update();
-  logits_.Update(next_tokens, new_length);
-  inputs_embeds_.UpdateSequenceLength(new_length);
-  if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
-}
-
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
@@ -552,8 +77,8 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   if (model_.speech_session_) {
     speech_state_ = CreateSpeechState(model_, params);
   }
-  embedding_state_ = std::make_unique<EmbeddingState>(model, params);
-  decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
+  embedding_state_ = CreateEmbeddingState(model_, params);
+  decoder_state_ = CreateDecoderState(model_, sequence_lengths, params);
   if (model_.depthformer_session_) {
     audio_output_ = std::make_unique<Lfm2AudioOutput>(model_, params);
   }
@@ -570,9 +95,9 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
 }
 
 void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  num_image_tokens_ = GetNumImageTokens(extra_inputs);
-  num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
-  num_images_ = GetImageFeatureBatchSize(extra_inputs);
+  num_image_tokens_ = vision_state_ ? vision_state_->GetNumImageTokens(extra_inputs) : 0;
+  num_audio_tokens_ = speech_state_ ? speech_state_->GetNumAudioTokens(extra_inputs) : 0;
+  num_images_ = vision_state_ ? vision_state_->GetImageFeatureBatchSize(extra_inputs) : 0;
 
   if (model_.vision_session_) {
     vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
@@ -581,23 +106,21 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
     speech_state_->SetExtraInputs(extra_inputs, num_audio_tokens_);
   }
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
-  // Set the grid tensors for Qwen2-VL if present
-  if (auto* qwen_pos_inputs = dynamic_cast<Qwen2VLPositionInputs*>(decoder_state_->position_inputs_.get())) {
-    std::shared_ptr<Tensor> img_grid, vid_grid, sec_grid;
 
-    for (const auto& input : extra_inputs) {
-      if (input.name == Config::Defaults::ImageGridThwName) {
-        img_grid = input.tensor;
-      } else if (input.name == "video_grid_thw") {
-        vid_grid = input.tensor;
-      } else if (input.name == "second_per_grid_ts") {
-        sec_grid = input.tensor;
-      }
+  // Hand any image/video grid metadata tensors to the decoder's position inputs. This is a no-op
+  // for position-input implementations that don't use them.
+  std::shared_ptr<Tensor> img_grid, vid_grid, sec_grid;
+  for (const auto& input : extra_inputs) {
+    if (input.name == Config::Defaults::ImageGridThwName) {
+      img_grid = input.tensor;
+    } else if (input.name == "video_grid_thw") {
+      vid_grid = input.tensor;
+    } else if (input.name == "second_per_grid_ts") {
+      sec_grid = input.tensor;
     }
-
-    if (img_grid || vid_grid) {
-      qwen_pos_inputs->SetGridTensors(img_grid, vid_grid, sec_grid);
-    }
+  }
+  if (img_grid || vid_grid) {
+    decoder_state_->GetPositionInputs().SetGridTensors(img_grid, vid_grid, sec_grid);
   }
 }
 
@@ -642,22 +165,11 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
       embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
     }
     if (speech_state_ && num_audio_tokens_ > 0) {
-      // Reshape speech output from 3D [B, T, hidden] to 2D [B*T, hidden]
-      // to match embedding model's expected 2D audio_features input rank.
-      auto& speech_shape = speech_state_->audio_features_->GetShape();
-      if (speech_shape.size() == 3) {
-        speech_state_->audio_features_->ReshapeFeatures(
-            {speech_shape[0] * speech_shape[1], speech_shape[2]});
-      }
-      embedding_state_->audio_features_->ReuseFeaturesBuffer(*speech_state_->audio_features_);
+      speech_state_->ReuseFeaturesBuffer(*embedding_state_->audio_features_);
     } else if (embedding_state_->audio_features_) {
-      // No audio: provide empty 2D tensor [0, hidden_size] for the embedding model
       embedding_state_->audio_features_->AllocateEmptyFeatures();
     }
-    embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
-    if (embedding_state_->per_layer_inputs_ && decoder_state_->per_layer_inputs_) {
-      embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
-    }
+    embedding_state_->ReuseBuffersInDecoder(*decoder_state_);
     embedding_state_->Run(current_length, next_tokens, next_indices);
 
     auto logits = chunk_prefill
@@ -671,14 +183,11 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     return audio_output_ ? SampleAudioOrText(logits) : logits;
   }
 
-  embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
-  if (embedding_state_->per_layer_inputs_ && decoder_state_->per_layer_inputs_) {
-    embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
-  }
+  embedding_state_->ReuseBuffersInDecoder(*decoder_state_);
   if (audio_output_ && audio_output_->HasPendingFrame()) {
     // The token is only the placeholder of the last audio frame: the decoder takes the frame itself,
     // and the embedding model would look for audio features to put in the placeholder's place.
-    audio_output_->WritePendingFrame(*decoder_state_->inputs_embeds_.Get());
+    audio_output_->WritePendingFrame(*decoder_state_->GetInputsEmbeds().Get());
   } else {
     embedding_state_->Run(current_length, next_tokens, next_indices);
   }

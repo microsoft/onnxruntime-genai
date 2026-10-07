@@ -8,7 +8,7 @@
 #include <string>
 
 #include "models/model.h"
-#include "models/silero_vad.h"
+#include "models/speech/silero_vad.h"
 
 namespace Generators {
 

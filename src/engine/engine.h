@@ -94,7 +94,7 @@ struct EngineDependencies {
   std::shared_ptr<CacheManager> cache_manager;
   std::unique_ptr<Scheduler> scheduler;
   std::unique_ptr<ModelExecutor> model_executor;
-  std::shared_ptr<DecoderOnly_Model> mtp_model;
+  std::shared_ptr<DecoderModel> mtp_model;
   std::shared_ptr<CacheManager> mtp_cache_manager;
   std::unique_ptr<ModelExecutor> mtp_model_executor;
   std::unique_ptr<Dflash2Drafter> dflash2_drafter;
@@ -295,7 +295,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<Tokenizer> stop_tokenizer_;
   // Present only when model.mtp names an auxiliary paged draft head. These are constructed with
   // the Engine so both cache pools share one memory budget; draft orchestration is added separately.
-  std::shared_ptr<DecoderOnly_Model> mtp_model_;
+  std::shared_ptr<DecoderModel> mtp_model_;
   std::shared_ptr<CacheManager> mtp_cache_manager_;
   std::unique_ptr<ModelExecutor> mtp_model_executor_;
   std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;

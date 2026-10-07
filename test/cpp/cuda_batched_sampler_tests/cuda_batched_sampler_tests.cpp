@@ -16,7 +16,7 @@
 #include <gtest/gtest.h>
 
 #include "generator/generators.h"
-#include "models/cpu_embedding.h"
+#include "models/embedding/cpu_embedding.h"
 #include "ort_genai.h"
 #include "telemetry_test_environment.h"
 

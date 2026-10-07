@@ -5,12 +5,12 @@
 
 #include "decoder.h"
 #include "varlen_decoder_io.h"
-#include "../../models/decoder_only.h"
+#include "../../models/decoder/multi_modal_decoder.h"
 
 namespace Generators {
 
 struct SimpleDecoder : public Decoder {
-  SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model, std::shared_ptr<CacheManager> cache_manager);
+  SimpleDecoder(std::shared_ptr<DecoderModel> model, std::shared_ptr<CacheManager> cache_manager);
   ~SimpleDecoder() override;
 
   void Decode(ScheduledRequests& scheduled_requests,
@@ -33,7 +33,7 @@ struct SimpleDecoder : public Decoder {
                         const ExecutionContext& context, int annotation_id,
                         GraphFallback fallback, size_t known_shapes);
 
-  std::shared_ptr<DecoderOnly_Model> model_;
+  std::shared_ptr<DecoderModel> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   bool has_fixed_state_groups_{};
   size_t position_planes_{};
