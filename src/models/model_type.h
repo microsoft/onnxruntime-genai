@@ -40,7 +40,12 @@ struct ModelType {
     return std::find(MMM.begin(), MMM.end(), model_type) != MMM.end();
   }
 
-  inline static bool IsPipe(const std::string& model_type) {
+  inline static bool IsPipe(const std::string& model_type, bool multimodal = false) {
+    if (multimodal) {
+      // Model families whose vision contracts are implemented by Qwen2_5_VL_PipelineModel.
+      static constexpr std::array<std::string_view, 4> MultimodalPipe = {"fara", "qwen2_5_vl", "qwen3_vl", "gemma4"};
+      return std::find(MultimodalPipe.begin(), MultimodalPipe.end(), model_type) != MultimodalPipe.end();
+    }
     // Pipeline (Pipe)
     static constexpr std::array<std::string_view, 1> Pipe = {"decoder-pipeline"};
     return std::find(Pipe.begin(), Pipe.end(), model_type) != Pipe.end();
