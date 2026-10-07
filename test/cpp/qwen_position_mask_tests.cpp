@@ -98,6 +98,52 @@ TEST(QwenPositionMask, DenseStaticInt64) { CheckMaskAndPositions<int64_t>(true, 
 TEST(QwenPositionMask, DenseDynamicInt32) { CheckMaskAndPositions<int32_t>(false, "qwen3_5_text"); }
 TEST(QwenPositionMask, DenseDynamicInt64) { CheckMaskAndPositions<int64_t>(false, "qwen3_5_text"); }
 
+template <typename T>
+void CheckShortPromptPositions(const char* model_type) {
+  for (int capture_length : {1, 2}) {
+    for (int prompt_length = 1; prompt_length <= capture_length; ++prompt_length) {
+      SCOPED_TRACE(::testing::Message() << "capture_length=" << capture_length << ", prompt_length=" << prompt_length);
+      auto model = std::make_shared<PositionTestModel>(sizeof(T) == 4 ? "int32" : "int64");
+      model->config_->model.type = model_type;
+      auto params = std::make_shared<GeneratorParams>(*model);
+      params->search.max_length = 8;
+      params->search.past_present_share_buffer = true;
+      params->use_graph_capture = true;
+      params->max_graph_capture_length = capture_length;
+      PositionTestState state{*params, *model};
+      auto& cpu = *GetDeviceInterface(DeviceType::CPU);
+      std::vector<int32_t> lengths(1), prompt(prompt_length, 5), next(capture_length, 6);
+      auto inputs = CreateStandardPositionInputs(state, cpu.WrapMemory(std::span{lengths}), "attention_mask");
+      inputs->Add();
+      inputs->Update(cpu.WrapMemory(std::span{prompt}), prompt_length, prompt_length);
+      const void* address = state.GetInput("position_ids")->GetTensorRawData();
+      auto check = [&](int width, int base) {
+        const auto* positions = state.GetInput("position_ids");
+        EXPECT_EQ(positions->GetTensorRawData(), address);
+        EXPECT_EQ(positions->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{3, 1, width}));
+        const auto* data = positions->GetTensorData<T>();
+        for (int dim = 0; dim < 3; ++dim)
+          for (int i = 0; i < width; ++i)
+            EXPECT_EQ(data[dim * width + i], base + i);
+      };
+      check(prompt_length, 0);
+      inputs->Update(cpu.WrapMemory(std::span{next}), prompt_length + capture_length, capture_length);
+      check(capture_length, prompt_length);
+      next.resize(1);
+      inputs->Update(cpu.WrapMemory(std::span{next}), prompt_length + capture_length + 1, 1);
+      check(1, prompt_length + capture_length);
+      inputs->RewindTo(0);
+      inputs->Update(cpu.WrapMemory(std::span{prompt}), prompt_length, prompt_length);
+      check(prompt_length, 0);
+    }
+  }
+}
+
+TEST(QwenPositionMask, ShortPromptInt32) { CheckShortPromptPositions<int32_t>("qwen3_5_moe_text"); }
+TEST(QwenPositionMask, ShortPromptInt64) { CheckShortPromptPositions<int64_t>("qwen3_5_moe_text"); }
+TEST(QwenPositionMask, DenseShortPromptInt32) { CheckShortPromptPositions<int32_t>("qwen3_5_text"); }
+TEST(QwenPositionMask, DenseShortPromptInt64) { CheckShortPromptPositions<int64_t>("qwen3_5_text"); }
+
 }  // namespace
 }  // namespace Generators::test
 
