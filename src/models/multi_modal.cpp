@@ -112,9 +112,31 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   }
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
-    vision_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, /*disable_graph_capture=*/true);
-    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
+    const auto& vision_config = config_->model.vision;
+    if (config_->model.type == "gemma4" && !vision_config.pipeline.empty()) {
+      if (vision_config.pipeline.size() != 2) {
+        throw std::runtime_error("Gemma 4 vision.pipeline must contain exactly two ordered stages: encoder and projector");
+      }
+      const auto create_stage = [&](const Config::Model::Vision::PipelineModel& stage,
+                                    std::unique_ptr<OrtSessionOptions>& options) {
+        options = OrtSessionOptions::Create();
+        static const Config::SessionOptions kDefaultSessionOptions;
+        auto settings = stage.session_options.value_or(vision_config.session_options.value_or(kDefaultSessionOptions));
+        if (stage.run_on_cpu) {
+          settings.providers.clear();
+          settings.provider_options.clear();
+        }
+        CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/false,
+                                       /*disable_graph_capture=*/true);
+        return CreateSession(ort_env, stage.filename, options.get());
+      };
+      vision_session_ = create_stage(vision_config.pipeline[0], vision_session_options_);
+      vision_projector_session_ = create_stage(vision_config.pipeline[1], vision_projector_session_options_);
+    } else {
+      vision_session_options_ = OrtSessionOptions::Create();
+      CreateSessionOptionsFromConfig(vision_config.session_options.has_value() ? vision_config.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, /*disable_graph_capture=*/true);
+      vision_session_ = CreateSession(ort_env, vision_config.filename, vision_session_options_.get());
+    }
   }
 
   if (speech) {
@@ -158,6 +180,9 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   }
   if (vision) {
     session_info_.Add(*vision_session_);
+    if (vision_projector_session_) {
+      session_info_.Add(*vision_projector_session_);
+    }
   }
 }
 

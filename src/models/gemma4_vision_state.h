@@ -16,9 +16,14 @@ struct Gemma4VisionState : VisionState {
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
+  DeviceSpan<float> RunSplitVision();
+
   std::vector<int64_t> image_token_counts_;
   size_t pixel_values_index_{SIZE_MAX};
   size_t position_ids_index_{SIZE_MAX};
+  std::vector<std::string> projector_input_names_;
+  std::vector<OrtValue*> projector_source_inputs_;
+  size_t encoder_output_index_{SIZE_MAX};
 };
 
 }  // namespace Generators
