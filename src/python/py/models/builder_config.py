@@ -259,6 +259,13 @@ def normalize_target_quant_config(
     canonical = canonical_quant_data(data)
     if "checkpoint_policy" in canonical:
         raise ValueError("target_options.quant_config.checkpoint_policy is not supported by target loaders")
+    target_weights = canonical.get("weights", {})
+    if (
+        target_weights.get("type") == "int2"
+        or canonical.get("moe", {}).get("type") == "int2"
+        or any(override.get("type") == "int2" for override in target_weights.get("overrides", []))
+    ):
+        raise ValueError("target_options.quant_config does not support int2; use drafter_options.quant_config")
     seed_precision = precision_from_quant_data(canonical, precision)
     normalized_legacy = copy.deepcopy(legacy_options)
     op_types = normalized_legacy.get("op_types_to_quantize")
@@ -321,7 +328,7 @@ def flatten_target_options(
     precision: str | None,
     execution_provider: str,
 ) -> tuple[dict[str, Any], QuantConfig, str]:
-    check_fields(options, {"quant_config", "attention", "vision"}, "target_options")
+    check_fields(options, {"quant_config", "attention", "optimizations", "vision"}, "target_options")
     if "vision" in options:
         raise ValueError("target_options.vision is reserved for a future schema capability")
 
@@ -370,6 +377,16 @@ def flatten_target_options(
             warn_structured_override(legacy_options, legacy_key, f"target_options.attention.kv_cache.{field_name}")
             flattened[legacy_key] = kv_cache[field_name]
 
+    optimizations = options.get("optimizations", {})
+    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "target_options.optimizations")
+    if "fuse_mlp_gate_up" in optimizations:
+        warn_structured_override(legacy_options, "fuse_mlp_gate_up", "target_options.optimizations.fuse_mlp_gate_up")
+        flattened["fuse_mlp_gate_up"] = optimizations["fuse_mlp_gate_up"]
+    if "fuse_qkv" in optimizations:
+        warn_structured_override(legacy_options, "fuse_qkv", "target_options.optimizations.fuse_qkv")
+        warn_structured_override(legacy_options, "disable_qkv_fusion", "target_options.optimizations.fuse_qkv")
+        flattened["fuse_qkv"] = optimizations["fuse_qkv"]
+
     return flattened, quant_config, effective_precision
 
 
@@ -387,14 +404,25 @@ def normalize_drafter_quant_config(
         "checkpoint_policy": "preserve",
         "weights": {"type": "none", "block_size": 32},
         "moe": {"type": "none", "block_size": 32, "weights_prepacked": 0},
-        "format": {"use_qdq": False, "matmulnbits_weights_prepacked": 0},
+        "format": {
+            "use_qdq": False,
+            "matmulnbits_weights_prepacked": 0,
+        },
     }
     quant_config = QuantConfig.from_dict(merge_objects(defaults, canonical))
-    if drafter_type in ("dflash2", "dspark") and quant_config.io_dtype != "bf16":
-        raise ValueError(f"{drafter_type} body io_dtype must be bf16 because its activations can exceed the fp16 range")
+    if drafter_type == "dspark" and quant_config.io_dtype != "bf16":
+        raise ValueError("dspark body io_dtype must be bf16 because its activations can exceed the fp16 range")
+    if drafter_type == "dflash2" and quant_config.io_dtype not in ("fp16", "bf16"):
+        raise ValueError("DFlash2 body io_dtype must be fp16 or bf16")
     if drafter_type == "mtp" and quant_config.io_dtype != target_io_dtype:
         # The MTP graph consumes the decoder hidden state directly; no exporter converts it.
         raise ValueError(f"MTP io_dtype must match the target io_dtype '{target_io_dtype}'")
+    if drafter_type == "mtp" and (
+        quant_config.weights.type == "int2"
+        or quant_config.moe.type == "int2"
+        or any(override.type == "int2" for override in quant_config.weights.overrides)
+    ):
+        raise ValueError("MTP quant_config does not support int2; use DFlash2")
     if drafter_type == "dspark" and quant_config.weights.type != "none":
         raise ValueError("DSpark integer weight quantization is not supported")
     if drafter_type == "dspark":
@@ -413,14 +441,28 @@ def normalize_drafter_quant_config(
         for field_name in ("accuracy_level", "op_types", "overrides"):
             if field_name in weights:
                 raise ValueError(f"DFlash2 weights.{field_name} is not supported")
-        if quant_config.weights.type not in ("none", "int4", "int8"):
-            raise ValueError("DFlash2 weights.type must be none, int4, or int8")
+        if quant_config.weights.type not in ("none", "int2", "int4", "int8"):
+            raise ValueError("DFlash2 weights.type must be none, int2, int4, or int8")
         if quant_config.weights.type != "none" and quant_config.weights.block_size not in (16, 32, 64, 128, 256):
             raise ValueError("DFlash2 integer weights.block_size must be one of 16, 32, 64, 128, or 256")
         if quant_config.weights.method != "default" or not quant_config.weights.symmetric:
             raise ValueError("DFlash2 supports only symmetric DEFAULT integer weight quantization")
         if quant_config.format.use_qdq:
             raise ValueError("DFlash2 body weights require QOperator format")
+        prepack = quant_config.format.matmulnbits_weights_prepacked
+        if prepack and quant_config.weights.type == "none":
+            raise ValueError("DFlash2 offline prepacking requires integer weights")
+        if prepack == 2 and quant_config.weights.type == "int2":
+            raise ValueError("DFlash2 INT2 weights support only the SM80 prepacked layout")
+        if prepack and quant_config.weights.type == "int2" and quant_config.weights.block_size not in (64, 128):
+            raise ValueError("DFlash2 INT2 offline prepacking requires weights.block_size=64 or 128")
+        supported_blocks = (32, 64, 128) if prepack == 1 else (64, 128)
+        if (
+            prepack
+            and quant_config.weights.type in ("int4", "int8")
+            and quant_config.weights.block_size not in supported_blocks
+        ):
+            raise ValueError(f"DFlash2 INT4/INT8 offline prepacking requires weights.block_size in {supported_blocks}")
     if quant_config.moe.type != "none":
         raise ValueError(f"{drafter_type} does not support MoE expert quantization")
     return quant_config
@@ -442,6 +484,7 @@ def flatten_drafter_options(
             "shared_weights",
             "quant_config",
             "attention",
+            "optimizations",
             "dspark",
         },
         "drafter_options",
@@ -449,6 +492,10 @@ def flatten_drafter_options(
     drafter_type = options.get("drafter_type")
     if drafter_type not in ("none", "mtp", "dflash2", "dspark"):
         raise ValueError("drafter_options.drafter_type must be mtp, dflash2, dspark, or none")
+    optimizations = options.get("optimizations", {})
+    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "drafter_options.optimizations")
+    if "fuse_mlp_gate_up" in optimizations and drafter_type != "dflash2":
+        raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
     if drafter_type == "mtp" and flattened.get("exclude_mtp", False):
         raise ValueError("drafter_options.drafter_type=mtp conflicts with legacy extra_options.exclude_mtp")
 
@@ -530,6 +577,17 @@ def flatten_drafter_options(
         if kv_cache.get("windowed", False):
             raise ValueError(f"{drafter_type} windowed KV cache is not supported")
 
+    optimizations = options.get("optimizations", {})
+    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "drafter_options.optimizations")
+    fuse_gate_up = optimizations.get("fuse_mlp_gate_up", False)
+    if fuse_gate_up and drafter_type != "dflash2":
+        raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
+    fuse_qkv = optimizations.get("fuse_qkv", False)
+    if "fuse_qkv" in optimizations and drafter_type != "dflash2":
+        raise ValueError(f"fuse_qkv is not supported for drafter_type={drafter_type}")
+    if drafter_type == "dflash2":
+        flattened["dflash2_fuse_gate_up"] = fuse_gate_up
+        flattened["dflash2_fuse_qkv"] = fuse_qkv
 
     shared_weights = options.get("shared_weights", {})
     check_fields(shared_weights, {"embedding", "lm_head"}, "drafter_options.shared_weights")
@@ -592,7 +650,7 @@ def normalize_builder_config(
                 f"extra_options.{option} has been removed; "
                 "weight packing is determined by the execution provider and GPU SM"
             )
-    for removed_option in ("fuse_mlp_gate_up", "dflash2_fuse_gate_up", "use_device_allocator_for_initializers"):
+    for removed_option in ("use_device_allocator_for_initializers",):
         if removed_option in legacy_options:
             raise ValueError(f"extra_options.{removed_option} has been removed; this behavior is always enabled")
     structured_present = any(
@@ -634,6 +692,7 @@ def normalize_builder_config(
     flattened, quant_config, effective_precision = flatten_target_options(target, legacy_options, precision, provider)
     flatten_speculative_options(speculative, flattened)
     effective_drafter = flatten_drafter_options(drafter, flattened, provider)
+    validate_runtime_quantization_policy(runtime, effective_drafter, flattened, provider)
     flattened["_runtime_config"] = runtime
 
     effective_target = copy.deepcopy(target)
@@ -692,6 +751,46 @@ def validate_model_dependent_config(effective_config: EffectiveBuilderConfig, mo
         raise ValueError(
             "target_options.quant_config.moe.type is required for an MoE checkpoint when weights.type=none"
         )
+
+
+RUNTIME_TUNABLE_SESSION_OPTIONS = frozenset({"ep.cuda.fpa_intb_gemm"})
+
+
+def validate_runtime_quantization_policy(
+    runtime_config: dict[str, Any],
+    drafter_options: dict[str, Any] | None,
+    flattened: dict[str, Any],
+    execution_provider: str,
+):
+    """Validate runtime kernel selection against the exported quantization policy."""
+    model = runtime_config.get("model", {})
+    if not isinstance(model, dict):
+        return
+    enabled_components = []
+    for component_name, component_options in model.items():
+        if not isinstance(component_options, dict):
+            continue
+        session_options = component_options.get("session_options", {})
+        if not isinstance(session_options, dict) or "ep.cuda.fpa_intb_gemm" not in session_options:
+            continue
+        value = session_options["ep.cuda.fpa_intb_gemm"]
+        if value not in ("0", "1"):
+            raise ValueError(
+                f"runtime_config.model.{component_name}.session_options.ep.cuda.fpa_intb_gemm must be '0' or '1'"
+            )
+        if value == "1":
+            enabled_components.append(component_name)
+    if enabled_components and execution_provider != "cuda":
+        raise ValueError("runtime_config ep.cuda.fpa_intb_gemm=1 is supported only on CUDA")
+    if "dflash2" not in enabled_components:
+        return
+    if not drafter_options or drafter_options.get("drafter_type") != "dflash2":
+        return
+    quant_config = flattened.get("_drafter_quant_config")
+    if quant_config is None or quant_config.weights.type == "none":
+        raise ValueError("DFlash2 ep.cuda.fpa_intb_gemm=1 requires integer weights")
+    if quant_config.weights.type == "int2" and quant_config.weights.block_size not in (64, 128):
+        raise ValueError("DFlash2 INT2 fpA_intB requires weights.block_size=64 or 128")
 
 
 def validate_runtime_config(runtime_config: dict[str, Any], generated_config: dict[str, Any]):
@@ -874,8 +973,17 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         for key, value in runtime_session.items():
             if key == "provider_options":
                 continue
+            if key == "ep.cuda.fpa_intb_gemm" and value not in ("0", "1"):
+                raise ValueError(
+                    f"runtime_config.model.{component_name}.session_options.ep.cuda.fpa_intb_gemm must be '0' or '1'"
+                )
             validate_session_option(key, value, f"runtime_config.model.{component_name}.session_options")
-            if key in generated_session and key != "log_id" and value != generated_session[key]:
+            if (
+                key in generated_session
+                and key != "log_id"
+                and key not in RUNTIME_TUNABLE_SESSION_OPTIONS
+                and value != generated_session[key]
+            ):
                 raise ValueError(
                     f"runtime_config.model.{component_name}.session_options cannot overwrite required session option '{key}'"
                 )
@@ -971,20 +1079,37 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
             raise ValueError(f"{path}.eligibility must be an object")
         check_fields(
             eligibility,
-            {"minimum_total_device_memory_bytes", "maximum_total_device_memory_bytes"},
+            {
+                "minimum_total_device_memory_bytes",
+                "maximum_total_device_memory_bytes",
+                "minimum_free_device_memory_bytes",
+                "maximum_free_device_memory_bytes",
+                "is_integrated",
+            },
             f"{path}.eligibility",
         )
         minimum = eligibility.get("minimum_total_device_memory_bytes")
         maximum = eligibility.get("maximum_total_device_memory_bytes", 2**53 - 1)
+        minimum_free = eligibility.get("minimum_free_device_memory_bytes", 0)
+        maximum_free = eligibility.get("maximum_free_device_memory_bytes", 2**53 - 1)
         for field_name, value in (
             ("minimum_total_device_memory_bytes", minimum),
             ("maximum_total_device_memory_bytes", maximum),
+            ("minimum_free_device_memory_bytes", minimum_free),
+            ("maximum_free_device_memory_bytes", maximum_free),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 2**53 - 1:
                 raise ValueError(f"{path}.eligibility.{field_name} must be a non-negative integer")
         if maximum < minimum:
             raise ValueError(f"{path}.eligibility maximum must not be below minimum")
-        ranges.append((minimum, maximum, profile_id))
+        if maximum_free < minimum_free:
+            raise ValueError(f"{path}.eligibility maximum free memory must not be below minimum")
+        if minimum_free > maximum:
+            raise ValueError(f"{path}.eligibility minimum free memory exceeds maximum total memory")
+        integrated = eligibility.get("is_integrated")
+        if "is_integrated" in eligibility and not isinstance(integrated, bool):
+            raise ValueError(f"{path}.eligibility.is_integrated must be a boolean")
+        ranges.append((minimum, maximum, minimum_free, maximum_free, integrated, profile_id))
 
         overlay = profile.get("overlay")
         if not isinstance(overlay, dict):
@@ -1035,9 +1160,16 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
         if not (decoder or dynamic_batching or search or speculative):
             raise ValueError(f"{path}.overlay must contain at least one overlay field")
 
-    for index, (minimum, maximum, profile_id) in enumerate(ranges):
-        for other_minimum, other_maximum, other_id in ranges[index + 1 :]:
-            if minimum <= other_maximum and other_minimum <= maximum:
+    for index, (minimum, maximum, minimum_free, maximum_free, integrated, profile_id) in enumerate(ranges):
+        for other_minimum, other_maximum, other_minimum_free, other_maximum_free, other_integrated, other_id in ranges[
+            index + 1 :
+        ]:
+            if (
+                max(minimum, other_minimum) <= min(maximum, other_maximum)
+                and max(minimum_free, other_minimum_free) <= min(maximum_free, other_maximum_free)
+                and max(minimum_free, other_minimum_free) <= min(maximum, other_maximum)
+                and (integrated is None or other_integrated is None or integrated == other_integrated)
+            ):
                 raise ValueError(f"runtime profile eligibility ranges overlap: {profile_id!r} and {other_id!r}")
 
 

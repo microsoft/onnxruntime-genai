@@ -29,13 +29,6 @@
 
 namespace Generators {
 
-// lfm2_audio exchanges tensors with its embedding and speech sessions in buffers allocated on the
-// decoder's devices. Throws if either has session_options of its own that leave it on CPU while a
-// buffer it would be handed is device memory, which the session would treat as host memory and
-// corrupt: the decoder's inputs for the embedding session, and with_audio, the audio features for both.
-void CheckLfm2AudioSessionDevices(const Config& config, DeviceType decoder_device, DeviceType inputs_device,
-                                  bool with_audio);
-
 struct MultiModalLanguageModel : Model {
   MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
   MultiModalLanguageModel(const MultiModalLanguageModel&) = delete;
@@ -59,6 +52,13 @@ struct MultiModalLanguageModel : Model {
   std::unique_ptr<OrtSession> audio_embedding_session_;  // audio_codes -> audio_embeds, summed into the decoder's next input
   std::unique_ptr<OrtSessionOptions> depthformer_session_options_;
   std::unique_ptr<OrtSessionOptions> audio_embedding_session_options_;
+
+  // The device each sub-model session actually runs on. A sub-model whose config block carries
+  // its own `session_options` does not inherit the decoder's providers, so it can land on the CPU
+  // EP while the decoder is on a GPU one. The states below allocate against these, not p_device_.
+  DeviceInterface* vision_device_{};
+  DeviceInterface* speech_device_{};
+  DeviceInterface* embedding_device_{};
 };
 
 // Base VisionState: runs vision.onnx with a single State::Run() call.
@@ -80,72 +80,6 @@ struct VisionState : State {
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> image_features_;
 };
-
-// QwenVisionState: per-image slicing loop for Qwen2.5-VL / Qwen3-VL.
-//
-// vision.onnx is exported for exactly one image (Dynamo unrolls Python
-// for-loops at trace time, so an N-image dummy produces a graph that only
-// works for that exact N).  This subclass iterates over images in C++,
-// creating zero-copy sub-tensor views of pixel_values / image_grid_thw and
-// writing each result into the correct offset of the pre-allocated
-// image_features output buffer.
-struct QwenVisionState : VisionState {
-  using VisionState::VisionState;  // inherit constructor
-
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
-};
-
-// PixtralVisionState: per-image vision loop for Pixtral / Mistral3.
-//
-// Each image is independently smart_resize'd to a different resolution.
-// The preprocessor zero-pads all images to max(H) × max(W) and provides
-// image_sizes[N, 2] with per-image (H, W).  This subclass slices
-// pixel_values[i, :, :H_i, :W_i] for each image, runs vision.onnx with
-// [1, C, H_i, W_i], and concatenates the resulting features.
-struct PixtralVisionState : VisionState {
-  using VisionState::VisionState;  // inherit constructor
-
-  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens) override;
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
-
- private:
-  std::vector<int64_t> image_heights_;
-  std::vector<int64_t> image_widths_;
-};
-
-inline void ValidateImageGridThwLayoutAndCount(const std::vector<int64_t>& shape,
-                                               size_t elem_count,
-                                               int64_t num_images,
-                                               const char* tensor_name) {
-  if (num_images < 0) {
-    throw std::runtime_error(std::string(tensor_name) + " num_images must be non-negative");
-  }
-
-  if (shape.size() != 2) {
-    throw std::runtime_error(std::string(tensor_name) + " must have rank 2 [num_images, 3]");
-  }
-
-  if (shape[0] < 0 || shape[1] < 0) {
-    throw std::runtime_error(std::string(tensor_name) + " dimensions must be non-negative");
-  }
-
-  if (shape[1] != 3) {
-    throw std::runtime_error(std::string(tensor_name) + " second dimension must be 3");
-  }
-
-  const size_t shape_image_count = static_cast<size_t>(shape[0]);
-  const size_t expected_image_count = static_cast<size_t>(num_images);
-  if (shape_image_count < expected_image_count) {
-    throw std::runtime_error(std::string(tensor_name) + " shape[0] (" + std::to_string(shape_image_count) +
-                             ") is less than required image count (" + std::to_string(expected_image_count) + ")");
-  }
-
-  if (elem_count % 3 != 0 || elem_count / 3 < expected_image_count) {
-    throw std::runtime_error(std::string(tensor_name) + " element count (" + std::to_string(elem_count) +
-                             ") is less than required for " + std::to_string(num_images) +
-                             " images (need at least 3 values per image)");
-  }
-}
 
 // Factory: pick the right VisionState subclass based on model type.
 std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);

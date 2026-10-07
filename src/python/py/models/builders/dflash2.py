@@ -59,14 +59,13 @@ class DFlash2Builder(BlockDrafterBuilder):
         quant=None,
         lm_head_quant=None,
         embed_quant=None,
+        fuse_gate_up=False,
+        compute_dtype=None,
+        fuse_qkv=False,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
-        # The drafter is a bf16 checkpoint and its activations genuinely leave the fp16 range
-        # (the fc output alone reaches ~1.4e4 and the MLP product overflows two layers in), so the
-        # body runs in bf16. Only the tensors it shares with the fp16 target -- the aux hidden
-        # states, the embedding table and the FP8 LM head -- stay at the target's dtype.
-        self.io_dtype = ir.DataType.BFLOAT16
+        self.io_dtype = compute_dtype or ir.DataType.BFLOAT16
         self.external_dtype = io_dtype
         if quant is not None:
             self.quant_bits = quant["bits"]
@@ -76,7 +75,10 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.embed_quant = embed_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
-        self.mlp_attrs = {"fuse_gate_up": True}
+        self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
+        self.attn_attrs = {"fuse_qkv": fuse_qkv}
+        # An unconsumed graph input is copied to the CPU by ORT, which breaks CUDA graph capture.
+        self.uses_q_row_map = not fuse_qkv
 
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)
@@ -282,7 +284,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         ctx = self.matmul("/dflash2/fc/MatMul", aux, w["fc.weight"], self.aux_hidden_size, self.hidden_size, "num_ctx")
         ctx_n = self.rms_norm("/dflash2/hidden_norm", ctx, w["hidden_norm.weight"], "num_ctx")
         ctx_kv = []
-        for i in range(self.num_layers):
+        for i in range(0 if self.attn_attrs["fuse_qkv"] else self.num_layers):
             k = self.matmul(
                 f"/dflash2/layers.{i}/ctx_k/MatMul",
                 ctx_n,
@@ -343,7 +345,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 rows_q,
             )
 
-            attn_out = self._make_attention(i, x, ctx_kv[i], rows_q)
+            attn_out = self._make_attention(i, x, ctx_n if self.attn_attrs["fuse_qkv"] else ctx_kv[i], rows_q)
             attn_out = self._grouped_conv(
                 f"{p}/attention_conv/finish",
                 attn_out,
@@ -378,57 +380,14 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.graph.sort()
         return self.model
 
-    def _make_attention(self, i, x, ctx_kv, rows_q):
+    def _make_attention(self, i, x, context, rows_q):
+        """``context`` is the normalized context hidden state when Q/K/V are fused, else its ``(k, v)``."""
         p = f"/dflash2/layers.{i}"
         w = self.weights
-        q = self.matmul(
-            f"{p}/attn/q_proj/MatMul",
-            x,
-            w[f"layers.{i}.self_attn.q_proj.weight"],
-            self.hidden_size,
-            self.num_heads * self.head_size,
-            rows_q,
-        )
-        k = self.matmul(
-            f"{p}/attn/k_proj/MatMul",
-            x,
-            w[f"layers.{i}.self_attn.k_proj.weight"],
-            self.hidden_size,
-            self.num_kv_heads * self.head_size,
-            rows_q,
-            weight_name=f"dflash2.layers.{i}.self_attn.k_proj.weight",
-        )
-        v = self.matmul(
-            f"{p}/attn/v_proj/MatMul",
-            x,
-            w[f"layers.{i}.self_attn.v_proj.weight"],
-            self.hidden_size,
-            self.num_kv_heads * self.head_size,
-            rows_q,
-            weight_name=f"dflash2.layers.{i}.self_attn.v_proj.weight",
-        )
-
-        # Interleave the block rows and the context rows into one packed token stream.
-        # `qkv_row_map` indexes concat(block, context); `q_row_map` indexes the block rows
-        # alone (context rows point at row 0 and their output is dropped).
-        kv_dim = self.num_kv_heads * self.head_size
-        k_cat = self.out(f"{p}/attn/k_concat")
-        self.make_node("Concat", [k, ctx_kv[0]], [k_cat], name=f"{p}/attn/k_concat", axis=0)
-        self.make_value(k_cat, self.io_dtype, ["num_rows", kv_dim])
-        v_cat = self.out(f"{p}/attn/v_concat")
-        self.make_node("Concat", [v, ctx_kv[1]], [v_cat], name=f"{p}/attn/v_concat", axis=0)
-        self.make_value(v_cat, self.io_dtype, ["num_rows", kv_dim])
-
-        q_all = self.binary(
-            "Gather",
-            f"{p}/attn/q_gather",
-            q,
-            "q_row_map",
-            self.io_dtype,
-            ["num_tokens", self.num_heads * self.head_size],
-        )
-        k_all = self.binary("Gather", f"{p}/attn/k_gather", k_cat, "qkv_row_map", self.io_dtype, ["num_tokens", kv_dim])
-        v_all = self.binary("Gather", f"{p}/attn/v_gather", v_cat, "qkv_row_map", self.io_dtype, ["num_tokens", kv_dim])
+        if self.attn_attrs["fuse_qkv"]:
+            query, key, value = self.make_packed_qkv(i, x, context), "", ""
+        else:
+            query, key, value = self.make_separate_qkv(i, x, context, rows_q)
 
         q_norm = self.make_initializer(
             w[f"layers.{i}.self_attn.q_norm.weight"], f"dflash2.layers.{i}.self_attn.q_norm.weight", to=self.io_dtype
@@ -442,9 +401,9 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.make_node(
             "PagedAttention",
             [
-                q_all,
-                k_all,
-                v_all,
+                query,
+                key,
+                value,
                 f"past_key_values.{i}.key",
                 f"past_key_values.{i}.value",
                 "cumulative_sequence_lengths",
@@ -495,6 +454,82 @@ class DFlash2Builder(BlockDrafterBuilder):
             self.hidden_size,
             rows_q,
         )
+
+    def make_packed_qkv(self, i, x, ctx_n):
+        """One projection over ``concat(block, context)`` rows, gathered into a packed QKV stream.
+
+        The stacked rows are exactly what ``qkv_row_map`` indexes, so a single Gather orders Q, K
+        and V at once. Context rows then carry their own query instead of borrowing row 0; their
+        attention output is still dropped.
+        """
+        p = f"/dflash2/layers.{i}"
+        w = self.weights
+        rows = self.out(f"{p}/attn/qkv_rows/Concat")
+        self.make_node("Concat", [x, ctx_n], [rows], name=f"{p}/attn/qkv_rows/Concat", axis=0)
+        self.make_value(rows, self.io_dtype, ["num_rows", self.hidden_size])
+        qkv_dim = (self.num_heads + 2 * self.num_kv_heads) * self.head_size
+        qkv = self.matmul(
+            f"{p}/attn/qkv_proj/MatMul",
+            rows,
+            torch.cat([w[f"layers.{i}.self_attn.{proj}.weight"] for proj in ("q_proj", "k_proj", "v_proj")], dim=0),
+            self.hidden_size,
+            qkv_dim,
+            "num_rows",
+        )
+        return self.binary("Gather", f"{p}/attn/qkv_gather", qkv, "qkv_row_map", self.io_dtype, ["num_tokens", qkv_dim])
+
+    def make_separate_qkv(self, i, x, ctx_kv, rows_q):
+        p = f"/dflash2/layers.{i}"
+        w = self.weights
+        q = self.matmul(
+            f"{p}/attn/q_proj/MatMul",
+            x,
+            w[f"layers.{i}.self_attn.q_proj.weight"],
+            self.hidden_size,
+            self.num_heads * self.head_size,
+            rows_q,
+        )
+        k = self.matmul(
+            f"{p}/attn/k_proj/MatMul",
+            x,
+            w[f"layers.{i}.self_attn.k_proj.weight"],
+            self.hidden_size,
+            self.num_kv_heads * self.head_size,
+            rows_q,
+            weight_name=f"dflash2.layers.{i}.self_attn.k_proj.weight",
+        )
+        v = self.matmul(
+            f"{p}/attn/v_proj/MatMul",
+            x,
+            w[f"layers.{i}.self_attn.v_proj.weight"],
+            self.hidden_size,
+            self.num_kv_heads * self.head_size,
+            rows_q,
+            weight_name=f"dflash2.layers.{i}.self_attn.v_proj.weight",
+        )
+
+        # Interleave the block rows and the context rows into one packed token stream.
+        # `qkv_row_map` indexes concat(block, context); `q_row_map` indexes the block rows
+        # alone (context rows point at row 0 and their output is dropped).
+        kv_dim = self.num_kv_heads * self.head_size
+        k_cat = self.out(f"{p}/attn/k_concat")
+        self.make_node("Concat", [k, ctx_kv[0]], [k_cat], name=f"{p}/attn/k_concat", axis=0)
+        self.make_value(k_cat, self.io_dtype, ["num_rows", kv_dim])
+        v_cat = self.out(f"{p}/attn/v_concat")
+        self.make_node("Concat", [v, ctx_kv[1]], [v_cat], name=f"{p}/attn/v_concat", axis=0)
+        self.make_value(v_cat, self.io_dtype, ["num_rows", kv_dim])
+
+        q_all = self.binary(
+            "Gather",
+            f"{p}/attn/q_gather",
+            q,
+            "q_row_map",
+            self.io_dtype,
+            ["num_tokens", self.num_heads * self.head_size],
+        )
+        k_all = self.binary("Gather", f"{p}/attn/k_gather", k_cat, "qkv_row_map", self.io_dtype, ["num_tokens", kv_dim])
+        v_all = self.binary("Gather", f"{p}/attn/v_gather", v_cat, "qkv_row_map", self.io_dtype, ["num_tokens", kv_dim])
+        return q_all, k_all, v_all
 
     def _make_mlp(self, i, x, w, rows_q):
         p = f"/dflash2/layers.{i}/mlp"

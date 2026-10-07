@@ -5,14 +5,16 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import onnx_ir as ir
+import onnxruntime as ort
 import pytest
 import torch
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
 
-from quantization import desugar_algo_config
+from quantization import QuantConfig, desugar_algo_config  # noqa: E402
 
 
 def _load_builder_module(module_name):
@@ -456,6 +458,123 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
     if algo_config == "k_quant_linear":
         assert gather_kwargs["bits"] == 8
     assert gather_kwargs["metadata_props"] == {"layer_ann": "cpu_embedding"}
+
+
+def _make_tied_embedding_model(*, vocab_size, hidden_size, quant_attrs):
+    model = Model.__new__(Model)
+    model.use_paged_attention = False
+    model.hidden_size = hidden_size
+    model.vocab_size = vocab_size
+    model.io_dtype = ir.DataType.FLOAT
+    model.input_names = {"input_ids": "input_ids"}
+    model.quant_attrs = quant_attrs
+    model.tied_quantized_embeddings = True
+    model.tied_unquantized_embeddings = False
+    return model
+
+
+def _add_lm_head_and_tied_embeddings(model, lm_head, make_lm_head):
+    model.values = {}
+    model.node_names = set()
+    graph = ir.Graph(
+        inputs=(), outputs=(), nodes=(), opset_imports={"": 21, "com.microsoft": 1}, name="tied_embedding_test"
+    )
+    model.model = ir.Model(graph, ir_version=10)
+    graph.inputs.append(model.make_value("input_ids", ir.DataType.INT64, ["batch_size", "sequence_length"]))
+    graph.inputs.append(model.make_value("hidden_states", ir.DataType.FLOAT, model.make_hidden_state_shape()))
+    make_lm_head(lm_head, "/lm_head/MatMul", "hidden_states", logits=True)
+    embeddings = model.make_embedding_lookup(None, "/model/embed_tokens", lm_head)
+    graph.outputs.append(model.make_value(embeddings, ir.DataType.FLOAT, model.make_hidden_state_shape()))
+    graph.outputs.append(model.make_value("logits"))
+
+
+def _assert_embeddings_are_lm_head_rows(onnx_model, tmp_path, *, vocab_size, hidden_size):
+    model_path = tmp_path / "tied_embedding.onnx"
+    ir.save(onnx_model, model_path)
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    input_ids = np.linspace(0, vocab_size - 1, hidden_size).astype(np.int64)[None]
+    # One-hot hidden states make the LM head return the dequantized weight: logits[k, t] = W[t, k].
+    embeddings, logits = session.run(
+        None, {"input_ids": input_ids, "hidden_states": np.eye(hidden_size, dtype=np.float32)[None]}
+    )
+
+    assert embeddings.shape == (1, hidden_size, hidden_size)
+    np.testing.assert_allclose(embeddings[0], logits[0][:, input_ids[0]].T, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "extra_options",
+    [
+        {},
+        {"algo_config": "rtn"},
+        {"algo_config": "rtn", "is_symmetric": False},
+        {"algo_config": "k_quant"},
+        {"algo_config": "rtn_last"},
+    ],
+    ids=["default", "rtn", "rtn_asymmetric", "k_quant", "rtn_last"],
+)
+@pytest.mark.parametrize("hidden_size, block_size", [(64, 32), (96, 64)])
+def test_tied_quantized_embeddings_read_the_quantized_lm_head_rows(tmp_path, extra_options, hidden_size, block_size):
+    # (96, 64) pads each quantized LM head row to whole blocks, which the lookup has to slice off.
+    vocab_size = 256
+    quant_config = QuantConfig.from_extra_options(
+        {**extra_options, "block_size": block_size}, precision="int4", execution_provider="cpu"
+    )
+    model = _make_tied_embedding_model(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        quant_attrs={
+            "accuracy_level": 0,
+            "matmul_block_size": block_size,
+            "bits": 4,
+            "is_symmetric": quant_config.weights.symmetric,
+            "op_types_to_quantize": ("MatMul",),
+            "nodes_to_exclude": [],
+            "algo_config": None,
+            "use_qdq": False,
+        },
+    )
+    model.ep = "cpu"
+    model.matmul_attrs = {"weights_prepacked": 0}
+    model.quant_type = None
+    model.quant_config = quant_config
+    model.make_quant_init(config=None)
+    weight = torch.randn(vocab_size, hidden_size, generator=torch.Generator().manual_seed(0))
+    _add_lm_head_and_tied_embeddings(model, types.SimpleNamespace(weight=weight, bias=None), model.make_matmul_float)
+
+    quantized = model.to_nbits()
+
+    _assert_embeddings_are_lm_head_rows(quantized, tmp_path, vocab_size=vocab_size, hidden_size=hidden_size)
+    slices = [node for node in quantized.graph if node.op_type == "Slice"]
+    assert len(slices) == (0 if hidden_size % block_size == 0 else 1)
+
+
+@pytest.mark.parametrize("with_zero_points", [False, True], ids=["symmetric", "asymmetric"])
+# Even block counts only: onnxruntime 1.26 and older misread packed zero points of rows with an odd block count.
+@pytest.mark.parametrize("hidden_size", [128, 96])
+def test_tied_embeddings_use_the_group_size_of_a_prequantized_lm_head(tmp_path, hidden_size, with_zero_points):
+    # A pre-quantized checkpoint (e.g. quant_auto) fixes the LM head's group size, whatever block_size the export uses.
+    vocab_size, group_size = 256, 64
+    k_blocks = (hidden_size + group_size - 1) // group_size
+    rng = np.random.default_rng(0)
+    qzeros = rng.integers(0, 256, (vocab_size, (k_blocks + 1) // 2), dtype=np.uint8)
+    lm_head = types.SimpleNamespace(
+        qweight=torch.from_numpy(rng.integers(0, 256, (vocab_size, k_blocks, group_size // 2), dtype=np.uint8)),
+        scales=torch.from_numpy(rng.uniform(0.01, 0.1, (vocab_size, k_blocks)).astype(np.float32)),
+        qzeros=torch.from_numpy(qzeros) if with_zero_points else None,
+        bits=4,
+        group_size=group_size,
+        in_features=hidden_size,
+        out_features=vocab_size,
+    )
+    model = _make_tied_embedding_model(
+        vocab_size=vocab_size, hidden_size=hidden_size, quant_attrs={"accuracy_level": 0, "matmul_block_size": 32}
+    )
+    model.weights = types.SimpleNamespace(lm_head=lm_head)
+
+    _add_lm_head_and_tied_embeddings(model, lm_head, model.make_matmul_nbits)
+
+    _assert_embeddings_are_lm_head_rows(model.model, tmp_path, vocab_size=vocab_size, hidden_size=hidden_size)
 
 
 def _make_minimal_model_for_embedding_branches(

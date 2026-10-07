@@ -1,0 +1,45 @@
+{
+  "model": {
+    "type": "marian-ssru",
+    "bos_token_id": 127,
+    "eos_token_id": 0,
+    "pad_token_id": 127,
+    "vocab_size": 128,
+    "context_length": 64,
+    "encoder": {
+      "filename": "encoder.onnx",
+      "hidden_size": 4,
+      "inputs": {
+        "input_ids": "input_ids",
+        "attention_mask": "attention_mask"
+      },
+      "outputs": {
+        "encoder_outputs": "encoder_outputs"
+      }
+    },
+    "decoder": {
+      "filename": "decoder.onnx",
+      "hidden_size": 4,
+      "session_options": {
+        "intra_op_num_threads": 1
+      },
+      "inputs": {
+        "input_ids": "input_ids",
+        "encoder_hidden_states": "encoder_hidden_states",
+        "encoder_attention_mask": "encoder_attention_mask",
+        "rnn_states_prev": "rnn_states_prev",
+        "past_key_values_length": "past_key_values_length"
+      },
+      "outputs": {
+        "logits": "logits",
+        "rnn_states": "rnn_states"
+      }
+    }
+  },
+  "search": {
+    "max_length": 12,
+    "num_beams": 1,
+    "do_sample": false,
+    "top_k": 1
+  }
+}

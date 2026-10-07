@@ -26,6 +26,8 @@ class BlockDrafterBuilder:
     # projection dense; subclasses set these from the target's quantization settings so the
     # drafter lands in the same format as the model it drafts for.
     quant_bits = None
+    # False when Q comes from the same packed rows as K/V, so the graph has no `q_row_map` input.
+    uses_q_row_map = True
     quant_block_size = 32
     quant_prepack = 0
     # Set only when the target's own LM head is symmetric/`default` quantized, which is the one
@@ -150,13 +152,17 @@ class BlockDrafterBuilder:
         ``MatMulNBits`` consumes ``[N, K]`` directly, so unlike the dense path the weight is
         not transposed. Repeat call sites reuse the initializer the first one registered.
         """
-        # Mirror prepack_matmulnbits_weights: nodes the fpA-intB kernel cannot run stay raw.
-        allowed_block_sizes = (32, 64, 128) if self.quant_prepack == 1 else (64, 128)
+        n_tile = {2: 128, 4: 64, 8: 32}.get(self.quant_bits)
+        supported_blocks = (32, 64, 128) if self.quant_prepack == 1 else (64, 128)
+        if self.quant_bits == 2:
+            supported_blocks = (64, 128)
         prepack = (
             self.quant_prepack
-            if self.quant_block_size in allowed_block_sizes
+            if n_tile
+            and out_features % n_tile == 0
+            and self.quant_block_size in supported_blocks
             and in_features % self.quant_block_size == 0
-            and out_features % (32 if self.quant_bits == 8 else 64) == 0
+            and (self.quant_bits != 2 or self.quant_prepack == 1)
             else 0
         )
         qweight_name = f"{initializer_name}_Q{self.quant_bits}"
@@ -528,6 +534,8 @@ class BlockDrafterBuilder:
             ("attention_metadata", ir.DataType.INT32, [3]),
         ]
         for name, dtype, shape in declarations:
+            if name == "q_row_map" and not self.uses_q_row_map:
+                continue
             self.graph.inputs.append(self.make_value(name, dtype, shape))
         # TODO: this is the target's block size. A drafter usually has the smaller head size and
         # so the larger FlashAttention tile, which means the block that is fastest for the target
@@ -594,7 +602,7 @@ class BlockDrafterBuilder:
             raise
 
     def genai_config_section(self):
-        return {
+        section = {
             "filename": self.filename,
             "session_options": {"ep.cuda.fpa_intb_gemm": "0"},
             "num_hidden_layers": self.num_layers,
@@ -626,3 +634,6 @@ class BlockDrafterBuilder:
                 "present_value_names": "present.%d.value",
             },
         }
+        if not self.uses_q_row_map:
+            del section["inputs"]["q_row_map"]
+        return section

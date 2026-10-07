@@ -5,11 +5,13 @@
 
 #include <algorithm>
 #include <exception>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
 
 #include "../models/model_state_manifest.h"
+#include "dflash2_drafter.h"
 
 namespace Generators {
 
@@ -208,12 +210,19 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 
 std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model,
                                                    size_t auxiliary_bytes_per_block,
-                                                   size_t auxiliary_reserved_memory_bytes) {
+                                                   size_t auxiliary_reserved_memory_bytes,
+                                                   size_t optional_draft_checkpoint_bytes,
+                                                   bool* draft_checkpoint_enabled) {
   const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
-    return std::make_unique<PagedCacheManager>(
-        model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes);
+    auto manager = std::make_unique<PagedCacheManager>(
+        model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
+        optional_draft_checkpoint_bytes);
+    if (draft_checkpoint_enabled) {
+      *draft_checkpoint_enabled = manager->DraftCheckpointEnabled();
+    }
+    return manager;
   }
   if (manifest.HasFixedStateGroups()) {
     throw std::runtime_error(
@@ -363,7 +372,8 @@ bool StaticCacheManager::IsResident(const std::shared_ptr<Request>& request) con
 
 PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
                                      size_t auxiliary_bytes_per_block,
-                                     size_t auxiliary_reserved_memory_bytes)
+                                     size_t auxiliary_reserved_memory_bytes,
+                                     size_t optional_draft_checkpoint_bytes)
     : CacheManager(model),
       params_(std::make_shared<GeneratorParams>(*model_)) {
   // The paged cache resolves its own paged_kv group. The fixed pool is created only when the
@@ -384,6 +394,26 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
         model, model_->config_->engine.dynamic_batching->max_batch_size,
         prefix_checkpoint_capacity);
     fixed_state_pool_ = std::move(fixed_state_pool);
+  }
+  if (optional_draft_checkpoint_bytes != 0 && hybrid_prefix_caching &&
+      auxiliary_bytes_per_block == 0) {
+    const auto& batching = *model_->config_->engine.dynamic_batching;
+    const size_t target_block_bytes = PagedKeyValueCacheBytesPerBlock(model_);
+    size_t budget = 0;
+    if (batching.num_blocks) {
+      if (*batching.num_blocks <= std::numeric_limits<size_t>::max() / target_block_bytes) {
+        budget = *batching.num_blocks * target_block_bytes;
+      }
+    } else {
+      size_t free_bytes = 0, total_bytes = 0;
+      model_->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
+      budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
+    }
+    if (CanReserveDflash2PrefixCheckpoint(budget, auxiliary_reserved_memory_bytes,
+                                          optional_draft_checkpoint_bytes, target_block_bytes)) {
+      auxiliary_reserved_memory_bytes += optional_draft_checkpoint_bytes;
+      draft_checkpoint_enabled_ = true;
+    }
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.
@@ -418,14 +448,14 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
     return;
   }
   for (const auto& entry : plan.requests) {
-    if (fixed_state_pool_ && !entry.is_prefill) {
+    if (!fixed_state_pool_) {
+      key_value_cache_->SealCommittedBlocks(
+          entry.request_id, entry.request->TokensCpu());
       continue;
     }
-    key_value_cache_->SealCommittedBlocks(
-        entry.request_id, entry.request->TokensCpu());
-    if (!fixed_state_pool_ ||
-        !key_value_cache_->CanAttachPrefixCheckpoint(
-            entry.request_id, entry.target_cache_slots)) {
+    if (!entry.is_prefill ||
+        !key_value_cache_->CanSealPrefixCheckpoint(
+            entry.request_id, entry.target_cache_slots, entry.request->TokensCpu())) {
       continue;
     }
     if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
@@ -436,19 +466,24 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
           static_cast<size_t>(entry.sequence_length_before)) {
         continue;
       }
-      key_value_cache_->ReclaimPrefixCheckpoints(1);
+      if (!key_value_cache_->ReclaimablePrefixCheckpoint()) {
+        continue;
+      }
     }
-    if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
-      continue;
-    }
-    auto checkpoint =
-        fixed_state_pool_->CapturePrefixCheckpoint(entry.request_id);
-    if (checkpoint &&
-        !key_value_cache_->AttachPrefixCheckpoint(
-            entry.request_id, std::move(checkpoint))) {
-      throw std::logic_error(
-          "A captured fixed state checkpoint could not be attached to its paged prefix.");
-    }
+    key_value_cache_->SealCheckpointedPrefix(
+        entry.request_id, entry.request->TokensCpu(), entry.target_cache_slots,
+        [this, request_id = entry.request_id] {
+          const auto* replacement =
+              fixed_state_pool_->AvailablePrefixCheckpoints() == 0
+                  ? key_value_cache_->ReclaimablePrefixCheckpoint()
+                  : nullptr;
+          return fixed_state_pool_->CapturePrefixCheckpoint(
+              request_id, replacement, [this] {
+                if (key_value_cache_->ReclaimPrefixCheckpoints(1) != 1) {
+                  throw std::logic_error("A selected prefix checkpoint could not be reclaimed.");
+                }
+              });
+        });
   }
 }
 

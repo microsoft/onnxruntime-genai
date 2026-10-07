@@ -181,6 +181,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
       mtp_cache_manager_{std::move(dependencies.mtp_cache_manager)},
       mtp_model_executor_{std::move(dependencies.mtp_model_executor)},
       dflash2_drafter_{std::move(dependencies.dflash2_drafter)},
+      dflash2_prefix_checkpoints_enabled_{dependencies.dflash2_prefix_checkpoints_enabled},
       make_step_error_{dependencies.make_step_error
                            ? dependencies.make_step_error
                            : MakeEngineStepError} {
@@ -221,6 +222,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     dflash2_draft_widths_.reserve(max_batch_size);
     dflash2_drafts_.reserve(max_batch_size);
     dflash2_draft_distributions_.reserve(max_batch_size);
+    dflash2_lattices_.reserve(max_batch_size);
     dflash2_rng_checkpoints_.reserve(max_batch_size);
   }
   WarnOnClampedDraftWidth();
@@ -328,6 +330,8 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   size_t dflash2_reserved_memory_bytes = 0;
   size_t dflash2_max_batch_size = 0;
   size_t dflash2_pool_blocks = 0;
+  size_t dflash2_prefix_checkpoint_bytes = 0;
+  bool dflash2_prefix_checkpoints_enabled = false;
   if (!model->config_->model.dflash2.filename.empty()) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
@@ -389,6 +393,12 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       }
       dflash2_reserved_memory_bytes += embedding_bytes;
     }
+    if (dflash2_pool_blocks != 0 && mtp_bytes_per_block == 0 && !dflash2.is_dspark &&
+        ModelStateManifest{model->config_->model.decoder}.HasFixedStateGroups() &&
+        ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0)) {
+      dflash2_prefix_checkpoint_bytes = Dflash2Drafter::PrefixCheckpointBytes(
+          *model->config_, paged_block_size, dflash2_cache_type);
+    }
   }
 
   if (dflash2_bytes_per_block > std::numeric_limits<size_t>::max() - mtp_bytes_per_block) {
@@ -425,7 +435,9 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   }
   std::shared_ptr<CacheManager> cache_manager =
       CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
-                           dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes);
+                           dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes,
+                           dflash2_prefix_checkpoint_bytes,
+                           &dflash2_prefix_checkpoints_enabled);
   if (dflash2_model && !dflash2_drafter) {
     const size_t paged_block_size =
         static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
@@ -460,7 +472,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   return EngineDependencies{
       std::move(cache_manager), std::move(scheduler), std::move(model_executor),
       std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor),
-      std::move(dflash2_drafter)};
+      std::move(dflash2_drafter), dflash2_prefix_checkpoints_enabled};
 }
 
 void Engine::PrepareDflash2Feeds(const StepPlan& plan,
@@ -473,8 +485,13 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& entry = plan.requests[i];
     const bool greedy = entry.request->TurnPolicy().IsGreedy();
-    const bool independent_sampling =
-        model_->config_->model.dflash2.independent_sampling && !greedy;
+    using Proposal = Config::Model::Dflash2::SampledProposal;
+    const Proposal sampled_proposal =
+        greedy ? Proposal::None : model_->config_->model.dflash2.sampled_proposal;
+    const bool independent_sampling = sampled_proposal == Proposal::Independent;
+    // A sampled turn without a positive top_k fails draft validation, so it should not take a slot.
+    const bool drafts_enabled =
+        greedy || (sampled_proposal != Proposal::None && entry.request->TurnPolicy().top_k > 0);
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
     if (accepted > entry.draft_token_count) {
       throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
@@ -489,11 +506,15 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
 
     Dflash2Drafter::Feed feed;
     feed.request = entry.request.get();
+    if (entry.prefix_match) {
+      feed.prefix_checkpoint = entry.prefix_match->draft_checkpoint;
+    }
     feed.aux_row_begin = entry.packed_token_offset;
     feed.aux_row_count = valid_rows;
     feed.first_position = first_position;
-    feed.draft_eligible = greedy || independent_sampling;
+    feed.draft_eligible = drafts_enabled;
     feed.wants_independent_sampling = independent_sampling;
+    feed.wants_lattice = sampled_proposal == Proposal::Lattice;
 
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
@@ -508,7 +529,7 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
         max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
-    feed.wants_drafts = (greedy || independent_sampling) && width > 0 &&
+    feed.wants_drafts = drafts_enabled && width > 0 &&
                         results[i].token_appended && !results[i].done &&
                         !entry.request->DraftTokenValidationError();
     feed.anchor_token = results[i].token;
@@ -527,10 +548,42 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
   }
 
   if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_,
-                                &dflash2_draft_distributions_)) {
+                                &dflash2_draft_distributions_, &dflash2_lattices_)) {
     ++speculative_stats_.draft_forward_passes;
   }
+  ReleaseConsumedDflash2Checkpoints();
   PublishDflash2DraftResults();
+  if (!dflash2_prefix_checkpoints_enabled_) {
+    return;
+  }
+  for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
+    const auto& entry = step_plan_.requests[i];
+    const auto& feed = dflash2_feeds_[i];
+    if (!entry.is_prefill || !feed.draft_eligible ||
+        feed.first_position + feed.aux_row_count != entry.target_cache_slots) {
+      continue;
+    }
+    auto boundary = cache_manager_->DraftBoundary(entry.request_id, entry.target_cache_slots);
+    if (!boundary ||
+        !dflash2_drafter_->CanCapturePrefix(feed.request, entry.target_cache_slots)) {
+      continue;
+    }
+    try {
+      cache_manager_->DropUnleasedDraftCheckpoints();
+      auto checkpoint = dflash2_drafter_->CapturePrefix(feed.request, entry.target_cache_slots);
+      if (checkpoint && !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
+        cache_manager_->RecordPrefixPublicationRefusal();
+      }
+    } catch (const std::bad_alloc&) {
+      cache_manager_->RecordPrefixPublicationRefusal();
+    }
+  }
+}
+
+void Engine::ReleaseConsumedDflash2Checkpoints() noexcept {
+  for (auto& feed : dflash2_feeds_) {
+    feed.prefix_checkpoint.reset();
+  }
 }
 
 void Engine::PublishDflash2DraftResults() {
@@ -539,7 +592,20 @@ void Engine::PublishDflash2DraftResults() {
     for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
       auto& drafts = dflash2_drafts_[i];
       auto& distributions = dflash2_draft_distributions_[i];
-      if (drafts.empty() && distributions.empty()) {
+      const Dflash2Lattice* lattice =
+          i < dflash2_lattices_.size() && dflash2_lattices_[i].top_k != 0 ? &dflash2_lattices_[i]
+                                                                          : nullptr;
+      if (drafts.empty() && distributions.empty() && !lattice) {
+        continue;
+      }
+      Request& request = *dflash2_feeds_[i].request;
+      if (lattice) {
+        dflash2_rng_checkpoints_.emplace_back(&request, request.draft_rng_);
+        const auto& policy = request.TurnPolicy();
+        Dflash2SampleLatticePath(*lattice, dflash2_draft_widths_[i], policy.temperature,
+                                 policy.top_k, policy.top_p, request.draft_rng_, drafts,
+                                 distributions);
+        request.SetSampledDraftTokens(drafts, distributions);
         continue;
       }
       // The drafter always emits its full block; a request with a narrower budget takes the prefix
@@ -706,7 +772,9 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       // match: it is true for any committed StopString result exactly like any other finish
       // reason, so this check below already skips proposing a new draft block for it with no
       // stop-specific condition needed.
-      if (!result.token_appended || result.done ||
+      // MTP is intentionally unavailable for scoped turns: its chained proposals may cross
+      // an opener before the target can switch to the grammar cursor.
+      if (!result.token_appended || result.done || entry.request->HasDelimitedGuidance() ||
           entry.request->DraftTokenValidationError() ||
           max_draft_tokens == 0) {
         continue;
@@ -1395,6 +1463,9 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   // Request joins the batch rather than inside a rollback-capable step. Reject both before any
   // Request mutation rather than letting a turn run without the guarantee its options promise.
   if (!dynamic_batching) {
+    if (options.delimited_guidance) {
+      throw std::runtime_error("Delimited guidance requires an Engine configured for dynamic batching.");
+    }
     if (!options.stop_strings.empty()) {
       throw std::runtime_error(
           "Stop strings require an Engine configured for dynamic batching.");
@@ -2615,6 +2686,20 @@ const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
 
 std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
     const TurnOptions& options) const {
+  if (options.delimited_guidance) {
+    if (!options.guidance_type.empty() || !options.guidance_data.empty()) {
+      throw std::invalid_argument("Delimited and whole-turn guidance cannot be combined.");
+    }
+    const auto& region = *options.delimited_guidance;
+    const auto& config = model_->config_->model;
+    auto params = std::make_shared<GeneratorParams>(*model_);
+    params->search.batch_size = 1;
+    params->SetGuidance("lark_grammar", region.grammar, false);
+    auto body = CreateGuidanceLogitsProcessor(std::move(params));
+    return std::make_unique<DelimitedGuidanceLogitsProcessor>(
+        std::move(body), *model_->p_device_, config.vocab_size,
+        config.eos_token_id, region.opening_token, region.closing_token);
+  }
   if (options.guidance_type.empty() && options.guidance_data.empty()) {
     return nullptr;
   }

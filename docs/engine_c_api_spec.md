@@ -135,6 +135,12 @@ OgaResult* OgaTurnOptionsSetGuidance(
     const char* guidance_type,
     const char* guidance_data);
 
+OgaResult* OgaTurnOptionsSetDelimitedGuidance(
+    OgaTurnOptions* options,
+    int32_t opening_token,
+    int32_t closing_token,
+    const char* grammar);
+
 OgaResult* OgaTurnOptionsClearGuidance(OgaTurnOptions* options);
 
 OgaResult* OgaTurnOptionsReset(OgaTurnOptions* options);
@@ -193,8 +199,8 @@ Rules:
   it explicitly.
 - `no_repeat_ngram_size` is rejected at admission on a scoring device whose search cannot apply it,
   rather than failing after the model has already run.
-- Static batching completes generation on a non-transactional path, so it rejects stop strings and a
-  per-turn seed at admission, before the Request is mutated.
+- Static batching completes generation on a non-transactional path, so it rejects stop strings,
+  delimited guidance, and a per-turn seed at admission, before the Request is mutated.
 - Dynamic batching also rejects a per-turn seed when the active batched sampler cannot checkpoint
   and restore its device RNG state.
 - The complete resolved policy is validated before any Request or Engine mutation, so a rejected
@@ -246,8 +252,18 @@ so an unsupported or invalid grammar leaves the previous completed turn reusable
 completion, stop match, cancellation, failure, and close -- releases the turn's grammar cursor, and a
 rolled-back step restores it.
 
-A guided turn does not accept speculative drafts; the next unguided turn is draft-eligible again.
-Guidance and stop strings can be enabled together.
+A turn with whole-turn guidance does not accept speculative drafts; the next unguided turn is
+draft-eligible again. Guidance and stop strings can be enabled together.
+
+`OgaTurnOptionsSetDelimitedGuidance` instead copies a Lark grammar for the body after a committed
+opening token and before a closing token. Admission checks that the distinct marker IDs are
+in-vocabulary and not end-of-sequence tokens, and compiles the body grammar before Request
+mutation. The body must reach an accepting state before the closing marker can be emitted;
+outside the region, including subsequent regions in the same turn, generation is unconstrained.
+Whole-turn and delimited guidance are mutually exclusive; clear guidance before switching modes.
+Delimited turns require dynamic batching. Draft verification is permitted outside regions but
+stops before an opening marker, and resumes after a closing marker. Automatic MTP drafting is
+disabled for the entire delimited turn. Stop strings, turn limits, and cancellation still apply.
 
 ### Stop strings
 
