@@ -2368,6 +2368,7 @@ void ValidateTimestampConfiguration(const Config::Model& model) {
     throw std::runtime_error("Timestamp metadata requires a nemotron_speech model");
   if (model.sample_rate <= 0 || model.hop_length <= 0 || model.subsampling_factor <= 0)
     throw std::runtime_error("Timestamp metadata requires positive sample_rate, hop_length, and subsampling_factor");
+  (void)GetSegmentGapThresholdFrames(model);
 }
 
 std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model) {
@@ -3240,6 +3241,7 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
   ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
+  ValidateTimestampConfiguration(candidate.model);
   std::swap(config, candidate);
 }
 
@@ -3438,6 +3440,7 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   // Validate all config-specified filenames/paths after parsing so downstream loaders
   // (model/processor/adapter creation) can rely on them being safe.
   ValidateModelPaths(*this);
+  ValidateTimestampConfiguration(model);
 
   WarnOnClampedDraftWidth(*this);
 }

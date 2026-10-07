@@ -242,8 +242,15 @@ TEST(AudioSpeechValidationTests, NemotronTimestampsRejectMissingFrameDurationPar
   config.model.timestamp_level = Generators::Config::TimestampLevel::Word;
   config.model.segment_gap_threshold_seconds = 1.0;
 
-  Generators::NemotronConfig nemotron_config;
-  EXPECT_THROW(nemotron_config.PopulateFromConfig(config), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateTimestampConfiguration(config.model), std::runtime_error);
+}
+
+TEST(AudioSpeechValidationTests, ConfigConstructorRejectsInvalidTimestampOverlay) {
+  EXPECT_THROW(
+      Generators::Config(
+          fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"},
+          R"({"model":{"type":"nemotron_speech","timestamp_level":"word"}})"),
+      std::runtime_error);
 }
 
 TEST(AudioSpeechValidationTests, NemotronTimestampsRejectOversizedSegmentGap) {
@@ -255,8 +262,7 @@ TEST(AudioSpeechValidationTests, NemotronTimestampsRejectOversizedSegmentGap) {
   config.model.subsampling_factor = 8;
   config.model.segment_gap_threshold_seconds = 1e20;
 
-  Generators::NemotronConfig nemotron_config;
-  EXPECT_THROW(nemotron_config.PopulateFromConfig(config), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateTimestampConfiguration(config.model), std::runtime_error);
 }
 
 TEST(AudioSpeechValidationTests, ZeroAndSubFrameGapsSplitEachWord) {
@@ -498,13 +504,6 @@ TEST_F(MetadataCoreStateTests, ResetRebuildsMetadataFromTokenizerConfig) {
   EXPECT_THROW(stream->FinalizeMetadata(), std::runtime_error);
   stream->Reset();
   EXPECT_NE(stream->FinalizeMetadata().timestampMetadata, nullptr);
-}
-
-TEST_F(MetadataCoreStateTests, MissingModelTimingRejectsTimestamps) {
-  Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
-  config.model.type = "nemotron_speech";
-  config.model.timestamp_level = Generators::Config::TimestampLevel::All;
-  EXPECT_THROW({ Generators::Tokenizer invalid_tokenizer{config}; }, std::runtime_error);
 }
 
 TEST_F(MetadataCoreStateTests, DisabledTokenizerProducesTextWithoutTimestamps) {

@@ -39,7 +39,7 @@ round down. Set it to `null` or omit it to disable gap-based completion.
 The frame duration comes from `sample_rate`, `hop_length`, and `subsampling_factor` under
 `model` in the same `genai_config.json`; do not repeat them in metadata overrides.
 If timestamps are requested for a non-Nemotron model, or these values are missing or non-positive,
-model or tokenizer creation fails. Unknown timestamp levels and negative or non-finite gap
+config creation or overlay fails. Unknown timestamp levels and negative or non-finite gap
 thresholds are rejected while loading the configuration.
 
 ## Decoding flows

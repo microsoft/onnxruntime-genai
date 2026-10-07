@@ -588,8 +588,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public void TestRequestedTimestampsRejectInvalidModelConfig(string overlay, string reason)
         {
             using var config = new Config(_tinyRandomGpt2ModelPath);
-            config.Overlay(overlay);
-            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new Model(config));
+            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => config.Overlay(overlay));
             Assert.Contains(reason, error.Message);
         }
 

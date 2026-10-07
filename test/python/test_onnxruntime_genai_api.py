@@ -74,9 +74,8 @@ def test_tokenizer_create_from_config_and_path(test_data_path):
 def test_requested_timestamps_reject_invalid_model_config(test_data_path, model_type, timing, reason):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
-    config.overlay(json.dumps({"model": {"type": model_type, "timestamp_level": "word", **timing}}))
     with pytest.raises(RuntimeError, match=reason):
-        og.Model(config)
+        config.overlay(json.dumps({"model": {"type": model_type, "timestamp_level": "word", **timing}}))
 
 
 def test_tokenizer_stream_timestamp_initialization(test_data_path):

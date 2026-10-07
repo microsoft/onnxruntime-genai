@@ -125,7 +125,6 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
                                              eot_token_id_{config.model.eot_token_id},
                                              bor_token_id_{config.model.bor_token_id},
                                              eor_token_id_{config.model.eor_token_id} {
-  ValidateTimestampConfiguration(config.model);
   // Default tokenizer options
   const bool timestamps_enabled = config.model.timestamp_level != Config::TimestampLevel::Off;
   const char* keys[] = {"add_special_tokens", "skip_special_tokens", "track_timestamp_metadata"};
