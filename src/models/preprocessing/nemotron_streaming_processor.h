@@ -17,6 +17,8 @@ void PopulateMelTensor(OrtValue& output, std::span<const float> cache,
 void UpdateMelCache(std::span<float> cache, int& cache_pos,
                     std::span<const float> mel, int num_frames, int num_mels);
 
+void AddTimestampChunkOrigin(NamedTensors& result, int64_t start_sample);
+
 /// Nemotron-specific streaming processor that converts raw PCM audio into
 /// mel spectrogram tensors for the cache-aware FastConformer encoder.
 struct NemotronStreamingProcessor : StreamingProcessor {

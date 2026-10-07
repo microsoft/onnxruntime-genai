@@ -73,6 +73,18 @@ flowchart TB
   generator --> timed_tokens
 ```
 
+When timestamps are enabled, the streaming processor includes a scalar int64
+`chunk_start_sample` tensor alongside `audio_features` in `NamedTensors`.
+The origin counts samples in chunks dropped by VAD; `Flush()` pads the final chunk
+for feature extraction but advances the origin by only the actual input samples.
+This is a processor-to-generator signal, not an ONNX model input. Pass the complete
+processor result to the generator: omitting or renaming `chunk_start_sample` is an
+error when timestamps are enabled.
+For a locally installed Nemotron model outside the test fixtures, set
+`NEMOTRON_STREAMING_MODEL_PATH` when running
+`AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
+That test uses CPU session options, even when the model package specifies CUDA.
+
 For the timed path, create a tokenizer stream; its metadata state is initialized from
 the tokenizer configuration. The generator supplies
 *when* each token occurred; Extensions supplies *which tokens* form each word. `DecodeWithMetadata`
