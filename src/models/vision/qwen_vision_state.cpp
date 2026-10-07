@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <numeric>
 
 #include "generator/generators.h"
 #include "models/multi_modal.h"
@@ -61,18 +60,6 @@ int64_t QwenVisionState::GetImageFeatureBatchSize(const std::vector<ExtraInput>&
       const int64_t num_images = shape.empty() ? 0 : shape[0];
       ValidateImageGridThwLayoutAndCount(shape, info->GetElementCount(), num_images, "image_grid_thw");
       return num_images;
-    }
-  }
-  return 0;
-}
-
-int64_t QwenVisionState::GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) const {
-  for (const auto& input : extra_inputs) {
-    if (input.name == Config::Defaults::NumImageTokens) {
-      assert(input.tensor->ort_tensor_);
-      const auto info = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
-      const int64_t* data = input.tensor->ort_tensor_->GetTensorData<int64_t>();
-      return std::accumulate(data, data + info->GetElementCount(), 0LL);
     }
   }
   return 0;
