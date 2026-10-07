@@ -350,11 +350,11 @@ def check_extra_options(
                     f"moe_quant_type={moe_quant_type} is only supported on the CUDA EP, got ep='{execution_provider}'."
                 )
         if moe_quant_type == "mxfp4":
-            if not (precision == "int4" and extra_options.get("is_symmetric", True)):
+            if not (precision in ("int4", "int8") and extra_options.get("is_symmetric", True)):
                 raise ValueError(
-                    "moe_quant_type=mxfp4 requires building with precision=int4 (symmetric int4): the "
-                    "int4 build precision is what exports the quantized QMoE op, and the FP4 scheme only sets the "
-                    "MoE expert weights to the FP4 encoding."
+                    "moe_quant_type=mxfp4 requires building with symmetric int4 or int8 precision: the integer "
+                    "build precision exports the quantized QMoE op, and the FP4 scheme sets only the MoE expert "
+                    "weights to the FP4 encoding."
                 )
 
     if extra_options.get("moe_quant_type") == "int2":
@@ -1138,8 +1138,8 @@ def get_args():
                     int8 = 8-bit integer QMoE weights (expert_weight_bits=8, quant_type="int").
                     mxfp4 = MXFP4 QMoE weights on the CUDA EP (quant_type="fp4", expert_weight_bits=4, block_size=32):
                         4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale.
-                        Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON, precision=int4 with symmetric
-                        INT4 quantization, and is only supported on the CUDA EP.
+                        Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON, precision=int4 or int8 with
+                        symmetric integer quantization, and is only supported on the CUDA EP.
                     nvfp4 = NVFP4 QMoE weights on the CUDA EP (quant_type="nvfp4", expert_weight_bits=4, block_size=16):
                         4-bit e2m1 weights with FP8-E4M3 block scales and a per-expert float32 global scale.
                         Requires an ONNX Runtime build with NVFP4 QMoE support. The graph precision controls

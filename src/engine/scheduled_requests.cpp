@@ -516,7 +516,7 @@ void ScheduledRequests::ScheduleGuidanceMasks() noexcept {
     std::vector<ConstrainedLogitsProcessor*> processors;
     processors.reserve(requests_.size());
     for (const auto& request : requests_) {
-      if (request->guidance_logits_processor_ &&
+      if (request->HasGuidance() &&
           !request->IsTurnComplete()) {
         processors.push_back(request->guidance_logits_processor_.get());
       }

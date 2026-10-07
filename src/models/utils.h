@@ -42,4 +42,10 @@ inline float ToFloat32(Ort::BFloat16_t v) { return BFloat16ToFloat32(v); }
 float FastFloat16ToFloat32(const uint16_t x);
 uint16_t FastFloat32ToFloat16(float v);
 
+// Bulk conversions used by the CPU cast. On x86 these use F16C / SSE2 when the CPU supports them.
+void ConvertFloat16ToFloat32(const uint16_t* src, float* dst, size_t count);
+void ConvertFloat32ToFloat16(const float* src, uint16_t* dst, size_t count);
+void ConvertBFloat16ToFloat32(const uint16_t* src, float* dst, size_t count);
+void ConvertFloat32ToBFloat16(const float* src, uint16_t* dst, size_t count);
+
 }  // namespace Generators

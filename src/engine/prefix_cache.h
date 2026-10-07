@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <optional>
@@ -151,6 +152,23 @@ class PrefixCache final : private BlockReferenceObserver {
       std::span<const int32_t> tokens,
       const std::shared_ptr<const BlockIdentity>& parent);
 
+  // Publishes a hybrid suffix only with its checkpoint. Failed publication removes all identities
+  // created by this call, leaving the physical blocks private and eligible for a later retry.
+  PrefixCacheRegistrationStatus CheckCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent);
+  PrefixCacheRegistration RegisterCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent,
+      std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+  PrefixCacheRegistration RegisterCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent,
+      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint);
+
   // Publishes and refreshes a match only after its adopting cache transaction commits.
   void RecordAdoption(
       std::span<const std::shared_ptr<Block>> blocks) noexcept;
@@ -176,6 +194,7 @@ class PrefixCache final : private BlockReferenceObserver {
   void DropUnleasedDraftCheckpoints();
   size_t ReclaimCheckpoints(size_t checkpoints_needed);
   size_t ReclaimableCheckpoints() const;
+  const FixedStatePrefixCheckpoint* ReclaimableCheckpoint() const;
   size_t CheckpointCount() const { return checkpoint_count_; }
 
   /**
@@ -218,6 +237,21 @@ class PrefixCache final : private BlockReferenceObserver {
     bool reclaimable{};
     bool promote_on_release{true};
   };
+
+  struct CheckpointedPrefixPlan {
+    PrefixCacheRegistrationStatus status{PrefixCacheRegistrationStatus::Indexed};
+    std::vector<uint64_t> retiring_hashes;
+  };
+  CheckpointedPrefixPlan PlanCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent);
+  PrefixCacheRegistration ReplaceCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent,
+      const CheckpointedPrefixPlan& plan,
+      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint);
 
   // Keeps `entry` ordered immediately before the entry it chains from, so a chain is always
   // evicted from its tail rather than its head.
