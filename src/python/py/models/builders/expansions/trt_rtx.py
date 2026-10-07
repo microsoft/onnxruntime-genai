@@ -3,6 +3,7 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+import numpy as np
 import onnx_ir as ir
 
 
@@ -10,6 +11,188 @@ class TRT_RTX:
     """
     TRT-RTX specific subgraph expansions
     """
+
+    def make_expansion_constant(self, name, value, dtype=np.int64):
+        # Shape inference needs these small constants in the graph, not in external weight files.
+        tensor = ir.tensor(np.asarray(value, dtype=dtype), name=name)
+        self.make_node("Constant", [], [name], name=f"{name}/Constant", value=tensor)
+        self.make_value(name, tensor.dtype, tensor.shape)
+        return name
+
+    def make_gated_add(self, name, root_input, scaled_input, gate, shape):
+        # scaled_input * gate -> Add(root_input)
+        mul_name = f"{name}/Mul"
+        self.make_mul(mul_name, [scaled_input, gate], self.io_dtype, shape=shape)
+        self.make_add(name, [root_input, f"{mul_name}/output_0"], self.io_dtype, shape=shape)
+
+    def make_linear_attention_gate(self, name, a, dt_bias, decay_scale, b, shape):
+        # a -> Cast(FP32) -> Add(dt_bias) -> Softplus -> Mul(decay_scale) -> Cast
+        # b -> Sigmoid
+        self.make_cast(f"{name}/a/Cast", a, ir.DataType.FLOAT, shape)
+        self.make_add(f"{name}/Add", [f"{name}/a/Cast/output_0", dt_bias], ir.DataType.FLOAT, shape)
+        self.make_softplus(f"{name}/Softplus", f"{name}/Add/output_0", ir.DataType.FLOAT, shape)
+        self.make_mul(f"{name}/Mul", [f"{name}/Softplus/output_0", decay_scale], ir.DataType.FLOAT, shape)
+        self.make_cast(name, f"{name}/Mul/output_0", self.io_dtype, shape)
+        self.make_node("Sigmoid", [b], [f"{name}/output_1"], name=f"{name}/Sigmoid")
+        self.make_value(f"{name}/output_1", self.io_dtype, shape)
+
+    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
+        # root_input -> Reshape(heads) -> RMSNorm -> Flatten -> Cast(FP32) --+
+        # gate -> Cast(FP32) -> SiLU ------------------------------------+-> Mul -> Cast
+        head_size = int(self.values[scale].shape[0])
+        grouped_shape = [*shape[:-1], shape[-1] // head_size, head_size]
+        # An inferred -1 is ambiguous when batch or sequence length is zero.
+        reshape = self.make_expansion_constant(
+            name=f"{name}/group_shape", value=[*([0] * (len(shape) - 1)), *grouped_shape[-2:]]
+        )
+        self.make_reshape(f"{name}/Reshape", [root_input, reshape], self.io_dtype, grouped_shape)
+        normalized = f"{name}/SimplifiedLayerNormalization/output_0"
+        self.make_node(
+            "SimplifiedLayerNormalization",
+            [f"{name}/Reshape/output_0", scale],
+            [normalized],
+            name=f"{name}/SimplifiedLayerNormalization",
+            axis=-1,
+            epsilon=epsilon,
+            stash_type=1,
+        )
+        self.make_value(normalized, self.io_dtype, grouped_shape)
+        restore = self.make_expansion_constant(f"{name}/flat_shape", [*([0] * (len(shape) - 1)), shape[-1]])
+        self.make_reshape(f"{name}/Flatten", [normalized, restore], self.io_dtype, shape)
+        self.make_cast(f"{name}/norm/Cast", f"{name}/Flatten/output_0", ir.DataType.FLOAT, shape)
+        self.make_cast(f"{name}/gate/Cast", gate, ir.DataType.FLOAT, shape)
+        gate = f"{name}/gate/Cast/output_0"
+        self.make_sigmoid(f"{name}/Sigmoid", gate, ir.DataType.FLOAT, shape)
+        self.make_mul(f"{name}/SiLU", [gate, f"{name}/Sigmoid/output_0"], ir.DataType.FLOAT, shape)
+        self.make_mul(f"{name}/Mul", [f"{name}/norm/Cast/output_0", f"{name}/SiLU/output_0"], ir.DataType.FLOAT, shape)
+        self.make_cast(name, f"{name}/Mul/output_0", self.io_dtype, shape)
+
+    def make_mrotary_embedding(self, name, root_input, output, **kwargs):
+        # position_ids -> Gather(T/H/W) -> select cos/sin cache columns --+
+        # root_input -> Reshape(heads) -> rotate pairs <-----------------+
+        #                            +-> unrotated tail -> Concat -> Flatten
+        if self.use_paged_attention:
+            raise ValueError("TRT-RTX MRoPE expansion requires non-paged attention")
+        dtype = kwargs["dtype"]
+        num_heads = kwargs["num_heads"]
+        rotary_dim = self.rope_attrs["rotary_embedding_dim"] or self.head_size
+        owners = self.get_mrope_owners(rotary_dim)
+        leading = list(self.values[root_input].shape)[:-1]
+        positions = self.make_mrope_positions(name, kwargs["position_ids"], leading)
+        axes = self.make_expansion_constant(f"{name}/head_axis", [2])
+        cos, sin = [
+            self.make_mrope_cache(name, kind, kwargs[f"{kind}_cache_name"], positions, owners, axes, dtype, leading)
+            for kind in ("cos", "sin")
+        ]
+        reshape = self.make_expansion_constant(f"{name}/head_shape", [0, 0, num_heads, self.head_size])
+        self.make_reshape(f"{name}/Reshape", [root_input, reshape], dtype, [*leading, num_heads, self.head_size])
+        heads = f"{name}/Reshape/output_0"
+        rotated = self.make_mrope_rotation(name, heads, cos, sin, dtype, [*leading, num_heads, rotary_dim])
+        self.make_mrope_output(name, heads, rotated, output, dtype, [*leading, num_heads, rotary_dim])
+
+    def get_mrope_owners(self, rotary_dim):
+        """Map each rotary cache column to its temporal, height, or width position stream."""
+        if rotary_dim <= 0 or rotary_dim % 2 != 0 or rotary_dim > self.head_size:
+            raise ValueError("TRT-RTX MRoPE requires a positive, even rotary dimension no greater than the head size")
+        half = rotary_dim // 2
+        sections = self.rope_attrs["mrope_section"]
+        layout = self.rope_attrs["mrope_layout"]
+        if (
+            layout not in (0, 1)
+            or len(sections) != 3
+            or any(section < 0 for section in sections)
+            or sum(sections) != half
+        ):
+            raise ValueError(
+                "TRT-RTX MRoPE requires sectioned/interleaved layout and three non-negative sections "
+                "summing to half the rotary dimension"
+            )
+        if layout == 0:
+            return np.repeat(np.arange(3), sections)
+        # Match ORT MRotaryEmbedding / Qwen apply_interleaved_mrope: T is the
+        # default; H/W replace every third slot up to their section bounds.
+        # This is not round-robin exhaustion: [1, 1, 2] maps to [T, H, W, T].
+        owners = np.zeros(half, dtype=np.int64)
+        for dim in (1, 2):
+            owners[dim : min(3 * sections[dim], half) : 3] = dim
+        return owners
+
+    def make_mrope_positions(self, name, position_ids, shape):
+        # position_ids[3, B, S] -> Gather(0), Gather(1), Gather(2)
+        positions = []
+        for dim in range(3):
+            index = self.make_expansion_constant(f"{name}/position_index_{dim}", dim)
+            self.make_gather(f"{name}/positions_{dim}", [position_ids, index], ir.DataType.INT64, shape, axis=0)
+            positions.append(f"{name}/positions_{dim}/output_0")
+        return positions
+
+    def make_mrope_cache(self, name, kind, cache, positions, owners, axes, dtype, leading):
+        # cache -> Gather(T/H/W positions) -> Where(H) -> Where(W) -> Unsqueeze(head axis)
+        cache_shape = [*leading, len(owners)]
+        streams = []
+        for dim, position in enumerate(positions):
+            self.make_gather(f"{name}/{kind}_{dim}", [cache, position], dtype, cache_shape, axis=0)
+            streams.append(f"{name}/{kind}_{dim}/output_0")
+        selected = streams[0]
+        for dim in (1, 2):
+            mask = self.make_expansion_constant(f"{name}/{kind}_mask_{dim}", owners == dim, np.bool_)
+            self.make_where(f"{name}/{kind}_select_{dim}", [mask, streams[dim], selected], dtype, cache_shape)
+            selected = f"{name}/{kind}_select_{dim}/output_0"
+        self.make_unsqueeze(f"{name}/{kind}/Unsqueeze", [selected, axes], dtype, [*leading, 1, len(owners)])
+        return f"{name}/{kind}/Unsqueeze/output_0"
+
+    def make_mrope_rotation(self, name, heads, cos, sin, dtype, shape):
+        # heads -> Gather(x1/x2) -> [x1*cos - x2*sin, x2*cos + x1*sin] -> Concat
+        #                                                              -> optional pair interleaving
+        rotary_dim = shape[-1]
+        half = rotary_dim // 2
+        pair_shape = [*shape[:-1], half]
+        interleaved = self.rope_attrs["interleaved"]
+        first = np.arange(0, rotary_dim, 2) if interleaved else np.arange(half)
+        second = first + 1 if interleaved else first + half
+        parts = []
+        for label, indices in (("first", first), ("second", second)):
+            index = self.make_expansion_constant(f"{name}/{label}_indices", indices)
+            self.make_gather(f"{name}/{label}", [heads, index], dtype, pair_shape, axis=-1)
+            parts.append(f"{name}/{label}/output_0")
+        x1, x2 = parts
+        rotated = []
+        for label, left, right, make_op in (("first", x1, x2, self.make_sub), ("second", x2, x1, self.make_add)):
+            self.make_mul(f"{name}/{label}/cos", [left, cos], dtype, pair_shape)
+            self.make_mul(f"{name}/{label}/sin", [right, sin], dtype, pair_shape)
+            make_op(
+                f"{name}/{label}/rotate",
+                [f"{name}/{label}/cos/output_0", f"{name}/{label}/sin/output_0"],
+                dtype,
+                pair_shape,
+            )
+            rotated.append(f"{name}/{label}/rotate/output_0")
+        self.make_concat(f"{name}/Concat", rotated, dtype, shape, axis=-1)
+        merged = f"{name}/Concat/output_0"
+        if interleaved:
+            order = self.make_expansion_constant(
+                f"{name}/interleave_indices", np.stack([np.arange(half), np.arange(half) + half], axis=1).ravel()
+            )
+            self.make_gather(f"{name}/Interleave", [merged, order], dtype, shape, axis=-1)
+            merged = f"{name}/Interleave/output_0"
+        return merged
+
+    def make_mrope_output(self, name, heads, rotated, output, dtype, shape):
+        # rotated + Gather(unrotated tail) -> Concat -> Reshape[B, S, N*H]
+        rotary_dim = shape[-1]
+        if rotary_dim < self.head_size:
+            tail_index = self.make_expansion_constant(f"{name}/tail_indices", np.arange(rotary_dim, self.head_size))
+            self.make_gather(
+                f"{name}/Tail", [heads, tail_index], dtype, [*shape[:-1], self.head_size - rotary_dim], axis=-1
+            )
+            self.make_concat(
+                f"{name}/ConcatTail", [rotated, f"{name}/Tail/output_0"], dtype, [*shape[:-1], self.head_size], axis=-1
+            )
+            rotated = f"{name}/ConcatTail/output_0"
+        flat_shape = self.make_expansion_constant(f"{name}/flat_shape", [0, 0, shape[-2] * self.head_size])
+        self.make_node("Reshape", [rotated, flat_shape], [output], name=name)
+        self.make_value(output, dtype, [*shape[:-2], shape[-2] * self.head_size])
+
     def make_layernorm_subgraph(self, name, **kwargs):
         # This method can be used to create multiple LayerNorm operations
         op_type = kwargs.pop("op_type")
@@ -21,7 +204,7 @@ class TRT_RTX:
         if op_type == "LayerNormalization":
             # Create LayerNorm op
             self.make_layernorm_op(name, op_type, inputs, outputs, skip, new_io_dtype, **kwargs)
-    
+
         elif op_type == "SkipLayerNormalization":
             # Create subgraph to calculate SkipLayerNorm
             self.make_skip_layer_norm(

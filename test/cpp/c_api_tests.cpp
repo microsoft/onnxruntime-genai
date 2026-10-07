@@ -1261,6 +1261,43 @@ TEST(CAPITests, EngineTurnOptionsGenerationPolicy) {
   }
 }
 
+TEST(CAPITests, EngineTurnOptionsDelimitedGuidanceSetters) {
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  constexpr const char* grammar = "start: \"ok\"";
+
+  auto expect_error = [](OgaResult* result) {
+    std::unique_ptr<OgaResult> error{result};
+    EXPECT_NE(error, nullptr);
+  };
+
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(nullptr, 11, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, nullptr));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), -1, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 11, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, ""));
+
+  // Both C and C++ entry points accept and copy a nonempty grammar. Invalid replacements leave
+  // the delimited configuration in place, so switching to whole-turn guidance still fails.
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(11, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 11, grammar));
+  expect_error(OgaTurnOptionsSetGuidance(options.get(), "regex", "ok"));
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(13, 14, grammar));
+
+  options->ClearGuidance();
+  EXPECT_NO_THROW(options->SetGuidance("regex", "ok"));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, grammar));
+
+  options->Reset();
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(11, 12, grammar));
+  options->ClearGuidance();
+  EXPECT_NO_THROW(options->SetGuidance("regex", "ok"));
+  request->Close();
+}
+
 // A model whose own search defaults keep every turn greedy silently overrides an explicit
 // do_sample. The caller cannot see those defaults through the options handle, so admission rejects
 // the turn and names the model-supplied cause instead of quietly selecting the top logit. One

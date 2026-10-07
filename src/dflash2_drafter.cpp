@@ -734,8 +734,8 @@ void Dflash2Drafter::ReleaseCapturedGraphs() noexcept {
   graph_ids_.Clear();
 }
 
-bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept {
-  return draft_eligible && first_position == 0;
+bool Dflash2CanJoin(bool draft_eligible, size_t first_position, size_t context_window) noexcept {
+  return draft_eligible && (first_position == 0 || context_window != 0);
 }
 
 bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest,
@@ -771,7 +771,11 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   if (feed.draft_eligible && feed.first_position != 0 && RestorePrefix(feed)) {
     return true;
   }
-  if (!Dflash2CanJoin(feed.draft_eligible, feed.first_position)) {
+  if (feed.first_position != 0 && feed.prefix_checkpoint) {
+    return false;
+  }
+  if (!Dflash2CanJoin(feed.draft_eligible, feed.first_position,
+                      config_.is_dspark ? 0 : context_window_)) {
     return false;
   }
   // Requests that arrive when the ring pool is full decode without DFlash 2 drafts instead of
@@ -782,7 +786,10 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
       return false;
     }
     // Claim the whole ring now so a second new request in the same step sees the smaller pool.
-    EnsureBlocks(requests_[feed.request], 0);
+    auto& state = requests_[feed.request];
+    state.cached_positions = feed.first_position;
+    state.context_start = feed.first_position;
+    EnsureBlocks(state, 0);
     return true;
   }
   // A full-attention pool only mirrors the target's blocks plus one query-block spill per sized
@@ -797,10 +804,17 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   return true;
 }
 
+bool Dflash2Drafter::HasContext(const RequestState& state, size_t end_position) const noexcept {
+  return state.context_start == 0 ||
+         (context_window_ != 0 && end_position >= state.context_start &&
+          end_position - state.context_start >= context_window_);
+}
+
 bool Dflash2Drafter::CanCapturePrefix(const Request* request, size_t token_count) const {
   const auto it = requests_.find(request);
   return ring_blocks_ != 0 && it != requests_.end() &&
          it->second.cached_positions == token_count &&
+         HasContext(it->second, token_count) &&
          it->second.blocks.size() == ring_blocks_;
 }
 
@@ -953,7 +967,10 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   // develops a hole; only the feeds that asked also contribute a query block.
   std::vector<size_t> block_feed_indices;
   for (const size_t i : served) {
-    if (feeds[i].wants_drafts) {
+    if (feeds[i].wants_drafts &&
+        HasContext(requests_.at(feeds[i].request),
+                   CheckedAdd(feeds[i].first_position, feeds[i].aux_row_count,
+                              "DFlash 2 context end"))) {
       block_feed_indices.push_back(i);
     }
   }

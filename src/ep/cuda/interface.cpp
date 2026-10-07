@@ -1018,6 +1018,15 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::CUDA; }
+  std::optional<bool> GetIsIntegrated(std::string& error) override {
+    int integrated{};
+    const auto result = cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, 0);
+    if (result != cudaSuccess) {
+      error = cudaGetErrorString(result);
+      return std::nullopt;
+    }
+    return integrated != 0;
+  }
   int GetDeviceId(const ProviderOptions*) override {
     int device_id{};
     CUDA_CHECK(cudaGetDevice(&device_id));
