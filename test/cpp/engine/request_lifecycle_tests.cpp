@@ -7,6 +7,7 @@
 // create/begin/schedule/continue/close move a request between Unassigned, Assigned, Active,
 // TurnComplete, and Closed.
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <memory>
@@ -1481,6 +1482,76 @@ TurnOptions GuidedOptions(std::string grammar) {
   options.guidance_type = "regex";
   options.guidance_data = std::move(grammar);
   return options;
+}
+
+TEST_F(RequestLifecycleTest, DelimitedGuidanceAdmitsAndMasksOnlyBetweenCommittedMarkers) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto tokenizer = guidance_model->CreateTokenizer();
+  auto single_token = [&](const char* text) {
+    const auto tokens = tokenizer->Encode(text);
+    EXPECT_EQ(tokens.size(), 1u) << text;
+    return tokens.size() == 1 ? tokens.front() : -1;
+  };
+  const int32_t opening = single_token("{");
+  const int32_t closing = single_token("}");
+  const int32_t body = single_token("!");
+  const int32_t before = single_token("a");
+  const int32_t after = single_token("b");
+  ASSERT_GE(std::min({opening, closing, body, before, after}), 0);
+  ASSERT_NE(opening, closing);
+  ASSERT_NE(body, opening);
+  ASSERT_NE(body, closing);
+
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8, before);
+  auto request = CreateEngineRequest(guidance_engine.engine);
+  TurnOptions options;
+  options.delimited_guidance = TurnOptions::DelimitedGuidance{opening, closing, "start: \"!\""};
+  options.max_generated_tokens = 8;
+
+  // Admission validates both the marker IDs and the grammar without consuming the first turn.
+  options.delimited_guidance->opening_token = EosToken(*guidance_model);
+  EXPECT_THROW(request->BeginTurn(Prompt(), options), std::invalid_argument);
+  EXPECT_TRUE(request->IsAwaitingFirstTurn());
+  options.delimited_guidance->opening_token = opening;
+  options.delimited_guidance->grammar = "start: /[/";
+  EXPECT_THROW(request->BeginTurn(Prompt(), options), std::runtime_error);
+  EXPECT_TRUE(request->IsAwaitingFirstTurn());
+  options.delimited_guidance->grammar = "start: \"!\"";
+  ASSERT_EQ(request->BeginTurn(Prompt(), options), 1u);
+  EXPECT_TRUE(request->HasDelimitedGuidance());
+  EXPECT_FALSE(request->HasGuidance());
+
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, before);
+  guidance_engine.executor->SetForcedToken(opening);
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, opening);
+  ASSERT_TRUE(request->HasGuidance());
+  EXPECT_NE(request->DraftTokenValidationError(), nullptr);
+
+  const auto mask = request->GetReadyGuidanceMask();
+  const auto allows = [&](int32_t token) {
+    const auto index = static_cast<size_t>(token);
+    return (mask[index / 32] & (uint32_t{1} << (index % 32))) != 0;
+  };
+  ASSERT_FALSE(mask.empty());
+  EXPECT_TRUE(allows(body));
+  EXPECT_FALSE(allows(closing));
+  EXPECT_FALSE(allows(after));
+
+  std::vector<float> body_logits(static_cast<size_t>(guidance_model->config_->model.vocab_size), 0.0f);
+  body_logits[closing] = 100.0f;
+  body_logits[body] = 50.0f;
+  guidance_engine.executor->SetVerifyRowLogits({std::move(body_logits)});
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, body);
+  guidance_engine.executor->SetVerifyRowLogits({});
+  guidance_engine.executor->SetForcedToken(closing);
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, closing);
+  EXPECT_FALSE(request->HasGuidance());
+  EXPECT_EQ(request->DraftTokenValidationError(), nullptr);
+
+  guidance_engine.executor->SetForcedToken(after);
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, after);
+  EXPECT_FALSE(request->IsTurnComplete());
 }
 
 TEST_F(RequestLifecycleTest, TerminalGuidanceTakesPrecedenceOverMinimumGeneratedTokens) {

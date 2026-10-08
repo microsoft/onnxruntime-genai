@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 import onnx_ir as ir
 import pytest
@@ -45,8 +45,9 @@ def test_moe_model_emits_one_gated_add(ep):
     assert kwargs["domain"] == "com.microsoft"
 
 
-def test_moe_model_emits_portable_gated_add_for_dml():
-    model = _make_model("dml")
+@pytest.mark.parametrize("ep", ["dml", "trt-rtx"])
+def test_moe_model_emits_portable_gated_add(ep):
+    model = _make_model(ep)
     name = "/model/layers.3/moe/GatedAdd"
     shape = ["batch_size", "sequence_length", model.hidden_size]
 
@@ -60,3 +61,120 @@ def test_moe_model_emits_portable_gated_add_for_dml():
     _, args, kwargs = model.calls[1]
     assert args == (name, ["routed", f"{name}/Mul/output_0"], model.io_dtype)
     assert kwargs["shape"] == shape
+
+
+def test_shared_expert_and_gated_add_node_names_are_unique():
+    model = _make_model("cuda")
+    model.intermediate_size = 64
+    model.shared_expert_intermediate_size = 128
+    model.mlp_attrs = {}
+    node_names = []
+
+    def make_matmul(self, weight, name, root_input):
+        node_names.append(name)
+        return name
+
+    def make_activation(self, layer_id, root_input):
+        name = f"/model/layers.{layer_id}/mlp/activation"
+        node_names.append(name)
+        return name
+
+    def make_mul(self, name, inputs, dtype, shape):
+        node_names.append(name)
+
+    def make_sigmoid(self, name, input_path, dtype, shape):
+        node_names.append(name)
+
+    def make_hidden_state_shape(self, last_dim=None):
+        return ["batch_size", "sequence_length", last_dim or self.hidden_size]
+
+    def make_node(self, op_type, **kwargs):
+        node_names.append(kwargs["name"])
+
+    model.make_matmul = MethodType(make_matmul, model)
+    model.make_activation = MethodType(make_activation, model)
+    model.make_mul = MethodType(make_mul, model)
+    model.make_sigmoid = MethodType(make_sigmoid, model)
+    model.make_hidden_state_shape = MethodType(make_hidden_state_shape, model)
+    model.make_node = MethodType(make_node, model)
+
+    projection = SimpleNamespace(bias=None)
+    shared_expert = SimpleNamespace(gate_proj=projection, up_proj=projection, down_proj=projection)
+    shared_output, shared_gate = model.make_shared_expert(3, shared_expert, "shared_gate", "root")
+    model.make_gated_add(
+        "/model/layers.3/moe/GatedAdd",
+        root_input="routed",
+        scaled_input=shared_output,
+        gate=shared_gate,
+        shape=["batch_size", "sequence_length", model.hidden_size],
+    )
+
+    assert node_names == [
+        "/model/layers.3/mlp/gate_proj/MatMul",
+        "/model/layers.3/mlp/up_proj/MatMul",
+        "/model/layers.3/mlp/activation",
+        "/model/layers.3/mlp/Mul",
+        "/model/layers.3/mlp/down_proj/MatMul",
+        "/model/layers.3/shared_expert_gate/MatMul",
+        "/model/layers.3/shared_expert_gate/Sigmoid",
+        "/model/layers.3/moe/GatedAdd",
+    ]
+    assert len(node_names) == len(set(node_names))
+
+
+@pytest.mark.parametrize(
+    "ep, use_paged_attention, hidden_rows_dim, expected_shape",
+    [
+        ("cuda", False, "num_tokens", ["batch_size", "sequence_length", 2048]),
+        ("trt-rtx", False, "num_tokens", ["batch_size", "sequence_length", 2048]),
+        ("cuda", True, "num_tokens", ["num_tokens", 2048]),
+        ("cuda", True, "num_logits", ["num_logits", 2048]),
+    ],
+)
+def test_moe_updates_decoder_residual(ep, use_paged_attention, hidden_rows_dim, expected_shape):
+    model = _make_model(ep)
+    model.use_paged_attention = use_paged_attention
+    model.hidden_rows_dim = hidden_rows_dim
+    model.make_ep_expansions_init()
+    model.moe_attrs = {"op_type": "QMoE"}
+    model.layernorm_attrs = {"skip_input": "attention_output"}
+    model.make_moe_preprocessing = lambda *args: None
+    model.make_moe_router = lambda *args: None
+    model.make_moe_op = lambda *args, **kwargs: None
+    model.make_shared_expert = lambda *args: ("shared", "gate")
+    moe = SimpleNamespace(shared_expert=object(), shared_expert_gate=object())
+
+    # make_moe ignores the subgraph's return value. The next decoder layer reads
+    # skip_input, which must include the routed and gated shared experts.
+    model.make_moe(3, moe, "normalized_hidden_states")
+
+    assert model.layernorm_attrs["skip_input"] == "/model/layers.3/moe/GatedAdd/output_0"
+    # The residual consumer must see the same rank and active row dimension as
+    # the expert inputs, including rows selected for last-layer logit pruning.
+    assert model.calls[-1][2]["shape"] == expected_shape
+
+
+@pytest.mark.parametrize(
+    "use_paged_attention, hidden_rows_dim, expected_shape",
+    [
+        (False, "num_tokens", ["batch_size", "sequence_length", 1]),
+        (True, "num_tokens", ["num_tokens", 1]),
+        (True, "num_logits", ["num_logits", 1]),
+    ],
+)
+def test_shared_expert_gate_preserves_hidden_layout(use_paged_attention, hidden_rows_dim, expected_shape):
+    model = _make_model("cuda")
+    model.use_paged_attention = use_paged_attention
+    model.hidden_rows_dim = hidden_rows_dim
+    model.intermediate_size = 16
+    model.shared_expert_intermediate_size = 8
+    model.mlp_attrs = {"output_0": "shared"}
+    model.make_mlp_proj = lambda *args: None
+    model.make_matmul = lambda projection, name, root_input: name
+
+    shared, gate = model.make_shared_expert(3, object(), object(), "normalized_hidden_states")
+
+    assert shared == "shared"
+    _, args, kwargs = model.calls[-1]
+    assert args[0] == gate
+    assert kwargs["shape"] == expected_shape

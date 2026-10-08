@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <span>
@@ -398,6 +399,451 @@ TEST_F(FixedStatePoolTest, DraftAttachmentRequiresExactFixedBoundaryAndRetainsLe
   EXPECT_FALSE(index.CanAttachDraftCheckpoint(registration.identity, block_size));
   EXPECT_FALSE(index.AttachDraftCheckpoint(registration.identity, fixed,
                                            std::make_shared<Dflash2PrefixCheckpoint>()));
+}
+
+TEST_F(FixedStatePoolTest, HybridPublicationRollsBackCapacityRefusalAndRetries) {
+  BlockPool blocks{4, 3};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 2;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/1, /*prefix_checkpoint_capacity=*/1};
+  MakeResident(pool, kRequestA, 7.0f, /*target_tokens=*/8);
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestA);
+
+  const std::array<int32_t, 4> unrelated{20, 21, 22, 23};
+  auto occupied = blocks.AllocateBlocks(4);
+  ASSERT_NE(index.Register(occupied.front(), unrelated, {}).identity, nullptr);
+  const std::array<int32_t, 8> tokens{1, 2, 3, 4, 5, 6, 7, 8};
+  auto suffix = blocks.AllocateBlocks(8);
+  auto refused = index.RegisterCheckpointedPrefix(suffix, tokens, {}, checkpoint);
+  EXPECT_EQ(refused.status, PrefixCacheRegistrationStatus::CapacityRefused);
+  EXPECT_EQ(index.IndexedBlocks(), 1u);
+  EXPECT_EQ(index.CheckpointCount(), 0u);
+  for (const auto& block : suffix) {
+    EXPECT_FALSE(block->HasIdentity());
+    EXPECT_EQ(block->RefCount(), 1u);
+  }
+
+  blocks.Free(occupied);
+  ASSERT_EQ(index.Reclaim(1), 1u);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(suffix, tokens, {}, checkpoint).identity, nullptr);
+  EXPECT_EQ(index.Match(tokens, tokens.size()).token_count, 8u);
+  EXPECT_EQ(index.CheckpointCount(), 1u);
+  blocks.Free(suffix);
+}
+
+TEST_F(FixedStatePoolTest, HybridPublicationDoesNotReplaceLeasedCheckpoint) {
+  BlockPool blocks{4, 3};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 3;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/2};
+  MakeResident(pool, kRequestA, 3.0f, /*target_tokens=*/4);
+  MakeResident(pool, kRequestB, 7.0f, /*target_tokens=*/8);
+  const std::array<int32_t, 4> first_tokens{20, 21, 22, 23};
+  auto first = blocks.AllocateBlocks(4);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     first, first_tokens, {}, pool.CapturePrefixCheckpoint(kRequestA))
+                .identity,
+            nullptr);
+  auto adopter = index.Match(first_tokens, first_tokens.size());
+  ASSERT_NE(adopter.fixed_state_checkpoint, nullptr);
+  blocks.AddRef(adopter.blocks);
+
+  const std::array<int32_t, 8> tokens{1, 2, 3, 4, 5, 6, 7, 8};
+  auto suffix = blocks.AllocateBlocks(8);
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestB);
+  EXPECT_EQ(index.RegisterCheckpointedPrefix(suffix, tokens, {}, checkpoint).status,
+            PrefixCacheRegistrationStatus::CapacityRefused);
+  EXPECT_EQ(index.IndexedBlocks(), 1u);
+  EXPECT_EQ(index.Match(first_tokens, first_tokens.size()).fixed_state_checkpoint,
+            adopter.fixed_state_checkpoint);
+  for (const auto& block : suffix) {
+    EXPECT_FALSE(block->HasIdentity());
+    EXPECT_EQ(block->RefCount(), 1u);
+  }
+
+  blocks.Free(adopter.blocks);
+  adopter = {};
+  ASSERT_NE(index.RegisterCheckpointedPrefix(suffix, tokens, {}, checkpoint).identity, nullptr);
+  EXPECT_EQ(index.Match(tokens, tokens.size()).token_count, 8u);
+  blocks.Free(first);
+  blocks.Free(suffix);
+}
+
+TEST_F(FixedStatePoolTest, HybridPublicationRollsBackAfterAllocationFailure) {
+  BlockPool blocks{4, 2};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 2;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  options.hash = [](uint64_t parent, std::span<const int32_t> tokens) {
+    static size_t second_block_calls = 0;
+    if (tokens.front() == 5 && ++second_block_calls % 2 == 0) {
+      throw std::bad_alloc{};
+    }
+    return PrefixCache::ChainHash(parent, tokens);
+  };
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/1, /*prefix_checkpoint_capacity=*/1};
+  MakeResident(pool, kRequestA, 7.0f, /*target_tokens=*/8);
+  const std::array<int32_t, 8> tokens{1, 2, 3, 4, 5, 6, 7, 8};
+  auto suffix = blocks.AllocateBlocks(8);
+  EXPECT_THROW(index.RegisterCheckpointedPrefix(
+                   suffix, tokens, {}, pool.CapturePrefixCheckpoint(kRequestA)),
+               std::bad_alloc);
+  EXPECT_EQ(index.IndexedBlocks(), 0u);
+  EXPECT_EQ(index.CheckpointCount(), 0u);
+  EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 1u);
+  for (const auto& block : suffix) {
+    EXPECT_FALSE(block->HasIdentity());
+    EXPECT_EQ(block->RefCount(), 1u);
+  }
+  blocks.Free(suffix);
+}
+
+TEST_F(FixedStatePoolTest, CompetingHybridPublicationKeepsCanonicalPhysicalHistory) {
+  BlockPool blocks{4, 4};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 4;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 2;
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/2};
+  MakeResident(pool, kRequestA, 3.0f, /*target_tokens=*/8);
+  MakeResident(pool, kRequestB, 7.0f, /*target_tokens=*/8);
+  const std::array<int32_t, 8> tokens{1, 2, 3, 4, 5, 6, 7, 8};
+  auto first = blocks.AllocateBlocks(8);
+  auto second = blocks.AllocateBlocks(8);
+  auto canonical = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(first, tokens, {}, canonical).identity, nullptr);
+  EXPECT_EQ(index.RegisterCheckpointedPrefix(
+                     second, tokens, {}, pool.CapturePrefixCheckpoint(kRequestB))
+                .status,
+            PrefixCacheRegistrationStatus::Duplicate);
+  const auto match = index.Match(tokens, tokens.size());
+  EXPECT_EQ(match.blocks, first);
+  EXPECT_EQ(match.fixed_state_checkpoint, canonical);
+  EXPECT_EQ(index.IndexedBlocks(), 2u);
+  for (const auto& block : second) {
+    EXPECT_FALSE(block->HasIdentity());
+    EXPECT_EQ(block->RefCount(), 1u);
+  }
+  blocks.Free(first);
+  blocks.Free(second);
+}
+
+TEST_F(FixedStatePoolTest, HybridBranchReplacementPreservesOldHitOnCaptureFailure) {
+  BlockPool blocks{4, 4};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 4;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/3, /*prefix_checkpoint_capacity=*/2};
+  MakeResident(pool, kRequestA, 7.0f, 8);
+  MakeResident(pool, kRequestB, 9.0f, 8);
+  const std::array<int32_t, 8> original{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::array<int32_t, 8> branch{1, 2, 3, 4, 5, 6, 7, 9};
+  auto first = blocks.AllocateBlocks(8);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     first, original, {}, pool.CapturePrefixCheckpoint(kRequestA))
+                .identity,
+            nullptr);
+  blocks.Free(first);
+  auto suffix = blocks.AllocateBlocks(8);
+  EXPECT_THROW(index.RegisterCheckpointedPrefix(suffix, branch, {}, []() -> std::shared_ptr<const FixedStatePrefixCheckpoint> {
+    throw std::bad_alloc{};
+  }),
+               std::bad_alloc);
+  EXPECT_EQ(index.IndexedBlocks(), 2u);
+  EXPECT_EQ(index.CheckpointCount(), 1u);
+  EXPECT_EQ(index.Metrics().evictions, 0u);
+  auto retained = index.Match(original, original.size());
+  ASSERT_EQ(retained.token_count, 8u);
+  {
+    auto restored = pool.Reserve(
+        std::array{Request{kRequestC, 9, 0, retained.fixed_state_checkpoint}});
+    ExpectInputRows(restored, 0, 7.0f);
+  }
+  retained = {};
+  for (const auto& block : suffix) {
+    EXPECT_FALSE(block->HasIdentity());
+    EXPECT_EQ(block->RefCount(), 1u);
+  }
+
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     suffix, branch, {}, pool.CapturePrefixCheckpoint(kRequestB))
+                .identity,
+            nullptr);
+  auto match = index.Match(branch, branch.size());
+  ASSERT_EQ(match.token_count, 8u);
+  EXPECT_EQ(match.blocks, suffix);
+  {
+    auto replacement = pool.Reserve(
+        std::array{Request{kRequestC, 9, 0, match.fixed_state_checkpoint}});
+    ExpectInputRows(replacement, 0, 9.0f);
+  }
+  EXPECT_EQ(index.Match(original, original.size()).token_count, 0u);
+  EXPECT_EQ(index.Metrics().evictions, 2u);
+  blocks.Free(suffix);
+}
+
+TEST_F(FixedStatePoolTest, HybridBranchMetadataFailurePreservesOldHit) {
+  BlockPool blocks{4, 4};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 4;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  static thread_local bool fail_staging = false;
+  static thread_local size_t hash_calls = 0;
+  hash_calls = 0;
+  options.hash = [](uint64_t parent, std::span<const int32_t> tokens) {
+    if (fail_staging && ++hash_calls == 4) {
+      throw std::bad_alloc{};
+    }
+    return PrefixCache::ChainHash(parent, tokens);
+  };
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/2};
+  MakeResident(pool, kRequestA, 7.0f, 8);
+  MakeResident(pool, kRequestB, 9.0f, 8);
+  const std::array<int32_t, 8> original{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::array<int32_t, 8> branch{1, 2, 3, 4, 5, 6, 7, 9};
+  auto first = blocks.AllocateBlocks(8);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     first, original, {}, pool.CapturePrefixCheckpoint(kRequestA))
+                .identity,
+            nullptr);
+  blocks.Free(first);
+  auto suffix = blocks.AllocateBlocks(8);
+  bool captured = false;
+  fail_staging = true;
+  EXPECT_THROW(index.RegisterCheckpointedPrefix(suffix, branch, {}, [&] {
+    captured = true;
+    return pool.CapturePrefixCheckpoint(kRequestB);
+  }),
+               std::bad_alloc);
+  fail_staging = false;
+  EXPECT_FALSE(captured);
+  EXPECT_EQ(index.Match(original, original.size()).token_count, 8u);
+  EXPECT_EQ(index.Metrics().evictions, 0u);
+  for (const auto& block : suffix) {
+    EXPECT_FALSE(block->HasIdentity());
+    EXPECT_EQ(block->RefCount(), 1u);
+  }
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     suffix, branch, {}, pool.CapturePrefixCheckpoint(kRequestB))
+                .identity,
+            nullptr);
+  EXPECT_EQ(index.Match(branch, branch.size()).blocks, suffix);
+  blocks.Free(suffix);
+}
+
+TEST_F(FixedStatePoolTest, HybridBranchCapacityRefusalPreservesOldHit) {
+  BlockPool blocks{4, 5};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 2;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/2};
+  MakeResident(pool, kRequestA, 7.0f, 8);
+  MakeResident(pool, kRequestB, 9.0f, 12);
+  const std::array<int32_t, 8> original{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::array<int32_t, 12> branch{1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12};
+  auto first = blocks.AllocateBlocks(8);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     first, original, {}, pool.CapturePrefixCheckpoint(kRequestA))
+                .identity,
+            nullptr);
+  blocks.Free(first);
+  auto suffix = blocks.AllocateBlocks(12);
+  bool captured = false;
+  EXPECT_EQ(index.RegisterCheckpointedPrefix(suffix, branch, {}, [&] {
+                   captured = true;
+                   return pool.CapturePrefixCheckpoint(kRequestB);
+                 })
+                .status,
+            PrefixCacheRegistrationStatus::CapacityRefused);
+  EXPECT_FALSE(captured);
+  EXPECT_EQ(index.Match(original, original.size()).token_count, 8u);
+  EXPECT_EQ(index.CheckpointCount(), 1u);
+  EXPECT_EQ(index.Metrics().evictions, 0u);
+  for (const auto& block : suffix) {
+    EXPECT_FALSE(block->HasIdentity());
+    EXPECT_EQ(block->RefCount(), 1u);
+  }
+  blocks.Free(suffix);
+}
+
+TEST_F(FixedStatePoolTest, HybridBranchReplacementWaitsForEveryOldHistoryLease) {
+  for (int lease_kind = 0; lease_kind < 3; ++lease_kind) {
+    SCOPED_TRACE(lease_kind);
+    BlockPool blocks{4, 4};
+    PrefixCacheOptions options;
+    options.enabled = true;
+    options.max_blocks = 4;
+    options.requires_checkpoint = true;
+    options.max_checkpoints = 1;
+    PrefixCache index{blocks, options};
+    FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/2};
+    MakeResident(pool, kRequestA, 7.0f, 8);
+    MakeResident(pool, kRequestB, 9.0f, 8);
+    const std::array<int32_t, 8> original{1, 2, 3, 4, 5, 6, 7, 8};
+    const std::array<int32_t, 8> branch{1, 2, 3, 4, 5, 6, 7, 9};
+    auto first = blocks.AllocateBlocks(8);
+    auto registration = index.RegisterCheckpointedPrefix(
+        first, original, {}, pool.CapturePrefixCheckpoint(kRequestA));
+    ASSERT_NE(registration.identity, nullptr);
+    PrefixCacheMatch held_match;
+    std::shared_ptr<Dflash2PrefixCheckpoint> held_draft;
+    if (lease_kind != 0) {
+      blocks.Free(first);
+    }
+    if (lease_kind == 1) {
+      held_match = index.Match(original, original.size());
+    } else if (lease_kind == 2) {
+      held_draft = std::make_shared<Dflash2PrefixCheckpoint>();
+      held_draft->token_count = original.size();
+      ASSERT_TRUE(index.AttachDraftCheckpoint(
+          registration.identity, index.Match(original, original.size()).fixed_state_checkpoint,
+          held_draft));
+    }
+    auto suffix = blocks.AllocateBlocks(8);
+    bool captured = false;
+    EXPECT_EQ(index.RegisterCheckpointedPrefix(suffix, branch, {}, [&] {
+                     captured = true;
+                     return pool.CapturePrefixCheckpoint(kRequestB);
+                   })
+                  .status,
+              PrefixCacheRegistrationStatus::CapacityRefused);
+    EXPECT_FALSE(captured);
+    EXPECT_EQ(index.Match(original, original.size()).token_count, 8u);
+    EXPECT_EQ(index.Metrics().evictions, 0u);
+    if (lease_kind == 0) {
+      blocks.Free(first);
+    }
+    held_match = {};
+    held_draft.reset();
+    ASSERT_NE(index.RegisterCheckpointedPrefix(
+                       suffix, branch, {}, pool.CapturePrefixCheckpoint(kRequestB))
+                  .identity,
+              nullptr);
+    EXPECT_EQ(index.Match(branch, branch.size()).blocks, suffix);
+    blocks.Free(suffix);
+  }
+}
+
+TEST_F(FixedStatePoolTest, HybridOrphanedHistoryCanPublishANewCheckpoint) {
+  BlockPool blocks{4, 5};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 5;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/1};
+  MakeResident(pool, kRequestA, 7.0f, 8);
+  MakeResident(pool, kRequestB, 9.0f, 12);
+  const std::array<int32_t, 12> tokens{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+  auto first = blocks.AllocateBlocks(8);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     first, std::span{tokens}.first(8), {}, pool.CapturePrefixCheckpoint(kRequestA))
+                .identity,
+            nullptr);
+  blocks.Free(first);
+  ASSERT_EQ(index.ReclaimCheckpoints(1), 1u);
+  EXPECT_EQ(index.Match(tokens, tokens.size()).token_count, 0u);
+  auto suffix = blocks.AllocateBlocks(12);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     suffix, tokens, {}, pool.CapturePrefixCheckpoint(kRequestB))
+                .identity,
+            nullptr);
+  EXPECT_EQ(index.Match(tokens, tokens.size()).token_count, 12u);
+  EXPECT_EQ(index.Match(tokens, tokens.size()).blocks, suffix);
+  EXPECT_EQ(index.Metrics().hash_collisions, 0u);
+  EXPECT_EQ(index.Metrics().duplicate_registrations, 0u);
+  blocks.Free(suffix);
+}
+
+TEST_F(FixedStatePoolTest, HybridBranchHashCollisionPreservesCanonicalHistory) {
+  BlockPool blocks{4, 4};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 4;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  options.hash = [](uint64_t, std::span<const int32_t> tokens) -> uint64_t {
+    return static_cast<uint64_t>(tokens.front());
+  };
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/1, /*prefix_checkpoint_capacity=*/1};
+  MakeResident(pool, kRequestA, 7.0f, 8);
+  const std::array<int32_t, 8> original{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::array<int32_t, 8> branch{1, 2, 3, 4, 5, 6, 7, 9};
+  auto first = blocks.AllocateBlocks(8);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     first, original, {}, pool.CapturePrefixCheckpoint(kRequestA))
+                .identity,
+            nullptr);
+  blocks.Free(first);
+  auto suffix = blocks.AllocateBlocks(8);
+  EXPECT_EQ(index.CheckCheckpointedPrefix(suffix, branch, {}),
+            PrefixCacheRegistrationStatus::HashCollision);
+  EXPECT_EQ(index.Match(original, original.size()).token_count, 8u);
+  EXPECT_EQ(index.Metrics().evictions, 0u);
+  blocks.Free(suffix);
+}
+
+TEST_F(FixedStatePoolTest, FailedCheckpointReplacementKeepsOldRowAndRetries) {
+  BlockPool blocks{4, 2};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 2;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  PrefixCache index{blocks, options};
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/1};
+  MakeResident(pool, kRequestA, 7.0f, /*target_tokens=*/4);
+  MakeResident(pool, kRequestB, 9.0f, /*target_tokens=*/4);
+  const std::array<int32_t, 4> first_tokens{1, 2, 3, 4};
+  const std::array<int32_t, 4> second_tokens{5, 6, 7, 8};
+  auto first = blocks.AllocateBlocks(4);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     first, first_tokens, {}, pool.CapturePrefixCheckpoint(kRequestA))
+                .identity,
+            nullptr);
+  const auto* replacement = index.ReclaimableCheckpoint();
+  ASSERT_NE(replacement, nullptr);
+  EXPECT_THROW(pool.CapturePrefixCheckpoint(kRequestB, replacement, [] {
+    throw std::bad_alloc{};
+  }),
+               std::bad_alloc);
+  EXPECT_EQ(index.Match(first_tokens, first_tokens.size()).fixed_state_checkpoint.get(), replacement);
+  EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 0u);
+  EXPECT_EQ(index.CheckpointCount(), 1u);
+
+  auto second = blocks.AllocateBlocks(4);
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestB, replacement, [&] {
+    EXPECT_EQ(index.ReclaimCheckpoints(1), 1u);
+  });
+  ASSERT_NE(checkpoint, nullptr);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(second, second_tokens, {}, checkpoint).identity, nullptr);
+  EXPECT_EQ(index.Match(second_tokens, second_tokens.size()).token_count, 4u);
+  blocks.Free(first);
+  blocks.Free(second);
 }
 
 TEST_F(FixedStatePoolTest, PrefixCheckpointMustBelongToTheAdoptingPool) {
@@ -977,6 +1423,75 @@ TEST_F(FixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   ExpectInputRow(reservation.Bindings()[3], 0, expected_gdn);
 }
 
+// The compact replay of a partial commit is launched by the next pool operation, so a checkpoint
+// captured right after the commit must still observe the replayed state.
+TEST_F(FixedStatePoolTest, PrefixCheckpointAfterPartialAcceptanceSeesReplayedState) {
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/1};
+  MakeResident(pool, kRequestA, 4.0f);
+  {
+    auto reservation = pool.Reserve(One(kRequestA, 4, 3));
+    FillStagedRows(reservation, 0, 99.0f);
+    const std::array<float, 6> conv_values{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
+    const std::array<float, 6> decay{0.5f, 0.25f, 1.0f, 0.5f, 1.0f, 1.0f};
+    const std::array<float, 6> key{2.0f, 3.0f, 4.0f, 5.0f, 1.0f, 1.0f};
+    const std::array<float, 12> delta{
+        1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_kind ==
+          Config::Model::Decoder::StateUpdateKind::CausalConv) {
+        FillConvUpdates(binding, 0, conv_values);
+      } else {
+        FillGdnUpdates(binding, 0, decay, key, delta);
+      }
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    reservation.Commit();
+  }
+
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(checkpoint, nullptr);
+  const std::array<FixedStateReservationRequest, 1> requests{
+      FixedStateReservationRequest{
+          kRequestB, /*target_tokens=*/3, /*capture_count=*/0, checkpoint}};
+  auto reservation = pool.Reserve(requests);
+  const std::array<float, 6> expected_conv{4.0f, 10.0f, 20.0f, 4.0f, 11.0f, 21.0f};
+  const std::array<float, 8> expected_gdn{
+      24.0f, 30.0f, 30.0f, 38.0f, 31.5f, 40.0f, 36.5f, 46.5f};
+  ExpectInputRow(reservation.Bindings()[0], 0, expected_conv);
+  ExpectInputRow(reservation.Bindings()[2], 0, expected_gdn);
+}
+
+// Discarding a prepared reservation drops the replay it deferred: the published state is untouched.
+TEST_F(FixedStatePoolTest, DiscardedPartialAcceptanceLeavesStateUnchanged) {
+  auto pool = MakePool(1);
+  MakeResident(*pool, kRequestA, 4.0f);
+  {
+    auto reservation = pool->Reserve(One(kRequestA, 4, 3));
+    FillStagedRows(reservation, 0, 99.0f);
+    const std::array<float, 6> conv_values{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
+    const std::array<float, 6> decay{0.5f, 0.25f, 1.0f, 0.5f, 1.0f, 1.0f};
+    const std::array<float, 6> key{2.0f, 3.0f, 4.0f, 5.0f, 1.0f, 1.0f};
+    const std::array<float, 12> delta{
+        1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_kind ==
+          Config::Model::Decoder::StateUpdateKind::CausalConv) {
+        FillConvUpdates(binding, 0, conv_values);
+      } else {
+        FillGdnUpdates(binding, 0, decay, key, delta);
+      }
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    reservation.PrepareCommit();
+    reservation.Discard();
+  }
+
+  auto reservation = pool->Reserve(One(kRequestA, 2));
+  ExpectInputRows(reservation, 0, 4.0f);
+}
+
 TEST_F(FixedStatePoolTest, DirectBindingsMixPartialAndFullAcceptance) {
   auto pool = MakePool(2);
   MakeResident(*pool, kRequestA, 4.0f);
@@ -1118,6 +1633,96 @@ TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   expect_tensor(*reservation.Bindings()[1].input, expected_conv);
   expect_tensor(*reservation.Bindings()[2].input, expected_gdn);
   expect_tensor(*reservation.Bindings()[3].input, expected_gdn);
+}
+
+// Realistic gated-delta-net geometries take the fast replay kernel, and a key width that is not a
+// multiple of 4 keeps the generic one; both must match the sequential host recurrence exactly.
+TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto& device = *model->p_device_kvcache_;
+
+  struct Geometry {
+    size_t heads, key_heads, value_width, key_width, capacity, kept;
+  };
+  const std::array<Geometry, 2> geometries{
+      Geometry{4, 2, 40, 128, 7, 3},  // fast kernel, with a partial row chunk
+      Geometry{3, 3, 5, 6, 4, 2},     // generic kernel
+  };
+  std::vector<DeviceSpan<float>> keepalive;
+  std::vector<std::vector<float>> expected;
+  std::vector<DeviceSpan<float>> outputs;
+  std::vector<StateUpdateReplayDesc> descriptors;
+  uint32_t seed = 1;
+  const auto next = [&seed] {
+    seed = seed * 1664525u + 1013904223u;
+    return static_cast<float>(seed >> 8) / static_cast<float>(1u << 24) - 0.5f;
+  };
+  for (const auto& g : geometries) {
+    const size_t state_count = g.heads * g.value_width * g.key_width;
+    const size_t capsule_count =
+        g.capacity * (g.heads + g.key_heads * g.key_width + g.heads * g.value_width);
+    std::vector<float> state(state_count), capsule(capsule_count);
+    for (auto& value : state) value = next();
+    for (auto& value : capsule) value = next();
+    const float* decay = capsule.data();
+    const float* key = decay + g.capacity * g.heads;
+    const float* delta = key + g.capacity * g.key_heads * g.key_width;
+
+    std::vector<float> reference = state;
+    for (size_t h = 0; h < g.heads; ++h) {
+      const size_t kh = h * g.key_heads / g.heads;
+      for (size_t v = 0; v < g.value_width; ++v) {
+        for (size_t k = 0; k < g.key_width; ++k) {
+          float s = reference[(h * g.value_width + v) * g.key_width + k];
+          for (size_t t = 0; t < g.kept; ++t) {
+            s = std::fma(key[(t * g.key_heads + kh) * g.key_width + k],
+                         delta[(t * g.heads + h) * g.value_width + v], s * decay[t * g.heads + h]);
+          }
+          reference[(h * g.value_width + v) * g.key_width + k] = s;
+        }
+      }
+    }
+
+    auto source = device.Allocate<float>(state_count);
+    auto destination = device.Allocate<float>(state_count);
+    auto capsule_device = device.Allocate<float>(capsule_count);
+    source.CopyFromCpu(state);
+    capsule_device.CopyFromCpu(capsule);
+    const float* capsule_base = capsule_device.Span().data();
+    descriptors.push_back(StateUpdateReplayDesc{
+        source.Span().data(),
+        destination.Span().data(),
+        nullptr,
+        capsule_base,
+        capsule_base + g.capacity * g.heads,
+        capsule_base + g.capacity * (g.heads + g.key_heads * g.key_width),
+        g.heads,
+        g.value_width,
+        g.key_width,
+        g.key_heads,
+        static_cast<uint32_t>(g.capacity),
+        static_cast<uint32_t>(g.kept),
+        static_cast<uint32_t>(sizeof(float)),
+        StateUpdateReplayKind::GatedDeltaNet,
+    });
+    keepalive.push_back(source);
+    keepalive.push_back(capsule_device);
+    outputs.push_back(destination);
+    expected.push_back(std::move(reference));
+  }
+
+  device.ReplayStateUpdates(descriptors.data(), descriptors.size());
+  device.Synchronize();
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const auto actual = outputs[i].CopyDeviceToCpu();
+    ASSERT_EQ(actual.size(), expected[i].size());
+    for (size_t j = 0; j < actual.size(); ++j) {
+      ASSERT_EQ(actual[j], expected[i][j]) << "descriptor " << i << " element " << j;
+    }
+  }
 }
 #endif
 

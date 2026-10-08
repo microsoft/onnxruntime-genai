@@ -167,7 +167,7 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
 
     std::vector<int64_t> sub_feat_shape = {num_feats, hidden_size};
     auto sub_feat = OrtValue::CreateTensor(
-        model_.p_device_->GetAllocator(), sub_feat_shape, feat_type);
+        p_session_device_->GetAllocator(), sub_feat_shape, feat_type);
 
     inputs_[pv_idx] = sub_pv.get();
     outputs_[0] = sub_feat.get();
@@ -176,9 +176,9 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
 
     size_t feature_offset_bytes = static_cast<size_t>(feat_offset * hidden_size) * feat_elem_size;
     size_t feature_size_bytes = static_cast<size_t>(num_feats * hidden_size) * feat_elem_size;
-    ByteWrapTensor(*model_.p_device_, *feat_full)
+    ByteWrapTensor(*p_session_device_, *feat_full)
         .subspan(feature_offset_bytes, feature_size_bytes)
-        .CopyFrom(ByteWrapTensor(*model_.p_device_, *sub_feat));
+        .CopyFrom(ByteWrapTensor(*p_session_device_, *sub_feat));
 
     feat_offset += num_feats;
   }

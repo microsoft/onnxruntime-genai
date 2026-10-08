@@ -15,6 +15,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -50,6 +51,24 @@ struct EngineRunTestAccess {
     engine.PublishDflash2DraftResults();
   }
 
+  static void PublishLattice(Engine& engine, Request& request, Dflash2Lattice lattice,
+                             size_t width) {
+    engine.dflash2_feeds_.assign(1, {.request = &request});
+    engine.dflash2_drafts_.assign(1, {});
+    engine.dflash2_draft_distributions_.assign(1, {});
+    engine.dflash2_lattices_.assign(1, std::move(lattice));
+    engine.dflash2_draft_widths_.assign(1, width);
+    engine.PublishDflash2DraftResults();
+  }
+
+  static std::vector<int32_t> StagedDrafts(const Request& request) {
+    return request.draft_tokens_;
+  }
+
+  static size_t DraftDistributionCount(const Request& request) {
+    return request.draft_token_distributions_.size();
+  }
+
   static int32_t DraftToken(const Request& request) {
     return request.draft_tokens_.front();
   }
@@ -76,6 +95,67 @@ struct EngineRunTestAccess {
 };
 
 namespace {
+
+class ScopedFailingCheckpointDevice final : public DeviceInterface {
+ public:
+  explicit ScopedFailingCheckpointDevice(Model& model)
+      : model_{model}, inner_{*model.p_device_kvcache_} {
+    model_.p_device_kvcache_ = this;
+  }
+  ScopedFailingCheckpointDevice(const ScopedFailingCheckpointDevice&) = delete;
+  ScopedFailingCheckpointDevice& operator=(const ScopedFailingCheckpointDevice&) = delete;
+  ~ScopedFailingCheckpointDevice() { model_.p_device_kvcache_ = &inner_; }
+
+  void FailNextWrapWhen(std::function<bool()> predicate) {
+    failure_predicate_ = std::move(predicate);
+  }
+  size_t FailureCount() const { return failure_count_; }
+
+  DeviceType GetType() const override { return inner_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    if (failure_predicate_ && failure_predicate_()) {
+      failure_predicate_ = {};
+      ++failure_count_;
+      throw std::bad_alloc{};
+    }
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return inner_.CreateGreedy(params);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
+    return inner_.CreateKeyValueCache(state);
+  }
+  void Synchronize() override { inner_.Synchronize(); }
+  bool SupportsOffsetTensorViews() const override {
+    return inner_.SupportsOffsetTensorViews();
+  }
+  bool SupportsTransactionalFixedState() const override {
+    return inner_.SupportsTransactionalFixedState();
+  }
+
+ private:
+  Model& model_;
+  DeviceInterface& inner_;
+  std::function<bool()> failure_predicate_;
+  size_t failure_count_{};
+};
 
 class TestBarrier {
  public:
@@ -2491,6 +2571,37 @@ TEST_F(EngineRunTest, SampledRatioSpeculativeRunAcceptsDraftsAndEmitsBonus) {
   EXPECT_EQ(engine.engine->GetSpeculativeStats().draft_tokens_accepted, 2u);
 }
 
+TEST_F(EngineRunTest, SampledLatticeProposalFollowsItsDrawsAndIsRatioVerified) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto options = SampledTurnOptions();
+  options.temperature = 1.0f;
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10), options);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+
+  // Three steps; the last is cut by the width. Step 1's row 1 is the one a walk that drew 12
+  // reads, and it points at 14 rather than row 0's 13.
+  Dflash2Lattice lattice;
+  lattice.top_k = 2;
+  lattice.candidate_ids = {11, 12, 13, 14, 15, 16};
+  lattice.scores = {-100.0f, 0.0f, -100.0f, 0.0f,
+                    0.0f, -100.0f, -100.0f, 0.0f,
+                    0.0f, -100.0f, 0.0f, -100.0f};
+  EngineRunTestAccess::PublishLattice(*engine.engine, *request, std::move(lattice), 2);
+  EXPECT_EQ(EngineRunTestAccess::StagedDrafts(*request), (std::vector<int32_t>{12, 14}));
+  EXPECT_EQ(EngineRunTestAccess::DraftDistributionCount(*request), 2u);
+
+  engine.executor->SetVerifyRowTokens({12, 14, 25});
+  std::array<EngineEvent, 3> events;
+  ASSERT_EQ(engine.engine->Run(events), 3u);
+  EXPECT_EQ(events[0].token, 12);
+  EXPECT_EQ(events[1].token, 14);
+  EXPECT_EQ(events[2].token, 25);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().draft_tokens_accepted, 2u);
+}
+
 TEST_F(EngineRunTest, SampledRatioSpeculativeRunUsesCanonicalTargetForCorrection) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
@@ -3876,6 +3987,249 @@ TEST_F(EngineRunTest, HybridBlockAlignedPromptRetainsLastAdoptableCheckpoint) {
   EXPECT_EQ(warm_event.request, warm);
   EXPECT_EQ(warm_event.usage.cached_prompt_tokens, 8u);
   EXPECT_EQ(warm->ProcessedSequenceLength(), 12);
+}
+
+TEST_F(EngineRunTest, HybridShortPrefixDoesNotStrandLongerCheckpoint) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/8);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 1;
+  batching.num_blocks = 32;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 23> prompt{
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+      14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24};
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    const auto& entry = context.plan->requests.front();
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, static_cast<float>(entry.target_cache_slots - entry.unprocessed_token_count));
+      FillFixedOutputRow(binding, 0, static_cast<float>(entry.target_cache_slots));
+    }
+  });
+  const auto finish = [&](const std::shared_ptr<Request>& request) {
+    EngineEvent event;
+    for (size_t step = 0; step < 8 && !request->IsTurnComplete(); ++step) {
+      event = RunOne(*engine.engine);
+    }
+    EXPECT_TRUE(request->IsTurnComplete());
+    EXPECT_EQ(event.request, request);
+    EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+    return event;
+  };
+
+  auto short_request = CreateRequestWithPrompt(
+      engine.engine, std::span<const int32_t>{prompt}.first(15));
+  EXPECT_EQ(finish(short_request).usage.cached_prompt_tokens, 0u);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 2u);
+  short_request->Close();
+
+  auto long_request = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(finish(long_request).usage.cached_prompt_tokens, 8u);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 4u);
+  long_request->Close();
+
+  auto repeat = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(finish(repeat).usage.cached_prompt_tokens, 16u);
+  const auto metrics = engine.engine->PrefixCacheStats();
+  ASSERT_TRUE(metrics.has_value());
+  EXPECT_EQ(metrics->duplicate_registrations, 0u);
+  EXPECT_EQ(metrics->hash_collisions, 0u);
+  EXPECT_EQ(metrics->retention_refusals, 0u);
+}
+
+TEST_F(EngineRunTest, HybridBranchBetweenCheckpointsPublishesItsLongerSuffix) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/8);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 2;
+  batching.num_blocks = 32;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 25> prompt{
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+      15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26};
+  std::vector<int32_t> seed(prompt.begin(), prompt.begin() + 17);
+  seed[15] = 30;
+  seed[16] = 29;
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    const auto& entry = context.plan->requests.front();
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, static_cast<float>(entry.target_cache_slots - entry.unprocessed_token_count));
+      FillFixedOutputRow(binding, 0, static_cast<float>(entry.target_cache_slots));
+    }
+  });
+  const auto finish = [&](std::span<const int32_t> tokens, size_t expected_cached) {
+    auto request = CreateRequestWithPrompt(engine.engine, tokens);
+    EngineEvent event;
+    for (size_t step = 0; step < 8 && !request->IsTurnComplete(); ++step) {
+      event = RunOne(*engine.engine);
+    }
+    EXPECT_TRUE(request->IsTurnComplete());
+    EXPECT_EQ(event.request, request);
+    EXPECT_EQ(event.usage.cached_prompt_tokens, expected_cached);
+    EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+    request->Close();
+  };
+  finish(seed, 0);
+  finish(seed, 16);
+  finish(prompt, 8);
+  finish(prompt, 24);
+  finish(seed, 8);
+  finish(seed, 16);
+  finish(prompt, 8);
+  finish(prompt, 24);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->duplicate_registrations, 0u);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->hash_collisions, 0u);
+}
+
+TEST_F(EngineRunTest, FailedHybridReplacementPreservesOldHitAndAllowsRetry) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/4);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 1;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  ScopedFailingCheckpointDevice device{*model_};
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 5> first_prompt{2, 3, 4, 5, 6};
+  const std::array<int32_t, 5> second_prompt{20, 21, 22, 23, 24};
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      FillFixedOutputRow(binding, 0, 7.0f);
+    }
+  });
+  auto first = CreateRequestWithPrompt(engine.engine, first_prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  ASSERT_EQ(RunOne(*engine.engine).request, first);
+  first->Close();
+  ASSERT_EQ(engine.cache->FixedStateSnapshot()->checkpoint_count, 1u);
+
+  // Fail checkpoint wrapper allocation after B's provisional KV registration, not step staging.
+  device.FailNextWrapWhen([&] {
+    return engine.cache->PrefixMetrics()->registered_blocks == 2;
+  });
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      FillFixedOutputRow(binding, 0, 9.0f);
+    }
+  });
+  auto failed = CreateRequestWithPrompt(engine.engine, second_prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(device.FailureCount(), 1u);
+  EXPECT_EQ(failed->ProcessedSequenceLength(), 4);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->publication_refusals, 1u);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 1u);
+  EXPECT_EQ(engine.cache->FixedStateSnapshot()->checkpoint_count, 1u);
+  ASSERT_EQ(RunOne(*engine.engine).request, failed);
+  failed->Close();
+
+  auto first_repeat = CreateRequestWithPrompt(engine.engine, first_prompt);
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, 7.0f);
+      FillFixedOutputRow(binding, 0, 7.0f);
+    }
+  });
+  const auto first_event = RunOne(*engine.engine);
+  ASSERT_EQ(first_event.request, first_repeat);
+  EXPECT_EQ(first_event.usage.cached_prompt_tokens, 4u);
+  first_repeat->Close();
+
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      FillFixedOutputRow(binding, 0, 9.0f);
+    }
+  });
+  auto retry = CreateRequestWithPrompt(engine.engine, second_prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  ASSERT_EQ(RunOne(*engine.engine).request, retry);
+  retry->Close();
+
+  auto second_repeat = CreateRequestWithPrompt(engine.engine, second_prompt);
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, 9.0f);
+      FillFixedOutputRow(binding, 0, 9.0f);
+    }
+  });
+  const auto second_event = RunOne(*engine.engine);
+  ASSERT_EQ(second_event.request, second_repeat);
+  EXPECT_EQ(second_event.usage.cached_prompt_tokens, 4u);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->publication_refusals, 1u);
+  EXPECT_EQ(device.FailureCount(), 1u);
+  EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+}
+
+TEST_F(EngineRunTest, HybridPartialChunksStayPrivateUntilCheckpointBoundary) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/6);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 1;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 19> prompt{
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+      14, 15, 16, 17, 18, 19, 20};
+  auto source = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(source->ProcessedSequenceLength(), 6);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 0u);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(source->ProcessedSequenceLength(), 12);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 3u);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(source->ProcessedSequenceLength(), 18);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 3u);
+  ASSERT_EQ(RunOne(*engine.engine).request, source);
+  source->Close();
+
+  auto repeat = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  const auto event = RunOne(*engine.engine);
+  EXPECT_EQ(event.request, repeat);
+  EXPECT_EQ(event.usage.cached_prompt_tokens, 12u);
+  EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+}
+
+TEST_F(EngineRunTest, ConcurrentHybridShortAndLongRequestsAllowLaterExtension) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/8);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 2;
+  batching.num_blocks = 32;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 23> prompt{
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+      14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24};
+  auto short_request = CreateRequestWithPrompt(
+      engine.engine, std::span<const int32_t>{prompt}.first(15));
+  auto long_request = CreateRequestWithPrompt(engine.engine, prompt);
+  std::array<EngineEvent, 8> events;
+  for (size_t step = 0; step < 8 && engine.engine->HasPendingRequests(); ++step) {
+    engine.engine->Run(events);
+  }
+  ASSERT_TRUE(short_request->IsTurnComplete());
+  ASSERT_TRUE(long_request->IsTurnComplete());
+  ASSERT_EQ(engine.engine->PrefixCacheStats()->duplicate_registrations, 1u);
+  short_request->Close();
+  long_request->Close();
+
+  for (const size_t expected_cached : {8u, 16u}) {
+    auto repeat = CreateRequestWithPrompt(engine.engine, prompt);
+    EngineEvent event;
+    for (size_t step = 0; step < 8 && !repeat->IsTurnComplete(); ++step) {
+      event = RunOne(*engine.engine);
+    }
+    ASSERT_TRUE(repeat->IsTurnComplete());
+    EXPECT_EQ(event.request, repeat);
+    EXPECT_EQ(event.usage.cached_prompt_tokens, expected_cached);
+    EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+    repeat->Close();
+  }
 }
 
 TEST_F(EngineRunTest, HybridPrefixCacheResumesPartwayThroughConfiguredChunk) {

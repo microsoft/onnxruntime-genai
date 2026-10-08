@@ -1586,12 +1586,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options, const char* guidance_type,
     const char* guidance_data);
-/** \brief Removes the configured grammar, so the Turn is unguided. */
+/** \brief Removes either whole-turn or delimited guidance, so the Turn is unguided. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsClearGuidance(
     OgaTurnOptions* options);
 /** \brief Restores every Turn option to its unset state. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsReset(
     OgaTurnOptions* options);
+/**
+ * \brief Sets marker-delimited Lark guidance for this Turn.
+ *
+ * Copies grammar immediately. opening_token and closing_token must be distinct nonnegative token
+ * IDs; grammar must be nonempty. The grammar describes only the body after the committed opening
+ * token and before the closing token. Outside that region generation is unguided. Marker IDs and
+ * grammar are validated against the model when the Turn is admitted, before Request mutation.
+ * An invalid setter call leaves the previous options unchanged. This mode and whole-turn guidance
+ * are mutually exclusive: call OgaTurnOptionsClearGuidance (or OgaTurnOptionsReset) before
+ * switching modes. The Engine must use dynamic batching. ClearGuidance and Reset both remove
+ * this configuration.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetDelimitedGuidance(
+    OgaTurnOptions* options, int32_t opening_token,
+    int32_t closing_token, const char* grammar);
 
 /** \brief Begins a Turn, copying input and supported options before return. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(

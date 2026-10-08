@@ -21,7 +21,8 @@ Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& n
   // So only create the transient input and reuse that ortvalue for previous
   // steps in the pipeline.
   if (mode == Embeddings::Mode::Input) {
-    embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
+    embeddings_ = std::make_unique<Tensor>(state_.p_session_device_inputs_, type_);
+    embeddings_->CreateTensor(shape_);
   }
 }
 
@@ -39,7 +40,7 @@ void Embeddings::Add() {
     state_.output_names_.push_back(name_.c_str());
   } else {
     index_ = state_.inputs_.size();
-    state_.inputs_.push_back(embeddings_.get());
+    state_.inputs_.push_back(embeddings_->GetOrtTensor());
     state_.input_names_.push_back(name_.c_str());
   }
 }
@@ -51,8 +52,8 @@ void Embeddings::UpdateSequenceLength(size_t new_length) {
     shape_[1] = new_length;
 
     if (mode_ == Embeddings::Mode::Input) {
-      embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
-      state_.inputs_[index_] = embeddings_.get();
+      embeddings_->CreateTensor(shape_, state_.params_->use_graph_capture && new_length == 1);
+      state_.inputs_[index_] = embeddings_->GetOrtTensor();
     }
   }
 }
@@ -70,10 +71,10 @@ void Embeddings::UseChunkView(size_t offset, size_t length) {
 
   const size_t element_size = Ort::SizeOf(type_);
   const size_t hidden_size = static_cast<size_t>(shape_[2]);
-  auto* raw = static_cast<uint8_t*>(embeddings_->GetTensorMutableRawData());
+  auto* raw = static_cast<uint8_t*>(embeddings_->GetMutableRawData());
 
   std::array<int64_t, 3> chunk_shape{shape_[0], static_cast<int64_t>(length), shape_[2]};
-  chunk_view_ = OrtValue::CreateTensor(embeddings_->GetTensorMemoryInfo(),
+  chunk_view_ = OrtValue::CreateTensor(embeddings_->GetOrtTensor()->GetTensorMemoryInfo(),
                                        raw + offset * hidden_size * element_size,
                                        length * hidden_size * element_size,
                                        std::span<const int64_t>(chunk_shape), type_);
@@ -86,7 +87,7 @@ void Embeddings::RestoreFullView() {
 
   chunk_view_ = nullptr;
   if (mode_ == Embeddings::Mode::Input) {
-    state_.inputs_[index_] = embeddings_.get();
+    state_.inputs_[index_] = embeddings_->GetOrtTensor();
   }
 }
 
@@ -96,8 +97,45 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
     throw std::runtime_error("Incorrect usage of the embeddings inputs and outputs.");
   }
 
-  // Share the input embeddings OrtValue* from other with the output embedding for this.
-  state_.outputs_[index_] = other.state_.inputs_[other.index_];
+  OrtValue* consumer = other.state_.inputs_[other.index_];
+  auto& consumer_device = *other.state_.p_session_device_inputs_;
+
+  if (SessionCanAccess(*state_.p_session_device_, consumer_device)) {
+    // Share the input embeddings OrtValue* from other with the output embedding for this.
+    staging_ = nullptr;
+    consumer_ = nullptr;
+    staging_bytes_ = consumer_bytes_ = {};
+    state_.outputs_[index_] = consumer;
+    return;
+  }
+
+  // The consumer allocated its input on a device this session has no EP for. Binding it as an
+  // output would have ORT write host bytes over that device pointer, so write a staging buffer on
+  // this session's own device instead and copy across in CopyToConsumer() once the session has run.
+  if (consumer != consumer_) {
+    // The decoder reallocated for a new sequence length: size the staging buffer to match and rewrap
+    // both sides once here, so steady-state decoding reuses the wrappers and their host mirrors.
+    auto consumer_shape = consumer->GetTensorTypeAndShapeInfo()->GetShape();
+    if (!staging_ || staging_shape_ != consumer_shape) {
+      staging_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), consumer_shape, type_);
+      staging_shape_ = std::move(consumer_shape);
+      staging_bytes_ = ByteWrapTensor(*state_.p_session_device_, *staging_);
+    }
+    consumer_ = consumer;
+    consumer_device_ = &consumer_device;
+    consumer_bytes_ = ByteWrapTensor(consumer_device, *consumer);
+  }
+  state_.outputs_[index_] = staging_.get();
+}
+
+void Embeddings::CopyToConsumer() {
+  if (!consumer_ || consumer_bytes_.empty())
+    return;
+
+  consumer_bytes_.CopyFrom(staging_bytes_);
+  // A copy onto a device is queued on its stream; wait for it so the next token cannot rewrite the
+  // host mirror while the transfer is still reading it.
+  consumer_device_->Synchronize();
 }
 
 }  // namespace Generators
