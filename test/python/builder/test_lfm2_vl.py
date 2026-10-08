@@ -32,17 +32,6 @@ def _load_builder_module(module_name):
 
 
 def _load_builder_entrypoint_module():
-    # `builder.py` imports every model class via `from builders import (...)`; stub the package so
-    # the architecture dispatch in `create_model` can be exercised with fake model classes.
-    builders_stub = types.ModuleType("builders")
-
-    def _stub_getattr(name):  # PEP 562: satisfies `from builders import <ModelClass>`
-        return type(name, (), {})
-
-    builders_stub.__getattr__ = _stub_getattr
-    builders_stub.__path__ = [str(BUILDERS_DIR)]
-    sys.modules["builders"] = builders_stub
-
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -110,8 +99,10 @@ def test_lfm2_vl_loads_the_vlm_transformers_model(monkeypatch, model_type):
     class FakeCausalLM(FakeLfm2VlModel):
         pass
 
-    monkeypatch.setattr(base_module, "Lfm2VlForConditionalGeneration", FakeLfm2VlModel)
-    monkeypatch.setattr(base_module, "AutoModelForCausalLM", FakeCausalLM)
+    transformers_stub = types.ModuleType("transformers")
+    transformers_stub.Lfm2VlForConditionalGeneration = FakeLfm2VlModel
+    transformers_stub.AutoModelForCausalLM = FakeCausalLM
+    monkeypatch.setattr(base_module, "transformers", transformers_stub)
 
     model = Model.__new__(Model)
     model.model_type = model_type
