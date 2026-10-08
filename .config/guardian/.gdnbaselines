@@ -41,6 +41,78 @@
       "createdDate": "2026-08-13 12:31:43Z",
       "expirationDate": "2027-01-30 12:46:28Z",
       "justification": "This error is baselined with an expiration date of 180 days from 2026-08-13 12:46:28Z"
+    },
+    "0f8bd4750eaf5a95e48e12e577c67e665512f769718397fa6ebd98c34462c66c": {
+      "signature": "0f8bd4750eaf5a95e48e12e577c67e665512f769718397fa6ebd98c34462c66c",
+      "alternativeSignatures": [
+        "a6225e330657500365722111a433bdef57a14ead83a523eda6e815d7ff57223e",
+        "479c791c285c1072f1def686c12fa94ad87364ed1f7a720b32bb6d87b05a059e",
+        "6559ec322ceb6554a12504a7bbcc1891220a54b48a91f5375aeccbba0bc2ca5b"
+      ],
+      "target": "build/cuda/linux-arm64/Release/libonnxruntime-genai-cuda.so",
+      "uriBaseId": "file:///N:/_work/1/onnxruntime-genai/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA3003",
+      "createdDate": "2026-10-07 13:48:54Z",
+      "expirationDate": "2027-03-26 13:52:02Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-10-07 13:52:02Z"
+    },
+    "ac9527584718ac2733eeda88a6ac89447baff91de6d3a2cd9a74ba029ee2c300": {
+      "signature": "ac9527584718ac2733eeda88a6ac89447baff91de6d3a2cd9a74ba029ee2c300",
+      "alternativeSignatures": [
+        "16e3219ad12e5177c72f97dfa35aa07ae6fb69e790a43d55c99454c2f393ef3f",
+        "92698799ba4244c4f78a6c815a8b9d324979fa8289ec3df4e721e3dd1ed8a2e3",
+        "ee9295229e21547d75345fb3f586c10b29ca95f342c19e30e7cb51a4a5549f28"
+      ],
+      "target": "build/cuda/linux-arm64/Release/libonnxruntime-genai-cuda.so",
+      "uriBaseId": "file:///N:/_work/1/onnxruntime-genai/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA3030",
+      "createdDate": "2026-10-07 13:48:54Z",
+      "expirationDate": "2027-03-26 13:52:02Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-10-07 13:52:02Z"
+    },
+    "f180cbb9144ac4cc85aa5c39bf8569adfdc8c6ea98d41065a61184e8a9aa4f3f": {
+      "signature": "f180cbb9144ac4cc85aa5c39bf8569adfdc8c6ea98d41065a61184e8a9aa4f3f",
+      "alternativeSignatures": [
+        "2ab8651a86f521bef9e1ee2efa2cfe0e9bbac7f4f0ddb17eca7d656527c99445",
+        "e123e379f7bcc5d8eb23e33bf7c435413670375c72592be93a92a25e35c1a2a1",
+        "03916c3e876a57383310577c0f1ce0ff2ad75ff7395f291bd856dfb1fb4355e0"
+      ],
+      "target": "build/cuda/linux-arm64/Release/libonnxruntime-genai.so",
+      "uriBaseId": "file:///N:/_work/1/onnxruntime-genai/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA3003",
+      "createdDate": "2026-10-07 13:48:54Z",
+      "expirationDate": "2027-03-26 13:52:02Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-10-07 13:52:02Z"
+    },
+    "a5f184cd2980321f97b34d39cf8c1757d7667814a45d53024a5bc91489ded900": {
+      "signature": "a5f184cd2980321f97b34d39cf8c1757d7667814a45d53024a5bc91489ded900",
+      "alternativeSignatures": [
+        "0dc30fb8111782b96c0f8bbf6627b552b80bcb744681eb10b5d3696ca21474a5",
+        "b4951713568efb36b96dc140bfc256e65492924525a69e768886d5520de6ae6d",
+        "8225a3b3ab6dd8fd625e5d4aaf5c2c27e99847444e77a3cff3bcc5450e80c516"
+      ],
+      "target": "build/cuda/linux-x64/Release/libonnxruntime-genai-cuda.so",
+      "uriBaseId": "file:///N:/_work/1/onnxruntime-genai/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA3003",
+      "createdDate": "2026-10-07 13:48:54Z",
+      "expirationDate": "2027-03-26 13:52:02Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-10-07 13:52:02Z"
     }
   }
 }
