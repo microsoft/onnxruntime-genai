@@ -50,6 +50,7 @@ same structure.
 | `drafter_options` | Drafter selection, source, quantization, attention, `optimizations`, `shared_weights`, and type-specific export settings. |
 | `speculative_options` | Graph requirements connecting the target and drafter. |
 | `runtime_config` | Inline runtime JSON fragment or a path/resource referencing one. |
+| `component_options` | Optional generic hidden-state backbone and named pre-built head graphs. |
 | `precision`, `search`, `extra_options` | Retained compatibility inputs. New recipes prefer the structured fields. |
 
 The target checkpoint remains Olive's `input_model`, or the direct builder's
@@ -523,6 +524,72 @@ Olive must not perform a second independent search merge on the new path.
 Updating only a runtime profile may reuse a validated metadata-only path for an
 existing artifact; it must never invent or modify graph capabilities. Automatic
 separate build/runtime caching is not required in the initial implementation.
+
+## Generic non-generative components
+
+`component_options` packages the exported model as a final-hidden-state backbone
+plus one or more named, pre-built ONNX head graphs:
+
+```json
+{
+  "backbone": {"filename": "backbone.onnx"},
+  "heads": [
+    {
+      "name": "classification",
+      "source": "heads/classification.onnx",
+      "filename": "classification.onnx",
+      "inputs": {"hidden_states": "encoder_output", "item_mask": "mask"},
+      "outputs": {"scores": "class_scores"}
+    }
+  ]
+}
+```
+
+The builder uses its existing `exclude_lm_head` path for the backbone and writes
+`component_manifest.json` with graph filenames and explicit logical-to-graph
+input/output bindings. Omitting `inputs` provides the concise
+`{"hidden_states": "hidden_states"}` default; `outputs` defaults to an empty
+object. Head graphs and every confined relative external-data file referenced by
+their ONNX protobufs are copied into the output directory. Absolute, traversing,
+missing, and conflicting external-data locations are rejected. Head computation
+and runtime selection remain outside Model Builder.
+
+### Pinned model-specific heads
+
+`component_options` also accepts a pinned local `model_source` instead of
+`heads`. The builder identifies the model from the artifact layout, not a
+hard-coded repository ID, and builds the head graph. `artifact_revision` and
+`base_revision` are mandatory. Materialize Hub snapshots at those revisions
+before export; checkpoints are loaded locally with
+`torch.load(..., weights_only=True)`.
+
+- **CLM-v0.1-8B** uses artifact revision
+  `e939398d4556fcd9400c76fa8c5a513202f42b0a` and the
+  `Qwen/Qwen3-8B` backbone. No verified upstream base revision is available, so
+  callers must provide an immutable pin rather than relying on an invented
+  default. Its verified `depth=3` projection is input, one
+  `Linear+LayerNorm+GELU` hidden block, and output; `layernorm=true` is required.
+  `clm_heads.onnx` performs both exact projection heads and records
+  last-token pooling plus scaled-dot scoring as caller-owned orchestration.
+- **jaredpalmer/kev-4b** uses PEFT adapter revision
+  `139fdd94f1b6a6ad80cc15e08fcb99cac885a101` and
+  `Qwen/Qwen3.5-4B-Base` revision
+  `1001bb4d826a52d1f399e183466143f4da7b741b`. The artifact must contain
+  `adapter_config.json` and `head.pt`. The base tokenizer is used and adapter
+  tokenizer files are ignored. The head gathers caller-provided decide and
+  box-end indices and applies masked, per-question softmax.
+
+```json
+{
+  "backbone": {"filename": "backbone.onnx"},
+  "model_source": "./pinned-kev-adapter",
+  "artifact_revision": "139fdd94f1b6a6ad80cc15e08fcb99cac885a101",
+  "base_revision": "1001bb4d826a52d1f399e183466143f4da7b741b"
+}
+```
+
+These exporters add no runtime ranking, decision, token-location, grouping, or
+request-orchestration API.
 
 ## 7. Complete Olive Example
 

@@ -126,6 +126,7 @@ class Model:
         self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = extra_options.get("hf_token", True)
         self.hf_remote = extra_options.get("hf_remote", False)
+        self.revision = extra_options.get("base_revision")
 
         # States for building the model
         self.graph = ir.Graph(
@@ -6187,6 +6188,7 @@ class Model:
                 cache_dir=self.cache_dir,
                 token=self.hf_token,
                 trust_remote_code=self.hf_remote,
+                revision=getattr(self, "revision", None),
                 **extra_kwargs,
             )
 
