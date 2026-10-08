@@ -158,6 +158,38 @@ space, with no space after the interval. Segment mode renders
 `[StartTime - StopTime] SegmentText`. All mode reports both views separately: the segment-timestamp
 transcript followed by the per-word timestamp transcript.
 
+### Building the examples
+
+These examples require headers, language bindings, and a native GenAI library from a build containing
+the timestamp APIs, together with the corresponding ONNX Runtime Extensions metadata support.
+Existing packages such as GenAI `0.17.0` do not provide those APIs. Until a feature-containing release
+is published:
+
+- For Python, use the wheel built from the implementation branch. Decode and finalization return
+  typed objects: read `result.timestamp_metadata`, then `.words` or `.segments`, and each record's
+  `.text`, `.start_time`, and `.stop_time` attributes rather than dictionary keys.
+- For C++, build the `model_asr` target with `MODEL_ASR=ON` and set `OGA_INCLUDE_DIR` and `OGA_LIB_DIR`
+  to the matching headers and native library.
+- For C#, pass `-p:UseLocalGenAI=true` to build against the local managed project. Run with matching
+  native libraries on the platform library search path; the project reference alone does not supply
+  the Linux native GenAI library. See the [general ASR sample](../examples/csharp/ModelASR/README.md)
+  and [segment timestamp sample](../examples/csharp/NemotronSpeechTimestamps/README.md).
+
+The C# package references remain at the common `0.17.0` baseline and must be updated to a release
+containing these APIs before using package-based builds. Selecting `timestamp_level: "off"` does not
+remove the timestamp API references from the C++ or C# example source.
+
+With a feature-enabled Python package installed, run the example regressions from the repository root:
+
+```bash
+python -m pytest test/python/test_onnxruntime_genai_api.py --test_models test/models -k asr_example_formats
+```
+
+The real-speech cases use `test/models/nemotron-speech-streaming` and `test/audios/jfk.flac`. Set
+`NEMOTRON_STREAMING_MODEL_PATH` to use a model outside the test fixtures. They exercise every timestamp
+level, trailing finalization, and VAD-skipped silence; they skip when the model or audio is absent.
+The VAD case requires a model with a configured VAD component. These tests run inference on CPU.
+
 ## Interval semantics
 
 Frame and time intervals are half-open: `[start, stop)`. Each RNNT token initially covers one

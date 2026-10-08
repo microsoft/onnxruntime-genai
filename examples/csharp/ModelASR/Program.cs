@@ -73,7 +73,6 @@ if (useVad == "true") {
 
 using var tokenizer = new Tokenizer(model);
 using var tokenizerStream = tokenizer.CreateStream();
-if (timestampsEnabled) tokenizerStream.CreateMetadataCoreStateUsingTokenizerConfig();
 using var genParams = new GeneratorParams(model);
 using var generator = new Generator(model, genParams);
 Console.WriteLine(new string('-', 60));
