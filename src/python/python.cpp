@@ -94,6 +94,10 @@ struct PyDirectoryTokenizer {
   std::vector<int32_t> Encode(const std::string& value) const {
     return tokenizer_.Encode(value);
   }
+  std::vector<std::vector<int32_t>> EncodeBatch(
+      const std::vector<std::string>& values) const {
+    return tokenizer_.EncodeBatch(values);
+  }
   int32_t PadTokenId() const { return tokenizer_.PadTokenId(); }
   DirectoryTokenizer tokenizer_;
 };
@@ -777,6 +781,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyDirectoryTokenizer>(m, "_DirectoryTokenizer")
       .def(pybind11::init<const std::string&>())
       .def("encode", &PyDirectoryTokenizer::Encode)
+      .def("encode_batch", &PyDirectoryTokenizer::EncodeBatch)
       .def_property_readonly("pad_token_id", &PyDirectoryTokenizer::PadTokenId);
 
   pybind11::class_<PyRankingSession>(m, "_RankingSession")

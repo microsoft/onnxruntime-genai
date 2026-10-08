@@ -69,6 +69,88 @@ struct Manifest : JSON::Element {
   Element& OnArray(std::string_view) override { return ignored; }
 };
 
+struct RuntimeComponentEntry : JSON::Element {
+  double cuda_graph_max_signatures{};
+  double cuda_graph_max_bytes{};
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "cuda_graph_max_signatures")
+      cuda_graph_max_signatures = JSON::Get<double>(value);
+    else if (name == "cuda_graph_max_bytes")
+      cuda_graph_max_bytes = JSON::Get<double>(value);
+  }
+};
+
+struct RuntimeComponents : JSON::Element {
+  std::unordered_map<std::string, RuntimeComponentEntry> values;
+  Element& OnObject(std::string_view name) override {
+    if (name.empty())
+      throw std::runtime_error("runtime component name must not be empty");
+    return values[std::string(name)];
+  }
+};
+
+struct RuntimeManifest : JSON::Element {
+  double schema_version{};
+  RuntimeComponents components;
+  IgnoreElement ignored;
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "schema_version")
+      schema_version = JSON::Get<double>(value);
+  }
+  Element& OnObject(std::string_view name) override {
+    if (name.empty()) return *this;
+    if (name == "components") return components;
+    return ignored;
+  }
+  Element& OnArray(std::string_view) override { return ignored; }
+};
+
+struct ComponentRuntimePolicy {
+  size_t max_signatures{};
+  size_t max_bytes{std::numeric_limits<size_t>::max()};
+};
+
+std::unordered_map<std::string, ComponentRuntimePolicy> LoadRuntimePolicies(
+    const fs::path& root) {
+  const auto path = root / "component_runtime.json";
+  if (!std::filesystem::is_regular_file(path.c_str())) return {};
+  std::ifstream stream(path.c_str(), std::ios::binary);
+  std::stringstream buffer;
+  buffer << stream.rdbuf();
+  RuntimeManifest manifest;
+  try {
+    JSON::Parse(manifest, buffer.str());
+  } catch (...) {
+    JSON::TranslateException("component_runtime.json");
+  }
+  if (manifest.schema_version != 1)
+    throw std::runtime_error(
+        "component_runtime.json schema_version must be 1");
+  std::unordered_map<std::string, ComponentRuntimePolicy> result;
+  for (const auto& [name, entry] : manifest.components.values) {
+    if (entry.cuda_graph_max_signatures < 0 ||
+        entry.cuda_graph_max_signatures >
+            static_cast<double>(std::numeric_limits<size_t>::max()) ||
+        std::floor(entry.cuda_graph_max_signatures) !=
+            entry.cuda_graph_max_signatures)
+      throw std::runtime_error(
+          "cuda_graph_max_signatures must be a non-negative integer");
+    if (entry.cuda_graph_max_bytes < 0 ||
+        entry.cuda_graph_max_bytes >
+            static_cast<double>(std::numeric_limits<size_t>::max()) ||
+        std::floor(entry.cuda_graph_max_bytes) !=
+            entry.cuda_graph_max_bytes)
+      throw std::runtime_error(
+          "cuda_graph_max_bytes must be a non-negative integer");
+    result[name] = {
+        static_cast<size_t>(entry.cuda_graph_max_signatures),
+        entry.cuda_graph_max_bytes
+            ? static_cast<size_t>(entry.cuda_graph_max_bytes)
+            : std::numeric_limits<size_t>::max()};
+  }
+  return result;
+}
+
 std::unordered_map<std::string, fs::path> LoadComponents(fs::path root) {
   auto manifest_path = root / "component_manifest.json";
   const auto canonical_root = std::filesystem::weakly_canonical(root.c_str());
@@ -83,6 +165,7 @@ std::unordered_map<std::string, fs::path> LoadComponents(fs::path root) {
     } catch (...) {
       JSON::TranslateException("component_manifest.json");
     }
+
     if (manifest.schema_version != 1)
       throw std::runtime_error("component_manifest.json schema_version must be 1");
     if (manifest.model_type.empty())
@@ -137,11 +220,55 @@ std::unordered_map<std::string, fs::path> LoadComponents(fs::path root) {
   return result;
 }
 
+}  // namespace
+
+struct ComponentPackageResources {
+  explicit ComponentPackageResources(const fs::path& path)
+      : root(std::filesystem::weakly_canonical(path.c_str())),
+        components(LoadComponents(root)),
+        graph_policies(LoadRuntimePolicies(root)) {
+    if (std::filesystem::is_regular_file(
+            (root / "genai_config.json").c_str()))
+      config = std::make_shared<const Config>(root, std::string_view{});
+  }
+  fs::path root;
+  std::unordered_map<std::string, fs::path> components;
+  std::unordered_map<std::string, ComponentRuntimePolicy> graph_policies;
+  std::shared_ptr<const Config> config;
+  std::mutex readiness_mutex;
+};
+
+namespace {
+
+std::shared_ptr<ComponentPackageResources> AcquirePackageResources(
+    const fs::path& package_path) {
+  static std::mutex registry_mutex;
+  static std::unordered_map<std::string,
+                            std::weak_ptr<ComponentPackageResources>>
+      registry;
+  const auto canonical =
+      std::filesystem::weakly_canonical(package_path.c_str());
+  const auto key = canonical.string();
+  std::lock_guard lock(registry_mutex);
+  for (auto it = registry.begin(); it != registry.end();) {
+    if (it->second.expired())
+      it = registry.erase(it);
+    else
+      ++it;
+  }
+  if (const auto found = registry.find(key); found != registry.end())
+    if (auto package = found->second.lock()) return package;
+  auto package =
+      std::make_shared<ComponentPackageResources>(fs::path(key));
+  registry[key] = package;
+  return package;
+}
+
 bool IsCudaProvider(std::string_view provider) {
   return provider == "cuda" || provider == "CUDAExecutionProvider";
 }
 
-bool KevCudaGraphEnabled() {
+bool LegacyKevCudaGraphEnabled() {
   const char* value = std::getenv("ORT_GENAI_KEV_CUDA_GRAPH");
   if (!value || !*value || std::string_view(value) == "0") return false;
   if (std::string_view(value) == "1") return true;
@@ -245,7 +372,7 @@ struct ComponentCudaGraphState {
 
   fs::path model_path;
   std::vector<std::string> providers;
-  std::unique_ptr<Config> config;
+  std::shared_ptr<const Config> config;
   DeviceInterface* device{};
   std::unique_ptr<OrtMemoryInfo> device_memory;
   std::unique_ptr<OrtRunOptions> eager_options;
@@ -254,20 +381,19 @@ struct ComponentCudaGraphState {
   bool multi_shape{};
   bool specialized{};
   bool disabled{};
+  size_t max_signatures{};
+  size_t max_persistent_bytes{std::numeric_limits<size_t>::max()};
+  size_t persistent_bytes{};
 };
 
 ComponentSession::ComponentSession(const fs::path& package_path, std::string component,
                                    const std::vector<std::string>& providers) {
-  auto components = LoadComponents(package_path);
-  auto found = components.find(component);
-  if (found == components.end()) throw std::runtime_error("component not declared: " + component);
-  std::unique_ptr<Config> component_config;
-  if (std::filesystem::is_regular_file(
-          (package_path / "genai_config.json").c_str()))
-    component_config =
-        std::make_unique<Config>(package_path, std::string_view{});
+  package_ = AcquirePackageResources(package_path);
+  auto found = package_->components.find(component);
+  if (found == package_->components.end())
+    throw std::runtime_error("component not declared: " + component);
   session_ = CreateComponentSession(found->second, providers, false,
-                                    component_config.get());
+                                    package_->config.get());
   input_names_ = session_->GetInputNames();
   output_names_ = session_->GetOutputNames();
   for (size_t i = 0; i < input_names_.size(); ++i) {
@@ -281,9 +407,18 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
       info.symbolic_dimensions.emplace_back(symbol ? symbol : "");
     inputs_.push_back(std::move(info));
   }
-  const bool kev_capture = component == "backbone" && KevCudaGraphEnabled();
-  const bool clm_capture = component == "fused_state_ranking";
-  if ((kev_capture || clm_capture) &&
+  size_t max_signatures =
+      component == "fused_state_ranking" ? 8 : 0;
+  size_t max_persistent_bytes = std::numeric_limits<size_t>::max();
+  if (const auto configured =
+          package_->graph_policies.find(component);
+      configured != package_->graph_policies.end()) {
+    max_signatures = configured->second.max_signatures;
+    max_persistent_bytes = configured->second.max_bytes;
+  }
+  else if (component == "backbone" && LegacyKevCudaGraphEnabled())
+    max_signatures = 1;
+  if (max_signatures &&
       std::any_of(providers.begin(), providers.end(), IsCudaProvider)) {
     Config config;
     for (const auto& provider : providers)
@@ -291,13 +426,15 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
     cuda_graph_ = std::make_unique<ComponentCudaGraphState>();
     cuda_graph_->model_path = found->second;
     cuda_graph_->providers = providers;
-    cuda_graph_->config = std::move(component_config);
+    cuda_graph_->config = package_->config;
     cuda_graph_->device = GetDeviceInterface(DeviceType::CUDA);
     EnsureDeviceOrtInit(*cuda_graph_->device, config);
     cuda_graph_->device_memory = cuda_graph_->device->GetMemoryInfo();
     cuda_graph_->eager_options = OrtRunOptions::Create();
     cuda_graph_->eager_options->AddConfigEntry("gpu_graph_id", "-1");
-    cuda_graph_->multi_shape = clm_capture;
+    cuda_graph_->max_signatures = max_signatures;
+    cuda_graph_->max_persistent_bytes = max_persistent_bytes;
+    cuda_graph_->multi_shape = max_signatures > 1;
   }
 }
 
@@ -325,6 +462,10 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
   std::lock_guard lock(mutex_);
   const auto& output_names = requested.empty() ? output_names_ : requested;
   const auto signature = TensorSignature(inputs, output_names);
+  std::unique_lock package_readiness_lock(package_->readiness_mutex,
+                                          std::defer_lock);
+  if (cuda_graph_ && !cuda_graph_->runs.contains(signature))
+    package_readiness_lock.lock();
 
   // Fixing symbolic dimensions folds host-side shape nodes so the backbone is
   // fully CUDA-resident and eligible for graph capture.
@@ -380,6 +521,7 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
           cuda_graph_->runs.begin()->second->graph_id);
 #endif
     cuda_graph_->runs.clear();
+    cuda_graph_->persistent_bytes = 0;
     session_.reset();
     session_ = CreateComponentSession(
         cuda_graph_->model_path, cuda_graph_->providers, false,
@@ -462,7 +604,28 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
     result.push_back(std::move(tensor));
   }
   if (cuda_graph_ && cuda_graph_->specialized) {
-    if (cuda_graph_->multi_shape && cuda_graph_->runs.size() >= 8)
+    if (cuda_graph_->multi_shape &&
+        cuda_graph_->runs.size() >= cuda_graph_->max_signatures)
+      return result;
+    size_t persistent_bytes{};
+    for (const auto& input : inputs) {
+      if (input.byte_count >
+          std::numeric_limits<size_t>::max() - persistent_bytes)
+        throw std::runtime_error(
+            "CUDA graph persistent input bytes overflow size_t");
+      persistent_bytes += input.byte_count;
+    }
+    for (const auto& output : result) {
+      if (output.data.size() >
+          std::numeric_limits<size_t>::max() - persistent_bytes)
+        throw std::runtime_error(
+            "CUDA graph persistent output bytes overflow size_t");
+      persistent_bytes += output.data.size();
+    }
+    if (persistent_bytes >
+        cuda_graph_->max_persistent_bytes -
+            std::min(cuda_graph_->persistent_bytes,
+                     cuda_graph_->max_persistent_bytes))
       return result;
     auto run = std::make_unique<ComponentCudaGraphState::Run>();
     run->signature = signature;
@@ -506,6 +669,7 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
     for (auto& output : run->outputs)
       run->binding->BindOutput(output.name.c_str(), *output.value);
     cuda_graph_->runs.emplace(signature, std::move(run));
+    cuda_graph_->persistent_bytes += persistent_bytes;
   }
   return result;
 }
@@ -667,6 +831,10 @@ struct OGA_CAPI_HANDLE OgaDirectoryTokenizer {
 
 struct OGA_CAPI_HANDLE OgaTokenIds {
   std::vector<int32_t> values;
+};
+
+struct OGA_CAPI_HANDLE OgaTokenIdSequences {
+  std::vector<std::vector<int32_t>> values;
 };
 
 extern "C" {
@@ -870,6 +1038,23 @@ OgaResult* OGA_API_CALL OgaDirectoryTokenizerEncode(
   OGA_CAPI_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaDirectoryTokenizerEncodeBatch(
+    const OgaDirectoryTokenizer* tokenizer, const char* const* texts,
+    size_t count, OgaTokenIdSequences** out) {
+  OGA_CAPI_TRY
+  auto& output = Required(out, "out");
+  if (!texts && count)
+    throw std::invalid_argument(
+        "texts must not be null when count is non-zero");
+  std::vector<const char*> values(texts, texts + count);
+  auto result = std::make_unique<OgaTokenIdSequences>();
+  result->values = Required(tokenizer, "tokenizer")
+                       .value.EncodeBatchRows(values);
+  output = result.release();
+  return nullptr;
+  OGA_CAPI_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaDirectoryTokenizerGetPadTokenId(
     const OgaDirectoryTokenizer* tokenizer, int32_t* out) {
   OGA_CAPI_TRY
@@ -889,5 +1074,31 @@ OgaResult* OGA_API_CALL OgaTokenIdsGetData(
 }
 
 void OGA_API_CALL OgaDestroyTokenIds(OgaTokenIds* token_ids) { delete token_ids; }
+
+OgaResult* OGA_API_CALL OgaTokenIdSequencesGetCount(
+    const OgaTokenIdSequences* sequences, size_t* out) {
+  OGA_CAPI_TRY
+  Required(out, "out") = Required(sequences, "sequences").values.size();
+  return nullptr;
+  OGA_CAPI_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenIdSequencesGetData(
+    const OgaTokenIdSequences* sequences, size_t index,
+    const int32_t** data, size_t* count) {
+  OGA_CAPI_TRY
+  const auto& values = Required(sequences, "sequences").values;
+  if (index >= values.size())
+    throw std::out_of_range("token sequence index is out of range");
+  Required(data, "data") = values[index].data();
+  Required(count, "count") = values[index].size();
+  return nullptr;
+  OGA_CAPI_CATCH
+}
+
+void OGA_API_CALL OgaDestroyTokenIdSequences(
+    OgaTokenIdSequences* sequences) {
+  delete sequences;
+}
 
 }  // extern "C"

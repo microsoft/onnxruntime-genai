@@ -10,6 +10,7 @@ import onnx
 import onnxruntime_genai as og
 import pytest
 from onnx import TensorProto, helper
+from onnxruntime_genai.onnxruntime_genai import _DirectoryTokenizer
 
 
 def _package(root: Path, filename: str = "graphs/arbitrary-name.onnx") -> Path:
@@ -129,6 +130,18 @@ def test_cuda_graph_capture_replays_and_falls_back_for_new_shape(tmp_path, monke
 
 def test_clm_cuda_graph_capture_replays_multiple_shapes(tmp_path, monkeypatch):
     package = _cuda_graph_package(tmp_path, "fused_state_ranking")
+    (package / "component_runtime.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "components": {
+                    "fused_state_ranking": {
+                        "cuda_graph_max_signatures": 2
+                    }
+                },
+            }
+        )
+    )
     try:
         session = og.ComponentSession(
             str(package), "fused_state_ranking", ["cuda"]
@@ -151,6 +164,24 @@ def test_clm_cuda_graph_capture_replays_multiple_shapes(tmp_path, monkeypatch):
         )
 
 
+def test_invalid_component_runtime_policy_is_rejected(tmp_path):
+    package = _package(tmp_path)
+    (package / "component_runtime.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "components": {
+                    "unusual.component": {
+                        "cuda_graph_max_signatures": -1
+                    }
+                },
+            }
+        )
+    )
+    with pytest.raises(RuntimeError, match="non-negative integer"):
+        og.ComponentSession(str(package), "unusual.component", ["cpu"])
+
+
 def test_manifest_mapping_arbitrary_filename_and_native_run(tmp_path):
     session = og.ComponentSession(str(_package(tmp_path)), "unusual.component", ["cpu"])
     value = np.asarray([[1.5, -2.0]], dtype=np.float32)
@@ -158,6 +189,21 @@ def test_manifest_mapping_arbitrary_filename_and_native_run(tmp_path):
     np.testing.assert_array_equal(result["output"], value)
     assert session.input_names == ["input"]
     assert session.input_info["input"]["shape"] == [-1, 2]
+
+
+def test_directory_tokenizer_batch_matches_individual_rows(tmp_path):
+    package = Path(
+        "/home/asonawane/non-generative/exports/mobius/"
+        "clm-v0.1-8b-fp16-backbone"
+    )
+    if not package.is_dir():
+        pytest.skip("CLM tokenizer package is unavailable")
+    tokenizer = _DirectoryTokenizer(str(package))
+    texts = ["short input", "a longer input with punctuation!", ""]
+
+    assert tokenizer.encode_batch(texts) == [
+        tokenizer.encode(text) for text in texts
+    ]
 
 
 def test_component_session_applies_genai_config_session_options(tmp_path):

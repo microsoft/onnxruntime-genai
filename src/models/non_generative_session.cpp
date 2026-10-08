@@ -4,10 +4,14 @@
 #include "../ort_genai_c_internal.h"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <list>
 #include <limits>
@@ -17,6 +21,7 @@
 #include <regex>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 
 namespace {
@@ -46,13 +51,22 @@ std::string PackageIdentity(const std::string& package_path,
   for (const auto& provider : providers) result << "|provider=" << provider;
   static constexpr std::string_view files[] = {
       "component_manifest.json", "tokenizer.json", "tokenizer_config.json",
+      "component_runtime.json",
       "encoder/model.onnx", "backbone/model.onnx", "state_head/model.onnx",
+      "safe_encoder/model.onnx",
       "action_head/model.onnx", "scorer/model.onnx", "clm_heads/model.onnx",
       "fused_state_ranking/model.onnx",
       "fused_state_ranking/model.onnx.data",
+      "fused_state_ranking.onnx",
       "fused_state_ranking.experimental.onnx",
+      "precomputed_action_projections.bin",
+      "precomputed_action_projections.json",
+      "clm_cuda_graph_buckets.txt",
+      "clm_cuda_graph_buckets.json",
+      "clm_fallback_idle_ms.txt",
       "pointer_head/model.onnx", "kev_head/model.onnx",
       "encoder/model.onnx.data", "backbone/model.onnx.data",
+      "safe_encoder/model.onnx.data",
       "state_head/model.onnx.data", "action_head/model.onnx.data",
       "scorer/model.onnx.data", "clm_heads/model.onnx.data",
       "pointer_head/model.onnx.data", "kev_head/model.onnx.data"};
@@ -92,6 +106,11 @@ class SessionLruCache {
 
   bool Get(const std::string& key, Value& value) {
     std::lock_guard lock(mutex_);
+    if (const auto pinned = pinned_.find(key); pinned != pinned_.end()) {
+      value = pinned->second.value;
+      ++hits_;
+      return true;
+    }
     const auto found = index_.find(key);
     if (found == index_.end()) {
       ++misses_;
@@ -103,39 +122,78 @@ class SessionLruCache {
     return true;
   }
 
-  void Put(std::string key, Value value) {
+  void Put(std::string key, Value value, size_t recompute_cost = 1) {
     std::lock_guard lock(mutex_);
     if (!entry_capacity_ || !byte_capacity_) return;
+    if (pinned_.contains(key)) return;
     const auto bytes = key.size() + size_(value);
-    if (bytes > byte_capacity_) return;
+    if (bytes > DynamicByteCapacity() ||
+        pinned_.size() >= entry_capacity_)
+      return;
     if (const auto found = index_.find(key); found != index_.end()) {
       byte_size_ -= found->second->bytes;
       entries_.erase(found->second);
       index_.erase(found);
     }
-    entries_.push_front({std::move(key), std::move(value), bytes});
+    entries_.push_front(
+        {std::move(key), std::move(value), bytes,
+         static_cast<double>(std::max<size_t>(recompute_cost, 1)) /
+             static_cast<double>(bytes)});
     index_[entries_.front().key] = entries_.begin();
     byte_size_ += bytes;
     Evict();
   }
 
+  void Pin(std::string key, Value value) {
+    std::lock_guard lock(mutex_);
+    if (!entry_capacity_ || !byte_capacity_)
+      throw std::runtime_error(
+          "cache capacity cannot hold package-pinned entries");
+    const auto bytes = key.size() + size_(value);
+    if (const auto found = pinned_.find(key); found != pinned_.end()) {
+      pinned_byte_size_ -= found->second.bytes;
+      pinned_.erase(found);
+    }
+    if (const auto found = index_.find(key); found != index_.end()) {
+      byte_size_ -= found->second->bytes;
+      entries_.erase(found->second);
+      index_.erase(found);
+    }
+    if (pinned_.size() + 1 > entry_capacity_ ||
+        pinned_byte_size_ + bytes > byte_capacity_)
+      throw std::runtime_error(
+          "package-pinned cache entries exceed configured capacity");
+    pinned_byte_size_ += bytes;
+    pinned_.emplace(std::move(key),
+                    PinnedEntry{std::move(value), bytes});
+    Evict();
+  }
+
   void SetCapacity(size_t entries, size_t bytes) {
     std::lock_guard lock(mutex_);
+    if (entries < pinned_.size() || bytes < pinned_byte_size_)
+      throw std::invalid_argument(
+          "cache capacity cannot be smaller than package-pinned entries");
     entry_capacity_ = entries;
     byte_capacity_ = bytes;
     Evict();
   }
 
-  void Clear() {
+  void Clear(bool include_pinned = false) {
     std::lock_guard lock(mutex_);
     entries_.clear();
     index_.clear();
     byte_size_ = 0;
+    if (include_pinned) {
+      pinned_.clear();
+      pinned_byte_size_ = 0;
+    }
   }
 
   OgaNonGenerativeCacheStats Stats() const {
     std::lock_guard lock(mutex_);
-    return {hits_, misses_, evictions_, entries_.size(), byte_size_,
+    return {hits_, misses_, evictions_, entries_.size() + pinned_.size(),
+            byte_size_ + pinned_byte_size_,
             entry_capacity_, byte_capacity_};
   }
 
@@ -144,23 +202,39 @@ class SessionLruCache {
     std::string key;
     Value value;
     size_t bytes;
+    double admission_score;
   };
+  struct PinnedEntry {
+    Value value;
+    size_t bytes;
+  };
+  size_t DynamicByteCapacity() const {
+    return byte_capacity_ > pinned_byte_size_
+               ? byte_capacity_ - pinned_byte_size_
+               : 0;
+  }
   void Evict() {
-    while ((!entry_capacity_ || !byte_capacity_ ||
-            entries_.size() > entry_capacity_ || byte_size_ > byte_capacity_) &&
+    while ((entries_.size() + pinned_.size() > entry_capacity_ ||
+            byte_size_ > DynamicByteCapacity()) &&
            !entries_.empty()) {
-      byte_size_ -= entries_.back().bytes;
-      index_.erase(entries_.back().key);
-      entries_.pop_back();
+      auto victim = std::prev(entries_.end());
+      for (auto it = entries_.begin(); it != entries_.end(); ++it)
+        if (it->admission_score < victim->admission_score)
+          victim = it;
+      byte_size_ -= victim->bytes;
+      index_.erase(victim->key);
+      entries_.erase(victim);
       ++evictions_;
     }
   }
   mutable std::mutex mutex_;
   std::list<Entry> entries_;
   std::unordered_map<std::string, typename std::list<Entry>::iterator> index_;
+  std::unordered_map<std::string, PinnedEntry> pinned_;
   size_t entry_capacity_{};
   size_t byte_capacity_{};
   size_t byte_size_{};
+  size_t pinned_byte_size_{};
   uint64_t hits_{};
   uint64_t misses_{};
   uint64_t evictions_{};
@@ -423,6 +497,16 @@ struct FeedStorage {
   std::vector<std::vector<std::byte>> bytes;
   std::vector<OgaComponentInput> inputs;
   template <typename T>
+  void AddView(std::string name, const std::vector<T>& value,
+               std::vector<int64_t> shape, OgaElementType type) {
+    static const std::byte empty{};
+    inputs.push_back(
+        {std::move(name),
+         value.empty() ? static_cast<const void*>(&empty)
+                       : static_cast<const void*>(value.data()),
+         value.size() * sizeof(T), std::move(shape), type});
+  }
+  template <typename T>
   void Add(std::string name, const std::vector<T>& value, std::vector<int64_t> shape,
            OgaElementType type) {
     bytes.emplace_back(value.size() * sizeof(T));
@@ -492,14 +576,16 @@ void AddPositionIds(FeedStorage& feeds, const NamedComponentSession& session,
 
 TokenBatch Tokenize(DirectoryTokenizer& tokenizer, const std::vector<std::string>& texts) {
   if (texts.empty()) throw std::invalid_argument("questions must be non-empty");
-  std::vector<std::vector<int32_t>> rows;
+  std::vector<std::string> normalized;
+  normalized.reserve(texts.size());
+  for (const auto& text : texts)
+    normalized.push_back(text.empty() ? " " : text);
+  auto rows = tokenizer.EncodeBatch(normalized);
   size_t width = 0;
-  for (const auto& text : texts) {
-    auto row = tokenizer.Encode(text.empty() ? " " : text);
+  for (auto& row : rows) {
     if (row.size() > 2048) row.resize(2048);
     if (row.empty()) throw std::invalid_argument("tokenization produced an empty row");
     width = std::max(width, row.size());
-    rows.push_back(std::move(row));
   }
   TokenBatch result;
   result.rows = rows.size();
@@ -514,8 +600,30 @@ TokenBatch Tokenize(DirectoryTokenizer& tokenizer, const std::vector<std::string
   return result;
 }
 
-TokenBatch BucketClmBatch(TokenBatch batch) {
-  static constexpr size_t buckets[] = {96, 120, 144, 168, 256, 512, 1024, 2048};
+std::vector<size_t> LoadClmBuckets(const std::string& package_path) {
+  std::vector<size_t> buckets;
+  std::ifstream input(std::filesystem::path(package_path) /
+                      "clm_cuda_graph_buckets.txt");
+  if (!input) return {96, 120, 144, 168, 256, 512, 1024, 2048};
+  size_t value{};
+  while (input >> value) {
+    if (!value || value > 2048)
+      throw std::runtime_error(
+          "CLM CUDA graph buckets must be in [1, 2048]");
+    if (!buckets.empty() && value <= buckets.back())
+      throw std::runtime_error(
+          "CLM CUDA graph buckets must be strictly increasing");
+    buckets.push_back(value);
+  }
+  if (!input.eof())
+    throw std::runtime_error("CLM CUDA graph bucket file is invalid");
+  if (buckets.empty())
+    throw std::runtime_error("CLM CUDA graph bucket file is empty");
+  return buckets;
+}
+
+TokenBatch BucketClmBatch(TokenBatch batch,
+                          const std::vector<size_t>& buckets) {
   const auto found = std::lower_bound(
       std::begin(buckets), std::end(buckets), batch.width);
   if (found == std::end(buckets) || *found == batch.width) return batch;
@@ -539,8 +647,9 @@ FeedStorage BackboneFeeds(const NamedComponentSession& session, const TokenBatch
   feeds.inputs.reserve(session.Inputs().size());
   const std::vector<int64_t> shape{static_cast<int64_t>(batch.rows),
                                    static_cast<int64_t>(batch.width)};
-  feeds.Add("input_ids", batch.ids, shape, OgaElementType_int64);
-  feeds.Add("attention_mask", batch.mask, shape, OgaElementType_int64);
+  feeds.AddView("input_ids", batch.ids, shape, OgaElementType_int64);
+  feeds.AddView("attention_mask", batch.mask, shape,
+                OgaElementType_int64);
   if (std::find(session.InputNames().begin(), session.InputNames().end(), "position_ids") !=
       session.InputNames().end()) {
     std::vector<int64_t> positions(batch.mask.size());
@@ -716,9 +825,81 @@ size_t FloatVectorBytes(const std::vector<float>& value) {
   return value.size() * sizeof(float);
 }
 
+void RequireFinite(const std::vector<float>& values, std::string_view name) {
+  if (std::any_of(values.begin(), values.end(),
+                  [](float value) { return !std::isfinite(value); }))
+    throw std::runtime_error(std::string(name) +
+                             " contains a non-finite value");
+}
+
+void RequireProbabilities(const std::vector<float>& values,
+                          std::string_view name) {
+  RequireFinite(values, name);
+  if (std::any_of(values.begin(), values.end(), [](float value) {
+        return value < 0.0f || value > 1.0f;
+      }))
+    throw std::runtime_error(std::string(name) +
+                             " contains a value outside [0, 1]");
+}
+
+std::chrono::milliseconds FallbackIdleTimeout(
+    const std::string& package_path) {
+  constexpr auto fallback = std::chrono::minutes(5);
+  std::ifstream input(std::filesystem::path(package_path) /
+                      "clm_fallback_idle_ms.txt");
+  if (!input) return fallback;
+  std::string configured;
+  std::getline(input, configured);
+  std::string trailing;
+  if (configured.empty() || std::getline(input, trailing))
+    throw std::invalid_argument(
+        "clm_fallback_idle_ms.txt must contain one non-negative integer");
+  uint64_t milliseconds{};
+  const std::string_view text(configured);
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), milliseconds);
+  if (error != std::errc{} || end != text.data() + text.size())
+    throw std::invalid_argument(
+        "OGA_CLM_FALLBACK_IDLE_MS must be a non-negative integer");
+  if (milliseconds >
+      static_cast<uint64_t>(std::chrono::milliseconds::max().count()))
+    throw std::invalid_argument(
+        "OGA_CLM_FALLBACK_IDLE_MS exceeds the supported range");
+  return std::chrono::milliseconds(milliseconds);
+}
+
+struct SharedFallbackEncoder {
+  SharedFallbackEncoder(const std::string& package_path,
+                        const std::vector<std::string>& providers)
+      : session(package_path, "safe_encoder", providers) {}
+  std::mutex operation_mutex;
+  NamedComponentSession session;
+};
+
+std::shared_ptr<SharedFallbackEncoder> AcquireSharedFallbackEncoder(
+    const std::string& key, const std::string& package_path,
+    const std::vector<std::string>& providers) {
+  static std::mutex registry_mutex;
+  static std::unordered_map<std::string, std::weak_ptr<SharedFallbackEncoder>>
+      registry;
+  std::lock_guard lock(registry_mutex);
+  for (auto it = registry.begin(); it != registry.end();) {
+    if (it->second.expired())
+      it = registry.erase(it);
+    else
+      ++it;
+  }
+  if (const auto found = registry.find(key); found != registry.end())
+    if (auto shared = found->second.lock()) return shared;
+  auto shared =
+      std::make_shared<SharedFallbackEncoder>(package_path, providers);
+  registry[key] = shared;
+  return shared;
+}
+
 struct NativeRankingSession {
   NativeRankingSession(std::string path, std::vector<std::string> configured_providers)
-      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(package_path), encoder(TryComponent(*this, "encoder", "backbone")) {
+      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(package_path), fallback_idle_timeout(FallbackIdleTimeout(package_path)), buckets(LoadClmBuckets(package_path)) {
     try {
       combined = std::make_unique<NamedComponentSession>(Component("clm_heads"));
     } catch (const std::exception& error) {
@@ -736,6 +917,28 @@ struct NativeRankingSession {
           std::string_view::npos)
         throw;
     }
+    precomputed_action_count = LoadPrecomputedActions();
+    if (!fused || !precomputed_action_count) EnsureEncoder();
+    if (fallback_idle_timeout.count() > 0 &&
+        std::filesystem::is_regular_file(
+            std::filesystem::path(package_path) / "safe_encoder" /
+            "model.onnx")) {
+      fallback_reaper = std::jthread([this](std::stop_token stop) {
+        const auto interval =
+            std::min(fallback_idle_timeout, std::chrono::milliseconds(1000));
+        std::unique_lock lock(fallback_mutex);
+        while (!stop.stop_requested()) {
+          fallback_condition.wait_for(lock, stop, interval,
+                                      [] { return false; });
+          if (stop.stop_requested()) break;
+          if (fallback_encoder &&
+              std::chrono::steady_clock::now() - fallback_last_used >=
+                  fallback_idle_timeout &&
+              fallback_encoder.use_count() == 1)
+            fallback_encoder.reset();
+        }
+      });
+    }
   }
   NamedComponentSession Component(const std::string& name) const {
     return NamedComponentSession(package_path, name, providers);
@@ -746,8 +949,41 @@ struct NativeRankingSession {
   mutable std::mutex operation_mutex;
   SessionLruCache<std::vector<float>> cache;
   DirectoryTokenizer tokenizer;
-  NamedComponentSession encoder;
+  std::unique_ptr<NamedComponentSession> encoder;
+  std::mutex fallback_mutex;
+  std::condition_variable_any fallback_condition;
+  std::shared_ptr<SharedFallbackEncoder> fallback_encoder;
+  std::chrono::steady_clock::time_point fallback_last_used{};
+  std::chrono::milliseconds fallback_idle_timeout;
+  std::jthread fallback_reaper;
+  std::vector<size_t> buckets;
   std::unique_ptr<NamedComponentSession> combined, state, action, scorer, fused;
+  size_t precomputed_action_count{};
+  size_t LoadPrecomputedActions();
+  NamedComponentSession& EnsureEncoder() {
+    if (!encoder)
+      encoder = std::make_unique<NamedComponentSession>(
+          TryComponent(*this, "encoder", "backbone"));
+    return *encoder;
+  }
+  std::shared_ptr<SharedFallbackEncoder> EnsureSafeEncoder() {
+    std::lock_guard lock(fallback_mutex);
+    if (fallback_encoder) {
+      fallback_last_used = std::chrono::steady_clock::now();
+      return fallback_encoder;
+    }
+    try {
+      fallback_encoder = AcquireSharedFallbackEncoder(
+          identity + "|safe_encoder", package_path, providers);
+    } catch (const std::exception& error) {
+      if (std::string_view(error.what()).find("component not declared:") ==
+          std::string_view::npos)
+        throw;
+      return {};
+    }
+    fallback_last_used = std::chrono::steady_clock::now();
+    return fallback_encoder;
+  }
   OgaModelResult Run(const OgaStructuredRequest& request);
   OgaRankingResult Rank(const OgaFreeFormRankRequest& request);
   void SetCacheCapacity(size_t entries, size_t bytes) {
@@ -765,9 +1001,80 @@ struct NativeRankingSession {
   void InvalidateCache() {
     std::lock_guard lock(operation_mutex);
     identity = PackageIdentity(package_path, providers);
-    cache.Clear();
+    cache.Clear(true);
+    precomputed_action_count = LoadPrecomputedActions();
+    std::lock_guard fallback_lock(fallback_mutex);
+    fallback_encoder.reset();
   }
 };
+
+size_t NativeRankingSession::LoadPrecomputedActions() {
+  const auto path =
+      std::filesystem::path(package_path) / "precomputed_action_projections.bin";
+  std::error_code error;
+  const auto exists = std::filesystem::exists(path, error);
+  if (error)
+    throw std::runtime_error(
+        "cannot inspect precomputed CLM action projections: " +
+        error.message());
+  if (!exists) return 0;
+  if (!std::filesystem::is_regular_file(path, error) || error)
+    throw std::runtime_error(
+        "precomputed CLM action projections are not a regular file");
+  std::ifstream input(path, std::ios::binary);
+  if (!input)
+    throw std::runtime_error(
+        "cannot open precomputed CLM action projections");
+  auto read_exact = [&](void* destination, size_t bytes,
+                        std::string_view field) {
+    if (bytes > static_cast<size_t>(
+                    std::numeric_limits<std::streamsize>::max()))
+      throw std::runtime_error(std::string(field) + " is too large");
+    input.read(static_cast<char*>(destination),
+               static_cast<std::streamsize>(bytes));
+    if (!input)
+      throw std::runtime_error(
+          "truncated precomputed CLM action projections at " +
+          std::string(field));
+  };
+  std::array<char, 8> magic{};
+  read_exact(magic.data(), magic.size(), "magic");
+  if (magic != std::array<char, 8>{'C', 'L', 'M', 'A', 'C', 'T', '1', '\0'})
+    throw std::runtime_error(
+        "invalid precomputed CLM action projection magic");
+  uint32_t count{};
+  read_exact(&count, sizeof(count), "record count");
+  if (count > 4096)
+    throw std::runtime_error(
+        "precomputed CLM action projection count exceeds 4096");
+  const auto mode = combined ? "combined" : "split";
+  for (uint32_t record = 0; record < count; ++record) {
+    uint32_t text_size{}, projection_size{};
+    read_exact(&text_size, sizeof(text_size), "text size");
+    read_exact(&projection_size, sizeof(projection_size),
+               "projection size");
+    if (!text_size || text_size > 1024 * 1024)
+      throw std::runtime_error(
+          "precomputed CLM action text size is invalid");
+    if (!projection_size || projection_size > 65536)
+      throw std::runtime_error(
+          "precomputed CLM action projection size is invalid");
+    std::string text(text_size, '\0');
+    read_exact(text.data(), text.size(), "text");
+    std::vector<float> projection(projection_size);
+    read_exact(projection.data(), projection.size() * sizeof(float),
+               "projection");
+    RequireFinite(projection, "precomputed CLM action projection");
+    std::ostringstream key;
+    key << identity << "|clm-action|" << mode << "|float32|"
+        << text.size() << ':' << text;
+    cache.Pin(key.str(), std::move(projection));
+  }
+  if (input.peek() != std::char_traits<char>::eof())
+    throw std::runtime_error(
+        "precomputed CLM action projection file has trailing data");
+  return count;
+}
 
 std::pair<std::vector<float>, size_t> EncodeAndPool(
     DirectoryTokenizer& tokenizer, NamedComponentSession& encoder,
@@ -781,6 +1088,7 @@ std::pair<std::vector<float>, size_t> EncodeAndPool(
       RequireHiddenShape(hidden_tensor, batch.rows, batch.width, "encoder hidden states");
   const auto hidden = FloatTensor(hidden_tensor);
   RequireFloatCount(hidden_tensor, hidden, "encoder hidden states");
+  RequireFinite(hidden, "encoder hidden states");
   std::vector<float> pooled(batch.rows * hidden_size);
   for (size_t row = 0; row < batch.rows; ++row) {
     const auto attended = std::accumulate(batch.mask.begin() + row * batch.width,
@@ -801,6 +1109,7 @@ std::pair<std::vector<float>, size_t> EncodeAndPool(
       pooled[row * hidden_size + i] =
           static_cast<float>(hidden[source + i] / norm);
   }
+  RequireFinite(pooled, "pooled encoder output");
   return {std::move(pooled), hidden_size};
 }
 
@@ -896,7 +1205,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       std::copy(cached[row].begin(), cached[row].end(),
                 action_projection.begin() + row * projection_size);
     }
-    auto batch = BucketClmBatch(Tokenize(tokenizer, texts));
+    auto batch = BucketClmBatch(Tokenize(tokenizer, texts), buckets);
     auto feeds = BackboneFeeds(*fused, batch);
     const auto selector_info = std::find_if(
         fused->Inputs().begin(), fused->Inputs().end(),
@@ -927,6 +1236,13 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
         selector[index] = uint16_t{0x3c00};
       feeds.Add("last_token_selector", selector, selector_shape,
                 OgaElementType_float16);
+    } else if (selector_info->type == OgaElementType_bfloat16) {
+      std::vector<uint16_t> selector(
+          batch.rows * batch.width, uint16_t{});
+      for (const auto index : selected_indices)
+        selector[index] = uint16_t{0x3f80};
+      feeds.Add("last_token_selector", selector, selector_shape,
+                OgaElementType_bfloat16);
     } else if (selector_info->type == OgaElementType_float32) {
       std::vector<float> selector(batch.rows * batch.width, 0.0f);
       for (const auto index : selected_indices) selector[index] = 1.0f;
@@ -936,14 +1252,14 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       throw std::runtime_error(
           "fused CLM last_token_selector must be float16 or float32");
     }
-    feeds.Add(
+    feeds.AddView(
         "action_projections", action_projection,
         {static_cast<int64_t>(candidate_count),
          static_cast<int64_t>(projection_size)},
         OgaElementType_float32);
     feeds.Add("temperature", std::vector<float>{request.temperature},
               {}, OgaElementType_float32);
-    feeds.Add(
+    feeds.AddView(
         "candidate_owners", owners,
         {static_cast<int64_t>(owners.size())}, OgaElementType_int64);
     const auto outputs = fused->Run(
@@ -966,7 +1282,8 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
           state_cache_keys[row],
           std::vector<float>(
               state_projection.begin() + row * projection_size,
-              state_projection.begin() + (row + 1) * projection_size));
+              state_projection.begin() + (row + 1) * projection_size),
+          texts[row].size());
     }
     fused_scored = true;
   }
@@ -975,13 +1292,27 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
   std::vector<float> pooled;
   size_t hidden_size{};
   if (!fully_cached && !fused_scored) {
-    std::tie(pooled, hidden_size) = EncodeAndPool(tokenizer, encoder, texts);
+    auto& encoder_session = EnsureEncoder();
+    auto encode_state = [&](const std::vector<std::string>& values) {
+      try {
+        return EncodeAndPool(tokenizer, encoder_session, values);
+      } catch (const std::runtime_error& error) {
+        if (std::string_view(error.what()).find("non-finite") ==
+            std::string_view::npos)
+          throw;
+        auto fallback = EnsureSafeEncoder();
+        if (!fallback) throw;
+        std::lock_guard fallback_lock(fallback->operation_mutex);
+        return EncodeAndPool(tokenizer, fallback->session, values);
+      }
+    };
+    std::tie(pooled, hidden_size) = encode_state(texts);
     if (!hidden_size || pooled.size() != texts.size() * hidden_size)
       throw std::runtime_error(
           "CLM pooled encoder output has invalid dimensions");
     if (!missing_texts.empty()) {
       auto [missing_pooled, missing_hidden_size] =
-          EncodeAndPool(tokenizer, encoder, missing_texts);
+          encode_state(missing_texts);
       if (missing_hidden_size != hidden_size)
         throw std::runtime_error(
             "CLM state/action encoder layouts do not match");
@@ -1015,19 +1346,19 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     FeedStorage scorer_feeds;
     scorer_feeds.bytes.reserve(4);
     scorer_feeds.inputs.reserve(4);
-    scorer_feeds.Add(
+    scorer_feeds.AddView(
         "state_projections", state_projection,
         {static_cast<int64_t>(question_count),
          static_cast<int64_t>(projection_size)},
         OgaElementType_float32);
-    scorer_feeds.Add(
+    scorer_feeds.AddView(
         "action_projections", action_projection,
         {static_cast<int64_t>(candidate_count),
          static_cast<int64_t>(projection_size)},
         OgaElementType_float32);
     scorer_feeds.Add("temperature", std::vector<float>{request.temperature},
                      {}, OgaElementType_float32);
-    scorer_feeds.Add(
+    scorer_feeds.AddView(
         "candidate_owners", owners,
         {static_cast<int64_t>(owners.size())}, OgaElementType_int64);
     const auto scorer_outputs =
@@ -1039,6 +1370,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     probabilities = FloatTensor(probability_tensor);
     RequireFloatCount(probability_tensor, probabilities,
                       "scorer probabilities");
+    RequireProbabilities(probabilities, "scorer probabilities");
   } else if (combined) {
     FeedStorage head;
     head.bytes.reserve(2);
@@ -1069,11 +1401,15 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     RequireFloatCount(state_tensor, state_projection, "state embedding");
     RequireFloatCount(action_tensor, missing_projection, "action embedding");
     RequireFloatCount(scale_tensor, scale, "effective logit scale");
+    RequireFinite(state_projection, "state embedding");
+    RequireFinite(missing_projection, "action embedding");
+    RequireFinite(scale, "effective logit scale");
     for (size_t row = 0; row < missing_indices.size(); ++row) {
       auto value = std::vector<float>(
           missing_projection.begin() + row * projection_size,
           missing_projection.begin() + (row + 1) * projection_size);
-      cache.Put(cache_keys[missing_indices[row]], value);
+      cache.Put(cache_keys[missing_indices[row]], value,
+                action_texts[missing_indices[row]].size());
       cached[missing_indices[row]] = std::move(value);
     }
     for (size_t row = 0; row < candidate_count; ++row)
@@ -1115,7 +1451,10 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       FeedStorage feeds;
       feeds.bytes.reserve(1);
       feeds.inputs.reserve(1);
-      feeds.Add("embeddings", values, {static_cast<int64_t>(rows), static_cast<int64_t>(columns)}, OgaElementType_float32);
+      feeds.AddView("embeddings", values,
+                    {static_cast<int64_t>(rows),
+                     static_cast<int64_t>(columns)},
+                    OgaElementType_float32);
       const auto tensors = session.Run(feeds.inputs, {"projections"});
       const auto& tensor = FindTensor(tensors, "projections");
       if (tensor.shape.size() != 2 || tensor.shape[1] <= 0)
@@ -1125,6 +1464,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       RequireShape(tensor, {rows, projection_size}, name);
       auto result = FloatTensor(tensor);
       RequireFloatCount(tensor, result, name);
+      RequireFinite(result, name);
       return std::pair{std::move(result), projection_size};
     };
     auto [state_projection, projection_size] = project(
@@ -1134,7 +1474,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       auto value = std::vector<float>(
           state_projection.begin() + row * projection_size,
           state_projection.begin() + (row + 1) * projection_size);
-      cache.Put(state_cache_keys[row], value);
+      cache.Put(state_cache_keys[row], value, texts[row].size());
     }
     if (!missing_indices.empty()) {
       auto [missing_projection, action_projection_size] = project(
@@ -1146,7 +1486,8 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
         auto value = std::vector<float>(
             missing_projection.begin() + row * projection_size,
             missing_projection.begin() + (row + 1) * projection_size);
-        cache.Put(cache_keys[missing_indices[row]], value);
+        cache.Put(cache_keys[missing_indices[row]], value,
+                  action_texts[missing_indices[row]].size());
         cached[missing_indices[row]] = std::move(value);
       }
     }
@@ -1164,19 +1505,19 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     FeedStorage scorer_feeds;
     scorer_feeds.bytes.reserve(4);
     scorer_feeds.inputs.reserve(4);
-    scorer_feeds.Add(
+    scorer_feeds.AddView(
         "state_projections", state_projection,
         {static_cast<int64_t>(question_count),
          static_cast<int64_t>(projection_size)},
         OgaElementType_float32);
-    scorer_feeds.Add(
+    scorer_feeds.AddView(
         "action_projections", action_projection,
         {static_cast<int64_t>(candidate_count),
          static_cast<int64_t>(projection_size)},
         OgaElementType_float32);
     scorer_feeds.Add("temperature", std::vector<float>{request.temperature},
                      {}, OgaElementType_float32);
-    scorer_feeds.Add(
+    scorer_feeds.AddView(
         "candidate_owners", owners,
         {static_cast<int64_t>(owners.size())}, OgaElementType_int64);
     const auto scorer_outputs =
@@ -1185,9 +1526,11 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     RequireShape(probability_tensor, {candidate_count}, "scorer probabilities");
     probabilities = FloatTensor(probability_tensor);
     RequireFloatCount(probability_tensor, probabilities, "scorer probabilities");
+    RequireProbabilities(probabilities, "scorer probabilities");
   }
   if (probabilities.size() != candidate_count)
     throw std::runtime_error("probability count does not match candidate count");
+  RequireProbabilities(probabilities, "CLM probabilities");
   OgaModelResult result{"clm", {}};
   size_t offset = 0;
   for (size_t i = 0; i < request.questions.size(); ++i) {
@@ -1414,8 +1757,8 @@ struct NativeDecisionSession {
   void InvalidateCache() {
     std::lock_guard lock(operation_mutex);
     identity = PackageIdentity(package_path, providers);
-    cache.Clear();
-    prefix_cache.Clear();
+    cache.Clear(true);
+    prefix_cache.Clear(true);
   }
 };
 
@@ -1437,7 +1780,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     if (state_tokens.size() > 8191) state_tokens.resize(8191);
     state_value.tokens.insert(state_value.tokens.end(), state_tokens.begin(),
                               state_tokens.end());
-    cache.Put(state_key, state_value);
+    cache.Put(state_key, state_value, state_value.tokens.size());
   }
   std::vector<std::vector<int64_t>> rows, option_indices;
   std::vector<Candidates> candidates;
@@ -1482,7 +1825,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
       throw std::invalid_argument(
           "state+question row exceeds 8192 tokens: " +
           std::to_string(state_value.tokens.size() + row.size()));
-    cache.Put(row_key, {row, indices});
+    cache.Put(row_key, {row, indices}, row.size());
     rows.push_back(std::move(row));
     option_indices.push_back(std::move(indices));
   }
@@ -1546,7 +1889,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
         ValidatePrefixState(binding, state);
         prefix.states.push_back(state);
       }
-      prefix_cache.Put(prefix_key, prefix);
+      prefix_cache.Put(prefix_key, prefix, state_value.tokens.size());
       ++prefix_runs;
     }
     if (prefix.length != state_value.tokens.size() ||
@@ -1558,7 +1901,8 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     branch_feeds.inputs.reserve(3 + state_bindings.size());
     const std::vector<int64_t> token_shape{static_cast<int64_t>(batch.rows),
                                            static_cast<int64_t>(batch.width)};
-    branch_feeds.Add("input_ids", batch.ids, token_shape, OgaElementType_int64);
+    branch_feeds.AddView("input_ids", batch.ids, token_shape,
+                         OgaElementType_int64);
     std::vector<int64_t> attention(
         batch.rows * (prefix.length + batch.width), 0);
     std::vector<int64_t> positions(batch.rows * batch.width, 0);
@@ -1572,7 +1916,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
         positions[token_index] = static_cast<int64_t>(prefix.length + column);
       }
     }
-    branch_feeds.Add(
+    branch_feeds.AddView(
         "attention_mask", attention,
         {static_cast<int64_t>(batch.rows),
          static_cast<int64_t>(prefix.length + batch.width)},
@@ -1646,14 +1990,14 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
                                   static_cast<int64_t>(batch.rows * batch.width),
                                   static_cast<int64_t>(hidden_size)}
                             : std::vector<int64_t>{static_cast<int64_t>(batch.rows), static_cast<int64_t>(batch.width), static_cast<int64_t>(hidden_size)};
-    head.Add("hidden_states", hidden, std::move(hidden_shape),
+    head.AddView("hidden_states", hidden, std::move(hidden_shape),
              OgaElementType_float32);
-    head.Add("decide_indices", decide_indices, {static_cast<int64_t>(rows.size())},
+    head.AddView("decide_indices", decide_indices, {static_cast<int64_t>(rows.size())},
              OgaElementType_int64);
-    head.Add("option_indices", padded,
+    head.AddView("option_indices", padded,
              {static_cast<int64_t>(rows.size()), static_cast<int64_t>(max_options)},
              OgaElementType_int64);
-    head.Add("option_mask", mask,
+    head.AddView("option_mask", mask,
              {static_cast<int64_t>(rows.size()), static_cast<int64_t>(max_options)},
              OgaElementType_bool);
     const auto pointer_outputs = pointer->Run(head.inputs, {"probabilities"});
@@ -1671,15 +2015,15 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
       decide_indices.push_back(static_cast<int64_t>(rows[i].size() - 1));
       indices.insert(indices.end(), option_indices[i].begin(), option_indices[i].end());
     }
-    head.Add("hidden_states", hidden,
+    head.AddView("hidden_states", hidden,
              {static_cast<int64_t>(batch.rows), static_cast<int64_t>(batch.width),
               static_cast<int64_t>(hidden_size)},
              OgaElementType_float32);
-    head.Add("decide_indices", decide_indices, {static_cast<int64_t>(rows.size())},
+    head.AddView("decide_indices", decide_indices, {static_cast<int64_t>(rows.size())},
              OgaElementType_int64);
-    head.Add("option_indices", indices, {static_cast<int64_t>(indices.size())},
+    head.AddView("option_indices", indices, {static_cast<int64_t>(indices.size())},
              OgaElementType_int64);
-    head.Add("option_owners", owners, {static_cast<int64_t>(owners.size())},
+    head.AddView("option_owners", owners, {static_cast<int64_t>(owners.size())},
              OgaElementType_int64);
     const auto pointer_outputs = pointer->Run(head.inputs, {"probabilities"});
     const auto& probability_tensor = FindTensor(pointer_outputs, "probabilities");

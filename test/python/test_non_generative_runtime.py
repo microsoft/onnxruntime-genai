@@ -139,6 +139,23 @@ def test_python_cache_controls(runtime, session_name):
         assert session.prefix_cache_stats["capacity"] == 1
 
 
+def test_precomputed_actions_remain_pinned_across_clear():
+    package = Path(
+        "/home/asonawane/non-generative/exports/mobius/"
+        "clm-v0.1-8b-fp16-bf16-fallback"
+    )
+    if not (package / "precomputed_action_projections.bin").is_file():
+        pytest.skip("precomputed CLM package is unavailable")
+    session = og.RankingSession(package, providers=["cuda"])
+    initial = session.cache_stats
+    if initial["entries"] == 0:
+        pytest.skip("package has no precomputed actions")
+
+    session.clear_cache()
+
+    assert session.cache_stats["entries"] == initial["entries"]
+
+
 @pytest.mark.skipif(
     os.getenv("ORT_GENAI_RUN_NON_GENERATIVE_INTEGRATION") != "1",
     reason="requires opt-in multi-gigabyte model packages",

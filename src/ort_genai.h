@@ -148,6 +148,8 @@ class OGA_CPP_ONLY DirectoryTokenizer {
   DirectoryTokenizer(const DirectoryTokenizer&) = delete;
   DirectoryTokenizer& operator=(const DirectoryTokenizer&) = delete;
   std::vector<int32_t> Encode(const std::string& text) const;
+  std::vector<std::vector<int32_t>> EncodeBatch(
+      const std::vector<std::string>& texts) const;
   int32_t PadTokenId() const;
 
  private:
@@ -651,6 +653,29 @@ inline std::vector<int32_t> DirectoryTokenizer::Encode(const std::string& text) 
   OgaCheckResult(OgaTokenIdsGetData(values.get(), &data, &count));
   if (!count) return {};
   return {data, data + count};
+}
+inline std::vector<std::vector<int32_t>> DirectoryTokenizer::EncodeBatch(
+    const std::vector<std::string>& texts) const {
+  std::vector<const char*> values;
+  values.reserve(texts.size());
+  for (const auto& text : texts) values.push_back(text.c_str());
+  OgaTokenIdSequences* raw{};
+  OgaCheckResult(OgaDirectoryTokenizerEncodeBatch(
+      handle_, values.data(), values.size(), &raw));
+  std::unique_ptr<OgaTokenIdSequences, decltype(&OgaDestroyTokenIdSequences)>
+      sequences(raw, OgaDestroyTokenIdSequences);
+  size_t count{};
+  OgaCheckResult(OgaTokenIdSequencesGetCount(sequences.get(), &count));
+  std::vector<std::vector<int32_t>> result;
+  result.reserve(count);
+  for (size_t index = 0; index < count; ++index) {
+    const int32_t* data{};
+    size_t size{};
+    OgaCheckResult(OgaTokenIdSequencesGetData(
+        sequences.get(), index, &data, &size));
+    result.emplace_back(data, data + size);
+  }
+  return result;
 }
 inline int32_t DirectoryTokenizer::PadTokenId() const {
   int32_t result{};
