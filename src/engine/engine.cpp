@@ -446,6 +446,9 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
           dflash2_max_batch_size);
     }
   }
+  if (dflash2_drafter) {
+    dflash2_drafter->SetPrefixCheckpointCapacity(cache_manager->DraftCheckpointCapacity());
+  }
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
 
@@ -561,7 +564,10 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
       continue;
     }
     try {
-      cache_manager_->DropUnleasedDraftCheckpoints();
+      if (dflash2_drafter_->AvailablePrefixCheckpoints() == 0 &&
+          !cache_manager_->ReclaimDraftCheckpoint()) {
+        continue;
+      }
       auto checkpoint = dflash2_drafter_->CapturePrefix(feed.request, entry.target_cache_slots);
       if (checkpoint && !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
         cache_manager_->RecordPrefixPublicationRefusal();

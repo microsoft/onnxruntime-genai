@@ -192,6 +192,7 @@ class PrefixCache final : private BlockReferenceObserver {
                              const std::shared_ptr<const FixedStatePrefixCheckpoint>& fixed_checkpoint,
                              std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint);
   void DropUnleasedDraftCheckpoints();
+  bool ReclaimDraftCheckpoint();
   size_t ReclaimCheckpoints(size_t checkpoints_needed);
   size_t ReclaimableCheckpoints() const;
   const FixedStatePrefixCheckpoint* ReclaimableCheckpoint() const;

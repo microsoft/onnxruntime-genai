@@ -401,6 +401,54 @@ TEST_F(FixedStatePoolTest, DraftAttachmentRequiresExactFixedBoundaryAndRetainsLe
                                            std::make_shared<Dflash2PrefixCheckpoint>()));
 }
 
+TEST_F(FixedStatePoolTest, DraftSnapshotReclamationDropsOnlyOneUnleasedSnapshot) {
+  constexpr size_t block_size = 4;
+  BlockPool blocks{block_size, 3};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 3;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 3;
+  FixedStatePool pool{model_, /*capacity=*/1, /*prefix_checkpoint_capacity=*/3};
+  PrefixCache index{blocks, options};
+  MakeResident(pool, kRequestA, 7.0f, block_size);
+  const std::array<std::array<int32_t, 5>, 3> histories{
+      std::array<int32_t, 5>{1, 2, 3, 4, 5}, {6, 7, 8, 9, 10}, {11, 12, 13, 14, 15}};
+  std::vector<std::shared_ptr<Block>> owned;
+  for (const auto& tokens : histories) {
+    auto allocated = blocks.AllocateBlocks(block_size);
+    ASSERT_EQ(allocated.size(), 1u);
+    auto registration = index.Register(allocated.front(), std::span<const int32_t>(tokens).first(block_size), {});
+    auto fixed = pool.CapturePrefixCheckpoint(kRequestA);
+    ASSERT_NE(fixed, nullptr);
+    ASSERT_TRUE(index.AttachCheckpoint(registration.identity, fixed));
+    auto draft = std::make_shared<Dflash2PrefixCheckpoint>();
+    draft->token_count = block_size;
+    ASSERT_TRUE(index.AttachDraftCheckpoint(registration.identity, fixed, std::move(draft)));
+    owned.push_back(std::move(allocated.front()));
+  }
+  auto leased = index.Match(histories[0], block_size);
+  ASSERT_NE(leased.draft_checkpoint, nullptr);
+  EXPECT_TRUE(index.ReclaimDraftCheckpoint());
+  size_t retained = 0;
+  for (const auto& tokens : histories) {
+    const auto match = index.Match(tokens, block_size);
+    EXPECT_EQ(match.token_count, block_size);
+    ASSERT_NE(match.fixed_state_checkpoint, nullptr);
+    if (match.draft_checkpoint) {
+      ++retained;
+    }
+  }
+  EXPECT_EQ(retained, 2u);
+  EXPECT_EQ(index.Match(histories[0], block_size).draft_checkpoint, leased.draft_checkpoint);
+  EXPECT_TRUE(index.ReclaimDraftCheckpoint());
+  EXPECT_FALSE(index.ReclaimDraftCheckpoint());
+  leased = {};
+  EXPECT_TRUE(index.ReclaimDraftCheckpoint());
+  EXPECT_FALSE(index.ReclaimDraftCheckpoint());
+  blocks.Free(owned);
+}
+
 TEST_F(FixedStatePoolTest, HybridPublicationRollsBackCapacityRefusalAndRetries) {
   BlockPool blocks{4, 3};
   PrefixCacheOptions options;

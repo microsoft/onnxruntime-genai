@@ -909,7 +909,7 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         raise ValueError("runtime_config.engine.dynamic_batching must be an object")
     check_fields(
         dynamic_batching,
-        {"max_batch_size", "max_scheduled_tokens", "num_blocks", "gpu_utilization_factor"},
+        {"max_batch_size", "max_scheduled_tokens", "num_blocks", "gpu_utilization_factor", "dflash2_max_snapshots"},
         "runtime_config.engine.dynamic_batching",
     )
     if "engine" in runtime_config and "engine" not in generated_config:
@@ -928,6 +928,13 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             raise ValueError(f"runtime_config.engine.dynamic_batching.{field_name} must be at most 2147483647")
     if dynamic_batching.get("max_batch_size", 1) > 256:
         raise ValueError("runtime_config.engine.dynamic_batching.max_batch_size must be at most 256")
+    if "dflash2_max_snapshots" in dynamic_batching:
+        value = dynamic_batching["dflash2_max_snapshots"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2_147_483_647:
+            raise ValueError(
+                "runtime_config.engine.dynamic_batching.dflash2_max_snapshots "
+                "must be an integer between 0 and 2147483647"
+            )
     if "gpu_utilization_factor" in dynamic_batching:
         value = dynamic_batching["gpu_utilization_factor"]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
@@ -1124,7 +1131,7 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
             raise ValueError(f"{path}.overlay.engine.dynamic_batching must be an object")
         check_fields(
             dynamic_batching,
-            {"num_blocks", "max_batch_size", "max_scheduled_tokens"},
+            {"num_blocks", "max_batch_size", "max_scheduled_tokens", "dflash2_max_snapshots"},
             f"{path}.overlay.engine.dynamic_batching",
         )
         search = overlay.get("search", {})

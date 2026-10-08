@@ -947,6 +947,32 @@ TEST(PagedKeyValueCacheManifestTest, OptionalDraftCheckpointDoesNotExhaustHybrid
   EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
 }
 
+TEST(PagedKeyValueCacheManifestTest, DraftSnapshotCountIsLimitedByConfigBudgetAndTargetCheckpoints) {
+  auto model = LoadSyntheticCompositeModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 4;
+  batching.num_blocks = 8;
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  for (const auto [requested, expected] :
+       {std::pair<size_t, size_t>{0, 0}, {1, 1}, {3, 3}, {100, 4}}) {
+    batching.dflash2_max_snapshots = requested;
+    auto manager = CacheManager::Create(model, 0, 0, block_bytes);
+    EXPECT_EQ(manager->DraftCheckpointCapacity(), expected);
+    EXPECT_EQ(manager->Snapshot().total_blocks, 8u - expected);
+  }
+  batching.dflash2_max_snapshots = 100;
+  auto manager = CacheManager::Create(model, 0, 0, 3 * block_bytes);
+  EXPECT_EQ(manager->DraftCheckpointCapacity(), 2u);
+  EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
+  manager.reset();
+
+  batching.prefix_caching = false;
+  manager = CacheManager::Create(model, 0, 0, block_bytes);
+  EXPECT_EQ(manager->DraftCheckpointCapacity(), 0u);
+  EXPECT_EQ(manager->Snapshot().total_blocks, 8u);
+}
+
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {
   auto model = LoadSyntheticPagedModel();
   auto& decoder = model->config_->model.decoder;

@@ -409,11 +409,10 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
       model_->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
       budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
     }
-    if (CanReserveDflash2PrefixCheckpoint(budget, auxiliary_reserved_memory_bytes,
-                                          optional_draft_checkpoint_bytes, target_block_bytes)) {
-      auxiliary_reserved_memory_bytes += optional_draft_checkpoint_bytes;
-      draft_checkpoint_enabled_ = true;
-    }
+    draft_checkpoint_capacity_ = Dflash2PrefixCheckpointCapacity(
+        budget, auxiliary_reserved_memory_bytes, optional_draft_checkpoint_bytes,
+        target_block_bytes, std::min(batching.dflash2_max_snapshots, prefix_checkpoint_capacity));
+    auxiliary_reserved_memory_bytes += draft_checkpoint_capacity_ * optional_draft_checkpoint_bytes;
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.

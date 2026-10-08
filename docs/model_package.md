@@ -265,8 +265,16 @@ two profiles may share the same memory range with
 - `engine.dynamic_batching.num_blocks`
 - `engine.dynamic_batching.max_batch_size`
 - `engine.dynamic_batching.max_scheduled_tokens`
+- `engine.dynamic_batching.dflash2_max_snapshots`
 - `search.chunk_size`
 - `speculative.max_draft_tokens`
+
+`dflash2_max_snapshots` defaults to `1`, accepts integers from `0` through
+`2147483647`, and uses `0` to disable windowed DFlash 2 prefix snapshots without
+disabling target prefix caching. The effective count is limited by the shared
+cache memory budget and target fixed-state checkpoint capacity (`max_batch_size`);
+it is not a guaranteed allocation. See [Engine prefix caching](paged_attention_engine.md)
+for snapshot capture, lease protection, and replacement behavior.
 
 Omitted fields retain their base values. Every other config field is rejected from a runtime
 profile overlay. In particular, profiles cannot override `search.max_length`; applications set

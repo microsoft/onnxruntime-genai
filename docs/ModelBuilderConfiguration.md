@@ -379,6 +379,10 @@ Allow supported settings under:
 - `search`, including generation parameters and `chunk_size`.
 - `speculative`, including `max_draft_tokens` and supported adaptation policy.
 - `engine.dynamic_batching`, including batch/token limits and cache allocation.
+- `engine.dynamic_batching.dflash2_max_snapshots`, an integer from `0` through
+  `2147483647` (default `1`). `0` disables windowed DFlash 2 prefix snapshots
+  without disabling target prefix caching. The runtime caps the effective
+  count by its cache memory budget and target checkpoint capacity (`max_batch_size`).
 - `model.<existing-component>.session_options` and `run_options`, including
   supported provider, allocator, threading, and profiling options.
 - `runtime_profiles`, for typed CUDA memory-class overlays applied before model

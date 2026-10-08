@@ -194,16 +194,49 @@ sliding-window KV rings and auxiliary caches that mirror every target block when
 `prefix_caching` is explicitly set to `true`. Existing configurations that omit
 the setting keep loading with caching disabled for those layouts, and builders
 emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
-can coexist with target prefix caching. For a windowed DFlash 2 drafter, one
+can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
 optional ring checkpoint can be attached to the exact indexed target boundary
 after its fixed-state checkpoint and the complete drafter proposal succeed.
 The ring is restored into newly allocated drafter blocks before a cached
-request joins at a nonzero position. An unleased older ring checkpoint may be
-replaced at a later boundary without evicting target blocks or fixed state.
+request joins at a nonzero position. Set
+`engine.dynamic_batching.dflash2_max_snapshots` to control the maximum number of
+retained DFlash 2 ring snapshots for a hybrid target with fixed state and prefix
+caching enabled. It defaults to `1`; `0` disables only drafter
+snapshots, not target prefix caching. Values must be integers from `0` through
+`2147483647`. The effective capacity is capped by the target fixed-state checkpoint
+capacity (`max_batch_size`) and the shared cache memory budget, reserving at least
+one target block. This applies to both explicit `num_blocks` and automatic
+`gpu_utilization_factor` sizing; insufficient memory reduces the snapshot count
+rather than exhausting the target pool. The setting is also supported in runtime-profile
+overlays. Snapshots are captured lazily. When the pool is full, only one unleased
+older ring checkpoint is replaced at a later boundary, without evicting target
+blocks or fixed state. Leased snapshots are never overwritten.
 If the matching draft checkpoint is absent, the request retains the full
 target hit and runs target-only until the windowed drafter has rebuilt its context.
 Full-attention DSpark remains target-only
 after a nonzero-position prefix hit.
+
+For example, retain up to four snapshots on a larger device while preserving
+the one-snapshot base default:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 512,
+      "max_batch_size": 8,
+      "dflash2_max_snapshots": 1
+    }
+  },
+  "runtime_profiles": [{
+    "id": "larger-snapshot-pool",
+    "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
+    "overlay": {
+      "engine": {"dynamic_batching": {"dflash2_max_snapshots": 4}}
+    }
+  }]
+}
+```
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 

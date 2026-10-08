@@ -974,6 +974,10 @@ void PagedKeyValueCache::DropUnleasedDraftCheckpoints() {
   prefix_cache_->DropUnleasedDraftCheckpoints();
 }
 
+bool PagedKeyValueCache::ReclaimDraftCheckpoint() {
+  return prefix_cache_->ReclaimDraftCheckpoint();
+}
+
 size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
     size_t checkpoints_needed) {
   return prefix_cache_->ReclaimCheckpoints(checkpoints_needed);

@@ -2542,6 +2542,11 @@ struct DynamicBatching_Element : JSON::Element {
     } else if (name == "prefix_caching") {
       v_->prefix_caching = JSON::Get<bool>(value);
       v_->prefix_caching_explicitly_set = true;
+    } else if (name == "dflash2_max_snapshots") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value < 0)
+        throw std::out_of_range("dflash2_max_snapshots must be >= 0");
+      v_->dflash2_max_snapshots = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2632,8 +2637,9 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     const auto parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
-    if (parsed <= 0) {
-      throw std::out_of_range(std::string{name} + " must be > 0");
+    if (parsed < 0 || (parsed == 0 && name != "dflash2_max_snapshots")) {
+      throw std::out_of_range(std::string{name} +
+                              (name == "dflash2_max_snapshots" ? " must be >= 0" : " must be > 0"));
     }
     if (name == "num_blocks") {
       v_.num_blocks = static_cast<size_t>(parsed);
@@ -2641,6 +2647,8 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
       v_.max_batch_size = static_cast<size_t>(parsed);
     } else if (name == "max_scheduled_tokens") {
       v_.max_scheduled_tokens = static_cast<size_t>(parsed);
+    } else if (name == "dflash2_max_snapshots") {
+      v_.dflash2_max_snapshots = static_cast<size_t>(parsed);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2914,7 +2922,7 @@ void ValidateRuntimeProfiles(const Config& config) {
                          "runtime profile '" + profile.id + "' model.decoder.filename");
     }
     if (!profile.overlay.model.decoder_filename && !batching.num_blocks && !batching.max_batch_size &&
-        !batching.max_scheduled_tokens && !search.chunk_size &&
+        !batching.max_scheduled_tokens && !batching.dflash2_max_snapshots && !search.chunk_size &&
         !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
@@ -3310,7 +3318,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   }
   const auto& batching = selected->overlay.dynamic_batching;
   const bool has_batching_overlay = batching.num_blocks || batching.max_batch_size ||
-                                    batching.max_scheduled_tokens;
+                                    batching.max_scheduled_tokens || batching.dflash2_max_snapshots;
   if (has_batching_overlay && !config.engine.dynamic_batching) {
     throw std::runtime_error("runtime profile '" + selected->id +
                              "' requires engine.dynamic_batching in the base config");
@@ -3324,6 +3332,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     if (batching.num_blocks) effective.num_blocks = batching.num_blocks;
     if (batching.max_batch_size) effective.max_batch_size = *batching.max_batch_size;
     if (batching.max_scheduled_tokens) effective.max_scheduled_tokens = *batching.max_scheduled_tokens;
+    if (batching.dflash2_max_snapshots) effective.dflash2_max_snapshots = *batching.dflash2_max_snapshots;
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;
