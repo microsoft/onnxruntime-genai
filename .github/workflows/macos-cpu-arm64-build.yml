@@ -1,0 +1,241 @@
+name: "macOS CPU ARM64 Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - rel-*
+    paths-ignore:
+      - "docs/**"
+      - README.md
+      - CONTRIBUTING.md
+      - BUILD.md
+  pull_request:
+    branches:
+      - main
+      - rel-*
+    paths-ignore:
+      - "docs/**"
+      - README.md
+      - CONTRIBUTING.md
+      - BUILD.md
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
+
+env:
+  ORT_BUILD_VERSION: "1.26.0"
+  ORT_RUNTIME_VERSION: "1.28.0"
+  ORT_BUILD_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  ORT_RUNTIME_SOURCE: "https://api.nuget.org/v3/index.json"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  BUILD_ROOT: "build/cpu/osx-arm64"
+  BINARY_DIR: "build/cpu/osx-arm64/Release"
+
+jobs:
+  macos-cpu-arm64-build:
+    runs-on: macos-latest # arm64
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          architecture: arm64
+          cache: pip
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Setup Java 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          java-version: "17"
+          distribution: temurin
+          architecture: aarch64
+          cache: gradle
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@d9c87d481d55275bb5441eef3fe0e46805f9ef70 # v3.5.0
+        with:
+          gradle-version: "8.6"
+
+      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@47a55233e7a9e40e8ade1a71d1b6141be5044924 # v0.0.8
+        with:
+          vcpkg-version: "2025.06.13"
+          vcpkg-hash: "735923258c5187966698f98ce0f1393b8adc6f84d44fd8829dda7db52828639331764ecf41f50c8e881e497b569f463dbd02dcb027ee9d9ede0711102de256cc"
+          cmake-version: "3.31.8"
+          cmake-hash: "99cc9c63ae49f21253efb5921de2ba84ce136018abf08632c92c060ba91d552e0f6acc214e9ba8123dee0cf6d1cf089ca389e321879fd9d719a60d975bcffcc8"
+          add-cmake-to-path: "true"
+          disable-terrapin: "true"
+
+      - name: Install build tools
+        run: brew install ccache jq
+
+      - name: Verify toolchains
+        run: |
+          set -e -x
+          python3 --version
+          dotnet --list-sdks
+          java -version
+          cmake --version
+          gradle --version
+          ccache --version
+
+      - name: Download build-time and runtime OnnxRuntime
+        run: |
+          set -e -x
+          dotnet new console
+          dotnet add package "$ORT_PACKAGE_NAME" --version "$ORT_BUILD_VERSION" --source "$ORT_BUILD_SOURCE" --package-directory .
+          dotnet add package "$ORT_PACKAGE_NAME" --version "$ORT_RUNTIME_VERSION" --source "$ORT_RUNTIME_SOURCE" --package-directory .
+
+      - name: Extract OnnxRuntime library and header files
+        run: |
+          set -e -x
+          mkdir -p ort-build/lib ort/lib
+          mv "$ORT_PACKAGE_NAME/$ORT_BUILD_VERSION/build/native/include" ort-build/
+          mv "$ORT_PACKAGE_NAME/$ORT_BUILD_VERSION/runtimes/osx-arm64/native/"* ort-build/lib/
+          mv "$ORT_PACKAGE_NAME/$ORT_RUNTIME_VERSION/runtimes/osx-arm64/native/"* ort/lib/
+
+      - name: Install Rust toolchain
+        run: |
+          set -e -x
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          source "$HOME/.cargo/env"
+          rustup install 1.86.0
+          rustup override set 1.86.0
+          rustup component add rust-src
+          rustup show active-toolchain
+
+      - name: Restore ccache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .ccache
+          key: ccache-macos-arm64-${{ hashFiles('.github/workflows/macos-cpu-arm64-build.yml', 'build.py', '**/CMakeLists.txt', 'cmake/**/*.cmake') }}
+          restore-keys: ccache-macos-arm64-
+
+      - name: Configure ccache
+        run: |
+          ccache --set-config "cache_dir=$GITHUB_WORKSPACE/.ccache"
+          ccache --set-config max_size=2G
+          ccache --zero-stats
+
+      - name: Build with build.py
+        run: |
+          set -e -x
+          export MACOSX_DEPLOYMENT_TARGET
+          MACOSX_DEPLOYMENT_TARGET="$(sw_vers -productVersion | cut -d. -f1,2)"
+          export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          export CC=clang
+          export CXX=clang++
+          python3 -m pip install -r requirements-dev.txt
+          python3 build.py \
+            --config Release \
+            --build_dir "$BUILD_ROOT" \
+            --cmake_generator "Unix Makefiles" \
+            --parallel \
+            --build_java \
+            --ort_home "$GITHUB_WORKSPACE/ort-build" \
+            --use_guidance \
+            --update --build \
+            --skip_examples \
+            --cmake_extra_defines \
+              CMAKE_OSX_ARCHITECTURES=arm64 \
+              CMAKE_C_COMPILER_LAUNCHER=ccache \
+              CMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              "CMAKE_C_FLAGS=-O3 -pipe" \
+              "CMAKE_CXX_FLAGS=-O3 -pipe"
+          ccache --show-stats
+
+      - name: Build the C examples
+        run: |
+          set -e -x
+          cmake -S examples/c -B examples/c/build \
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DMODEL_ASR=ON \
+            -DORT_INCLUDE_DIR="$GITHUB_WORKSPACE/ort-build/include" \
+            -DORT_LIB_DIR="$GITHUB_WORKSPACE/ort-build/lib" \
+            -DOGA_INCLUDE_DIR="$GITHUB_WORKSPACE/src" \
+            -DOGA_LIB_DIR="$GITHUB_WORKSPACE/$BINARY_DIR"
+          cmake --build examples/c/build --config Release
+
+      - name: Install the Python wheel and test dependencies
+        run: |
+          set -e -x
+          python3 -m venv genai-macos-venv
+          source genai-macos-venv/bin/activate
+          python3 -m pip install -r test/python/requirements.txt
+          python3 -m pip install -r test/python/macos/torch/requirements.txt
+          python3 -m pip install -r test/python/macos/ort/requirements.txt
+          python3 -m pip install "$BINARY_DIR"/wheel/onnxruntime_genai*.whl --no-deps
+
+      - name: Run the Java tests
+        run: |
+          set -e -x
+          DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-}:$GITHUB_WORKSPACE/ort/lib" \
+            ctest --test-dir "$BINARY_DIR/src/java" --build-config Release --verbose --timeout 10800
+
+      - name: Verify build artifacts
+        if: always()
+        continue-on-error: true
+        run: |
+          ls -l "$GITHUB_WORKSPACE/$BINARY_DIR"
+          ls -l "$GITHUB_WORKSPACE/$BINARY_DIR/wheel"
+
+      - name: Run the Python tests
+        run: |
+          set -e -x
+          source genai-macos-venv/bin/activate
+          export ORTGENAI_LOG_ORT_LIB=1
+          python3 -m pip install requests
+          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models
+
+      - name: Build the C# API and run the C# tests
+        run: |
+          set -e -x
+          export ORTGENAI_LOG_ORT_LIB=1
+          dotnet test test/csharp \
+            /p:Configuration=Release \
+            /p:NativeBuildOutputDir="$GITHUB_WORKSPACE/$BINARY_DIR" \
+            /p:OrtLibDir="$GITHUB_WORKSPACE/ort/lib" \
+            --verbosity normal
+
+      - name: Build the C# examples
+        run: |
+          set -e -x
+          export ORTGENAI_LOG_ORT_LIB=1
+          dotnet build examples/csharp/ModelChat -c Release
+          dotnet build examples/csharp/ModelMM -c Release
+
+      - name: Test the C# LLM example with tool calling
+        run: |
+          set -e -x
+          export ORTGENAI_LOG_ORT_LIB=1
+          python3 test/python/special_tokens.py -p test/models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat \
+            -m test/models/qwen-2.5-0.5b/int4/cpu/ \
+            -e cpu \
+            --response_format lark_grammar \
+            --tools_file test/models/tool-definitions/weather.json \
+            --tool_call_start "<tool_call>" \
+            --tool_call_end "</tool_call>" \
+            --user_prompt "What is the weather in Redmond, WA?" \
+            --tool_output --non_interactive --verbose
+
+      - name: Run unit tests
+        run: |
+          set -e -x
+          export ORTGENAI_LOG_ORT_LIB=1
+          export DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-}:$GITHUB_WORKSPACE/ort/lib:$GITHUB_WORKSPACE/$BINARY_DIR"
+          "$GITHUB_WORKSPACE/$BINARY_DIR/unit_tests"
