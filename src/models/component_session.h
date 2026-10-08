@@ -17,6 +17,24 @@ namespace Generators {
 struct ComponentCudaGraphState;
 struct ComponentPackageResources;
 
+struct ComponentPackageTokenizer {
+  explicit ComponentPackageTokenizer(const fs::path& package_path);
+  ~ComponentPackageTokenizer();
+  ComponentPackageTokenizer(ComponentPackageTokenizer&&) noexcept;
+  ComponentPackageTokenizer& operator=(ComponentPackageTokenizer&&) noexcept;
+  ComponentPackageTokenizer(const ComponentPackageTokenizer&) = delete;
+  ComponentPackageTokenizer& operator=(const ComponentPackageTokenizer&) = delete;
+
+  std::vector<int32_t> Encode(const std::string& text) const;
+  std::vector<std::vector<int32_t>> EncodeBatch(
+      const std::vector<std::string>& texts) const;
+  int32_t PadTokenId() const;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 struct ComponentSession {
   ComponentSession(const fs::path& package_path, std::string component,
                    const std::vector<std::string>& providers);

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #include "../ort_genai.h"
 #include "../ort_genai_c_internal.h"
+#include "component_session.h"
 
 #include <algorithm>
 #include <array>
@@ -574,7 +575,8 @@ void AddPositionIds(FeedStorage& feeds, const NamedComponentSession& session,
       "[axes, batch, sequence] with a fixed axis count");
 }
 
-TokenBatch Tokenize(DirectoryTokenizer& tokenizer, const std::vector<std::string>& texts) {
+TokenBatch Tokenize(Generators::ComponentPackageTokenizer& tokenizer,
+                    const std::vector<std::string>& texts) {
   if (texts.empty()) throw std::invalid_argument("questions must be non-empty");
   std::vector<std::string> normalized;
   normalized.reserve(texts.size());
@@ -948,7 +950,7 @@ struct NativeRankingSession {
   std::string identity;
   mutable std::mutex operation_mutex;
   SessionLruCache<std::vector<float>> cache;
-  DirectoryTokenizer tokenizer;
+  Generators::ComponentPackageTokenizer tokenizer;
   std::unique_ptr<NamedComponentSession> encoder;
   std::mutex fallback_mutex;
   std::condition_variable_any fallback_condition;
@@ -1077,7 +1079,8 @@ size_t NativeRankingSession::LoadPrecomputedActions() {
 }
 
 std::pair<std::vector<float>, size_t> EncodeAndPool(
-    DirectoryTokenizer& tokenizer, NamedComponentSession& encoder,
+    Generators::ComponentPackageTokenizer& tokenizer,
+    NamedComponentSession& encoder,
     const std::vector<std::string>& texts) {
   if (texts.empty()) return {{}, 0};
   auto batch = Tokenize(tokenizer, texts);
@@ -1703,7 +1706,7 @@ struct NativeDecisionSession {
   mutable std::mutex operation_mutex;
   SessionLruCache<CachedKevTokens> cache;
   SessionLruCache<CachedKevPrefix> prefix_cache;
-  DirectoryTokenizer tokenizer;
+  Generators::ComponentPackageTokenizer tokenizer;
   NamedComponentSession backbone;
   std::unique_ptr<NamedComponentSession> pointer;
   std::vector<KevStateBinding> state_bindings;

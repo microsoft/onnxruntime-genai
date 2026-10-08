@@ -92,7 +92,6 @@ typedef struct OgaComponentInputs OgaComponentInputs;
 typedef struct OgaComponentTensors OgaComponentTensors;
 typedef struct OgaDirectoryTokenizer OgaDirectoryTokenizer;
 typedef struct OgaTokenIds OgaTokenIds;
-typedef struct OgaTokenIdSequences OgaTokenIdSequences;
 typedef struct OgaStructuredValueHandle OgaStructuredValueHandle;
 typedef struct OgaQuestionHandle OgaQuestionHandle;
 typedef struct OgaStructuredRequestHandle OgaStructuredRequestHandle;
@@ -259,21 +258,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateDirectoryTokenizer(
 OGA_EXPORT void OGA_API_CALL OgaDestroyDirectoryTokenizer(OgaDirectoryTokenizer* tokenizer);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaDirectoryTokenizerEncode(
     const OgaDirectoryTokenizer* tokenizer, const char* text, OgaTokenIds** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDirectoryTokenizerEncodeBatch(
-    const OgaDirectoryTokenizer* tokenizer, const char* const* texts,
-    size_t count, OgaTokenIdSequences** out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaDirectoryTokenizerGetPadTokenId(
     const OgaDirectoryTokenizer* tokenizer, int32_t* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenIdsGetData(
     const OgaTokenIds* token_ids, const int32_t** data, size_t* count);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenIds(OgaTokenIds* token_ids);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenIdSequencesGetCount(
-    const OgaTokenIdSequences* sequences, size_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenIdSequencesGetData(
-    const OgaTokenIdSequences* sequences, size_t index,
-    const int32_t** data, size_t* count);
-OGA_EXPORT void OGA_API_CALL OgaDestroyTokenIdSequences(
-    OgaTokenIdSequences* sequences);
 
 // Structured values and request builders clone values passed to append/set functions.
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredValueNull(OgaStructuredValueHandle** out);

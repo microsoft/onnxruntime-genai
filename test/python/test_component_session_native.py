@@ -10,7 +10,6 @@ import onnx
 import onnxruntime_genai as og
 import pytest
 from onnx import TensorProto, helper
-from onnxruntime_genai.onnxruntime_genai import _DirectoryTokenizer
 
 
 def _package(root: Path, filename: str = "graphs/arbitrary-name.onnx") -> Path:
@@ -189,21 +188,6 @@ def test_manifest_mapping_arbitrary_filename_and_native_run(tmp_path):
     np.testing.assert_array_equal(result["output"], value)
     assert session.input_names == ["input"]
     assert session.input_info["input"]["shape"] == [-1, 2]
-
-
-def test_directory_tokenizer_batch_matches_individual_rows(tmp_path):
-    package = Path(
-        "/home/asonawane/non-generative/exports/mobius/"
-        "clm-v0.1-8b-fp16-backbone"
-    )
-    if not package.is_dir():
-        pytest.skip("CLM tokenizer package is unavailable")
-    tokenizer = _DirectoryTokenizer(str(package))
-    texts = ["short input", "a longer input with punctuation!", ""]
-
-    assert tokenizer.encode_batch(texts) == [
-        tokenizer.encode(text) for text in texts
-    ]
 
 
 def test_component_session_applies_genai_config_session_options(tmp_path):

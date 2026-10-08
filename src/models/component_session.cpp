@@ -780,6 +780,43 @@ int32_t ResolvePadTokenId(
 
 }  // namespace
 
+struct Generators::ComponentPackageTokenizer::Impl {
+  explicit Impl(const fs::path& package_path)
+      : value(DirectoryTokenizerConfig(package_path.string().c_str())),
+        pad_token_id(
+            ResolvePadTokenId(package_path.string().c_str(), value)) {}
+  Generators::Tokenizer value;
+  int32_t pad_token_id;
+};
+
+Generators::ComponentPackageTokenizer::ComponentPackageTokenizer(
+    const fs::path& package_path)
+    : impl_(std::make_unique<Impl>(package_path)) {}
+Generators::ComponentPackageTokenizer::~ComponentPackageTokenizer() = default;
+Generators::ComponentPackageTokenizer::ComponentPackageTokenizer(
+    ComponentPackageTokenizer&&) noexcept = default;
+Generators::ComponentPackageTokenizer&
+Generators::ComponentPackageTokenizer::operator=(
+    ComponentPackageTokenizer&&) noexcept = default;
+
+std::vector<int32_t> Generators::ComponentPackageTokenizer::Encode(
+    const std::string& text) const {
+  return impl_->value.Encode(text.c_str());
+}
+
+std::vector<std::vector<int32_t>>
+Generators::ComponentPackageTokenizer::EncodeBatch(
+    const std::vector<std::string>& texts) const {
+  std::vector<const char*> values;
+  values.reserve(texts.size());
+  for (const auto& text : texts) values.push_back(text.c_str());
+  return impl_->value.EncodeBatchRows(values);
+}
+
+int32_t Generators::ComponentPackageTokenizer::PadTokenId() const {
+  return impl_->pad_token_id;
+}
+
 #if defined(__GNUC__) && !defined(_WIN32)
 #define OGA_CAPI_HANDLE __attribute__((visibility("hidden")))
 #else
@@ -823,18 +860,12 @@ struct OGA_CAPI_HANDLE OgaComponentTensors {
 
 struct OGA_CAPI_HANDLE OgaDirectoryTokenizer {
   explicit OgaDirectoryTokenizer(const char* path)
-      : value(DirectoryTokenizerConfig(path)),
-        pad_token_id(ResolvePadTokenId(path, value)) {}
-  Generators::Tokenizer value;
-  int32_t pad_token_id;
+      : value(fs::path(Required(path, "package_path"))) {}
+  Generators::ComponentPackageTokenizer value;
 };
 
 struct OGA_CAPI_HANDLE OgaTokenIds {
   std::vector<int32_t> values;
-};
-
-struct OGA_CAPI_HANDLE OgaTokenIdSequences {
-  std::vector<std::vector<int32_t>> values;
 };
 
 extern "C" {
@@ -1038,27 +1069,11 @@ OgaResult* OGA_API_CALL OgaDirectoryTokenizerEncode(
   OGA_CAPI_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaDirectoryTokenizerEncodeBatch(
-    const OgaDirectoryTokenizer* tokenizer, const char* const* texts,
-    size_t count, OgaTokenIdSequences** out) {
-  OGA_CAPI_TRY
-  auto& output = Required(out, "out");
-  if (!texts && count)
-    throw std::invalid_argument(
-        "texts must not be null when count is non-zero");
-  std::vector<const char*> values(texts, texts + count);
-  auto result = std::make_unique<OgaTokenIdSequences>();
-  result->values = Required(tokenizer, "tokenizer")
-                       .value.EncodeBatchRows(values);
-  output = result.release();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaDirectoryTokenizerGetPadTokenId(
     const OgaDirectoryTokenizer* tokenizer, int32_t* out) {
   OGA_CAPI_TRY
-  Required(out, "out") = Required(tokenizer, "tokenizer").pad_token_id;
+  Required(out, "out") =
+      Required(tokenizer, "tokenizer").value.PadTokenId();
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -1074,31 +1089,5 @@ OgaResult* OGA_API_CALL OgaTokenIdsGetData(
 }
 
 void OGA_API_CALL OgaDestroyTokenIds(OgaTokenIds* token_ids) { delete token_ids; }
-
-OgaResult* OGA_API_CALL OgaTokenIdSequencesGetCount(
-    const OgaTokenIdSequences* sequences, size_t* out) {
-  OGA_CAPI_TRY
-  Required(out, "out") = Required(sequences, "sequences").values.size();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenIdSequencesGetData(
-    const OgaTokenIdSequences* sequences, size_t index,
-    const int32_t** data, size_t* count) {
-  OGA_CAPI_TRY
-  const auto& values = Required(sequences, "sequences").values;
-  if (index >= values.size())
-    throw std::out_of_range("token sequence index is out of range");
-  Required(data, "data") = values[index].data();
-  Required(count, "count") = values[index].size();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-void OGA_API_CALL OgaDestroyTokenIdSequences(
-    OgaTokenIdSequences* sequences) {
-  delete sequences;
-}
 
 }  // extern "C"
