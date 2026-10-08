@@ -88,15 +88,16 @@ def _register_gemma4_image_token(model_path):
     tokenizer_path.write_text(json.dumps(tokenizer), encoding="utf-8")
 
 
-def _create_static_batch_vision_model(onnx, output_path, num_patches="num_patches"):
+def _create_static_batch_vision_model(onnx, output_path, num_patches="num_patches", position_type=None):
     """Create a static-B=1 vision model that removes padding and pools 3x3 patches."""
     helper = onnx.helper
     tensor_proto = onnx.TensorProto
+    position_type = position_type or tensor_proto.INT64
     pixel_values = helper.make_tensor_value_info(
         "pixel_values", tensor_proto.FLOAT, [1, num_patches, 768]
     )
     position_ids = helper.make_tensor_value_info(
-        "pixel_position_ids", tensor_proto.INT64, [1, num_patches, 2]
+        "pixel_position_ids", position_type, [1, num_patches, 2]
     )
     image_features = helper.make_tensor_value_info(
         "image_features", tensor_proto.FLOAT, ["num_soft_tokens", 2048]
@@ -125,7 +126,9 @@ def _create_static_batch_vision_model(onnx, output_path, num_patches="num_patche
     ]
     initializers = [
         onnx.numpy_helper.from_array(np.array(0, dtype=np.int64), "x_axis"),
-        onnx.numpy_helper.from_array(np.array(-1, dtype=np.int64), "negative_one"),
+        onnx.numpy_helper.from_array(
+            np.array(-1, dtype=np.int32 if position_type == tensor_proto.INT32 else np.int64), "negative_one"
+        ),
         onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "slice_start"),
         onnx.numpy_helper.from_array(
             np.array([np.iinfo(np.int64).max], dtype=np.int64), "slice_end"
@@ -169,13 +172,16 @@ def _set_vision_position_dtype(onnx, model_path, dtype):
     onnx.save(model, model_path)
 
 
-def _create_static_batch_vision_pipeline(onnx, encoder_path, projector_path, num_patches="num_patches"):
+def _create_static_batch_vision_pipeline(
+    onnx, encoder_path, projector_path, num_patches="num_patches", position_type=None
+):
     """Split the static-B=1 vision fixture at a vision_features boundary."""
     helper = onnx.helper
     tensor_proto = onnx.TensorProto
+    position_type = position_type or tensor_proto.INT64
 
     pixel_values = helper.make_tensor_value_info("pixel_values", tensor_proto.FLOAT, [1, num_patches, 768])
-    position_ids = helper.make_tensor_value_info("pixel_position_ids", tensor_proto.INT64, [1, num_patches, 2])
+    position_ids = helper.make_tensor_value_info("pixel_position_ids", position_type, [1, num_patches, 2])
     vision_features = helper.make_tensor_value_info("vision_features", tensor_proto.FLOAT, [1, num_patches, 768])
     encoder_graph = helper.make_graph(
         [helper.make_node("Identity", ["pixel_values"], ["vision_features"])],
@@ -200,7 +206,9 @@ def _create_static_batch_vision_pipeline(onnx, encoder_path, projector_path, num
     ]
     initializers = [
         onnx.numpy_helper.from_array(np.array(0, dtype=np.int64), "x_axis"),
-        onnx.numpy_helper.from_array(np.array(-1, dtype=np.int64), "negative_one"),
+        onnx.numpy_helper.from_array(
+            np.array(-1, dtype=np.int32 if position_type == tensor_proto.INT32 else np.int64), "negative_one"
+        ),
         onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "slice_start"),
         onnx.numpy_helper.from_array(np.array([np.iinfo(np.int64).max], dtype=np.int64), "slice_end"),
         onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "slice_axis"),
@@ -238,6 +246,20 @@ def _configure_split_vision(config):
             },
         }
     ]
+
+
+def _assert_split_position_ids(source_model_path, prompt, images, positions, position_dtype):
+    source_model = og.Model(os.fspath(source_model_path))
+    source_inputs = source_model.create_multimodal_processor()(prompt, images=images)
+    expected = _to_numpy(source_inputs["pixel_position_ids"]).astype(position_dtype)
+    padding = positions.shape[1] - expected.shape[1]
+    assert padding >= 0
+    assert np.any(expected[..., 0] > 0)
+    assert positions.dtype == position_dtype
+    np.testing.assert_array_equal(
+        positions,
+        np.pad(expected, ((0, 0), (0, padding), (0, 0)), constant_values=-1),
+    )
 
 
 def _create_dynamic_embedding_model(
@@ -875,7 +897,8 @@ def test_gemma4_split_vision_requires_two_stages(test_data_path, tmp_path):
 
 @pytest.mark.parametrize("fixed_patches", [False, True])
 @pytest.mark.parametrize("image_names", [("australia.jpg",), ("australia.jpg", "sheet.png")])
-def test_gemma4_flat_decoder_runs_split_vision(test_data_path, tmp_path, fixed_patches, image_names):
+@pytest.mark.parametrize("position_dtype", [np.int32, np.int64])
+def test_gemma4_flat_decoder_runs_split_vision(test_data_path, tmp_path, fixed_patches, image_names, position_dtype):
     """Split vision with a flat decoder must bind projector-only positions for each image."""
     onnx = pytest.importorskip("onnx")
     source_model_path = Path(_get_gemma4_model_path(test_data_path))
@@ -887,6 +910,7 @@ def test_gemma4_flat_decoder_runs_split_vision(test_data_path, tmp_path, fixed_p
         model_path / "dummy_vision_encoder.onnx",
         model_path / "dummy_vision_projector.onnx",
         2520 if fixed_patches else "num_patches",
+        onnx.TensorProto.INT32 if position_dtype == np.int32 else onnx.TensorProto.INT64,
     )
     config_path = model_path / "genai_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -905,9 +929,12 @@ def test_gemma4_flat_decoder_runs_split_vision(test_data_path, tmp_path, fixed_p
     image_paths = [os.fspath(_get_test_media_path(test_data_path, Path("images") / name)) for name in image_names]
     if not all(os.path.exists(path) for path in image_paths):
         pytest.skip("Gemma4 test images not available")
-    inputs = processor(GEMMA4_IMAGE_TOKEN * len(image_names) + "Compare these images", images=og.Images.open(*image_paths))
+    prompt = GEMMA4_IMAGE_TOKEN * len(image_names) + "Compare these images"
+    images = og.Images.open(*image_paths)
+    inputs = processor(prompt, images=images)
     pixels = _to_numpy(inputs["pixel_values"])
     positions = _to_numpy(inputs["pixel_position_ids"])
+    _assert_split_position_ids(source_model_path, prompt, images, positions, position_dtype)
     if fixed_patches:
         assert pixels.shape[1] == 2520
     expected_features = np.concatenate(
@@ -939,8 +966,12 @@ def test_gemma4_flat_decoder_runs_split_vision(test_data_path, tmp_path, fixed_p
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
 )
-def test_gemma4_fixed_patch_vision_pads_multiple_images(test_data_path, tmp_path, relative_image_paths):
-    """Test that processor output is padded to the vision model's fixed patch capacity."""
+@pytest.mark.parametrize("position_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("extra_patches", [0, 9])
+def test_gemma4_fixed_patch_vision_pads_multiple_images(
+    test_data_path, tmp_path, relative_image_paths, position_dtype, extra_patches
+):
+    """Test exact-size and padded vision inputs preserve position values and dtype."""
     onnx = pytest.importorskip("onnx")
     source_model_path = Path(_get_gemma4_model_path(test_data_path))
     image_paths = [os.fspath(_get_test_media_path(test_data_path, path)) for path in relative_image_paths]
@@ -950,7 +981,10 @@ def test_gemma4_fixed_patch_vision_pads_multiple_images(test_data_path, tmp_path
     source_processor = source_model.create_multimodal_processor()
     source_inputs = source_processor("<|image|><|image|>Compare these images", images=images)
     image_token_counts = _to_numpy(source_inputs["num_image_tokens"])
-    fixed_num_patches = (int(image_token_counts.max()) + 1) * 9
+    source_positions = _to_numpy(source_inputs["pixel_position_ids"])
+    assert source_positions.dtype == np.int64
+    assert np.any(source_positions[..., 0] > 0)
+    fixed_num_patches = source_positions.shape[1] + extra_patches
 
     model_path = tmp_path / "gemma4"
     shutil.copytree(source_model_path, model_path)
@@ -963,7 +997,12 @@ def test_gemma4_fixed_patch_vision_pads_multiple_images(test_data_path, tmp_path
     config["model"]["image_token_id"] = GEMMA4_IMAGE_TOKEN_ID
     config["search"]["past_present_share_buffer"] = False
     config_path.write_text(json.dumps(config), encoding="utf-8")
-    _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx", fixed_num_patches)
+    _create_static_batch_vision_model(
+        onnx,
+        model_path / "dummy_vision.onnx",
+        fixed_num_patches,
+        onnx.TensorProto.INT32 if position_dtype == np.int32 else onnx.TensorProto.INT64,
+    )
     _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx", config["model"]["image_token_id"])
     _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")
 
@@ -975,8 +1014,15 @@ def test_gemma4_fixed_patch_vision_pads_multiple_images(test_data_path, tmp_path
 
     assert pixel_values.shape == (len(image_paths), fixed_num_patches, 768)
     assert pixel_position_ids.shape == (len(image_paths), fixed_num_patches, 2)
-    assert np.all(pixel_values[:, -9:, :] == 0)
-    assert np.all(pixel_position_ids[:, -9:, :] == -1)
+    assert pixel_position_ids.dtype == position_dtype
+    expected_positions = np.pad(
+        source_positions.astype(position_dtype),
+        ((0, 0), (0, extra_patches), (0, 0)),
+        constant_values=-1,
+    )
+    np.testing.assert_array_equal(pixel_position_ids, expected_positions)
+    if extra_patches:
+        assert np.all(pixel_values[:, -extra_patches:, :] == 0)
     np.testing.assert_array_equal(_to_numpy(inputs["num_image_tokens"]), image_token_counts)
 
     params = og.GeneratorParams(model)
@@ -1482,7 +1528,8 @@ def test_gemma4_pipelined_decoder_injects_features_when_embedding_has_no_feature
 
 
 @pytest.mark.parametrize("fixed_patches", [False, True])
-def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fixed_patches):
+@pytest.mark.parametrize("position_dtype", [np.int32, np.int64])
+def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fixed_patches, position_dtype):
     """A decoder pipeline must also run both vision stages for every image."""
     onnx = pytest.importorskip("onnx")
     source_model_path = Path(_get_gemma4_model_path(test_data_path))
@@ -1493,6 +1540,7 @@ def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fi
         model_path / "dummy_vision_encoder.onnx",
         model_path / "dummy_vision_projector.onnx",
         2520 if fixed_patches else "num_patches",
+        onnx.TensorProto.INT32 if position_dtype == np.int32 else onnx.TensorProto.INT64,
     )
     config_path = model_path / "genai_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1507,7 +1555,9 @@ def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fi
     ]
     if not all(os.path.exists(path) for path in image_paths):
         pytest.skip("Gemma4 test images not available")
-    inputs = processor("<|image|><|image|>Compare these images", images=og.Images.open(*image_paths))
+    prompt = "<|image|><|image|>Compare these images"
+    images = og.Images.open(*image_paths)
+    inputs = processor(prompt, images=images)
     if fixed_patches:
         assert _to_numpy(inputs["pixel_values"]).shape[1] == 2520
     params = og.GeneratorParams(model)
@@ -1516,6 +1566,7 @@ def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fi
     generator.set_inputs(inputs)
     pixel_values = _to_numpy(inputs["pixel_values"])
     positions = _to_numpy(inputs["pixel_position_ids"])
+    _assert_split_position_ids(source_model_path, prompt, images, positions, position_dtype)
     expected_features = np.concatenate(
         [
             np.pad(pixels[image_positions[:, 0] > -1][::9], ((0, 0), (0, 1280)))
