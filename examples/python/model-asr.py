@@ -139,18 +139,16 @@ def load_audio(audio_path, sample_rate):
 
 
 def format_timestamp_records(result, use_segments):
-    timestamps = result["timestamp_metadata"]
+    timestamps = result.timestamp_metadata
     if timestamps is None:
         return ""
-    records = timestamps["segments"] if use_segments else timestamps["words"]
+    records = timestamps.segments if use_segments else timestamps.words
     formatted = []
     for record in records:
-        text = record["text"] if use_segments else record["text"].strip()
+        text = record.text if use_segments else record.text.strip()
         separator = " " if use_segments and not text[:1].isspace() else ""
         suffix = "" if use_segments else " "
-        formatted.append(
-            f"[{record['start_time']:.2f} - {record['stop_time']:.2f}]{separator}{text}{suffix}"
-        )
+        formatted.append(f"[{record.start_time:.2f} - {record.stop_time:.2f}]{separator}{text}{suffix}")
     return "".join(formatted)
 
 
@@ -219,8 +217,6 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
 
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
-    if timestamps_enabled:
-        tokenizer_stream.create_metadata_core_state_using_tokenizer_config()
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
     # Per-generator language selection

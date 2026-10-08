@@ -43,7 +43,6 @@ if (useVadOverride == "true") {
 
 using var tokenizer = new Tokenizer(model);
 using var tokenizerStream = tokenizer.CreateStream();
-tokenizerStream.CreateMetadataCoreStateUsingTokenizerConfig();
 using var generatorParams = new GeneratorParams(model);
 using var generator = new Generator(model, generatorParams);
 var timestampedTranscript = new StringBuilder();
