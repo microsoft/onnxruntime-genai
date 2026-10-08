@@ -154,6 +154,14 @@ def test_gemma4_unified_model_io_contract(unified_model_path):
         "audio_sizes": (onnx.TensorProto.INT64, ["batch_size"]),
         "input_features_mask": (onnx.TensorProto.BOOL, ["batch_size", "num_frames"]),
     }
+    assert len(speech.graph.output) == 1
+    speech_output = speech.graph.output[0]
+    assert speech_output.name == "audio_features"
+    assert speech_output.type.tensor_type.elem_type == onnx.TensorProto.FLOAT
+    assert [
+        dim.dim_value or dim.dim_param
+        for dim in speech_output.type.tensor_type.shape.dim
+    ] == ["tokens", 2048]
 
 
 def test_gemma4_unified_text_only(unified_model_path):
@@ -368,7 +376,7 @@ def test_gemma4_unified_modality_sessions_generate(
             providers=["CPUExecutionProvider"],
         )
         features = session.run(None, feed)[0]
-        assert features.shape == (1, int(feed["audio_sizes"][0]), 2048)
+        assert features.shape == (int(feed["audio_sizes"].sum()), 2048)
         expected = (
             feed["input_features"].mean(axis=2) * feed["input_features_mask"]
         ).sum()
@@ -392,11 +400,8 @@ def test_gemma4_unified_modality_sessions_generate(
         )
         changed_sizes = feed["audio_sizes"] - 1
         counted = session.run(None, {**controlled, "audio_sizes": changed_sizes})[0]
-        assert counted.shape == (1, int(changed_sizes[0]), 2048)
-        np.testing.assert_allclose(all_valid[:, :-1] - counted, 1.0, rtol=0, atol=0)
-        features = features.reshape(
-            -1, 2048
-        )  # Match native speech -> embedding handoff.
+        assert counted.shape == (int(changed_sizes.sum()), 2048)
+        np.testing.assert_allclose(all_valid[:-1] - counted, 1.0, rtol=0, atol=0)
 
     # Verify that the modality output is consumed, not just declared, by embedding.
     embedding = ort.InferenceSession(
@@ -430,7 +435,7 @@ def test_gemma4_unified_modality_sessions_generate(
                 inputs["audio_embeds"] = changed_input
                 features = session.run(None, {**feed, "input_features": changed_input})[
                     0
-                ].reshape(-1, 2048)
+                ]
         expected_signal = np.float32(features.mean(dtype=np.float64))
         expected_logits = np.zeros(8, dtype=np.float32)
         expected_logits[2] = expected_signal

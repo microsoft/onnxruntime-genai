@@ -96,8 +96,7 @@ def _create_unified_speech_model(out_path: Path) -> None:
         ),
         h.make_tensor_value_info("audio_sizes", t.INT64, ["batch_size"]),
     ]
-    # SpeechState binds rank-3 output, then reshapes it to rank 2 for embedding.
-    outputs = [h.make_tensor_value_info("audio_features", t.FLOAT, [1, "tokens", 2048])]
+    outputs = [h.make_tensor_value_info("audio_features", t.FLOAT, ["tokens", 2048])]
     nodes = [
         h.make_node(
             "ReduceMean", ["input_features"], ["frame_means"], axes=[2], keepdims=0
@@ -108,16 +107,16 @@ def _create_unified_speech_model(out_path: Path) -> None:
         h.make_node("Cast", ["audio_sizes"], ["sizes_float"], to=t.FLOAT),
         h.make_node("ReduceSum", ["sizes_float"], ["size_sum"], keepdims=0),
         h.make_node("Add", ["audio_sum", "size_sum"], ["signal"]),
+        h.make_node("ReduceSum", ["audio_sizes"], ["token_count"], keepdims=1),
         h.make_node(
             "Concat",
-            ["batch_size", "audio_sizes", "hidden_size"],
+            ["token_count", "hidden_size"],
             ["feature_shape"],
             axis=0,
         ),
         h.make_node("Expand", ["signal", "feature_shape"], ["audio_features"]),
     ]
     initializers = [
-        onnx.numpy_helper.from_array(np.array([1], np.int64), "batch_size"),
         onnx.numpy_helper.from_array(np.array([2048], np.int64), "hidden_size"),
     ]
     graph = h.make_graph(
