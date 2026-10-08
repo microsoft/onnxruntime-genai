@@ -1194,7 +1194,7 @@ def test_text_only_pipelined_decoder_requires_append_tokens(test_data_path, tmp_
     params.set_search_options(max_length=32)
     generator = og.Generator(model, params)
     with pytest.raises(
-        RuntimeError, match="Please use generator.AppendTokens for decoder-pipeline"
+        RuntimeError, match=r"Please use generator\.AppendTokens for decoder-pipeline"
     ):
         generator.set_inputs(inputs)
     generator.append_tokens(np.array([0, 2], dtype=np.int32))
