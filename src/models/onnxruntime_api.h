@@ -711,6 +711,7 @@ struct OrtSessionOptions {
   OrtSessionOptions& DisablePerSessionThreads();  ///< Wraps OrtApi::DisablePerSessionThreads
 
   OrtSessionOptions& AddConfigEntry(const char* config_key, const char* config_value);                                                          ///< Wraps OrtApi::AddSessionConfigEntry
+  OrtSessionOptions& AddFreeDimensionOverrideByName(const char* dimension_name, int64_t dimension_value);                                       ///< Wraps OrtApi::AddFreeDimensionOverrideByName
   bool HasConfigEntry(const char* config_key) const;                                                                                            ///< Wraps OrtApi::HasSessionConfigEntry
   OrtSessionOptions& AddInitializer(const char* name, const OrtValue& ort_val);                                                                 ///< Wraps OrtApi::AddInitializer
   OrtSessionOptions& AddExternalInitializers(const std::vector<std::string>& names, const std::vector<std::unique_ptr<OrtValue>>& ort_values);  ///< Wraps OrtApi::AddExternalInitializers

@@ -24,8 +24,8 @@ extern "C" {
 #endif
 #define OGA_API_CALL _stdcall
 #else
-// To make symbols visible on macOS/iOS
-#ifdef __APPLE__
+// Keep the C ABI visible even when the library is built with hidden visibility.
+#if defined(__GNUC__)
 #define OGA_EXPORT __attribute__((visibility("default")))
 #else
 #define OGA_EXPORT
@@ -87,6 +87,45 @@ typedef struct OgaRequestOptions OgaRequestOptions;
 typedef struct OgaTurnOptions OgaTurnOptions;
 typedef struct OgaTurnUsage OgaTurnUsage;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
+typedef struct OgaComponentSession OgaComponentSession;
+typedef struct OgaComponentInputs OgaComponentInputs;
+typedef struct OgaComponentTensors OgaComponentTensors;
+typedef struct OgaDirectoryTokenizer OgaDirectoryTokenizer;
+typedef struct OgaTokenIds OgaTokenIds;
+typedef struct OgaStructuredValueHandle OgaStructuredValueHandle;
+typedef struct OgaQuestionHandle OgaQuestionHandle;
+typedef struct OgaStructuredRequestHandle OgaStructuredRequestHandle;
+typedef struct OgaFreeFormRankRequestHandle OgaFreeFormRankRequestHandle;
+typedef struct OgaRankingSessionHandle OgaRankingSessionHandle;
+typedef struct OgaDecisionSessionHandle OgaDecisionSessionHandle;
+typedef struct OgaModelResultHandle OgaModelResultHandle;
+typedef struct OgaRankingResultHandle OgaRankingResultHandle;
+
+typedef struct OgaNonGenerativeCacheStats {
+  uint64_t hits;
+  uint64_t misses;
+  uint64_t evictions;
+  size_t entries;
+  size_t bytes;
+  size_t entry_capacity;
+  size_t byte_capacity;
+} OgaNonGenerativeCacheStats;
+
+typedef struct OgaKevPrefixReuseStats {
+  uint64_t prefix_runs;
+  uint64_t branch_runs;
+  uint64_t fallback_runs;
+} OgaKevPrefixReuseStats;
+
+typedef enum OgaStructuredValueType {
+  OgaStructuredValueType_Null,
+  OgaStructuredValueType_Bool,
+  OgaStructuredValueType_Int64,
+  OgaStructuredValueType_Double,
+  OgaStructuredValueType_String,
+  OgaStructuredValueType_Array,
+  OgaStructuredValueType_Object,
+} OgaStructuredValueType;
 
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
@@ -168,6 +207,216 @@ OGA_EXPORT void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled);
  *         and can will be freed when the OgaResult is destroyed.
  */
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
+
+// Opaque, uncached execution API for independently exported ONNX components.
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateComponentSession(
+    const char* package_path, const char* component, const char* const* providers,
+    size_t provider_count, OgaComponentSession** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyComponentSession(OgaComponentSession* session);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputCount(
+    const OgaComponentSession* session, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetOutputCount(
+    const OgaComponentSession* session, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputName(
+    const OgaComponentSession* session, size_t index, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetOutputName(
+    const OgaComponentSession* session, size_t index, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputType(
+    const OgaComponentSession* session, size_t index, OgaElementType* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputShapeRank(
+    const OgaComponentSession* session, size_t index, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputShapeDimension(
+    const OgaComponentSession* session, size_t index, size_t dimension, int64_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputSymbolicDimension(
+    const OgaComponentSession* session, size_t index, size_t dimension, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateComponentInputs(OgaComponentInputs** out);
+// Copies name, data, and shape. The caller may release or mutate all supplied
+// buffers immediately after this function returns.
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentInputsAdd(
+    OgaComponentInputs* inputs, const char* name, const void* data, size_t byte_count,
+    const int64_t* shape, size_t shape_rank, OgaElementType type);
+OGA_EXPORT void OGA_API_CALL OgaDestroyComponentInputs(OgaComponentInputs* inputs);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionRun(
+    OgaComponentSession* session, const OgaComponentInputs* inputs,
+    const char* const* output_names, size_t output_count, OgaComponentTensors** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetCount(
+    const OgaComponentTensors* tensors, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetName(
+    const OgaComponentTensors* tensors, size_t index, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetType(
+    const OgaComponentTensors* tensors, size_t index, OgaElementType* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetShapeRank(
+    const OgaComponentTensors* tensors, size_t index, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetShapeDimension(
+    const OgaComponentTensors* tensors, size_t index, size_t dimension, int64_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetData(
+    const OgaComponentTensors* tensors, size_t index, const void** data, size_t* byte_count);
+OGA_EXPORT void OGA_API_CALL OgaDestroyComponentTensors(OgaComponentTensors* tensors);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateDirectoryTokenizer(
+    const char* package_path, OgaDirectoryTokenizer** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyDirectoryTokenizer(OgaDirectoryTokenizer* tokenizer);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDirectoryTokenizerEncode(
+    const OgaDirectoryTokenizer* tokenizer, const char* text, OgaTokenIds** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDirectoryTokenizerGetPadTokenId(
+    const OgaDirectoryTokenizer* tokenizer, int32_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenIdsGetData(
+    const OgaTokenIds* token_ids, const int32_t** data, size_t* count);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTokenIds(OgaTokenIds* token_ids);
+
+// Structured values and request builders clone values passed to append/set functions.
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredValueNull(OgaStructuredValueHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredValueBool(bool value, OgaStructuredValueHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredValueInt64(int64_t value, OgaStructuredValueHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredValueDouble(double value, OgaStructuredValueHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredValueString(const char* value, OgaStructuredValueHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredValueArray(OgaStructuredValueHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredValueObject(OgaStructuredValueHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueArrayAppend(
+    OgaStructuredValueHandle* array, const OgaStructuredValueHandle* value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueObjectAppend(
+    OgaStructuredValueHandle* object, const char* key, const OgaStructuredValueHandle* value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetType(
+    const OgaStructuredValueHandle* value, OgaStructuredValueType* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetBool(
+    const OgaStructuredValueHandle* value, bool* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetInt64(
+    const OgaStructuredValueHandle* value, int64_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetDouble(
+    const OgaStructuredValueHandle* value, double* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetString(
+    const OgaStructuredValueHandle* value, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetCount(
+    const OgaStructuredValueHandle* value, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetArrayItem(
+    const OgaStructuredValueHandle* value, size_t index, const OgaStructuredValueHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetObjectItem(
+    const OgaStructuredValueHandle* value, size_t index, const char** key,
+    const OgaStructuredValueHandle** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyStructuredValue(OgaStructuredValueHandle* value);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateQuestion(
+    const char* type, const OgaStructuredValueHandle* instructions,
+    const OgaStructuredValueHandle* criteria, OgaQuestionHandle** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyQuestion(OgaQuestionHandle* question);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredRequest(OgaStructuredRequestHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredRequestSetState(
+    OgaStructuredRequestHandle* request, const OgaStructuredValueHandle* state);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredRequestAddQuestion(
+    OgaStructuredRequestHandle* request, const char* id, const OgaQuestionHandle* question);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredRequestSetTemperature(
+    OgaStructuredRequestHandle* request, float temperature);
+OGA_EXPORT void OGA_API_CALL OgaDestroyStructuredRequest(OgaStructuredRequestHandle* request);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateFreeFormRankRequest(OgaFreeFormRankRequestHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaFreeFormRankRequestSetState(
+    OgaFreeFormRankRequestHandle* request, const OgaStructuredValueHandle* state);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaFreeFormRankRequestSetInstructions(
+    OgaFreeFormRankRequestHandle* request, const OgaStructuredValueHandle* instructions);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaFreeFormRankRequestAddCandidate(
+    OgaFreeFormRankRequestHandle* request, const char* key, const OgaStructuredValueHandle* value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaFreeFormRankRequestSetTemperature(
+    OgaFreeFormRankRequestHandle* request, float temperature);
+OGA_EXPORT void OGA_API_CALL OgaDestroyFreeFormRankRequest(OgaFreeFormRankRequestHandle* request);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRankingSession(
+    const char* package_path, const char* const* providers, size_t provider_count,
+    OgaRankingSessionHandle** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyRankingSession(OgaRankingSessionHandle* session);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionCreateComponent(
+    const OgaRankingSessionHandle* session, const char* name, OgaComponentSession** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionRun(
+    OgaRankingSessionHandle* session, const OgaStructuredRequestHandle* request,
+    OgaModelResultHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionRank(
+    OgaRankingSessionHandle* session, const OgaFreeFormRankRequestHandle* request,
+    OgaRankingResultHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionSetCacheCapacity(
+    OgaRankingSessionHandle* session, size_t entry_capacity, size_t byte_capacity);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionGetCacheStats(
+    const OgaRankingSessionHandle* session, OgaNonGenerativeCacheStats* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionClearCache(
+    OgaRankingSessionHandle* session);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionInvalidateCache(
+    OgaRankingSessionHandle* session);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateDecisionSession(
+    const char* package_path, const char* const* providers, size_t provider_count,
+    OgaDecisionSessionHandle** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyDecisionSession(OgaDecisionSessionHandle* session);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionCreateComponent(
+    const OgaDecisionSessionHandle* session, const char* name, OgaComponentSession** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionRun(
+    OgaDecisionSessionHandle* session, const OgaStructuredRequestHandle* request,
+    OgaModelResultHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionDecide(
+    OgaDecisionSessionHandle* session, const OgaStructuredRequestHandle* request,
+    OgaModelResultHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionSetCacheCapacity(
+    OgaDecisionSessionHandle* session, size_t entry_capacity, size_t byte_capacity);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionGetCacheStats(
+    const OgaDecisionSessionHandle* session, OgaNonGenerativeCacheStats* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionClearCache(
+    OgaDecisionSessionHandle* session);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionInvalidateCache(
+    OgaDecisionSessionHandle* session);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionSetPrefixReuseEnabled(
+    OgaDecisionSessionHandle* session, bool enabled);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseEnabled(
+    const OgaDecisionSessionHandle* session, bool* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseStatus(
+    const OgaDecisionSessionHandle* session, const char** out);
+// Copies the status, including its trailing NUL, into buffer. Pass a null
+// buffer and zero capacity to query the required size.
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionCopyPrefixReuseStatus(
+    const OgaDecisionSessionHandle* session, char* buffer, size_t buffer_capacity,
+    size_t* required_size);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionSetPrefixCacheCapacity(
+    OgaDecisionSessionHandle* session, size_t entry_capacity, size_t byte_capacity);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixCacheStats(
+    const OgaDecisionSessionHandle* session, OgaNonGenerativeCacheStats* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseStats(
+    const OgaDecisionSessionHandle* session, OgaKevPrefixReuseStats* out);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetModel(
+    const OgaModelResultHandle* result, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetAnswerCount(
+    const OgaModelResultHandle* result, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetAnswerId(
+    const OgaModelResultHandle* result, size_t answer, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetAnswerType(
+    const OgaModelResultHandle* result, size_t answer, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetAnswerNoul(
+    const OgaModelResultHandle* result, size_t answer, double* value, bool* present);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetAnswerChoice(
+    const OgaModelResultHandle* result, size_t answer, const char** value, bool* present);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetAnswerScore(
+    const OgaModelResultHandle* result, size_t answer, double* value, bool* present);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetAnswerConfidence(
+    const OgaModelResultHandle* result, size_t answer, double* value, bool* present);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetProbabilityCount(
+    const OgaModelResultHandle* result, size_t answer, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetProbability(
+    const OgaModelResultHandle* result, size_t answer, size_t index,
+    const char** key, double* value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetLegendCount(
+    const OgaModelResultHandle* result, size_t answer, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetLegend(
+    const OgaModelResultHandle* result, size_t answer, size_t index,
+    const char** key, const char** value);
+OGA_EXPORT void OGA_API_CALL OgaDestroyModelResult(OgaModelResultHandle* result);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingResultGetModel(
+    const OgaRankingResultHandle* result, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingResultGetCount(
+    const OgaRankingResultHandle* result, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingResultGetRank(
+    const OgaRankingResultHandle* result, size_t index, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingResultGetKey(
+    const OgaRankingResultHandle* result, size_t index, const char** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingResultGetValue(
+    const OgaRankingResultHandle* result, size_t index, const OgaStructuredValueHandle** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingResultGetProbability(
+    const OgaRankingResultHandle* result, size_t index, double* out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyRankingResult(OgaRankingResultHandle* result);
 
 /**
  * \brief Control the logging behavior of the library.

@@ -10,6 +10,7 @@
 #include <optional>
 #include "span.h"
 #include "ort_genai_c.h"
+#include "ort_genai_c_internal.h"
 #include "generator/generators.h"
 #include "models/model.h"
 #include "constrained_logits_processor.h"
@@ -216,6 +217,10 @@ void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled) {
 
 const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
   return result->what_.c_str();
+}
+
+OgaResult* OgaCreateResultFromError(const char* error) {
+  return ReturnUnique<OgaResult>(std::make_unique<Generators::Result>(error));
 }
 
 OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value) {
