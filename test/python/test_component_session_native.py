@@ -3,6 +3,7 @@
 
 import json
 import shutil
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -163,7 +164,17 @@ def test_clm_cuda_graph_capture_replays_multiple_shapes(tmp_path, monkeypatch):
         )
 
 
-def test_invalid_component_runtime_policy_is_rejected(tmp_path):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cuda_graph_max_signatures", -1),
+        ("cuda_graph_max_signatures", 1 << (8 * struct.calcsize("P"))),
+        ("cuda_graph_max_bytes", 1 << (8 * struct.calcsize("P"))),
+    ],
+)
+def test_invalid_component_runtime_policy_is_rejected(
+    tmp_path, field, value
+):
     package = _package(tmp_path)
     (package / "component_runtime.json").write_text(
         json.dumps(
@@ -171,7 +182,7 @@ def test_invalid_component_runtime_policy_is_rejected(tmp_path):
                 "schema_version": 1,
                 "components": {
                     "unusual.component": {
-                        "cuda_graph_max_signatures": -1
+                        field: value
                     }
                 },
             }

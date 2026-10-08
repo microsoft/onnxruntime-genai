@@ -110,6 +110,7 @@ std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   const extTokenId_t* tokens;
   size_t count;
   CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));
+  if (!count) return {};
   return {tokens, tokens + count};
 }
 
@@ -133,7 +134,10 @@ std::vector<std::vector<int32_t>> Tokenizer::EncodeBatchRows(
     size_t count{};
     CheckResult(
         OrtxTokenId2DArrayGetItem(ids, index, &tokens, &count));
-    result.emplace_back(tokens, tokens + count);
+    if (count)
+      result.emplace_back(tokens, tokens + count);
+    else
+      result.emplace_back();
   }
   return result;
 }

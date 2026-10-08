@@ -140,9 +140,11 @@ def test_python_cache_controls(runtime, session_name):
 
 
 def test_precomputed_actions_remain_pinned_across_clear():
-    package = Path(
-        "/home/asonawane/non-generative/exports/mobius/"
-        "clm-v0.1-8b-fp16-bf16-fallback"
+    root_value = os.getenv("ORT_GENAI_NON_GENERATIVE_TEST_ROOT")
+    if not root_value:
+        pytest.skip("set ORT_GENAI_NON_GENERATIVE_TEST_ROOT to exported packages")
+    package = (
+        Path(root_value) / "clm-v0.1-8b-fp16-bf16-fallback"
     )
     if not (package / "precomputed_action_projections.bin").is_file():
         pytest.skip("precomputed CLM package is unavailable")

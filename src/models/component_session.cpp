@@ -110,6 +110,13 @@ struct ComponentRuntimePolicy {
   size_t max_bytes{std::numeric_limits<size_t>::max()};
 };
 
+bool IsRepresentableSize(double value) {
+  return std::isfinite(value) && value >= 0 &&
+         std::floor(value) == value &&
+         value < std::ldexp(
+                     1.0, std::numeric_limits<size_t>::digits);
+}
+
 std::unordered_map<std::string, ComponentRuntimePolicy> LoadRuntimePolicies(
     const fs::path& root) {
   const auto path = root / "component_runtime.json";
@@ -128,18 +135,10 @@ std::unordered_map<std::string, ComponentRuntimePolicy> LoadRuntimePolicies(
         "component_runtime.json schema_version must be 1");
   std::unordered_map<std::string, ComponentRuntimePolicy> result;
   for (const auto& [name, entry] : manifest.components.values) {
-    if (entry.cuda_graph_max_signatures < 0 ||
-        entry.cuda_graph_max_signatures >
-            static_cast<double>(std::numeric_limits<size_t>::max()) ||
-        std::floor(entry.cuda_graph_max_signatures) !=
-            entry.cuda_graph_max_signatures)
+    if (!IsRepresentableSize(entry.cuda_graph_max_signatures))
       throw std::runtime_error(
           "cuda_graph_max_signatures must be a non-negative integer");
-    if (entry.cuda_graph_max_bytes < 0 ||
-        entry.cuda_graph_max_bytes >
-            static_cast<double>(std::numeric_limits<size_t>::max()) ||
-        std::floor(entry.cuda_graph_max_bytes) !=
-            entry.cuda_graph_max_bytes)
+    if (!IsRepresentableSize(entry.cuda_graph_max_bytes))
       throw std::runtime_error(
           "cuda_graph_max_bytes must be a non-negative integer");
     result[name] = {
@@ -464,7 +463,16 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
   const auto signature = TensorSignature(inputs, output_names);
   std::unique_lock package_readiness_lock(package_->readiness_mutex,
                                           std::defer_lock);
-  if (cuda_graph_ && !cuda_graph_->runs.contains(signature))
+  const bool signature_is_new =
+      cuda_graph_ &&
+      cuda_graph_->runs.find(signature) == cuda_graph_->runs.end();
+  const bool signature_is_capture_eligible =
+      signature_is_new && !cuda_graph_->disabled &&
+      (!cuda_graph_->multi_shape ||
+       (cuda_graph_->runs.size() < cuda_graph_->max_signatures &&
+        cuda_graph_->persistent_bytes <
+            cuda_graph_->max_persistent_bytes));
+  if (signature_is_capture_eligible)
     package_readiness_lock.lock();
 
   // Fixing symbolic dimensions folds host-side shape nodes so the backbone is

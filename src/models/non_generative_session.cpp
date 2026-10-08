@@ -126,7 +126,7 @@ class SessionLruCache {
   void Put(std::string key, Value value, size_t recompute_cost = 1) {
     std::lock_guard lock(mutex_);
     if (!entry_capacity_ || !byte_capacity_) return;
-    if (pinned_.contains(key)) return;
+    if (pinned_.find(key) != pinned_.end()) return;
     const auto bytes = key.size() + size_(value);
     if (bytes > DynamicByteCapacity() ||
         pinned_.size() >= entry_capacity_)
@@ -147,9 +147,6 @@ class SessionLruCache {
 
   void Pin(std::string key, Value value) {
     std::lock_guard lock(mutex_);
-    if (!entry_capacity_ || !byte_capacity_)
-      throw std::runtime_error(
-          "cache capacity cannot hold package-pinned entries");
     const auto bytes = key.size() + size_(value);
     if (const auto found = pinned_.find(key); found != pinned_.end()) {
       pinned_byte_size_ -= found->second.bytes;
@@ -160,10 +157,11 @@ class SessionLruCache {
       entries_.erase(found->second);
       index_.erase(found);
     }
-    if (pinned_.size() + 1 > entry_capacity_ ||
-        pinned_byte_size_ + bytes > byte_capacity_)
-      throw std::runtime_error(
-          "package-pinned cache entries exceed configured capacity");
+    entry_capacity_ = std::max(entry_capacity_, pinned_.size() + 1);
+    if (bytes > std::numeric_limits<size_t>::max() - pinned_byte_size_)
+      throw std::runtime_error("package-pinned cache bytes overflow size_t");
+    byte_capacity_ =
+        std::max(byte_capacity_, pinned_byte_size_ + bytes);
     pinned_byte_size_ += bytes;
     pinned_.emplace(std::move(key),
                     PinnedEntry{std::move(value), bytes});
@@ -862,11 +860,11 @@ std::chrono::milliseconds FallbackIdleTimeout(
       std::from_chars(text.data(), text.data() + text.size(), milliseconds);
   if (error != std::errc{} || end != text.data() + text.size())
     throw std::invalid_argument(
-        "OGA_CLM_FALLBACK_IDLE_MS must be a non-negative integer");
+        "clm_fallback_idle_ms.txt must contain one non-negative integer");
   if (milliseconds >
       static_cast<uint64_t>(std::chrono::milliseconds::max().count()))
     throw std::invalid_argument(
-        "OGA_CLM_FALLBACK_IDLE_MS exceeds the supported range");
+        "clm_fallback_idle_ms.txt exceeds the supported range");
   return std::chrono::milliseconds(milliseconds);
 }
 
@@ -921,26 +919,14 @@ struct NativeRankingSession {
     }
     precomputed_action_count = LoadPrecomputedActions();
     if (!fused || !precomputed_action_count) EnsureEncoder();
-    if (fallback_idle_timeout.count() > 0 &&
-        std::filesystem::is_regular_file(
-            std::filesystem::path(package_path) / "safe_encoder" /
-            "model.onnx")) {
-      fallback_reaper = std::jthread([this](std::stop_token stop) {
-        const auto interval =
-            std::min(fallback_idle_timeout, std::chrono::milliseconds(1000));
-        std::unique_lock lock(fallback_mutex);
-        while (!stop.stop_requested()) {
-          fallback_condition.wait_for(lock, stop, interval,
-                                      [] { return false; });
-          if (stop.stop_requested()) break;
-          if (fallback_encoder &&
-              std::chrono::steady_clock::now() - fallback_last_used >=
-                  fallback_idle_timeout &&
-              fallback_encoder.use_count() == 1)
-            fallback_encoder.reset();
-        }
-      });
+  }
+  ~NativeRankingSession() {
+    {
+      std::lock_guard lock(fallback_mutex);
+      fallback_reaper_stop = true;
     }
+    fallback_condition.notify_all();
+    if (fallback_reaper.joinable()) fallback_reaper.join();
   }
   NamedComponentSession Component(const std::string& name) const {
     return NamedComponentSession(package_path, name, providers);
@@ -953,11 +939,12 @@ struct NativeRankingSession {
   Generators::ComponentPackageTokenizer tokenizer;
   std::unique_ptr<NamedComponentSession> encoder;
   std::mutex fallback_mutex;
-  std::condition_variable_any fallback_condition;
+  std::condition_variable fallback_condition;
   std::shared_ptr<SharedFallbackEncoder> fallback_encoder;
   std::chrono::steady_clock::time_point fallback_last_used{};
   std::chrono::milliseconds fallback_idle_timeout;
-  std::jthread fallback_reaper;
+  bool fallback_reaper_stop{};
+  std::thread fallback_reaper;
   std::vector<size_t> buckets;
   std::unique_ptr<NamedComponentSession> combined, state, action, scorer, fused;
   size_t precomputed_action_count{};
@@ -984,6 +971,27 @@ struct NativeRankingSession {
       return {};
     }
     fallback_last_used = std::chrono::steady_clock::now();
+    if (fallback_idle_timeout.count() > 0 &&
+        !fallback_reaper.joinable()) {
+      fallback_reaper = std::thread([this] {
+        const auto interval =
+            std::min(fallback_idle_timeout,
+                     std::chrono::milliseconds(1000));
+        std::unique_lock lock(fallback_mutex);
+        while (!fallback_reaper_stop) {
+          fallback_condition.wait_for(
+              lock, interval,
+              [this] { return fallback_reaper_stop; });
+          if (fallback_reaper_stop) break;
+          if (fallback_encoder &&
+              std::chrono::steady_clock::now() -
+                      fallback_last_used >=
+                  fallback_idle_timeout &&
+              fallback_encoder.use_count() == 1)
+            fallback_encoder.reset();
+        }
+      });
+    }
     return fallback_encoder;
   }
   OgaModelResult Run(const OgaStructuredRequest& request);
@@ -1253,7 +1261,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
                 OgaElementType_float32);
     } else {
       throw std::runtime_error(
-          "fused CLM last_token_selector must be float16 or float32");
+          "fused CLM last_token_selector must be float16, bfloat16, or float32");
     }
     feeds.AddView(
         "action_projections", action_projection,
@@ -1280,6 +1288,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     const auto state_projection = FloatTensor(state_tensor);
     RequireFloatCount(state_tensor, state_projection,
                       "fused CLM state projections");
+    RequireFinite(state_projection, "fused CLM state projections");
     for (size_t row = 0; row < question_count; ++row) {
       cache.Put(
           state_cache_keys[row],
