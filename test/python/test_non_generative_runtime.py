@@ -156,6 +156,10 @@ def test_precomputed_actions_remain_pinned_across_clear():
     session.clear_cache()
 
     assert session.cache_stats["entries"] == initial["entries"]
+    session.set_cache_capacity(0, 0)
+    assert session.cache_stats["capacity"] == 0
+    assert session.cache_stats["capacity_bytes"] == 0
+    assert session.cache_stats["entries"] == initial["entries"]
 
 
 @pytest.mark.skipif(

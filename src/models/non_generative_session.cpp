@@ -128,9 +128,7 @@ class SessionLruCache {
     if (!entry_capacity_ || !byte_capacity_) return;
     if (pinned_.find(key) != pinned_.end()) return;
     const auto bytes = key.size() + size_(value);
-    if (bytes > DynamicByteCapacity() ||
-        pinned_.size() >= entry_capacity_)
-      return;
+    if (bytes > byte_capacity_) return;
     if (const auto found = index_.find(key); found != index_.end()) {
       byte_size_ -= found->second->bytes;
       entries_.erase(found->second);
@@ -157,11 +155,8 @@ class SessionLruCache {
       entries_.erase(found->second);
       index_.erase(found);
     }
-    entry_capacity_ = std::max(entry_capacity_, pinned_.size() + 1);
     if (bytes > std::numeric_limits<size_t>::max() - pinned_byte_size_)
       throw std::runtime_error("package-pinned cache bytes overflow size_t");
-    byte_capacity_ =
-        std::max(byte_capacity_, pinned_byte_size_ + bytes);
     pinned_byte_size_ += bytes;
     pinned_.emplace(std::move(key),
                     PinnedEntry{std::move(value), bytes});
@@ -170,9 +165,6 @@ class SessionLruCache {
 
   void SetCapacity(size_t entries, size_t bytes) {
     std::lock_guard lock(mutex_);
-    if (entries < pinned_.size() || bytes < pinned_byte_size_)
-      throw std::invalid_argument(
-          "cache capacity cannot be smaller than package-pinned entries");
     entry_capacity_ = entries;
     byte_capacity_ = bytes;
     Evict();
@@ -207,14 +199,9 @@ class SessionLruCache {
     Value value;
     size_t bytes;
   };
-  size_t DynamicByteCapacity() const {
-    return byte_capacity_ > pinned_byte_size_
-               ? byte_capacity_ - pinned_byte_size_
-               : 0;
-  }
   void Evict() {
-    while ((entries_.size() + pinned_.size() > entry_capacity_ ||
-            byte_size_ > DynamicByteCapacity()) &&
+    while ((entries_.size() > entry_capacity_ ||
+            byte_size_ > byte_capacity_) &&
            !entries_.empty()) {
       auto victim = std::prev(entries_.end());
       for (auto it = entries_.begin(); it != entries_.end(); ++it)

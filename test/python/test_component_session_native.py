@@ -164,6 +164,41 @@ def test_clm_cuda_graph_capture_replays_multiple_shapes(tmp_path, monkeypatch):
         )
 
 
+def test_cuda_graph_byte_rejection_restores_eager_shapes(tmp_path):
+    package = _cuda_graph_package(tmp_path, "fused_state_ranking")
+    (package / "component_runtime.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "components": {
+                    "fused_state_ranking": {
+                        "cuda_graph_max_signatures": 2,
+                        "cuda_graph_max_bytes": 1,
+                    }
+                },
+            }
+        )
+    )
+    try:
+        session = og.ComponentSession(
+            str(package), "fused_state_ranking", ["cuda"]
+        )
+    except RuntimeError as error:
+        if "Cuda interface not available" in str(error):
+            pytest.skip(str(error))
+        raise
+
+    weight = np.asarray([[1.0, 0.5], [-0.25, 2.0]], dtype=np.float32)
+    for value in (
+        np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.asarray([[5.0, 6.0]], dtype=np.float32),
+    ):
+        np.testing.assert_allclose(
+            session.run({"input": value})["output"],
+            value @ weight,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

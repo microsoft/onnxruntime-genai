@@ -612,9 +612,20 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
     result.push_back(std::move(tensor));
   }
   if (cuda_graph_ && cuda_graph_->specialized) {
+    const auto disable_unusable_specialization = [&] {
+      if (!cuda_graph_->runs.empty()) return;
+      session_.reset();
+      session_ = CreateComponentSession(
+          cuda_graph_->model_path, cuda_graph_->providers, false,
+          cuda_graph_->config.get());
+      cuda_graph_->specialized = false;
+      cuda_graph_->disabled = true;
+    };
     if (cuda_graph_->multi_shape &&
-        cuda_graph_->runs.size() >= cuda_graph_->max_signatures)
+        cuda_graph_->runs.size() >= cuda_graph_->max_signatures) {
+      disable_unusable_specialization();
       return result;
+    }
     size_t persistent_bytes{};
     for (const auto& input : inputs) {
       if (input.byte_count >
@@ -633,8 +644,10 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
     if (persistent_bytes >
         cuda_graph_->max_persistent_bytes -
             std::min(cuda_graph_->persistent_bytes,
-                     cuda_graph_->max_persistent_bytes))
+                     cuda_graph_->max_persistent_bytes)) {
+      disable_unusable_specialization();
       return result;
+    }
     auto run = std::make_unique<ComponentCudaGraphState::Run>();
     run->signature = signature;
     run->graph_id = cuda_graph_->next_graph_id++;
