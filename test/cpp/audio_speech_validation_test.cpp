@@ -338,9 +338,9 @@ TEST_F(MetadataCoreStateTests, ChunkStartSampleSurvivesGeneratorInputHandoff) {
   generator->SetInputs(inputs);
   ASSERT_EQ(source->received_inputs.size(), 2U);
   const auto origin_input = std::find_if(source->received_inputs.begin(), source->received_inputs.end(),
-                                        [](const Generators::ExtraInput& input) {
-                                          return input.name == "chunk_start_sample";
-                                        });
+                                         [](const Generators::ExtraInput& input) {
+                                           return input.name == "chunk_start_sample";
+                                         });
   ASSERT_NE(origin_input, source->received_inputs.end());
   EXPECT_EQ(origin_input->tensor, origin);
   EXPECT_EQ(*origin_input->tensor->GetData<int64_t>(), 25600);
