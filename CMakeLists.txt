@@ -396,6 +396,11 @@ if (ENABLE_JAVA)
   add_subdirectory("${SRC_ROOT}/java")
 endif()
 
+if (ENABLE_JAVASCRIPT)
+  message("------------------Enabling JavaScript Node addon------------------")
+  add_subdirectory("${SRC_ROOT}/js")
+endif()
+
 if(ENABLE_MODEL_BENCHMARK)
   message("------------------Enabling model benchmark------------------")
   add_subdirectory("${REPO_ROOT}/benchmark/c")
