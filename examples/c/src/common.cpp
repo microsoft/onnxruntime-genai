@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <cassert>
+#include <stdexcept>
 
 #include "common.h"
 
@@ -252,6 +253,9 @@ void RegisterEP(const std::string& ep, const std::string& ep_path) {
 }
 
 std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string& ep, const std::unordered_map<std::string, std::string>& ep_options, GeneratorParamsArgs& search_options) {
+  if (search_options.max_length && search_options.max_length.value() <= 0) {
+    throw std::invalid_argument("max_length must be greater than 0");
+  }
   auto config = OgaConfig::Create(path.c_str());
   if (ep.compare("follow_config") != 0) {
     config->ClearProviders();

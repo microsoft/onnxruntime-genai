@@ -146,3 +146,14 @@ if(MODEL_ASR)
   prepare_executable(model_asr)
   target_link_libraries(model_asr PRIVATE nlohmann_json::nlohmann_json)
 endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  foreach(example model_qa model_chat model_mm)
+    if(TARGET ${example})
+      add_test(NAME ${example}_invalid_max_length
+        COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_max_length.cmake)
+    endif()
+  endforeach()
+endif()
