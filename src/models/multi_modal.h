@@ -30,11 +30,11 @@ struct MultiModalLanguageModel : Model {
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
-  std::unique_ptr<OrtSession> vision_session_;     // pixel_values, [image_attention_mask], image_sizes -> image_features
+  std::unique_ptr<OrtSession> vision_session_;            // pixel_values, [image_attention_mask], image_sizes -> image_features
   std::unique_ptr<OrtSession> vision_projector_session_;  // vision_features, auxiliary inputs -> image_features
-  std::unique_ptr<OrtSession> speech_session_;     // audio_embeds, audio_sizes, audio_projection_mode -> audio_features
-  std::unique_ptr<OrtSession> embedding_session_;  // input_ids, image_features, audio_features -> inputs_embeds
-  std::unique_ptr<OrtSession> decoder_session_;    // inputs_embeds, attention_mask, kv_cache -> logits
+  std::unique_ptr<OrtSession> speech_session_;            // audio_embeds, audio_sizes, audio_projection_mode -> audio_features
+  std::unique_ptr<OrtSession> embedding_session_;         // input_ids, image_features, audio_features -> inputs_embeds
+  std::unique_ptr<OrtSession> decoder_session_;           // inputs_embeds, attention_mask, kv_cache -> logits
 
   std::unique_ptr<OrtSessionOptions> vision_session_options_;
   std::unique_ptr<OrtSessionOptions> vision_projector_session_options_;

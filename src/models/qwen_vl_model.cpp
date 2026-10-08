@@ -479,7 +479,7 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   const auto encoder_output_index = static_cast<size_t>(
       std::distance(projector_input_names.begin(), encoder_output));
   const auto final_output_names = split_vision ? vl_model_.vision_projector_session_->GetOutputNames()
-                                                : output_names;
+                                               : output_names;
   // Fall back to the first output only when the config names no output at all. A name that
   // is set but absent from the model is a misconfiguration: running output 0 instead would
   // inject whatever that output happens to be as if it were image features.
@@ -533,8 +533,8 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
       projector_values[encoder_output_index] = owned.get();
       raw_output = nullptr;
       vl_model_.vision_projector_session_->Run(projector_options.get(), projector_names.data(),
-                                                projector_values.data(), projector_names.size(),
-                                                output_name_ptrs, &raw_output, 1);
+                                               projector_values.data(), projector_names.size(),
+                                               output_name_ptrs, &raw_output, 1);
       owned.reset(raw_output);
     }
     if (owned->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
