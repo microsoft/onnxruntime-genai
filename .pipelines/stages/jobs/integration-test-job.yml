@@ -15,6 +15,9 @@ parameters:
   - 'osx'
 - name: model
   type: string
+- name: runToolcalling
+  type: boolean
+  default: false
 - name: py_dot_ver
   type: string
   default: '3.12'
@@ -100,3 +103,12 @@ jobs:
       modelRoot: $(modelRoot)
       cudaDockerImage: $(cuda_docker_image)
       wheelDir: '$(Build.BinariesDirectory)/wheel'
+      runToolcalling: ${{ parameters.runToolcalling }}
+
+  - ${{ if eq(parameters.runToolcalling, true) }}:
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish tool-calling regression report'
+      condition: succeededOrFailed()
+      inputs:
+        targetPath: '$(Common.TestResultsDirectory)/toolcalling-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.json'
+        artifactName: 'toolcalling-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}'
