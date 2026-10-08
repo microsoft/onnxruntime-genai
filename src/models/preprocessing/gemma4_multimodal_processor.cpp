@@ -189,8 +189,8 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
 }  // namespace
 
 std::unique_ptr<OrtValue> ConvertAndResizeGemma4PositionIds(const int64_t* data, std::span<const int64_t> shape,
-                                                             int64_t target_patches, ONNXTensorElementDataType target_type,
-                                                             Ort::Allocator& allocator) {
+                                                            int64_t target_patches, ONNXTensorElementDataType target_type,
+                                                            Ort::Allocator& allocator) {
   if (shape.size() != 2 && shape.size() != 3) {
     throw std::runtime_error("pixel_position_ids has unexpected rank " + std::to_string(shape.size()) +
                              ". Expected 2 (num_patches, 2) or 3 (batch, num_patches, 2).");
@@ -497,7 +497,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       CheckResult(OrtxGetTensorData(pixel_position_ids, reinterpret_cast<const void**>(&pos_data), &pos_shape, &pos_dims));
 
       auto processed_pos = ConvertAndResizeGemma4PositionIds(pos_data, {pos_shape, pos_dims}, target_patches,
-                                                              pixel_position_ids_type_, allocator);
+                                                             pixel_position_ids_type_, allocator);
       named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
                              std::make_shared<Tensor>(std::move(processed_pos)));
     }
