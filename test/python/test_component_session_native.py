@@ -43,7 +43,34 @@ def _package(root: Path, filename: str = "graphs/arbitrary-name.onnx") -> Path:
     return root
 
 
-def _cuda_graph_package(root: Path) -> Path:
+def _write_component_genai_config(root: Path, filename: str, threads: int) -> None:
+    (root / "genai_config.json").write_text(
+        json.dumps(
+            {
+                "model": {
+                    "type": "component",
+                    "pad_token_id": 0,
+                    "eos_token_id": 0,
+                    "vocab_size": 1,
+                    "context_length": 8,
+                    "decoder": {
+                        "filename": filename,
+                        "session_options": {
+                            "intra_op_num_threads": threads,
+                            "inter_op_num_threads": 1,
+                            "session.intra_op.allow_spinning": "0",
+                            "session.inter_op.allow_spinning": "0",
+                        },
+                    },
+                }
+            }
+        )
+    )
+
+
+def _cuda_graph_package(
+    root: Path, component: str = "backbone"
+) -> Path:
     weight = helper.make_tensor(
         "weight",
         TensorProto.FLOAT,
@@ -66,7 +93,7 @@ def _cuda_graph_package(root: Path) -> Path:
                 "schema_version": 1,
                 "model_type": "synthetic-cuda-graph",
                 "components": {
-                    "backbone": {"filename": "backbone.onnx"},
+                    component: {"filename": "backbone.onnx"},
                 },
             }
         )
@@ -100,6 +127,30 @@ def test_cuda_graph_capture_replays_and_falls_back_for_new_shape(tmp_path, monke
     )
 
 
+def test_clm_cuda_graph_capture_replays_multiple_shapes(tmp_path, monkeypatch):
+    package = _cuda_graph_package(tmp_path, "fused_state_ranking")
+    try:
+        session = og.ComponentSession(
+            str(package), "fused_state_ranking", ["cuda"]
+        )
+    except RuntimeError as error:
+        if "Cuda interface not available" in str(error):
+            pytest.skip(str(error))
+        raise
+
+    weight = np.asarray([[1.0, 0.5], [-0.25, 2.0]], dtype=np.float32)
+    batches = [
+        np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.asarray([[5.0, 6.0]], dtype=np.float32),
+        np.asarray([[7.0, 8.0], [9.0, 10.0]], dtype=np.float32),
+    ]
+    for value in batches:
+        np.testing.assert_allclose(
+            session.run({"input": value})["output"],
+            value @ weight,
+        )
+
+
 def test_manifest_mapping_arbitrary_filename_and_native_run(tmp_path):
     session = og.ComponentSession(str(_package(tmp_path)), "unusual.component", ["cpu"])
     value = np.asarray([[1.5, -2.0]], dtype=np.float32)
@@ -107,6 +158,25 @@ def test_manifest_mapping_arbitrary_filename_and_native_run(tmp_path):
     np.testing.assert_array_equal(result["output"], value)
     assert session.input_names == ["input"]
     assert session.input_info["input"]["shape"] == [-1, 2]
+
+
+def test_component_session_applies_genai_config_session_options(tmp_path):
+    filename = "graphs/arbitrary-name.onnx"
+    package = _package(tmp_path, filename)
+    _write_component_genai_config(package, filename, 1)
+    session = og.ComponentSession(str(package), "unusual.component", ["cpu"])
+    value = np.asarray([[1.5, -2.0]], dtype=np.float32)
+    np.testing.assert_array_equal(
+        session.run({"input": value}, ["output"])["output"], value
+    )
+
+
+def test_component_session_rejects_malformed_genai_config(tmp_path):
+    filename = "graphs/arbitrary-name.onnx"
+    package = _package(tmp_path, filename)
+    (package / "genai_config.json").write_text("{")
+    with pytest.raises(RuntimeError):
+        og.ComponentSession(str(package), "unusual.component", ["cpu"])
 
 
 def test_zero_element_component_output_is_supported(tmp_path):

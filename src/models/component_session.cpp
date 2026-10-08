@@ -151,10 +151,25 @@ bool KevCudaGraphEnabled() {
 
 std::unique_ptr<OrtSession> CreateComponentSession(
     const fs::path& model_path, const std::vector<std::string>& providers,
-    bool capture,
+    bool capture, const Config* component_config,
     const std::map<std::string, int64_t>& dimension_overrides = {}) {
   auto options = OrtSessionOptions::Create();
-  Config config;
+  Config config = component_config ? *component_config : Config{};
+  auto& configured_session_options =
+      config.model.decoder.session_options;
+  if (component_config) {
+    if (configured_session_options.intra_op_num_threads)
+      options->SetIntraOpNumThreads(
+          *configured_session_options.intra_op_num_threads);
+    if (configured_session_options.inter_op_num_threads)
+      options->SetInterOpNumThreads(
+          *configured_session_options.inter_op_num_threads);
+    for (const auto& [name, value] :
+         configured_session_options.config_entries)
+      options->AddConfigEntry(name.c_str(), value.c_str());
+  }
+  configured_session_options.providers.clear();
+  configured_session_options.provider_options.clear();
   for (const auto& provider : providers) {
     if (provider.empty())
       throw std::runtime_error("provider name must not be empty");
@@ -230,10 +245,13 @@ struct ComponentCudaGraphState {
 
   fs::path model_path;
   std::vector<std::string> providers;
+  std::unique_ptr<Config> config;
   DeviceInterface* device{};
   std::unique_ptr<OrtMemoryInfo> device_memory;
   std::unique_ptr<OrtRunOptions> eager_options;
-  std::unique_ptr<Run> run;
+  std::unordered_map<std::string, std::unique_ptr<Run>> runs;
+  int next_graph_id{1};
+  bool multi_shape{};
   bool specialized{};
   bool disabled{};
 };
@@ -243,7 +261,13 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
   auto components = LoadComponents(package_path);
   auto found = components.find(component);
   if (found == components.end()) throw std::runtime_error("component not declared: " + component);
-  session_ = CreateComponentSession(found->second, providers, false);
+  std::unique_ptr<Config> component_config;
+  if (std::filesystem::is_regular_file(
+          (package_path / "genai_config.json").c_str()))
+    component_config =
+        std::make_unique<Config>(package_path, std::string_view{});
+  session_ = CreateComponentSession(found->second, providers, false,
+                                    component_config.get());
   input_names_ = session_->GetInputNames();
   output_names_ = session_->GetOutputNames();
   for (size_t i = 0; i < input_names_.size(); ++i) {
@@ -257,34 +281,40 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
       info.symbolic_dimensions.emplace_back(symbol ? symbol : "");
     inputs_.push_back(std::move(info));
   }
-  if (component == "backbone" &&
-      std::any_of(providers.begin(), providers.end(), IsCudaProvider) &&
-      KevCudaGraphEnabled()) {
+  const bool kev_capture = component == "backbone" && KevCudaGraphEnabled();
+  const bool clm_capture = component == "fused_state_ranking";
+  if ((kev_capture || clm_capture) &&
+      std::any_of(providers.begin(), providers.end(), IsCudaProvider)) {
     Config config;
     for (const auto& provider : providers)
       SetProviderOption(config, provider, {}, {});
     cuda_graph_ = std::make_unique<ComponentCudaGraphState>();
     cuda_graph_->model_path = found->second;
     cuda_graph_->providers = providers;
+    cuda_graph_->config = std::move(component_config);
     cuda_graph_->device = GetDeviceInterface(DeviceType::CUDA);
     EnsureDeviceOrtInit(*cuda_graph_->device, config);
     cuda_graph_->device_memory = cuda_graph_->device->GetMemoryInfo();
     cuda_graph_->eager_options = OrtRunOptions::Create();
     cuda_graph_->eager_options->AddConfigEntry("gpu_graph_id", "-1");
+    cuda_graph_->multi_shape = clm_capture;
   }
 }
 
 ComponentSession::~ComponentSession() {
 #if ORT_API_VERSION >= 27
-  if (cuda_graph_ && cuda_graph_->run && cuda_graph_->run->captured) {
-    try {
-      session_->ReleaseCapturedGraph(cuda_graph_->run->graph_id);
-    } catch (...) {
-      if (g_log.enabled && g_log.ort_lib)
-        Log("ort_lib") << "ReleaseCapturedGraph(id="
-                       << cuda_graph_->run->graph_id
-                       << ") failed during component-session cleanup"
-                       << std::endl;
+  if (cuda_graph_) {
+    for (const auto& [_, run] : cuda_graph_->runs) {
+      if (!run->captured) continue;
+      try {
+        session_->ReleaseCapturedGraph(run->graph_id);
+      } catch (...) {
+        if (g_log.enabled && g_log.ort_lib)
+          Log("ort_lib") << "ReleaseCapturedGraph(id="
+                         << run->graph_id
+                         << ") failed during component-session cleanup"
+                         << std::endl;
+      }
     }
   }
 #endif
@@ -324,35 +354,47 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
     }
     session_.reset();
     try {
-      session_ = CreateComponentSession(cuda_graph_->model_path,
-                                        cuda_graph_->providers, true, overrides);
+      session_ = CreateComponentSession(
+          cuda_graph_->model_path, cuda_graph_->providers, true,
+          cuda_graph_->config.get(),
+          cuda_graph_->multi_shape ? std::map<std::string, int64_t>{}
+                                   : overrides);
       cuda_graph_->specialized = true;
     } catch (...) {
-      session_ = CreateComponentSession(cuda_graph_->model_path,
-                                        cuda_graph_->providers, false);
+      session_ = CreateComponentSession(
+          cuda_graph_->model_path, cuda_graph_->providers, false,
+          cuda_graph_->config.get());
       cuda_graph_->disabled = true;
       throw;
     }
   }
 
-  if (cuda_graph_ && cuda_graph_->run &&
-      cuda_graph_->run->signature != signature) {
+  if (cuda_graph_ && !cuda_graph_->multi_shape &&
+      !cuda_graph_->runs.empty() &&
+      cuda_graph_->runs.begin()->second->signature != signature) {
     // A captured graph owns fixed launch dimensions and buffer addresses.
     // Restore the generic session rather than recapturing unbounded shapes.
 #if ORT_API_VERSION >= 27
-    if (cuda_graph_->run->captured)
-      session_->ReleaseCapturedGraph(cuda_graph_->run->graph_id);
+    if (cuda_graph_->runs.begin()->second->captured)
+      session_->ReleaseCapturedGraph(
+          cuda_graph_->runs.begin()->second->graph_id);
 #endif
-    cuda_graph_->run.reset();
+    cuda_graph_->runs.clear();
     session_.reset();
-    session_ = CreateComponentSession(cuda_graph_->model_path,
-                                      cuda_graph_->providers, false);
+    session_ = CreateComponentSession(
+        cuda_graph_->model_path, cuda_graph_->providers, false,
+        cuda_graph_->config.get());
     cuda_graph_->specialized = false;
     cuda_graph_->disabled = true;
   }
 
-  if (cuda_graph_ && cuda_graph_->run) {
-    auto& run = *cuda_graph_->run;
+  const auto captured =
+      cuda_graph_ ? cuda_graph_->runs.find(signature)
+                  : std::unordered_map<
+                        std::string,
+                        std::unique_ptr<ComponentCudaGraphState::Run>>::iterator{};
+  if (cuda_graph_ && captured != cuda_graph_->runs.end()) {
+    auto& run = *captured->second;
     for (size_t i = 0; i < inputs.size(); ++i) {
       if (!inputs[i].data && inputs[i].byte_count)
         throw std::runtime_error(
@@ -420,8 +462,11 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
     result.push_back(std::move(tensor));
   }
   if (cuda_graph_ && cuda_graph_->specialized) {
+    if (cuda_graph_->multi_shape && cuda_graph_->runs.size() >= 8)
+      return result;
     auto run = std::make_unique<ComponentCudaGraphState::Run>();
     run->signature = signature;
+    run->graph_id = cuda_graph_->next_graph_id++;
     run->options = OrtRunOptions::Create();
     run->options->AddConfigEntry("gpu_graph_id",
                                  std::to_string(run->graph_id).c_str());
@@ -460,7 +505,7 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
       run->binding->BindInput(input.name.c_str(), *input.value);
     for (auto& output : run->outputs)
       run->binding->BindOutput(output.name.c_str(), *output.value);
-    cuda_graph_->run = std::move(run);
+    cuda_graph_->runs.emplace(signature, std::move(run));
   }
   return result;
 }
