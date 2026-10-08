@@ -243,6 +243,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      bool prefault{true};
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
@@ -700,6 +701,14 @@ struct Config {
       int selector_top_k{};
       int mask_token_id{};
       int sliding_window{-1};
+      // How a sampled (non-greedy) turn drafts. Greedy turns always walk the lattice greedily.
+      enum class SampledProposal {
+        None,         // Sampled turns decode without block drafts.
+        GreedyPath,   // Greedy lattice path, verified by sampling the target and matching.
+        Independent,  // Each slot sampled from its own proposal; ratio-verified.
+        Lattice,      // Path sampled through the lattice at the turn's policy; ratio-verified.
+      };
+      SampledProposal sampled_proposal{SampledProposal::Lattice};
       bool independent_sampling{};
       float sampling_temperature{0.1f};
       float sampling_top_p{0.95f};
@@ -811,6 +820,9 @@ struct Config {
     struct Eligibility {
       std::optional<uint64_t> minimum_total_device_memory_bytes;
       std::optional<uint64_t> maximum_total_device_memory_bytes;
+      std::optional<uint64_t> minimum_free_device_memory_bytes;
+      std::optional<uint64_t> maximum_free_device_memory_bytes;
+      std::optional<bool> is_integrated;
     } eligibility;
 
     struct Overlay {
@@ -855,6 +867,13 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+struct RuntimeProfileDeviceFacts {
+  uint64_t total_device_memory_bytes{};
+  std::optional<bool> is_integrated;
+  // Unset means unknown: profiles with free-memory bounds do not match.
+  std::optional<uint64_t> free_device_memory_bytes;
+};
+void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
 

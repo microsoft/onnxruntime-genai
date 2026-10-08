@@ -529,6 +529,21 @@ def test_structured_unquantized_moe_completes_cli_option_parsing(monkeypatch):
     assert "moe_quant_type" not in options
 
 
+@pytest.mark.parametrize(
+    ("extra_options", "expected"),
+    [
+        ({"disable_qkv_fusion": "true"}, False),
+        ({"disable_qkv_fusion": "false"}, True),
+        ({"disable_qkv_fusion": "true", "fuse_qkv": "true"}, True),
+    ],
+)
+def test_disable_qkv_fusion_is_a_deprecated_inverse_alias(monkeypatch, capsys, extra_options, expected):
+    _run_check_extra_options(monkeypatch, extra_options)
+
+    assert extra_options["fuse_qkv"] is expected
+    assert "'disable_qkv_fusion' is deprecated" in capsys.readouterr().out
+
+
 def test_mtp_quant_config_json_is_parsed(monkeypatch):
     options = {"mtp_quant_config": '{"io_dtype":"bf16","weights":{"type":"int4"}}'}
 

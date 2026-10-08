@@ -177,7 +177,7 @@ Pool size, scheduler limits, utilization targets, and prefill chunk size belong
 to `runtime_config`. They remain constrained by the exported graph and supported
 runtime behavior even though they are not graph-construction options.
 
-### Gate/Up Projection Fusion
+### Projection Fusion
 
 Expose `optimizations.fuse_mlp_gate_up` independently under `target_options` and
 `drafter_options`. The default is `false` for each; enabling target fusion does
@@ -198,6 +198,19 @@ be preserved. Resolve exact-name overrides against the final emitted graph;
 do not silently drop old gate/up names after fusion or change one projection's
 policy to match the other. An unsupported DSpark/MTP fusion request must fail,
 not be accepted just because the schema has the field.
+
+`target_options.optimizations.fuse_qkv` controls target Q/K/V projection fusion
+and defaults to `true`. It maps to the `fuse_qkv` exporter option. The legacy
+inverse option `disable_qkv_fusion` is deprecated but remains supported; when
+both spellings are present, `fuse_qkv` takes precedence. Fusion remains
+automatically disabled for unsupported execution providers and incompatible
+projection or quantization configurations.
+
+`drafter_options.optimizations.fuse_qkv` (DFlash2 only, default `false`) maps to
+`dflash2_fuse_qkv`. Each layer stacks its query-block rows over the shared context
+rows and projects both with one Q/K/V projection whose gathered output feeds
+`PagedAttention` as packed QKV. The fused drafter has no `q_row_map` input and
+therefore requires a runtime that treats `q_row_map` as optional.
 
 Fusion is distinct from selecting the CUDA fpA/intB kernel family. The legacy
 `enable_cuda_fpa_intb_gemm` option maps to the runtime decoder session entry
@@ -437,6 +450,18 @@ parser, `max_batch_size` cannot exceed 256, and batching overrides require an
 exported dynamic-batching configuration. Draft-token overrides are checked
 against the same exported drafter/state capacity as ordinary runtime overlays.
 
+Profile `eligibility` combines its required inclusive total-device-memory range with
+optional inclusive `minimum_free_device_memory_bytes` and `maximum_free_device_memory_bytes`
+bounds and optional `is_integrated: true|false`. Omitted free-memory bounds match any
+free-memory value; omitted `is_integrated` matches either device type. Equal total-memory
+ranges may use disjoint free-memory ranges or separate integrated and discrete profiles.
+The builder checks the same reachable-overlap rules as the C++ loader, rejects invalid
+byte counts and non-boolean `is_integrated`, and rejects a free-memory minimum above the
+maximum total memory. Further typed conditions belong in this existing eligibility object,
+with matching and intersection validation added on both sides. CUDA free memory is sampled
+once at Model creation, not reserved; on integrated devices it is not a measure of free
+OS memory. Select conservative `num_blocks` using measured peak OS-memory headroom.
+
 With a CUDA-enabled GenAI build and ORT built with INT4 KV-cache support, this
 integration test assembles a temporary shared-weight package, selects each
 INT4/INT8 profile, creates an Engine, and performs a short decode:
@@ -577,7 +602,8 @@ there, or be supplied as resolved Olive resources.
           }
         },
         "optimizations": {
-          "fuse_mlp_gate_up": true
+          "fuse_mlp_gate_up": true,
+          "fuse_qkv": true
         }
       },
       "drafter_options": {
@@ -866,7 +892,10 @@ target/drafter/runtime envelope.
 | `dflash2_precision` | Drafter weight policy plus explicit legacy-derived settings |
 | `dflash2_num_draft_tokens`, `dspark_num_draft_tokens` | `drafter_options.num_draft_tokens` |
 | `fuse_mlp_gate_up` | `target_options.optimizations.fuse_mlp_gate_up` |
+| `fuse_qkv` | `target_options.optimizations.fuse_qkv` |
+| `disable_qkv_fusion` | Deprecated inverse alias for `target_options.optimizations.fuse_qkv` |
 | `dflash2_fuse_gate_up` | `drafter_options.optimizations.fuse_mlp_gate_up` |
+| `dflash2_fuse_qkv` | `drafter_options.optimizations.fuse_qkv` |
 | `dspark_top_k` | `drafter_options.dspark.top_k` |
 | Existing automatic target/drafter tensor adoption | New `drafter_options.shared_weights` policies; preserve existing decisions for legacy-only calls |
 | `shared_embeddings` | Existing within-model tying; not an alias for cross-model `shared_weights` |

@@ -10,7 +10,7 @@ from safetensors.torch import save_file
 
 
 def _projection_tensors(layer_id=0):
-    prefix = f"model.layers.{layer_id}.moe.experts"
+    prefix = f"model.layers.{layer_id}.mlp.experts"
     gate_up_blocks = torch.arange(2 * 4 * 2 * 16, dtype=torch.uint8).reshape(2, 4, 2, 16)
     down_blocks = torch.arange(2 * 6 * 2 * 16, dtype=torch.uint8).reshape(2, 6, 2, 16)
     return {
@@ -22,7 +22,7 @@ def _projection_tensors(layer_id=0):
 
 
 def test_pack_blocks_for_qmoe_preserves_fp4_codes():
-    blocks = _projection_tensors()["model.layers.0.moe.experts.gate_up_proj_blocks"]
+    blocks = _projection_tensors()["model.layers.0.mlp.experts.gate_up_proj_blocks"]
     packed = GptOssMXFP4Loader("").pack_blocks_for_qmoe(blocks)
 
     codes = torch.empty(2, 4, 2, 32, dtype=torch.uint8)
@@ -41,8 +41,8 @@ def test_prepare_experts_decodes_e2m1_values_and_e8m0_scales(tmp_path):
     blocks = packed.repeat(2).reshape(1, 1, 1, 16)
     scales = torch.tensor([[[128]]], dtype=torch.uint8)
     tensors = _projection_tensors()
-    tensors["model.layers.0.moe.experts.gate_up_proj_blocks"] = blocks
-    tensors["model.layers.0.moe.experts.gate_up_proj_scales"] = scales
+    tensors["model.layers.0.mlp.experts.gate_up_proj_blocks"] = blocks
+    tensors["model.layers.0.mlp.experts.gate_up_proj_scales"] = scales
     save_file(tensors, tmp_path / "model.safetensors")
 
     decoded, _ = GptOssMXFP4Loader(tmp_path).prepare_experts(0, decode=True)
@@ -66,7 +66,7 @@ def test_prepare_experts_preserves_mxfp4_scale_bytes(tmp_path):
     assert experts.scales_raw
     assert torch.equal(
         experts.gate_up_scales,
-        tensors["model.layers.0.moe.experts.gate_up_proj_scales"],
+        tensors["model.layers.0.mlp.experts.gate_up_proj_scales"],
     )
     assert torch.equal(experts.gate_up_global_scales, torch.ones(2))
     assert experts.gate_up_qweight.shape == (2, 64, 2)

@@ -937,6 +937,7 @@ def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
 
 def test_qwen35_native_nvfp4_moe_uses_global_scales(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.use_paged_attention = False
     model.hidden_size = 16
     model.moe_attrs = {
         "op_type": "QMoE",
@@ -967,6 +968,7 @@ def test_qwen35_native_nvfp4_moe_uses_global_scales(monkeypatch):
 
 def test_qwen35_shared_expert_reuses_mlp_builder(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
     model.intermediate_size = 2048
     model.shared_expert_intermediate_size = 512
@@ -1000,6 +1002,7 @@ def test_qwen35_shared_expert_reuses_mlp_builder(monkeypatch):
 
 def test_qwen35_shared_expert_uses_fused_mlp_builder(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
     model.intermediate_size = 2048
     model.shared_expert_intermediate_size = 512
