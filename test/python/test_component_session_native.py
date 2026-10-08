@@ -136,7 +136,7 @@ def test_clm_cuda_graph_capture_replays_multiple_shapes(tmp_path, monkeypatch):
                 "schema_version": 1,
                 "components": {
                     "fused_state_ranking": {
-                        "cuda_graph_max_signatures": 2
+                        "cuda_graph_max_bytes": 1048576
                     }
                 },
             }

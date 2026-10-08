@@ -70,8 +70,8 @@ struct Manifest : JSON::Element {
 };
 
 struct RuntimeComponentEntry : JSON::Element {
-  double cuda_graph_max_signatures{};
-  double cuda_graph_max_bytes{};
+  std::optional<double> cuda_graph_max_signatures;
+  std::optional<double> cuda_graph_max_bytes;
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "cuda_graph_max_signatures")
       cuda_graph_max_signatures = JSON::Get<double>(value);
@@ -106,8 +106,8 @@ struct RuntimeManifest : JSON::Element {
 };
 
 struct ComponentRuntimePolicy {
-  size_t max_signatures{};
-  size_t max_bytes{std::numeric_limits<size_t>::max()};
+  std::optional<size_t> max_signatures;
+  std::optional<size_t> max_bytes;
 };
 
 bool IsRepresentableSize(double value) {
@@ -135,17 +135,24 @@ std::unordered_map<std::string, ComponentRuntimePolicy> LoadRuntimePolicies(
         "component_runtime.json schema_version must be 1");
   std::unordered_map<std::string, ComponentRuntimePolicy> result;
   for (const auto& [name, entry] : manifest.components.values) {
-    if (!IsRepresentableSize(entry.cuda_graph_max_signatures))
+    if (entry.cuda_graph_max_signatures &&
+        !IsRepresentableSize(*entry.cuda_graph_max_signatures))
       throw std::runtime_error(
           "cuda_graph_max_signatures must be a non-negative integer");
-    if (!IsRepresentableSize(entry.cuda_graph_max_bytes))
+    if (entry.cuda_graph_max_bytes &&
+        !IsRepresentableSize(*entry.cuda_graph_max_bytes))
       throw std::runtime_error(
           "cuda_graph_max_bytes must be a non-negative integer");
-    result[name] = {
-        static_cast<size_t>(entry.cuda_graph_max_signatures),
-        entry.cuda_graph_max_bytes
-            ? static_cast<size_t>(entry.cuda_graph_max_bytes)
-            : std::numeric_limits<size_t>::max()};
+    ComponentRuntimePolicy policy;
+    if (entry.cuda_graph_max_signatures)
+      policy.max_signatures =
+          static_cast<size_t>(*entry.cuda_graph_max_signatures);
+    if (entry.cuda_graph_max_bytes)
+      policy.max_bytes =
+          *entry.cuda_graph_max_bytes
+              ? static_cast<size_t>(*entry.cuda_graph_max_bytes)
+              : std::numeric_limits<size_t>::max();
+    result.emplace(name, std::move(policy));
   }
   return result;
 }
@@ -412,8 +419,10 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
   if (const auto configured =
           package_->graph_policies.find(component);
       configured != package_->graph_policies.end()) {
-    max_signatures = configured->second.max_signatures;
-    max_persistent_bytes = configured->second.max_bytes;
+    if (configured->second.max_signatures)
+      max_signatures = *configured->second.max_signatures;
+    if (configured->second.max_bytes)
+      max_persistent_bytes = *configured->second.max_bytes;
   }
   else if (component == "backbone" && LegacyKevCudaGraphEnabled())
     max_signatures = 1;

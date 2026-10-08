@@ -1045,6 +1045,8 @@ size_t NativeRankingSession::LoadPrecomputedActions() {
     throw std::runtime_error(
         "precomputed CLM action projection count exceeds 4096");
   const auto mode = combined ? "combined" : "split";
+  std::vector<std::pair<std::string, std::vector<float>>> records;
+  records.reserve(count);
   for (uint32_t record = 0; record < count; ++record) {
     uint32_t text_size{}, projection_size{};
     read_exact(&text_size, sizeof(text_size), "text size");
@@ -1065,11 +1067,13 @@ size_t NativeRankingSession::LoadPrecomputedActions() {
     std::ostringstream key;
     key << identity << "|clm-action|" << mode << "|float32|"
         << text.size() << ':' << text;
-    cache.Pin(key.str(), std::move(projection));
+    records.emplace_back(key.str(), std::move(projection));
   }
   if (input.peek() != std::char_traits<char>::eof())
     throw std::runtime_error(
         "precomputed CLM action projection file has trailing data");
+  for (auto& [key, projection] : records)
+    cache.Pin(std::move(key), std::move(projection));
   return count;
 }
 
