@@ -199,6 +199,10 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
   // Query pixel_position_ids type (int32 or int64) if the vision model has this input
   if (session_info.HasInput(config.model.vision.inputs.pixel_position_ids)) {
     pixel_position_ids_type_ = session_info.GetInputDataType(config.model.vision.inputs.pixel_position_ids);
+    if (pixel_position_ids_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 &&
+        pixel_position_ids_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+      throw std::runtime_error("Gemma4 pixel_position_ids input must have type INT32 or INT64");
+    }
   }
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
@@ -447,7 +451,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
           std::transform(src + b * src_stride, src + b * src_stride + dst_stride,
                          dst + b * dst_stride, [](int64_t value) { return static_cast<int32_t>(value); });
         }
-      } else {
+      } else if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
         auto* dst = output_pos->GetTensorMutableData<int64_t>();
         for (int64_t b = 0; b < pos_batch; ++b) {
           std::copy_n(src + b * src_stride, dst_stride, dst + b * dst_stride);

@@ -246,6 +246,50 @@ def test_gemma4_unified_vision_int32_positions(
         )
 
 
+@pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
+@pytest.mark.parametrize(
+    "position_dtype", [onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16]
+)
+def test_gemma4_vision_rejects_unsupported_position_dtype(
+    test_data_path, unified_model_path, tmp_path, model_type, position_dtype
+):
+    """Reject floating-point positions before any image output allocation."""
+    source = (
+        unified_model_path
+        if model_type == "gemma4_unified"
+        else Path(test_data_path) / "gemma4"
+    )
+    model_path = tmp_path / model_type
+    shutil.copytree(source, model_path)
+    vision_path = model_path / "dummy_vision.onnx"
+    vision = onnx.load(vision_path)
+    position_input = next(
+        value for value in vision.graph.input if value.name == "pixel_position_ids"
+    )
+    position_input.type.tensor_type.elem_type = position_dtype
+    # Keep the graph valid so rejection comes from the processor's dtype guard.
+    for node in vision.graph.node:
+        for index, name in enumerate(node.input):
+            if name == "pixel_position_ids":
+                node.input[index] = "integer_position_ids"
+    vision.graph.node.insert(
+        0,
+        onnx.helper.make_node(
+            "Cast",
+            ["pixel_position_ids"],
+            ["integer_position_ids"],
+            to=onnx.TensorProto.INT64,
+        ),
+    )
+    onnx.checker.check_model(vision)
+    onnx.save(vision, vision_path)
+    model = og.Model(os.fspath(model_path))
+    with pytest.raises(
+        RuntimeError, match="pixel_position_ids input must have type INT32 or INT64"
+    ):
+        model.create_multimodal_processor()
+
+
 @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "jfk.flac"])
 def test_gemma4_unified_audio_contract(
     test_data_path, unified_model_path, relative_audio_path
