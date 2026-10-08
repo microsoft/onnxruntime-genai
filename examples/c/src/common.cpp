@@ -272,7 +272,7 @@ std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string&
 
   // Set any search-specific options that need to be known before constructing a Model object
   // Otherwise they can be set with params.SetSearchOptions(search_options)
-  nlohmann::ordered_json j = search_options;
+  nlohmann::ordered_json j = {{"search", search_options}};
   std::string s = j.dump();
   config->Overlay(s.c_str());
   return config;
@@ -295,6 +295,10 @@ void SetSearchOptions(OgaGeneratorParams& generatorParams, GeneratorParamsArgs& 
   if (args.min_length) {
     generatorParams.SetSearchOption("min_length", args.min_length.value());
     opts.push_back("min_length: " + std::to_string(args.min_length.value()));
+  }
+  if (args.max_length) {
+    generatorParams.SetSearchOption("max_length", args.max_length.value());
+    opts.push_back("max_length: " + std::to_string(args.max_length.value()));
   }
   if (args.num_beams) {
     generatorParams.SetSearchOption("num_beams", args.num_beams);
