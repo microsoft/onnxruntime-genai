@@ -169,6 +169,7 @@ def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path):
     session_options = ort.SessionOptions()
     session_options.enable_profiling = True
     session_options.profile_file_prefix = str(tmp_path / "webgpu-profile")
+    session_options.add_session_config_entry("ep.webgpuexecutionprovider.enableMatmulFp32Accumulation", "1")
     webgpu_devices = [device for device in ort.get_ep_devices() if device.ep_name == webgpu_provider]
     assert webgpu_devices, (
         f"No {webgpu_provider} device found after registering {webgpu_ep.get_library_path()}; "
