@@ -25,6 +25,19 @@ cd examples/csharp/
 dotnet build ModelASR -c Release
 ```
 
+The timestamp-capable example requires bindings and a native GenAI library containing the timestamp
+APIs; the current `0.17.0` package references do not contain them, even when running in plain-text mode.
+Until a feature-containing package is published, build from the repository root with:
+
+```bash
+dotnet build examples/csharp/ModelASR -c Release -p:UseLocalGenAI=true
+```
+
+Use the matching native GenAI, ONNX Runtime, and execution-provider libraries at runtime. Make their
+directories available on `LD_LIBRARY_PATH` on Linux or `PATH` on Windows. The native build also needs
+the corresponding ONNX Runtime Extensions metadata support. Update both the CPU and CUDA package
+references to a feature-containing release before using the package-based build.
+
 ## Run
 
 ```bash
@@ -56,6 +69,13 @@ cd ./ModelASR/bin/Release/net8.0/
 The example prints transcribed text incrementally as each audio chunk is processed,
 followed by a summary with the full transcript, audio duration, wall-clock time,
 and real-time factor (RTFx).
+
+For Nemotron, configure `model.timestamp_level` in `genai_config.json` as `word`, `segment`, or `all`
+to print completed timestamp records instead of incremental token text. The tokenizer stream
+initializes metadata automatically, and finalization emits the trailing records. `off` (the default)
+keeps ordinary decoding; Moonshine supports only this plain-text path. See
+[Nemotron streaming timestamps](../../../docs/nemotron_speech_timestamps.md) for configuration and
+output formats.
 
 ```
 ------------------------------------------------------------

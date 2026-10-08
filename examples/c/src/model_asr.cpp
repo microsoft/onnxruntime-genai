@@ -240,7 +240,6 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   auto tokenizer = OgaTokenizer::Create(*model);
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
-  if (timestamps_enabled) tokenizer_stream->CreateMetadataCoreStateUsingTokenizerConfig();
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
