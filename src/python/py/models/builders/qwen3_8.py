@@ -2288,6 +2288,10 @@ class Qwen4ExpModel(MTPModel):
             self.mtp_attrs["shared_initializers"] = self.share_initializers(
                 output_dir, self.decoder.filename, self.mtp.filename
             )
+            if self.extra_options.get("indexshare_mtp", self.mtp.use_paged_attention):
+                self.mtp_attrs["index_share"] = self.export_indexshare_graphs(
+                    output_dir, self.mtp.filename, int(self.extra_options.get("indexshare_max_draft_tokens", 7))
+                )
         if self.text_only:
             return
         embedding_model = Qwen4ExpEmbeddingModel(
@@ -2400,6 +2404,8 @@ class Qwen4ExpModel(MTPModel):
             },
         }
         self.add_shared_initializers_to_genai_config(genai_config)
+        if "index_share" in self.mtp_attrs:
+            genai_config["model"]["mtp"]["index_share"] = self.mtp_attrs["index_share"]
         with open(config_path, "w") as config_file:
             json.dump(genai_config, config_file, indent=4)
 

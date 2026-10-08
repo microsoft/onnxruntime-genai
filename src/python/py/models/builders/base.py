@@ -442,6 +442,7 @@ class Model:
         self.quant_attrs = {
             "accuracy_level": self.quant_config.weights.accuracy_level,                    # ORT quantization accuracy level for MatMulNBits
             "qmoe_block_size": self.quant_config.moe.block_size,                           # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig)
+            "qmoe_weights_prepacked": self.quant_config.moe.weights_prepacked,
             "matmul_block_size": int(self.quant_config.weights.block_size),                # MatMulNBits block size
             "bits": 8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4,  # Dense MatMulNBits weight bit-width (int4 vs int8 precision)
             "is_symmetric": self.quant_config.weights.symmetric,                           # Use symmetric zero-centered weight quantization

@@ -6,6 +6,7 @@ import pytest
 import torch
 from quantization import QuantConfig
 from safetensors.torch import save_file
+from transformers import LlamaConfig
 from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpVisionConfig
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpVisionModel
 
@@ -119,11 +120,11 @@ def checkpoint(tmp_path):
     return tmp_path
 
 
-def load(checkpoint, num_layers=2):
+def load(checkpoint, num_layers=2, weights_prepacked=1):
     return QuantModel.from_pretrained(
         "modelopt",
         input_path=str(checkpoint),
-        quant_attrs={"config": {}},
+        quant_attrs={"config": {}, "qmoe_weights_prepacked": weights_prepacked},
         q_size=16,
         kv_size=16,
         intermediate_size=16,
@@ -145,29 +146,87 @@ def test_nvfp4_dispatch_and_qwen38_surface(checkpoint):
     assert model.handles == {}
 
 
+@pytest.mark.parametrize(
+    "provider,capability,available,hip,expected_mode",
+    [
+        ("cuda", (7, 5), True, None, 0),
+        ("cuda", (8, 0), True, None, 1),
+        ("cuda", (8, 9), True, None, 1),
+        ("cuda", (9, 0), True, None, 1),
+        ("cuda", (12, 0), True, None, 1),
+        ("cuda", (12, 1), True, None, 1),
+        ("cuda", (8, 0), False, None, 0),
+        ("cuda", (8, 0), True, "6.0", 0),
+        ("cpu", (8, 0), True, None, 0),
+        ("webgpu", (8, 0), True, None, 0),
+        ("dml", (8, 0), True, None, 0),
+        ("trt-rtx", (8, 0), True, None, 0),
+    ],
+)
+def test_nvfp4_loader_uses_builder_hardware_packing_policy(
+    checkpoint, monkeypatch, provider, capability, available, hip, expected_mode
+):
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: available)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+    queried_devices = []
+
+    def get_capability(device):
+        queried_devices.append(device)
+        return capability
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", get_capability)
+    config = LlamaConfig(
+        hidden_size=16, intermediate_size=16, num_hidden_layers=1,
+        num_attention_heads=2, num_key_value_heads=1, vocab_size=32,
+        max_position_embeddings=128, architectures=["LlamaForCausalLM"],
+    )
+    builder = Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, provider, "", {})
+    assert builder.quant_attrs["qmoe_weights_prepacked"] == expected_mode
+    assert builder.quant_config.moe.weights_prepacked == expected_mode
+    assert queried_devices == ([3] if provider == "cuda" and available and hip is None else [])
+
+    model = load(checkpoint, weights_prepacked=builder.quant_attrs["qmoe_weights_prepacked"])
+    assert all(layer.mlp.experts.weights_prepacked == expected_mode for layer in model.layers)
+
+
 @pytest.mark.parametrize("weights_prepacked", [None, -1, 0, 1])
-def test_nvfp4_experts_keep_row_major_checkpoint_bytes(weights_prepacked):
+def test_nvfp4_experts_preserve_checkpoint_codes_and_scales(weights_prepacked):
     loader = object.__new__(Qwen38ModeloptModel)
+    loader.quant_attrs = {"qmoe_weights_prepacked": int(weights_prepacked == 1)}
     experts = []
     for expert_id in range(2):
         projections = {}
         for projection_id, name in enumerate(("gate_proj", "up_proj", "down_proj")):
+            rows, packed_columns = (32, 8) if name == "down_proj" else (16, 16)
             projections[name] = SimpleNamespace(
-                weight=(torch.arange(128).reshape(16, 8) + expert_id * 53 + projection_id * 37).to(torch.uint8),
-                weight_scale=torch.arange(1, 17).reshape(16, 1).to(torch.float8_e4m3fn),
+                weight=(torch.arange(rows * packed_columns).reshape(rows, packed_columns)
+                        + expert_id * 53 + projection_id * 37).to(torch.uint8),
+                weight_scale=torch.arange(1, 33).reshape(rows, packed_columns // 8).to(torch.float8_e4m3fn),
                 weight_scale_2=torch.tensor(0.5 + expert_id),
             )
         experts.append(SimpleNamespace(**projections))
 
     prepared = loader.prepare_qmoe_experts(experts)
-    assert prepared.weights_prepacked == 1
+    assert prepared.weights_prepacked == int(weights_prepacked == 1)
     assert prepared.gate_up_qweight.dtype == prepared.down_qweight.dtype == torch.uint8
     for expert_id, expert in enumerate(experts):
-        fused_weight = prepared.gate_up_qweight[expert_id].reshape(32, 8)
-        assert torch.equal(fused_weight[0::2], expert.gate_proj.weight)
-        assert torch.equal(fused_weight[1::2], expert.up_proj.weight)
-        assert torch.equal(prepared.down_qweight[expert_id].reshape(16, 8), expert.down_proj.weight)
-        fused_scales = prepared.gate_up_scales[expert_id].reshape(32, 1)
+        if weights_prepacked == 1:
+            fused_weight = prepared.gate_up_qweight[expert_id].reshape(32, 16)
+            assert torch.equal(fused_weight[0::2], expert.gate_proj.weight)
+            assert torch.equal(fused_weight[1::2], expert.up_proj.weight)
+            assert torch.equal(prepared.down_qweight[expert_id].reshape(32, 8), expert.down_proj.weight)
+        else:
+            fused_weight = prepared.gate_up_qweight[expert_id]
+            fused_codes = torch.stack((fused_weight & 15, fused_weight >> 4), dim=-1).reshape(32, 32).T
+            for rows, projection in ((fused_codes[0::2], expert.gate_proj), (fused_codes[1::2], expert.up_proj)):
+                expected = torch.stack((projection.weight & 15, projection.weight >> 4), dim=-1).reshape(16, 32)
+                assert torch.equal(rows, expected)
+            down_weight = prepared.down_qweight[expert_id]
+            down_codes = torch.stack((down_weight & 15, down_weight >> 4), dim=-1).reshape(16, 32).T
+            expected = torch.stack((expert.down_proj.weight & 15, expert.down_proj.weight >> 4), dim=-1).reshape(32, 16)
+            assert torch.equal(down_codes, expected)
+        fused_scales = prepared.gate_up_scales[expert_id].reshape(32, 2)
         assert torch.equal(fused_scales[0::2], expert.gate_proj.weight_scale.view(torch.uint8))
         assert torch.equal(fused_scales[1::2], expert.up_proj.weight_scale.view(torch.uint8))
         assert torch.equal(prepared.down_scales[expert_id], expert.down_proj.weight_scale.view(torch.uint8))

@@ -40,6 +40,7 @@ class ModeloptModel(QuantizedModel):
             load_weights=False,
             lm_head=TensorModule(),
         )
+        self.quant_attrs = quant_attrs
         self.input_path = input_path
         self.handles = {}
         self.handle_keys = {}
@@ -196,6 +197,14 @@ class ModeloptModel(QuantizedModel):
         return module
 
     def prepare_qmoe_experts(self, experts):
+        weights_prepacked = self.quant_attrs.get("qmoe_weights_prepacked", 0)
+
+        def pack_weight(weight):
+            if weights_prepacked == 1:
+                return weight.reshape(weight.shape[1] * 2, weight.shape[0] // 2)
+            codes = torch.stack((weight & 15, weight >> 4), dim=-1).reshape(weight.shape[0], -1).transpose(0, 1)
+            return (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous()
+
         def scale_bytes(projection):
             return projection.weight_scale.view(torch.uint8).contiguous()
 
@@ -212,7 +221,7 @@ class ModeloptModel(QuantizedModel):
 
             intermediate_size = gate_weight.shape[0]
             fused_weight = torch.stack((gate_weight, up_weight), dim=1).reshape(2 * intermediate_size, -1)
-            gate_up_weights.append(fused_weight.reshape(fused_weight.shape[1] * 2, intermediate_size))
+            gate_up_weights.append(pack_weight(fused_weight))
             gate_up_scales.append(
                 torch.stack((scale_bytes(expert.gate_proj), scale_bytes(expert.up_proj)), dim=1).reshape(
                     2 * intermediate_size, -1
@@ -231,13 +240,13 @@ class ModeloptModel(QuantizedModel):
             down_weight = expert.down_proj.weight
             if down_weight.shape[0] % 2 != 0:
                 raise ValueError(f"NVFP4 QMoE packing requires an even N={down_weight.shape[0]} for nibble packing.")
-            down_weights.append(down_weight.reshape(down_weight.shape[1] * 2, down_weight.shape[0] // 2))
+            down_weights.append(pack_weight(down_weight))
             down_scales.append(scale_bytes(expert.down_proj))
             down_globals.append(expert.down_proj.weight_scale_2.float().reshape(()))
 
         prepared = QuantizedExperts()
         prepared.quant_type = "nvfp4"
-        prepared.weights_prepacked = 1
+        prepared.weights_prepacked = weights_prepacked
         prepared.block_size = 16
         prepared.scale_dtype = ir.DataType.FLOAT8E4M3FN
         prepared.scales_raw = True

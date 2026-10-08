@@ -168,11 +168,13 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
       },
       {
         "kind": "fixed_conv",
-        "layer_ids": [0, 1, 2]
+        "layer_ids": [0, 1, 2],
+        "state_update": { "capacity": 3 }
       },
       {
         "kind": "fixed_recurrent",
-        "layer_ids": [0, 1, 2]
+        "layer_ids": [0, 1, 2],
+        "state_update": { "capacity": 3, "key_head_count": 1 }
       }
     ]
   })");

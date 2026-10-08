@@ -35,6 +35,12 @@ struct ExecutionContext {
   // Optional packed [token_count, hidden_size] input supplied by an auxiliary decoder driver.
   // Ordinary decoder steps leave this null.
   OrtValue* hidden_states_input{};
+  OrtSession* decoder_session{};
+  bool indexshare_decode{};
+  std::span<const char* const> extra_input_names;
+  std::span<OrtValue* const> extra_inputs;
+  std::span<const char* const> extra_output_names;
+  std::span<OrtValue* const> extra_outputs;
   std::unique_ptr<OrtRunOptions> run_options;
   size_t block_table_columns{};
 };

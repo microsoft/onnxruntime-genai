@@ -343,11 +343,11 @@ TEST(FixedStatePoolComponentsTest, InitializesAndCommitsPleAndIndexerState) {
     EXPECT_STREQ(reservation.Bindings()[3].input_name, "past.1.indexer_kv_buffer");
     EXPECT_STREQ(reservation.Bindings()[4].input_name, "past.1.indexer_state_lengths");
     EXPECT_EQ(reservation.Bindings()[2].input->GetTensorMutableData<void>(),
-          reservation.Bindings()[2].output->GetTensorMutableData<void>());
+              reservation.Bindings()[2].output->GetTensorMutableData<void>());
     EXPECT_NE(reservation.Bindings()[3].input->GetTensorMutableData<void>(),
-          reservation.Bindings()[3].output->GetTensorMutableData<void>());
+              reservation.Bindings()[3].output->GetTensorMutableData<void>());
     EXPECT_NE(reservation.Bindings()[4].input->GetTensorMutableData<void>(),
-          reservation.Bindings()[4].output->GetTensorMutableData<void>());
+              reservation.Bindings()[4].output->GetTensorMutableData<void>());
 
     const auto& token_binding = reservation.Bindings()[0];
     const auto* token_input = token_binding.input->GetTensorData<int64_t>();
@@ -386,8 +386,8 @@ TEST(FixedStatePoolComponentsTest, InitializesAndCommitsPleAndIndexerState) {
   EXPECT_EQ(token_input[0], 11);
   EXPECT_EQ(token_input[1], 11);
   ExpectHalfInputRow(resident.Bindings()[1], std::array<float, 12>{
-                                                     2, 2, 2, 2, 2, 2,
-                                                     2, 2, 2, 2, 2, 2});
+                                                 2, 2, 2, 2, 2, 2,
+                                                 2, 2, 2, 2, 2, 2});
   for (size_t index = 2; index < 4; ++index) {
     const auto& binding = resident.Bindings()[index];
     const auto elements = RowElements(*binding.input);
@@ -435,7 +435,7 @@ TEST(FixedStatePoolComponentsTest, ReplaysPleAndIndexerUpdatesAcrossBlockBoundar
     for (size_t token = 0; token < 7; ++token) {
       for (size_t channel = 0; channel < 4; ++channel) {
         conv_updates[token * 4 + channel] =
-          Ort::Float16_t{FastFloat32ToFloat16(static_cast<float>(token * 10 + channel))};
+            Ort::Float16_t{FastFloat32ToFloat16(static_cast<float>(token * 10 + channel))};
       }
       indexer_updates[token * 2] = static_cast<float>(token * 10);
       indexer_updates[token * 2 + 1] = static_cast<float>(token * 10 + 1);
@@ -1917,8 +1917,10 @@ TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
         for (size_t k = 0; k < g.key_width; ++k) {
           float s = reference[(h * g.value_width + v) * g.key_width + k];
           for (size_t t = 0; t < g.kept; ++t) {
-            s = std::fma(key[(t * g.key_heads + kh) * g.key_width + k],
-                         delta[(t * g.heads + h) * g.value_width + v], s * decay[t * g.heads + h]);
+            const volatile float scaled_state = s * decay[t * g.heads + h];
+            const volatile float update = key[(t * g.key_heads + kh) * g.key_width + k] *
+                                          delta[(t * g.heads + h) * g.value_width + v];
+            s = scaled_state + update;
           }
           reference[(h * g.value_width + v) * g.key_width + k] = s;
         }
@@ -1932,20 +1934,19 @@ TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
     capsule_device.CopyFromCpu(capsule);
     const float* capsule_base = capsule_device.Span().data();
     descriptors.push_back(StateUpdateReplayDesc{
-        source.Span().data(),
-        destination.Span().data(),
-        nullptr,
-        capsule_base,
-        capsule_base + g.capacity * g.heads,
-        capsule_base + g.capacity * (g.heads + g.key_heads * g.key_width),
-        g.heads,
-        g.value_width,
-        g.key_width,
-        g.key_heads,
-        static_cast<uint32_t>(g.capacity),
-        static_cast<uint32_t>(g.kept),
-        static_cast<uint32_t>(sizeof(float)),
-        StateUpdateReplayKind::GatedDeltaNet,
+        .source_state = source.Span().data(),
+        .destination_state = destination.Span().data(),
+        .decay = capsule_base,
+        .key = capsule_base + g.capacity * g.heads,
+        .delta = capsule_base + g.capacity * (g.heads + g.key_heads * g.key_width),
+        .channel_count = g.heads,
+        .state_width = g.value_width,
+        .key_width = g.key_width,
+        .key_head_count = g.key_heads,
+        .capacity = static_cast<uint32_t>(g.capacity),
+        .kept_count = static_cast<uint32_t>(g.kept),
+        .element_size = static_cast<uint32_t>(sizeof(float)),
+        .kind = StateUpdateReplayKind::GatedDeltaNet,
     });
     keepalive.push_back(source);
     keepalive.push_back(capsule_device);

@@ -94,6 +94,59 @@ TEST(MtpDecoderConfigTest, ParsesDisabledRuntimeToggle) {
   EXPECT_EQ(config.model.mtp.filename, "mtp.onnx");
 }
 
+TEST(MtpDecoderConfigTest, IndexShareIsOptInAndRequiresCompleteMetadata) {
+  Config config;
+  config.model.decoder.hidden_size = 16;
+  auto& mtp = config.model.mtp;
+  mtp.filename = "mtp.onnx";
+  mtp.num_key_value_heads = 1;
+  mtp.head_size = 16;
+  mtp.shared_initializers.push_back({"lm_head", "model.onnx.data"});
+  EXPECT_FALSE(mtp.index_share.enabled);
+  EXPECT_NO_THROW(CreateMtpDecoderConfig(config));
+  mtp.index_share.enabled = true;
+  EXPECT_THROW(CreateMtpDecoderConfig(config), std::runtime_error);
+  mtp.index_share.indices_output = "indices";
+  mtp.index_share.counts_output = "counts";
+  mtp.index_share.base_capacity = 2051;
+  mtp.index_share.max_draft_tokens = 7;
+  auto projected = CreateMtpDecoderConfig(config);
+  ASSERT_EQ(projected->model.decoder.shared_initializers.size(), 1u);
+  EXPECT_EQ(projected->model.decoder.shared_initializers[0].name, "lm_head");
+  EXPECT_EQ(projected->model.decoder.filename, "mtp.onnx");
+  mtp.index_share.max_draft_tokens = 1;
+  EXPECT_NO_THROW(CreateMtpDecoderConfig(config));
+  mtp.index_share.max_draft_tokens = 0;
+  EXPECT_THROW(CreateMtpDecoderConfig(config), std::runtime_error);
+  mtp.index_share.enabled = false;
+  EXPECT_THROW(CreateMtpDecoderConfig(config), std::runtime_error);
+  mtp.index_share.max_draft_tokens = 7;
+  projected = CreateMtpDecoderConfig(config);
+  EXPECT_EQ(projected->model.decoder.shared_initializers[0].name, "lm_head");
+}
+
+TEST(MtpDecoderConfigTest, SingleModelIndexShareUsesMtpFilenameForEveryBudget) {
+  Config config;
+  config.model.decoder.hidden_size = 16;
+  auto& mtp = config.model.mtp;
+  mtp.filename = "mtp.onnx";
+  mtp.num_key_value_heads = 1;
+  mtp.head_size = 16;
+  mtp.index_share.indices_output = "indices";
+  mtp.index_share.counts_output = "counts";
+  mtp.index_share.base_capacity = 2051;
+  mtp.shared_initializers.push_back({"expert", "mtp.onnx.data"});
+  for (int budget = 1; budget <= 7; ++budget) {
+    mtp.index_share.max_draft_tokens = budget;
+    const auto projected = CreateMtpDecoderConfig(config);
+    EXPECT_EQ(projected->model.decoder.filename, "mtp.onnx");
+    ASSERT_EQ(projected->model.decoder.shared_initializers.size(), 1u);
+    EXPECT_EQ(projected->model.decoder.shared_initializers[0].name, "expert");
+  }
+  mtp.index_share.base_capacity = std::numeric_limits<int>::max();
+  EXPECT_THROW(CreateMtpDecoderConfig(config), std::runtime_error);
+}
+
 TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   Config config;
   auto& decoder = config.model.decoder;
@@ -208,9 +261,11 @@ TEST(MtpDecoderConfigTest, ProjectsOneLayerFixedIndexerStateForTheHead) {
   decoder.outputs.state_update_indexer_names = "state_update.%d.indexer";
   decoder.state_groups = std::vector<Config::Model::Decoder::StateGroup>{
       {Config::Model::Decoder::StateGroupKind::PagedKeyValue,
-       {3, 7}, std::nullopt},
+       {3, 7},
+       std::nullopt},
       {Config::Model::Decoder::StateGroupKind::FixedIndexer,
-       {3, 7}, Config::Model::Decoder::StateUpdate{7, true, 0, 4}}};
+       {3, 7},
+       Config::Model::Decoder::StateUpdate{7, true, 0, 4}}};
 
   auto& mtp = config.model.mtp;
   mtp.filename = "mtp.onnx";

@@ -691,6 +691,13 @@ struct Config {
     // hidden-state output and the head's feedback output.
     struct Mtp {
       bool enabled{true};
+      struct IndexShare {
+        bool enabled{false};
+        int base_capacity{};
+        int max_draft_tokens{};
+        std::string indices_output;
+        std::string counts_output;
+      } index_share;
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;

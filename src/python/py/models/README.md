@@ -604,7 +604,7 @@ The `--precision` argument controls the unquantized tensors and model I/O; it do
 
 NVIDIA's `nvidia/Qwen3.8-Flash-Next-NVFP4` checkpoint is also supported. Its routed main-model experts remain native NVFP4, attention/shared experts/hyper-connections follow `--precision`, and the sharded PLE table retains its FP8 bytes and per-tensor scale. The loader concatenates PLE shards in numeric order without loading the checkpoint through Hugging Face's eager ModelOpt quantizer. Vision weights are loaded only when exporting the multimodal components.
 
-Native NVFP4 expert exports preserve the checkpoint's K-packed row-major bytes and emit `weights_prepacked=1` on `QMoE`, retaining its logical weight dimensions. For `quant_type="nvfp4"` on CUDA, omitted/default `weights_prepacked=-1` and explicit `0` select legacy N-packed raw storage; `1` selects K-packed row-major storage, and `2` is not supported. Integer QMoE keeps its existing meanings: `-1`/`1` are provider-specific packed layouts and `0` is raw. Gate/up rows are interleaved without dequantization; FP8 block scales and FP32 global scales are unchanged. This requires an ONNX Runtime build supporting the NVFP4 meanings of `weights_prepacked`. CUDA GEMV on SM90 and native NVFP4 GEMM on SM120/SM121 consume the same weight payload, with a layout-aware dense fallback for unsupported shapes. Runtime prepacking prepares native GEMM scales, not another full weight copy. Qwen3.8 exports with mode `1` do not disable prepacking by default. Legacy raw-layout exports retain `session.disable_prepacking=1` as a memory-safety default; the MTP session does not inherit it.
+Native NVFP4 expert exports automatically use the same packing policy as integer QMoE: the CUDA EP with an available, active NVIDIA SM80-or-newer GPU (not HIP) selects `weights_prepacked=1`. In this mode, exports preserve the checkpoint's K-packed row-major bytes and retain the logical QMoE weight dimensions. Otherwise, the loader rearranges only the nibble codes into legacy N-packed raw storage with mode `0`; it does not dequantize or requantize weights. For `quant_type="nvfp4"` on CUDA, omitted/default `weights_prepacked=-1` and explicit `0` select legacy N-packed raw storage; `1` selects K-packed row-major storage, and `2` is not supported. Integer QMoE keeps its existing meanings: `-1`/`1` are provider-specific packed layouts and `0` is raw. Gate/up rows are interleaved without dequantization; FP8 block scales and FP32 global scales are unchanged. This requires an ONNX Runtime build supporting the NVFP4 meanings of `weights_prepacked`. CUDA GEMV on SM90 and native NVFP4 GEMM on SM120/SM121 consume the same weight payload, with a layout-aware dense fallback for unsupported shapes. Runtime prepacking prepares native GEMM scales, not another full weight copy. Qwen3.8 exports with mode `1` do not disable prepacking by default. Legacy raw-layout exports retain `session.disable_prepacking=1` as a memory-safety default; the MTP session does not inherit it. Existing exported artifacts must be re-exported to change their weight layout; changing only the node attribute is not sufficient.
 
 Qwen3.8 Flash exports always include `engram.onnx` and `engram.onnx.data`, including paged exports with `text_only=true` or `exclude_mtp=true`. The main decoder consumes embeddings from the standalone Engram session instead of repeating the table lookup internally. CUDA exports run Engram with the CUDA provider and assign its `cpu_embedding`-annotated `GatherBlockQuantized` lookup to CPU using `session.layer_assignment_settings="cpu(=cpu_embedding)"`. Engram retains the native FP8 table without duplicating or dequantizing its stored weights. Text-only export does not require vision or embedding companion graphs.
 
@@ -621,6 +621,62 @@ python builder.py -i /home/kvaishnavi/Qwen3.8-Flash-Next-NVFP4 \
 Use `--extra_options text_only=true` to omit the vision and embedding components, or `exclude_mtp=true` to omit MTP. NVIDIA's MTP experts retain their original E4M3 FP8 weights and 128x128 `weight_scale_inv` block multipliers in ONNX, without export-time dequantization or requantization. Gate, up, and down projections are separate `QMoE` inputs with `quant_type="fp8"`, `block_size=128`, `activation_type="silu"`, and `swiglu_fusion=0`. This requires the CUDA block-scaled FP8 support from [ORT PR #32887](https://github.com/microsoft/onnxruntime/pull/32887). That implementation dequantizes only routed experts into scratch memory at runtime; native FP8 storage does not imply FP8 tensor-core computation.
 
 #### MTP Head (Qwen3.6/Qwen3.8)
+
+Paged Qwen3.8 QSA MTP exports include IndexShare in `mtp.onnx` by default.
+There are no separate extend/decode model files and no ONNX `If` node.
+`indexshare_max_draft_tokens` defaults to `7` and must be between `1` and `7`. Runtime
+budgets `1` through the exported limit all use the same IndexShare-enabled MTP
+session. `indexshare_mtp=false` explicitly exports the older non-IndexShare
+model instead. Existing older exports are unchanged.
+
+The unversioned IndexShare contract adds CPU `indexshare.mode`, GPU int64
+`indexshare.projection_rows`, frozen `indexshare.0.indices`/`counts`,
+`indexshare.base_row_indices`, and `indexshare.range_starts`/`range_ends`.
+Refresh selects all projection rows and supplies zero merge rows; reuse selects
+zero projection rows and merges one query per active request. A standalone
+`PackedSparseAttentionIndexerMerge` feeds the extended
+`PackedSparseAttentionIndexer`, which accepts packed Q/K without a Split.
+Every forward uses the same session, decoder body, output names and state
+interface, including selected indices/counts and `indexshare.0.status`.
+There is no output pruning, special executor option, ONNX If, or duplicated
+decoder body. This interface requires the extended CUDA operators; unsupported
+runtimes/providers fail rather than silently ignoring reuse.
+
+The dynamic Engine captures the final extend row's QSA selection per request,
+freezes it for the iteration, and appends draft positions without rerunning
+indexer projection, scoring, or TopK. Extend already includes the bonus token,
+so decode capacity is `base_capacity + max_draft_tokens - 1` (2057 for a
+2051-entry QSA base and seven drafts). Target verification is unchanged. A
+single draft uses the same extend path, with no subsequent reuse call. A
+runtime draft budget above the exported limit is rejected. All merge statuses
+are checked before publishing the chain.
+External expert tensors retain their original storage without changing their
+checkpoint bytes or quantized formats.
+
+To convert an existing engine package without overwriting it:
+
+```bash
+python tools/export_indexshare_mtp.py --input path_to_engine \
+  --output path_to_new_engine --max-draft-tokens 7
+```
+
+The output directory must not exist. The new package's `mtp.onnx` gains the
+selection inputs/outputs and the single-body refresh/reuse interface; other ONNX graph
+headers are copied. External data and other file assets are hard-linked
+without copying bytes, so source and output must share a filesystem. Treat
+shared files as immutable; directory assets remain symlinks and require their
+source directories. IndexShare defaults to enabled for the new MTP model;
+`model.mtp.index_share.enabled=false` runs refresh on every draft forward through
+the same graph. Use the dynamic `Engine`, not the separate legacy
+`MtpGenerator` API. Full native-model greedy parity and H200/GB10 performance
+gates remain unverified on the available hardware.
+
+The CUDA operators also support CSA reuse: `append_indices` merges compressed
+entry IDs, and the indexer's default CSA reuse policy advances key/gate state
+without query rotation, scoring or TopK. Required auxiliary K/V production and
+the attention-owned local window remain outside projection gating. This is an
+operator contract, not a complete DeepSeek V4 exporter or MTP integration;
+its model-specific cache ownership, visibility and rollback still need validation.
 
 When a Qwen3.5 MoE configuration declares one or more MTP layers with `mtp_num_hidden_layers`, the builder exports the multi-token-prediction head for self-speculative decoding. An auxiliary `mtp.onnx` (plus its `mtp.onnx.data`) is generated alongside the main model, and the main model automatically exposes the hidden states consumed by the MTP head. Models without declared MTP layers do not produce this file or an MTP section in `genai_config.json`.
 

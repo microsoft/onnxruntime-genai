@@ -572,8 +572,8 @@ __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restr
         (static_cast<uint64_t>(old_buffer_length) + descriptor.kept_count) %
         descriptor.compress_ratio;
     const uint64_t work_entries = descriptor.state_capacity > descriptor.aux_capacity
-                      ? descriptor.state_capacity
-                      : descriptor.aux_capacity;
+                                      ? descriptor.state_capacity
+                                      : descriptor.aux_capacity;
     for (uint64_t index = start; index < work_entries * descriptor.state_width; index += stride) {
       const uint64_t entry = index / descriptor.state_width;
       const uint64_t component = index % descriptor.state_width;
@@ -740,10 +740,10 @@ __global__ void __launch_bounds__(kReplayThreads) ReplayGatedDeltaNetKernel(
         const float decay = decay_tile[t];
         const float delta = delta_tile[t * kReplayRows + r];
         const float* key = key_tile + t * key_width + k;
-        s.x = __fmaf_rn(key[0], delta, __fmul_rn(s.x, decay));
-        s.y = __fmaf_rn(key[1], delta, __fmul_rn(s.y, decay));
-        s.z = __fmaf_rn(key[2], delta, __fmul_rn(s.z, decay));
-        s.w = __fmaf_rn(key[3], delta, __fmul_rn(s.w, decay));
+        s.x = __fadd_rn(__fmul_rn(s.x, decay), __fmul_rn(key[0], delta));
+        s.y = __fadd_rn(__fmul_rn(s.y, decay), __fmul_rn(key[1], delta));
+        s.z = __fadd_rn(__fmul_rn(s.z, decay), __fmul_rn(key[2], delta));
+        s.w = __fadd_rn(__fmul_rn(s.w, decay), __fmul_rn(key[3], delta));
       }
       *reinterpret_cast<float4*>(destination + row + k) = s;
     }

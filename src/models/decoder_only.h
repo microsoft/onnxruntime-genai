@@ -20,7 +20,10 @@ struct DecoderOnly_Model : Model {
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params) const override;
 
+  void InitializeIndexShare(const Config::Model::Mtp::IndexShare& config, OrtEnv& ort_env);
+
   std::unique_ptr<OrtSession> session_decoder_;
+  Config::Model::Mtp::IndexShare index_share_config_;
   std::unique_ptr<OrtSession> session_engram_;
   std::unique_ptr<OrtSessionOptions> engram_session_options_;
   std::shared_ptr<CpuEmbedding> cpu_embedding_;

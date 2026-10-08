@@ -177,6 +177,7 @@ def check_extra_options(
         "text_only",
         "enable_cuda_fpa_intb_gemm",
         "exclude_mtp",
+        "indexshare_mtp",
     ]
 
     for key in bools:
@@ -220,20 +221,17 @@ def check_extra_options(
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
         extra_options["state_update_capacity"] = state_update_capacity
 
-    if "max_draft_tokens" in extra_options:
-        # Keep this limit synchronized with Speculative_Element::kMaxDraftTokens in src/config.cpp
-        # and the model-builder README.
-        max_draft_tokens_limit = 16
-        message = f"max_draft_tokens must be an integer between 1 and {max_draft_tokens_limit}."
+    for option, draft_tokens_limit in (("max_draft_tokens", 16), ("indexshare_max_draft_tokens", 7)):
+        if option not in extra_options:
+            continue
+        message = f"{option} must be an integer between 1 and {draft_tokens_limit}."
         try:
-            # Parsed from text so a fractional value is rejected instead of truncated; the runtime
-            # treats speculative.max_draft_tokens as integral.
-            max_draft_tokens = int(str(extra_options["max_draft_tokens"]).strip())
+            max_draft_tokens = int(str(extra_options[option]).strip())
         except (TypeError, ValueError) as e:
             raise ValueError(message) from e
-        if not 1 <= max_draft_tokens <= max_draft_tokens_limit:
+        if not 1 <= max_draft_tokens <= draft_tokens_limit:
             raise ValueError(message)
-        extra_options["max_draft_tokens"] = max_draft_tokens
+        extra_options[option] = max_draft_tokens
 
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]

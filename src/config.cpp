@@ -122,6 +122,14 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   }
   // An empty MTP list intentionally disables sharing the main decoder's initializers.
   decoder.shared_initializers = mtp.shared_initializers;
+  if (mtp.index_share.enabled || mtp.index_share.base_capacity != 0) {
+    if (mtp.index_share.indices_output.empty() || mtp.index_share.counts_output.empty() ||
+        mtp.index_share.base_capacity <= 0 || mtp.index_share.max_draft_tokens < 1 ||
+        mtp.index_share.max_draft_tokens > 7 ||
+        mtp.index_share.base_capacity > std::numeric_limits<int>::max() - mtp.index_share.max_draft_tokens + 1) {
+      throw std::runtime_error("MTP IndexShare requires complete selection metadata.");
+    }
+  }
   decoder.num_hidden_layers = mtp.num_hidden_layers;
   decoder.num_key_value_heads = mtp.num_key_value_heads;
   decoder.head_size = mtp.head_size;
@@ -1173,6 +1181,31 @@ struct MtpOutputs_Element : JSON::Element {
   Config::Model::Mtp::Outputs& v_;
 };
 
+struct MtpIndexShare_Element : JSON::Element {
+  explicit MtpIndexShare_Element(Config::Model::Mtp::IndexShare& value) : value_{value} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "enabled")
+      value_.enabled = JSON::Get<bool>(value);
+    else if (name == "indices_output")
+      value_.indices_output = JSON::Get<std::string_view>(value);
+    else if (name == "counts_output")
+      value_.counts_output = JSON::Get<std::string_view>(value);
+    else if (name == "base_capacity" || name == "max_draft_tokens") {
+      const int parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed <= 0) throw std::out_of_range("IndexShare capacities must be positive");
+      if (name == "base_capacity")
+        value_.base_capacity = parsed;
+      else
+        value_.max_draft_tokens = parsed;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Mtp::IndexShare& value_;
+};
+
 struct Mtp_Element : JSON::Element {
   explicit Mtp_Element(Config::Model::Mtp& v) : v_{v} {}
 
@@ -1198,6 +1231,9 @@ struct Mtp_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "index_share") {
+      return index_share_;
+    }
     if (name == "session_options") {
       v_.session_options = Config::SessionOptions{};
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
@@ -1231,6 +1267,7 @@ struct Mtp_Element : JSON::Element {
   MtpInputs_Element inputs_{v_.inputs};
   MtpOutputs_Element outputs_{v_.outputs};
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
+  MtpIndexShare_Element index_share_{v_.index_share};
 };
 
 struct Dflash2Inputs_Element : JSON::Element {

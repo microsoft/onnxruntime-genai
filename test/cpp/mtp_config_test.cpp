@@ -75,6 +75,34 @@ TEST(MtpConfigTest, EnablesMtpByDefault) {
   EXPECT_TRUE(config.model.mtp.IsEnabled());
 }
 
+TEST(MtpConfigTest, ParsesIndexShareMetadata) {
+  const auto root = WriteMtpConfig(
+      "hidden_states",
+      R"("index_share": {"enabled": false, "base_capacity": 2051,
+          "max_draft_tokens": 7, "indices_output": "indices", "counts_output": "counts"}, )",
+      "_indexshare");
+  const Config config{fs::path{root.string()}, {}};
+  EXPECT_FALSE(config.model.mtp.index_share.enabled);
+  EXPECT_EQ(config.model.mtp.index_share.base_capacity, 2051);
+  EXPECT_EQ(config.model.mtp.index_share.max_draft_tokens, 7);
+}
+
+TEST(MtpConfigTest, ParsesSingleModelIndexShareMetadata) {
+  const auto root = WriteMtpConfig(
+      "hidden_states",
+      R"("index_share": {"enabled": true, "base_capacity": 2051,
+          "max_draft_tokens": 1, "indices_output": "indices", "counts_output": "counts"}, )",
+      "_single_indexshare");
+  const Config config{fs::path{root.string()}, {}};
+  EXPECT_TRUE(config.model.mtp.index_share.enabled);
+  EXPECT_EQ(config.model.mtp.index_share.max_draft_tokens, 1);
+}
+
+TEST(MtpConfigTest, RejectsNonpositiveIndexShareCapacity) {
+  const auto root = WriteMtpConfig("hidden_states", R"("index_share": {"base_capacity": 0}, )", "_bad_indexshare");
+  EXPECT_THROW(OgaConfig::Create(root.string().c_str()), std::exception);
+}
+
 TEST(MtpConfigTest, AcceptsDisabledMtpToggleThroughPublicApi) {
   const auto root =
       WriteMtpConfig("hidden_states", "\"enabled\": false, ", "_disabled");

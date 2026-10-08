@@ -1889,7 +1889,7 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         }
         const auto sibling_source = [&](size_t index, const Impl::TensorSpec* sibling) -> const uint8_t* {
           return sibling
-                     ? ByteWrapTensor(*impl_->device, *storage.gathered_inputs[index]).Span().data() +
+                     ? ByteWrapTensor(*impl_->device, *views.gathered_inputs[index]).Span().data() +
                            row * sibling->row_bytes
                      : nullptr;
         };

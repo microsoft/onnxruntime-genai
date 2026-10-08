@@ -7,7 +7,9 @@
 import copy
 import os
 
+import onnx
 import onnx_ir as ir
+from onnx import TensorProto, helper
 from quantization import QuantConfig
 
 
@@ -25,6 +27,138 @@ class MTPModel:
             "extra_options": None,  # Builder options inherited or overridden for MTP.
         }
         return copy.deepcopy(extra_options)
+
+    def export_indexshare_graphs(self, output_dir, source_file, max_draft_tokens=7):
+        if not 1 <= max_draft_tokens <= 7:
+            raise ValueError("IndexShare export requires between one and seven draft tokens.")
+        source = onnx.load(os.path.join(output_dir, source_file), load_external_data=False)
+        indexers = [node for node in source.graph.node if node.op_type == "PackedSparseAttentionIndexer"]
+        if len(indexers) != 1:
+            raise ValueError("IndexShare export currently requires exactly one packed QSA indexer.")
+        indexer = indexers[0]
+        if any(indexer.input[18:]):
+            raise ValueError("IndexShare export requires a graph that has not already been converted.")
+        attributes = {attribute.name: helper.get_attribute_value(attribute) for attribute in indexer.attribute}
+        if attributes.get("policy_mode") != b"qsa":
+            raise ValueError("IndexShare MTP export requires QSA raw-token selections.")
+        capacity = attributes["token_budget"] + attributes["compress_ratio"] - 1
+        attention_nodes = [
+            node
+            for node in source.graph.node
+            if node.op_type == "SparsePagedAttention" and list(node.input[9:11]) == list(indexer.output[:2])
+        ]
+        if len(attention_nodes) != 1:
+            raise ValueError("The packed indexer must feed exactly one SparsePagedAttention node.")
+        past_lengths = indexer.input[7]
+        input_types = {value.name: value.type.tensor_type.elem_type for value in source.graph.input}
+        if input_types.get(past_lengths) != TensorProto.INT32:
+            raise ValueError("IndexShare requires packed int32 past sequence lengths.")
+        return self._export_packed_indexshare_graph(
+            source, indexer, capacity, output_dir, source_file, max_draft_tokens
+        )
+
+    def _export_packed_indexshare_graph(self, source, indexer, capacity, output_dir, source_file, max_draft_tokens):
+        producers = {name: node for node in source.graph.node for name in node.output if name}
+        query_producer = producers.get(indexer.input[0])
+        split = None
+        if len(indexer.input) > 1 and indexer.input[1]:
+            if (
+                query_producer is None
+                or query_producer.op_type != "Split"
+                or list(query_producer.output) != list(indexer.input[:2])
+            ):
+                raise ValueError("Packed IndexShare requires a shared Q/K projection with an optional Split.")
+            split = query_producer
+            packed_qk = split.input[0]
+        else:
+            packed_qk = indexer.input[0]
+        projection = producers.get(packed_qk)
+        if projection is None or projection.op_type != "MatMul":
+            raise ValueError("Packed IndexShare requires an indexer MatMul projection.")
+        projection_consumers = [node for node in source.graph.node if packed_qk in node.input]
+        if len(projection_consumers) != 1:
+            raise ValueError("Packed IndexShare cannot gate a projection with other consumers.")
+        if split is not None:
+            consumers = [node for node in source.graph.node if any(name in split.output for name in node.input)]
+            if len(consumers) != 1 or consumers[0].name != indexer.name:
+                raise ValueError("Packed IndexShare cannot remove a Split with other consumers.")
+
+        prefix = indexer.name.rsplit("/", 1)[0] + "/indexshare"
+        gated_hidden = prefix + "/GatherProjectionRows/output_0"
+        merged = [
+            prefix + "/IndexerMerge/output_0",
+            prefix + "/IndexerMerge/output_1",
+            prefix + "/IndexerMerge/status",
+        ]
+        output_capacity = capacity + max_draft_tokens - 1
+        gather = helper.make_node(
+            "Gather",
+            [projection.input[0], "indexshare.projection_rows"],
+            [gated_hidden],
+            name=prefix + "/GatherProjectionRows",
+            axis=0,
+        )
+        merge = helper.make_node(
+            "PackedSparseAttentionIndexerMerge",
+            [
+                "indexshare.0.indices",
+                "indexshare.0.counts",
+                "indexshare.base_row_indices",
+                "indexshare.range_starts",
+                "indexshare.range_ends",
+            ],
+            merged,
+            name=prefix + "/IndexerMerge",
+            domain="com.microsoft",
+            policy_mode="append_range",
+            max_output_entries=output_capacity,
+        )
+        projection.input[0] = gated_hidden
+        while len(indexer.input) < 18:
+            indexer.input.append("")
+        indexer.input[0] = packed_qk
+        indexer.input[1] = ""
+        indexer.input.extend(["indexshare.mode", *merged])
+        while len(indexer.output) < 7:
+            indexer.output.append("")
+        indexer.output.append("indexshare.0.status")
+        indexer.attribute.append(helper.make_attribute("max_output_entries", output_capacity))
+        nodes = []
+        for node in source.graph.node:
+            if split is not None and node.name == split.name:
+                continue
+            if node.name == projection.name:
+                nodes.append(gather)
+            if node.name == indexer.name:
+                nodes.append(merge)
+            nodes.append(node)
+        del source.graph.node[:]
+        source.graph.node.extend(nodes)
+        for name, dtype, shape in (
+            ("indexshare.mode", TensorProto.INT32, [1]),
+            ("indexshare.projection_rows", TensorProto.INT64, ["indexer_projection_rows"]),
+            ("indexshare.0.indices", TensorProto.INT32, ["indexshare_rows", capacity]),
+            ("indexshare.0.counts", TensorProto.INT32, ["indexshare_rows"]),
+            ("indexshare.base_row_indices", TensorProto.INT32, ["indexshare_merge_queries"]),
+            ("indexshare.range_starts", TensorProto.INT32, ["indexshare_merge_queries"]),
+            ("indexshare.range_ends", TensorProto.INT32, ["indexshare_merge_queries"]),
+        ):
+            source.graph.input.append(helper.make_tensor_value_info(name, dtype, shape))
+        for name, shape in (
+            (indexer.output[0], ["num_tokens", output_capacity]),
+            (indexer.output[1], ["num_tokens"]),
+            ("indexshare.0.status", ["num_tokens"]),
+        ):
+            source.graph.output.append(helper.make_tensor_value_info(name, TensorProto.INT32, shape))
+        del source.graph.value_info[:]
+        onnx.save_model(source, os.path.join(output_dir, source_file))
+        return {
+            "enabled": True,
+            "base_capacity": capacity,
+            "max_draft_tokens": max_draft_tokens,
+            "indices_output": indexer.output[0],
+            "counts_output": indexer.output[1],
+        }
 
     def resolve_mtp_model_config(self, extra_options):
         mtp_quant_config_value = extra_options.get("mtp_quant_config")
@@ -269,11 +403,15 @@ class MTPModel:
             for staged_path in (staged_data, staged_model):
                 if os.path.exists(staged_path):
                     os.remove(staged_path)
-            print(f"Warning: could not share auxiliary initializers ({exc}); duplicated copies remain in {target_data}.")
+            print(
+                f"Warning: could not share auxiliary initializers ({exc}); duplicated copies remain in {target_data}."
+            )
             return []
 
         if not self.replace_shared_initializer_files(target_model_path, target_data, staged_model, staged_data):
-            print(f"Warning: could not commit shared auxiliary initializers; duplicated copies remain in {target_data}.")
+            print(
+                f"Warning: could not commit shared auxiliary initializers; duplicated copies remain in {target_data}."
+            )
             return []
 
         shared_size_mb = sum(length for _, length, _ in shared.values()) / 1e6

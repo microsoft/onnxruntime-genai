@@ -31,6 +31,47 @@ std::unique_ptr<State> DecoderOnly_Model::CreateState(DeviceSpan<int32_t> sequen
   return std::make_unique<DecoderOnly_State>(*this, sequence_lengths_unk, params);
 }
 
+void DecoderOnly_Model::InitializeIndexShare(const Config::Model::Mtp::IndexShare& config, OrtEnv&) {
+  if (config.base_capacity == 0) return;
+  SessionInfo extend_info;
+  extend_info.Add(*session_decoder_);
+  SessionInfo decode_info;
+  decode_info.Add(*session_decoder_);
+  const auto indices_shape = extend_info.GetOutputShape(config.indices_output);
+  const auto counts_shape = extend_info.GetOutputShape(config.counts_output);
+  const int output_capacity = config.base_capacity + config.max_draft_tokens - 1;
+  if (indices_shape.size() != 2 || indices_shape[1] != output_capacity || counts_shape.size() != 1 ||
+      extend_info.GetOutputDataType(config.indices_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      extend_info.GetOutputDataType(config.counts_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      decode_info.GetOutputDataType("indexshare.0.status") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      decode_info.GetOutputShape("indexshare.0.status").size() != 1) {
+    throw std::runtime_error("IndexShare graph outputs do not match their configured int32 selection contract.");
+  }
+  const std::vector<const char*> selection_inputs{
+      "indexshare.0.indices", "indexshare.0.counts", "indexshare.base_row_indices",
+      "indexshare.range_starts", "indexshare.range_ends"};
+  for (const char* name : selection_inputs) {
+    if (!decode_info.HasInput(name) || decode_info.GetInputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+      throw std::runtime_error("IndexShare decode graph is missing a configured int32 input.");
+    }
+    const auto shape = decode_info.GetInputShape(name);
+    const bool indices = std::string_view{name} == "indexshare.0.indices";
+    if (shape.size() != (indices ? 2u : 1u) || (indices && shape[1] != config.base_capacity)) {
+      throw std::runtime_error("IndexShare decode input shape does not match the configured selection contract.");
+    }
+  }
+  {
+    if (!decode_info.HasInput("indexshare.mode") || !decode_info.HasInput("indexshare.projection_rows") ||
+        decode_info.GetInputDataType("indexshare.mode") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+        decode_info.GetInputShape("indexshare.mode") != std::vector<int64_t>{1} ||
+        decode_info.GetInputDataType("indexshare.projection_rows") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+        decode_info.GetInputShape("indexshare.projection_rows").size() != 1) {
+      throw std::runtime_error("IndexShare requires an int32[1] mode and int64 projection rows.");
+    }
+  }
+  index_share_config_ = config;
+}
+
 DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model},
@@ -95,13 +136,15 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
     engram_state_->UpdateInputsOutputs(next_tokens);
     engram_state_->Run(total_length, next_tokens, next_indices);
     auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.engram_embeddings);
-    if (shape.size() == 2) shape[0] = static_cast<int64_t>(num_tokens);
+    if (shape.size() == 2)
+      shape[0] = static_cast<int64_t>(num_tokens);
     else if (shape.size() == 3) {
       shape[0] = params_->BatchBeamSize();
       shape[1] = static_cast<int64_t>(num_tokens / params_->BatchBeamSize());
-    } else throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
+    } else
+      throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
     engram_embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape,
-        model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
+                                                model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
     inputs_[engram_input_index_] = engram_embeddings_.get();
     engram_state_->CopyEmbeddingsTo(*engram_embeddings_);
   }
@@ -162,13 +205,15 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
       engram_state_->UpdateInputsOutputs(chunk_tokens);
       engram_state_->Run(length, chunk_tokens, next_indices);
       auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.engram_embeddings);
-      if (shape.size() == 2) shape[0] = static_cast<int64_t>(current_chunk_size);
+      if (shape.size() == 2)
+        shape[0] = static_cast<int64_t>(current_chunk_size);
       else if (shape.size() == 3) {
         shape[0] = params_->BatchBeamSize();
         shape[1] = static_cast<int64_t>(current_chunk_size / params_->BatchBeamSize());
-      } else throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
+      } else
+        throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
       engram_embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape,
-          model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
+                                                  model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
       inputs_[engram_input_index_] = engram_embeddings_.get();
       engram_state_->CopyEmbeddingsTo(*engram_embeddings_);
     }

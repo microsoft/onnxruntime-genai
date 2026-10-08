@@ -317,6 +317,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     target_hidden_states = model->config_->model.mtp.main_hidden_states;
     mtp_model = std::make_shared<DecoderOnly_Model>(
         CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+    mtp_model->InitializeIndexShare(model->config_->model.mtp.index_share, GetOrtEnv());
     ValidateMtpModelCompatibility(
         *model->config_, model->session_info_, mtp_model->session_info_);
     mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
@@ -878,6 +879,88 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
                                           return left.max_draft_tokens < right.max_draft_tokens;
                                         })
                                         ->max_draft_tokens;
+    const auto& indexshare = mtp_model_->index_share_config_;
+    const bool use_indexshare = indexshare.base_capacity > 0;
+    if (use_indexshare && max_draft_tokens > static_cast<size_t>(indexshare.max_draft_tokens)) {
+      throw std::logic_error("MTP draft budget exceeds the IndexShare model's exported capacity.");
+    }
+    auto& selection_buffers = mtp_indexshare_buffers_;
+    const size_t selection_capacity = static_cast<size_t>(indexshare.base_capacity);
+    const size_t output_capacity = use_indexshare ? selection_capacity + indexshare.max_draft_tokens - 1 : 0;
+    if (use_indexshare && selection_buffers.max_batch == 0) {
+      const size_t max_batch = mtp_model_->config_->engine.dynamic_batching->max_batch_size;
+      const size_t max_extend_rows = max_batch * (static_cast<size_t>(indexshare.max_draft_tokens) + 1);
+      auto* device = mtp_model_->p_device_inputs_;
+      selection_buffers.extend_indices = device->Allocate<int32_t>(max_extend_rows * output_capacity);
+      selection_buffers.extend_counts = device->Allocate<int32_t>(max_extend_rows);
+      selection_buffers.indices = device->Allocate<int32_t>(max_batch * selection_capacity);
+      selection_buffers.counts = device->Allocate<int32_t>(max_batch);
+      selection_buffers.capture_ends = device->Allocate<int32_t>(max_batch);
+      selection_buffers.extend_row_indices = device->Allocate<int32_t>(max_extend_rows);
+      selection_buffers.row_indices.resize(indexshare.max_draft_tokens - 1);
+      for (auto& rows : selection_buffers.row_indices) rows = device->Allocate<int32_t>(max_batch);
+      selection_buffers.status = device->Allocate<int32_t>(max_batch * std::max(1, indexshare.max_draft_tokens - 1) +
+                                                           max_extend_rows);
+      {
+        const size_t stages = static_cast<size_t>(indexshare.max_draft_tokens - 1);
+        selection_buffers.projection_rows = device->Allocate<int64_t>(max_extend_rows);
+        auto projection_host = selection_buffers.projection_rows.CpuSpan();
+        std::iota(projection_host.begin(), projection_host.end(), int64_t{0});
+        selection_buffers.projection_rows.CopyCpuToDevice();
+        selection_buffers.stage_projection_rows.resize(stages);
+        selection_buffers.range_starts.resize(stages);
+        selection_buffers.range_ends.resize(stages);
+        selection_buffers.stage_capture_counts.resize(stages);
+        selection_buffers.stage_state_inputs.resize(stages);
+        selection_buffers.stage_state_outputs.resize(stages);
+        selection_buffers.stage_state_updates.resize(stages);
+        for (size_t stage = 0; stage < stages; ++stage) {
+          selection_buffers.stage_projection_rows[stage] = device->Allocate<int64_t>(max_batch);
+          auto rows = selection_buffers.stage_projection_rows[stage].CpuSpan();
+          std::iota(rows.begin(), rows.end(), int64_t{0});
+          selection_buffers.stage_projection_rows[stage].CopyCpuToDevice();
+          selection_buffers.range_starts[stage] = device->Allocate<int32_t>(max_batch);
+          selection_buffers.range_ends[stage] = device->Allocate<int32_t>(max_batch);
+          selection_buffers.stage_capture_counts[stage] = device->Allocate<int32_t>(max_batch);
+          selection_buffers.stage_capture_counts[stage].Zero();
+        }
+        selection_buffers.stage_indices = device->Allocate<int32_t>(stages * max_batch * output_capacity);
+        selection_buffers.stage_counts = device->Allocate<int32_t>(stages * max_batch);
+      }
+      selection_buffers.max_batch = max_batch;
+    }
+    if (use_indexshare) {
+      if (feeds.size() > selection_buffers.max_batch || total_rows > selection_buffers.extend_counts.size()) {
+        throw std::runtime_error("IndexShare feed exceeds its persistent buffer capacity.");
+      }
+      selection_buffers.status.Zero();
+    }
+    const auto selection_view = [&](DeviceSpan<int32_t> values, std::initializer_list<int64_t> shape) {
+      auto tensor = OrtValue::CreateTensor(*mtp_model_->p_device_inputs_->GetMemoryInfo(),
+                                           values.Span().data(), values.size() * sizeof(int32_t),
+                                           {shape.begin(), shape.size()}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+      auto* result = tensor.get();
+      step->indexshare_views.push_back(std::move(tensor));
+      return result;
+    };
+    const auto projection_view = [&](DeviceSpan<int64_t> values) {
+      const std::array<int64_t, 1> shape{static_cast<int64_t>(values.size())};
+      auto tensor = OrtValue::CreateTensor(*mtp_model_->p_device_inputs_->GetMemoryInfo(),
+                                           values.Span().data(), values.size() * sizeof(int64_t), shape,
+                                           ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      auto* result = tensor.get();
+      step->indexshare_views.push_back(std::move(tensor));
+      return result;
+    };
+    const auto mode_view = [&](bool reuse) {
+      auto memory = OrtMemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+      const std::array<int64_t, 1> shape{1};
+      auto tensor = OrtValue::CreateTensor(*memory, &selection_buffers.modes[reuse ? 1 : 0],
+                                           sizeof(int32_t), shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+      auto* result = tensor.get();
+      step->indexshare_views.push_back(std::move(tensor));
+      return result;
+    };
     bool device_draft_chain =
         max_draft_tokens > 1 && mtp_model_->p_device_->GetType() == DeviceType::CUDA;
     DeviceSpan<int32_t> device_drafts;
@@ -933,11 +1016,61 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();
     }
     context.hidden_states_input = packed_hidden_states.GetOrtTensor();
+    std::array<OrtValue*, 2> selection_outputs{};
+    const std::array<const char*, 7> packed_selection_input_names{
+        "indexshare.mode", "indexshare.projection_rows", "indexshare.0.indices", "indexshare.0.counts",
+        "indexshare.base_row_indices", "indexshare.range_starts", "indexshare.range_ends"};
+    const std::array<const char*, 3> packed_selection_output_names{
+        indexshare.indices_output.c_str(), indexshare.counts_output.c_str(), "indexshare.0.status"};
+    std::array<OrtValue*, 7> packed_extend_inputs{};
+    std::array<OrtValue*, 3> packed_extend_outputs{};
+    if (use_indexshare) {
+      context.decoder_session = mtp_model_->session_decoder_.get();
+      {
+        const int64_t cached_rows = static_cast<int64_t>(selection_buffers.max_batch);
+        packed_extend_inputs = {
+            mode_view(false), projection_view(selection_buffers.projection_rows.subspan(0, total_rows)),
+            selection_view(selection_buffers.indices, {cached_rows, static_cast<int64_t>(selection_capacity)}),
+            selection_view(selection_buffers.counts, {cached_rows}),
+            selection_view(selection_buffers.extend_row_indices.subspan(0, 0), {0}),
+            selection_view(selection_buffers.capture_ends.subspan(0, 0), {0}),
+            selection_view(selection_buffers.capture_ends.subspan(0, 0), {0})};
+        context.extra_input_names = packed_selection_input_names;
+        context.extra_inputs = packed_extend_inputs;
+      }
+      selection_outputs = {
+          selection_view(selection_buffers.extend_indices.subspan(0, total_rows * output_capacity),
+                         {static_cast<int64_t>(total_rows), static_cast<int64_t>(output_capacity)}),
+          selection_view(selection_buffers.extend_counts.subspan(0, total_rows), {static_cast<int64_t>(total_rows)})};
+      {
+        packed_extend_outputs = {selection_outputs[0], selection_outputs[1],
+                                 selection_view(selection_buffers.status.subspan(0, total_rows),
+                                                {static_cast<int64_t>(total_rows)})};
+        context.extra_output_names = packed_selection_output_names;
+        context.extra_outputs = packed_extend_outputs;
+      }
+    }
     if (device_draft_chain) {
       context.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
     }
     mtp_model_executor_->Decode(mtp_requests, context);
     ++speculative_stats_.draft_forward_passes;
+    if (use_indexshare) {
+      std::vector<int32_t> capture_ends(feeds.size());
+      for (size_t row = 0; row < feeds.size(); ++row) {
+        const auto& entry = step->plan.requests[row];
+        if (entry.target_cache_slots >= static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+          throw std::runtime_error("IndexShare capture position must fit int32 with room for the next query.");
+        }
+        capture_ends[row] = static_cast<int32_t>(entry.target_cache_slots);
+        selection_buffers.indices.subspan(row * selection_capacity, selection_capacity).CopyFrom(selection_buffers.extend_indices.subspan(entry.logits_row_index * output_capacity, selection_capacity));
+        selection_buffers.counts.subspan(row, 1).CopyFrom(
+            selection_buffers.extend_counts.subspan(entry.logits_row_index, 1));
+      }
+      auto capture_end_host = selection_buffers.capture_ends.CpuSpan();
+      std::copy(capture_ends.begin(), capture_ends.end(), capture_end_host.begin());
+      selection_buffers.capture_ends.CopyCpuToDevice();
+    }
     auto logits = mtp_requests.ProcessLogits();
     device_draft_chain =
         device_draft_chain &&
@@ -1156,6 +1289,112 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         chain_context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();
       }
       chain_context.hidden_states_input = feedback_hidden->GetOrtTensor();
+      std::array<OrtValue*, 7> packed_stage_inputs{};
+      std::array<OrtValue*, 3> packed_stage_outputs{};
+      std::vector<FixedStateSlotHandle> stage_slots;
+      std::vector<FixedStateBinding> stage_bindings;
+      if (use_indexshare) {
+        std::vector<int32_t> row_indices(active_feed_indices.begin(), active_feed_indices.end());
+        auto stage_rows = selection_buffers.row_indices[draft_index - 1];
+        auto row_host = stage_rows.CpuSpan();
+        std::copy(row_indices.begin(), row_indices.end(), row_host.begin());
+        stage_rows.CopyCpuToDevice();
+        const int64_t cached_rows = static_cast<int64_t>(selection_buffers.max_batch);
+        const int64_t query_count = static_cast<int64_t>(row_indices.size());
+        chain_context.decoder_session = mtp_model_->session_decoder_.get();
+        {
+          const size_t stage = draft_index - 1;
+          const bool reuse = indexshare.enabled;
+          const size_t merge_queries = reuse ? row_indices.size() : 0;
+          auto starts_host = selection_buffers.range_starts[stage].CpuSpan();
+          auto ends_host = selection_buffers.range_ends[stage].CpuSpan();
+          auto capture_host = selection_buffers.capture_ends.CpuSpan();
+          for (size_t row = 0; row < row_indices.size(); ++row) {
+            const auto end = chain_plan.requests[row].target_cache_slots;
+            if (end > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+              throw std::runtime_error("IndexShare range end exceeds int32.");
+            }
+            starts_host[row] = capture_host[active_feed_indices[row]];
+            ends_host[row] = static_cast<int32_t>(end);
+          }
+          selection_buffers.range_starts[stage].CopyCpuToDevice();
+          selection_buffers.range_ends[stage].CopyCpuToDevice();
+          packed_stage_inputs = {
+              mode_view(reuse), projection_view(selection_buffers.stage_projection_rows[stage].subspan(0, reuse ? 0 : row_indices.size())),
+              selection_view(selection_buffers.indices, {cached_rows, static_cast<int64_t>(selection_capacity)}),
+              selection_view(selection_buffers.counts, {cached_rows}),
+              selection_view(stage_rows.subspan(0, merge_queries), {static_cast<int64_t>(merge_queries)}),
+              selection_view(selection_buffers.range_starts[stage].subspan(0, merge_queries), {static_cast<int64_t>(merge_queries)}),
+              selection_view(selection_buffers.range_ends[stage].subspan(0, merge_queries), {static_cast<int64_t>(merge_queries)})};
+          packed_stage_outputs = {
+              selection_view(selection_buffers.stage_indices.subspan(stage * selection_buffers.max_batch * output_capacity,
+                                                                     row_indices.size() * output_capacity),
+                             {query_count, static_cast<int64_t>(output_capacity)}),
+              selection_view(selection_buffers.stage_counts.subspan(stage * selection_buffers.max_batch, row_indices.size()), {query_count}),
+              selection_view(selection_buffers.status.subspan(selection_buffers.extend_counts.size() + stage * selection_buffers.max_batch,
+                                                              row_indices.size()),
+                             {query_count})};
+          chain_context.indexshare_decode = reuse;
+          chain_context.extra_input_names = packed_selection_input_names;
+          chain_context.extra_inputs = packed_stage_inputs;
+          chain_context.extra_output_names = packed_selection_output_names;
+          chain_context.extra_outputs = packed_stage_outputs;
+
+          if (!context.fixed_state_slots.empty()) {
+            for (size_t feed_index : active_feed_indices) stage_slots.push_back(context.fixed_state_slots[feed_index]);
+          }
+          stage_bindings.assign(context.fixed_state_bindings.begin(), context.fixed_state_bindings.end());
+          auto& state_inputs = selection_buffers.stage_state_inputs[stage];
+          auto& state_outputs = selection_buffers.stage_state_outputs[stage];
+          auto& state_updates = selection_buffers.stage_state_updates[stage];
+          state_inputs.resize(stage_bindings.size());
+          state_outputs.resize(stage_bindings.size());
+          state_updates.resize(stage_bindings.size());
+          const auto state_view = [&](DeviceSpan<uint8_t>& buffer, OrtValue& geometry) {
+            auto info = geometry.GetTensorTypeAndShapeInfo();
+            auto shape = info->GetShape();
+            const size_t row_bytes = info->GetElementCount() / static_cast<size_t>(shape[0]) * Ort::SizeOf(info->GetElementType());
+            if (buffer.size() == 0) buffer = mtp_model_->p_device_inputs_->Allocate<uint8_t>(selection_buffers.max_batch * row_bytes);
+            shape[0] = query_count;
+            auto tensor = OrtValue::CreateTensor(*mtp_model_->p_device_inputs_->GetMemoryInfo(), buffer.Span().data(),
+                                                 row_indices.size() * row_bytes, shape, info->GetElementType());
+            auto* result = tensor.get();
+            step->indexshare_views.push_back(std::move(tensor));
+            return result;
+          };
+          for (size_t binding_index = 0; binding_index < stage_bindings.size(); ++binding_index) {
+            auto& binding = stage_bindings[binding_index];
+            const auto& original = context.fixed_state_bindings[binding_index];
+            binding.input = state_view(state_inputs[binding_index], *original.input);
+            binding.output = state_view(state_outputs[binding_index], *original.output);
+            auto source = draft_index == 1
+                              ? ByteWrapTensor(*mtp_model_->p_device_inputs_, *original.output)
+                              : selection_buffers.stage_state_outputs[stage - 1][binding_index];
+            const size_t row_bytes = state_inputs[binding_index].size() / selection_buffers.max_batch;
+            for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+              const size_t source_row = draft_index == 1 ? active_feed_indices[row] : previous_stage_rows[active_feed_indices[row]];
+              state_inputs[binding_index].subspan(row * row_bytes, row_bytes).CopyFrom(source.subspan(source_row * row_bytes, row_bytes));
+            }
+            if (binding.state_update_capacity != 0) {
+              binding.state_update_capture_count = selection_view(selection_buffers.stage_capture_counts[stage].subspan(0, row_indices.size()), {query_count});
+              if (binding.state_update_active) binding.state_update_active = packed_extend_inputs[0];
+              if (binding.state_update_value) binding.state_update_value = state_view(state_updates[binding_index], *original.state_update_value);
+              if (binding.state_update_capsule) throw std::runtime_error("IndexShare MTP supports indexer state, not recurrent capsules.");
+            }
+          }
+          if (!stage_bindings.empty()) {
+            OrtValue* capture_count = nullptr;
+            for (auto& binding : stage_bindings) {
+              if (binding.state_update_capture_count) {
+                if (!capture_count) capture_count = binding.state_update_capture_count;
+                binding.state_update_capture_count = capture_count;
+              }
+            }
+          }
+          chain_context.fixed_state_slots = stage_slots;
+          chain_context.fixed_state_bindings = stage_bindings;
+        }
+      }
       if (device_draft_chain) {
         chain_context.input_ids = packed_device_inputs;
         chain_context.run_options->AddConfigEntry(
@@ -1224,6 +1463,13 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
 
     if (device_draft_chain) {
       materialize_device_drafts();
+    }
+
+    if (use_indexshare) {
+      const auto status = selection_buffers.status.CopyDeviceToCpu();
+      if (std::any_of(status.begin(), status.end(), [](int32_t value) { return value != 0; })) {
+        throw std::logic_error("IndexShare indexer merge failed; tentative drafts were not published.");
+      }
     }
 
     for (size_t i = 0; i < feeds.size(); ++i) {

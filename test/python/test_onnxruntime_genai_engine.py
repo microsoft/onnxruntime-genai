@@ -19,6 +19,7 @@ import onnx
 import onnxruntime_genai as og
 import pytest
 from _test_utils import register_plugin_providers
+from onnxruntime.capi import _pybind_state
 
 register_plugin_providers(logging.getLogger(__name__))
 
@@ -39,6 +40,369 @@ _DEVICES = ["cpu"] + (["cuda"] if og.is_cuda_available() else [])
 _PROMPT_A = [5, 9, 13]
 _PROMPT_B = [7, 2, 20, 4]
 _PROMPT_LONG = [3, 8, 2, 15, 6, 11]
+
+
+def _has_indexer_merge():
+    return any(schema.name == "PackedSparseAttentionIndexerMerge" for schema in _pybind_state.get_all_operator_schema())
+
+
+def _make_indexshare_mtp_model(
+    root, enabled=True, draft_count=7, merge_capacity=8, capture=False, persistent_state=False
+):
+    helper = onnx.helper
+    tensor = onnx.TensorProto
+    target = onnx.load(_DRAFT_MODEL_DIR / "decoder.onnx")
+    for value in list(target.graph.input) + list(target.graph.output):
+        if value.name.startswith(("past_key_values.", "present.")):
+            dimension = value.type.tensor_type.shape.dim[0]
+            dimension.ClearField("dim_value")
+            dimension.dim_param = "num_blocks"
+    next(value for value in target.graph.initializer if value.name == "cache_shape").CopyFrom(
+        helper.make_tensor("cache_shape", tensor.INT64, [4], [-1, 4, 1, 1])
+    )
+    del target.graph.value_info[:]
+    onnx.save_model(target, root / "decoder.onnx")
+    config = json.loads((_DRAFT_MODEL_DIR / "genai_config.json").read_text())
+    config["model"]["decoder"]["session_options"]["provider_options"] = [{"cuda": {}}]
+    config["speculative"] = {"max_draft_tokens": draft_count}
+    config["model"]["mtp"] = {
+        "filename": "mtp.onnx",
+        "num_hidden_layers": 1,
+        "num_key_value_heads": 1,
+        "head_size": 1,
+        "main_hidden_states": "hidden_states",
+        "inputs": {"hidden_states": "hidden_states"},
+        "outputs": {"hidden_states": "hidden_states_out"},
+        "session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "1" if capture else "0"}}]},
+        "index_share": {
+            "enabled": enabled,
+            "base_capacity": 3,
+            "max_draft_tokens": 7,
+            "indices_output": "selection",
+            "counts_output": "count",
+        },
+    }
+    logits = np.zeros((_VOCAB_SIZE, _VOCAB_SIZE), dtype=np.float16)
+    logits[:, 17] = 10
+    initializers = [
+        onnx.numpy_helper.from_array(logits, "constant_logits"),
+        helper.make_tensor("first_column", tensor.INT64, [1], [0]),
+        helper.make_tensor("squeeze_axis", tensor.INT64, [1], [1]),
+    ]
+    inputs = [
+        helper.make_tensor_value_info("input_ids", tensor.INT64, ["num_tokens"]),
+        helper.make_tensor_value_info("hidden_states", tensor.FLOAT16, ["num_tokens", 1]),
+        helper.make_tensor_value_info("block_table", tensor.INT32, ["batch_size", "columns"]),
+        helper.make_tensor_value_info("cumulative_sequence_lengths", tensor.INT32, ["batch_plus_one"]),
+        helper.make_tensor_value_info("past_sequence_lengths", tensor.INT32, ["num_tokens"]),
+        helper.make_tensor_value_info("attention_metadata", tensor.INT32, [3]),
+    ]
+    outputs = [
+        helper.make_tensor_value_info("logits", tensor.FLOAT16, ["num_tokens", _VOCAB_SIZE]),
+        helper.make_tensor_value_info("hidden_states_out", tensor.FLOAT16, ["num_tokens", 1]),
+    ]
+    nodes = [
+        helper.make_node("Gather", ["constant_logits", "input_ids"], ["raw_logits"], axis=0),
+        helper.make_node("Gather", ["cumulative_sequence_lengths", "first_column"], ["first_offset"], axis=0),
+        helper.make_node("Gather", ["past_sequence_lengths", "first_column"], ["first_past"], axis=0),
+        helper.make_node("Gather", ["block_table", "first_column"], ["first_block_column"], axis=1),
+        helper.make_node("Gather", ["first_block_column", "first_column"], ["first_block"], axis=0),
+        helper.make_node("Squeeze", ["first_block", "squeeze_axis"], ["block_scalar"]),
+        helper.make_node("Gather", ["attention_metadata", "first_column"], ["first_metadata"], axis=0),
+        helper.make_node("Sub", ["block_scalar", "block_scalar"], ["block_zero"]),
+        helper.make_node("Sub", ["first_metadata", "first_metadata"], ["attention_zero"]),
+        helper.make_node("Sub", ["first_past", "first_past"], ["past_zero"]),
+        helper.make_node("Add", ["first_offset", "past_zero"], ["sequence_zero"]),
+        helper.make_node("Add", ["block_zero", "attention_zero"], ["cache_zero"]),
+        helper.make_node("Add", ["sequence_zero", "cache_zero"], ["metadata_zero"]),
+        helper.make_node("Cast", ["metadata_zero"], ["logit_zero"], to=tensor.FLOAT16),
+        helper.make_node("Add", ["raw_logits", "logit_zero"], ["logits"]),
+        helper.make_node("Identity", ["hidden_states"], ["hidden_states_out"]),
+    ]
+    for kind in ("key", "value"):
+        name = f"past_key_values.0.{kind}"
+        present = f"present.0.{kind}"
+        inputs.append(helper.make_tensor_value_info(name, tensor.FLOAT16, ["num_blocks", 4, 1, 1]))
+        outputs.append(helper.make_tensor_value_info(present, tensor.FLOAT16, ["num_blocks", 4, 1, 1]))
+        nodes.append(helper.make_node("Identity", [name], [present]))
+
+    def save(filename, graph_nodes, graph_inputs, graph_outputs):
+        model = helper.make_model(
+            helper.make_graph(graph_nodes, filename, graph_inputs, graph_outputs, initializers),
+            opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("com.microsoft", 1)],
+        )
+        model.ir_version = 10
+        onnx.save_model(model, root / filename)
+
+    packed_inputs = [
+        *inputs,
+        helper.make_tensor_value_info("indexshare.mode", tensor.INT32, [1]),
+        helper.make_tensor_value_info("indexshare.projection_rows", tensor.INT64, ["projection_rows"]),
+        helper.make_tensor_value_info("indexshare.0.indices", tensor.INT32, ["rows", 3]),
+        helper.make_tensor_value_info("indexshare.0.counts", tensor.INT32, ["rows"]),
+        helper.make_tensor_value_info("indexshare.base_row_indices", tensor.INT32, ["merge_rows"]),
+        helper.make_tensor_value_info("indexshare.range_starts", tensor.INT32, ["merge_rows"]),
+        helper.make_tensor_value_info("indexshare.range_ends", tensor.INT32, ["merge_rows"]),
+    ]
+    initializers.extend(
+        [
+            onnx.numpy_helper.from_array(np.zeros((1, 4), dtype=np.float16), "index_weight"),
+            onnx.numpy_helper.from_array(np.ones(2, dtype=np.float16), "index_norm"),
+            onnx.numpy_helper.from_array(np.ones((64, 2), dtype=np.float16), "index_cos"),
+            onnx.numpy_helper.from_array(np.zeros((64, 2), dtype=np.float16), "index_sin"),
+            helper.make_tensor("key_geometry", tensor.INT64, [2], [4, 2]),
+            helper.make_tensor("buffer_geometry", tensor.INT64, [2], [3, 2]),
+            helper.make_tensor("length_geometry", tensor.INT64, [1], [2]),
+            helper.make_tensor("range_extra", tensor.INT32, [], [0 if merge_capacity == 8 else 64]),
+        ]
+    )
+    packed_nodes = [
+        *nodes,
+        helper.make_node("Gather", ["hidden_states", "indexshare.projection_rows"], ["projected_hidden"], axis=0),
+        helper.make_node("MatMul", ["projected_hidden", "index_weight"], ["packed_qk"]),
+        helper.make_node("Shape", ["past_sequence_lengths"], ["batch_shape"]),
+        helper.make_node("Concat", ["batch_shape", "key_geometry"], ["key_shape"], axis=0),
+        helper.make_node("Concat", ["batch_shape", "buffer_geometry"], ["buffer_shape"], axis=0),
+        helper.make_node("Concat", ["batch_shape", "length_geometry"], ["length_shape"], axis=0),
+        helper.make_node(
+            "ConstantOfShape",
+            ["key_shape"],
+            ["key_state"],
+            value=onnx.numpy_helper.from_array(np.zeros(1, dtype=np.float16)),
+        ),
+        helper.make_node(
+            "ConstantOfShape",
+            ["buffer_shape"],
+            ["kv_buffer"],
+            value=onnx.numpy_helper.from_array(np.zeros(1, dtype=np.float16)),
+        ),
+        helper.make_node(
+            "ConstantOfShape",
+            ["length_shape"],
+            ["state_lengths"],
+            value=helper.make_tensor("", tensor.INT32, [1], [0]),
+        ),
+        helper.make_node("Add", ["indexshare.range_ends", "range_extra"], ["merge_ends"]),
+        helper.make_node(
+            "PackedSparseAttentionIndexerMerge",
+            [
+                "indexshare.0.indices",
+                "indexshare.0.counts",
+                "indexshare.base_row_indices",
+                "indexshare.range_starts",
+                "merge_ends",
+            ],
+            ["merged", "merged_count", "merge_status"],
+            domain="com.microsoft",
+            policy_mode="append_range",
+            max_output_entries=9,
+        ),
+        helper.make_node(
+            "PackedSparseAttentionIndexer",
+            [
+                "packed_qk",
+                "",
+                "index_norm",
+                "index_norm",
+                "index_cos",
+                "index_sin",
+                "cumulative_sequence_lengths",
+                "past_sequence_lengths",
+                "",
+                "",
+                "",
+                "",
+                "key_state",
+                "kv_buffer",
+                "",
+                "state_lengths",
+                "",
+                "",
+                "indexshare.mode",
+                "merged",
+                "merged_count",
+                "merge_status",
+            ],
+            [
+                "selection",
+                "count",
+                "present_index_keys",
+                "present_index_buffer",
+                "",
+                "present_index_lengths",
+                "",
+                "indexshare.0.status",
+            ],
+            domain="com.microsoft",
+            policy_mode="qsa",
+            compress_ratio=2,
+            state_capacity=4,
+            token_budget=2,
+            max_output_entries=9,
+        ),
+    ]
+    packed_outputs = [
+        *outputs,
+        helper.make_tensor_value_info("selection", tensor.INT32, ["num_tokens", 9]),
+        helper.make_tensor_value_info("count", tensor.INT32, ["num_tokens"]),
+        helper.make_tensor_value_info("indexshare.0.status", tensor.INT32, ["num_tokens"]),
+    ]
+    if persistent_state:
+        state_names = {
+            "key_state": ("indexer_key", tensor.FLOAT16, [4, 2]),
+            "kv_buffer": ("indexer_kv_buffer", tensor.FLOAT16, [3, 2]),
+            "state_lengths": ("indexer_state_lengths", tensor.INT32, [2]),
+        }
+        state_outputs = {
+            "key_state": "present_index_keys",
+            "kv_buffer": "present_index_buffer",
+            "state_lengths": "present_index_lengths",
+        }
+        renames = {}
+        for name, (suffix, dtype, dimensions) in state_names.items():
+            past, present = f"past.0.{suffix}", f"present.0.{suffix}"
+            shape = ["batch_size", *dimensions]
+            past_info = helper.make_tensor_value_info(past, dtype, shape)
+            present_info = helper.make_tensor_value_info(present, dtype, shape)
+            packed_inputs.append(past_info)
+            packed_outputs.append(present_info)
+            target.graph.input.append(past_info)
+            target.graph.output.append(present_info)
+            target.graph.node.append(helper.make_node("Identity", [past], [present]))
+            renames[name] = past
+            renames[state_outputs[name]] = present
+        packed_nodes = [
+            node for node in packed_nodes if not (node.op_type == "ConstantOfShape" and node.output[0] in state_names)
+        ]
+        for node in packed_nodes:
+            for names in (node.input, node.output):
+                for index, name in enumerate(names):
+                    names[index] = renames.get(name, name)
+        decoder = config["model"]["decoder"]
+        for field, name in (("inputs", "past"), ("outputs", "present")):
+            bindings = decoder.setdefault(field, {})
+            for key in state_names:
+                suffix = state_names[key][0]
+                config_field = {
+                    "key_state": "indexer_names",
+                    "kv_buffer": "indexer_kv_buffer_names",
+                    "state_lengths": "indexer_state_lengths_names",
+                }[key]
+                bindings[f"{name}_{config_field}"] = f"{name}.%d.{suffix}"
+        decoder.setdefault("state_groups", []).append(
+            {
+                "kind": "fixed_indexer",
+                "layer_ids": [0],
+                "state_update": {"capacity": 7, "compress_ratio": 2},
+            }
+        )
+        decoder["state_update_capacity"] = 7
+        decoder["inputs"]["state_update_capture_count"] = "state_update_capture_count"
+        decoder["inputs"]["state_update_active"] = "state_update_active"
+        decoder["outputs"]["state_update_indexer_names"] = "state_update.%d.indexer"
+        config["model"]["mtp"]["inputs"]["past_indexer_names"] = "past.%d.indexer_key"
+        config["model"]["mtp"]["outputs"]["present_indexer_names"] = "present.%d.indexer_key"
+        capture_input = helper.make_tensor_value_info("state_update_capture_count", tensor.INT32, ["batch_size"])
+        active_input = helper.make_tensor_value_info("state_update_active", tensor.INT32, [1])
+        snapshot_output = helper.make_tensor_value_info("state_update.0.indexer", tensor.FLOAT16, ["batch_size", 7, 2])
+        target.graph.input.extend([capture_input, active_input])
+        target.graph.output.append(snapshot_output)
+        target.graph.initializer.extend(
+            [
+                helper.make_tensor("indexer_batch_axis", tensor.INT64, [1], [0]),
+                helper.make_tensor("snapshot_geometry", tensor.INT64, [2], [7, 2]),
+            ]
+        )
+        target.graph.node.extend(
+            [
+                helper.make_node("Shape", ["past.0.indexer_key"], ["indexer_key_shape"]),
+                helper.make_node("Gather", ["indexer_key_shape", "indexer_batch_axis"], ["indexer_batch"], axis=0),
+                helper.make_node("Concat", ["indexer_batch", "snapshot_geometry"], ["snapshot_shape"], axis=0),
+                helper.make_node(
+                    "ConstantOfShape",
+                    ["snapshot_shape"],
+                    ["state_update.0.indexer"],
+                    value=onnx.numpy_helper.from_array(np.zeros(1, dtype=np.float16)),
+                ),
+            ]
+        )
+        onnx.save_model(target, root / "decoder.onnx")
+        packed_inputs.extend([capture_input, active_input])
+        packed_outputs.append(snapshot_output)
+        indexer = next(node for node in packed_nodes if node.op_type == "PackedSparseAttentionIndexer")
+        indexer.input[16:18] = ["state_update_capture_count", "state_update_active"]
+        indexer.output[6] = "state_update.0.indexer"
+        indexer.attribute.append(helper.make_attribute("state_update_capacity", 7))
+    save("mtp.onnx", packed_nodes, packed_inputs, packed_outputs)
+    (root / "genai_config.json").write_text(json.dumps(config))
+    return og.Model(str(root))
+
+
+@pytest.mark.skipif(not og.is_cuda_available(), reason="Requires CUDA")
+@pytest.mark.parametrize("draft_count", range(1, 8))
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_indexshare_single_mtp_default_all_budgets(tmp_path, draft_count, capture, enabled):
+    if not _has_indexer_merge():
+        pytest.skip("Requires an ORT runtime with PackedSparseAttentionIndexerMerge")
+    model = _make_indexshare_mtp_model(tmp_path, draft_count=draft_count, capture=capture, enabled=enabled)
+    assert {path.name for path in tmp_path.glob("mtp*.onnx")} == {"mtp.onnx"}
+    graph = onnx.load(tmp_path / "mtp.onnx")
+    assert not any(node.op_type == "If" for node in graph.graph.node)
+    assert sum(node.op_type == "PackedSparseAttentionIndexer" for node in graph.graph.node) == 1
+    assert not any(node.op_type == "Split" for node in graph.graph.node)
+    engine = og.Engine(model)
+    sinks = {}
+    first, second = _Sink(), _Sink()
+    prompt_a = [3, 8, 4]
+    _create_request(engine, prompt_a, 12, first, sinks)
+    _create_request(engine, _PROMPT_B, 16, second, sinks)
+    _run(engine, sinks)
+    assert first.tokens == predicted_tokens(prompt_a, 12)
+    assert second.tokens == predicted_tokens(_PROMPT_B, 16)
+    stats = engine.get_speculative_stats()
+    assert stats["draft_forward_passes"] > 0
+    assert stats["mtp_failures"] == 0
+    if draft_count > 1:
+        assert stats["partial_accept_rounds"] > 0
+
+
+@pytest.mark.skipif(not og.is_cuda_available(), reason="Requires CUDA")
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_indexshare_persistent_state_and_shrinking_batch(tmp_path, capture, enabled):
+    if not _has_indexer_merge():
+        pytest.skip("Requires IndexShare operators")
+    model = _make_indexshare_mtp_model(tmp_path, enabled=enabled, capture=capture, persistent_state=True)
+    engine = og.Engine(model)
+    sinks = {}
+    first, second = _Sink(), _Sink()
+    _create_request(engine, _PROMPT_A, 6, first, sinks)
+    _create_request(engine, _PROMPT_B, 16, second, sinks)
+    _run(engine, sinks)
+    assert first.tokens == predicted_tokens(_PROMPT_A, 6)
+    assert second.tokens == predicted_tokens(_PROMPT_B, 16)
+    assert engine.get_speculative_stats()["mtp_failures"] == 0
+
+
+@pytest.mark.skipif(not og.is_cuda_available(), reason="Requires CUDA")
+def test_indexshare_status_rejects_chain_before_publication(tmp_path):
+    if not _has_indexer_merge():
+        pytest.skip("Requires an ORT runtime with PackedSparseAttentionIndexerMerge")
+    model = _make_indexshare_mtp_model(tmp_path, True, merge_capacity=1)
+    engine = og.Engine(model)
+    sink = _Sink()
+    sinks = {}
+    _create_request(engine, _PROMPT_A, 12, sink, sinks)
+    try:
+        _run(engine, sinks)
+    except RuntimeError as error:
+        assert "IndexShare indexer merge failed" in str(error)
+    else:
+        assert sink.finish_reason == og.FinishReason.FAILED
+    assert len(sink.tokens) < 12
+    assert sink.tokens == predicted_tokens(_PROMPT_A, len(sink.tokens))
+    assert 17 not in sink.tokens
 
 
 def predicted_tokens(prompt, max_new_tokens):
