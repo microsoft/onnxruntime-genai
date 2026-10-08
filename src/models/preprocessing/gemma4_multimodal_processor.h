@@ -6,6 +6,10 @@
 
 namespace Generators {
 
+std::unique_ptr<OrtValue> ConvertAndResizeGemma4PositionIds(const int64_t* data, std::span<const int64_t> shape,
+                                                             int64_t target_patches, ONNXTensorElementDataType target_type,
+                                                             Ort::Allocator& allocator);
+
 struct Gemma4MultiModalProcessor : Processor {
   Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info);
 
