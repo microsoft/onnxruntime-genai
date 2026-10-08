@@ -357,7 +357,7 @@ def test_bfloat16_uses_uint16_storage_with_onnx_type_metadata(tmp_path):
     np.testing.assert_array_equal(result["output"], bits)
 
 
-def test_combined_clm_high_level_session(tmp_path):
+def _combined_clm_package(tmp_path):
     fixture = Path(__file__).parents[1] / "models/multimodal-decoder-no-input-ids"
     shutil.copy(fixture / "tokenizer.json", tmp_path / "tokenizer.json")
     shutil.copy(fixture / "tokenizer_config.json", tmp_path / "tokenizer_config.json")
@@ -419,10 +419,54 @@ def test_combined_clm_high_level_session(tmp_path):
             }
         )
     )
+    return tmp_path
+
+
+def _precomputed_actions(records):
+    content = bytearray(struct.pack("<8sI", b"CLMACT1\0", len(records)))
+    for text, projection in records:
+        encoded = text.encode()
+        content.extend(struct.pack("<II", len(encoded), len(projection)))
+        content.extend(encoded)
+        content.extend(struct.pack(f"<{len(projection)}f", *projection))
+    return bytes(content)
+
+
+def test_combined_clm_high_level_session(tmp_path):
+    _combined_clm_package(tmp_path)
     session = og.RankingSession(tmp_path, providers=["cpu"])
     answer = session.rank({"state": "1", "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}}})
     assert answer["q"]["type"] == "choice"
     assert set(answer["q"]["probabilities"]) == {"a", "b"}
+
+
+@pytest.mark.parametrize(
+    "invalid_sidecar",
+    [
+        _precomputed_actions([("1", [1.0, 1.0, 1.0, float("nan")])]),
+        _precomputed_actions([("1", [1.0] * 4)]) + b"trailing",
+        struct.pack("<8sI", b"CLMACT1\0", 2)
+        + _precomputed_actions([("1", [1.0] * 4)])[12:]
+        + struct.pack("<II", 1, 4)
+        + b"2",
+        struct.pack("<8sIII", b"CLMACT1\0", 1, 0, 4),
+    ],
+    ids=["non-finite", "trailing-data", "truncated", "invalid-record"],
+)
+def test_rejected_precomputed_actions_leave_no_pinned_records(
+    tmp_path, invalid_sidecar
+):
+    _combined_clm_package(tmp_path)
+    sidecar = tmp_path / "precomputed_action_projections.bin"
+    sidecar.write_bytes(_precomputed_actions([("1", [1.0] * 4)]))
+    session = og.RankingSession(tmp_path, providers=["cpu"])
+    assert session.cache_stats["entries"] == 1
+
+    sidecar.write_bytes(invalid_sidecar)
+    with pytest.raises(RuntimeError):
+        session.invalidate_cache()
+
+    assert session.cache_stats["entries"] == 0
 
 
 def test_flat_kev_high_level_session(tmp_path):
