@@ -197,7 +197,7 @@ class PrefixCache final : private BlockReferenceObserver {
   size_t ReclaimableCheckpoints() const;
   const FixedStatePrefixCheckpoint* ReclaimableCheckpoint(
       const std::shared_ptr<const BlockIdentity>& current_path = nullptr) const;
-  size_t CheckpointCount() const { return checkpoint_count_; }
+  size_t CheckpointCount() const { return checkpoint_entries_.size(); }
 
   /**
    * @brief Identity hash a chain starts from, before any block has contributed to it.
@@ -265,11 +265,10 @@ class PrefixCache final : private BlockReferenceObserver {
   Entry* FindLogical(uint64_t hash,
                      const std::shared_ptr<const LogicalPrefixIdentity>& parent,
                      std::span<const int32_t> tokens) const;
-  bool IsRetainedPhysicalPath(const Entry& endpoint,
-                              std::span<const int32_t> tokens,
-                              size_t token_count,
-                              std::vector<std::shared_ptr<Block>>& blocks) const;
-  bool HasRetainedPhysicalPath(const Entry& endpoint, size_t block_count) const;
+  bool HasRetainedPhysicalPath(
+      const Entry& endpoint, size_t block_count,
+      std::span<const int32_t> tokens = {},
+      std::vector<std::shared_ptr<Block>>* blocks = nullptr) const;
   bool IsProtectedByLeasedCheckpoint(const Entry& entry) const;
   static bool IsCheckpointUnleased(const Entry& entry);
   bool HasCheckpointedDescendant(const Entry& ancestor) const;
@@ -294,7 +293,6 @@ class PrefixCache final : private BlockReferenceObserver {
   // LRU checkpoint endpoints. Capacity is reserved at construction, so promotion and publication
   // are allocation-free after checkpoint capture starts.
   std::vector<Entry*> checkpoint_entries_;
-  size_t checkpoint_count_{};
   PrefixCacheMetrics metrics_;
 };
 

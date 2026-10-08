@@ -169,6 +169,9 @@ block can belong to an older suffix that the new request cannot adopt. With
 capacity for multiple checkpoints, the index may retain distinct physical
 histories for the same logical tokens. Logical identity verifies token content;
 physical ancestry identifies the exact KV chain that belongs with a checkpoint.
+Physical variants share immutable logical token metadata rather than retaining
+duplicate token arrays. Paged-only identities store their tokens directly and
+do not allocate a separate logical-identity chain.
 A hybrid match selects a complete checkpointed history, never a mixture of
 blocks from different histories.
 

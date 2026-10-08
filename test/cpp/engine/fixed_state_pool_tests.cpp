@@ -640,6 +640,19 @@ TEST_F(FixedStatePoolTest, HybridLogicalVariantsRetainExactRootPhysicalHistories
                 .identity,
             nullptr);
 
+  EXPECT_NE(first.front()->IdentityPtr(), second.front()->IdentityPtr());
+  ASSERT_NE(first.front()->Identity().logical, nullptr);
+  EXPECT_EQ(first.front()->Identity().logical, second.front()->Identity().logical);
+  for (const auto* history : {&first, &second}) {
+    for (const auto& block : *history) {
+      const auto& identity = block->Identity();
+      ASSERT_NE(identity.logical, nullptr);
+      EXPECT_TRUE(identity.tokens.empty());
+      EXPECT_EQ(identity.Tokens().data(), identity.logical->tokens.data());
+      EXPECT_EQ(identity.Tokens().size(), block->Capacity());
+    }
+  }
+
   auto first_match = index.Match(first_tokens, first_tokens.size());
   auto second_match = index.Match(second_tokens, second_tokens.size());
   EXPECT_EQ(first_match.blocks, first);
