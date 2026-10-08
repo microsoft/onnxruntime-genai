@@ -124,6 +124,7 @@ class Scenario:
     name: str
     actions: tuple[Action, ...]
     pressure: bool = False
+    uncached_control: bool = False
 
 
 def read_profile(config, chunk_size=None, max_batch_size=None, num_blocks=None):
@@ -246,10 +247,25 @@ def make_plan(
     seed_name = "short-seed"
     specs[seed_name] = PromptSpec(seed_name, 2 * chunk + 1)
     if "concurrency" in suites:
+        for order, names in (("short-long", (seed_name, "long")), ("long-short", ("long", seed_name))):
+            scenarios.append(
+                Scenario(
+                    f"simultaneous-{order}",
+                    (Action(names), Action(("long",)), Action(("long",), "warm")),
+                    uncached_control=True,
+                )
+            )
         scenarios.append(
             Scenario(
-                "simultaneous-short-long",
-                (Action((seed_name, "long")), Action(("long",)), Action(("long",), "warm")),
+                "single-row-pinned-short-slot",
+                (
+                    Action((seed_name,), "cold", keep_open=True),
+                    Action(("long",)),
+                    Action((seed_name,), release=True),
+                    Action(("long",)),
+                    Action(("long",), "warm"),
+                ),
+                uncached_control=True,
             )
         )
     pinned = "pinned-branch"
@@ -552,6 +568,70 @@ def save_report(path, report):
     path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
 
+def run_uncached_controls(
+    og, np, model, tokenizer, prompts, args, template_thinks, profile, scenarios, references, entry, report
+):
+    for scenario in scenarios:
+        if not scenario.uncached_control:
+            continue
+        baseline = {}
+        entry["control_stability"][scenario.name] = None
+        for repeat in range(args.reference_repeats):
+            result = {"name": scenario.name, "repeat": repeat, "steps": [], "status": "running"}
+            entry["uncached_controls"].append(result)
+            driver = Driver(og, np, model, tokenizer, prompts, args, template_thinks)
+            try:
+                for index, planned_action in enumerate(scenario.actions):
+                    action = replace(planned_action, check="cold")
+                    print(
+                        f"chunk-{profile.chunk_size}/uncached-{scenario.name}/repeat-{repeat + 1}/step-{index}: {', '.join(action.prompts)}",
+                        flush=True,
+                    )
+                    step = {"action": asdict(action), "rows": [], "status": "running", "errors": []}
+                    result["steps"].append(step)
+                    save_report(args.output, report)
+                    rows, stats = driver.run(action)
+                    step.update(rows=rows, speculative_stats=stats)
+                    for row in rows:
+                        try:
+                            check_result(
+                                row, references[row["prompt"]]["tokens"], profile, "cold", None, args.generated_tokens
+                            )
+                        except ValidationError as error:
+                            step["errors"].append(str(error))
+                            step["status"] = "failed"
+                            print(f"FAIL: uncached-{scenario.name}: {error}", file=sys.stderr, flush=True)
+                            if args.fail_fast or not row["checks"]["safety"]:
+                                raise
+                        key = (index, row["prompt"])
+                        row["checks"]["repeat_parity"] = None if repeat == 0 else row["tokens"] == baseline[key]
+                        if row["checks"]["repeat_parity"] is False:
+                            entry["control_stability"][scenario.name] = False
+                            error = f"{scenario.name}: cache-disabled admission control is unstable for {row['prompt']} at step {index}."
+                            step["errors"].append(error)
+                            step["status"] = "failed"
+                            print(f"FAIL: {error}", file=sys.stderr, flush=True)
+                            if args.fail_fast:
+                                raise ValidationError(error)
+                        baseline.setdefault(key, row["tokens"])
+                    if step["status"] == "running":
+                        step["status"] = "passed"
+                    save_report(args.output, report)
+                result["status"] = "failed" if any(step["status"] == "failed" for step in result["steps"]) else "passed"
+                if repeat > 0 and entry["control_stability"][scenario.name] is None:
+                    entry["control_stability"][scenario.name] = True
+            finally:
+                driver.close()
+                if result["status"] == "running":
+                    result["status"] = "failed"
+                for step in result["steps"]:
+                    if step["status"] == "running":
+                        step["status"] = "failed"
+                save_report(args.output, report)
+            del driver
+            gc.collect()
+
+
 def run_profile(og, np, args, source_config, profile, specs, scenarios, draft_mode, report):
     model, overlay = make_model(og, args, profile, False, draft_mode, source_config)
     tokenizer = og.Tokenizer(model)
@@ -573,6 +653,8 @@ def run_profile(og, np, args, source_config, profile, specs, scenarios, draft_mo
         "references": [],
         "reference_stability": {},
         "reference_failures": [],
+        "uncached_controls": [],
+        "control_stability": {},
         "scenarios": [],
     }
     report["profiles"].append(entry)
@@ -615,7 +697,11 @@ def run_profile(og, np, args, source_config, profile, specs, scenarios, draft_mo
                 save_report(args.output, report)
     finally:
         driver.close()
-    del driver, tokenizer, model
+    del driver
+    run_uncached_controls(
+        og, np, model, tokenizer, prompts, args, template_thinks, profile, scenarios, references, entry, report
+    )
+    del tokenizer, model
     gc.collect()
     for pressure in (False, True):
         selected = [scenario for scenario in scenarios if scenario.pressure == pressure]
@@ -876,10 +962,17 @@ def main(argv=None):
             if scenario["status"] != "passed"
         ]
         reference_failures = [failure for entry in report["profiles"] for failure in entry["reference_failures"]]
-        if failures or reference_failures:
+        control_failures = [
+            control["name"]
+            for entry in report["profiles"]
+            for control in entry["uncached_controls"]
+            if control["status"] != "passed"
+        ]
+        if failures or reference_failures or control_failures:
             raise ValidationError(
                 f"{len(failures)} scenario(s) failed: {', '.join(failures)}; "
-                f"{len(reference_failures)} unstable reference comparison(s); report={args.output}"
+                f"{len(reference_failures)} unstable reference comparison(s); "
+                f"{len(control_failures)} cache-disabled admission control(s) failed; report={args.output}"
             )
         report["status"] = "passed"
     except KeyboardInterrupt:

@@ -146,6 +146,158 @@ def test_batch_one_rejects_concurrency_instead_of_skipping():
         qa.make_plan(qa.Profile(4, 8, 1, 16, 64, True), [25], ["leases"], 42, 1, 2)
 
 
+def test_concurrency_plan_covers_both_admission_orders_and_single_row_slot_isolation():
+    _, scenarios = qa.make_plan(profile(), [25], ["concurrency"], 42, 1, 2)
+    assert scenarios[0].actions[0].prompts == ("short-seed", "long")
+    assert scenarios[1].actions[0].prompts == ("long", "short-seed")
+    pinned = scenarios[2]
+    assert pinned.actions[0].keep_open
+    assert pinned.actions[1].prompts == ("long",)
+    assert pinned.actions[2].release
+    assert all(scenario.uncached_control for scenario in scenarios)
+
+
+@pytest.mark.parametrize("failure", [None, "batch", "unstable", "false-hit"])
+def test_uncached_controls_use_fresh_engines_preserve_schedule_and_keep_sequential_parity(
+    tmp_path, monkeypatch, failure
+):
+    drivers = []
+
+    class ControlDriver:
+        def __init__(self, *args):
+            self.number = len(drivers)
+            self.actions = []
+            self.retained = set()
+            self.closed = False
+            drivers.append(self)
+
+        def close(self):
+            self.retained.clear()
+            self.closed = True
+
+        def run(self, action):
+            self.actions.append(action)
+            if action.release:
+                for name in action.prompts:
+                    self.retained.remove(name)
+                return [], {}
+            if action.keep_open:
+                self.retained.update(action.prompts)
+            token = 8 if failure == "batch" and len(action.prompts) > 1 else 7
+            if failure == "unstable" and self.number == 1:
+                token = 9
+            cached = 4 if failure == "false-hit" else 0
+            return [{**row(cached, 25, (token,)), "prompt": name} for name in reversed(action.prompts)], {}
+
+    monkeypatch.setattr(qa, "Driver", ControlDriver)
+    _, scenarios = qa.make_plan(profile(), [25], ["concurrency"], 42, 1, 2)
+    args = SimpleNamespace(reference_repeats=2, generated_tokens=1, fail_fast=False, output=tmp_path / "report.json")
+    entry = {"uncached_controls": [], "control_stability": {}}
+    report = {"profiles": [entry]}
+    references = {name: {"tokens": [7]} for name in ("short-seed", "long")}
+    qa.run_uncached_controls(None, None, None, None, {}, args, False, profile(), scenarios, references, entry, report)
+    assert len(drivers) == 6
+    assert all(driver.closed and not driver.retained for driver in drivers)
+    assert all(action.check == "cold" for driver in drivers for action in driver.actions)
+    assert drivers[0].actions[0].prompts == ("short-seed", "long")
+    assert drivers[2].actions[0].prompts == ("long", "short-seed")
+    assert drivers[4].actions[0].keep_open
+    assert drivers[4].actions[2].release
+    controls = entry["uncached_controls"]
+    assert all(control["status"] == "passed" for control in controls) == (failure is None)
+    if failure == "batch":
+        actual = controls[0]["steps"][0]["rows"][0]
+        assert actual["cached_tokens"] == 0
+        assert actual["checks"]["parity"] is False
+        assert controls[1]["steps"][0]["rows"][0]["checks"]["repeat_parity"] is True
+        assert entry["control_stability"]["simultaneous-short-long"] is True
+    elif failure == "unstable":
+        assert entry["control_stability"]["simultaneous-short-long"] is False
+        assert controls[1]["steps"][0]["rows"][0]["checks"]["repeat_parity"] is False
+        assert controls[0]["steps"][0]["rows"][0]["tokens"] == [7]
+    elif failure == "false-hit":
+        assert controls[0]["steps"][0]["rows"][0]["checks"]["reuse"] is False
+    assert json.loads(args.output.read_text())["profiles"][0] == json.loads(json.dumps(entry))
+
+
+def test_uncached_control_failure_releases_pinned_owner_and_persists_partial_report(tmp_path, monkeypatch):
+    closed = []
+
+    class ControlDriver:
+        def __init__(self, *args):
+            self.calls = 0
+
+        def close(self):
+            closed.append(True)
+
+        def run(self, action):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("Execution failed with a pinned owner.")
+            return [{**row(0, 25, (7,)), "prompt": "p"}], {}
+
+    monkeypatch.setattr(qa, "Driver", ControlDriver)
+    scenario = qa.Scenario("held-slot", (qa.Action(("p",), keep_open=True), qa.Action(("q",))), uncached_control=True)
+    args = SimpleNamespace(reference_repeats=2, generated_tokens=1, fail_fast=False, output=tmp_path / "report.json")
+    entry = {"uncached_controls": [], "control_stability": {}}
+    with pytest.raises(RuntimeError, match="pinned owner"):
+        qa.run_uncached_controls(
+            None,
+            None,
+            None,
+            None,
+            {},
+            args,
+            False,
+            profile(),
+            [scenario],
+            {"p": {"tokens": [7]}, "q": {"tokens": [7]}},
+            entry,
+            {"profiles": [entry]},
+        )
+    assert closed == [True]
+    control = json.loads(args.output.read_text())["profiles"][0]["uncached_controls"][0]
+    assert control["status"] == "failed"
+    assert control["steps"][0]["status"] == "passed"
+    assert control["steps"][1]["status"] == "failed"
+    assert entry["control_stability"]["held-slot"] is None
+
+
+def test_one_uncached_control_repeat_leaves_stability_unchecked(tmp_path, monkeypatch):
+    class ControlDriver:
+        def __init__(self, *args):
+            pass
+
+        def close(self):
+            pass
+
+        def run(self, action):
+            return [row(0, 25)], {}
+
+    monkeypatch.setattr(qa, "Driver", ControlDriver)
+    scenario = qa.Scenario("single", (qa.Action(("p",)),), uncached_control=True)
+    args = SimpleNamespace(reference_repeats=1, generated_tokens=2, fail_fast=False, output=tmp_path / "report.json")
+    entry = {"uncached_controls": [], "control_stability": {}}
+    qa.run_uncached_controls(
+        None,
+        None,
+        None,
+        None,
+        {},
+        args,
+        False,
+        profile(),
+        [scenario],
+        {"p": {"tokens": [7, 8]}},
+        entry,
+        {"profiles": [entry]},
+    )
+    assert entry["control_stability"]["single"] is None
+    control = entry["uncached_controls"][0]
+    assert control["status"] == "passed"
+    assert control["steps"][0]["rows"][0]["checks"]["repeat_parity"] is None
+
+
 def test_alternation_requires_deep_hits_on_each_switch_not_just_immediate_repeats():
     specs, scenarios = qa.make_plan(profile(), [25], ["alternation"], 42, 1, 2, generated=2)
     assert set(specs) == {"long", "alternating-branch"}
@@ -403,8 +555,8 @@ def test_orchestrator_releases_regular_model_and_collects_independent_failures(
         )
 
 
-@pytest.mark.parametrize("reference_failure", [False, True])
-def test_cli_returns_failure_after_collecting_validation_findings(tmp_path, monkeypatch, reference_failure):
+@pytest.mark.parametrize("failure", ["scenario", "reference", "control"])
+def test_cli_returns_failure_after_collecting_validation_findings(tmp_path, monkeypatch, failure):
     (tmp_path / "genai_config.json").write_text(
         json.dumps(
             {"model": {}, "engine": {"dynamic_batching": {"block_size": 4, "max_batch_size": 2, "num_blocks": 64}}}
@@ -417,15 +569,19 @@ def test_cli_returns_failure_after_collecting_validation_findings(tmp_path, monk
     def failed_profile(og, np, args, source, profile, specs, scenarios, mode, report):
         report["profiles"].append(
             {
-                "reference_failures": ["unstable"] if reference_failure else [],
-                "scenarios": [{"name": "red-case", "status": "passed" if reference_failure else "failed"}],
+                "reference_failures": ["unstable"] if failure == "reference" else [],
+                "scenarios": [{"name": "red-case", "status": "failed" if failure == "scenario" else "passed"}],
+                "uncached_controls": [{"name": "batch", "status": "failed" if failure == "control" else "passed"}],
             }
         )
 
     monkeypatch.setattr(qa, "run_profile", failed_profile)
-    with pytest.raises(
-        qa.ValidationError, match=r"1 unstable reference" if reference_failure else r"1 scenario.*failed"
-    ):
+    message = {
+        "reference": r"1 unstable reference",
+        "scenario": r"1 scenario.*failed",
+        "control": r"1 cache-disabled admission control.*failed",
+    }[failure]
+    with pytest.raises(qa.ValidationError, match=message):
         qa.main(["-m", str(tmp_path), "--output", str(output)])
     assert json.loads(output.read_text())["status"] == "failed"
 
