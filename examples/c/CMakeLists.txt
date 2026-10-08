@@ -149,11 +149,24 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  set(EXAMPLE_TEST_MODEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../test/models/hf-internal-testing/tiny-random-gpt2-fp32")
   foreach(example model_qa model_chat model_mm)
     if(TARGET ${example})
       add_test(NAME ${example}_invalid_max_length
         COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
           -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_max_length.cmake)
+      add_test(NAME ${example}_oversized_max_length
+        COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
+          -DMODEL_DIR=${EXAMPLE_TEST_MODEL_DIR}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/oversized_max_length.cmake)
+    endif()
+  endforeach()
+  foreach(example model_qa model_chat)
+    if(TARGET ${example})
+      add_test(NAME ${example}_valid_max_length
+        COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
+          -DMODEL_DIR=${EXAMPLE_TEST_MODEL_DIR}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/valid_max_length.cmake)
     endif()
   endforeach()
 endif()

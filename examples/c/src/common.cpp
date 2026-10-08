@@ -257,6 +257,17 @@ std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string&
     throw std::invalid_argument("max_length must be greater than 0");
   }
   auto config = OgaConfig::Create(path.c_str());
+  if (search_options.max_length) {
+    // Check the model limit before an EP can use max_length during session creation.
+    // OgaConfig does not expose a context_length getter.
+    std::ifstream config_file(std::filesystem::path(path) / "genai_config.json");
+    const auto model_config = nlohmann::ordered_json::parse(config_file);
+    const auto context_length = model_config.at("model").at("context_length").get<int64_t>();
+    if (search_options.max_length.value() > context_length) {
+      throw std::invalid_argument("max_length (" + std::to_string(search_options.max_length.value()) +
+                                  ") cannot be greater than model context_length (" + std::to_string(context_length) + ")");
+    }
+  }
   if (ep.compare("follow_config") != 0) {
     config->ClearProviders();
     if (ep.compare("cpu") != 0) {
