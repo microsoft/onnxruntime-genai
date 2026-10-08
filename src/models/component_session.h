@@ -15,6 +15,25 @@
 namespace Generators {
 
 struct ComponentCudaGraphState;
+struct ComponentPackageResources;
+
+struct ComponentPackageTokenizer {
+  explicit ComponentPackageTokenizer(const fs::path& package_path);
+  ~ComponentPackageTokenizer();
+  ComponentPackageTokenizer(ComponentPackageTokenizer&&) noexcept;
+  ComponentPackageTokenizer& operator=(ComponentPackageTokenizer&&) noexcept;
+  ComponentPackageTokenizer(const ComponentPackageTokenizer&) = delete;
+  ComponentPackageTokenizer& operator=(const ComponentPackageTokenizer&) = delete;
+
+  std::vector<int32_t> Encode(const std::string& text) const;
+  std::vector<std::vector<int32_t>> EncodeBatch(
+      const std::vector<std::string>& texts) const;
+  int32_t PadTokenId() const;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
 
 struct ComponentSession {
   ComponentSession(const fs::path& package_path, std::string component,
@@ -27,6 +46,7 @@ struct ComponentSession {
   const std::vector<OgaComponentInfo>& Inputs() const { return inputs_; }
 
  private:
+  std::shared_ptr<ComponentPackageResources> package_;
   std::unique_ptr<OrtSession> session_;
   std::unique_ptr<ComponentCudaGraphState> cuda_graph_;
   std::vector<std::string> input_names_;

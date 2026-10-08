@@ -110,7 +110,36 @@ std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   const extTokenId_t* tokens;
   size_t count;
   CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));
+  if (!count) return {};
   return {tokens, tokens + count};
+}
+
+std::vector<std::vector<int32_t>> Tokenizer::EncodeBatchRows(
+    std::span<const char*> strings) const {
+  if (strings.empty())
+    throw std::runtime_error(
+        "EncodeBatchRows: input strings must not be empty");
+  for (size_t index = 0; index < strings.size(); ++index)
+    if (!strings[index])
+      throw std::runtime_error(
+          "EncodeBatchRows: input string at index " +
+          std::to_string(index) + " must not be null");
+  OrtxPtr<OrtxTokenId2DArray> ids;
+  CheckResult(OrtxTokenize(tokenizer_, strings.data(), strings.size(),
+                           ids.Address()));
+  std::vector<std::vector<int32_t>> result;
+  result.reserve(strings.size());
+  for (size_t index = 0; index < strings.size(); ++index) {
+    const extTokenId_t* tokens{};
+    size_t count{};
+    CheckResult(
+        OrtxTokenId2DArrayGetItem(ids, index, &tokens, &count));
+    if (count)
+      result.emplace_back(tokens, tokens + count);
+    else
+      result.emplace_back();
+  }
+  return result;
 }
 
 std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
@@ -158,12 +187,13 @@ std::string Tokenizer::ApplyChatTemplateWithOptions(const char* template_str, co
 }
 
 std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
-  std::vector<std::vector<int32_t>> sequences;
+  std::vector<const char*> text;
+  text.reserve(strings.size());
+  for (const auto& value : strings) text.push_back(value.c_str());
+  auto sequences = EncodeBatchRows(text);
   std::vector<std::span<const int32_t>> span_sequences;
-  for (size_t i = 0; i < strings.size(); i++) {
-    sequences.emplace_back(Encode(strings[i].c_str()));
-    span_sequences.emplace_back(sequences.back());
-  }
+  for (const auto& sequence : sequences)
+    span_sequences.emplace_back(sequence);
 
   return PadInputs(span_sequences, pad_token_id_);
 }
@@ -178,12 +208,10 @@ std::shared_ptr<Tensor> Tokenizer::EncodeBatch(std::span<const char*> strings) c
     }
   }
 
-  std::vector<std::vector<int32_t>> sequences;
+  auto sequences = EncodeBatchRows(strings);
   std::vector<std::span<const int32_t>> span_sequences;
-  for (size_t i = 0; i < strings.size(); i++) {
-    sequences.emplace_back(Encode(strings[i]));
-    span_sequences.emplace_back(sequences.back());
-  }
+  for (const auto& sequence : sequences)
+    span_sequences.emplace_back(sequence);
 
   auto encoded = PadInputs(span_sequences, pad_token_id_);  // TODO: Pad directly into tensor vs copying?
 
