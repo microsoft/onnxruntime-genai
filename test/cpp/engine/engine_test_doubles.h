@@ -150,6 +150,7 @@ struct RecordingCacheManager : CacheManager {
             : plan.scheduled_request_limit;
     size_t selected_requests = 0;
     size_t selected_new_requests = 0;
+    size_t selected_prefill_requests = 0;
     bool capacity_deferred = false;
     const void* unserviceable_request_id = nullptr;
     std::vector<const void*> request_ids;
@@ -178,13 +179,22 @@ struct RecordingCacheManager : CacheManager {
         capacity_deferred = true;
         continue;
       }
+      if (entry.is_prefill && plan.max_prefill_requests &&
+          selected_prefill_requests >= *plan.max_prefill_requests) {
+        capacity_deferred = true;
+        continue;
+      }
       const bool newly_admitted = entry.newly_admitted;
+      const bool is_prefill = entry.is_prefill;
       if (selected_requests != i) {
         plan.requests[selected_requests] = std::move(plan.requests[i]);
       }
       ++selected_requests;
       if (newly_admitted) {
         ++selected_new_requests;
+      }
+      if (is_prefill) {
+        ++selected_prefill_requests;
       }
     }
     plan.requests.resize(selected_requests);

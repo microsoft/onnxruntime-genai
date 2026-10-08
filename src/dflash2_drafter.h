@@ -55,6 +55,23 @@ TargetTokenSelection Dflash2IndependentDraftDistribution(
     const int32_t* candidate_ids, const float* logits, size_t top_k,
     float temperature, float top_p, float min_p);
 
+// One request's drafted lattice: `top_k` candidates per step and, per step, a [top_k, top_k] edge
+// matrix whose row i scores this step's candidates given the previous step's candidate i.
+struct Dflash2Lattice {
+  size_t top_k{};
+  std::vector<int32_t> candidate_ids;  // [steps, top_k]
+  std::vector<float> scores;           // [steps, top_k, top_k]
+
+  size_t Steps() const noexcept { return top_k == 0 ? 0 : candidate_ids.size() / top_k; }
+};
+
+// Samples a path of up to `steps` tokens: each step draws from the row its predecessor's draw
+// selects, tempered and truncated like the target, and records the distribution it drew from.
+void Dflash2SampleLatticePath(const Dflash2Lattice& lattice, size_t steps, float temperature,
+                              int top_k, float top_p, std::mt19937& rng,
+                              std::vector<int32_t>& tokens,
+                              std::vector<TargetTokenSelection>& distributions);
+
 /**
  * @brief Hosts a DFlash 2 or DSpark block-drafter session.
  *
@@ -113,6 +130,7 @@ struct Dflash2Drafter {
     bool draft_eligible{};
     bool wants_drafts{};
     bool wants_independent_sampling{};
+    bool wants_lattice{};
   };
 
   /**
@@ -168,10 +186,12 @@ struct Dflash2Drafter {
    * are skipped for good rather than failing the step, so they decode without block drafts. A tracked
    * request continues feeding context during sampled turns so a later greedy turn can resume drafting.
    */
-  // Returns true only when the drafter session executed.
+  // Returns true only when the drafter session executed. A feed that wants its lattice gets it in
+  // `lattices` instead of a greedy path, so the caller can sample it with the request's RNG.
   bool Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                std::vector<std::vector<int32_t>>& drafts,
-               std::vector<std::vector<TargetTokenSelection>>* draft_distributions = nullptr);
+               std::vector<std::vector<TargetTokenSelection>>* draft_distributions = nullptr,
+               std::vector<Dflash2Lattice>* lattices = nullptr);
 
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
   void Release(const Request* request);

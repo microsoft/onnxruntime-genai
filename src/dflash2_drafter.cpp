@@ -157,6 +157,70 @@ TargetTokenSelection Dflash2IndependentDraftDistribution(
       candidate_ids, logits, top_k, temperature, top_p, min_p);
 }
 
+void Dflash2SampleLatticePath(const Dflash2Lattice& lattice, size_t steps, float temperature,
+                              int top_k, float top_p, std::mt19937& rng,
+                              std::vector<int32_t>& tokens,
+                              std::vector<TargetTokenSelection>& distributions) {
+  const size_t width = lattice.top_k;
+  if (width == 0 || lattice.scores.size() != lattice.candidate_ids.size() * width ||
+      !(temperature > 0.0f)) {
+    throw std::invalid_argument("A DFlash 2 lattice walk needs a well-formed lattice and temperature.");
+  }
+  steps = std::min(steps, lattice.Steps());
+  const size_t keep_limit =
+      top_k > 0 ? std::min(width, static_cast<size_t>(top_k)) : width;
+  const bool truncate_top_p = top_p > 0.0f && top_p < 1.0f;
+  tokens.clear();
+  distributions.clear();
+  tokens.reserve(steps);
+  distributions.reserve(steps);
+  std::vector<size_t> order(width);
+  std::vector<float> probabilities(width);
+  std::vector<float> weights;
+  weights.reserve(width);
+  size_t previous = 0;
+  for (size_t step = 0; step < steps; ++step) {
+    const float* row = lattice.scores.data() + (step * width + previous) * width;
+    const int32_t* candidates = lattice.candidate_ids.data() + step * width;
+    std::iota(order.begin(), order.end(), size_t{0});
+    std::stable_sort(order.begin(), order.end(),
+                     [row](size_t left, size_t right) { return row[left] > row[right]; });
+    const float max_score = row[order.front()];
+    float sum = 0.0f;
+    for (size_t i = 0; i < keep_limit; ++i) {
+      probabilities[i] = std::exp((row[order[i]] - max_score) / temperature);
+      sum += probabilities[i];
+    }
+    if (!(sum > 0.0f) || !std::isfinite(sum)) {
+      throw std::runtime_error("A DFlash 2 lattice row has non-finite scores.");
+    }
+    // Same retention rule as the target selection (normalize over top-k, then top-p), so q is
+    // nonzero only where p can be.
+    weights.clear();
+    float cumulative = 0.0f;
+    for (size_t i = 0; i < keep_limit; ++i) {
+      if (truncate_top_p && !(cumulative < top_p)) break;
+      const float probability = probabilities[i] / sum;
+      cumulative += probability;
+      weights.push_back(probability);
+    }
+    const float kept = std::accumulate(weights.begin(), weights.end(), 0.0f);
+    std::discrete_distribution<size_t> draw(weights.begin(), weights.end());
+    const size_t chosen = draw(rng);
+
+    TargetTokenSelection distribution;
+    distribution.indices.reserve(weights.size());
+    distribution.probs.reserve(weights.size());
+    for (size_t i = 0; i < weights.size(); ++i) {
+      distribution.indices.push_back(candidates[order[i]]);
+      distribution.probs.push_back(weights[i] / kept);
+    }
+    tokens.push_back(candidates[order[chosen]]);
+    distributions.push_back(std::move(distribution));
+    previous = order[chosen];
+  }
+}
+
 size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
                          size_t remaining_turn_tokens_after_step) {
@@ -320,14 +384,12 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
     throw std::runtime_error(
         "model.dflash2 block_table must have two dynamic dimensions and a unique name.");
   }
-  if (!inputs.attention_metadata.empty()) {
-    RequireTensor(drafter_metadata, inputs.attention_metadata, true,
-                  Ort::TypeToTensorType<int32_t>, 1);
-    const auto metadata_shape = drafter_metadata.GetInputShape(inputs.attention_metadata);
-    if (metadata_shape[0] != 3 || !input_names.insert(inputs.attention_metadata).second) {
-      throw std::runtime_error(
-          "model.dflash2 attention_metadata must contain three values and have a unique name.");
-    }
+  RequireTensor(drafter_metadata, inputs.attention_metadata, true,
+                Ort::TypeToTensorType<int32_t>, 1);
+  const auto metadata_shape = drafter_metadata.GetInputShape(inputs.attention_metadata);
+  if (metadata_shape[0] != 3 || !input_names.insert(inputs.attention_metadata).second) {
+    throw std::runtime_error(
+        "model.dflash2 attention_metadata must contain three values and have a unique name.");
   }
   if (!input_names.insert(inputs.aux_hidden_states).second) {
     throw std::runtime_error("model.dflash2 input names must be unique.");
@@ -853,10 +915,19 @@ void Dflash2Drafter::ReleaseAll() {
 
 bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                              std::vector<std::vector<int32_t>>& drafts,
-                             std::vector<std::vector<TargetTokenSelection>>* draft_distributions) {
+                             std::vector<std::vector<TargetTokenSelection>>* draft_distributions,
+                             std::vector<Dflash2Lattice>* lattices) {
   drafts.assign(feeds.size(), {});
   if (draft_distributions) {
     draft_distributions->assign(feeds.size(), {});
+  }
+  if (lattices) {
+    lattices->resize(feeds.size());
+    for (auto& lattice : *lattices) {
+      lattice.top_k = 0;
+      lattice.candidate_ids.clear();
+      lattice.scores.clear();
+    }
   }
   if (feeds.empty()) {
     return false;
@@ -1170,10 +1241,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                                 qkv_row_map.GetOrtTensor(),
                                 block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
                                 past_lengths.GetOrtTensor(), block_table.GetOrtTensor()};
-  if (!config_.inputs.attention_metadata.empty()) {
-    input_names.push_back(config_.inputs.attention_metadata.c_str());
-    inputs.push_back(metadata.GetOrtTensor());
-  }
+  input_names.push_back(config_.inputs.attention_metadata.c_str());
+  inputs.push_back(metadata.GetOrtTensor());
   if (q_row_map) {
     input_names.push_back(config_.inputs.q_row_map.c_str());
     inputs.push_back(q_row_map->GetOrtTensor());
@@ -1224,6 +1293,16 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
             top_k, config_.sampling_temperature,
             config_.sampling_top_p, config_.sampling_min_p));
       }
+      continue;
+    }
+    if (feeds[feed_index].wants_lattice && lattices) {
+      auto& lattice = (*lattices)[feed_index];
+      const size_t candidate_offset = slot * num_spec * top_k;
+      lattice.top_k = top_k;
+      lattice.candidate_ids.assign(candidate_cpu.begin() + candidate_offset,
+                                   candidate_cpu.begin() + candidate_offset + num_spec * top_k);
+      lattice.scores.assign(scores_cpu.begin() + candidate_offset * top_k,
+                            scores_cpu.begin() + (candidate_offset + num_spec * top_k) * top_k);
       continue;
     }
     // Greedy walk of the lattice: slot l's chosen candidate index selects the row of slot l+1's
