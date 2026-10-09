@@ -52,6 +52,33 @@ request wall times.
 | 20 | **Opt-in tensor-core sparse prefill: QK + FP16 PV** | FP16 attention replay **approximately 41.3 -> 20.1 ms/layer**; E2E **94.24 -> 99.18 TPS** | **Approximately 51% lower operator time**, **+5.2% E2E**. Combined with vector staging, actual attention GPU time falls **754.66 -> 238.13 ms**. |
 | 21 | **Enable GEMM autotuning for the MTP head too** | E2E **99.58 -> 100.01 TPS** | Observed **+0.4%**; **too small to establish a conclusive independent gain** |
 | 22 | **Exact FP8-to-FP32 bit conversion instead of repeated `ldexpf`** | Matched ten-request pools: E2E **99.44 -> 100.48 TPS** | **+1.05% measured E2E**; conversion is bitwise validated. Timing/acceptance variation means the entire gain cannot be assigned to conversion alone. |
+| 23 | **Increase small-N split-K parallelism**: maximum 32 -> 64 splits, vector CTA target 128 -> 256 | Fresh matched ten-request pools: E2E **99.69 -> 101.37 TPS**, decode **125.19 -> 127.85 TPS** | **+1.68% observed E2E**, **+2.12% decode**; three-row GEMV **8.71 -> 7.72 us/launch**. Separate ORT commit [`0a03b230a7`](https://github.com/microsoft/onnxruntime/commit/0a03b230a7); MTP acceptance also changed. |
+
+### Latest local follow-up: dense split-K
+
+The original published 100.48-TPS result above remains unchanged. The
+split-K follow-up uses the same exact workload, flags and width-two
+overlay, with control/candidate then candidate/control ordering and five
+measured requests after one excluded warmup per invocation. Candidate
+invocations reach **100.99 and 101.76 E2E TPS**, pooling at **101.37 TPS**.
+TTFT remains **1.054 s**; mean request time falls **5.136 -> 5.051 s**.
+
+Fresh 64-token decode profiles confirm the targeted N=324, K=10240 vector
+GEMV uses 64 instead of 32 splits. Its three-row mean GPU duration falls
+**11.3%**, independently of request-wall timing. All 36 base-projection
+graph comparisons pass (maximum absolute FP16 difference **0.0001221**),
+and all 11 targeted C++ tests pass, including FP16/BF16, scalar/vector
+kernels, higher split counts, workspace sizing, CUDA-graph replay and
+forced/tuned dispatch.
+
+MTP verification rounds total **2,233 -> 2,195** and accepted drafts
+**2,872 -> 2,911** across the pools. Thus the full E2E gain is not solely
+kernel savings. Changed reduction partitions can change floating-point
+outputs; no general quality or complete greedy-sequence-equivalence claim
+is made. The original isolated runtime is preserved. Source and tests are
+in separate ORT commit [`0a03b230a7`](https://github.com/microsoft/onnxruntime/commit/0a03b230a7)
+on `asonawane/qwen-38-flash-100-e2e`; peak memory has not been remeasured
+for this candidate.
 
 ## Experiments not enabled in the final configuration
 

@@ -1098,6 +1098,71 @@ The installed packages, previous isolated runtime, original graphs/config
 and weights are unchanged. Full-model output equivalence is not claimed;
 existing greedy nondeterminism remains observable.
 
+#### Dense-projection attribution and higher split-K parallelism
+
+A temporary, graph-disabled MatMul diagnostic captured 16,000 synchronized
+node events. It identified frequent three-row `input_mix_down_block_inject`
+projections (N=324, K=10240), alongside large QKV, output and vocabulary
+projections. These events identify shapes and dispatch choices, not
+production wall-time attribution: synchronization changes execution and
+graph-disabled selection differs from graph replay. The diagnostic is
+removed from production source.
+
+The retained local follow-up increases the shared small-N split limit
+from 32 to 64 and the vector occupancy target from 128 to 256 CTAs.
+Existing minimum-K-per-slice constraints, workspace sizing and the
+GEMM tuner remain in place. The scalar fallback can also use 64 splits.
+Standalone graph-tuner timings for N=324, K=10240 improve M2 GEMV from
+9.728 to 9.280 us and M3 from 10.944 to 10.176 us; M1 still selects
+cuBLAS. Plain Python graph microbenchmarks do not show a convincing wall
+gain on their own, and verbose versus plain wall timing is not compared.
+
+Twenty exact warmed requests use the unchanged final width-two policy,
+with five requests per invocation in control/candidate/candidate/control
+order. No measured samples are discarded:
+
+| Configuration | Pooled E2E TPS | Pooled decode TPS | Mean TTFT | Mean request |
+|---|---:|---:|---:|---:|
+| Fresh production control, 10 requests | 99.692 | 125.186 | 1.053867 s | 5.135816 s |
+| Higher-split candidate, 10 requests | 101.370 | 127.846 | 1.053759 s | 5.050782 s |
+
+Candidate invocations individually reach 100.988 and 101.755 E2E TPS,
+versus 98.888 and 100.510 for control. The pooled observed changes are
+**+1.68% E2E and +2.12% decode**. Fresh, separate 64-token decode profiles
+confirm grid (6,32) -> (6,64) for the targeted vector GEMV; M3 averages
+8.70698 -> 7.72424 us/launch, **11.3% lower GPU duration**. Profile timing
+is excluded from E2E measurements.
+
+Verification rounds total 2,233 -> 2,195 and accepted drafts 2,872 ->
+2,911, so acceptance/output variation contributes to the full-request
+change. Split partitioning changes summation order. All 36 tuned
+base-projection graph comparisons pass their existing tolerances; the
+largest FP16 absolute difference is 0.0001220703125. All 11 targeted
+C++ tests pass, covering FP16/BF16, scalar/vector variants, M1-64,
+column/K boundaries, higher split counts, workspace capacity, repeated
+CUDA-graph replay, forced/tuned dispatch and ineligible-shape fallback.
+No general quality or full greedy-sequence equivalence is claimed.
+
+The candidate provider SHA256 is
+`c5e49b2f0adbb0e52fbda61664bd9c3c10b11a0ef17f4b3147a8ee5c238dac5b`.
+The original 100.48-TPS isolated provider remains unchanged at
+`103a10ceae4aaac2ae5dbdb0c6f40c35c012dcc3a8dfd1491b9a5fb564e035d2`.
+The local production build contains the candidate; no deployment files
+or model weights are replaced. Source and added tests are in separate
+ORT commit [`0a03b230a7`](https://github.com/microsoft/onnxruntime/commit/0a03b230a7)
+on `asonawane/qwen-38-flash-100-e2e`. Results documentation is committed
+separately in GenAI; previously published commits are unchanged.
+
+Artifacts are local session files: `benchmark_dense_split.sh`,
+`analyze_dense_split.py`, `dense-split-results.json`, the four
+`qwen_dense_split_{control,candidate}{,_repeat}.json` results and separate
+control/candidate Nsight traces. The analyzer asserts workload, prompt,
+policy, loaded library paths, draft accounting, zero failures, provider
+hashes and actual split grids. Temporary numerical reference arrays are
+removed after validation. Peak memory has not been remeasured for this
+candidate; the previous sampled memory result applies to the original
+configuration only.
+
 #### Vector K/V staging, opt-in tensor attention and 100 E2E TPS
 
 The user subsequently approved MTP optimization and confirmed that the
