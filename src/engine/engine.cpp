@@ -1222,7 +1222,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         }
         auto source = ByteWrapTensor(*mtp_model_->p_device_inputs_, *binding.output);
         const size_t source_rows = static_cast<size_t>(shape.front());
-        const size_t row_bytes = source.size() / source_rows;
+        const size_t fixed_state_row_bytes = source.size() / source_rows;
         if (initialize_buffers) {
           const size_t capacity = mtp_cache_manager_->MaxBatchSize();
           shape.front() = static_cast<int64_t>(capacity);
@@ -1248,7 +1248,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
           for (size_t bank = 0; bank < banks.size(); ++bank) {
             row_views[bank] = OrtValue::CreateTensor(
                 banks[bank]->GetTensorMemoryInfo(), banks[bank]->GetTensorMutableData<void>(),
-                row_bytes * active_feed_indices.size(), shape, info->GetElementType());
+                fixed_state_row_bytes * active_feed_indices.size(), shape, info->GetElementType());
           }
           views.push_back(std::move(row_views));
         }
@@ -1261,8 +1261,8 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
             throw std::logic_error("Chained MTP fixed state row is out of range.");
           }
           if (binding.output != input) {
-            destination.subspan(row * row_bytes, row_bytes)
-                .CopyFrom(source.subspan(source_row * row_bytes, row_bytes));
+            destination.subspan(row * fixed_state_row_bytes, fixed_state_row_bytes)
+                .CopyFrom(source.subspan(source_row * fixed_state_row_bytes, fixed_state_row_bytes));
           } else if (source_row != row) {
             throw std::logic_error("Chained MTP aliased rows must retain their order.");
           }
@@ -1294,7 +1294,14 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       std::vector<FixedStateSlotHandle> stage_slots;
       std::vector<FixedStateBinding> stage_bindings;
       if (use_indexshare) {
-        std::vector<int32_t> row_indices(active_feed_indices.begin(), active_feed_indices.end());
+        std::vector<int32_t> row_indices;
+        row_indices.reserve(active_feed_indices.size());
+        for (size_t feed_index : active_feed_indices) {
+          if (feed_index > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            throw std::runtime_error("IndexShare row index exceeds int32.");
+          }
+          row_indices.push_back(static_cast<int32_t>(feed_index));
+        }
         auto stage_rows = selection_buffers.row_indices[draft_index - 1];
         auto row_host = stage_rows.CpuSpan();
         std::copy(row_indices.begin(), row_indices.end(), row_host.begin());
@@ -1362,23 +1369,23 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
             step->indexshare_views.push_back(std::move(tensor));
             return result;
           };
-          for (size_t binding_index = 0; binding_index < stage_bindings.size(); ++binding_index) {
-            auto& binding = stage_bindings[binding_index];
-            const auto& original = context.fixed_state_bindings[binding_index];
-            binding.input = state_view(state_inputs[binding_index], *original.input);
-            binding.output = state_view(state_outputs[binding_index], *original.output);
+          for (size_t state_binding_index = 0; state_binding_index < stage_bindings.size(); ++state_binding_index) {
+            auto& binding = stage_bindings[state_binding_index];
+            const auto& original = context.fixed_state_bindings[state_binding_index];
+            binding.input = state_view(state_inputs[state_binding_index], *original.input);
+            binding.output = state_view(state_outputs[state_binding_index], *original.output);
             auto source = draft_index == 1
                               ? ByteWrapTensor(*mtp_model_->p_device_inputs_, *original.output)
-                              : selection_buffers.stage_state_outputs[stage - 1][binding_index];
-            const size_t row_bytes = state_inputs[binding_index].size() / selection_buffers.max_batch;
+                              : selection_buffers.stage_state_outputs[stage - 1][state_binding_index];
+            const size_t state_row_bytes = state_inputs[state_binding_index].size() / selection_buffers.max_batch;
             for (size_t row = 0; row < active_feed_indices.size(); ++row) {
               const size_t source_row = draft_index == 1 ? active_feed_indices[row] : previous_stage_rows[active_feed_indices[row]];
-              state_inputs[binding_index].subspan(row * row_bytes, row_bytes).CopyFrom(source.subspan(source_row * row_bytes, row_bytes));
+              state_inputs[state_binding_index].subspan(row * state_row_bytes, state_row_bytes).CopyFrom(source.subspan(source_row * state_row_bytes, state_row_bytes));
             }
             if (binding.state_update_capacity != 0) {
               binding.state_update_capture_count = selection_view(selection_buffers.stage_capture_counts[stage].subspan(0, row_indices.size()), {query_count});
               if (binding.state_update_active) binding.state_update_active = packed_extend_inputs[0];
-              if (binding.state_update_value) binding.state_update_value = state_view(state_updates[binding_index], *original.state_update_value);
+              if (binding.state_update_value) binding.state_update_value = state_view(state_updates[state_binding_index], *original.state_update_value);
               if (binding.state_update_capsule) throw std::runtime_error("IndexShare MTP supports indexer state, not recurrent capsules.");
             }
           }

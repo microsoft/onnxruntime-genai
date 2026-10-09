@@ -114,6 +114,8 @@ struct ScheduledRequests {
   void CommitStateForTransaction();
 
  private:
+  friend struct test::EngineRunTestAccess;
+
   bool PrepareBatchedSamplingPlan(bool require_transaction_support);
   bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits,
                                     bool guidance_applied,

@@ -1047,7 +1047,6 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     // Rows 0..a-1 are contiguous in both the verify output and the merged buffer: one D2D copy.
     // Row a is filled in by the finalize phase below from hidden_slice_.
     Tensor& hbuf = *refeed_multi_[a + 1];
-    const size_t row_bytes = refeed_hidden_->GetByteSpan().size();
     CopyHiddenRows(vhidden, 0, a, hbuf.GetByteSpan());
     for (int k = 0; k < a; ++k) merged_tokens_[k] = drafts_[k];
   }
@@ -1247,7 +1246,6 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
   head_len_ = head_start + 1;
   if (a > 0) {
     Tensor& hbuf = *refeed_multi_[a];
-    const size_t row_bytes = refeed_hidden_->GetByteSpan().size();
     CopyHiddenRows(vhidden, 0, a, hbuf.GetByteSpan());
     mtp_->SetHiddenStates(refeed_multi_[a]);
     mtp_->AppendTokens(cpu_span<const int32_t>(drafts_.data(), a));  // d0..d_{a-1} with main hiddens

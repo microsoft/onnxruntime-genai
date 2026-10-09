@@ -55,7 +55,16 @@ def monitor_gpu_memory():
         memory_usage = result.stdout.splitlines()
 
         if len(memory_usage) >= 1:
-            gpu_memory = [float(line) for line in memory_usage]
+            gpu_memory = []
+            for line in memory_usage:
+                try:
+                    gpu_memory.append(float(line))
+                except ValueError:
+                    continue
+            if not gpu_memory:
+                print("No GPU Memory Info Found")
+                time.sleep(0.1)
+                continue
             current_peak = round(max(gpu_memory) / 1024, 2)
             with peak_memory_lock:
                 peak_gpu_memory = max(current_peak, peak_gpu_memory)
@@ -166,8 +175,6 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
         record.config.customized["max_length"] = row["Max Length"]
         record.config.customized["aggregation"] = args.aggregation
-        record.config.warmup_runs = args.warmup
-        record.config.measured_runs = args.repetitions
         record.metrics.customized["model_creation_latency_ms"] = row["Model Creation Latency (ms)"]
         record.metrics.customized["tokenizer_creation_latency_ms"] = row["Tokenizer Creation Latency (ms)"]
         generator_creation_latency_ms = row["Generator Creation Latency (ms)"]
@@ -221,11 +228,11 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
         monitor_thread = threading.Thread(target=monitor_cpu_memory)
 
     monitor_thread.start()
-
-    metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length)
-
-    stop_monitoring = True
-    monitor_thread.join()
+    try:
+        metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length)
+    finally:
+        stop_monitoring = True
+        monitor_thread.join()
 
     if IS_NVIDIA_SYSTEM:
         metrics.append(peak_gpu_memory)
@@ -305,7 +312,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     # large enough for all subsequent iterations.
     if args.use_random_tokens:
         # use random tokens instead of generating a prompt using the model and then tokenizing it
-        _random_tokens = np.random.randint(100, size=(batch_size, prompt_length))
+        random_generator = np.random.default_rng(0)
+        _random_tokens = random_generator.integers(1, 100, size=(batch_size, prompt_length))
         tokens = _random_tokens
         text = [tokenizer.decode(tokens[0])] * batch_size
         prompt = f"{args.chat_template.format(input=text)}"

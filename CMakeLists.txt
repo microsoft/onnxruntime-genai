@@ -210,6 +210,20 @@ endif()
 # The genai library itself is always embedded in the shared library
 list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
 
+if(WIN32 AND NOT USE_WINML)
+  file(GLOB ort_runtime_dlls "${ORT_LIB_DIR}/*.dll")
+  add_custom_target(onnxruntime-genai-ort-runtime
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${ort_runtime_dlls}
+            "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    DEPENDS ${ort_runtime_dlls}
+    COMMAND_EXPAND_LISTS
+  )
+  add_dependencies(onnxruntime-genai onnxruntime-genai-ort-runtime)
+endif()
+
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
 if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST)))
