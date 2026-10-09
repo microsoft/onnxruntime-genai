@@ -1487,7 +1487,6 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
         self.make_initializer(
             weight_scale.reshape(1, 1),
             "model.ple.ngram_embedding.weight_scale",
-            to=ir.DataType.FLOAT if weight_scale.dtype == torch.bfloat16 else None,
         )
         scale_dtype = self.graph.initializers["model.ple.ngram_embedding.weight_scale"].dtype
         gathered = "/model/ple/ngram_embedding/GatherBlockQuantized/output_0"
@@ -2404,10 +2403,6 @@ class Qwen4ExpModel(MTPModel):
         engram_session_options = {
             "provider_options": [{"cuda" if self.decoder.ep == "cuda" else "cpu": {}}],
         }
-        if self.decoder.ep == "cuda":
-            engram_session_options["session.layer_assignment_settings"] = (
-                f"cpu(={Qwen4ExpTextModel.CPU_EMBEDDING_ANNOTATION})"
-            )
         model_config["engram"] = {
             "filename": "engram.onnx",
             "cache_capacity": 4096,

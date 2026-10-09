@@ -1571,9 +1571,7 @@ def test_text_only_config_connects_external_engram(
         "embeddings": "engram_embeddings", "present_ple_token_names": f"present.{ple_layer_id}.ple_tokens",
     }
     assert config["engram"]["session_options"]["provider_options"] == [{ep: {}}]
-    assert config["engram"]["session_options"].get("session.layer_assignment_settings") == (
-        "cpu(=cpu_embedding)" if ep == "cuda" else None
-    )
+    assert "session.layer_assignment_settings" not in config["engram"]["session_options"]
     assert "intra_op_num_threads" not in config["engram"]["session_options"]
     assert "embedding" not in config and "vision" not in config
     assert mtp_calls == ([tmp_path] if include_mtp else [])
