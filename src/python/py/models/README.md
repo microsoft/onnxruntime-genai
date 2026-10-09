@@ -607,13 +607,12 @@ NVIDIA's `nvidia/Qwen3.8-Flash-Next-NVFP4` checkpoint is also supported. Its rou
 The official [`Qwen/Qwen3.8-Flash-Next-FP8`](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8)
 checkpoint is supported on CUDA through the native loader, without Hugging Face's eager FP8 quantizer.
 Decoder and MTP experts retain their E4M3 weight bytes and BF16 128x128
-`weight_scale_inv` block multipliers. Engram retains its E4M3 table and original BF16 scalar scale.
+`weight_scale_inv` block multipliers. Engram retains its E4M3 table and widens its BF16 scalar scale
+to FP32 without changing its value, for compatibility with the CPU lookup kernel.
 No export-time dequantization, reciprocal-scale conversion, or requantization is performed on these tensors.
 Use `bf16` to retain the source precision of unquantized tensors as well.
 The existing FP8 `QMoE` path is weight-only, not the official checkpoint's dynamic-A8 arithmetic.
-Native BF16 Engram scales require an ORT CPU BF16 `GatherBlockQuantized` implementation;
-current CPU kernels without that support cannot load the Engram graph. Full-model export and
-generation have not been validated.
+Full-model export and generation have not been validated.
 
 ```bash
 # From source; repository downloads reuse the specified cache:

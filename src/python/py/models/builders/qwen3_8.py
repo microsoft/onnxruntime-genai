@@ -1488,6 +1488,7 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
         self.make_initializer(
             weight_scale.reshape(1, 1),
             "model.ple.ngram_embedding.weight_scale",
+            to=ir.DataType.FLOAT if weight_scale.dtype == torch.bfloat16 else None,
         )
         scale_dtype = self.graph.initializers["model.ple.ngram_embedding.weight_scale"].dtype
         gathered = "/model/ple/ngram_embedding/GatherBlockQuantized/output_0"

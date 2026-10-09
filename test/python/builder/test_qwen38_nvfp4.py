@@ -1,7 +1,9 @@
 import json
 from types import SimpleNamespace
 
+import numpy as np
 import onnx_ir as ir
+import onnxruntime as ort
 import pytest
 import torch
 from quantization import QuantConfig
@@ -258,20 +260,38 @@ def test_official_fp8_repository_uses_shared_cache(fp8_checkpoint, monkeypatch):
     assert wrapper.input_path == str(fp8_checkpoint)
 
 
-def test_official_fp8_engram_preserves_scale_bits(fp8_checkpoint):
+@pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT])
+def test_official_fp8_engram_widens_scale_for_cpu(fp8_checkpoint, tmp_path, io_dtype):
     embedding = load_fp8(fp8_checkpoint).layers[1].ple.ple_embedding
+    embedding.layer_multipliers = torch.tensor([0, 1], dtype=torch.int64)
+    embedding.ngram_heads_vocab_sizes = torch.tensor([8], dtype=torch.int64)
+    embedding.ngram_heads_offsets = torch.tensor([0], dtype=torch.int64)
     config = SimpleNamespace(
         ngram_size=2, heads_per_ngram=1, ple_embed_dim=8, ple_layer_ids=[2],
     )
-    builder = Qwen4ExpEngramModel(SimpleNamespace(ple_embedding=embedding), config, ir.DataType.FLOAT16)
+    builder = Qwen4ExpEngramModel(SimpleNamespace(ple_embedding=embedding), config, io_dtype)
     proto = ir.to_proto(builder.model)
     initializers = {tensor.name: tensor for tensor in proto.graph.initializer}
     scale = initializers["model.ple.ngram_embedding.weight_scale"]
-    assert scale.data_type == 16
-    assert scale.raw_data == embedding.ngram_embedding.weight_scale.view(torch.uint8).numpy().tobytes()
+    assert scale.data_type == 1
+    assert scale.raw_data == embedding.ngram_embedding.weight_scale.float().numpy().tobytes()
+    assert embedding.ngram_embedding.weight_scale.dtype == torch.bfloat16
     weight = initializers["model.ple.ngram_embedding.weight"]
     assert weight.data_type == 17
     assert weight.raw_data == embedding.ngram_embedding.weight.view(torch.uint8).numpy().tobytes()
+    builder.save_model(tmp_path)
+    session = ort.InferenceSession(str(tmp_path / "engram.onnx"), providers=["CPUExecutionProvider"])
+    binding = session.io_binding()
+    binding.bind_cpu_input("input_ids", np.array([[1, 2, 3]], dtype=np.int64))
+    binding.bind_cpu_input("past.1.ple_tokens", np.zeros((1, 1), dtype=np.int64))
+    binding.bind_output("engram_embeddings", "cpu")
+    binding.bind_output("present.1.ple_tokens", "cpu")
+    session.run_with_iobinding(binding)
+    outputs = binding.get_outputs()
+    assert outputs[0].shape() == [1, 3, 8]
+    np.testing.assert_array_equal(outputs[1].numpy(), [[3]])
+    if io_dtype != ir.DataType.BFLOAT16:
+        assert np.isfinite(outputs[0].numpy()).all()
 
 
 def test_nvfp4_dispatch_and_qwen38_surface(checkpoint):
