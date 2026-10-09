@@ -1437,6 +1437,9 @@ struct VisionPipelineModel_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "model_id") {
+      // Array-style pipeline stages carry their id inline; the object-style form derives it from the key.
+      v_.model_id = JSON::Get<std::string_view>(value);
     } else if (name == "run_on_cpu") {
       v_.run_on_cpu = JSON::Get<bool>(value);
     } else {
@@ -1496,11 +1499,17 @@ struct VisionPipelineModelObject_Element : JSON::Element {
 struct VisionPipeline_Element : JSON::Element {
   explicit VisionPipeline_Element(std::vector<Config::Model::Vision::PipelineModel>& v) : v_{v} {}
 
-  Element& OnObject(std::string_view name) override { return object_; }
+  // Array-style pipeline: each item is a flat stage object carrying its own model_id, e.g.
+  // "pipeline": [ { "model_id": "patch_embed", "filename": "...", ... }, ... ].
+  Element& OnObject(std::string_view /*name*/) override {
+    auto& model = v_.emplace_back();
+    elements_.emplace_back(model);
+    return elements_.back();
+  }
 
  private:
   std::vector<Config::Model::Vision::PipelineModel>& v_;
-  VisionPipelineModelObject_Element object_{v_};
+  std::vector<VisionPipelineModel_Element> elements_;
 };
 
 struct Vision_Element : JSON::Element {

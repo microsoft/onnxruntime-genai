@@ -324,10 +324,9 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
                                  std::to_string(patch_dim));
       }
 
-      // Create patched pixel_values: [1, total_patches, patch_dim] for NPU pipeline compatibility
-      // NPU pipeline expects rank 3, CUDA/CPU models will squeeze if needed
+      // Create patched pixel_values: [total_patches, patch_dim]
       patched_pixel_values = OrtValue::CreateTensor<float>(
-          allocator, std::vector<int64_t>{1, total_patches, patch_dim});
+          allocator, std::vector<int64_t>{total_patches, patch_dim});
       auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
 
       ExtractQwenImagePatches(thread_pool_, pixel_values_data, patched_data, height, width,
