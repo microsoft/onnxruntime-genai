@@ -256,6 +256,13 @@ std::unique_ptr<OgaConfig> GetConfig(const std::string& path, const std::string&
   if (search_options.max_length && search_options.max_length.value() <= 0) {
     throw std::invalid_argument("max_length must be greater than 0");
   }
+  // Match the generator's limits before providers use batch_size * num_beams for model profiles.
+  if (search_options.batch_size < 1 || search_options.batch_size > 32) {
+    throw std::invalid_argument("batch_size (" + std::to_string(search_options.batch_size) + ") must be in [1, 32]");
+  }
+  if (search_options.num_beams < 1 || search_options.num_beams > 32) {
+    throw std::invalid_argument("num_beams (" + std::to_string(search_options.num_beams) + ") must be in [1, 32]");
+  }
   auto config = OgaConfig::Create(path.c_str());
   if (search_options.max_length) {
     // Check the model limit before an EP can use max_length during session creation.

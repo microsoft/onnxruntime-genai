@@ -155,6 +155,9 @@ if(BUILD_TESTING)
       add_test(NAME ${example}_invalid_max_length
         COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
           -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_max_length.cmake)
+      add_test(NAME ${example}_invalid_batch_beam
+        COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_batch_beam.cmake)
       add_test(NAME ${example}_oversized_max_length
         COMMAND ${CMAKE_COMMAND} -DEXAMPLE=$<TARGET_FILE:${example}>
           -DMODEL_DIR=${EXAMPLE_TEST_MODEL_DIR}
