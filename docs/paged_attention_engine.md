@@ -594,8 +594,10 @@ token budget. The proposal width an automatic drafter aims for is model/Engine c
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
 proposals remain deterministic. Whole-turn guidance, a `repetition_penalty` other than 1,
-no-repeat-ngram processing, or a not-yet-met minimum generated token count makes a turn
+or no-repeat-ngram processing makes a turn
 ineligible for drafts, because the verification rows do not reproduce those logits processors.
+Minimum generated-token counts are supported: each target verification row, including the
+correction/bonus row, masks EOS using its own logical sequence position before argmax or sampling.
 Delimited guidance permits drafts outside its constrained regions: proposals stop before the
 opening marker, drafts pause inside the region, and resume after the closing marker. Automatic
 MTP drafting remains disabled throughout a delimited turn. Eligibility is per turn: the next turn
@@ -636,6 +638,15 @@ can never be verified under a later turn that resolved a different policy.
 loading or running that head. The flag does not affect an `MtpGenerator` constructed explicitly by
 the application. Server authors should size capacity and handle failures against the following
 behaviors.
+
+**Selected logits.** An MTP graph can expose an optional
+`model.mtp.inputs.logits_indices` input containing int32 packed-row indices.
+Gathering those hidden-state rows before the vocabulary projection avoids
+computing logits for auxiliary cache-update rows that drafting does not sample.
+This binding belongs to the head and is not inherited from
+`model.decoder.inputs.logits_indices`; target and head graphs may select logits
+independently. Target verification must still project every required draft and
+correction/bonus row.
 
 **Auxiliary memory accounting.** The head is a second paged pool that always holds the same block
 count as the target pool, so both are sized from one budget. With
@@ -879,7 +890,7 @@ For eligible decode shapes, the decoder may capture or replay a CUDA graph. Pref
 `ScheduledRequests::GenerateNextTokensForTransaction()` then:
 
 1. Applies each request's logits processors to its own logits row.
-2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path. A greedy request that verified drafts this step skips sampling: drafted requests run without logits processors, so the argmax that verification already computed for the row after the accepted prefix is committed directly.
+2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path. A greedy request that verified drafts this step skips sampling: verification already applied the row-specific EOS floor before computing argmax, so the token for the row after the accepted prefix is committed directly.
 3. Runs the per-request sequence and EOS handling.
 4. Produces a `RequestStepResult` for each request.
 
@@ -1021,7 +1032,7 @@ override it explicitly.
 `no_repeat_ngram_size` is only implemented by the CPU search, so a nonzero value is rejected at
 admission by a core-owned capability predicate keyed by the scoring device type, rather than
 throwing after the model has already run. A `repetition_penalty` other than 1, a nonzero
-`no_repeat_ngram_size`, or an unmet minimum also disables speculative drafting for that turn,
+`no_repeat_ngram_size` also disables speculative drafting for that turn,
 because verification rows do not reproduce those logits processors.
 
 `min_generated_tokens` masks the end-of-sequence token until the turn has generated that many

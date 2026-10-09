@@ -87,11 +87,13 @@ class FakeModelStateMetadata final : public ModelStateMetadata {
 
 TEST(MtpDecoderConfigTest, ParsesDisabledRuntimeToggle) {
   const auto root = WriteDisabledMtpConfig();
-  const Config config{fs::path{root.string()}, {}};
+  Config config{fs::path{root.string()}, {}};
 
   EXPECT_FALSE(config.model.mtp.enabled);
   EXPECT_FALSE(config.model.mtp.IsEnabled());
   EXPECT_EQ(config.model.mtp.filename, "mtp.onnx");
+  OverlayConfig(config, R"({"model":{"mtp":{"inputs":{"logits_indices":"head_logits_indices"}}}})");
+  EXPECT_EQ(config.model.mtp.inputs.logits_indices, "head_logits_indices");
 }
 
 TEST(MtpDecoderConfigTest, IndexShareIsOptInAndRequiresCompleteMetadata) {
@@ -160,6 +162,7 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   decoder.inputs.past_sequence_lengths = "past_sequence_lengths";
   decoder.inputs.attention_metadata = "attention_metadata";
   decoder.inputs.engram_embeddings = "engram_embeddings";
+  decoder.inputs.logits_indices = "target_logits_indices";
   config.model.engram.filename = "engram.onnx";
   decoder.session_options.providers = {"cuda"};
   decoder.session_options.intra_op_num_threads = 2;
@@ -202,6 +205,10 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_EQ(head.head_size, 64);
   EXPECT_EQ(head.hidden_size, 2048);
   EXPECT_EQ(head.inputs.hidden_states, "head_hidden");
+  EXPECT_TRUE(head.inputs.logits_indices.empty());
+  mtp.inputs.logits_indices = "head_logits_indices";
+  EXPECT_EQ(CreateMtpDecoderConfig(config)->model.decoder.inputs.logits_indices,
+            "head_logits_indices");
   EXPECT_EQ(head.outputs.hidden_states, "head_hidden_out");
   EXPECT_EQ(head.inputs.block_table, "block_table");
   EXPECT_EQ(head.inputs.cumulative_sequence_lengths, "cumulative_sequence_lengths");

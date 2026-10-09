@@ -1,0 +1,17 @@
+{
+  "model": {
+    "decoder": {
+      "session_options": {
+        "ep.cuda.enable_gemm_auto_tune": "1",
+        "provider_options": [{"cuda": {"enable_cuda_graph": "1"}}]
+      }
+    },
+    "mtp": {
+      "session_options": {"ep.cuda.enable_gemm_auto_tune": "1"}
+    }
+  },
+  "engine": {
+    "dynamic_batching": {"max_scheduled_tokens": 8192, "gpu_utilization_factor": 0.05}
+  },
+  "speculative": {"max_draft_tokens": 2}
+}
