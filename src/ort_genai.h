@@ -421,6 +421,8 @@ struct OgaTokenizer : OgaAbstract {
     return token_id;
   }
 
+  // Encode and EncodeLiteral follow the C API's encoding-only concurrency rules:
+  // distinct output sequences, no concurrent option updates or other tokenizer operations.
   void Encode(const char* str, OgaSequences& sequences) const {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }

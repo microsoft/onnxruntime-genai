@@ -35,7 +35,7 @@ extern "C" {
 
 /** \addtogroup Global
  * ONNX Runtime Generative AI C API
- * This API is not thread safe.
+ * This API is not thread safe unless a function explicitly documents otherwise.
  * @{
  */
 
@@ -947,6 +947,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer*
 /**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
  * when it is no longer needed.
+ *
+ * May run concurrently with OgaTokenizerEncode or OgaTokenizerEncodeLiteral on
+ * the same tokenizer under the encoding-only concurrency rules documented below.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
@@ -955,6 +958,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const
  * token strings or inserting automatic control tokens, and appends one sequence on success.
  * Returns an error if literal text requires added/special IDs or an unknown-token fallback.
  * Does not modify tokenizer options. OgaTokenizerEncode retains its existing behavior.
+ *
+ * Thread safety: OgaTokenizerEncode and OgaTokenizerEncodeLiteral may run
+ * concurrently on the same tokenizer. Each concurrent call must use a distinct
+ * OgaSequences output, which must not be accessed or destroyed until that call
+ * completes. Keep the tokenizer alive until all encoding calls finish.
+ * Do not update tokenizer options or run other operations on that tokenizer
+ * while encoding calls are in progress.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeLiteral(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
