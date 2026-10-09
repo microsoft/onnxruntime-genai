@@ -394,6 +394,9 @@ def test_dense_gated_delta_net_emits_compact_state_update():
 def test_qwen_attention_packs_gated_qkv_before_splitting():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
+    model.int4_customized_weight_config = {}
+    model.quant_attrs = {"nodes_to_exclude": []}
+    model.exact_quant_override_names = set()
     model.io_dtype = ir.DataType.FLOAT16
     model.q_size = 128
     model.kv_size = 32
@@ -1465,7 +1468,7 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
     if native_fp8:
         embedding.ngram_embedding = SimpleNamespace(
             weight=torch.linspace(-3, 3, 28 * 8).reshape(28, 8).to(torch.float8_e4m3fn),
-            weight_scale=torch.tensor([0.25]),
+            weight_scale=torch.tensor([0.25], dtype=torch.bfloat16),
         )
     table_name = "model.ple.ngram_embedding.weight"
     table = Qwen4ExpEngramModel(ple, text_config, ir.DataType.FLOAT16).graph.initializers[table_name].const_value
@@ -1487,6 +1490,7 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
     wrapper = object.__new__(Qwen4ExpModel)
     wrapper.text_only = text_only
     wrapper.input_path = "unused"
+    wrapper.extra_options = {"indexshare_mtp": False}
     wrapper.config = SimpleNamespace(text_config=text_config, vision_config=SimpleNamespace(out_hidden_size=8))
     wrapper.decoder = component("model.onnx")
     wrapper.decoder.io_dtype = ir.DataType.FLOAT16
@@ -1498,6 +1502,8 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
     )
     wrapper.decoder.load_weights = lambda _: SimpleNamespace(model=SimpleNamespace(language_model=language_model, visual=None))
     wrapper.mtp = component("mtp.onnx") if include_mtp else None
+    if wrapper.mtp is not None:
+        wrapper.mtp.use_paged_attention = False
     wrapper.mtp_attrs = {}
     wrapper.share_initializers = lambda *args: []
     saved_components = []
@@ -1527,7 +1533,11 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
         assert all((value.view("uint8") == expected_bytes).all() for value in table_values)
         scale = next(value for value in loaded[0].graph.initializer
                      if value.name == "model.ple.ngram_embedding.weight_scale")
+        assert scale.data_type == onnx.TensorProto.FLOAT
         assert onnx.numpy_helper.to_array(scale).item() == 0.25
+        assert embedding.ngram_embedding.weight_scale.dtype == torch.bfloat16
+        lookup = next(node for node in loaded[0].graph.node if node.op_type == "GatherBlockQuantized")
+        assert {value.key: value.value for value in lookup.metadata_props}["layer_ann"] == "cpu_embedding"
 
 
 @pytest.mark.parametrize("include_mtp", [False, True])
@@ -1571,7 +1581,9 @@ def test_text_only_config_connects_external_engram(
         "embeddings": "engram_embeddings", "present_ple_token_names": f"present.{ple_layer_id}.ple_tokens",
     }
     assert config["engram"]["session_options"]["provider_options"] == [{ep: {}}]
-    assert "session.layer_assignment_settings" not in config["engram"]["session_options"]
+    assert config["engram"]["session_options"].get("session.layer_assignment_settings") == (
+        "cpu(=cpu_embedding)" if ep == "cuda" else None
+    )
     assert "intra_op_num_threads" not in config["engram"]["session_options"]
     assert "embedding" not in config and "vision" not in config
     assert mtp_calls == ([tmp_path] if include_mtp else [])

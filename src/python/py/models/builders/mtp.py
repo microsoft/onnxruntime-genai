@@ -62,8 +62,11 @@ class MTPModel:
         existing_names = set(producers)
         existing_names.update(value.name for value in source.graph.input)
         existing_names.update(value.name for value in source.graph.initializer)
-        if existing_names.intersection({"indices", "counts"}):
-            raise ValueError("IndexShare graph output names 'indices' and 'counts' must be unused.")
+        if existing_names.intersection({
+            "indexshare.past_indices", "indexshare.past_counts",
+            "indexshare.present_indices", "indexshare.present_counts", "indexshare.status",
+        }):
+            raise ValueError("IndexShare graph input/output names must be unused.")
         query_producer = producers.get(indexer.input[0])
         split = None
         if len(indexer.input) > 1 and indexer.input[1]:
@@ -106,8 +109,8 @@ class MTPModel:
         merge = helper.make_node(
             "PackedSparseAttentionIndexerMerge",
             [
-                "indexshare.0.indices",
-                "indexshare.0.counts",
+                "indexshare.past_indices",
+                "indexshare.past_counts",
                 "indexshare.base_row_indices",
                 "indexshare.range_starts",
                 "indexshare.range_ends",
@@ -126,8 +129,19 @@ class MTPModel:
         indexer.input.extend(["indexshare.mode", *merged])
         while len(indexer.output) < 7:
             indexer.output.append("")
-        indexer.output.append("indexshare.0.status")
+        indexer.output.append("indexshare.status")
         indexer.attribute.append(helper.make_attribute("max_output_entries", output_capacity))
+        original_indexer_outputs = tuple(indexer.output[:2])
+        output_names = dict(zip(
+            original_indexer_outputs, ("indexshare.present_indices", "indexshare.present_counts"), strict=True,
+        ))
+        for node in source.graph.node:
+            for position, name in enumerate(node.input):
+                if name in output_names:
+                    node.input[position] = output_names[name]
+            for position, name in enumerate(node.output):
+                if name in output_names:
+                    node.output[position] = output_names[name]
         nodes = []
         for node in source.graph.node:
             if split is not None and node.name == split.name:
@@ -139,38 +153,50 @@ class MTPModel:
             nodes.append(node)
         del source.graph.node[:]
         source.graph.node.extend(nodes)
-        for name, internal_output in zip(("indices", "counts"), indexer.output[:2], strict=True):
-            source.graph.node.append(helper.make_node(
-                "Identity", [internal_output], [name], name=prefix + "/" + name,
-            ))
         for name, dtype, shape in (
             ("indexshare.mode", TensorProto.INT32, [1]),
             ("indexshare.projection_rows", TensorProto.INT64, ["indexer_projection_rows"]),
-            ("indexshare.0.indices", TensorProto.INT32, ["indexshare_rows", capacity]),
-            ("indexshare.0.counts", TensorProto.INT32, ["indexshare_rows"]),
+            ("indexshare.past_indices", TensorProto.INT32, ["indexshare_rows", capacity]),
+            ("indexshare.past_counts", TensorProto.INT32, ["indexshare_rows"]),
             ("indexshare.base_row_indices", TensorProto.INT32, ["indexshare_merge_queries"]),
             ("indexshare.range_starts", TensorProto.INT32, ["indexshare_merge_queries"]),
             ("indexshare.range_ends", TensorProto.INT32, ["indexshare_merge_queries"]),
         ):
             source.graph.input.append(helper.make_tensor_value_info(name, dtype, shape))
-        preserved_outputs = [value for value in source.graph.output if value.name not in indexer.output[:2]]
+        preserved_outputs = [value for value in source.graph.output if value.name not in original_indexer_outputs]
         del source.graph.output[:]
         source.graph.output.extend(preserved_outputs)
         for name, shape in (
-            ("indices", ["num_tokens", output_capacity]),
-            ("counts", ["num_tokens"]),
-            ("indexshare.0.status", ["num_tokens"]),
+            ("indexshare.present_indices", ["num_tokens", output_capacity]),
+            ("indexshare.present_counts", ["num_tokens"]),
+            ("indexshare.status", ["num_tokens"]),
         ):
             source.graph.output.append(helper.make_tensor_value_info(name, TensorProto.INT32, shape))
+        self.remove_unused_constants(source.graph)
         del source.graph.value_info[:]
         onnx.save_model(source, os.path.join(output_dir, source_file))
         return {
             "enabled": True,
             "base_capacity": capacity,
             "max_draft_tokens": max_draft_tokens,
-            "indices_output": "indices",
-            "counts_output": "counts",
+            "indices_output": "indexshare.present_indices",
+            "counts_output": "indexshare.present_counts",
         }
+
+    @staticmethod
+    def remove_unused_constants(graph):
+        used_names = {name for node in graph.node for name in node.input if name}
+        used_names.update(value.name for value in graph.output)
+        nodes = [
+            node for node in graph.node
+            if node.op_type != "Constant" or any(name in used_names for name in node.output)
+        ]
+        del graph.node[:]
+        graph.node.extend(nodes)
+        used_names.update(value.name for value in graph.input)
+        initializers = [value for value in graph.initializer if value.name in used_names]
+        del graph.initializer[:]
+        graph.initializer.extend(initializers)
 
     def resolve_mtp_model_config(self, extra_options):
         mtp_quant_config_value = extra_options.get("mtp_quant_config")

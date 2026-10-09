@@ -39,11 +39,17 @@ def export_package(source, output, max_draft_tokens=7):
                 destination.symlink_to(path, target_is_directory=path.is_dir())
         metadata = MTPModel().export_indexshare_graphs(str(output), mtp["filename"], max_draft_tokens)
         mtp.pop("index_share", None)
+        mtp.pop("max_draft_tokens", None)
         mtp["base_capacity"] = metadata["base_capacity"]
-        mtp["max_draft_tokens"] = metadata["max_draft_tokens"]
+        inputs = mtp.setdefault("inputs", {})
+        inputs["past_indices"] = "indexshare.past_indices"
+        inputs["past_counts"] = "indexshare.past_counts"
         outputs = mtp.setdefault("outputs", {})
-        outputs["indices"] = metadata["indices_output"]
-        outputs["counts"] = metadata["counts_output"]
+        outputs.pop("indices", None)
+        outputs.pop("counts", None)
+        outputs["present_indices"] = metadata["indices_output"]
+        outputs["present_counts"] = metadata["counts_output"]
+        config.setdefault("speculative", {}).setdefault("max_draft_tokens", metadata["max_draft_tokens"])
         with (output / "genai_config.json").open("w") as config_file:
             config_file.write(serialize_genai_config(config))
     except Exception:

@@ -644,6 +644,12 @@ Use `--extra_options text_only=true` to omit the vision and embedding components
 
 #### MTP Head (Qwen3.6/Qwen3.8)
 
+For CUDA decoder exports, standalone Engram uses a CUDA session with
+`session.layer_assignment_settings="cpu(=cpu_embedding)"`. Only its
+`GatherBlockQuantized` node carries `layer_ann=cpu_embedding`; hashing and other
+supported operations remain on CUDA. The FP8 table stays unchanged, and its
+scalar scale is widened exactly to FP32 for the CPU lookup kernel.
+
 Paged Qwen3.8 QSA MTP exports include IndexShare in `mtp.onnx` by default.
 There are no separate extend/decode model files and no ONNX `If` node.
 `indexshare_max_draft_tokens` defaults to `7` and must be between `1` and `7`. Runtime
@@ -661,6 +667,13 @@ zero projection rows and merges one query per active request. A standalone
 Every forward uses the same session, decoder body, output names and state
 interface, including `indexshare.present_indices`, `indexshare.present_counts`,
 and `indexshare.status`, produced directly by the indexer without Identity aliases.
+Export removes unused Constant nodes and initializers while preserving live
+constants and external weight payloads.
+The MTP config maps `inputs.past_indices`/`past_counts` and
+`outputs.present_indices`/`present_counts` to those graph names. The requested
+draft limit is specified only by `speculative.max_draft_tokens`; the runtime
+derives the exported IndexShare capacity from the graph rather than a second
+MTP draft limit. Older IndexShare config aliases are not accepted.
 Packages using the former IndexShare binding names must be renamed or re-exported
 for a GenAI runtime using this contract.
 There is no output pruning, special executor option, ONNX If, or duplicated

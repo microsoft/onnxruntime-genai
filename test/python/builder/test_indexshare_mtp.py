@@ -20,6 +20,18 @@ def mtp_graph(tmp_path):
     counts = "/model/layers.0/attn/PackedSparseAttentionIndexer/output_1"
     nodes = [
         helper.make_node(
+            "Constant", [], ["split_sizes"], name="split_sizes",
+            value=numpy_helper.from_array(np.array([4, 2], dtype=np.int64)),
+        ),
+        helper.make_node(
+            "Constant", [], ["constant_output"], name="constant_output",
+            value=numpy_helper.from_array(np.ones((1, 2), dtype=np.float32)),
+        ),
+        helper.make_node(
+            "Constant", [], ["unused_constant"], name="unused_constant",
+            value=numpy_helper.from_array(np.ones(2, dtype=np.float32)),
+        ),
+        helper.make_node(
             "MatMul",
             ["hidden", "indexer.weight"],
             ["index_qk"],
@@ -60,9 +72,10 @@ def mtp_graph(tmp_path):
         helper.make_tensor_value_info(name, TensorProto.FLOAT, ["num_tokens", 2])
         for name in ["logits", "hidden_states_out", "present.key", "present.value", "present.indexer"]
     ]
+    outputs.append(helper.make_tensor_value_info("constant_output", TensorProto.FLOAT, [1, 2]))
     tensors = [
         numpy_helper.from_array(np.ones((2, 6), dtype=np.float32), "indexer.weight"),
-        numpy_helper.from_array(np.array([4, 2], dtype=np.int64), "split_sizes"),
+        numpy_helper.from_array(np.ones(2, dtype=np.float32), "unused.initializer"),
         numpy_helper.from_array(np.ones(2, dtype=np.float32), "norm"),
         numpy_helper.from_array(np.array([[0x12, 0xAB], [0xFF, 0x00]], dtype=np.uint8), "expert.weight"),
     ]
@@ -127,18 +140,24 @@ def test_single_model_selection_io(mtp_graph, draft_count, quantized_projection)
     assert list(gather.input) == ["hidden", "indexshare.projection_rows"]
     assert "indexshare.base_row_indices" in {value.name for value in model.graph.input}
     output_names = {value.name for value in model.graph.output}
-    assert {"logits", "indexshare.0.status", "indices", "counts"} <= output_names
-    assert metadata["indices_output"] == "indices"
-    assert metadata["counts_output"] == "counts"
-    assert not set(indexer.output[:2]).intersection(output_names)
-    for public_name, internal_name in zip(("indices", "counts"), indexer.output[:2], strict=True):
-        alias = next(node for node in model.graph.node if list(node.output) == [public_name])
-        assert alias.op_type == "Identity"
-        assert list(alias.input) == [internal_name]
+    assert {"logits", "indexshare.status", "indexshare.present_indices", "indexshare.present_counts", "constant_output"} <= output_names
+    assert {"indexshare.past_indices", "indexshare.past_counts"} <= {value.name for value in model.graph.input}
+    assert list(merge.input[:2]) == ["indexshare.past_indices", "indexshare.past_counts"]
+    assert metadata["indices_output"] == "indexshare.present_indices"
+    assert metadata["counts_output"] == "indexshare.present_counts"
+    assert list(indexer.output[:2]) == ["indexshare.present_indices", "indexshare.present_counts"]
+    assert indexer.output[7] == "indexshare.status"
+    attention = next(node for node in model.graph.node if node.op_type == "SparsePagedAttention")
+    assert list(attention.input[9:11]) == list(indexer.output[:2])
+    assert not any(node.op_type == "Identity" and set(node.output).intersection(indexer.output[:2]) for node in model.graph.node)
+    unused = {"split_sizes", "unused_constant", "unused.initializer"}
+    assert not any(unused.intersection(node.output) for node in model.graph.node)
+    assert not any(value.name in unused for value in model.graph.initializer)
+    for public_name in ("indexshare.present_indices", "indexshare.present_counts"):
         value = next(value for value in model.graph.output if value.name == public_name)
         assert value.type.tensor_type.elem_type == TensorProto.INT32
         assert value.type.tensor_type.shape.dim[0].dim_param == "num_tokens"
-        if public_name == "indices":
+        if public_name == "indexshare.present_indices":
             assert value.type.tensor_type.shape.dim[1].dim_value == metadata["base_capacity"] + draft_count - 1
     assert not any(name.startswith("indexshare.decode.") for name in output_names)
     assert (mtp_graph / "mtp.onnx.data").read_bytes() == weight_bytes
@@ -153,6 +172,20 @@ def test_rejects_already_converted_graph(mtp_graph):
     source_bytes = (mtp_graph / "mtp.onnx").read_bytes()
     with pytest.raises(ValueError, match="already been converted"):
         MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 3)
+    assert (mtp_graph / "mtp.onnx").read_bytes() == source_bytes
+
+
+@pytest.mark.parametrize("reserved_name", [
+    "indexshare.past_indices", "indexshare.past_counts",
+    "indexshare.present_indices", "indexshare.present_counts", "indexshare.status",
+])
+def test_rejects_indexshare_name_collision(mtp_graph, reserved_name):
+    model = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
+    model.graph.node.append(helper.make_node("Identity", ["hidden"], [reserved_name]))
+    onnx.save_model(model, mtp_graph / "mtp.onnx")
+    source_bytes = (mtp_graph / "mtp.onnx").read_bytes()
+    with pytest.raises(ValueError, match="input/output names must be unused"):
+        MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 7)
     assert (mtp_graph / "mtp.onnx").read_bytes() == source_bytes
 
 
@@ -188,9 +221,12 @@ def test_qwen_indexshare_config_and_session_options(mtp_graph, ep, paged, cuda_g
     mtp = config["model"]["mtp"]
     assert "index_share" not in mtp
     assert mtp["base_capacity"] == metadata["base_capacity"]
-    assert mtp["max_draft_tokens"] == 7
-    assert mtp["outputs"]["indices"] == "indices"
-    assert mtp["outputs"]["counts"] == "counts"
+    assert "max_draft_tokens" not in mtp
+    assert config["speculative"]["max_draft_tokens"] == 7
+    assert mtp["inputs"]["past_indices"] == "indexshare.past_indices"
+    assert mtp["inputs"]["past_counts"] == "indexshare.past_counts"
+    assert mtp["outputs"]["present_indices"] == "indexshare.present_indices"
+    assert mtp["outputs"]["present_counts"] == "indexshare.present_counts"
     assert '"eos_token_id": [11, 12]' in config_path.read_text()
     expected_options = {
         "ep.cuda.fpa_intb_gemm": "1",
@@ -250,12 +286,16 @@ def test_side_by_side_package_does_not_touch_source(mtp_graph):
     onnx.save_model(probe, output / "probe.onnx")
     session = ort.InferenceSession(str(output / "probe.onnx"), providers=["CPUExecutionProvider"])
     np.testing.assert_array_equal(session.run(None, {})[0], [[0x12, 0xAB], [0xFF, 0x00]])
-    mtp_config = json.loads((output / "genai_config.json").read_text())["model"]["mtp"]
+    config = json.loads((output / "genai_config.json").read_text())
+    mtp_config = config["model"]["mtp"]
     assert "index_share" not in mtp_config
     assert mtp_config["base_capacity"] == metadata["base_capacity"]
-    assert mtp_config["max_draft_tokens"] == 3
-    assert mtp_config["outputs"]["indices"] == "indices"
-    assert mtp_config["outputs"]["counts"] == "counts"
+    assert "max_draft_tokens" not in mtp_config
+    assert config["speculative"]["max_draft_tokens"] == 3
+    assert mtp_config["inputs"]["past_indices"] == "indexshare.past_indices"
+    assert mtp_config["inputs"]["past_counts"] == "indexshare.past_counts"
+    assert mtp_config["outputs"]["present_indices"] == "indexshare.present_indices"
+    assert mtp_config["outputs"]["present_counts"] == "indexshare.present_counts"
     for path in mtp_graph.iterdir():
         assert path.read_bytes() == source_bytes[path.name]
     with pytest.raises(ValueError, match="must not exist"):

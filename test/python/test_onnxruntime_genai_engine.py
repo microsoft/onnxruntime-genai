@@ -47,7 +47,7 @@ def _has_indexer_merge():
 
 
 def _make_indexshare_mtp_model(
-    root, enabled=True, draft_count=7, merge_capacity=8, capture=False, persistent_state=False
+    root, draft_count=7, merge_capacity=8, capture=False, persistent_state=False
 ):
     helper = onnx.helper
     tensor = onnx.TensorProto
@@ -71,16 +71,18 @@ def _make_indexshare_mtp_model(
         "num_key_value_heads": 1,
         "head_size": 1,
         "main_hidden_states": "hidden_states",
-        "inputs": {"hidden_states": "hidden_states"},
-        "outputs": {"hidden_states": "hidden_states_out"},
-        "session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "1" if capture else "0"}}]},
-        "index_share": {
-            "enabled": enabled,
-            "base_capacity": 3,
-            "max_draft_tokens": 7,
-            "indices_output": "indexshare.present_indices",
-            "counts_output": "indexshare.present_counts",
+        "inputs": {
+            "hidden_states": "hidden_states",
+            "past_indices": "indexshare.past_indices",
+            "past_counts": "indexshare.past_counts",
         },
+        "outputs": {
+            "hidden_states": "hidden_states_out",
+            "present_indices": "indexshare.present_indices",
+            "present_counts": "indexshare.present_counts",
+        },
+        "session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "1" if capture else "0"}}]},
+        "base_capacity": 3,
     }
     logits = np.zeros((_VOCAB_SIZE, _VOCAB_SIZE), dtype=np.float16)
     logits[:, 17] = 10
@@ -341,11 +343,10 @@ def _make_indexshare_mtp_model(
 @pytest.mark.skipif(not og.is_cuda_available(), reason="Requires CUDA")
 @pytest.mark.parametrize("draft_count", range(1, 8))
 @pytest.mark.parametrize("capture", [False, True])
-@pytest.mark.parametrize("enabled", [False, True])
-def test_indexshare_single_mtp_default_all_budgets(tmp_path, draft_count, capture, enabled):
+def test_indexshare_single_mtp_default_all_budgets(tmp_path, draft_count, capture):
     if not _has_indexer_merge():
         pytest.skip("Requires an ORT runtime with PackedSparseAttentionIndexerMerge")
-    model = _make_indexshare_mtp_model(tmp_path, draft_count=draft_count, capture=capture, enabled=enabled)
+    model = _make_indexshare_mtp_model(tmp_path, draft_count=draft_count, capture=capture)
     assert {path.name for path in tmp_path.glob("mtp*.onnx")} == {"mtp.onnx"}
     graph = onnx.load(tmp_path / "mtp.onnx")
     assert not any(node.op_type == "If" for node in graph.graph.node)
@@ -369,11 +370,10 @@ def test_indexshare_single_mtp_default_all_budgets(tmp_path, draft_count, captur
 
 @pytest.mark.skipif(not og.is_cuda_available(), reason="Requires CUDA")
 @pytest.mark.parametrize("capture", [False, True])
-@pytest.mark.parametrize("enabled", [False, True])
-def test_indexshare_persistent_state_and_shrinking_batch(tmp_path, capture, enabled):
+def test_indexshare_persistent_state_and_shrinking_batch(tmp_path, capture):
     if not _has_indexer_merge():
         pytest.skip("Requires IndexShare operators")
-    model = _make_indexshare_mtp_model(tmp_path, enabled=enabled, capture=capture, persistent_state=True)
+    model = _make_indexshare_mtp_model(tmp_path, capture=capture, persistent_state=True)
     engine = og.Engine(model)
     sinks = {}
     first, second = _Sink(), _Sink()
@@ -389,7 +389,7 @@ def test_indexshare_persistent_state_and_shrinking_batch(tmp_path, capture, enab
 def test_indexshare_status_rejects_chain_before_publication(tmp_path):
     if not _has_indexer_merge():
         pytest.skip("Requires an ORT runtime with PackedSparseAttentionIndexerMerge")
-    model = _make_indexshare_mtp_model(tmp_path, True, merge_capacity=1)
+    model = _make_indexshare_mtp_model(tmp_path, merge_capacity=1)
     engine = og.Engine(model)
     sink = _Sink()
     sinks = {}

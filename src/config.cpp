@@ -123,7 +123,8 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   // An empty MTP list intentionally disables sharing the main decoder's initializers.
   decoder.shared_initializers = mtp.shared_initializers;
   if (mtp.index_share.enabled || mtp.index_share.base_capacity != 0) {
-    if (mtp.index_share.indices_output.empty() || mtp.index_share.counts_output.empty() ||
+    if (mtp.index_share.indices_input.empty() || mtp.index_share.counts_input.empty() ||
+      mtp.index_share.indices_output.empty() || mtp.index_share.counts_output.empty() ||
         mtp.index_share.base_capacity <= 0 || mtp.index_share.max_draft_tokens < 1 ||
         mtp.index_share.max_draft_tokens > 7 ||
         mtp.index_share.base_capacity > std::numeric_limits<int>::max() - mtp.index_share.max_draft_tokens + 1) {
@@ -1130,7 +1131,7 @@ struct Decoder_Element : JSON::Element {
 };
 
 struct MtpInputs_Element : JSON::Element {
-  explicit MtpInputs_Element(Config::Model::Mtp::Inputs& v) : v_{v} {}
+  explicit MtpInputs_Element(Config::Model::Mtp& mtp) : v_{mtp.inputs}, index_share_{mtp.index_share} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "input_ids") {
@@ -1149,6 +1150,10 @@ struct MtpInputs_Element : JSON::Element {
       v_.past_indexer_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_sequence_length") {
       v_.past_sequence_length = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indices") {
+      index_share_.indices_input = JSON::Get<std::string_view>(value);
+    } else if (name == "past_counts") {
+      index_share_.counts_input = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1156,6 +1161,7 @@ struct MtpInputs_Element : JSON::Element {
 
  private:
   Config::Model::Mtp::Inputs& v_;
+  Config::Model::Mtp::IndexShare& index_share_;
 };
 
 struct MtpOutputs_Element : JSON::Element {
@@ -1172,9 +1178,9 @@ struct MtpOutputs_Element : JSON::Element {
       v_.present_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_indexer_names") {
       v_.present_indexer_names = JSON::Get<std::string_view>(value);
-    } else if (name == "indices") {
+    } else if (name == "present_indices") {
       index_share_.indices_output = JSON::Get<std::string_view>(value);
-    } else if (name == "counts") {
+    } else if (name == "present_counts") {
       index_share_.counts_output = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
@@ -1184,31 +1190,6 @@ struct MtpOutputs_Element : JSON::Element {
  private:
   Config::Model::Mtp::Outputs& v_;
   Config::Model::Mtp::IndexShare& index_share_;
-};
-
-struct MtpIndexShare_Element : JSON::Element {
-  explicit MtpIndexShare_Element(Config::Model::Mtp::IndexShare& value) : value_{value} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "enabled")
-      value_.enabled = JSON::Get<bool>(value);
-    else if (name == "indices_output")
-      value_.indices_output = JSON::Get<std::string_view>(value);
-    else if (name == "counts_output")
-      value_.counts_output = JSON::Get<std::string_view>(value);
-    else if (name == "base_capacity" || name == "max_draft_tokens") {
-      const int parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (parsed <= 0) throw std::out_of_range("IndexShare capacities must be positive");
-      if (name == "base_capacity")
-        value_.base_capacity = parsed;
-      else
-        value_.max_draft_tokens = parsed;
-    } else
-      throw JSON::unknown_value_error{};
-  }
-
- private:
-  Config::Model::Mtp::IndexShare& value_;
 };
 
 struct Mtp_Element : JSON::Element {
@@ -1235,19 +1216,12 @@ struct Mtp_Element : JSON::Element {
       if (v_.index_share.base_capacity <= 0) throw std::out_of_range("base_capacity must be > 0");
       v_.index_share.enabled = true;
       if (v_.index_share.max_draft_tokens == 0) v_.index_share.max_draft_tokens = 7;
-    } else if (name == "max_draft_tokens") {
-      v_.index_share.max_draft_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (v_.index_share.max_draft_tokens < 1 || v_.index_share.max_draft_tokens > 7)
-        throw std::out_of_range("mtp.max_draft_tokens must be between 1 and 7");
     } else {
       throw JSON::unknown_value_error{};
     }
   }
 
   Element& OnObject(std::string_view name) override {
-    if (name == "index_share") {
-      return index_share_;
-    }
     if (name == "session_options") {
       v_.session_options = Config::SessionOptions{};
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
@@ -1278,10 +1252,9 @@ struct Mtp_Element : JSON::Element {
   Config::Model::Mtp& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
-  MtpInputs_Element inputs_{v_.inputs};
+  MtpInputs_Element inputs_{v_};
   MtpOutputs_Element outputs_{v_};
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
-  MtpIndexShare_Element index_share_{v_.index_share};
 };
 
 struct Dflash2Inputs_Element : JSON::Element {

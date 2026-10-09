@@ -2342,7 +2342,7 @@ class Qwen4ExpModel(MTPModel):
             language_model.layers[ple_layer_id].ple,
             self.config.text_config,
             self.decoder.io_dtype,
-            scale_dtype=ir.DataType.FLOAT if self.decoder.ep == "webgpu" else None,
+            scale_dtype=ir.DataType.FLOAT,
         )
         engram_model.save_model(output_dir)
         table = ir.load(os.path.join(output_dir, engram_model.filename)).graph.initializers[table_name].const_value
@@ -2448,6 +2448,10 @@ class Qwen4ExpModel(MTPModel):
         engram_session_options = {
             "provider_options": [{"cuda" if self.decoder.ep == "cuda" else "cpu": {}}],
         }
+        if self.decoder.ep == "cuda":
+            engram_session_options["session.layer_assignment_settings"] = (
+                f"cpu(={Qwen4ExpTextModel.CPU_EMBEDDING_ANNOTATION})"
+            )
         model_config["engram"] = {
             "filename": "engram.onnx",
             "cache_capacity": 4096,
@@ -2508,9 +2512,11 @@ class Qwen4ExpModel(MTPModel):
             metadata = self.mtp_attrs["index_share"]
             mtp_config = genai_config["model"]["mtp"]
             mtp_config["base_capacity"] = metadata["base_capacity"]
-            mtp_config["max_draft_tokens"] = metadata["max_draft_tokens"]
-            mtp_config["outputs"]["indices"] = metadata["indices_output"]
-            mtp_config["outputs"]["counts"] = metadata["counts_output"]
+            mtp_config["inputs"]["past_indices"] = "indexshare.past_indices"
+            mtp_config["inputs"]["past_counts"] = "indexshare.past_counts"
+            mtp_config["outputs"]["present_indices"] = metadata["indices_output"]
+            mtp_config["outputs"]["present_counts"] = metadata["counts_output"]
+            genai_config.setdefault("speculative", {}).setdefault("max_draft_tokens", metadata["max_draft_tokens"])
         self.configure_paged_sessions(genai_config)
         with open(config_path, "w") as config_file:
             config_file.write(serialize_genai_config(genai_config))

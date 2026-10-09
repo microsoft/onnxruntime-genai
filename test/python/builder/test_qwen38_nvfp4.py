@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import onnx
 import onnx_ir as ir
+import onnxruntime as ort
 import pytest
 import torch
 from quantization import QuantConfig
@@ -314,6 +315,41 @@ def test_native_engram_preserves_or_widens_bf16_scale(request, checkpoint_fixtur
                        if value.name == "model.ple.ngram_embedding.weight_scale")
     assert saved_scale.data_type == int(expected_dtype)
     assert saved_scale.raw_data == expected_scale
+
+
+@pytest.mark.skipif("CUDAExecutionProvider" not in ort.get_available_providers(), reason="Requires CUDA")
+@pytest.mark.parametrize("checkpoint_fixture", ["checkpoint", "fp8_checkpoint"])
+def test_engram_cuda_session_runs_annotated_lookup_on_cpu(request, checkpoint_fixture, tmp_path):
+    checkpoint_path = request.getfixturevalue(checkpoint_fixture)
+    loader = load_fp8(checkpoint_path) if checkpoint_fixture == "fp8_checkpoint" else load(checkpoint_path)
+    embedding = loader.layers[1].ple.ple_embedding
+    embedding.layer_multipliers = torch.tensor([0, 1], dtype=torch.int64)
+    embedding.ngram_heads_vocab_sizes = torch.tensor([8], dtype=torch.int64)
+    embedding.ngram_heads_offsets = torch.tensor([0], dtype=torch.int64)
+    config = SimpleNamespace(ngram_size=2, heads_per_ngram=1, ple_embed_dim=8, ple_layer_ids=[2])
+    model = Qwen4ExpEngramModel(SimpleNamespace(ple_embedding=embedding), config, ir.DataType.FLOAT16, scale_dtype=ir.DataType.FLOAT)
+    model.save_model(tmp_path)
+    options = ort.SessionOptions()
+    options.enable_profiling = True
+    options.profile_file_prefix = str(tmp_path / "engram_cpu_lookup")
+    options.add_session_config_entry("session.layer_assignment_settings", "cpu(=cpu_embedding)")
+    mixed = ort.InferenceSession(str(tmp_path / "engram.onnx"), sess_options=options, providers=["CUDAExecutionProvider"])
+    cpu = ort.InferenceSession(str(tmp_path / "engram.onnx"), providers=["CPUExecutionProvider"])
+    feeds = {
+        "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.int64).numpy(),
+        "past.1.ple_tokens": torch.tensor([[0]], dtype=torch.int64).numpy(),
+    }
+    actual = mixed.run(None, feeds)
+    expected = cpu.run(None, feeds)
+    for actual_output, expected_output in zip(actual, expected, strict=True):
+        assert (actual_output == expected_output).all()
+    with open(mixed.end_profiling()) as profile_file:
+        profile = json.load(profile_file)
+    lookup_events = [event for event in profile if event.get("args", {}).get("op_name") == "GatherBlockQuantized"]
+    assert lookup_events
+    assert all(event["args"]["provider"] == "CPUExecutionProvider" for event in lookup_events)
+    assert any(event.get("args", {}).get("op_name") == "NGramHashMapping" and
+               event["args"].get("provider") == "CUDAExecutionProvider" for event in profile)
 
 
 def test_nvfp4_dispatch_and_qwen38_surface(checkpoint):

@@ -695,6 +695,8 @@ struct Config {
         bool enabled{false};
         int base_capacity{};
         int max_draft_tokens{};
+        std::string indices_input{"indexshare.past_indices"};
+        std::string counts_input{"indexshare.past_counts"};
         std::string indices_output;
         std::string counts_output;
       } index_share;

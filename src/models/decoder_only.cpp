@@ -39,8 +39,9 @@ void DecoderOnly_Model::InitializeIndexShare(const Config::Model::Mtp::IndexShar
   decode_info.Add(*session_decoder_);
   const auto indices_shape = extend_info.GetOutputShape(config.indices_output);
   const auto counts_shape = extend_info.GetOutputShape(config.counts_output);
-  const int output_capacity = config.base_capacity + config.max_draft_tokens - 1;
-  if (indices_shape.size() != 2 || indices_shape[1] != output_capacity || counts_shape.size() != 1 ||
+  const int64_t output_capacity = indices_shape.size() == 2 ? indices_shape[1] : 0;
+  if (indices_shape.size() != 2 || output_capacity < config.base_capacity ||
+      output_capacity > static_cast<int64_t>(config.base_capacity) + config.max_draft_tokens - 1 || counts_shape.size() != 1 ||
       extend_info.GetOutputDataType(config.indices_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
       extend_info.GetOutputDataType(config.counts_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
       decode_info.GetOutputDataType("indexshare.status") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
@@ -48,14 +49,14 @@ void DecoderOnly_Model::InitializeIndexShare(const Config::Model::Mtp::IndexShar
     throw std::runtime_error("IndexShare graph outputs do not match their configured int32 selection contract.");
   }
   const std::vector<const char*> selection_inputs{
-      "indexshare.past_indices", "indexshare.past_counts", "indexshare.base_row_indices",
+      config.indices_input.c_str(), config.counts_input.c_str(), "indexshare.base_row_indices",
       "indexshare.range_starts", "indexshare.range_ends"};
   for (const char* name : selection_inputs) {
     if (!decode_info.HasInput(name) || decode_info.GetInputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
       throw std::runtime_error("IndexShare decode graph is missing a configured int32 input.");
     }
     const auto shape = decode_info.GetInputShape(name);
-    const bool indices = std::string_view{name} == "indexshare.past_indices";
+    const bool indices = std::string_view{name} == config.indices_input;
     if (shape.size() != (indices ? 2u : 1u) || (indices && shape[1] != config.base_capacity)) {
       throw std::runtime_error("IndexShare decode input shape does not match the configured selection contract.");
     }
@@ -70,6 +71,7 @@ void DecoderOnly_Model::InitializeIndexShare(const Config::Model::Mtp::IndexShar
     }
   }
   index_share_config_ = config;
+  index_share_config_.max_draft_tokens = static_cast<int>(output_capacity - config.base_capacity + 1);
 }
 
 DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
