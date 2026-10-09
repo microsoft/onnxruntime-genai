@@ -72,6 +72,7 @@ struct Qwen2VLPositionInputs : PositionInputs {
   ONNXTensorElementDataType type_;
   bool has_mask_input_{false};
   bool has_posid_input_{false};
+  int64_t rope_rank_{3};
   std::array<int64_t, 3> position_ids_shape_{};
   std::unique_ptr<Tensor> position_ids_;
   std::array<int64_t, 2> attention_mask_shape_{};

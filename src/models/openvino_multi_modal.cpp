@@ -1,7 +1,7 @@
 // Copyright (c) Intel® Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "openvino_multi_modal.h"
 
 namespace Generators {

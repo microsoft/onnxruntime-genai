@@ -42,6 +42,7 @@
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
 #include "ep/amdgpu/interface.h"
+#include "openvino_multi_modal.h"
 #include "ep/dml/interface.h"
 #include "ep/openvino/interface.h"
 #include "ep/qnn/interface.h"

@@ -27,16 +27,22 @@ struct UpdatePositionIdsFunctor {
   int64_t batch_size;
   int64_t seq_len;
   const std::vector<int64_t>& rope_deltas;
+  int64_t rope_rank;  // 3 (Qwen2-VL/Qwen3-VL) or 4 (Qwen3.5, leading text-position row)
 
   template <typename T>
   void operator()() {
     auto* data = position_ids->GetTensorMutableData<T>();
-    for (int64_t dim = 0; dim < 3; ++dim) {
-      for (int64_t b = 0; b < batch_size; ++b) {
-        for (int64_t s = 0; s < seq_len; ++s) {
-          T delta = static_cast<T>(base_pos + rope_deltas[b]);
-          T pos = static_cast<T>(s);
-          data[dim * batch_size * seq_len + b * seq_len + s] = delta + pos;
+    // Qwen3.5 row 0 is the sequential text position (base_pos + s); the 3 vision rows follow.
+    T* vision = data + (rope_rank - 3) * batch_size * seq_len;
+    for (int64_t b = 0; b < batch_size; ++b) {
+      for (int64_t s = 0; s < seq_len; ++s) {
+        if (rope_rank == 4) {
+          data[b * seq_len + s] = static_cast<T>(base_pos) + static_cast<T>(s);
+        }
+        T delta = static_cast<T>(base_pos + rope_deltas[b]);
+        T pos = static_cast<T>(s);
+        for (int64_t dim = 0; dim < 3; ++dim) {
+          vision[dim * batch_size * seq_len + b * seq_len + s] = delta + pos;
         }
       }
     }
@@ -96,9 +102,12 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
   if (has_posid_input_) {
     ONNXTensorElementDataType posid_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
 
-    // Set up 3D position IDs shape: [3, batch_size, sequence_length]
-    // The 3 dimensions represent temporal, height, and width for mrope
-    position_ids_shape_[0] = 3;
+    // mrope rows come from the decoder's declared position_ids rank: 3 (temporal/height/width) for
+    // Qwen2-VL / Qwen3-VL, or 4 for Qwen3.5 (a leading text-position row precedes the 3 vision rows).
+    auto posid_shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.position_ids);
+    rope_rank_ = (!posid_shape.empty() && posid_shape[0] == 4) ? 4 : 3;
+
+    position_ids_shape_[0] = rope_rank_;
     position_ids_shape_[1] = state_.params_->search.batch_size;
     position_ids_shape_[2] = 0;  // Will be set during first update
 
@@ -169,7 +178,10 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
   int64_t seq_len = shape[2];
 
   auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
-  auto* position_data = position_ids->GetTensorMutableData<T>();
+  auto* position_data_base = position_ids->GetTensorMutableData<T>();
+  // Qwen3.5 (rope_rank_==4) prepends a text-position row; the 3 vision rows are written after it. For the
+  // 3-row families vision_base is 0, so the writes below are byte-for-byte identical.
+  auto* position_data = position_data_base + (rope_rank_ - 3) * batch_size * seq_len;
 
   // Get spans for grid_thw tensors (on CPU)
   std::span<const int64_t> image_grid_thw_span;
@@ -347,6 +359,15 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
     rope_deltas_.push_back(max_pos_for_batch + 1 - seq_len);
   }
 
+  // Qwen3.5: row 0 is the sequential text position.
+  if (rope_rank_ == 4) {
+    for (int64_t b = 0; b < batch_size; ++b) {
+      for (int64_t s = 0; s < seq_len; ++s) {
+        position_data_base[b * seq_len + s] = static_cast<T>(s);
+      }
+    }
+  }
+
   // Move tensor to GPU and expand by num_beams
   position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
   position_ids_shape_[1] *= state_.params_->search.num_beams;
@@ -396,7 +417,7 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
     throw std::runtime_error("rope_deltas size mismatch with batch_size * num_beams.");
   }
 
-  DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_});
+  DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_, rope_rank_});
 
   position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);  // No beam expansion needed, already expanded
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
