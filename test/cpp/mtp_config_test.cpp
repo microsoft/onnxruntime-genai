@@ -103,13 +103,16 @@ TEST(MtpConfigTest, RejectsNonpositiveIndexShareCapacity) {
 TEST(MtpConfigTest, EnablesFlatIndexShareMetadataByDefault) {
   const auto root = WriteMtpConfig(
       "hidden_states", R"("base_capacity": 2051, )", "_flat_indexshare",
-      R"(, "present_indices": "indexshare.present_indices", "present_counts": "indexshare.present_counts")");
+      R"(, "present_indices": "present_indices", "present_counts": "present_counts")");
   const Config config{fs::path{root.string()}, {}};
   EXPECT_TRUE(config.model.mtp.index_share.enabled);
   EXPECT_EQ(config.model.mtp.index_share.base_capacity, 2051);
   EXPECT_EQ(config.model.mtp.index_share.max_draft_tokens, 7);
-  EXPECT_EQ(config.model.mtp.index_share.indices_output, "indexshare.present_indices");
-  EXPECT_EQ(config.model.mtp.index_share.counts_output, "indexshare.present_counts");
+  EXPECT_EQ(config.model.mtp.index_share.indices_input, "past_indices");
+  EXPECT_EQ(config.model.mtp.index_share.counts_input, "past_counts");
+  EXPECT_EQ(config.model.mtp.index_share.indices_output, "present_indices");
+  EXPECT_EQ(config.model.mtp.index_share.counts_output, "present_counts");
+  EXPECT_EQ(config.model.mtp.index_share.status_output, "indexer_status");
 }
 
 TEST(MtpConfigTest, ParsesNamedIndexShareInputsAndOutputsWithOneDraftLimit) {
@@ -117,7 +120,7 @@ TEST(MtpConfigTest, ParsesNamedIndexShareInputsAndOutputsWithOneDraftLimit) {
       "hidden_states",
       R"("base_capacity": 2051, "inputs": {"past_indices": "cached.indices", "past_counts": "cached.counts"}, )",
       "_named_indexshare",
-      R"(, "present_indices": "selected.indices", "present_counts": "selected.counts")",
+      R"(, "present_indices": "selected.indices", "present_counts": "selected.counts", "indexer_status": "selected.status")",
       R"(, "speculative": {"max_draft_tokens": 3})");
   const Config config{fs::path{root.string()}, {}};
   EXPECT_TRUE(config.model.mtp.index_share.enabled);
@@ -125,6 +128,7 @@ TEST(MtpConfigTest, ParsesNamedIndexShareInputsAndOutputsWithOneDraftLimit) {
   EXPECT_EQ(config.model.mtp.index_share.counts_input, "cached.counts");
   EXPECT_EQ(config.model.mtp.index_share.indices_output, "selected.indices");
   EXPECT_EQ(config.model.mtp.index_share.counts_output, "selected.counts");
+  EXPECT_EQ(config.model.mtp.index_share.status_output, "selected.status");
   EXPECT_EQ(config.speculative.max_draft_tokens, 3);
   EXPECT_EQ(config.model.mtp.index_share.max_draft_tokens, 7);
 }
@@ -139,7 +143,7 @@ TEST(MtpConfigTest, ParsesFlatIndexShareDraftWidth) {
 TEST(MtpConfigTest, RejectsLegacyIndexShareOutputAliases) {
   const auto root = WriteMtpConfig(
       "hidden_states", R"("base_capacity": 2051, )", "_legacy_outputs",
-      R"(, "indices": "indexshare.present_indices", "counts": "indexshare.present_counts")");
+      R"(, "indices": "present_indices", "counts": "present_counts")");
   EXPECT_THROW(OgaConfig::Create(root.string().c_str()), std::exception);
 }
 

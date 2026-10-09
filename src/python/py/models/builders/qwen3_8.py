@@ -2512,10 +2512,11 @@ class Qwen4ExpModel(MTPModel):
             metadata = self.mtp_attrs["index_share"]
             mtp_config = genai_config["model"]["mtp"]
             mtp_config["base_capacity"] = metadata["base_capacity"]
-            mtp_config["inputs"]["past_indices"] = "indexshare.past_indices"
-            mtp_config["inputs"]["past_counts"] = "indexshare.past_counts"
+            mtp_config["inputs"]["past_indices"] = "past_indices"
+            mtp_config["inputs"]["past_counts"] = "past_counts"
             mtp_config["outputs"]["present_indices"] = metadata["indices_output"]
             mtp_config["outputs"]["present_counts"] = metadata["counts_output"]
+            mtp_config["outputs"]["indexer_status"] = metadata["status_output"]
             genai_config.setdefault("speculative", {}).setdefault("max_draft_tokens", metadata["max_draft_tokens"])
         self.configure_paged_sessions(genai_config)
         with open(config_path, "w") as config_file:

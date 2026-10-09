@@ -63,8 +63,8 @@ class MTPModel:
         existing_names.update(value.name for value in source.graph.input)
         existing_names.update(value.name for value in source.graph.initializer)
         if existing_names.intersection({
-            "indexshare.past_indices", "indexshare.past_counts",
-            "indexshare.present_indices", "indexshare.present_counts", "indexshare.status",
+            "past_indices", "past_counts", "present_indices", "present_counts", "indexer_status",
+            "mode", "projection_rows", "base_row_indices", "range_starts", "range_ends",
         }):
             raise ValueError("IndexShare graph input/output names must be unused.")
         query_producer = producers.get(indexer.input[0])
@@ -101,7 +101,7 @@ class MTPModel:
         output_capacity = capacity + max_draft_tokens - 1
         gather = helper.make_node(
             "Gather",
-            [projection.input[0], "indexshare.projection_rows"],
+            [projection.input[0], "projection_rows"],
             [gated_hidden],
             name=prefix + "/GatherProjectionRows",
             axis=0,
@@ -109,11 +109,11 @@ class MTPModel:
         merge = helper.make_node(
             "PackedSparseAttentionIndexerMerge",
             [
-                "indexshare.past_indices",
-                "indexshare.past_counts",
-                "indexshare.base_row_indices",
-                "indexshare.range_starts",
-                "indexshare.range_ends",
+                "past_indices",
+                "past_counts",
+                "base_row_indices",
+                "range_starts",
+                "range_ends",
             ],
             merged,
             name=prefix + "/IndexerMerge",
@@ -126,14 +126,14 @@ class MTPModel:
             indexer.input.append("")
         indexer.input[0] = packed_qk
         indexer.input[1] = ""
-        indexer.input.extend(["indexshare.mode", *merged])
+        indexer.input.extend(["mode", *merged])
         while len(indexer.output) < 7:
             indexer.output.append("")
-        indexer.output.append("indexshare.status")
+        indexer.output.append("indexer_status")
         indexer.attribute.append(helper.make_attribute("max_output_entries", output_capacity))
         original_indexer_outputs = tuple(indexer.output[:2])
         output_names = dict(zip(
-            original_indexer_outputs, ("indexshare.present_indices", "indexshare.present_counts"), strict=True,
+            original_indexer_outputs, ("present_indices", "present_counts"), strict=True,
         ))
         for node in source.graph.node:
             for position, name in enumerate(node.input):
@@ -154,22 +154,22 @@ class MTPModel:
         del source.graph.node[:]
         source.graph.node.extend(nodes)
         for name, dtype, shape in (
-            ("indexshare.mode", TensorProto.INT32, [1]),
-            ("indexshare.projection_rows", TensorProto.INT64, ["indexer_projection_rows"]),
-            ("indexshare.past_indices", TensorProto.INT32, ["indexshare_rows", capacity]),
-            ("indexshare.past_counts", TensorProto.INT32, ["indexshare_rows"]),
-            ("indexshare.base_row_indices", TensorProto.INT32, ["indexshare_merge_queries"]),
-            ("indexshare.range_starts", TensorProto.INT32, ["indexshare_merge_queries"]),
-            ("indexshare.range_ends", TensorProto.INT32, ["indexshare_merge_queries"]),
+            ("mode", TensorProto.INT32, [1]),
+            ("projection_rows", TensorProto.INT64, ["indexer_projection_rows"]),
+            ("past_indices", TensorProto.INT32, ["indexshare_rows", capacity]),
+            ("past_counts", TensorProto.INT32, ["indexshare_rows"]),
+            ("base_row_indices", TensorProto.INT32, ["indexshare_merge_queries"]),
+            ("range_starts", TensorProto.INT32, ["indexshare_merge_queries"]),
+            ("range_ends", TensorProto.INT32, ["indexshare_merge_queries"]),
         ):
             source.graph.input.append(helper.make_tensor_value_info(name, dtype, shape))
         preserved_outputs = [value for value in source.graph.output if value.name not in original_indexer_outputs]
         del source.graph.output[:]
         source.graph.output.extend(preserved_outputs)
         for name, shape in (
-            ("indexshare.present_indices", ["num_tokens", output_capacity]),
-            ("indexshare.present_counts", ["num_tokens"]),
-            ("indexshare.status", ["num_tokens"]),
+            ("present_indices", ["num_tokens", output_capacity]),
+            ("present_counts", ["num_tokens"]),
+            ("indexer_status", ["num_tokens"]),
         ):
             source.graph.output.append(helper.make_tensor_value_info(name, TensorProto.INT32, shape))
         self.remove_unused_constants(source.graph)
@@ -179,8 +179,9 @@ class MTPModel:
             "enabled": True,
             "base_capacity": capacity,
             "max_draft_tokens": max_draft_tokens,
-            "indices_output": "indexshare.present_indices",
-            "counts_output": "indexshare.present_counts",
+            "indices_output": "present_indices",
+            "counts_output": "present_counts",
+            "status_output": "indexer_status",
         }
 
     @staticmethod

@@ -44,13 +44,13 @@ void DecoderOnly_Model::InitializeIndexShare(const Config::Model::Mtp::IndexShar
       output_capacity > static_cast<int64_t>(config.base_capacity) + config.max_draft_tokens - 1 || counts_shape.size() != 1 ||
       extend_info.GetOutputDataType(config.indices_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
       extend_info.GetOutputDataType(config.counts_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
-      decode_info.GetOutputDataType("indexshare.status") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
-      decode_info.GetOutputShape("indexshare.status").size() != 1) {
+      decode_info.GetOutputDataType(config.status_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      decode_info.GetOutputShape(config.status_output).size() != 1) {
     throw std::runtime_error("IndexShare graph outputs do not match their configured int32 selection contract.");
   }
   const std::vector<const char*> selection_inputs{
-      config.indices_input.c_str(), config.counts_input.c_str(), "indexshare.base_row_indices",
-      "indexshare.range_starts", "indexshare.range_ends"};
+      config.indices_input.c_str(), config.counts_input.c_str(), "base_row_indices",
+      "range_starts", "range_ends"};
   for (const char* name : selection_inputs) {
     if (!decode_info.HasInput(name) || decode_info.GetInputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
       throw std::runtime_error("IndexShare decode graph is missing a configured int32 input.");
@@ -62,11 +62,11 @@ void DecoderOnly_Model::InitializeIndexShare(const Config::Model::Mtp::IndexShar
     }
   }
   {
-    if (!decode_info.HasInput("indexshare.mode") || !decode_info.HasInput("indexshare.projection_rows") ||
-        decode_info.GetInputDataType("indexshare.mode") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
-        decode_info.GetInputShape("indexshare.mode") != std::vector<int64_t>{1} ||
-        decode_info.GetInputDataType("indexshare.projection_rows") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
-        decode_info.GetInputShape("indexshare.projection_rows").size() != 1) {
+    if (!decode_info.HasInput("mode") || !decode_info.HasInput("projection_rows") ||
+      decode_info.GetInputDataType("mode") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      decode_info.GetInputShape("mode") != std::vector<int64_t>{1} ||
+      decode_info.GetInputDataType("projection_rows") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+      decode_info.GetInputShape("projection_rows").size() != 1) {
       throw std::runtime_error("IndexShare requires an int32[1] mode and int64 projection rows.");
     }
   }

@@ -695,10 +695,11 @@ struct Config {
         bool enabled{false};
         int base_capacity{};
         int max_draft_tokens{};
-        std::string indices_input{"indexshare.past_indices"};
-        std::string counts_input{"indexshare.past_counts"};
+        std::string indices_input{"past_indices"};
+        std::string counts_input{"past_counts"};
         std::string indices_output;
         std::string counts_output;
+        std::string status_output{"indexer_status"};
       } index_share;
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;

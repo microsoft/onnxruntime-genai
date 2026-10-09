@@ -47,7 +47,7 @@ def _has_indexer_merge():
 
 
 def _make_indexshare_mtp_model(
-    root, draft_count=7, merge_capacity=8, capture=False, persistent_state=False
+    root, draft_count=7, merge_capacity=8, capture=False, persistent_state=False, status_output="indexer_status"
 ):
     helper = onnx.helper
     tensor = onnx.TensorProto
@@ -73,13 +73,14 @@ def _make_indexshare_mtp_model(
         "main_hidden_states": "hidden_states",
         "inputs": {
             "hidden_states": "hidden_states",
-            "past_indices": "indexshare.past_indices",
-            "past_counts": "indexshare.past_counts",
+            "past_indices": "past_indices",
+            "past_counts": "past_counts",
         },
         "outputs": {
             "hidden_states": "hidden_states_out",
-            "present_indices": "indexshare.present_indices",
-            "present_counts": "indexshare.present_counts",
+            "present_indices": "present_indices",
+            "present_counts": "present_counts",
+            "indexer_status": status_output,
         },
         "session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "1" if capture else "0"}}]},
         "base_capacity": 3,
@@ -138,13 +139,13 @@ def _make_indexshare_mtp_model(
 
     packed_inputs = [
         *inputs,
-        helper.make_tensor_value_info("indexshare.mode", tensor.INT32, [1]),
-        helper.make_tensor_value_info("indexshare.projection_rows", tensor.INT64, ["projection_rows"]),
-        helper.make_tensor_value_info("indexshare.past_indices", tensor.INT32, ["rows", 3]),
-        helper.make_tensor_value_info("indexshare.past_counts", tensor.INT32, ["rows"]),
-        helper.make_tensor_value_info("indexshare.base_row_indices", tensor.INT32, ["merge_rows"]),
-        helper.make_tensor_value_info("indexshare.range_starts", tensor.INT32, ["merge_rows"]),
-        helper.make_tensor_value_info("indexshare.range_ends", tensor.INT32, ["merge_rows"]),
+        helper.make_tensor_value_info("mode", tensor.INT32, [1]),
+        helper.make_tensor_value_info("projection_rows", tensor.INT64, ["projection_rows"]),
+        helper.make_tensor_value_info("past_indices", tensor.INT32, ["rows", 3]),
+        helper.make_tensor_value_info("past_counts", tensor.INT32, ["rows"]),
+        helper.make_tensor_value_info("base_row_indices", tensor.INT32, ["merge_rows"]),
+        helper.make_tensor_value_info("range_starts", tensor.INT32, ["merge_rows"]),
+        helper.make_tensor_value_info("range_ends", tensor.INT32, ["merge_rows"]),
     ]
     initializers.extend(
         [
@@ -160,7 +161,7 @@ def _make_indexshare_mtp_model(
     )
     packed_nodes = [
         *nodes,
-        helper.make_node("Gather", ["hidden_states", "indexshare.projection_rows"], ["projected_hidden"], axis=0),
+        helper.make_node("Gather", ["hidden_states", "projection_rows"], ["projected_hidden"], axis=0),
         helper.make_node("MatMul", ["projected_hidden", "index_weight"], ["packed_qk"]),
         helper.make_node("Shape", ["past_sequence_lengths"], ["batch_shape"]),
         helper.make_node("Concat", ["batch_shape", "key_geometry"], ["key_shape"], axis=0),
@@ -184,14 +185,14 @@ def _make_indexshare_mtp_model(
             ["state_lengths"],
             value=helper.make_tensor("", tensor.INT32, [1], [0]),
         ),
-        helper.make_node("Add", ["indexshare.range_ends", "range_extra"], ["merge_ends"]),
+        helper.make_node("Add", ["range_ends", "range_extra"], ["merge_ends"]),
         helper.make_node(
             "PackedSparseAttentionIndexerMerge",
             [
-                "indexshare.past_indices",
-                "indexshare.past_counts",
-                "indexshare.base_row_indices",
-                "indexshare.range_starts",
+                "past_indices",
+                "past_counts",
+                "base_row_indices",
+                "range_starts",
                 "merge_ends",
             ],
             ["merged", "merged_count", "merge_status"],
@@ -220,20 +221,20 @@ def _make_indexshare_mtp_model(
                 "state_lengths",
                 "",
                 "",
-                "indexshare.mode",
+                "mode",
                 "merged",
                 "merged_count",
                 "merge_status",
             ],
             [
-                "indexshare.present_indices",
-                "indexshare.present_counts",
+                "present_indices",
+                "present_counts",
                 "present_index_keys",
                 "present_index_buffer",
                 "",
                 "present_index_lengths",
                 "",
-                "indexshare.status",
+                status_output,
             ],
             domain="com.microsoft",
             policy_mode="qsa",
@@ -245,9 +246,9 @@ def _make_indexshare_mtp_model(
     ]
     packed_outputs = [
         *outputs,
-        helper.make_tensor_value_info("indexshare.present_indices", tensor.INT32, ["num_tokens", 9]),
-        helper.make_tensor_value_info("indexshare.present_counts", tensor.INT32, ["num_tokens"]),
-        helper.make_tensor_value_info("indexshare.status", tensor.INT32, ["num_tokens"]),
+        helper.make_tensor_value_info("present_indices", tensor.INT32, ["num_tokens", 9]),
+        helper.make_tensor_value_info("present_counts", tensor.INT32, ["num_tokens"]),
+        helper.make_tensor_value_info(status_output, tensor.INT32, ["num_tokens"]),
     ]
     if persistent_state:
         state_names = {
@@ -386,10 +387,11 @@ def test_indexshare_persistent_state_and_shrinking_batch(tmp_path, capture):
 
 
 @pytest.mark.skipif(not og.is_cuda_available(), reason="Requires CUDA")
-def test_indexshare_status_rejects_chain_before_publication(tmp_path):
+@pytest.mark.parametrize("status_output", ["indexer_status", "selection_status"])
+def test_indexshare_status_rejects_chain_before_publication(tmp_path, status_output):
     if not _has_indexer_merge():
         pytest.skip("Requires an ORT runtime with PackedSparseAttentionIndexerMerge")
-    model = _make_indexshare_mtp_model(tmp_path, merge_capacity=1)
+    model = _make_indexshare_mtp_model(tmp_path, merge_capacity=1, status_output=status_output)
     engine = og.Engine(model)
     sink = _Sink()
     sinks = {}

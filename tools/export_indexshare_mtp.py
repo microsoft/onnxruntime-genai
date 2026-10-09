@@ -42,13 +42,14 @@ def export_package(source, output, max_draft_tokens=7):
         mtp.pop("max_draft_tokens", None)
         mtp["base_capacity"] = metadata["base_capacity"]
         inputs = mtp.setdefault("inputs", {})
-        inputs["past_indices"] = "indexshare.past_indices"
-        inputs["past_counts"] = "indexshare.past_counts"
+        inputs["past_indices"] = "past_indices"
+        inputs["past_counts"] = "past_counts"
         outputs = mtp.setdefault("outputs", {})
         outputs.pop("indices", None)
         outputs.pop("counts", None)
         outputs["present_indices"] = metadata["indices_output"]
         outputs["present_counts"] = metadata["counts_output"]
+        outputs["indexer_status"] = metadata["status_output"]
         config.setdefault("speculative", {}).setdefault("max_draft_tokens", metadata["max_draft_tokens"])
         with (output / "genai_config.json").open("w") as config_file:
             config_file.write(serialize_genai_config(config))

@@ -120,7 +120,9 @@ def test_single_model_selection_io(mtp_graph, draft_count, quantized_projection)
     model = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
     onnx.checker.check_model(str(mtp_graph / "mtp.onnx"), check_custom_domain=False)
     assert metadata["enabled"] is True
-    assert set(metadata) == {"enabled", "base_capacity", "max_draft_tokens", "indices_output", "counts_output"}
+    assert set(metadata) == {
+        "enabled", "base_capacity", "max_draft_tokens", "indices_output", "counts_output", "status_output",
+    }
     assert {path.name for path in mtp_graph.glob("*.onnx")} == {"mtp.onnx"}
     assert not any(node.op_type == "If" for node in model.graph.node)
     merge = next(node for node in model.graph.node if node.op_type == "PackedSparseAttentionIndexerMerge")
@@ -128,7 +130,7 @@ def test_single_model_selection_io(mtp_graph, draft_count, quantized_projection)
     assert list(merge.output) == [merge.name + suffix for suffix in ("/output_0", "/output_1", "/status")]
     assert {attribute.name for attribute in merge.attribute} == {"policy_mode", "max_output_entries"}
     indexer = next(node for node in model.graph.node if node.op_type == "PackedSparseAttentionIndexer")
-    assert list(indexer.input[18:22]) == ["indexshare.mode", *merge.output]
+    assert list(indexer.input[18:22]) == ["mode", *merge.output]
     assert indexer.input[:2] == ["index_qk", ""]
     assert len([node for node in model.graph.node if node.op_type == "PackedSparseAttentionIndexer"]) == 1
     assert len([node for node in model.graph.node if node.op_type == "SparsePagedAttention"]) == 1
@@ -137,29 +139,32 @@ def test_single_model_selection_io(mtp_graph, draft_count, quantized_projection)
     projection = next(node for node in model.graph.node if gather.output[0] in node.input)
     assert projection.op_type == ("MatMulNBits" if quantized_projection else "MatMul")
     assert projection.input[0] == gather.output[0]
-    assert list(gather.input) == ["hidden", "indexshare.projection_rows"]
-    assert "indexshare.base_row_indices" in {value.name for value in model.graph.input}
+    assert list(gather.input) == ["hidden", "projection_rows"]
+    assert "base_row_indices" in {value.name for value in model.graph.input}
     output_names = {value.name for value in model.graph.output}
-    assert {"logits", "indexshare.status", "indexshare.present_indices", "indexshare.present_counts", "constant_output"} <= output_names
-    assert {"indexshare.past_indices", "indexshare.past_counts"} <= {value.name for value in model.graph.input}
-    assert list(merge.input[:2]) == ["indexshare.past_indices", "indexshare.past_counts"]
-    assert metadata["indices_output"] == "indexshare.present_indices"
-    assert metadata["counts_output"] == "indexshare.present_counts"
-    assert list(indexer.output[:2]) == ["indexshare.present_indices", "indexshare.present_counts"]
-    assert indexer.output[7] == "indexshare.status"
+    assert {"logits", "indexer_status", "present_indices", "present_counts", "constant_output"} <= output_names
+    assert {"past_indices", "past_counts"} <= {value.name for value in model.graph.input}
+    assert list(merge.input[:2]) == ["past_indices", "past_counts"]
+    assert metadata["indices_output"] == "present_indices"
+    assert metadata["counts_output"] == "present_counts"
+    assert list(indexer.output[:2]) == ["present_indices", "present_counts"]
+    assert indexer.output[7] == "indexer_status"
+    assert metadata["status_output"] == "indexer_status"
     attention = next(node for node in model.graph.node if node.op_type == "SparsePagedAttention")
     assert list(attention.input[9:11]) == list(indexer.output[:2])
     assert not any(node.op_type == "Identity" and set(node.output).intersection(indexer.output[:2]) for node in model.graph.node)
     unused = {"split_sizes", "unused_constant", "unused.initializer"}
     assert not any(unused.intersection(node.output) for node in model.graph.node)
     assert not any(value.name in unused for value in model.graph.initializer)
-    for public_name in ("indexshare.present_indices", "indexshare.present_counts"):
+    for public_name in ("present_indices", "present_counts"):
         value = next(value for value in model.graph.output if value.name == public_name)
         assert value.type.tensor_type.elem_type == TensorProto.INT32
         assert value.type.tensor_type.shape.dim[0].dim_param == "num_tokens"
-        if public_name == "indexshare.present_indices":
+        if public_name == "present_indices":
             assert value.type.tensor_type.shape.dim[1].dim_value == metadata["base_capacity"] + draft_count - 1
-    assert not any(name.startswith("indexshare.decode.") for name in output_names)
+    graph_names = output_names | {value.name for value in model.graph.input}
+    graph_names.update(name for node in model.graph.node for name in (*node.input, *node.output))
+    assert not any(name.startswith("indexshare.") for name in graph_names)
     assert (mtp_graph / "mtp.onnx.data").read_bytes() == weight_bytes
     originals = {value.name: value.SerializeToString() for value in source.graph.initializer}
     for value in model.graph.initializer:
@@ -176,8 +181,8 @@ def test_rejects_already_converted_graph(mtp_graph):
 
 
 @pytest.mark.parametrize("reserved_name", [
-    "indexshare.past_indices", "indexshare.past_counts",
-    "indexshare.present_indices", "indexshare.present_counts", "indexshare.status",
+    "past_indices", "past_counts", "present_indices", "present_counts", "indexer_status",
+    "mode", "projection_rows", "base_row_indices", "range_starts", "range_ends",
 ])
 def test_rejects_indexshare_name_collision(mtp_graph, reserved_name):
     model = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
@@ -223,10 +228,11 @@ def test_qwen_indexshare_config_and_session_options(mtp_graph, ep, paged, cuda_g
     assert mtp["base_capacity"] == metadata["base_capacity"]
     assert "max_draft_tokens" not in mtp
     assert config["speculative"]["max_draft_tokens"] == 7
-    assert mtp["inputs"]["past_indices"] == "indexshare.past_indices"
-    assert mtp["inputs"]["past_counts"] == "indexshare.past_counts"
-    assert mtp["outputs"]["present_indices"] == "indexshare.present_indices"
-    assert mtp["outputs"]["present_counts"] == "indexshare.present_counts"
+    assert mtp["inputs"]["past_indices"] == "past_indices"
+    assert mtp["inputs"]["past_counts"] == "past_counts"
+    assert mtp["outputs"]["present_indices"] == "present_indices"
+    assert mtp["outputs"]["present_counts"] == "present_counts"
+    assert mtp["outputs"]["indexer_status"] == "indexer_status"
     assert '"eos_token_id": [11, 12]' in config_path.read_text()
     expected_options = {
         "ep.cuda.fpa_intb_gemm": "1",
@@ -292,10 +298,11 @@ def test_side_by_side_package_does_not_touch_source(mtp_graph):
     assert mtp_config["base_capacity"] == metadata["base_capacity"]
     assert "max_draft_tokens" not in mtp_config
     assert config["speculative"]["max_draft_tokens"] == 3
-    assert mtp_config["inputs"]["past_indices"] == "indexshare.past_indices"
-    assert mtp_config["inputs"]["past_counts"] == "indexshare.past_counts"
-    assert mtp_config["outputs"]["present_indices"] == "indexshare.present_indices"
-    assert mtp_config["outputs"]["present_counts"] == "indexshare.present_counts"
+    assert mtp_config["inputs"]["past_indices"] == "past_indices"
+    assert mtp_config["inputs"]["past_counts"] == "past_counts"
+    assert mtp_config["outputs"]["present_indices"] == "present_indices"
+    assert mtp_config["outputs"]["present_counts"] == "present_counts"
+    assert mtp_config["outputs"]["indexer_status"] == "indexer_status"
     for path in mtp_graph.iterdir():
         assert path.read_bytes() == source_bytes[path.name]
     with pytest.raises(ValueError, match="must not exist"):

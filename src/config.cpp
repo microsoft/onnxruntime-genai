@@ -124,7 +124,8 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.shared_initializers = mtp.shared_initializers;
   if (mtp.index_share.enabled || mtp.index_share.base_capacity != 0) {
     if (mtp.index_share.indices_input.empty() || mtp.index_share.counts_input.empty() ||
-      mtp.index_share.indices_output.empty() || mtp.index_share.counts_output.empty() ||
+        mtp.index_share.indices_output.empty() || mtp.index_share.counts_output.empty() ||
+        mtp.index_share.status_output.empty() ||
         mtp.index_share.base_capacity <= 0 || mtp.index_share.max_draft_tokens < 1 ||
         mtp.index_share.max_draft_tokens > 7 ||
         mtp.index_share.base_capacity > std::numeric_limits<int>::max() - mtp.index_share.max_draft_tokens + 1) {
@@ -1182,6 +1183,8 @@ struct MtpOutputs_Element : JSON::Element {
       index_share_.indices_output = JSON::Get<std::string_view>(value);
     } else if (name == "present_counts") {
       index_share_.counts_output = JSON::Get<std::string_view>(value);
+    } else if (name == "indexer_status") {
+      index_share_.status_output = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

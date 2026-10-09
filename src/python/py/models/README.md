@@ -657,20 +657,20 @@ budgets `1` through the exported limit all use the same IndexShare-enabled MTP
 session. `indexshare_mtp=false` explicitly exports the older non-IndexShare
 model instead. Existing older exports are unchanged.
 
-The unversioned IndexShare contract adds CPU `indexshare.mode`, GPU int64
-`indexshare.projection_rows`, frozen `indexshare.past_indices`/`indexshare.past_counts`,
-`indexshare.base_row_indices`, and `indexshare.range_starts`/`range_ends`.
+The unversioned IndexShare contract adds CPU `mode`, GPU int64
+`projection_rows`, frozen `past_indices`/`past_counts`,
+`base_row_indices`, and `range_starts`/`range_ends`.
 Refresh selects all projection rows and supplies zero merge rows; reuse selects
 zero projection rows and merges one query per active request. A standalone
 `PackedSparseAttentionIndexerMerge` feeds the extended
 `PackedSparseAttentionIndexer`, which accepts packed Q/K without a Split.
 Every forward uses the same session, decoder body, output names and state
-interface, including `indexshare.present_indices`, `indexshare.present_counts`,
-and `indexshare.status`, produced directly by the indexer without Identity aliases.
+interface, including `present_indices`, `present_counts`,
+and `indexer_status`, produced directly by the indexer without Identity aliases.
 Export removes unused Constant nodes and initializers while preserving live
 constants and external weight payloads.
 The MTP config maps `inputs.past_indices`/`past_counts` and
-`outputs.present_indices`/`present_counts` to those graph names. The requested
+`outputs.present_indices`/`present_counts`/`indexer_status` to those graph names. The requested
 draft limit is specified only by `speculative.max_draft_tokens`; the runtime
 derives the exported IndexShare capacity from the graph rather than a second
 MTP draft limit. Older IndexShare config aliases are not accepted.
