@@ -42,6 +42,27 @@ std::vector<int64_t> SqueezeToRank2(const std::vector<int64_t>& shape) {
   return squeezed;
 }
 
+void ApplyVisionRunOption(OrtRunOptions& options, const char* key, const char* value) {
+  if (strcmp(key, "terminate_session") == 0) {
+    if (strcmp(value, "1") == 0) {
+      options.SetTerminate();
+    } else {
+      options.UnsetTerminate();
+    }
+  } else if (strcmp(key, "enable_profiling") == 0) {
+#if ORT_API_VERSION >= 25
+    if (strcmp(value, "0") == 0) {
+      options.DisableProfiling();
+    } else {
+      const char* prefix = strcmp(value, "1") == 0 ? "onnxruntime_run_profile" : value;
+      options.EnableProfiling(fs::path(prefix).c_str());
+    }
+#endif
+  } else {
+    options.AddConfigEntry(key, value);
+  }
+}
+
 }  // namespace
 
 Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -160,6 +181,31 @@ Qwen2_5_VL_PipelineState::Qwen2_5_VL_PipelineState(const Qwen2_5_VL_PipelineMode
                                                    const GeneratorParams& params)
     : DecoderOnlyPipelineState(model, sequence_lengths, params), vl_model_{model} {
   InitializeFeatureInputs();
+  if (vl_model_.vision_projector_session_) {
+    const auto& vision = vl_model_.config_->model.vision;
+    auto stage_run_options = [&](size_t index) {
+      auto options = OrtRunOptions::Create();
+      const auto& configured = vision.pipeline[index].run_options.has_value()
+                                   ? vision.pipeline[index].run_options
+                                   : vision.run_options;
+      if (configured) {
+        for (const auto& [key, value] : *configured) {
+          options->AddConfigEntry(key.c_str(), value.c_str());
+        }
+      }
+      return options;
+    };
+    encoder_run_options_ = stage_run_options(0);
+    projector_run_options_ = stage_run_options(1);
+  }
+}
+
+void Qwen2_5_VL_PipelineState::SetRunOption(const char* key, const char* value) {
+  State::SetRunOption(key, value);
+  if (encoder_run_options_) {
+    ApplyVisionRunOption(*encoder_run_options_, key, value);
+    ApplyVisionRunOption(*projector_run_options_, key, value);
+  }
 }
 
 void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
@@ -504,20 +550,6 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   const char* output_name_ptrs[] = {final_output_names[output_index].c_str()};
 
   const auto& vision = vl_model_.config_->model.vision;
-  auto stage_run_options = [&](size_t index) {
-    auto options = OrtRunOptions::Create();
-    const auto& configured = vision.pipeline[index].run_options.has_value()
-                                 ? vision.pipeline[index].run_options
-                                 : vision.run_options;
-    if (configured) {
-      for (const auto& [key, value] : *configured) {
-        options->AddConfigEntry(key.c_str(), value.c_str());
-      }
-    }
-    return options;
-  };
-  auto encoder_options = split_vision ? stage_run_options(0) : OrtRunOptions::Create();
-  auto projector_options = split_vision ? stage_run_options(1) : OrtRunOptions::Create();
   const char* encoder_output_name[] = {split_vision ? output_names[0].c_str() : output_name_ptrs[0]};
 
   if (!split_vision && vision.run_options.has_value()) {
@@ -525,14 +557,14 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   }
   auto run_encoder = [&]() {
     OrtValue* raw_output = nullptr;
-    vl_model_.vision_session_->Run(split_vision ? encoder_options.get() : run_options_.get(),
+    vl_model_.vision_session_->Run(split_vision ? encoder_run_options_.get() : run_options_.get(),
                                    input_name_ptrs.data(), input_values.data(),
                                    input_name_ptrs.size(), encoder_output_name, &raw_output, 1);
     std::unique_ptr<OrtValue> owned(raw_output);
     if (split_vision) {
       projector_values[encoder_output_index] = owned.get();
       raw_output = nullptr;
-      vl_model_.vision_projector_session_->Run(projector_options.get(), projector_names.data(),
+      vl_model_.vision_projector_session_->Run(projector_run_options_.get(), projector_names.data(),
                                                projector_values.data(), projector_names.size(),
                                                output_name_ptrs, &raw_output, 1);
       owned.reset(raw_output);

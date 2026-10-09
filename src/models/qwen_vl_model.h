@@ -61,6 +61,7 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
                            const GeneratorParams& params);
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  void SetRunOption(const char* key, const char* value) override;
 
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
@@ -103,6 +104,8 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
   std::unique_ptr<OrtValue> image_feature_input_;
   std::unique_ptr<OrtValue> image_feature_cast_;
   std::unique_ptr<OrtValue> audio_feature_input_;
+  std::unique_ptr<OrtRunOptions> encoder_run_options_;
+  std::unique_ptr<OrtRunOptions> projector_run_options_;
 };
 
 }  // namespace Generators

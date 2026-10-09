@@ -1563,7 +1563,21 @@ def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fi
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=4096)
     generator = og.Generator(model, params)
+    profile_split_vision = fixed_patches and position_dtype == np.int32
+    if profile_split_vision:
+        generator.set_runtime_option("enable_profiling", os.fspath(tmp_path / "pipeline_vision_profile"))
     generator.set_inputs(inputs)
+    if profile_split_vision:
+        profiles = list(tmp_path.glob("pipeline_vision_profile*.json"))
+        assert profiles
+        node_names = {
+            event["name"]
+            for path in profiles
+            for event in json.loads(path.read_text(encoding="utf-8"))
+            if event.get("cat") == "Node"
+        }
+        assert any("Identity" in name for name in node_names)
+        assert any("GatherND" in name for name in node_names)
     pixel_values = _to_numpy(inputs["pixel_values"])
     positions = _to_numpy(inputs["pixel_position_ids"])
     _assert_split_position_ids(source_model_path, prompt, images, positions, position_dtype)
@@ -1579,6 +1593,11 @@ def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fi
     np.testing.assert_array_equal(generator.get_output("inputs_embeds"), expected_embeds)
     generator.generate_next_token()
     assert len(generator.get_next_tokens()) == 1
+    if profile_split_vision:
+        cancelled = og.Generator(model, params)
+        cancelled.set_runtime_option("terminate_session", "1")
+        with pytest.raises(RuntimeError, match="[Tt]erminat"):
+            cancelled.set_inputs(inputs)
 
 
 def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(
