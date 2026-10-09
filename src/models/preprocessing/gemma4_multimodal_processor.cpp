@@ -188,9 +188,21 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
 
 Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
+  // gemma-4-12B "unified" is encoder-free: it consumes raw 48px merged pixel
+  // patches (patch_dim 6912) and raw 640-sample waveform frames directly. The
+  // preprocessing ops (Gemma4ImageTransform at patch_size=48/pooling=1 and
+  // Gemma4UnifiedAudioFrames) already emit the final contract, so — unlike the
+  // SigLIP/log-mel "gemma4" path — no pixel trimming or conv-subsampling of the
+  // audio-token count is applied.
+  unified_ = config.model.type == "gemma4_unified";
+
   // Query pixel_position_ids type (int32 or int64) if the vision model has this input
   if (session_info.HasInput(config.model.vision.inputs.pixel_position_ids)) {
     pixel_position_ids_type_ = session_info.GetInputDataType(config.model.vision.inputs.pixel_position_ids);
+    if (pixel_position_ids_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 &&
+        pixel_position_ids_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+      throw std::runtime_error("Gemma4 pixel_position_ids input must have type INT32 or INT64");
+    }
   }
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
@@ -298,14 +310,14 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
 
     // OrtxTensorResultGetAt allocates a new TensorObject the caller owns; wrap in OrtxObjectPtr to dispose.
-    ort_extensions::OrtxObjectPtr<OrtxTensor> audio_features_owner;
+    ort_extensions::OrtxObjectPtr<OrtxTensor> audio_features_owner, audio_attention_mask_owner;
     CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, audio_features_owner.ToBeAssigned()));
+    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 1, audio_attention_mask_owner.ToBeAssigned()));
     OrtxTensor* audio_features = audio_features_owner.get();
+    OrtxTensor* audio_attention_mask = audio_attention_mask_owner.get();
 
     EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
 
-    // Create input_features_mask: all-True for single-clip inference (no padding)
-    // Shape matches audio features: [batch, time] bool
     const float* audio_data{};
     const int64_t* audio_shape{};
     size_t audio_dims;
@@ -319,17 +331,23 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
           "but received " +
           std::to_string(batch_dim) + " clips.");
     }
-    {
-      auto mask = OrtValue::CreateTensor<bool>(allocator, std::vector<int64_t>{batch_dim, time_dim});
-      std::fill_n(mask->GetTensorMutableData<bool>(), batch_dim * time_dim, true);
-      named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
-                             std::make_shared<Tensor>(std::move(mask)));
-    }
+    // Preserve the extractor's actual mask. Current single-clip frames are all
+    // valid; retaining the mask also respects padding bounds if batching evolves.
+    named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
+                           std::make_shared<Tensor>(ProcessTensor<bool>(audio_attention_mask, allocator)));
 
-    // Compute audio_sizes: the speech encoder uses 2-stage Conv2d with stride=2 each
-    int64_t t_after_1 = (time_dim - 1) / 2 + 1;
-    int64_t t_after_2 = (t_after_1 - 1) / 2 + 1;
-    num_audio_tokens = t_after_2;
+    // Compute audio_sizes / audio-token count.
+    // Unified: each 640-sample frame is exactly one audio soft token, so the
+    // token count equals the number of frames (time_dim) — no subsampling.
+    // Standard gemma4: the Conformer speech encoder applies 2-stage Conv2d with
+    // stride=2 each, so the token count is reduced accordingly.
+    if (unified_) {
+      num_audio_tokens = time_dim;
+    } else {
+      int64_t t_after_1 = (time_dim - 1) / 2 + 1;
+      int64_t t_after_2 = (t_after_1 - 1) / 2 + 1;
+      num_audio_tokens = t_after_2;
+    }
     std::array<int64_t, 1> audio_sizes_shape = {1};
     auto audio_sizes = OrtValue::CreateTensor<int64_t>(allocator, audio_sizes_shape);
     audio_sizes->GetTensorMutableData<int64_t>()[0] = num_audio_tokens;
@@ -345,8 +363,15 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
   if (payload.images) {
     // The Gemma4ImageTransform pads pixel_values and position_ids to max_patches.
-    // The vision ONNX model expects the actual (unpadded) number of patches.
-    // Trim the tensors to actual_patches = actual_soft_tokens * pooling_kernel_size².
+    //
+    // Standard gemma4: the SigLIP vision ONNX expects the actual (unpadded)
+    // number of teacher patches, so the tensors are trimmed to
+    // actual_patches = actual_soft_tokens * pooling_kernel_size².
+    //
+    // Unified (gemma4_unified): the encoder-free vision graph consumes the full
+    // padded (max_soft_tokens, 6912) tensors and strips padding internally using
+    // position_ids (== -1 marks padding). No trimming is applied; actual_patches
+    // is computed but the trim branches below are gated on !unified_.
     constexpr int64_t kPoolingKernelSize = 3;
     const int64_t actual_patches = static_cast<int64_t>(max_soft_tokens) * kPoolingKernelSize * kPoolingKernelSize;
 
@@ -361,7 +386,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     const int64_t num_padded_patches = (pv_dims == 3) ? pv_shape[1] : pv_shape[0];
     const int64_t patch_dim = (pv_dims == 3) ? pv_shape[2] : pv_shape[1];
 
-    if (actual_patches < num_padded_patches) {
+    if (!unified_ && actual_patches < num_padded_patches) {
       // Trim: copy only the first actual_patches from the padded tensor.
       // The preprocessor outputs float32 data, so we trim using float32 strides,
       // then cast to the model's pixel_values type (float, fp16, or bf16).
@@ -406,33 +431,34 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       const int64_t num_padded_pos = (pos_dims == 3) ? pos_shape[1] : pos_shape[0];
       const int64_t pos_last_dim = (pos_dims == 3) ? pos_shape[2] : pos_shape[1];
 
-      if (actual_patches < num_padded_pos) {
-        // Trim position_ids: for 3D, copy per-batch with correct stride.
-        // Detect the element type from the vision model's input to handle both int32 and int64.
-        const int64_t pos_batch = (pos_dims == 3) ? pos_shape[0] : 1;
-        auto trimmed_pos_shape = (pos_dims == 3) ? std::vector<int64_t>{pos_batch, actual_patches, pos_last_dim}
-                                                 : std::vector<int64_t>{actual_patches, pos_last_dim};
-
-        auto trimmed_pos = OrtValue::CreateTensor(allocator, trimmed_pos_shape, pixel_position_ids_type_);
-        const size_t pos_elem_size = (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) ? 4 : 8;
-        auto* dst = static_cast<uint8_t*>(trimmed_pos->GetTensorMutableRawData());
-        const auto* src = static_cast<const uint8_t*>(pos_data_raw);
-        const size_t src_stride = static_cast<size_t>(num_padded_pos * pos_last_dim) * pos_elem_size;
-        const size_t dst_stride = static_cast<size_t>(actual_patches * pos_last_dim) * pos_elem_size;
+      // Gemma4ImageTransform always emits INT64 positions, regardless of the
+      // graph's requested type. Use source-element strides for both trimmed
+      // standard grids and full padded unified grids, converting values rather
+      // than reinterpreting the source bytes when the graph expects INT32.
+      const int64_t pos_batch = (pos_dims == 3) ? pos_shape[0] : 1;
+      const int64_t output_patches = (!unified_ && actual_patches < num_padded_pos)
+                                         ? actual_patches
+                                         : num_padded_pos;
+      auto output_pos_shape = (pos_dims == 3) ? std::vector<int64_t>{pos_batch, output_patches, pos_last_dim}
+                                              : std::vector<int64_t>{output_patches, pos_last_dim};
+      auto output_pos = OrtValue::CreateTensor(allocator, output_pos_shape, pixel_position_ids_type_);
+      const auto* src = static_cast<const int64_t*>(pos_data_raw);
+      const size_t src_stride = static_cast<size_t>(num_padded_pos * pos_last_dim);
+      const size_t dst_stride = static_cast<size_t>(output_patches * pos_last_dim);
+      if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+        auto* dst = output_pos->GetTensorMutableData<int32_t>();
         for (int64_t b = 0; b < pos_batch; ++b) {
-          std::memcpy(dst + b * dst_stride, src + b * src_stride, dst_stride);
+          std::transform(src + b * src_stride, src + b * src_stride + dst_stride,
+                         dst + b * dst_stride, [](int64_t value) { return static_cast<int32_t>(value); });
         }
-        named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
-                               std::make_shared<Tensor>(std::move(trimmed_pos)));
-      } else {
-        if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-          named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
-                                 std::make_shared<Tensor>(ProcessTensor<int32_t>(pixel_position_ids, allocator)));
-        } else {
-          named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
-                                 std::make_shared<Tensor>(ProcessTensor<int64_t>(pixel_position_ids, allocator)));
+      } else if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+        auto* dst = output_pos->GetTensorMutableData<int64_t>();
+        for (int64_t b = 0; b < pos_batch; ++b) {
+          std::copy_n(src + b * src_stride, dst_stride, dst + b * dst_stride);
         }
       }
+      named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
+                             std::make_shared<Tensor>(std::move(output_pos)));
     }
   }
 
