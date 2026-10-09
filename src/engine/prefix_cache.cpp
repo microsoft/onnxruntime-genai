@@ -69,7 +69,8 @@ uint64_t PrefixCache::ChainHash(uint64_t parent_hash, std::span<const int32_t> t
 PrefixCache::PrefixCache(BlockPool& block_pool, PrefixCacheOptions options)
     : block_pool_{block_pool},
       options_{options},
-      entries_by_block_id_(block_pool.Capacity()) {
+      entries_by_block_id_(block_pool.Capacity()),
+      leased_ancestry_(block_pool.Capacity()) {
   entries_.reserve(options_.max_blocks);
   entries_by_hash_.reserve(options_.max_blocks);
   checkpoint_entries_.reserve(options_.max_checkpoints);
@@ -402,11 +403,15 @@ PrefixCache::CheckpointedPrefixPlan PrefixCache::PlanCheckpointedPrefix(
     return plan;
   }
   size_t retained_after_retirement = entries_.size() - plan.retiring_block_ids.size();
+  const size_t protected_blocks =
+      retained_after_retirement + blocks.size() > options_.max_blocks
+          ? MarkLeasedReclaimableBlocks()
+          : 0;
   for (auto* entry : reclaimable_entries_) {
     if (retained_after_retirement + blocks.size() <= options_.max_blocks) {
       break;
     }
-    if (!IsProtectedByLeasedCheckpoint(*entry) &&
+    if ((protected_blocks == 0 || !leased_ancestry_[entry->block->Id()]) &&
         std::find(plan.retiring_block_ids.begin(), plan.retiring_block_ids.end(),
                   entry->block->Id()) == plan.retiring_block_ids.end()) {
       plan.retiring_block_ids.push_back(entry->block->Id());
@@ -736,19 +741,19 @@ size_t PrefixCache::ReclaimableCheckpoints() const {
 }
 
 size_t PrefixCache::Reclaim(size_t blocks_needed) {
+  if (blocks_needed == 0) {
+    return 0;
+  }
+  const size_t protected_blocks = MarkLeasedReclaimableBlocks();
   size_t reclaimed = 0;
-  while (reclaimed < blocks_needed) {
-    const auto candidate = std::find_if(
-        reclaimable_entries_.begin(), reclaimable_entries_.end(),
-        [this](const Entry* entry) {
-          return entry && !IsProtectedByLeasedCheckpoint(*entry);
-        });
-    if (candidate == reclaimable_entries_.end()) {
-      break;
-    }
-    Entry* entry = *candidate;
+  auto candidate = reclaimable_entries_.begin();
+  while (reclaimed < blocks_needed && candidate != reclaimable_entries_.end()) {
+    Entry* entry = *candidate++;
     if (!entry || !entry->reclaimable || entry->block->RefCount() != 1) {
       throw std::logic_error("Prefix cache reclaimable order contains an invalid entry.");
+    }
+    if (protected_blocks != 0 && leased_ancestry_[entry->block->Id()]) {
+      continue;
     }
     const auto entry_it = entries_.find(entry->block->Id());
     if (entry_it == entries_.end()) {
@@ -762,11 +767,7 @@ size_t PrefixCache::Reclaim(size_t blocks_needed) {
 }
 
 size_t PrefixCache::ReclaimableBlocks() const {
-  return static_cast<size_t>(std::count_if(
-      reclaimable_entries_.begin(), reclaimable_entries_.end(),
-      [this](const Entry* entry) {
-        return entry && !IsProtectedByLeasedCheckpoint(*entry);
-      }));
+  return reclaimable_entries_.size() - MarkLeasedReclaimableBlocks();
 }
 
 void PrefixCache::Reorder(Entry& entry, const std::shared_ptr<const BlockIdentity>& parent) {
@@ -957,19 +958,37 @@ bool PrefixCache::HasRetainedPhysicalPath(
   return true;
 }
 
-bool PrefixCache::IsProtectedByLeasedCheckpoint(const Entry& entry) const {
+size_t PrefixCache::MarkLeasedReclaimableBlocks() const {
+  if (reclaimable_entries_.empty()) {
+    return 0;
+  }
+  bool initialized = false;
+  size_t protected_blocks = 0;
   for (const auto* endpoint : checkpoint_entries_) {
     if ((!endpoint->checkpoint || endpoint->checkpoint.use_count() == 1) &&
         (!endpoint->draft_checkpoint || endpoint->draft_checkpoint.use_count() == 1)) {
       continue;
     }
+    if (!initialized) {
+      std::fill(leased_ancestry_.begin(), leased_ancestry_.end(), uint8_t{0});
+      initialized = true;
+    }
     for (auto identity = endpoint->identity; identity; identity = identity->parent) {
-      if (identity == entry.identity) {
-        return true;
+      const auto* entry = FindEntry(identity);
+      if (!entry) {
+        continue;
+      }
+      auto& marked = leased_ancestry_[entry->block->Id()];
+      if (marked) {
+        break;
+      }
+      marked = 1;
+      if (entry->reclaimable) {
+        ++protected_blocks;
       }
     }
   }
-  return false;
+  return protected_blocks;
 }
 
 bool PrefixCache::IsCheckpointUnleased(const Entry& entry) {
