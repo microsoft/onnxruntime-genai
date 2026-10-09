@@ -109,6 +109,7 @@ struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
+struct OgaEngineOptions : Generators::EngineOptions, OgaAbstract {};
 struct OgaEngineCapabilities : Generators::EngineCapabilities, OgaAbstract {};
 struct OgaEngineEvent : Generators::EngineEvent, OgaAbstract {};
 struct OgaEngineEventBuffer : Generators::EngineEventBuffer, OgaAbstract {};
@@ -1465,6 +1466,11 @@ OgaResult* OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters, c
 }
 
 OgaResult* OgaCreateEngine(OgaModel* model, OgaEngine** out) {
+  return OgaCreateEngineWithOptions(model, nullptr, out);
+}
+
+OgaResult* OgaCreateEngineWithOptions(
+    OgaModel* model, const OgaEngineOptions* options, OgaEngine** out) {
   OGA_TRY
   if (!out) {
     throw std::runtime_error("out must not be null.");
@@ -1473,8 +1479,35 @@ OgaResult* OgaCreateEngine(OgaModel* model, OgaEngine** out) {
   if (!model) {
     throw std::runtime_error("model must not be null.");
   }
-  auto engine = std::make_shared<Generators::Engine>(model->shared_from_this());
+  auto engine = std::make_shared<Generators::Engine>(
+      model->shared_from_this(),
+      options ? Generators::EngineOptions{*options} : Generators::EngineOptions{});
   *out = ReturnShared<OgaEngine>(engine);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaCreateEngineOptions(OgaEngineOptions** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = nullptr;
+  *out = ReturnUnique<OgaEngineOptions>(std::make_unique<Generators::EngineOptions>());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineOptionsSetDflash2MaxSnapshots(
+    OgaEngineOptions* options, size_t max_snapshots) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  if (max_snapshots > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+    throw std::out_of_range("dflash2_max_snapshots must be between 0 and 2147483647.");
+  }
+  options->dflash2_max_snapshots = max_snapshots;
   return nullptr;
   OGA_CATCH
 }
@@ -2173,6 +2206,9 @@ void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete static_cas
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete static_cast<Generators::RuntimeSettings*>(p); }
 void OGA_API_CALL OgaDestroyEngine(OgaEngine* p) { p->ExternalRelease(); }
+void OGA_API_CALL OgaDestroyEngineOptions(OgaEngineOptions* p) {
+  delete static_cast<Generators::EngineOptions*>(p);
+}
 void OGA_API_CALL OgaDestroyEngineCapabilities(OgaEngineCapabilities* p) {
   delete static_cast<Generators::EngineCapabilities*>(p);
 }

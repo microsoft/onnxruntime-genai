@@ -1049,6 +1049,22 @@ struct OgaEngineEventBuffer : OgaAbstract {
   }
 };
 
+struct OgaEngineOptions : OgaAbstract {
+  static std::unique_ptr<OgaEngineOptions> Create() {
+    OgaEngineOptions* options{};
+    OgaCheckResult(OgaCreateEngineOptions(&options));
+    return std::unique_ptr<OgaEngineOptions>(options);
+  }
+
+  void SetDflash2MaxSnapshots(size_t value) {
+    OgaCheckResult(OgaEngineOptionsSetDflash2MaxSnapshots(this, value));
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyEngineOptions(reinterpret_cast<OgaEngineOptions*>(p));
+  }
+};
+
 struct OgaRequestOptions : OgaAbstract {
   static std::unique_ptr<OgaRequestOptions> Create() {
     OgaRequestOptions* options{};
@@ -1200,6 +1216,12 @@ struct OgaEngine : OgaAbstract {
   static std::unique_ptr<OgaEngine> Create(OgaModel& model) {
     OgaEngine* p;
     OgaCheckResult(OgaCreateEngine(&model, &p));
+    return std::unique_ptr<OgaEngine>(p);
+  }
+
+  static std::unique_ptr<OgaEngine> Create(OgaModel& model, const OgaEngineOptions& options) {
+    OgaEngine* p{};
+    OgaCheckResult(OgaCreateEngineWithOptions(&model, &options, &p));
     return std::unique_ptr<OgaEngine>(p);
   }
 

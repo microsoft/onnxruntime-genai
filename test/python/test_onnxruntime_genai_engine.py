@@ -174,6 +174,37 @@ def _generate_isolated(model, prompt, max_new_tokens):
     return sink.tokens
 
 
+@pytest.mark.parametrize("limit", [None, 0, 1, 4, 2147483647])
+def test_engine_construction_options(model, limit):
+    options = og.EngineOptions()
+    if limit is not None:
+        options.set_dflash2_max_snapshots(limit)
+    engine = og.Engine(model, options=options)
+    options.set_dflash2_max_snapshots(0)
+    del options
+    gc.collect()
+    sink = _Sink()
+    sinks = {}
+    _create_request(engine, _PROMPT_A, 3, sink, sinks)
+    _run(engine, sinks)
+    assert sink.tokens == predicted_tokens(_PROMPT_A, 3)
+    assert engine.get_capabilities().configured_max_batch_size == 8
+
+
+def test_engine_options_reject_out_of_range_snapshot_limit():
+    options = og.EngineOptions()
+    with pytest.raises(RuntimeError, match="between 0 and 2147483647"):
+        options.set_dflash2_max_snapshots(2147483648)
+    with pytest.raises(TypeError):
+        options.set_dflash2_max_snapshots(-1)
+    options.set_dflash2_max_snapshots(0)
+
+
+def test_engine_accepts_null_options(model):
+    engine = og.Engine(model, options=None)
+    assert engine.get_capabilities().configured_max_batch_size == 8
+
+
 def test_engine_capabilities(model):
     engine = og.Engine(model)
 

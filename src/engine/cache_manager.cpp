@@ -212,13 +212,14 @@ std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model,
                                                    size_t auxiliary_bytes_per_block,
                                                    size_t auxiliary_reserved_memory_bytes,
                                                    size_t optional_draft_checkpoint_bytes,
-                                                   bool* draft_checkpoint_enabled) {
+                                                   bool* draft_checkpoint_enabled,
+                                                   std::optional<size_t> dflash2_max_snapshots) {
   const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
     auto manager = std::make_unique<PagedCacheManager>(
         model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
-        optional_draft_checkpoint_bytes);
+        optional_draft_checkpoint_bytes, dflash2_max_snapshots);
     if (draft_checkpoint_enabled) {
       *draft_checkpoint_enabled = manager->DraftCheckpointEnabled();
     }
@@ -373,7 +374,8 @@ bool StaticCacheManager::IsResident(const std::shared_ptr<Request>& request) con
 PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
                                      size_t auxiliary_bytes_per_block,
                                      size_t auxiliary_reserved_memory_bytes,
-                                     size_t optional_draft_checkpoint_bytes)
+                                     size_t optional_draft_checkpoint_bytes,
+                                     std::optional<size_t> dflash2_max_snapshots)
     : CacheManager(model),
       params_(std::make_shared<GeneratorParams>(*model_)) {
   // The paged cache resolves its own paged_kv group. The fixed pool is created only when the
@@ -411,7 +413,9 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
     }
     draft_checkpoint_capacity_ = Dflash2PrefixCheckpointCapacity(
         budget, auxiliary_reserved_memory_bytes, optional_draft_checkpoint_bytes,
-        target_block_bytes, std::min(batching.dflash2_max_snapshots, prefix_checkpoint_capacity));
+        target_block_bytes,
+        std::min(dflash2_max_snapshots.value_or(batching.dflash2_max_snapshots),
+                 prefix_checkpoint_capacity));
     auxiliary_reserved_memory_bytes += draft_checkpoint_capacity_ * optional_draft_checkpoint_bytes;
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is

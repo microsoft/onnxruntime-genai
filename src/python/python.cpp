@@ -839,6 +839,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly(
           "cached_prompt_tokens", &OgaTurnUsage::CachedPromptTokens);
 
+  pybind11::class_<OgaEngineOptions>(m, "EngineOptions")
+      .def(pybind11::init([] {
+        return OgaEngineOptions::Create();
+      }))
+      .def("set_dflash2_max_snapshots", &OgaEngineOptions::SetDflash2MaxSnapshots,
+           "Engine-wide snapshot limit overriding package/profile defaults. Zero disables "
+           "drafter snapshots; the effective capacity remains bounded by cache resources.");
+
   pybind11::class_<OgaRequestOptions>(m, "RequestOptions")
       .def(pybind11::init([] {
         return OgaRequestOptions::Create();
@@ -1003,7 +1011,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           &OgaEngineCapabilities::MaxRequestLength);
 
   pybind11::class_<OgaEngine>(m, "Engine")
-      .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
+      .def(pybind11::init([](OgaModel& model, const OgaEngineOptions* options) {
+             return options ? OgaEngine::Create(model, *options) : OgaEngine::Create(model);
+           }),
+           pybind11::arg("model"),
+           pybind11::kw_only(),
+           pybind11::arg("options") = pybind11::none())
       .def(
           "create_request",
           [](OgaEngine& engine, OgaRequestOptions* options) {

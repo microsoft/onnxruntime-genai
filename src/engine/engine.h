@@ -10,6 +10,7 @@
 #include "../dflash2_drafter.h"
 
 #include <random>
+#include <optional>
 #include <thread>
 #include <utility>
 
@@ -34,6 +35,10 @@ struct EngineCapabilities {
   size_t configured_max_batch_size{};
   size_t max_scheduled_tokens{};
   uint64_t max_request_length{};
+};
+
+struct EngineOptions {
+  std::optional<size_t> dflash2_max_snapshots;
 };
 
 enum class EngineErrorCode : uint32_t {
@@ -139,6 +144,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
    * to constructing those collaborators inline.
    */
   Engine(std::shared_ptr<Model> model);
+  Engine(std::shared_ptr<Model> model, const EngineOptions& options);
   ~Engine();
 
   /**
@@ -155,7 +161,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
    * @brief Assembles the Engine's collaborators (cache manager, scheduler, model executor) for a
    *        model, in the order they depend on one another.
    */
-  static EngineDependencies CreateDependencies(std::shared_ptr<Model> model);
+  static EngineDependencies CreateDependencies(std::shared_ptr<Model> model,
+                                               const EngineOptions& options = {});
 
   std::shared_ptr<Request> CreateRequest(const RequestOptions& options);
   std::shared_ptr<Request> CreateRequest() {

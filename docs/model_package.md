@@ -273,7 +273,11 @@ two profiles may share the same memory range with
 `2147483647`, and uses `0` to disable windowed DFlash 2 prefix snapshots without
 disabling target prefix caching. The effective count is limited by the shared
 cache memory budget and target fixed-state checkpoint capacity (`max_batch_size`);
-it is not a guaranteed allocation. See [Engine prefix caching](paged_attention_engine.md)
+it is not a guaranteed allocation. This package/profile value is a default:
+applications may override it with `EngineOptions` at Engine construction, without
+changing the loaded Model. An explicit Engine option takes precedence over the
+selected profile and base configuration, including an explicit `0` opt-out.
+See [Engine prefix caching](paged_attention_engine.md)
 for snapshot capture, lease protection, and replacement behavior.
 
 Omitted fields retain their base values. Every other config field is rejected from a runtime
