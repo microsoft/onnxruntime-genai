@@ -32,13 +32,13 @@ void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float
   ThreadPool::TryParallelFor(
       thread_pool, total_spatial_elements, static_cast<double>(temporal_patch_size),
       [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-        int64_t patch_idx = static_cast<int64_t>(first) / spatial_patch_dim;
-        const int64_t patch_offset = static_cast<int64_t>(first) % spatial_patch_dim;
-        int64_t channel = patch_offset / (patch_size * patch_size);
-        const int64_t patch_pixel = patch_offset % (patch_size * patch_size);
-        int64_t patch_h = patch_pixel / patch_size;
-        int64_t patch_w = patch_pixel % patch_size;
         for (auto output_idx = first; output_idx < last; ++output_idx) {
+          const int64_t patch_idx = static_cast<int64_t>(output_idx) / spatial_patch_dim;
+          const int64_t patch_offset = static_cast<int64_t>(output_idx) % spatial_patch_dim;
+          const int64_t channel = patch_offset / (patch_size * patch_size);
+          const int64_t patch_pixel = patch_offset % (patch_size * patch_size);
+          const int64_t patch_h = patch_pixel / patch_size;
+          const int64_t patch_w = patch_pixel % patch_size;
           const int64_t patch_row = patch_idx / width_patches;
           const int64_t patch_col = patch_idx % width_patches;
           const int64_t source_idx =
@@ -46,16 +46,6 @@ void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float
               (patch_col * patch_size + patch_w) * channels + channel;
           destination[patch_idx * patch_dim + channel * patch_size * patch_size +
                       patch_h * patch_size + patch_w] = source[source_idx];
-          if (++patch_w == patch_size) {
-            patch_w = 0;
-            if (++patch_h == patch_size) {
-              patch_h = 0;
-              if (++channel == channels) {
-                channel = 0;
-                ++patch_idx;
-              }
-            }
-          }
         }
       });
 

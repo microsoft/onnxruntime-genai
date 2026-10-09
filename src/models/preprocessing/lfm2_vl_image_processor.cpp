@@ -116,14 +116,13 @@ void WriteLfm2VlImagePatches(ThreadPool* thread_pool, const float* image, int64_
   ThreadPool::TryParallelFor(
       thread_pool, total_elements, 1.0,
       [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-        int64_t patch_index =
-            static_cast<int64_t>(first) / patch_dim;
-        const int64_t patch_offset = static_cast<int64_t>(first) % patch_dim;
-        const int64_t patch_pixel = patch_offset / channels;
-        int64_t channel = patch_offset % channels;
-        int64_t patch_y = patch_pixel / encoder_patch_size;
-        int64_t patch_x = patch_pixel % encoder_patch_size;
         for (std::ptrdiff_t output_idx = first; output_idx < last; ++output_idx) {
+          const int64_t patch_index = static_cast<int64_t>(output_idx) / patch_dim;
+          const int64_t patch_offset = static_cast<int64_t>(output_idx) % patch_dim;
+          const int64_t patch_pixel = patch_offset / channels;
+          const int64_t channel = patch_offset % channels;
+          const int64_t patch_y = patch_pixel / encoder_patch_size;
+          const int64_t patch_x = patch_pixel % encoder_patch_size;
           const int64_t patch_row = patch_index / geometry.patch_cols;
           const int64_t patch_col = patch_index % geometry.patch_cols;
           const int64_t source_row = patch_row * encoder_patch_size + patch_y;
@@ -131,16 +130,6 @@ void WriteLfm2VlImagePatches(ThreadPool* thread_pool, const float* image, int64_
           destination[output_idx] =
               image[channel * channel_stride +
                     source_row * padded_width + source_col];
-          if (++channel == channels) {
-            channel = 0;
-            if (++patch_x == encoder_patch_size) {
-              patch_x = 0;
-              if (++patch_y == encoder_patch_size) {
-                patch_y = 0;
-                ++patch_index;
-              }
-            }
-          }
         }
       });
 }
