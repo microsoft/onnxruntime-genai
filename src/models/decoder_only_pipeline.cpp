@@ -255,6 +255,8 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     }
     pipeline_state->ClearIO();
 
+    OnStageStart(pipeline_state->id_);
+
     // Managed inputs and outputs are those inputs and outputs that the
     // Model knows how to create and update from one run to the next.
 

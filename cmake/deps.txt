@@ -14,7 +14,7 @@ pybind11;https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.zip;f78029
 googletest;https://github.com/google/googletest/archive/530d5c8c84abd2a46f38583ee817743c9b3a42b4.zip;5e3a61db2aa975cfd0f97ba92c818744e7fa7034
 microsoft_wil;https://github.com/microsoft/wil/archive/refs/tags/v1.0.230629.1.zip;e4a542a323c070376f7c2d1973d0f7ddbc1d2fa5
 directx_headers;https://github.com/microsoft/DirectX-Headers/archive/refs/tags/v1.613.1.zip;47653509a3371eabb156360f42faf582f314bf2e
-onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;0353c93d966d74706724e41ddab63f580eebbbf0
+onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;99fec2db1c0a17de60eb0f1c2353c91f8d5e22ca
 
 # These two dependencies are for the optional constrained decoding feature (USE_GUIDANCE)
 llguidance;https://github.com/microsoft/llguidance.git;94fa39128ef184ffeda33845f6d333f332a34b4d
@@ -22,7 +22,7 @@ corrosion;https://github.com/corrosion-rs/corrosion.git;b1fab721655c5c4b1b08a083
 
 # 1DS SDK (cpp_client_telemetry) for the telemetry feature (ENABLE_TELEMETRY). Used only by
 # the FetchContent path in cmake/telemetry.cmake when no caller-supplied MSTelemetry package is available.
-cpp_client_telemetry;https://github.com/microsoft/cpp_client_telemetry/archive/refs/tags/v3.10.267.1.zip;9d29169b8e51157d44a24a0d6cf6847260ea2efc
+cpp_client_telemetry;https://github.com/microsoft/cpp_client_telemetry/archive/refs/tags/v3.10.279.1.zip;e97ee8f91c9348551d35873da33a18b4e50cf0db
 
 # Transitive 1DS Linux transport dependencies, retained here for dependency inventory generation.
 curl;https://github.com/curl/curl/releases/download/curl-8_21_0/curl-8.21.0.tar.xz;c3b4712175609f1e1662e716efd4fd48901e863d

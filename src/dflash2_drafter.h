@@ -48,8 +48,8 @@ Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device
                           bool* reallocated = nullptr,
                           std::unique_ptr<Tensor>* displaced = nullptr);
 
-// Without a matching ring checkpoint, a new request can join only at position zero.
-bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept;
+// A windowed drafter can rebuild a missing prefix from subsequently recomputed context rows.
+bool Dflash2CanJoin(bool draft_eligible, size_t first_position, size_t context_window = 0) noexcept;
 
 TargetTokenSelection Dflash2IndependentDraftDistribution(
     const int32_t* candidate_ids, const float* logits, size_t top_k,
@@ -181,10 +181,12 @@ struct Dflash2Drafter {
    * @param aux_hidden_states The target's packed [token_count, aux_hidden_size] output.
    * @param drafts Resized to feeds.size(); entry i is empty unless feeds[i] was served and asked.
    *
-   * A request joins at position zero or with a restored windowed checkpoint,
-   * and keeps its cache blocks until Release. Requests that arrive once the pool is fully subscribed
-   * are skipped for good rather than failing the step, so they decode without block drafts. A tracked
-   * request continues feeding context during sampled turns so a later greedy turn can resume drafting.
+   * A request joins at position zero, with a restored windowed checkpoint, or by rebuilding a
+   * window from recomputed target rows. A rebuilding request cannot draft or capture a prefix until
+   * its complete attention window is available. Every admitted request keeps its cache blocks until
+   * Release. Requests that arrive once the pool is fully subscribed decode without block drafts;
+   * a windowed request can rebuild after capacity becomes available. A tracked request continues
+   * feeding context during sampled turns so a later greedy turn can resume drafting.
    */
   // Returns true only when the drafter session executed. A feed that wants its lattice gets it in
   // `lattices` instead of a greedy path, so the caller can sample it with the request's RNG.
@@ -198,16 +200,18 @@ struct Dflash2Drafter {
 
   // Drops every tracked request's cache state and returns its blocks. Used after a recoverable
   // proposal failure: the drafter's cached context is no longer contiguous with the target for any
-  // in-flight request, and a request can only rejoin from position zero, so those requests finish
-  // without drafts while requests admitted later still get them.
+  // in-flight request. Windowed requests can rebuild a complete window before resuming drafts;
+  // full-attention requests can only rejoin from position zero.
   void ReleaseAll();
 
  private:
   struct RequestState {
     std::vector<int32_t> blocks;
     size_t cached_positions{};  // Logical committed cursor; a windowed ring retains only its live tail.
+    size_t context_start{};     // Nonzero when rebuilding after a target-only prefix hit.
   };
 
+  bool HasContext(const RequestState& state, size_t end_position) const noexcept;
   // Whether the drafter can carry this feed's request, admitting it to the pool when it can.
   bool Admit(const Feed& feed);
   bool RestorePrefix(const Feed& feed);
