@@ -4076,11 +4076,68 @@ TEST_F(EngineRunTest, HybridBranchBetweenCheckpointsPublishesItsLongerSuffix) {
   finish(seed, 16);
   finish(prompt, 8);
   finish(prompt, 24);
-  finish(seed, 8);
+  // Both physical histories and their fixed-state endpoints now fit in the bounded budgets.
+  // Alternating branches must preserve each warm endpoint instead of replacing the other branch.
   finish(seed, 16);
-  finish(prompt, 8);
+  finish(seed, 16);
+  finish(prompt, 24);
   finish(prompt, 24);
   EXPECT_EQ(engine.engine->PrefixCacheStats()->duplicate_registrations, 0u);
+  EXPECT_EQ(engine.engine->PrefixCacheStats()->hash_collisions, 0u);
+}
+
+TEST_F(EngineRunTest, ConcurrentHybridDuplicateCheckpointRetriesPrivateDivergentSuffix) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/8);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 2;
+  batching.num_blocks = 32;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 17> first_prompt{
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18};
+  auto second_prompt = first_prompt;
+  second_prompt[14] = 30;
+
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (size_t row = 0; row < context.plan->requests.size(); ++row) {
+      const auto& entry = context.plan->requests[row];
+      const auto committed_before =
+          entry.target_cache_slots - entry.unprocessed_token_count;
+      for (const auto& binding : context.fixed_state_bindings) {
+        ExpectFixedInputRow(binding, row, static_cast<float>(committed_before));
+        FillFixedOutputRow(binding, row, static_cast<float>(entry.target_cache_slots));
+      }
+    }
+  });
+
+  auto first = CreateRequestWithPrompt(engine.engine, first_prompt);
+  auto second = CreateRequestWithPrompt(engine.engine, second_prompt);
+  std::array<EngineEvent, 8> events;
+  for (size_t step = 0;
+       step < 8 && (!first->IsTurnComplete() || !second->IsTurnComplete()); ++step) {
+    engine.engine->Run(events);
+  }
+  ASSERT_TRUE(first->IsTurnComplete());
+  ASSERT_TRUE(second->IsTurnComplete());
+  ASSERT_EQ(engine.engine->PrefixCacheStats()->duplicate_registrations, 1u);
+  first->Close();
+  second->Close();
+
+  const auto finish_repeat = [&](std::span<const int32_t> prompt) {
+    auto request = CreateRequestWithPrompt(engine.engine, prompt);
+    EngineEvent event;
+    for (size_t step = 0; step < 4 && !request->IsTurnComplete(); ++step) {
+      event = RunOne(*engine.engine);
+    }
+    EXPECT_TRUE(request->IsTurnComplete());
+    EXPECT_EQ(event.request, request);
+    EXPECT_EQ(event.usage.cached_prompt_tokens, 16u);
+    EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+    request->Close();
+  };
+  finish_repeat(first_prompt);
+  finish_repeat(second_prompt);
   EXPECT_EQ(engine.engine->PrefixCacheStats()->hash_collisions, 0u);
 }
 
@@ -4106,16 +4163,20 @@ TEST_F(EngineRunTest, FailedHybridReplacementPreservesOldHitAndAllowsRetry) {
   first->Close();
   ASSERT_EQ(engine.cache->FixedStateSnapshot()->checkpoint_count, 1u);
 
-  // Fail checkpoint wrapper allocation after B's provisional KV registration, not step staging.
-  device.FailNextWrapWhen([&] {
-    return engine.cache->PrefixMetrics()->registered_blocks == 2;
-  });
-  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+  // Arm the failure after B's execution bindings have finished using the device. Hybrid prefix
+  // metadata is now staged without publishing registered blocks, so a registered-block count is
+  // not a valid capture seam. Preparation may still create wrappers after execution, so wait for
+  // the request's committed cursor to reach the checkpoint boundary. The first matching wrapper
+  // is checkpoint capture, before either the old endpoint or staged replacement is published.
+  auto failed = CreateRequestWithPrompt(engine.engine, second_prompt);
+  engine.executor->SetExecutionCallback([&device, failed](ExecutionContext& context) {
     for (const auto& binding : context.fixed_state_bindings) {
       FillFixedOutputRow(binding, 0, 9.0f);
     }
+    device.FailNextWrapWhen([failed] {
+      return failed->ProcessedSequenceLength() == 4;
+    });
   });
-  auto failed = CreateRequestWithPrompt(engine.engine, second_prompt);
   EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
   EXPECT_EQ(device.FailureCount(), 1u);
   EXPECT_EQ(failed->ProcessedSequenceLength(), 4);
@@ -4218,7 +4279,9 @@ TEST_F(EngineRunTest, ConcurrentHybridShortAndLongRequestsAllowLaterExtension) {
   short_request->Close();
   long_request->Close();
 
-  for (const size_t expected_cached : {8u, 16u}) {
+  // The long request's duplicate checkpoint at 8 stayed retryable, so it published its private
+  // extension at 16 during the concurrent run rather than waiting for a later replay.
+  for (const size_t expected_cached : {16u, 16u}) {
     auto repeat = CreateRequestWithPrompt(engine.engine, prompt);
     EngineEvent event;
     for (size_t step = 0; step < 8 && !repeat->IsTurnComplete(); ++step) {
