@@ -22,7 +22,6 @@ from builder_config import (
     apply_runtime_config,
     load_json_object,
     normalize_builder_config,
-    serialize_genai_config,
     validate_model_dependent_config,
 )
 from builders import (
@@ -832,7 +831,7 @@ def create_model(
             genai_config = json.load(config_file)
         genai_config = apply_runtime_config(genai_config, runtime_config)
         with open(config_path, "w", encoding="utf-8") as config_file:
-            config_file.write(serialize_genai_config(genai_config))
+            json.dump(genai_config, config_file, indent=4)
 
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
