@@ -1563,11 +1563,18 @@ def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fi
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=4096)
     generator = og.Generator(model, params)
-    profile_split_vision = fixed_patches and position_dtype == np.int32
-    if profile_split_vision:
-        generator.set_runtime_option("enable_profiling", os.fspath(tmp_path / "pipeline_vision_profile"))
+    check_runtime_options = fixed_patches and position_dtype == np.int32
+    profile_enabled = False
+    if check_runtime_options:
+        try:
+            generator.set_runtime_option("enable_profiling", os.fspath(tmp_path / "pipeline_vision_profile"))
+        except RuntimeError as exc:
+            if str(exc) != "enable_profiling requires ONNX Runtime 1.25 or later":
+                raise
+        else:
+            profile_enabled = True
     generator.set_inputs(inputs)
-    if profile_split_vision:
+    if profile_enabled:
         profiles = list(tmp_path.glob("pipeline_vision_profile*.json"))
         assert profiles
         node_names = {
@@ -1593,7 +1600,7 @@ def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fi
     np.testing.assert_array_equal(generator.get_output("inputs_embeds"), expected_embeds)
     generator.generate_next_token()
     assert len(generator.get_next_tokens()) == 1
-    if profile_split_vision:
+    if check_runtime_options:
         cancelled = og.Generator(model, params)
         cancelled.set_runtime_option("terminate_session", "1")
         with pytest.raises(RuntimeError, match="[Tt]erminat"):

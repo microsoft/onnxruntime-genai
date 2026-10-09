@@ -452,8 +452,10 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     }
     const int64_t num_padded_patches = (pv_dims == 3) ? pv_shape[1] : pv_shape[0];
     const int64_t patch_dim = (pv_dims == 3) ? pv_shape[2] : pv_shape[1];
-    const int64_t target_patches =
-        unified_ ? num_padded_patches : vision_fixed_num_patches_ > 0 ? vision_fixed_num_patches_ : actual_patches;
+    int64_t target_patches = num_padded_patches;
+    if (!unified_) {
+      target_patches = vision_fixed_num_patches_ > 0 ? vision_fixed_num_patches_ : actual_patches;
+    }
 
     std::unique_ptr<OrtValue> resized_fp32;
     if (target_patches != num_padded_patches) {
