@@ -136,6 +136,57 @@ TEST_F(StandardPositionInputsTest, QwenVLWith3DPositionIdsPrefersMropeOverSlidin
   EXPECT_NE(dynamic_cast<Qwen2VLPositionInputs*>(inputs.get()), nullptr);
 }
 
+TEST_F(StandardPositionInputsTest, Qwen3DGraphCaptureUsesStableDecodeBuffers) {
+  Use3DPositionIds();
+  model_->config_->model.type = "qwen3_5_moe_text";
+  params_->use_graph_capture = true;
+  params_->max_graph_capture_length = 1;
+  params_->search.max_length = 16;
+
+  auto inputs = CreatePositionInputs();
+  inputs->Add();
+
+  auto prompt_tokens = model_->p_device_inputs_->Allocate<int32_t>(3);
+  auto prompt_span = prompt_tokens.CpuSpan();
+  prompt_span[0] = 1;
+  prompt_span[1] = 2;
+  prompt_span[2] = 3;
+  prompt_tokens.CopyCpuToDevice();
+  inputs->Update(prompt_tokens, 3, 3);
+
+  auto* attention_mask = state_->GetInput(model_->config_->model.decoder.inputs.attention_mask.c_str());
+  ASSERT_NE(attention_mask, nullptr);
+  EXPECT_EQ(attention_mask->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{1, 16}));
+  const auto* attention_mask_data = attention_mask->GetTensorRawData();
+
+  auto decode_token = model_->p_device_inputs_->Allocate<int32_t>(1);
+  decode_token.CpuSpan()[0] = 4;
+  decode_token.CopyCpuToDevice();
+  inputs->Update(decode_token, 4, 1);
+
+  auto* position_ids = state_->GetInput(model_->config_->model.decoder.inputs.position_ids.c_str());
+  ASSERT_NE(position_ids, nullptr);
+  EXPECT_EQ(position_ids->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{3, 1, 1}));
+  const auto* position_ids_data = position_ids->GetTensorRawData();
+
+  inputs->Update(decode_token, 5, 1);
+
+  auto* next_position_ids = state_->GetInput(model_->config_->model.decoder.inputs.position_ids.c_str());
+  auto* next_attention_mask = state_->GetInput(model_->config_->model.decoder.inputs.attention_mask.c_str());
+  ASSERT_NE(next_position_ids, nullptr);
+  ASSERT_NE(next_attention_mask, nullptr);
+  EXPECT_EQ(next_position_ids, position_ids);
+  EXPECT_EQ(next_position_ids->GetTensorRawData(), position_ids_data);
+  EXPECT_EQ(next_attention_mask, attention_mask);
+  EXPECT_EQ(next_attention_mask->GetTensorRawData(), attention_mask_data);
+
+  const auto mask = next_attention_mask->GetTensorData<int64_t>();
+  EXPECT_EQ(std::vector<int64_t>(mask, mask + 16),
+            (std::vector<int64_t>{1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
+}
+
 TEST(Qwen2VLPositionInputsTest, RejectsNegativeGridDimensions) {
   const std::vector<int64_t> grid{1, -1, 2};
   const std::string message = CaptureThrowMessage([&] {

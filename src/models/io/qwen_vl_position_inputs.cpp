@@ -379,9 +379,31 @@ void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  // Move tensor to GPU and expand by num_beams
-  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
-  attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  if (ShouldUseStaticAttentionMask()) {
+    const int64_t input_batch_size = attention_mask_shape_[0];
+    const int64_t prompt_length = attention_mask_shape_[1];
+    const int num_beams = state_.params_->search.num_beams;
+    const int64_t max_length = state_.params_->search.max_length;
+    if (prompt_length > max_length) {
+      throw std::runtime_error("Qwen attention mask prompt length exceeds search.max_length.");
+    }
+
+    attention_mask_shape_[0] *= num_beams;
+    attention_mask_shape_[1] = max_length;
+    attention_mask_->CreateTensor(attention_mask_shape_, true);
+    auto output_span = attention_mask_->GetDeviceSpan<T>();
+    output_span.Zero();
+    auto input_span = WrapTensor<T>(model_.p_device_inputs_->GetCpuFallbackDevice(), *attention_mask);
+    for (int64_t batch = 0; batch < input_batch_size; ++batch) {
+      for (int beam = 0; beam < num_beams; ++beam) {
+        output_span.subspan((batch * num_beams + beam) * max_length, prompt_length)
+            .CopyFrom(input_span.subspan(batch * prompt_length, prompt_length));
+      }
+    }
+  } else {
+    attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
+    attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  }
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
@@ -398,11 +420,38 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
 
   DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_});
 
+  if (state_.params_->use_graph_capture) {
+    const auto current_shape = position_ids_->GetShape();
+    if (!position_ids_static_ || current_shape != std::vector<int64_t>{position_ids_shape_.begin(), position_ids_shape_.end()}) {
+      const size_t capacity_bytes = static_cast<size_t>(position_ids_shape_[0]) * position_ids_shape_[1] *
+                                    std::max(1, state_.params_->max_graph_capture_length) * Ort::SizeOf(type_);
+      position_ids_->CreateTensor(position_ids_shape_, true, capacity_bytes);
+      position_ids_static_ = true;
+      state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
+    }
+    position_ids_->GetByteSpan().CopyFrom(ByteWrapTensor(model_.p_device_inputs_->GetCpuFallbackDevice(), *position_ids));
+    return;
+  }
+
   position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);  // No beam expansion needed, already expanded
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
-void Qwen2VLPositionInputs::UpdateAttentionMask() {
+void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_length) {
+  if (ShouldUseStaticAttentionMask()) {
+    const int max_length = static_cast<int>(attention_mask_shape_[1]);
+    if (!model_.p_device_inputs_->UpdateAttentionMask(nullptr, attention_mask_->GetMutableRawData(),
+                                                      static_cast<int>(attention_mask_shape_[0]), new_length,
+                                                      total_length, max_length, true, type_)) {
+      auto mask_span = attention_mask_->GetByteSpan();
+      model_.p_device_inputs_->GetCpuFallbackDevice().UpdateAttentionMask(
+          nullptr, mask_span.CopyDeviceToCpu().data(), static_cast<int>(attention_mask_shape_[0]),
+          new_length, total_length, max_length, true, type_);
+      mask_span.CopyCpuToDevice();
+    }
+    return;
+  }
+
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
 
   DispatchOnType(type_, FillMaskFunctor{attention_mask.get(), attention_mask_shape_[0] * attention_mask_shape_[1]});
@@ -426,8 +475,10 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       attention_mask_shape_[1] = new_length;
       DispatchOnType(type_, InitAttentionMaskFunctor{this, next_tokens, attention_mask_shape_});
     } else {
-      attention_mask_shape_[1] = total_length;
-      UpdateAttentionMask();
+      if (!ShouldUseStaticAttentionMask()) {
+        attention_mask_shape_[1] = total_length;
+      }
+      UpdateAttentionMask(total_length, new_length);
     }
   }
 
@@ -443,8 +494,31 @@ void Qwen2VLPositionInputs::RewindTo(size_t index) {
     position_ids_shape_[2] = static_cast<int64_t>(index);
   }
   if (has_mask_input_) {
-    attention_mask_shape_[1] = static_cast<int64_t>(index);
+    if (ShouldUseStaticAttentionMask()) {
+      auto mask_span = attention_mask_->GetByteSpan();
+      auto cpu_data = mask_span.CopyDeviceToCpu();
+      const size_t max_length = static_cast<size_t>(attention_mask_shape_[1]);
+      if (index > max_length) {
+        throw std::runtime_error("Qwen attention mask rewind index exceeds search.max_length.");
+      }
+      DispatchOnType(type_, [&]<typename T>() {
+        auto* data = reinterpret_cast<T*>(cpu_data.data());
+        for (int64_t batch = 0; batch < attention_mask_shape_[0]; ++batch) {
+          std::fill_n(data + batch * max_length, index, static_cast<T>(1));
+          std::fill_n(data + batch * max_length + index, max_length - index, static_cast<T>(0));
+        }
+      });
+      mask_span.CopyCpuToDevice();
+    } else {
+      attention_mask_shape_[1] = static_cast<int64_t>(index);
+    }
   }
+}
+
+bool Qwen2VLPositionInputs::ShouldUseStaticAttentionMask() const {
+  return state_.params_->use_graph_capture ||
+         (state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type) &&
+          model_.p_device_inputs_->ShouldUseStaticPositionInputsForSharedBuffers(model_.config_->model));
 }
 
 }  // namespace Generators

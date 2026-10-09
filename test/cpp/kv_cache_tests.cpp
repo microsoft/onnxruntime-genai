@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include "models/io/shared_kv_cache.h"
 #include "models/io/static_kv_cache.h"
 #include "telemetry_test_environment.h"
 
@@ -40,6 +41,33 @@ TEST(KvCacheTests, IgnoresTopLevelDeviceWindowSizeForPipelineModel) {
   EXPECT_FALSE(Generators::UsesNonRewindableWindowedKeyValueCache(
       model, model.config_->model.decoder));
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 4096), 0);
+}
+
+TEST(KvCacheTests, LogicalOutputViewSharesBackingAllocation) {
+  CacheTestModel model{false};
+  constexpr std::array<int64_t, 4> backing_shape{1, 2, 96, 4};
+  auto backing = OrtValue::CreateTensor(
+      model.allocator_cpu_, backing_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+
+  auto output_view = Generators::KeyValueCacheDetail::CreateLogicalKeyValueCacheOutputView(
+      *backing, 34);
+
+  EXPECT_EQ(output_view->GetTensorMutableRawData(), backing->GetTensorMutableRawData());
+  EXPECT_EQ(output_view->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{1, 2, 34, 4}));
+  EXPECT_EQ(backing->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{1, 2, 96, 4}));
+}
+
+TEST(KvCacheTests, LogicalOutputViewRejectsLengthBeyondCapacity) {
+  CacheTestModel model{false};
+  constexpr std::array<int64_t, 4> backing_shape{1, 2, 96, 4};
+  auto backing = OrtValue::CreateTensor(
+      model.allocator_cpu_, backing_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+
+  EXPECT_THROW(Generators::KeyValueCacheDetail::CreateLogicalKeyValueCacheOutputView(
+                   *backing, 97),
+               std::runtime_error);
 }
 
 }  // namespace
