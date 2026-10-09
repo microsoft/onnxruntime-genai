@@ -5,6 +5,7 @@
 
 import importlib.util
 import json
+import subprocess
 import sys
 import weakref
 from enum import Enum, IntFlag
@@ -18,6 +19,22 @@ _SPEC = importlib.util.spec_from_file_location("prefix_cache_qa", _SCRIPT)
 qa = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = qa
 _SPEC.loader.exec_module(qa)
+
+
+def test_standalone_import_initializes_optional_provider_discovery():
+    program = """
+import importlib
+import sys
+import types
+
+module = types.ModuleType("prefix_cache_standalone")
+module.__file__ = sys.argv[1]
+sys.modules[module.__name__] = module
+with open(module.__file__, encoding="utf-8") as source:
+    exec(compile(source.read(), module.__file__, "exec"), module.__dict__)
+assert importlib.util.find_spec("prefix_cache_nonexistent_provider") is None
+"""
+    subprocess.run([sys.executable, "-I", "-S", "-c", program, str(_SCRIPT)], check=True)
 
 
 def profile(hybrid=True):
@@ -80,8 +97,44 @@ def test_rejects_unsafe_boundaries(cached):
 
 
 def test_parity_failure_is_not_waived_for_cross_shape_numerical_changes():
+    actual = row(tokens=(7, 9))
     with pytest.raises(RuntimeError, match=r"differs.*token 1"):
-        qa.check_result(row(tokens=(7, 9)), [7, 8], profile(), "safe", None, 2)
+        qa.check_result(actual, [7, 8], profile(), "safe", None, 2)
+    assert actual["parity_difference"] == {
+        "index": 1,
+        "actual_token": 9,
+        "expected_token": 8,
+        "actual_length": 2,
+        "expected_length": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("actual", "expected", "index", "actual_token", "expected_token"),
+    [
+        ([7], [7, 8], 1, None, 8),
+        ([7, 8], [7], 1, 8, None),
+        ([], [7], 0, None, 7),
+        ([7], [], 0, 7, None),
+        ([9, 8], [7, 8], 0, 9, 7),
+    ],
+)
+def test_token_difference_records_mismatches_and_length_only_divergence(
+    actual, expected, index, actual_token, expected_token
+):
+    assert qa.token_difference(actual, expected) == {
+        "index": index,
+        "actual_token": actual_token,
+        "expected_token": expected_token,
+        "actual_length": len(actual),
+        "expected_length": len(expected),
+    }
+
+
+def test_matching_outputs_have_no_parity_difference():
+    actual = row()
+    qa.check_result(actual, [7, 8], profile(), "safe", None, 2)
+    assert actual["parity_difference"] is None
 
 
 def test_parity_and_reuse_failures_are_reported_independently():
@@ -155,6 +208,22 @@ def test_concurrency_plan_covers_both_admission_orders_and_single_row_slot_isola
     assert pinned.actions[1].prompts == ("long",)
     assert pinned.actions[2].release
     assert all(scenario.uncached_control for scenario in scenarios)
+
+
+def test_named_selection_preserves_actions_controls_and_only_required_references():
+    specs, scenarios = qa.make_plan(profile(), [25], ["branching", "concurrency"], 42, 1, 2)
+    selected_specs, selected = qa.select_scenarios(specs, scenarios, ["branch-16", "simultaneous-long-short"])
+    assert [scenario.name for scenario in selected] == ["branch-16", "simultaneous-long-short"]
+    assert set(selected_specs) == {"long", "branch-16", "short-seed"}
+    assert selected == [scenario for scenario in scenarios if scenario.name in {item.name for item in selected}]
+    assert selected[1].uncached_control
+    assert qa.select_scenarios(specs, scenarios, None) == (specs, scenarios)
+
+
+def test_named_selection_rejects_unknown_cases_instead_of_silently_skipping():
+    specs, scenarios = qa.make_plan(profile(), [25], ["boundaries"], 42, 1, 2)
+    with pytest.raises(ValueError, match=r"Unknown scenario.*branch-16"):
+        qa.select_scenarios(specs, scenarios, ["boundary-25", "branch-16"])
 
 
 @pytest.mark.parametrize("failure", [None, "batch", "unstable", "false-hit"])
@@ -372,6 +441,62 @@ def test_plan_only_does_not_import_genai(tmp_path, monkeypatch, capsys):
     assert plan[0]["scenarios"]
 
 
+def test_plan_only_named_selection_does_not_import_runtime_and_preserves_controls(tmp_path, monkeypatch, capsys):
+    (tmp_path / "genai_config.json").write_text(
+        json.dumps({"model": {}, "engine": {"dynamic_batching": {"block_size": 4, "max_batch_size": 2}}})
+    )
+    monkeypatch.setattr(qa.importlib, "import_module", lambda name: pytest.fail(f"Unexpected runtime import: {name}"))
+    qa.main(
+        [
+            "-m",
+            str(tmp_path),
+            "--plan-only",
+            "--suites",
+            "concurrency",
+            "--scenarios",
+            "simultaneous-long-short",
+        ]
+    )
+    plan = json.loads(capsys.readouterr().out)[0]
+    assert [scenario["name"] for scenario in plan["scenarios"]] == ["simultaneous-long-short"]
+    assert plan["scenarios"][0]["uncached_control"]
+    assert {spec["name"] for spec in plan["prompts"]} == {"short-seed", "long"}
+
+
+def test_unknown_named_case_overwrites_stale_success_report(tmp_path):
+    (tmp_path / "genai_config.json").write_text(
+        json.dumps({"model": {}, "engine": {"dynamic_batching": {"block_size": 4}}})
+    )
+    output = tmp_path / "report.json"
+    output.write_text('{"status":"passed"}')
+    with pytest.raises(ValueError, match="Unknown scenario"):
+        qa.main(["-m", str(tmp_path), "--scenarios", "misspelled", "--output", str(output)])
+    report = json.loads(output.read_text())
+    assert report["status"] == "failed"
+    assert report["arguments"]["scenarios"] == ["misspelled"]
+
+
+def test_named_case_must_exist_in_every_chunk_profile(tmp_path):
+    (tmp_path / "genai_config.json").write_text(
+        json.dumps({"model": {}, "engine": {"dynamic_batching": {"block_size": 4}}})
+    )
+    with pytest.raises(ValueError, match="Unknown scenario"):
+        qa.main(
+            [
+                "-m",
+                str(tmp_path),
+                "--plan-only",
+                "--suites",
+                "branching",
+                "--chunk-sizes",
+                "8",
+                "16",
+                "--scenarios",
+                "branch-8",
+            ]
+        )
+
+
 class CorpusTokenizer:
     def apply_chat_template(self, messages, add_generation_prompt):
         roles = [message["role"] for message in json.loads(messages)]
@@ -387,6 +512,17 @@ class CorpusTokenizer:
         if text.startswith(" alternative"):
             return [201, 202, 203]
         return list(range(20, 150))
+
+
+def test_named_selection_preserves_exact_prompt_tokens_and_hashes():
+    specs, scenarios = qa.make_plan(profile(), [25], ["branching", "concurrency"], 42, 1, 2)
+    original, _ = qa.materialize_prompts(CorpusTokenizer(), specs, "body", "task")
+    selected_specs, _ = qa.select_scenarios(specs, scenarios, ["branch-16", "simultaneous-long-short"])
+    selected, _ = qa.materialize_prompts(CorpusTokenizer(), selected_specs, "body", "task")
+    assert selected == {name: original[name] for name in selected_specs}
+    assert {name: qa.token_digest(tokens) for name, tokens in selected.items()} == {
+        name: qa.token_digest(original[name]) for name in selected_specs
+    }
 
 
 def test_materialized_prompts_have_exact_lengths_and_exact_branch_position():
@@ -471,9 +607,12 @@ def test_target_only_dspark_overlay_does_not_introduce_conflicting_alias():
     assert overlay["model"]["dspark"]["filename"] == ""
 
 
-@pytest.mark.parametrize(("failure", "reference_repeats"), [(None, 1), (None, 2), ("cached", 2), ("reference", 2)])
+@pytest.mark.parametrize(
+    ("failure", "reference_repeats", "include_prompt_tokens"),
+    [(None, 1, False), (None, 2, True), ("cached", 2, False), ("reference", 2, False)],
+)
 def test_orchestrator_releases_regular_model_and_collects_independent_failures(
-    tmp_path, monkeypatch, failure, reference_repeats
+    tmp_path, monkeypatch, failure, reference_repeats, include_prompt_tokens
 ):
     loaded = []
 
@@ -526,6 +665,7 @@ def test_orchestrator_releases_regular_model_and_collects_independent_failures(
         output=tmp_path / "report.json",
         max_warm_ttft_ratio=None,
         fail_fast=False,
+        include_prompt_tokens=include_prompt_tokens,
     )
     specs, scenarios = qa.make_plan(profile(), [25], ["boundaries", "pressure"], 42, 1, 2, 1, 20)
     report = {"profiles": []}
@@ -535,6 +675,12 @@ def test_orchestrator_releases_regular_model_and_collects_independent_failures(
     entry = json.loads(args.output.read_text())["profiles"][0]
     assert entry["corpus_sha256"]
     assert entry["prompts"]["churn-0"]["mutation_width"] == 4
+    assert entry["selected_scenarios"] == [scenario.name for scenario in scenarios]
+    for prompt in entry["prompts"].values():
+        assert ("tokens" in prompt) is include_prompt_tokens
+        if include_prompt_tokens:
+            assert len(prompt["tokens"]) == prompt["length"]
+            assert qa.token_digest(prompt["tokens"]) == prompt["sha256"]
     assert len(entry["references"]) == len(entry["prompts"]) * reference_repeats
     if failure == "cached":
         assert entry["scenarios"][0]["status"] == "failed"
@@ -583,7 +729,9 @@ def test_cli_returns_failure_after_collecting_validation_findings(tmp_path, monk
     }[failure]
     with pytest.raises(qa.ValidationError, match=message):
         qa.main(["-m", str(tmp_path), "--output", str(output)])
-    assert json.loads(output.read_text())["status"] == "failed"
+    report = json.loads(output.read_text())
+    assert report["status"] == "failed"
+    assert report["coverage"] == "selected-suites"
 
 
 class Flags(IntFlag):

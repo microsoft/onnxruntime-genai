@@ -156,6 +156,45 @@ loading GenAI or a model. `--pressure-num-blocks` controls the separate churn
 budget; churn count grows to exceed it. Regular and pressure models are loaded
 sequentially.
 
+### Focused numerical-parity reproductions
+
+Use `--scenarios` with exact names from `--plan-only` to isolate a failing
+sequence without changing its actions, retained owners, or cache-disabled
+admission controls. Only prompts used by the selected scenarios are referenced;
+their token construction is unchanged. Unknown names fail for each profile
+rather than silently disappearing during a chunk-size sweep.
+
+For the branching and simultaneous-admission follow-ups in #2698:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/python/engine/prefix-cache-qa.py \
+  --model-path /models/qwen-hybrid-dflash --num-blocks 1024 \
+  --chunk-sizes 512 --max-batch-size 8 --generated-tokens 64 \
+  --suites branching concurrency random \
+  --scenarios branch-1024 branch-1025 random-branch-3 \
+    simultaneous-short-long simultaneous-long-short \
+  --draft-mode both --include-prompt-tokens \
+  --output prefix-cache-numerical-repro.json
+```
+
+`--include-prompt-tokens` additionally records the exact input IDs alongside
+their hashes. It is opt-in because a custom corpus or user prompt can contain
+sensitive content. Each checked output includes `parity_difference`: `null`
+for exact equality, otherwise the first zero-based divergent index, actual and
+expected token IDs, and both output lengths. A missing token is `null`, not
+token zero. Cancellation still compares only the emitted reference prefix.
+
+Reports explicitly record the coverage selection and scenario names. A passing
+focused run does **not** qualify omitted scenarios or the complete matrix.
+Selection is a reproduction tool, not a failing-test exclusion or parity waiver.
+
+Keep generation limits identical when comparing revisions. Reducing
+`--generated-tokens` changes speculative verification near the end of a turn
+and the lifetime of concurrently scheduled requests. It can change the first
+divergence or make a failure disappear; do not truncate a longer reference and
+call that a shorter-run oracle. The runner recomputes sequential references and
+admission controls for the requested limit.
+
 ## Reading the results
 
 JSON reports include runtime/configuration identity, overlays, Engine capacities,
