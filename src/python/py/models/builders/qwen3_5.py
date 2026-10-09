@@ -13,8 +13,8 @@ from .mtp import MTPModel
 
 class Qwen35TextModel(Qwen35, Model):
     def validate_gated_delta_net_options(self, state_window, ep):
-        if ep != "cuda":
-            raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
+        if ep not in {"cuda", "webgpu"}:
+            raise ValueError("GatedDeltaNet exports require the CUDA or WebGPU execution provider")
         if state_window == 1:
             raise ValueError("GatedDeltaNet state_window must be 0 or at least 2")
 

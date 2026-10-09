@@ -78,8 +78,8 @@ def _make_indexshare_mtp_model(
             "enabled": enabled,
             "base_capacity": 3,
             "max_draft_tokens": 7,
-            "indices_output": "selection",
-            "counts_output": "count",
+            "indices_output": "indexshare.present_indices",
+            "counts_output": "indexshare.present_counts",
         },
     }
     logits = np.zeros((_VOCAB_SIZE, _VOCAB_SIZE), dtype=np.float16)
@@ -138,8 +138,8 @@ def _make_indexshare_mtp_model(
         *inputs,
         helper.make_tensor_value_info("indexshare.mode", tensor.INT32, [1]),
         helper.make_tensor_value_info("indexshare.projection_rows", tensor.INT64, ["projection_rows"]),
-        helper.make_tensor_value_info("indexshare.0.indices", tensor.INT32, ["rows", 3]),
-        helper.make_tensor_value_info("indexshare.0.counts", tensor.INT32, ["rows"]),
+        helper.make_tensor_value_info("indexshare.past_indices", tensor.INT32, ["rows", 3]),
+        helper.make_tensor_value_info("indexshare.past_counts", tensor.INT32, ["rows"]),
         helper.make_tensor_value_info("indexshare.base_row_indices", tensor.INT32, ["merge_rows"]),
         helper.make_tensor_value_info("indexshare.range_starts", tensor.INT32, ["merge_rows"]),
         helper.make_tensor_value_info("indexshare.range_ends", tensor.INT32, ["merge_rows"]),
@@ -186,8 +186,8 @@ def _make_indexshare_mtp_model(
         helper.make_node(
             "PackedSparseAttentionIndexerMerge",
             [
-                "indexshare.0.indices",
-                "indexshare.0.counts",
+                "indexshare.past_indices",
+                "indexshare.past_counts",
                 "indexshare.base_row_indices",
                 "indexshare.range_starts",
                 "merge_ends",
@@ -224,14 +224,14 @@ def _make_indexshare_mtp_model(
                 "merge_status",
             ],
             [
-                "selection",
-                "count",
+                "indexshare.present_indices",
+                "indexshare.present_counts",
                 "present_index_keys",
                 "present_index_buffer",
                 "",
                 "present_index_lengths",
                 "",
-                "indexshare.0.status",
+                "indexshare.status",
             ],
             domain="com.microsoft",
             policy_mode="qsa",
@@ -243,9 +243,9 @@ def _make_indexshare_mtp_model(
     ]
     packed_outputs = [
         *outputs,
-        helper.make_tensor_value_info("selection", tensor.INT32, ["num_tokens", 9]),
-        helper.make_tensor_value_info("count", tensor.INT32, ["num_tokens"]),
-        helper.make_tensor_value_info("indexshare.0.status", tensor.INT32, ["num_tokens"]),
+        helper.make_tensor_value_info("indexshare.present_indices", tensor.INT32, ["num_tokens", 9]),
+        helper.make_tensor_value_info("indexshare.present_counts", tensor.INT32, ["num_tokens"]),
+        helper.make_tensor_value_info("indexshare.status", tensor.INT32, ["num_tokens"]),
     ]
     if persistent_state:
         state_names = {

@@ -1018,10 +1018,10 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     context.hidden_states_input = packed_hidden_states.GetOrtTensor();
     std::array<OrtValue*, 2> selection_outputs{};
     const std::array<const char*, 7> packed_selection_input_names{
-        "indexshare.mode", "indexshare.projection_rows", "indexshare.0.indices", "indexshare.0.counts",
+        "indexshare.mode", "indexshare.projection_rows", "indexshare.past_indices", "indexshare.past_counts",
         "indexshare.base_row_indices", "indexshare.range_starts", "indexshare.range_ends"};
     const std::array<const char*, 3> packed_selection_output_names{
-        indexshare.indices_output.c_str(), indexshare.counts_output.c_str(), "indexshare.0.status"};
+        indexshare.indices_output.c_str(), indexshare.counts_output.c_str(), "indexshare.status"};
     std::array<OrtValue*, 7> packed_extend_inputs{};
     std::array<OrtValue*, 3> packed_extend_outputs{};
     if (use_indexshare) {

@@ -605,11 +605,12 @@ The `--precision` argument controls the unquantized tensors and model I/O; it do
 NVIDIA's `nvidia/Qwen3.8-Flash-Next-NVFP4` checkpoint is also supported. Its routed main-model experts remain native NVFP4, attention/shared experts/hyper-connections follow `--precision`, and the sharded PLE table retains its FP8 bytes and per-tensor scale. The loader concatenates PLE shards in numeric order without loading the checkpoint through Hugging Face's eager ModelOpt quantizer. Vision weights are loaded only when exporting the multimodal components.
 
 The official [`Qwen/Qwen3.8-Flash-Next-FP8`](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8)
-checkpoint is supported on CUDA through the native loader, without Hugging Face's eager FP8 quantizer.
-Decoder and MTP experts retain their E4M3 weight bytes and BF16 128x128
-`weight_scale_inv` block multipliers. Engram retains its E4M3 table and original BF16 scalar scale
-without dtype conversion, independently of model I/O precision.
-No export-time dequantization, reciprocal-scale conversion, or requantization is performed on these tensors.
+checkpoint is supported on CUDA and WebGPU through the native loader, without Hugging Face's eager FP8 quantizer.
+Decoder and MTP experts retain their E4M3 weight bytes and 128x128
+`weight_scale_inv` block multipliers. CUDA preserves BF16 expert scales; WebGPU widens them
+exactly to FP32 to match its QMoE kernel. Engram retains its E4M3 table and preserves its
+scalar scale on CUDA; WebGPU widens that scale to FP32 for its CPU Engram companion.
+No export-time weight dequantization, reciprocal-scale conversion, or requantization is performed.
 Use `bf16` to retain the source precision of unquantized tensors as well.
 The existing FP8 `QMoE` path is weight-only, not the official checkpoint's dynamic-A8 arithmetic.
 Full-model export and generation have not been validated.
@@ -651,14 +652,17 @@ session. `indexshare_mtp=false` explicitly exports the older non-IndexShare
 model instead. Existing older exports are unchanged.
 
 The unversioned IndexShare contract adds CPU `indexshare.mode`, GPU int64
-`indexshare.projection_rows`, frozen `indexshare.0.indices`/`counts`,
+`indexshare.projection_rows`, frozen `indexshare.past_indices`/`indexshare.past_counts`,
 `indexshare.base_row_indices`, and `indexshare.range_starts`/`range_ends`.
 Refresh selects all projection rows and supplies zero merge rows; reuse selects
 zero projection rows and merges one query per active request. A standalone
 `PackedSparseAttentionIndexerMerge` feeds the extended
 `PackedSparseAttentionIndexer`, which accepts packed Q/K without a Split.
 Every forward uses the same session, decoder body, output names and state
-interface, including selected indices/counts and `indexshare.0.status`.
+interface, including `indexshare.present_indices`, `indexshare.present_counts`,
+and `indexshare.status`, produced directly by the indexer without Identity aliases.
+Packages using the former IndexShare binding names must be renamed or re-exported
+for a GenAI runtime using this contract.
 There is no output pruning, special executor option, ONNX If, or duplicated
 decoder body. This interface requires the extended CUDA operators; unsupported
 runtimes/providers fail rather than silently ignoring reuse.
@@ -737,7 +741,7 @@ A multi-token verify forward can additionally carry a window of recurrent/conv s
 
 #### Compact State Updates (Qwen3.5/3.8)
 
-Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled) and requires `use_paged_attention=true`. It must be an integer from `0` through `8`, matching the kernel and runtime-parser bound, because the kernel packs every captured transition for a layer into a single fixed-width capsule output. Qwen3.5/3.8 hybrid layers use GatedDeltaNet and support CUDA with `fp16` or `bf16` model I/O. When enabled, `genai_config.json` records the capacity, the `state_update_capture_count` and `state_update_active` input bindings, and the per-layer convolution-value and recurrent-capsule output templates. All compact state-update inputs and outputs are omitted when `state_update_capacity=0`.
+Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled) and requires `use_paged_attention=true`. It must be an integer from `0` through `8`, matching the kernel and runtime-parser bound, because the kernel packs every captured transition for a layer into a single fixed-width capsule output. Qwen3.5/3.8 hybrid layers use GatedDeltaNet and support CUDA with `fp16` or `bf16` model I/O, or WebGPU with `fp16` model I/O. When enabled, `genai_config.json` records the capacity, the `state_update_capture_count` and `state_update_active` input bindings, and the per-layer convolution-value and recurrent-capsule output templates. All compact state-update inputs and outputs are omitted when `state_update_capacity=0`.
 
 ```bash
 # From wheel:
@@ -749,7 +753,7 @@ python builder.py -m model_name -o path_to_output_folder -p bf16 -e cuda -c cach
 
 #### Qwen3.5/3.8 Recurrent Operator
 
-Qwen3.5/3.8 hybrid layers emit `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. GatedDeltaNet is CUDA-only, requires `state_window=0`, and supports `fp16` or `bf16` model I/O. The equivalent `LinearAttention` + `LinearAttentionGate` decomposition is retained internally with the Qwen3.8 builder expansions rather than exposed as a model export option.
+Qwen3.5/3.8 hybrid layers emit `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. GatedDeltaNet export supports CUDA and WebGPU, with `state_window=0` or at least `2`; paged exports use CUDA with `fp16`/`bf16` or WebGPU with `fp16` model I/O. The equivalent `LinearAttention` + `LinearAttentionGate` decomposition is retained internally with the Qwen3.8 builder expansions rather than exposed as a model export option.
 
 #### Enable WebGPU Graph Capture
 

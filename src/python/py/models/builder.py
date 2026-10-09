@@ -407,8 +407,8 @@ def check_extra_options(
     if quantization_config.get("quant_method") == "fp8":
         if getattr(config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text"}:
             raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8.")
-        if execution_provider != "cuda":
-            raise ValueError("Native Qwen3.8 FP8 checkpoint export requires the CUDA EP.")
+        if execution_provider not in {"cuda", "webgpu"}:
+            raise ValueError("Native Qwen3.8 FP8 checkpoint export requires the CUDA or WebGPU EP.")
     if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}:
         if execution_provider != "cuda":
             raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")

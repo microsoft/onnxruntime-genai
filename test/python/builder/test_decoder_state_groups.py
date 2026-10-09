@@ -735,14 +735,20 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 @pytest.mark.parametrize(
     ("state_window", "ep", "message"),
     [
-        (0, "webgpu", "CUDA execution provider"),
-        (1, "cuda", "require state_window=0"),
+        (0, "cpu", "CUDA or WebGPU execution provider"),
+        (1, "cuda", "state_window must be 0 or at least 2"),
     ],
 )
 def test_qwen35_gated_delta_net_validation(state_window, ep, message):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     with pytest.raises(ValueError, match=message):
         model.validate_gated_delta_net_options(state_window, ep)
+
+
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_qwen35_gated_delta_net_supported_providers(ep):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.validate_gated_delta_net_options(0, ep)
 
 
 def _packed_gated_delta_net_model(

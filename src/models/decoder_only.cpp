@@ -43,19 +43,19 @@ void DecoderOnly_Model::InitializeIndexShare(const Config::Model::Mtp::IndexShar
   if (indices_shape.size() != 2 || indices_shape[1] != output_capacity || counts_shape.size() != 1 ||
       extend_info.GetOutputDataType(config.indices_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
       extend_info.GetOutputDataType(config.counts_output) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
-      decode_info.GetOutputDataType("indexshare.0.status") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
-      decode_info.GetOutputShape("indexshare.0.status").size() != 1) {
+      decode_info.GetOutputDataType("indexshare.status") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      decode_info.GetOutputShape("indexshare.status").size() != 1) {
     throw std::runtime_error("IndexShare graph outputs do not match their configured int32 selection contract.");
   }
   const std::vector<const char*> selection_inputs{
-      "indexshare.0.indices", "indexshare.0.counts", "indexshare.base_row_indices",
+      "indexshare.past_indices", "indexshare.past_counts", "indexshare.base_row_indices",
       "indexshare.range_starts", "indexshare.range_ends"};
   for (const char* name : selection_inputs) {
     if (!decode_info.HasInput(name) || decode_info.GetInputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
       throw std::runtime_error("IndexShare decode graph is missing a configured int32 input.");
     }
     const auto shape = decode_info.GetInputShape(name);
-    const bool indices = std::string_view{name} == "indexshare.0.indices";
+    const bool indices = std::string_view{name} == "indexshare.past_indices";
     if (shape.size() != (indices ? 2u : 1u) || (indices && shape[1] != config.base_capacity)) {
       throw std::runtime_error("IndexShare decode input shape does not match the configured selection contract.");
     }

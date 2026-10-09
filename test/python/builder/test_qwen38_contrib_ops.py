@@ -522,7 +522,7 @@ def test_qwen_linear_attention_packs_a_and_b():
         "/model/layers.3/linear_attn/a_proj/MatMul/output_0",
         "/model/layers.3/linear_attn/b_proj/MatMul/output_0",
     ]
-    assert ("exclude_node_from_quantization", ("/model/layers.3/linear_attn/a_b_proj/MatMul",), {}) in model.calls
+    assert not any(call[0] == "exclude_node_from_quantization" for call in model.calls)
     assert b_name == "/model/layers.3/linear_attn/b_proj/MatMul"
     assert a_name == "/model/layers.3/linear_attn/a_proj/MatMul"
 

@@ -171,6 +171,17 @@ def load_fp8(checkpoint):
     )
 
 
+@pytest.mark.parametrize("checkpoint_fixture,loader", [("checkpoint", load), ("fp8_checkpoint", load_fp8)])
+def test_native_dense_gates_are_eligible_for_quantization(request, checkpoint_fixture, loader):
+    model = loader(request.getfixturevalue(checkpoint_fixture))
+    for layer in model.layers:
+        assert not getattr(layer.mlp.gate, "exclude_from_quantization", False)
+        assert not getattr(layer.mlp.shared_expert_gate, "exclude_from_quantization", False)
+        if layer.linear_attn is not None:
+            assert not getattr(layer.linear_attn.in_proj_a, "exclude_from_quantization", False)
+            assert not getattr(layer.linear_attn.in_proj_b, "exclude_from_quantization", False)
+
+
 def test_official_fp8_loader_preserves_native_tensors(fp8_checkpoint, monkeypatch):
     def reject_dequantization(*args, **kwargs):
         pytest.fail("Native FP8 loading must not call dequantization")
@@ -201,11 +212,12 @@ def test_official_fp8_loader_preserves_native_tensors(fp8_checkpoint, monkeypatc
 
 
 @pytest.mark.parametrize("builder_class", [Qwen4ExpTextModel, Qwen4ExpMTPTextModel])
-def test_official_fp8_serialized_experts_preserve_bits(fp8_checkpoint, builder_class):
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_official_fp8_serialized_experts_preserve_bits(fp8_checkpoint, builder_class, ep):
     loader = load_fp8(fp8_checkpoint)
     layer = loader.layers[0] if builder_class is Qwen4ExpTextModel else loader.load_mtp().layers[0]
     builder = object.__new__(builder_class)
-    builder.ep = "cuda"
+    builder.ep = ep
     builder.moe_attrs = {"num_experts": 2}
     builder.values = {}
     builder.model = ir.Model(ir.Graph([], [], nodes=[], opset_imports={"": 21, "com.microsoft": 1}), ir_version=10)
@@ -224,7 +236,9 @@ def test_official_fp8_serialized_experts_preserve_bits(fp8_checkpoint, builder_c
                 for index in range(2)
             ])
             actual = initializers[initializer_name]
-            assert actual.data_type == (17 if attribute == "weight" else 16)
+            if attribute == "weight_scale_inv" and ep == "webgpu":
+                expected = expected.float()
+            assert actual.data_type == (17 if attribute == "weight" else 1 if ep == "webgpu" else 16)
             assert list(actual.dims) == list(expected.shape)
             assert actual.raw_data == expected.view(torch.uint8).numpy().tobytes()
 
@@ -261,7 +275,8 @@ def test_official_fp8_repository_uses_shared_cache(fp8_checkpoint, monkeypatch):
 
 @pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT])
 @pytest.mark.parametrize("checkpoint_fixture", ["checkpoint", "fp8_checkpoint"])
-def test_native_engram_preserves_bf16_scale(request, checkpoint_fixture, tmp_path, io_dtype):
+@pytest.mark.parametrize("scale_dtype", [None, ir.DataType.FLOAT])
+def test_native_engram_preserves_or_widens_bf16_scale(request, checkpoint_fixture, tmp_path, io_dtype, scale_dtype):
     checkpoint_path = request.getfixturevalue(checkpoint_fixture)
     loader = load_fp8(checkpoint_path) if checkpoint_fixture == "fp8_checkpoint" else load(checkpoint_path)
     embedding = loader.layers[1].ple.ple_embedding
@@ -271,19 +286,24 @@ def test_native_engram_preserves_bf16_scale(request, checkpoint_fixture, tmp_pat
     config = SimpleNamespace(
         ngram_size=2, heads_per_ngram=1, ple_embed_dim=8, ple_layer_ids=[2],
     )
-    builder = Qwen4ExpEngramModel(SimpleNamespace(ple_embedding=embedding), config, io_dtype)
+    builder = Qwen4ExpEngramModel(SimpleNamespace(ple_embedding=embedding), config, io_dtype, scale_dtype=scale_dtype)
     proto = ir.to_proto(builder.model)
     initializers = {tensor.name: tensor for tensor in proto.graph.initializer}
     scale = initializers["model.ple.ngram_embedding.weight_scale"]
-    expected_scale = embedding.ngram_embedding.weight_scale.view(torch.uint8).numpy().tobytes()
-    assert scale.data_type == onnx.TensorProto.BFLOAT16
+    expected_tensor = embedding.ngram_embedding.weight_scale
+    expected_dtype = ir.DataType.BFLOAT16
+    if scale_dtype == ir.DataType.FLOAT:
+        expected_tensor = expected_tensor.float()
+        expected_dtype = ir.DataType.FLOAT
+    expected_scale = expected_tensor.view(torch.uint8).numpy().tobytes()
+    assert scale.data_type == int(expected_dtype)
     assert scale.raw_data == expected_scale
     assert embedding.ngram_embedding.weight_scale.dtype == torch.bfloat16
     weight = initializers["model.ple.ngram_embedding.weight"]
     assert weight.data_type == 17
     assert weight.raw_data == embedding.ngram_embedding.weight.view(torch.uint8).numpy().tobytes()
     casts = [node for node in proto.graph.node if node.op_type == "Cast"]
-    assert len(casts) == int(io_dtype != ir.DataType.BFLOAT16)
+    assert len(casts) == int(io_dtype != expected_dtype)
     if casts:
         assert casts[0].input[0] == "/model/ple/ngram_embedding/GatherBlockQuantized/output_0"
         assert next(attribute.i for attribute in casts[0].attribute if attribute.name == "to") == int(io_dtype)
@@ -292,7 +312,7 @@ def test_native_engram_preserves_bf16_scale(request, checkpoint_fixture, tmp_pat
     saved = onnx.load(tmp_path / "engram.onnx")
     saved_scale = next(value for value in saved.graph.initializer
                        if value.name == "model.ple.ngram_embedding.weight_scale")
-    assert saved_scale.data_type == onnx.TensorProto.BFLOAT16
+    assert saved_scale.data_type == int(expected_dtype)
     assert saved_scale.raw_data == expected_scale
 
 
@@ -486,10 +506,11 @@ def test_visual_blocks_are_ordered_and_loaded_lazily(checkpoint):
     assert model.handles == {}
 
 
-def test_native_mtp_expert_initializers_preserve_checkpoint_bytes(checkpoint):
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_native_mtp_expert_initializers_preserve_checkpoint_bytes(checkpoint, ep):
     mtp = load(checkpoint).load_mtp()
     model = object.__new__(Qwen4ExpMTPTextModel)
-    model.ep = "cuda"
+    model.ep = ep
     model.io_dtype = ir.DataType.FLOAT16
     model.moe_attrs = {"num_experts": 2}
     model.moe_intermediate_size = model.hidden_size = 16
@@ -554,7 +575,12 @@ def test_nvfp4_mtp_unquantized_module_config_and_explicit_override(monkeypatch, 
     wrapper = object.__new__(Qwen4ExpModel)
     wrapper.decoder = SimpleNamespace(quant_type="modelopt", quant_config=config)
     wrapper.mtp_attrs = {}
-    options = {"_quant_config": config}
+    runtime_options = {
+        "use_paged_attention": True, "paged_block_size": 256, "enable_webgpu_graph": True,
+        "gpu_utilization_factor": 0.25, "max_batch_size": 1,
+        "state_update_capacity": 7, "max_draft_tokens": 7, "indexshare_mtp": True,
+    }
+    options = {"_quant_config": config, **runtime_options}
     if explicit:
         options["mtp_quant_config"] = QuantConfig.from_dict({"io_dtype": "bf16", "moe": {"type": "int8"}})
     captured = {}
@@ -567,6 +593,7 @@ def test_nvfp4_mtp_unquantized_module_config_and_explicit_override(monkeypatch, 
     wrapper.make_mtp_model(SimpleNamespace(), ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, options)
     assert captured["options"]["_quant_config"].moe.type == ("int8" if explicit else "none")
     assert captured["io_dtype"] == (ir.DataType.BFLOAT16 if explicit else ir.DataType.FLOAT16)
+    assert all(captured["options"][key] == value for key, value in runtime_options.items())
     assert config.moe.type == "nvfp4"
 
 

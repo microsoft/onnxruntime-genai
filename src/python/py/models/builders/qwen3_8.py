@@ -20,8 +20,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         if getattr(moe.experts, "quant_type", None) != "fp8_block":
             return super().make_moe_preprocessing(layer_id, moe, root_input)
-        if self.ep != "cuda":
-            raise ValueError("Native block-FP8 Qwen3.8 experts require the CUDA execution provider.")
+        if self.ep not in {"cuda", "webgpu"}:
+            raise ValueError("Native block-FP8 Qwen3.8 experts require the CUDA or WebGPU execution provider.")
         self.moe_attrs.update(
             op_type="QMoE",
             quant_type="fp8",
@@ -39,14 +39,15 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         up_scales = torch.stack([expert.up_proj.weight_scale_inv for expert in projections])
         down = torch.stack([expert.down_proj.weight for expert in projections])
         down_scales = torch.stack([expert.down_proj.weight_scale_inv for expert in projections])
+        scale_dtype = ir.DataType.FLOAT if self.ep == "webgpu" else None
         self.make_initializer(gate, names["gate_up_weight"])
-        self.make_initializer(gate_scales, names["gate_up_scales"])
+        self.make_initializer(gate_scales, names["gate_up_scales"], to=scale_dtype)
         prefix = f"model.layers.{layer_id}.moe.experts.up_proj"
         self.moe_attrs["up_projection_names"] = (f"{prefix}.qweight", f"{prefix}.scales")
         self.make_initializer(up, f"{prefix}.qweight")
-        self.make_initializer(up_scales, f"{prefix}.scales")
+        self.make_initializer(up_scales, f"{prefix}.scales", to=scale_dtype)
         self.make_initializer(down, names["down_weight"])
-        self.make_initializer(down_scales, names["down_scales"])
+        self.make_initializer(down_scales, names["down_scales"], to=scale_dtype)
 
     def make_moe_expert_names(self, layer_id):
         names = super().make_moe_expert_names(layer_id)
@@ -235,7 +236,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.require_dense_linear_attention_gate(b, b_name)
 
         packed_name = f"{basename}/a_b_proj/MatMul"
-        self.exclude_node_from_quantization(packed_name)
 
         class PackedAB:
             weight = torch.cat([a.weight, b.weight], dim=0)
@@ -1428,7 +1428,7 @@ class Qwen4ExpEmbeddingModel(_Qwen4ExpGraphModel):
 
 
 class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
-    def __init__(self, ple, config, io_dtype):
+    def __init__(self, ple, config, io_dtype, scale_dtype=None):
         super().__init__(io_dtype, "engram.onnx", "qwen4_exp_engram")
         self.graph.opset_imports["com.microsoft"] = 1
         embedding = ple.ple_embedding
@@ -1487,6 +1487,7 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
         self.make_initializer(
             weight_scale.reshape(1, 1),
             "model.ple.ngram_embedding.weight_scale",
+            to=scale_dtype,
         )
         scale_dtype = self.graph.initializers["model.ple.ngram_embedding.weight_scale"].dtype
         gathered = "/model/ple/ngram_embedding/GatherBlockQuantized/output_0"
@@ -2290,6 +2291,13 @@ class Qwen4ExpModel(MTPModel):
             self.mtp_attrs["onnx_dtype"] = io_dtype
         self.resolve_mtp_model_config(extra_options)
         mtp_options = self.mtp_attrs["extra_options"]
+        for option in (
+            "use_paged_attention", "paged_block_size", "enable_webgpu_graph",
+            "gpu_utilization_factor", "max_batch_size", "state_update_capacity",
+            "max_draft_tokens", "indexshare_mtp",
+        ):
+            if option in extra_options:
+                mtp_options[option] = copy.deepcopy(extra_options[option])
         mtp_options["text_only"] = True
         mtp_options["filename"] = "mtp.onnx"
         mtp_options.pop("include_hidden_states", None)
@@ -2333,6 +2341,7 @@ class Qwen4ExpModel(MTPModel):
             language_model.layers[ple_layer_id].ple,
             self.config.text_config,
             self.decoder.io_dtype,
+            scale_dtype=ir.DataType.FLOAT if self.decoder.ep == "webgpu" else None,
         )
         engram_model.save_model(output_dir)
         table = ir.load(os.path.join(output_dir, engram_model.filename)).graph.initializers[table_name].const_value

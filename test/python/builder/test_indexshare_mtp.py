@@ -7,6 +7,7 @@ import onnx
 import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
+from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer
 
 from models.builders.mtp import MTPModel
 
@@ -16,6 +17,14 @@ def mtp_graph(tmp_path):
     indices = "/model/layers.0/attn/PackedSparseAttentionIndexer/output_0"
     counts = "/model/layers.0/attn/PackedSparseAttentionIndexer/output_1"
     nodes = [
+        helper.make_node(
+            "Constant", [], ["split_sizes"], name="split_sizes",
+            value=numpy_helper.from_array(np.array([4, 2], dtype=np.int64)),
+        ),
+        helper.make_node(
+            "Constant", [], ["constant_output"], name="constant_output",
+            value=numpy_helper.from_array(np.ones((1, 2), dtype=np.float32)),
+        ),
         helper.make_node(
             "MatMul",
             ["hidden", "indexer.weight"],
@@ -57,9 +66,9 @@ def mtp_graph(tmp_path):
         helper.make_tensor_value_info(name, TensorProto.FLOAT, ["num_tokens", 2])
         for name in ["logits", "hidden_states_out", "present.key", "present.value", "present.indexer"]
     ]
+    outputs.append(helper.make_tensor_value_info("constant_output", TensorProto.FLOAT, [1, 2]))
     tensors = [
         numpy_helper.from_array(np.ones((2, 6), dtype=np.float32), "indexer.weight"),
-        numpy_helper.from_array(np.array([4, 2], dtype=np.int64), "split_sizes"),
         numpy_helper.from_array(np.ones(2, dtype=np.float32), "norm"),
         numpy_helper.from_array(np.array([[0x12, 0xAB], [0xFF, 0x00]], dtype=np.uint8), "expert.weight"),
     ]
@@ -89,7 +98,15 @@ def test_rejects_non_qsa_policy(mtp_graph, policy):
 
 
 @pytest.mark.parametrize("draft_count", range(1, 8))
-def test_single_model_selection_io(mtp_graph, draft_count):
+@pytest.mark.parametrize("quantized_projection", [False, True])
+def test_single_model_selection_io(mtp_graph, draft_count, quantized_projection):
+    if quantized_projection:
+        quantizer = MatMulNBitsQuantizer(
+            onnx.load(mtp_graph / "mtp.onnx"), bits=4, block_size=16, is_symmetric=True,
+            op_types_to_quantize=("MatMul",),
+        )
+        quantizer.process()
+        onnx.save_model(quantizer.model.model, mtp_graph / "mtp.onnx")
     source = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
     weight_bytes = (mtp_graph / "mtp.onnx.data").read_bytes()
     metadata = MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", draft_count)
@@ -109,24 +126,31 @@ def test_single_model_selection_io(mtp_graph, draft_count):
     assert len([node for node in model.graph.node if node.op_type == "PackedSparseAttentionIndexer"]) == 1
     assert len([node for node in model.graph.node if node.op_type == "SparsePagedAttention"]) == 1
     assert not any(node.op_type == "Split" for node in model.graph.node)
-    projection = next(node for node in model.graph.node if node.name.endswith("index_qk_proj/MatMul"))
+    constants = [node for node in model.graph.node if node.op_type == "Constant"]
+    assert [list(node.output) for node in constants] == [["constant_output"]]
     gather = next(node for node in model.graph.node if node.name.endswith("GatherProjectionRows"))
+    projection = next(node for node in model.graph.node if gather.output[0] in node.input)
+    assert projection.op_type == ("MatMulNBits" if quantized_projection else "MatMul")
     assert projection.input[0] == gather.output[0]
     assert list(gather.input) == ["hidden", "indexshare.projection_rows"]
     assert "indexshare.base_row_indices" in {value.name for value in model.graph.input}
     output_names = {value.name for value in model.graph.output}
-    assert {"logits", "indexshare.0.status", "indices", "counts"} <= output_names
-    assert metadata["indices_output"] == "indices"
-    assert metadata["counts_output"] == "counts"
-    assert not set(indexer.output[:2]).intersection(output_names)
-    for public_name, internal_name in zip(("indices", "counts"), indexer.output[:2], strict=True):
-        alias = next(node for node in model.graph.node if list(node.output) == [public_name])
-        assert alias.op_type == "Identity"
-        assert list(alias.input) == [internal_name]
+    assert {"logits", "indexshare.status", "indexshare.present_indices", "indexshare.present_counts"} <= output_names
+    assert {"indexshare.past_indices", "indexshare.past_counts"} <= {value.name for value in model.graph.input}
+    assert list(merge.input[:2]) == ["indexshare.past_indices", "indexshare.past_counts"]
+    assert metadata["indices_output"] == "indexshare.present_indices"
+    assert metadata["counts_output"] == "indexshare.present_counts"
+    assert list(indexer.output[:2]) == ["indexshare.present_indices", "indexshare.present_counts"]
+    assert indexer.output[7] == "indexshare.status"
+    attention = next(node for node in model.graph.node if node.op_type == "SparsePagedAttention")
+    assert list(attention.input[9:11]) == ["indexshare.present_indices", "indexshare.present_counts"]
+    assert not any(node.op_type == "Identity" and set(node.output).intersection({"indexshare.present_indices", "indexshare.present_counts"})
+                   for node in model.graph.node)
+    for public_name in ("indexshare.present_indices", "indexshare.present_counts"):
         value = next(value for value in model.graph.output if value.name == public_name)
         assert value.type.tensor_type.elem_type == TensorProto.INT32
         assert value.type.tensor_type.shape.dim[0].dim_param == "num_tokens"
-        if public_name == "indices":
+        if public_name == "indexshare.present_indices":
             assert value.type.tensor_type.shape.dim[1].dim_value == metadata["base_capacity"] + draft_count - 1
     assert not any(name.startswith("indexshare.decode.") for name in output_names)
     assert (mtp_graph / "mtp.onnx.data").read_bytes() == weight_bytes
@@ -187,8 +211,8 @@ def test_side_by_side_package_does_not_touch_source(mtp_graph):
     assert "index_share" not in mtp_config
     assert mtp_config["base_capacity"] == metadata["base_capacity"]
     assert mtp_config["max_draft_tokens"] == 3
-    assert mtp_config["outputs"]["indices"] == "indices"
-    assert mtp_config["outputs"]["counts"] == "counts"
+    assert mtp_config["outputs"]["indices"] == "indexshare.present_indices"
+    assert mtp_config["outputs"]["counts"] == "indexshare.present_counts"
     for path in mtp_graph.iterdir():
         assert path.read_bytes() == source_bytes[path.name]
     with pytest.raises(ValueError, match="must not exist"):
