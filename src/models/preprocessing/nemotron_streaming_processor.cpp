@@ -23,9 +23,9 @@ void PopulateMelTensorImpl(ThreadPool* thread_pool, T* output, std::span<const f
       thread_pool, total_elements, 8.0,
       [&](std::ptrdiff_t first, std::ptrdiff_t last) {
         auto local_convert = convert;
-        auto frame = first / num_mels;
-        auto mel_bin = first % num_mels;
         for (auto output_idx = first; output_idx < last; ++output_idx) {
+          const auto frame = output_idx / num_mels;
+          const auto mel_bin = output_idx % num_mels;
           if (frame < cache_frames) {
             const int source_frame = (cache_pos + static_cast<int>(frame)) % cache_frames;
             output[output_idx] = local_convert(
@@ -36,10 +36,6 @@ void PopulateMelTensorImpl(ThreadPool* thread_pool, T* output, std::span<const f
             output[output_idx] = local_convert(
                 mel[static_cast<size_t>(mel_bin) * static_cast<size_t>(num_frames) +
                     static_cast<size_t>(chunk_frame)]);
-          }
-          if (++mel_bin == num_mels) {
-            mel_bin = 0;
-            ++frame;
           }
         }
       });
@@ -72,16 +68,12 @@ void PopulateMelTensor(ThreadPool* thread_pool, OrtValue& output, std::span<cons
     ThreadPool::TryParallelFor(
         thread_pool, static_cast<std::ptrdiff_t>(mel.size()), 2.0,
         [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-          auto frame = first / num_mels;
-          auto mel_bin = first % num_mels;
           for (auto output_idx = first; output_idx < last; ++output_idx) {
+            const auto frame = output_idx / num_mels;
+            const auto mel_bin = output_idx % num_mels;
             chunk_output[output_idx] =
                 mel[static_cast<size_t>(mel_bin) * static_cast<size_t>(num_frames) +
                     static_cast<size_t>(frame)];
-            if (++mel_bin == num_mels) {
-              mel_bin = 0;
-              ++frame;
-            }
           }
         });
   } else if (output_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
