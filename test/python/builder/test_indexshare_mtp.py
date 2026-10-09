@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import onnx
@@ -10,6 +11,7 @@ from onnx import TensorProto, helper, numpy_helper
 from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer
 
 from models.builders.mtp import MTPModel
+from models.builders.qwen3_8 import Qwen4ExpModel
 
 
 @pytest.fixture
@@ -17,14 +19,6 @@ def mtp_graph(tmp_path):
     indices = "/model/layers.0/attn/PackedSparseAttentionIndexer/output_0"
     counts = "/model/layers.0/attn/PackedSparseAttentionIndexer/output_1"
     nodes = [
-        helper.make_node(
-            "Constant", [], ["split_sizes"], name="split_sizes",
-            value=numpy_helper.from_array(np.array([4, 2], dtype=np.int64)),
-        ),
-        helper.make_node(
-            "Constant", [], ["constant_output"], name="constant_output",
-            value=numpy_helper.from_array(np.ones((1, 2), dtype=np.float32)),
-        ),
         helper.make_node(
             "MatMul",
             ["hidden", "indexer.weight"],
@@ -66,9 +60,9 @@ def mtp_graph(tmp_path):
         helper.make_tensor_value_info(name, TensorProto.FLOAT, ["num_tokens", 2])
         for name in ["logits", "hidden_states_out", "present.key", "present.value", "present.indexer"]
     ]
-    outputs.append(helper.make_tensor_value_info("constant_output", TensorProto.FLOAT, [1, 2]))
     tensors = [
         numpy_helper.from_array(np.ones((2, 6), dtype=np.float32), "indexer.weight"),
+        numpy_helper.from_array(np.array([4, 2], dtype=np.int64), "split_sizes"),
         numpy_helper.from_array(np.ones(2, dtype=np.float32), "norm"),
         numpy_helper.from_array(np.array([[0x12, 0xAB], [0xFF, 0x00]], dtype=np.uint8), "expert.weight"),
     ]
@@ -126,8 +120,6 @@ def test_single_model_selection_io(mtp_graph, draft_count, quantized_projection)
     assert len([node for node in model.graph.node if node.op_type == "PackedSparseAttentionIndexer"]) == 1
     assert len([node for node in model.graph.node if node.op_type == "SparsePagedAttention"]) == 1
     assert not any(node.op_type == "Split" for node in model.graph.node)
-    constants = [node for node in model.graph.node if node.op_type == "Constant"]
-    assert [list(node.output) for node in constants] == [["constant_output"]]
     gather = next(node for node in model.graph.node if node.name.endswith("GatherProjectionRows"))
     projection = next(node for node in model.graph.node if gather.output[0] in node.input)
     assert projection.op_type == ("MatMulNBits" if quantized_projection else "MatMul")
@@ -135,22 +127,18 @@ def test_single_model_selection_io(mtp_graph, draft_count, quantized_projection)
     assert list(gather.input) == ["hidden", "indexshare.projection_rows"]
     assert "indexshare.base_row_indices" in {value.name for value in model.graph.input}
     output_names = {value.name for value in model.graph.output}
-    assert {"logits", "indexshare.status", "indexshare.present_indices", "indexshare.present_counts"} <= output_names
-    assert {"indexshare.past_indices", "indexshare.past_counts"} <= {value.name for value in model.graph.input}
-    assert list(merge.input[:2]) == ["indexshare.past_indices", "indexshare.past_counts"]
-    assert metadata["indices_output"] == "indexshare.present_indices"
-    assert metadata["counts_output"] == "indexshare.present_counts"
-    assert list(indexer.output[:2]) == ["indexshare.present_indices", "indexshare.present_counts"]
-    assert indexer.output[7] == "indexshare.status"
-    attention = next(node for node in model.graph.node if node.op_type == "SparsePagedAttention")
-    assert list(attention.input[9:11]) == ["indexshare.present_indices", "indexshare.present_counts"]
-    assert not any(node.op_type == "Identity" and set(node.output).intersection({"indexshare.present_indices", "indexshare.present_counts"})
-                   for node in model.graph.node)
-    for public_name in ("indexshare.present_indices", "indexshare.present_counts"):
+    assert {"logits", "indexshare.0.status", "indices", "counts"} <= output_names
+    assert metadata["indices_output"] == "indices"
+    assert metadata["counts_output"] == "counts"
+    assert not set(indexer.output[:2]).intersection(output_names)
+    for public_name, internal_name in zip(("indices", "counts"), indexer.output[:2], strict=True):
+        alias = next(node for node in model.graph.node if list(node.output) == [public_name])
+        assert alias.op_type == "Identity"
+        assert list(alias.input) == [internal_name]
         value = next(value for value in model.graph.output if value.name == public_name)
         assert value.type.tensor_type.elem_type == TensorProto.INT32
         assert value.type.tensor_type.shape.dim[0].dim_param == "num_tokens"
-        if public_name == "indexshare.present_indices":
+        if public_name == "indices":
             assert value.type.tensor_type.shape.dim[1].dim_value == metadata["base_capacity"] + draft_count - 1
     assert not any(name.startswith("indexshare.decode.") for name in output_names)
     assert (mtp_graph / "mtp.onnx.data").read_bytes() == weight_bytes
@@ -176,6 +164,61 @@ def test_rejects_projection_with_other_consumers(mtp_graph):
     with pytest.raises(ValueError, match="projection with other consumers"):
         MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 7)
     assert (mtp_graph / "mtp.onnx").read_bytes() == source_bytes
+
+
+@pytest.mark.parametrize("ep,paged", [("cuda", True), ("cuda", False), ("cpu", True), ("webgpu", True), ("webgpu", False)])
+@pytest.mark.parametrize("cuda_graph", [None, "0", "1"])
+def test_qwen_indexshare_config_and_session_options(mtp_graph, ep, paged, cuda_graph):
+    metadata = MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 7)
+    options = {"provider_options": [{ep: {}}]}
+    capture_option = "enableGraphCapture" if ep == "webgpu" else "enable_cuda_graph"
+    if cuda_graph is not None:
+        options["provider_options"][0][ep][capture_option] = cuda_graph
+    if ep == "webgpu":
+        options["provider_options"][0][ep]["validationMode"] = "disabled"
+    config_path = mtp_graph / "genai_config.json"
+    config_path.write_text(json.dumps({"model": {"decoder": {"session_options": options}, "eos_token_id": [11, 12]}}))
+    model = object.__new__(Qwen4ExpModel)
+    model.decoder = SimpleNamespace(ep=ep, use_paged_attention=paged, num_kv_heads=2, head_size=256)
+    model.mtp_attrs = {"shared_initializers": [], "index_share": metadata}
+
+    model.add_mtp_to_genai_config(str(mtp_graph))
+
+    config = json.loads(config_path.read_text())
+    mtp = config["model"]["mtp"]
+    assert "index_share" not in mtp
+    assert mtp["base_capacity"] == metadata["base_capacity"]
+    assert mtp["max_draft_tokens"] == 7
+    assert mtp["outputs"]["indices"] == "indices"
+    assert mtp["outputs"]["counts"] == "counts"
+    assert '"eos_token_id": [11, 12]' in config_path.read_text()
+    expected_options = {
+        "ep.cuda.fpa_intb_gemm": "1",
+        "ep.cuda.qmoe_skip_nvfp4_gemv_profiling": "1",
+        "ep.cuda.sparse_paged_attention_grouped": "1",
+        "ep.cuda.sparse_paged_attention_grouped_decode": "0",
+        "ep.cuda.sparse_paged_attention_grouped_decode_splits": "0",
+        "ep.cuda.sparse_paged_attention_grouped_tile_size": "8",
+        "ep.cuda.sparse_paged_attention_grouped_vectorized": "1",
+        "ep.cuda.sparse_paged_attention_warp_reduction": "0",
+        "session.use_device_allocator_for_initializers": "1",
+    }
+    for section in ("decoder", "mtp"):
+        session_options = config["model"][section]["session_options"]
+        if ep == "cuda" and paged:
+            assert all(session_options.get(name) == value for name, value in expected_options.items())
+            if cuda_graph is not None:
+                provider = next(provider["cuda"] for provider in session_options["provider_options"] if "cuda" in provider)
+                assert provider["enable_cuda_graph"] == cuda_graph
+            else:
+                assert not any("enable_cuda_graph" in provider.get("cuda", {}) for provider in session_options.get("provider_options", []))
+        else:
+            assert "ep.cuda.sparse_paged_attention_grouped" not in session_options
+        if ep == "webgpu" and paged:
+            provider = next(provider[ep] for provider in session_options["provider_options"] if ep in provider)
+            assert provider["validationMode"] == "disabled"
+            assert provider.get(capture_option) == cuda_graph
+            assert not any(name.startswith("ep.cuda.") for name in session_options)
 
 
 def test_side_by_side_package_does_not_touch_source(mtp_graph):
@@ -211,8 +254,8 @@ def test_side_by_side_package_does_not_touch_source(mtp_graph):
     assert "index_share" not in mtp_config
     assert mtp_config["base_capacity"] == metadata["base_capacity"]
     assert mtp_config["max_draft_tokens"] == 3
-    assert mtp_config["outputs"]["indices"] == "indexshare.present_indices"
-    assert mtp_config["outputs"]["counts"] == "indexshare.present_counts"
+    assert mtp_config["outputs"]["indices"] == "indices"
+    assert mtp_config["outputs"]["counts"] == "counts"
     for path in mtp_graph.iterdir():
         assert path.read_bytes() == source_bytes[path.name]
     with pytest.raises(ValueError, match="must not exist"):

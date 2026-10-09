@@ -4,6 +4,7 @@ import os
 
 import onnx_ir as ir
 import torch
+from builder_config import serialize_genai_config
 from huggingface_hub import hf_hub_download, snapshot_download
 
 from .base import Model
@@ -2376,6 +2377,41 @@ class Qwen4ExpModel(MTPModel):
         vision_model.save_model(output_dir)
         del weights
 
+    def configure_paged_sessions(self, genai_config):
+        if self.decoder.ep not in {"cuda", "webgpu"} or not getattr(self.decoder, "use_paged_attention", False):
+            return
+        model_config = genai_config["model"]
+        decoder_options = model_config["decoder"].get("session_options", {})
+        ep = self.decoder.ep
+        inherited_provider_options = next(
+            (provider[ep] for provider in decoder_options.get("provider_options", []) if ep in provider),
+            {},
+        )
+        for section in ("decoder", "mtp"):
+            if section not in model_config:
+                continue
+            options = model_config[section].setdefault("session_options", {})
+            providers = options.setdefault("provider_options", [])
+            provider_options = next((provider[ep] for provider in providers if ep in provider), None)
+            if provider_options is None:
+                provider_options = {}
+                providers.append({ep: provider_options})
+            provider_options.update(copy.deepcopy(inherited_provider_options))
+            options["session.use_device_allocator_for_initializers"] = "1"
+            if ep != "cuda":
+                continue
+            options.update({
+                "ep.cuda.fpa_intb_gemm": "1",
+                "ep.cuda.qmoe_skip_nvfp4_gemv_profiling": "1",
+                "ep.cuda.sparse_paged_attention_grouped": "1",
+                "ep.cuda.sparse_paged_attention_grouped_decode": "0",
+                "ep.cuda.sparse_paged_attention_grouped_decode_splits": "0",
+                "ep.cuda.sparse_paged_attention_grouped_tile_size": "8",
+                "ep.cuda.sparse_paged_attention_grouped_vectorized": "1",
+                "ep.cuda.sparse_paged_attention_warp_reduction": "0",
+                "session.use_device_allocator_for_initializers": "1",
+            })
+
     def make_genai_config(self, config, extra_kwargs, out_dir):
         self.decoder.make_genai_config(config.text_config, extra_kwargs, out_dir)
         config_path = os.path.join(out_dir, "genai_config.json")
@@ -2425,8 +2461,9 @@ class Qwen4ExpModel(MTPModel):
                 "present_ple_token_names": f"present.{ple_layer_id}.ple_tokens",
             },
         }
+        self.configure_paged_sessions(genai_config)
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         if self.mtp is not None:
             self.add_mtp_to_genai_config(out_dir)
 
@@ -2468,9 +2505,15 @@ class Qwen4ExpModel(MTPModel):
         }
         self.add_shared_initializers_to_genai_config(genai_config)
         if "index_share" in self.mtp_attrs:
-            genai_config["model"]["mtp"]["index_share"] = self.mtp_attrs["index_share"]
+            metadata = self.mtp_attrs["index_share"]
+            mtp_config = genai_config["model"]["mtp"]
+            mtp_config["base_capacity"] = metadata["base_capacity"]
+            mtp_config["max_draft_tokens"] = metadata["max_draft_tokens"]
+            mtp_config["outputs"]["indices"] = metadata["indices_output"]
+            mtp_config["outputs"]["counts"] = metadata["counts_output"]
+        self.configure_paged_sessions(genai_config)
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
