@@ -33,9 +33,11 @@ class QuantModel:
             model = OliveModel(quant_type, **kwargs)
         elif quant_type == "quark":
             model = QuarkModel(quant_type, **kwargs)
-        elif quant_type in {"modelopt", "compressed-tensors"}:
+        elif quant_type in {"modelopt", "compressed-tensors", "fp8"}:
             with open(os.path.join(kwargs["input_path"], "config.json")) as config_file:
                 config = json.load(config_file)
+            if quant_type == "fp8" and config.get("model_type") not in {"qwen4_exp", "qwen4_exp_text"}:
+                raise NotImplementedError("Native FP8 checkpoint loading is currently supported only for Qwen3.8.")
             loader = Qwen38ModeloptModel if config.get("model_type") in {"qwen4_exp", "qwen4_exp_text"} else ModeloptModel
             model = loader(quant_type, **kwargs)
         elif quant_type == "quant_auto":

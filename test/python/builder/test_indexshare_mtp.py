@@ -115,7 +115,19 @@ def test_single_model_selection_io(mtp_graph, draft_count):
     assert list(gather.input) == ["hidden", "indexshare.projection_rows"]
     assert "indexshare.base_row_indices" in {value.name for value in model.graph.input}
     output_names = {value.name for value in model.graph.output}
-    assert {"logits", "indexshare.0.status", metadata["indices_output"]} <= output_names
+    assert {"logits", "indexshare.0.status", "indices", "counts"} <= output_names
+    assert metadata["indices_output"] == "indices"
+    assert metadata["counts_output"] == "counts"
+    assert not set(indexer.output[:2]).intersection(output_names)
+    for public_name, internal_name in zip(("indices", "counts"), indexer.output[:2], strict=True):
+        alias = next(node for node in model.graph.node if list(node.output) == [public_name])
+        assert alias.op_type == "Identity"
+        assert list(alias.input) == [internal_name]
+        value = next(value for value in model.graph.output if value.name == public_name)
+        assert value.type.tensor_type.elem_type == TensorProto.INT32
+        assert value.type.tensor_type.shape.dim[0].dim_param == "num_tokens"
+        if public_name == "indices":
+            assert value.type.tensor_type.shape.dim[1].dim_value == metadata["base_capacity"] + draft_count - 1
     assert not any(name.startswith("indexshare.decode.") for name in output_names)
     assert (mtp_graph / "mtp.onnx.data").read_bytes() == weight_bytes
     originals = {value.name: value.SerializeToString() for value in source.graph.initializer}
@@ -171,7 +183,12 @@ def test_side_by_side_package_does_not_touch_source(mtp_graph):
     onnx.save_model(probe, output / "probe.onnx")
     session = ort.InferenceSession(str(output / "probe.onnx"), providers=["CPUExecutionProvider"])
     np.testing.assert_array_equal(session.run(None, {})[0], [[0x12, 0xAB], [0xFF, 0x00]])
-    assert json.loads((output / "genai_config.json").read_text())["model"]["mtp"]["index_share"] == metadata
+    mtp_config = json.loads((output / "genai_config.json").read_text())["model"]["mtp"]
+    assert "index_share" not in mtp_config
+    assert mtp_config["base_capacity"] == metadata["base_capacity"]
+    assert mtp_config["max_draft_tokens"] == 3
+    assert mtp_config["outputs"]["indices"] == "indices"
+    assert mtp_config["outputs"]["counts"] == "counts"
     for path in mtp_graph.iterdir():
         assert path.read_bytes() == source_bytes[path.name]
     with pytest.raises(ValueError, match="must not exist"):

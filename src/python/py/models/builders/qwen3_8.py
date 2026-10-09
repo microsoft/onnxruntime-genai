@@ -4,7 +4,8 @@ import os
 
 import onnx_ir as ir
 import torch
-from huggingface_hub import hf_hub_download
+from builder_config import serialize_genai_config
+from huggingface_hub import hf_hub_download, snapshot_download
 
 from .base import Model
 from .expansions import Qwen38
@@ -16,6 +17,50 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
     """Qwen4-Exp decoder builder using external token/vision embeddings."""
 
     CPU_EMBEDDING_ANNOTATION = "cpu_embedding"
+
+    def make_moe_preprocessing(self, layer_id, moe, root_input):
+        if getattr(moe.experts, "quant_type", None) != "fp8_block":
+            return super().make_moe_preprocessing(layer_id, moe, root_input)
+        if self.ep != "cuda":
+            raise ValueError("Native block-FP8 Qwen3.8 experts require the CUDA execution provider.")
+        self.moe_attrs.update(
+            op_type="QMoE",
+            quant_type="fp8",
+            expert_weight_bits=8,
+            block_size=128,
+            activation_type="silu",
+            swiglu_fusion=0,
+            weights_prepacked=-1,
+        )
+        names = self.make_moe_expert_names(layer_id)
+        projections = [getattr(moe.experts, str(index)) for index in range(self.moe_attrs["num_experts"])]
+        gate = torch.stack([expert.gate_proj.weight for expert in projections])
+        gate_scales = torch.stack([expert.gate_proj.weight_scale_inv for expert in projections])
+        up = torch.stack([expert.up_proj.weight for expert in projections])
+        up_scales = torch.stack([expert.up_proj.weight_scale_inv for expert in projections])
+        down = torch.stack([expert.down_proj.weight for expert in projections])
+        down_scales = torch.stack([expert.down_proj.weight_scale_inv for expert in projections])
+        self.make_initializer(gate, names["gate_up_weight"])
+        self.make_initializer(gate_scales, names["gate_up_scales"])
+        prefix = f"model.layers.{layer_id}.moe.experts.up_proj"
+        self.moe_attrs["up_projection_names"] = (f"{prefix}.qweight", f"{prefix}.scales")
+        self.make_initializer(up, f"{prefix}.qweight")
+        self.make_initializer(up_scales, f"{prefix}.scales")
+        self.make_initializer(down, names["down_weight"])
+        self.make_initializer(down_scales, names["down_scales"])
+
+    def make_moe_expert_names(self, layer_id):
+        names = super().make_moe_expert_names(layer_id)
+        if self.moe_attrs.get("quant_type") == "fp8" and self.moe_attrs.get("block_size", 0) > 0:
+            for name in ("gate_up_weight", "gate_up_scales"):
+                names[name] = names[name].replace("gate_up_proj", "gate_proj")
+            names["gate_up_bias"] = names["down_bias"] = ""
+        return names
+
+    def make_moe_op(self, name, **kwargs):
+        if self.moe_attrs.get("quant_type") == "fp8" and self.moe_attrs.get("block_size", 0) > 0:
+            kwargs["weight3"], kwargs["scales3"] = self.moe_attrs["up_projection_names"]
+        return super().make_moe_op(name, **kwargs)
 
     def is_packed_matmul_supported(self):
         return Model.is_packed_matmul_supported(self)
@@ -1443,8 +1488,8 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
         self.make_initializer(
             weight_scale.reshape(1, 1),
             "model.ple.ngram_embedding.weight_scale",
-            to=self.io_dtype,
         )
+        scale_dtype = self.graph.initializers["model.ple.ngram_embedding.weight_scale"].dtype
         gathered = "/model/ple/ngram_embedding/GatherBlockQuantized/output_0"
         self.make_node(
             "GatherBlockQuantized",
@@ -1459,9 +1504,16 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
         )
         self.make_value(
             gathered,
-            self.io_dtype,
+            scale_dtype,
             ["batch_size", "sequence_length", ngram_heads, head_dim],
         )
+        if scale_dtype != self.io_dtype:
+            cast_name = "/model/ple/ngram_embedding/Cast"
+            self.make_cast(
+                cast_name, gathered, self.io_dtype,
+                ["batch_size", "sequence_length", ngram_heads, head_dim],
+            )
+            gathered = f"{cast_name}/output_0"
         self.make_reshape(
             "/model/ple/ngram_embedding/Reshape",
             [gathered, f"/model/constants/INT64/[0, 0, {ple_embed_dim}]"],
@@ -2231,7 +2283,7 @@ class Qwen4ExpModel(MTPModel):
         self.mtp_attrs["io_dtype"] = io_dtype
         self.mtp_attrs["onnx_dtype"] = onnx_dtype
         self.mtp_attrs["extra_options"] = copy.deepcopy(extra_options)
-        if getattr(self.decoder, "quant_type", None) in {"modelopt", "compressed-tensors"} and "mtp_quant_config" not in extra_options:
+        if getattr(self.decoder, "quant_type", None) in {"modelopt", "compressed-tensors", "fp8"} and "mtp_quant_config" not in extra_options:
             mtp_quant_config = copy.deepcopy(self.decoder.quant_config)
             mtp_quant_config.weights.type = "none"
             mtp_quant_config.moe.type = "none"
@@ -2254,6 +2306,13 @@ class Qwen4ExpModel(MTPModel):
         )
 
     def make_model(self, input_path):
+        if self.decoder.quant_type == "fp8" and not os.path.isdir(input_path):
+            input_path = snapshot_download(
+                repo_id=self.decoder.model_name_or_path,
+                cache_dir=self.decoder.cache_dir,
+                token=self.decoder.hf_token,
+                allow_patterns=["*.json", "*.safetensors"],
+            )
         self.input_path = input_path
         self.decoder.make_model(input_path)
         if self.mtp is not None:
@@ -2363,7 +2422,7 @@ class Qwen4ExpModel(MTPModel):
             },
         }
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         if self.mtp is not None:
             self.add_mtp_to_genai_config(out_dir)
 
@@ -2405,9 +2464,14 @@ class Qwen4ExpModel(MTPModel):
         }
         self.add_shared_initializers_to_genai_config(genai_config)
         if "index_share" in self.mtp_attrs:
-            genai_config["model"]["mtp"]["index_share"] = self.mtp_attrs["index_share"]
+            metadata = self.mtp_attrs["index_share"]
+            mtp_config = genai_config["model"]["mtp"]
+            mtp_config["base_capacity"] = metadata["base_capacity"]
+            mtp_config["max_draft_tokens"] = metadata["max_draft_tokens"]
+            mtp_config["outputs"]["indices"] = metadata["indices_output"]
+            mtp_config["outputs"]["counts"] = metadata["counts_output"]
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
@@ -2489,50 +2553,6 @@ class Qwen4ExpModel(MTPModel):
 
 class Qwen4ExpMTPTextModel(Qwen4ExpTextModel):
     """Qwen4-Exp one-layer self-speculative MTP head builder."""
-
-    def make_moe_preprocessing(self, layer_id, moe, root_input):
-        if getattr(moe.experts, "quant_type", None) != "fp8_block":
-            return super().make_moe_preprocessing(layer_id, moe, root_input)
-        if self.ep != "cuda":
-            raise ValueError("Native block-FP8 Qwen3.8 MTP experts require the CUDA execution provider.")
-        self.moe_attrs.update(
-            op_type="QMoE",
-            quant_type="fp8",
-            expert_weight_bits=8,
-            block_size=128,
-            activation_type="silu",
-            swiglu_fusion=0,
-            weights_prepacked=-1,
-        )
-        names = self.make_moe_expert_names(layer_id)
-        projections = [getattr(moe.experts, str(index)) for index in range(self.moe_attrs["num_experts"])]
-        gate = torch.stack([expert.gate_proj.weight for expert in projections])
-        gate_scales = torch.stack([expert.gate_proj.weight_scale_inv for expert in projections])
-        up = torch.stack([expert.up_proj.weight for expert in projections])
-        up_scales = torch.stack([expert.up_proj.weight_scale_inv for expert in projections])
-        down = torch.stack([expert.down_proj.weight for expert in projections])
-        down_scales = torch.stack([expert.down_proj.weight_scale_inv for expert in projections])
-        self.make_initializer(gate, names["gate_up_weight"])
-        self.make_initializer(gate_scales, names["gate_up_scales"])
-        prefix = f"model.layers.{layer_id}.moe.experts.up_proj"
-        self.moe_attrs["up_projection_names"] = (f"{prefix}.qweight", f"{prefix}.scales")
-        self.make_initializer(up, f"{prefix}.qweight")
-        self.make_initializer(up_scales, f"{prefix}.scales")
-        self.make_initializer(down, names["down_weight"])
-        self.make_initializer(down_scales, names["down_scales"])
-
-    def make_moe_expert_names(self, layer_id):
-        names = super().make_moe_expert_names(layer_id)
-        if self.moe_attrs.get("quant_type") == "fp8" and self.moe_attrs.get("block_size", 0) > 0:
-            for name in ("gate_up_weight", "gate_up_scales"):
-                names[name] = names[name].replace("gate_up_proj", "gate_proj")
-            names["gate_up_bias"] = names["down_bias"] = ""
-        return names
-
-    def make_moe_op(self, name, **kwargs):
-        if self.moe_attrs.get("quant_type") == "fp8" and self.moe_attrs.get("block_size", 0) > 0:
-            kwargs["weight3"], kwargs["scales3"] = self.moe_attrs["up_projection_names"]
-        return super().make_moe_op(name, **kwargs)
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         config = copy.deepcopy(config)

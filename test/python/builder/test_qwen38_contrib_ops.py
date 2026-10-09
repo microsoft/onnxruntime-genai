@@ -1416,6 +1416,7 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path, ple_layer_id
     assert [node.op_type for node in model.graph] == [
         "NGramHashMapping",
         "GatherBlockQuantized",
+        "Cast",
         "Constant",
         "Reshape",
     ]
@@ -1576,6 +1577,33 @@ def test_text_only_config_connects_external_engram(
     assert "intra_op_num_threads" not in config["engram"]["session_options"]
     assert "embedding" not in config and "vision" not in config
     assert mtp_calls == ([tmp_path] if include_mtp else [])
+
+
+def test_qwen38_mtp_config_flattens_indexshare_metadata(tmp_path):
+    state_groups = [{"kind": "paged_kv", "layer_ids": [3, 7]}]
+    (tmp_path / "genai_config.json").write_text(json.dumps({
+        "model": {"decoder": {"outputs": {}, "session_options": {}, "state_groups": state_groups}},
+    }))
+    wrapper = object.__new__(Qwen4ExpModel)
+    wrapper.decoder = SimpleNamespace(num_kv_heads=2, head_size=256)
+    wrapper.mtp_attrs = {"index_share": {
+        "enabled": True, "base_capacity": 2051, "max_draft_tokens": 7,
+        "indices_output": "indices", "counts_output": "counts",
+    }}
+    wrapper.add_shared_initializers_to_genai_config = lambda config: None
+
+    wrapper.add_mtp_to_genai_config(tmp_path)
+
+    serialized = (tmp_path / "genai_config.json").read_text()
+    assert f'            "state_groups": {json.dumps(state_groups)}' in serialized.splitlines()
+    mtp_config = json.loads(serialized)["model"]["mtp"]
+    assert "index_share" not in mtp_config
+    assert mtp_config["base_capacity"] == 2051
+    assert mtp_config["max_draft_tokens"] == 7
+    assert mtp_config["outputs"]["indices"] == "indices"
+    assert mtp_config["outputs"]["counts"] == "counts"
+    assert "indices_output" not in mtp_config["outputs"]
+    assert "counts_output" not in mtp_config["outputs"]
 
 
 def test_qwen38_config_assigns_embedding_annotation_to_cpu():

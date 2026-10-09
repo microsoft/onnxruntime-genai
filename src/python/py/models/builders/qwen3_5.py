@@ -4,6 +4,7 @@ import os
 
 import onnx_ir as ir
 import torch
+from builder_config import serialize_genai_config
 
 from .base import Model
 from .expansions.qwen3_5 import Qwen35
@@ -710,7 +711,7 @@ class Qwen35MoEModel(MTPModel):
             return
         genai_config["search"]["do_sample"] = False
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         print("Set search.do_sample to false: a block drafter only proposes drafts for greedy turns.")
 
     def add_mtp_to_genai_config(self, out_dir):
@@ -748,7 +749,7 @@ class Qwen35MoEModel(MTPModel):
         self.add_shared_initializers_to_genai_config(genai_config)
 
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         print("Added 'mtp' section to genai_config.json")
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
@@ -1085,7 +1086,7 @@ class Qwen35MoEModel(MTPModel):
             dynamic_batching.setdefault("prefix_caching", False)
 
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         print("Added 'dflash2' section to genai_config.json")
 
     def make_dspark_init(self, io_dtype, extra_options):
@@ -1186,7 +1187,7 @@ class Qwen35MoEModel(MTPModel):
         genai_config["engine"]["dynamic_batching"].setdefault("prefix_caching", False)
 
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         print("Added 'dspark' section to genai_config.json")
 
 

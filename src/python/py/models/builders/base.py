@@ -19,6 +19,7 @@ from collections.abc import Sequence
 import numpy as np
 import onnx_ir as ir
 import torch
+from builder_config import serialize_genai_config
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -1538,7 +1539,7 @@ class Model:
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
-            json.dump(genai_config, f, indent=4)
+            f.write(serialize_genai_config(genai_config))
 
     def update_genai_config(self, genai_config):
         """

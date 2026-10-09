@@ -59,6 +59,11 @@ class MTPModel:
 
     def _export_packed_indexshare_graph(self, source, indexer, capacity, output_dir, source_file, max_draft_tokens):
         producers = {name: node for node in source.graph.node for name in node.output if name}
+        existing_names = set(producers)
+        existing_names.update(value.name for value in source.graph.input)
+        existing_names.update(value.name for value in source.graph.initializer)
+        if existing_names.intersection({"indices", "counts"}):
+            raise ValueError("IndexShare graph output names 'indices' and 'counts' must be unused.")
         query_producer = producers.get(indexer.input[0])
         split = None
         if len(indexer.input) > 1 and indexer.input[1]:
@@ -134,6 +139,10 @@ class MTPModel:
             nodes.append(node)
         del source.graph.node[:]
         source.graph.node.extend(nodes)
+        for name, internal_output in zip(("indices", "counts"), indexer.output[:2], strict=True):
+            source.graph.node.append(helper.make_node(
+                "Identity", [internal_output], [name], name=prefix + "/" + name,
+            ))
         for name, dtype, shape in (
             ("indexshare.mode", TensorProto.INT32, [1]),
             ("indexshare.projection_rows", TensorProto.INT64, ["indexer_projection_rows"]),
@@ -144,9 +153,12 @@ class MTPModel:
             ("indexshare.range_ends", TensorProto.INT32, ["indexshare_merge_queries"]),
         ):
             source.graph.input.append(helper.make_tensor_value_info(name, dtype, shape))
+        preserved_outputs = [value for value in source.graph.output if value.name not in indexer.output[:2]]
+        del source.graph.output[:]
+        source.graph.output.extend(preserved_outputs)
         for name, shape in (
-            (indexer.output[0], ["num_tokens", output_capacity]),
-            (indexer.output[1], ["num_tokens"]),
+            ("indices", ["num_tokens", output_capacity]),
+            ("counts", ["num_tokens"]),
             ("indexshare.0.status", ["num_tokens"]),
         ):
             source.graph.output.append(helper.make_tensor_value_info(name, TensorProto.INT32, shape))
@@ -156,8 +168,8 @@ class MTPModel:
             "enabled": True,
             "base_capacity": capacity,
             "max_draft_tokens": max_draft_tokens,
-            "indices_output": indexer.output[0],
-            "counts_output": indexer.output[1],
+            "indices_output": "indices",
+            "counts_output": "counts",
         }
 
     def resolve_mtp_model_config(self, extra_options):

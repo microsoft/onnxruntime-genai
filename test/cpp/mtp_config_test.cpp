@@ -17,7 +17,8 @@ namespace fs_std = std::filesystem;
 
 fs_std::path WriteMtpConfig(const std::string& output_name,
                             const std::string& enabled_field = {},
-                            const std::string& suffix = {}) {
+                            const std::string& suffix = {},
+                            const std::string& output_fields = {}) {
   const auto root = fs_std::temp_directory_path() /
                     ("ortgenai_mtp_config_" + output_name + suffix);
   std::error_code ec;
@@ -34,7 +35,7 @@ fs_std::path WriteMtpConfig(const std::string& output_name,
       " \"main_hidden_states\": \"main_hidden\","
       " \"outputs\": { \"" +
       output_name +
-      "\": \"head_feedback\" } } },"
+      "\": \"head_feedback\" " + output_fields + " } } },"
       " \"search\": {} }";
   std::ofstream out(root / "genai_config.json", std::ios::binary);
   out << config;
@@ -100,6 +101,37 @@ TEST(MtpConfigTest, ParsesSingleModelIndexShareMetadata) {
 
 TEST(MtpConfigTest, RejectsNonpositiveIndexShareCapacity) {
   const auto root = WriteMtpConfig("hidden_states", R"("index_share": {"base_capacity": 0}, )", "_bad_indexshare");
+  EXPECT_THROW(OgaConfig::Create(root.string().c_str()), std::exception);
+}
+
+TEST(MtpConfigTest, EnablesFlatIndexShareMetadataByDefault) {
+  const auto root = WriteMtpConfig(
+      "hidden_states", R"("base_capacity": 2051, )", "_flat_indexshare",
+      R"(, "indices": "indices", "counts": "counts")");
+  const Config config{fs::path{root.string()}, {}};
+  EXPECT_TRUE(config.model.mtp.index_share.enabled);
+  EXPECT_EQ(config.model.mtp.index_share.base_capacity, 2051);
+  EXPECT_EQ(config.model.mtp.index_share.max_draft_tokens, 7);
+  EXPECT_EQ(config.model.mtp.index_share.indices_output, "indices");
+  EXPECT_EQ(config.model.mtp.index_share.counts_output, "counts");
+}
+
+TEST(MtpConfigTest, ParsesFlatIndexShareDraftWidth) {
+  const auto root = WriteMtpConfig(
+      "hidden_states", R"("max_draft_tokens": 1, "base_capacity": 2051, )", "_flat_single_indexshare",
+      R"(, "indices": "indices", "counts": "counts")");
+  const Config config{fs::path{root.string()}, {}};
+  EXPECT_TRUE(config.model.mtp.index_share.enabled);
+  EXPECT_EQ(config.model.mtp.index_share.max_draft_tokens, 1);
+}
+
+TEST(MtpConfigTest, RejectsNonpositiveFlatIndexShareCapacity) {
+  const auto root = WriteMtpConfig("hidden_states", R"("base_capacity": 0, )", "_bad_flat_indexshare");
+  EXPECT_THROW(OgaConfig::Create(root.string().c_str()), std::exception);
+}
+
+TEST(MtpConfigTest, RejectsInvalidFlatIndexShareDraftWidth) {
+  const auto root = WriteMtpConfig("hidden_states", R"("base_capacity": 2051, "max_draft_tokens": 8, )", "_bad_flat_width");
   EXPECT_THROW(OgaConfig::Create(root.string().c_str()), std::exception);
 }
 

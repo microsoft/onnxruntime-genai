@@ -20,6 +20,22 @@ from typing import Any
 
 from quantization import QuantConfig
 
+
+def serialize_genai_config(config: dict[str, Any]) -> str:
+    """Indent config objects while keeping every array on one line."""
+    def format_value(value, level):
+        if not isinstance(value, dict) or not value:
+            return json.dumps(value)
+        indentation = " " * (4 * (level + 1))
+        entries = [
+            f"{indentation}{json.dumps(key)}: {format_value(child, level + 1)}"
+            for key, child in value.items()
+        ]
+        return "{\n" + ",\n".join(entries) + "\n" + " " * (4 * level) + "}"
+
+    return format_value(config, 0) + "\n"
+
+
 STRUCTURED_FIELDS = (
     "target_options",
     "drafter_options",

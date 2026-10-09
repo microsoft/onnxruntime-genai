@@ -17,8 +17,25 @@ from builder_config import (  # noqa: E402
     apply_runtime_config,
     load_json_object,
     normalize_builder_config,
+    serialize_genai_config,
     validate_model_dependent_config,
 )
+
+
+@pytest.mark.parametrize("values", [
+    [], [1, 2, 3], [[1, 2], []],
+    [{"kind": "paged_kv", "layer_ids": [3, 7]}, {"enabled": True}],
+    ["brackets [ ]", "quote\"", "line\nbreak", None, False, 0.25],
+])
+def test_genai_config_serialization_keeps_arrays_inline(values):
+    config = {"model": {"values": values, "inputs": {"input_ids": "input_ids"}}, "search": {}}
+
+    serialized = serialize_genai_config(config)
+
+    assert json.loads(serialized) == config
+    assert f'        "values": {json.dumps(values)},' in serialized.splitlines()
+    assert '        "inputs": {\n            "input_ids": "input_ids"\n        }' in serialized
+    assert serialized.endswith("\n")
 
 
 def test_legacy_configuration_preserves_options():

@@ -604,6 +604,28 @@ The `--precision` argument controls the unquantized tensors and model I/O; it do
 
 NVIDIA's `nvidia/Qwen3.8-Flash-Next-NVFP4` checkpoint is also supported. Its routed main-model experts remain native NVFP4, attention/shared experts/hyper-connections follow `--precision`, and the sharded PLE table retains its FP8 bytes and per-tensor scale. The loader concatenates PLE shards in numeric order without loading the checkpoint through Hugging Face's eager ModelOpt quantizer. Vision weights are loaded only when exporting the multimodal components.
 
+The official [`Qwen/Qwen3.8-Flash-Next-FP8`](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8)
+checkpoint is supported on CUDA through the native loader, without Hugging Face's eager FP8 quantizer.
+Decoder and MTP experts retain their E4M3 weight bytes and BF16 128x128
+`weight_scale_inv` block multipliers. Engram retains its E4M3 table and original BF16 scalar scale.
+No export-time dequantization, reciprocal-scale conversion, or requantization is performed on these tensors.
+Use `bf16` to retain the source precision of unquantized tensors as well.
+The existing FP8 `QMoE` path is weight-only, not the official checkpoint's dynamic-A8 arithmetic.
+Native BF16 Engram scales require an ORT CPU BF16 `GatherBlockQuantized` implementation;
+current CPU kernels without that support cannot load the Engram graph. Full-model export and
+generation have not been validated.
+
+```bash
+# From source; repository downloads reuse the specified cache:
+python builder.py -m Qwen/Qwen3.8-Flash-Next-FP8 \
+  -o /home/kvaishnavi/qwen38_fp8_onnx -p bf16 -e cuda \
+  -c /home/kvaishnavi/cache_dir --extra_options text_only=true
+```
+
+An already-downloaded checkpoint directory can instead be supplied with `-i`.
+Omit `text_only=true` to include vision and embedding companion graphs;
+MTP and the standalone Engram graph are included by default.
+
 Native NVFP4 expert exports automatically use the same packing policy as integer QMoE: the CUDA EP with an available, active NVIDIA SM80-or-newer GPU (not HIP) selects `weights_prepacked=1`. In this mode, exports preserve the checkpoint's K-packed row-major bytes and retain the logical QMoE weight dimensions. Otherwise, the loader rearranges only the nibble codes into legacy N-packed raw storage with mode `0`; it does not dequantize or requantize weights. For `quant_type="nvfp4"` on CUDA, omitted/default `weights_prepacked=-1` and explicit `0` select legacy N-packed raw storage; `1` selects K-packed row-major storage, and `2` is not supported. Integer QMoE keeps its existing meanings: `-1`/`1` are provider-specific packed layouts and `0` is raw. Gate/up rows are interleaved without dequantization; FP8 block scales and FP32 global scales are unchanged. This requires an ONNX Runtime build supporting the NVFP4 meanings of `weights_prepacked`. CUDA GEMV on SM90 and native NVFP4 GEMM on SM120/SM121 consume the same weight payload, with a layout-aware dense fallback for unsupported shapes. Runtime prepacking prepares native GEMM scales, not another full weight copy. Qwen3.8 exports with mode `1` do not disable prepacking by default. Legacy raw-layout exports retain `session.disable_prepacking=1` as a memory-safety default; the MTP session does not inherit it. Existing exported artifacts must be re-exported to change their weight layout; changing only the node attribute is not sufficient.
 
 Qwen3.8 Flash exports always include `engram.onnx` and `engram.onnx.data`, including paged exports with `text_only=true` or `exclude_mtp=true`. The main decoder consumes embeddings from the standalone Engram session instead of repeating the table lookup internally. CUDA exports run Engram with the CUDA provider and assign its `cpu_embedding`-annotated `GatherBlockQuantized` lookup to CPU using `session.layer_assignment_settings="cpu(=cpu_embedding)"`. Engram retains the native FP8 table without duplicating or dequantizing its stored weights. Text-only export does not require vision or embedding companion graphs.

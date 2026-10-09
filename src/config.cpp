@@ -1159,7 +1159,7 @@ struct MtpInputs_Element : JSON::Element {
 };
 
 struct MtpOutputs_Element : JSON::Element {
-  explicit MtpOutputs_Element(Config::Model::Mtp::Outputs& v) : v_{v} {}
+  explicit MtpOutputs_Element(Config::Model::Mtp& mtp) : v_{mtp.outputs}, index_share_{mtp.index_share} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "logits") {
@@ -1172,6 +1172,10 @@ struct MtpOutputs_Element : JSON::Element {
       v_.present_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_indexer_names") {
       v_.present_indexer_names = JSON::Get<std::string_view>(value);
+    } else if (name == "indices") {
+      index_share_.indices_output = JSON::Get<std::string_view>(value);
+    } else if (name == "counts") {
+      index_share_.counts_output = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1179,6 +1183,7 @@ struct MtpOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Mtp::Outputs& v_;
+  Config::Model::Mtp::IndexShare& index_share_;
 };
 
 struct MtpIndexShare_Element : JSON::Element {
@@ -1225,6 +1230,15 @@ struct Mtp_Element : JSON::Element {
       if (v_.head_size <= 0) throw std::out_of_range("head_size must be > 0");
     } else if (name == "main_hidden_states") {
       v_.main_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "base_capacity") {
+      v_.index_share.base_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.index_share.base_capacity <= 0) throw std::out_of_range("base_capacity must be > 0");
+      v_.index_share.enabled = true;
+      if (v_.index_share.max_draft_tokens == 0) v_.index_share.max_draft_tokens = 7;
+    } else if (name == "max_draft_tokens") {
+      v_.index_share.max_draft_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.index_share.max_draft_tokens < 1 || v_.index_share.max_draft_tokens > 7)
+        throw std::out_of_range("mtp.max_draft_tokens must be between 1 and 7");
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1265,7 +1279,7 @@ struct Mtp_Element : JSON::Element {
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
   MtpInputs_Element inputs_{v_.inputs};
-  MtpOutputs_Element outputs_{v_.outputs};
+  MtpOutputs_Element outputs_{v_};
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
   MtpIndexShare_Element index_share_{v_.index_share};
 };

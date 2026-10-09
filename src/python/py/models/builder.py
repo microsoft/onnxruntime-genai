@@ -22,6 +22,7 @@ from builder_config import (
     apply_runtime_config,
     load_json_object,
     normalize_builder_config,
+    serialize_genai_config,
     validate_model_dependent_config,
 )
 from builders import (
@@ -404,6 +405,11 @@ def check_extra_options(
         extra_options["num_hidden_layers"] = num_hidden_layers
 
     quantization_config = getattr(config, "quantization_config", {})
+    if quantization_config.get("quant_method") == "fp8":
+        if getattr(config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text"}:
+            raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8.")
+        if execution_provider != "cuda":
+            raise ValueError("Native Qwen3.8 FP8 checkpoint export requires the CUDA EP.")
     if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}:
         if execution_provider != "cuda":
             raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
@@ -826,7 +832,7 @@ def create_model(
             genai_config = json.load(config_file)
         genai_config = apply_runtime_config(genai_config, runtime_config)
         with open(config_path, "w", encoding="utf-8") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
 
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)

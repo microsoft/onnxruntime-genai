@@ -10,6 +10,7 @@ sys.path.insert(0, str(MODEL_BUILDER_ROOT))
 sys.path.insert(0, str(MODEL_BUILDER_ROOT / "models"))
 
 MTPModel = importlib.import_module("models.builders.mtp").MTPModel
+serialize_genai_config = importlib.import_module("models.builder_config").serialize_genai_config
 
 
 def export_package(source, output, max_draft_tokens=7):
@@ -37,10 +38,14 @@ def export_package(source, output, max_draft_tokens=7):
             else:
                 destination.symlink_to(path, target_is_directory=path.is_dir())
         metadata = MTPModel().export_indexshare_graphs(str(output), mtp["filename"], max_draft_tokens)
-        mtp["index_share"] = metadata
+        mtp.pop("index_share", None)
+        mtp["base_capacity"] = metadata["base_capacity"]
+        mtp["max_draft_tokens"] = metadata["max_draft_tokens"]
+        outputs = mtp.setdefault("outputs", {})
+        outputs["indices"] = metadata["indices_output"]
+        outputs["counts"] = metadata["counts_output"]
         with (output / "genai_config.json").open("w") as config_file:
-            json.dump(config, config_file, indent=2)
-            config_file.write("\n")
+            config_file.write(serialize_genai_config(config))
     except Exception:
         shutil.rmtree(output)
         raise
