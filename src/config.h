@@ -727,6 +727,7 @@ struct Config {
         std::string past_value_names{Defaults::PastValueName};
         std::string past_indexer_names;
         std::string past_sequence_length;
+        std::string logits_indices;
       } inputs;
 
       struct Outputs {

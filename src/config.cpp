@@ -143,6 +143,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.inputs.past_value_names = mtp.inputs.past_value_names;
   decoder.inputs.past_indexer_names = mtp.inputs.past_indexer_names;
   decoder.inputs.past_sequence_length = mtp.inputs.past_sequence_length;
+  decoder.inputs.logits_indices = mtp.inputs.logits_indices;
   // The projection starts from a copy of the target config, so a per-token quantized target would
   // otherwise leak its scale name templates into the head. The head is always an unquantized
   // full-attention layer and declares no scale tensors, so clear them: leaving them in place would
@@ -1155,6 +1156,8 @@ struct MtpInputs_Element : JSON::Element {
       index_share_.indices_input = JSON::Get<std::string_view>(value);
     } else if (name == "past_counts") {
       index_share_.counts_input = JSON::Get<std::string_view>(value);
+    } else if (name == "logits_indices") {
+      v_.logits_indices = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

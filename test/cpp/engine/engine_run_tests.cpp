@@ -2747,8 +2747,8 @@ TEST_F(EngineRunTest, FailedTurnDiscardsPendingDraftsAndTheNextTurnPolicyGoverns
   }
   EXPECT_EQ(reused->PendingDraftTokenCount(), 0u);
 
-  // The next turn masks end-of-stream until it has generated three tokens, one of the policies that
-  // makes a turn ineligible for drafting at all.
+  // The next turn masks end-of-stream until it has generated three tokens. Old proposals must
+  // still be discarded even though the new turn can verify fresh drafts with its own EOS floor.
   engine.executor->SetVerifyRowTokens({});
   engine.executor->SetForcedToken(eos);
   const size_t prefix_commits_before = engine.cache->prefix_commits.size();
@@ -2758,7 +2758,7 @@ TEST_F(EngineRunTest, FailedTurnDiscardsPendingDraftsAndTheNextTurnPolicyGoverns
   floored_turn.max_generated_tokens = 3;
   reused->BeginTurn(std::vector<int32_t>{7}, floored_turn);
   EXPECT_EQ(reused->PendingDraftTokenCount(), 0u);
-  EXPECT_NE(reused->DraftTokenValidationError(), nullptr);
+  EXPECT_EQ(reused->DraftTokenValidationError(), nullptr);
   EXPECT_THROW(reused->SetDraftTokens(std::vector<int32_t>{21, 22, 23}),
                std::runtime_error);
 
@@ -2782,6 +2782,65 @@ TEST_F(EngineRunTest, FailedTurnDiscardsPendingDraftsAndTheNextTurnPolicyGoverns
   }
   EXPECT_EQ(reused->FinishReason(), GenerationFinishReason::TurnLimit);
   EXPECT_EQ(engine.cache->prefix_commits.size(), prefix_commits_before);
+}
+
+TEST_F(EngineRunTest, SpeculativeMinimumMasksEosPerVerificationRow) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 11 ? 12 : 11;
+  for (const bool sampled : {false, true}) {
+    for (const bool bonus_below_floor : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "sampled=" << sampled
+                                        << ", bonus_below_floor=" << bonus_below_floor);
+      auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+      engine.cache->SetMaxDraftTokensPerStep(3);
+      TurnOptions options;
+      options.do_sample = sampled;
+      if (sampled) {
+        options.top_k = 2;
+        options.top_p = 0.0f;
+        options.seed = 13;
+      }
+      options.min_generated_tokens = bonus_below_floor ? 4 : 3;
+      options.max_generated_tokens = 8;
+      auto request = CreateRequestWithPrompt(engine.engine, Prompt(10), options);
+      ASSERT_EQ(RunOne(*engine.engine).token, filler);
+      ASSERT_EQ(request->DraftTokenValidationError(), nullptr);
+
+      std::vector<int32_t> drafts{filler, filler};
+      if (!bonus_below_floor) {
+        drafts.push_back(eos);
+      }
+      request->SetDraftTokens(drafts);
+      std::vector<float> row(model_->config_->model.vocab_size, -1000.0f);
+      row[eos] = 1000.0f;
+      row[filler] = 100.0f;
+      engine.executor->SetVerifyRowLogits(
+          std::vector<std::vector<float>>(drafts.size() + 1, row));
+      std::array<EngineEvent, 8> events;
+      const size_t count = engine.engine->Run(events);
+      EXPECT_EQ(count, bonus_below_floor ? 3u : 2u);
+      for (size_t i = 0; i < count; ++i) {
+        EXPECT_TRUE(events[i].flags & EngineEventFlagToken);
+        EXPECT_EQ(events[i].token, filler);
+      }
+      EXPECT_EQ(request->TurnGeneratedTokens(), options.min_generated_tokens);
+      EXPECT_EQ(request->IsTurnComplete(), !bonus_below_floor);
+      if (!bonus_below_floor) {
+        EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+      }
+      ASSERT_EQ(engine.cache->prefix_commits.size(), 1u);
+      EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
+
+      if (bonus_below_floor) {
+        engine.executor->SetVerifyRowLogits({});
+        engine.executor->SetForcedToken(eos);
+        const auto terminal = RunOne(*engine.engine);
+        EXPECT_TRUE(terminal.flags & EngineEventFlagTurnFinished);
+        EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+        EXPECT_EQ(request->TurnGeneratedTokens(), 4u);
+      }
+    }
+  }
 }
 
 TEST_F(EngineRunTest, SampledSpeculativeRunKeepsAcceptedPrefixAndCorrection) {

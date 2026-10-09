@@ -29,6 +29,14 @@ See documentation at the [ONNX Runtime website](https://onnxruntime.ai/docs/gena
 
 See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install) or [build from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html)
 
+## Qwen3.8 Flash NVFP4 H200 reproduction
+
+This branch includes the [8K-input / 512-output reproduction guide](benchmark/python/qwen38/README.md),
+portable benchmark scripts, configuration overlay and [optimization results](benchmark/python/qwen38/RESULTS.md).
+The measured final configuration achieves 100.48 E2E tokens/s pooled across ten requests
+on one H200, using opt-in tensor attention and width-two MTP. This is not a per-request
+throughput guarantee or a general model-quality evaluation.
+
 ## Sample code for Phi-3 in Python
 
 1. Download the model
