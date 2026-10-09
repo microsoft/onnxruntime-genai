@@ -344,6 +344,10 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
     init_session_provider_options.device_filtering_options = user_provider_options->device_filtering_options;
 
   device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
+  if (type == DeviceType::WEBGPU) {
+    // Native provider factories capture this option when appended, before options are cloned.
+    init_session_provider_options.options.emplace_back("enableGraphCapture", "0");
+  }
 
   provider_options_list.emplace_back(std::move(init_session_provider_options));
   const std::vector<std::string> providers{provider_name};
@@ -371,6 +375,9 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // decode inputs). Devices that offer none leave the defaults in place.
   device.InitDeviceAllocators(user_provider_options, allocator.device_id_);
   allocator.host_accessible_allocator_ = device.GetHostAccessibleAllocator();
+  if (type == DeviceType::WEBGPU) {
+    allocator.session_options_ = std::move(session_options);
+  }
 }
 
 // Update provider options using values from a parent if they are not already specified in the child.
