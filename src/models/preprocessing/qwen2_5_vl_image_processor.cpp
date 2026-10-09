@@ -22,40 +22,38 @@ void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float
   const int64_t total_patches = height_patches * width_patches;
   const int64_t spatial_patch_dim = channels * patch_size * patch_size;
   const int64_t patch_dim = temporal_patch_size * spatial_patch_dim;
-  const int64_t patch_rows_per_patch = channels * patch_size;
-  if (patch_rows_per_patch > 0 &&
-      total_patches > std::numeric_limits<std::ptrdiff_t>::max() / patch_rows_per_patch) {
-    throw std::overflow_error("Image patch row count exceeds ptrdiff_t range");
+  if (spatial_patch_dim > 0 &&
+      total_patches > std::numeric_limits<std::ptrdiff_t>::max() / spatial_patch_dim) {
+    throw std::overflow_error("Image patch element count exceeds ptrdiff_t range");
   }
-  const auto total_patch_rows =
-      static_cast<std::ptrdiff_t>(total_patches * patch_rows_per_patch);
+  const auto total_spatial_elements =
+      static_cast<std::ptrdiff_t>(total_patches * spatial_patch_dim);
 
   ThreadPool::TryParallelFor(
-      thread_pool, total_patch_rows,
-      static_cast<double>(patch_size * temporal_patch_size),
+      thread_pool, total_spatial_elements, static_cast<double>(temporal_patch_size),
       [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-        int64_t patch_idx = static_cast<int64_t>(first) / patch_rows_per_patch;
-        int64_t row_offset = static_cast<int64_t>(first) % patch_rows_per_patch;
-        int64_t channel = row_offset / patch_size;
-        int64_t patch_h = row_offset % patch_size;
-        for (auto patch_row_idx = first; patch_row_idx < last; ++patch_row_idx) {
+        int64_t patch_idx = static_cast<int64_t>(first) / spatial_patch_dim;
+        const int64_t patch_offset = static_cast<int64_t>(first) % spatial_patch_dim;
+        int64_t channel = patch_offset / (patch_size * patch_size);
+        const int64_t patch_pixel = patch_offset % (patch_size * patch_size);
+        int64_t patch_h = patch_pixel / patch_size;
+        int64_t patch_w = patch_pixel % patch_size;
+        for (auto output_idx = first; output_idx < last; ++output_idx) {
           const int64_t patch_row = patch_idx / width_patches;
           const int64_t patch_col = patch_idx % width_patches;
-          const int64_t source_row =
+          const int64_t source_idx =
               (patch_row * patch_size + patch_h) * width * channels +
-              patch_col * patch_size * channels + channel;
-          const int64_t destination_row =
-              patch_idx * patch_dim + channel * patch_size * patch_size +
-              patch_h * patch_size;
-          for (int64_t patch_w = 0; patch_w < patch_size; ++patch_w) {
-            destination[destination_row + patch_w] =
-                source[source_row + patch_w * channels];
-          }
-          if (++patch_h == patch_size) {
-            patch_h = 0;
-            if (++channel == channels) {
-              channel = 0;
-              ++patch_idx;
+              (patch_col * patch_size + patch_w) * channels + channel;
+          destination[patch_idx * patch_dim + channel * patch_size * patch_size +
+                      patch_h * patch_size + patch_w] = source[source_idx];
+          if (++patch_w == patch_size) {
+            patch_w = 0;
+            if (++patch_h == patch_size) {
+              patch_h = 0;
+              if (++channel == channels) {
+                channel = 0;
+                ++patch_idx;
+              }
             }
           }
         }

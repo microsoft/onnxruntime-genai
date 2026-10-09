@@ -106,39 +106,40 @@ void WriteLfm2VlImagePatches(ThreadPool* thread_pool, const float* image, int64_
                              float* destination) {
   const int64_t channel_stride = padded_height * padded_width;
   const int64_t patch_dim = encoder_patch_size * encoder_patch_size * channels;
-  if (encoder_patch_size > 0 &&
-      geometry.num_patches > std::numeric_limits<std::ptrdiff_t>::max() / encoder_patch_size) {
-    throw std::overflow_error("Lfm2VlImageProcessor: image patch row count exceeds ptrdiff_t range.");
+  if (patch_dim > 0 &&
+      geometry.num_patches > std::numeric_limits<std::ptrdiff_t>::max() / patch_dim) {
+    throw std::overflow_error("Lfm2VlImageProcessor: image patch element count exceeds ptrdiff_t range.");
   }
-  const auto total_patch_rows =
-      static_cast<std::ptrdiff_t>(geometry.num_patches * encoder_patch_size);
+  const auto total_elements =
+      static_cast<std::ptrdiff_t>(geometry.num_patches * patch_dim);
 
   ThreadPool::TryParallelFor(
-      thread_pool, total_patch_rows,
-      static_cast<double>(encoder_patch_size * channels),
+      thread_pool, total_elements, 1.0,
       [&](std::ptrdiff_t first, std::ptrdiff_t last) {
         int64_t patch_index =
-            static_cast<int64_t>(first) / encoder_patch_size;
-        int64_t patch_y =
-            static_cast<int64_t>(first) % encoder_patch_size;
-        for (std::ptrdiff_t patch_row_idx = first; patch_row_idx < last; ++patch_row_idx) {
+            static_cast<int64_t>(first) / patch_dim;
+        const int64_t patch_offset = static_cast<int64_t>(first) % patch_dim;
+        const int64_t patch_pixel = patch_offset / channels;
+        int64_t channel = patch_offset % channels;
+        int64_t patch_y = patch_pixel / encoder_patch_size;
+        int64_t patch_x = patch_pixel % encoder_patch_size;
+        for (std::ptrdiff_t output_idx = first; output_idx < last; ++output_idx) {
           const int64_t patch_row = patch_index / geometry.patch_cols;
           const int64_t patch_col = patch_index % geometry.patch_cols;
           const int64_t source_row = patch_row * encoder_patch_size + patch_y;
-          float* destination_row =
-              destination + patch_index * patch_dim +
-              patch_y * encoder_patch_size * channels;
-          for (int64_t patch_x = 0; patch_x < encoder_patch_size; ++patch_x) {
-            const int64_t source_col = patch_col * encoder_patch_size + patch_x;
-            for (int64_t channel = 0; channel < channels; ++channel) {
-              destination_row[patch_x * channels + channel] =
-                  image[channel * channel_stride +
-                        source_row * padded_width + source_col];
+          const int64_t source_col = patch_col * encoder_patch_size + patch_x;
+          destination[output_idx] =
+              image[channel * channel_stride +
+                    source_row * padded_width + source_col];
+          if (++channel == channels) {
+            channel = 0;
+            if (++patch_x == encoder_patch_size) {
+              patch_x = 0;
+              if (++patch_y == encoder_patch_size) {
+                patch_y = 0;
+                ++patch_index;
+              }
             }
-          }
-          if (++patch_y == encoder_patch_size) {
-            patch_y = 0;
-            ++patch_index;
           }
         }
       });
