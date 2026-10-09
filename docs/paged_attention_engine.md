@@ -1514,6 +1514,23 @@ that contract. CPU and CUDA bind offset tensor views directly; WebGPU uses stagi
 bindings. Compact partial-acceptance replay is device-native on CUDA and currently
 stages the required ranges through CPU on WebGPU for correctness.
 
+An internal, opt-in WebGPU helper can invoke ORT's
+`com.microsoft::GatedDeltaNetStateReplay` (version 1) for one FP32 recurrent-state
+descriptor. It is not yet called by `ReplayStateUpdates` or `PrepareCommit`.
+The device owns its lazily created helper session, cloned from the fully configured
+allocator-initialization session options, with graph capture disabled. This first
+version supports context 0 only and requires an ORT build containing the operator.
+Full backing allocations are bound as rank-1 tensors; absolute logical byte offsets
+from `DeviceSpan::ByteOffset()` are converted to FP32-element metadata offsets.
+The output is prebound to the same inactive destination allocation as its input.
+The operator's checked completion makes a successful helper return a GPU-completion
+boundary; ORT failures propagate to the caller. The helper serializes its own runs,
+but callers must order target-session work before invoking it and keep borrowed
+buffer owners alive through the call. It does not publish or flip a state bank.
+The source must be the incoming state before capsule capture, and capsule geometry
+and original capture capacity must match the producer; `kept_count` selects only
+the leading transitions, not a different capsule layout.
+
 Each resident request owns a stable slot identified by request identity and an
 allocation generation. A released and reused slot receives a new generation, so
 old handles are rejected. Each slot also tracks a `state_generation` (bumped on

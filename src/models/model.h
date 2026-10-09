@@ -21,6 +21,7 @@ struct MultiModalProcessor;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
+void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config);
 
 struct State {
   State(const GeneratorParams& params, const Model& model_);
