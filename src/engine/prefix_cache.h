@@ -269,7 +269,7 @@ class PrefixCache final : private BlockReferenceObserver {
       const Entry& endpoint, size_t block_count,
       std::span<const int32_t> tokens = {},
       std::vector<std::shared_ptr<Block>>* blocks = nullptr) const;
-  bool IsProtectedByLeasedCheckpoint(const Entry& entry) const;
+  size_t MarkLeasedReclaimableBlocks() const;
   static bool IsCheckpointUnleased(const Entry& entry);
   bool HasCheckpointedDescendant(const Entry& ancestor) const;
   void PromoteCheckpoint(Entry& entry) noexcept;
@@ -290,6 +290,8 @@ class PrefixCache final : private BlockReferenceObserver {
   std::list<Entry*> referenced_entries_;
   std::list<Entry*> reclaimable_entries_;
   std::vector<Entry*> entries_by_block_id_;
+  // Scratch is rebuilt for each query: shared checkpoint leases can change without cache callbacks.
+  mutable std::vector<uint8_t> leased_ancestry_;
   // LRU checkpoint endpoints. Capacity is reserved at construction, so promotion and publication
   // are allocation-free after checkpoint capture starts.
   std::vector<Entry*> checkpoint_entries_;
