@@ -1098,6 +1098,80 @@ The installed packages, previous isolated runtime, original graphs/config
 and weights are unchanged. Full-model output equivalence is not claimed;
 existing greedy nondeterminism remains observable.
 
+#### NVFP4 verification row reuse and block geometry (rejected)
+
+After publishing the 100-E2E-TPS branches, a bounded diagnostic captured
+the first 192 eligible three-row NVFP4 layer invocations. A temporary
+host routing copy ran only with CUDA graphs and dense GEMM tuning disabled;
+its synchronized timings are not performance evidence. The diagnostic
+hook was removed. Each invocation contains 30 routes (top ten per row),
+averaging 23.531 unique experts and 3.195 shared experts between adjacent
+query rows. Pairing expert-sorted rows could eliminate at most 19.6875%
+of weight passes; reusing across all three rows could eliminate 21.5625%.
+These are load-count upper bounds, not measured DRAM savings: L2 may
+already serve repeated weights. This bounded, single-prompt sample does
+not characterize every decode round.
+
+An opt-in paired-row K-packed GEMV kept the original eight-lane K
+partition, accumulation and reduction order for each output. Within each
+expert's sorted range, even relative rows owned the following row if
+present, shared packed-weight/scale decoding and wrote both outputs;
+odd relative rows returned, and singleton/tail experts used one output.
+FC1 source-row mapping, FC2 expanded inputs, FP16/BF16 and projection
+biases were preserved. Seventy-two operator comparisons matched the
+original provider bitwise, eagerly and through CUDA graph replay,
+covering captured-like, complete and disjoint overlap and one/two/three
+rows. Full overlap improved some screening cases by about 6-8%, but
+disjoint three-row cases regressed by about 10-19%. Operator timing
+reuses small synthetic expert matrices and is not full-model evidence.
+
+The subsequent geometry-only experiment kept the original per-row
+arithmetic and swept 8/16/32 output columns per block with 64/128/256
+threads. All 216 operator comparisons matched the original provider
+bitwise, including graph replay and all three routing patterns. Eight
+columns showed small screening advantages; 32 did not justify further
+integrated testing. An actual-model eight-column capture confirms
+64-thread kernels and 38 registers/thread. Its average gate/up and down
+durations are about 39.51 and 21.09 us, versus about 39.49 and 20.98 us
+in the earlier production capture. Launch counts differ, so raw summed
+times cannot be used as equal-work speedup evidence.
+
+Both candidates were tested separately against the retained production
+runtime, with the exact 8,192/512 policy, width two, both tensor flags,
+decoder/head tuning and CUDA graphs. Each provider has two five-request
+invocations, with provider order reversed and one excluded warmup per
+invocation. Every measured sample is retained; instrumented profiles
+are excluded. The two experiments have independent fresh controls:
+
+| Experiment / provider | Pooled E2E TPS | Pooled decode TPS | Disposition |
+|---|---:|---:|---|
+| Paired-row fresh control | 100.172 | 125.933 | Retained |
+| Paired-row candidate | 99.117 | 124.264 | Rejected, 1.05% lower E2E |
+| Geometry fresh control | 101.176 | 127.598 | Retained |
+| Eight-column candidate | 99.692 | 125.189 | Rejected, 1.47% lower E2E |
+
+Actual paired-row profiling confirms both projection launches use the
+two-row template, with 49/51 registers per thread. Gate/up and down
+average about 40.81/21.91 us, slower than the earlier production means.
+The profile and microbenchmarks do not independently identify which
+fraction of that change comes from register pressure, branches or cache
+behavior. Integrated output/acceptance variation also affects E2E.
+Neither proposal demonstrates a gain, so both kernel experiments and
+their environment switches are removed; the production provider is
+rebuilt from the original source. The validated isolated 100.48-TPS
+runtime is never replaced.
+
+All forty measured comparison requests pass exact token counts, prompt
+hash, flags, overlays, library paths, width-two proposal accounting and
+zero MTP failures. Scripts, logs, candidate libraries and profiles remain
+local session artifacts. The assertion-based summary is
+`nvfp4-experiment-results.json`; the overlap report is
+`nvfp4-routing-overlap-results.json`. Temporary numerical reference arrays
+are removed after validation. No additional C++ test is retained for
+these rejected source changes. The next priority is attribution and
+optimization of large dense decode projections, rather than further
+overlap-dependent GEMV work.
+
 #### Dense-projection attribution and higher split-K parallelism
 
 A temporary, graph-disabled MatMul diagnostic captured 16,000 synchronized

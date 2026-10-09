@@ -94,6 +94,8 @@ for this candidate.
 | Eight interleaved rows instead of four | FP16 **approximately 63.2 -> 64.1 ms/layer** | Rejected |
 | Early tensor-PV designs without the final staging/layout improvements | Approximately **64-106 ms/layer**, versus final **20.1 ms** | Replaced |
 | MTP widths three and four | **89.38 / 85.64 E2E TPS**, versus width-two pooled **90.20** at that stage | Kept width two |
+| Paired-row NVFP4 expert-weight reuse | Fresh paired/reversed pools: **100.17 -> 99.12 E2E TPS**, **1.05% lower**; 72 bitwise operator cases passed | Rejected; kernel and opt-in switch removed |
+| Eight-column NVFP4 block geometry | Fresh paired/reversed pools: **101.18 -> 99.69 E2E TPS**, **1.47% lower**; 216 geometry-sweep bitwise cases passed | Rejected; original 16-column geometry retained |
 
 ## Validation and limitations
 
