@@ -17,6 +17,7 @@ using CommonUtils;
 using Microsoft.ML.OnnxRuntimeGenAI;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
+using System.Text;
 using System.Text.Json;
 
 if (args.Length < 2) {
@@ -42,6 +43,10 @@ var configJson = JsonDocument.Parse(File.ReadAllText(Path.Combine(modelPath, "ge
 var modelConfig = configJson.RootElement.GetProperty("model");
 int sampleRate = modelConfig.GetProperty("sample_rate").GetInt32();
 int chunkSize = modelConfig.GetProperty("chunk_samples").GetInt32();
+string timestampLevel = modelConfig.TryGetProperty("timestamp_level", out var timestampLevelElement)
+  ? timestampLevelElement.GetString() ?? "off"
+  : "off";
+bool timestampsEnabled = timestampLevel != "off";
 
 // Load audio, convert to mono, and resample to match the model's expected sample rate
 float[] audio = LoadAudio(audioFile, sampleRate);
@@ -72,6 +77,7 @@ using var genParams = new GeneratorParams(model);
 using var generator = new Generator(model, genParams);
 Console.WriteLine(new string('-', 60));
 string fullTranscript = "";
+var allWordTranscript = new StringBuilder();
 int chunksTotal = 0;
 int chunksProcessed = 0;
 int chunksSkipped = 0;
@@ -86,7 +92,7 @@ for (int i = 0; i < audio.Length; i += chunkSize) {
   if (inputs != null) {
     chunksProcessed++;
     generator.SetInputs(inputs);
-    fullTranscript += DecodeTokens(generator, tokenizerStream);
+    fullTranscript += DecodeTokens(generator, tokenizerStream, timestampLevel, allWordTranscript);
   } else {
     chunksSkipped++;
   }
@@ -96,11 +102,22 @@ for (int i = 0; i < audio.Length; i += chunkSize) {
 using var flushInputs = processor.Flush();
 if (flushInputs != null) {
   generator.SetInputs(flushInputs);
-  fullTranscript += DecodeTokens(generator, tokenizerStream);
+  fullTranscript += DecodeTokens(generator, tokenizerStream, timestampLevel, allWordTranscript);
+}
+
+if (!timestampsEnabled) {
+  // Ordinary decoding has no pending timestamp records.
+} else {
+  var result = tokenizerStream.FinalizeMetadata();
+  fullTranscript += FormatTimestampRecords(result, timestampLevel is "segment" or "all");
+  if (timestampLevel == "all")
+    allWordTranscript.Append(FormatTimestampRecords(result, false));
 }
 
 Console.WriteLine($"\n{new string('=', 60)}");
 Console.WriteLine($"  {fullTranscript.Trim()}");
+if (timestampLevel == "all")
+  Console.WriteLine($"  Word timestamps: {allWordTranscript}");
 Console.WriteLine(new string('=', 60));
 if (useVad == "true") {
   double pctSaved = chunksTotal > 0 ? (double)chunksSkipped / chunksTotal * 100.0 : 0.0;
@@ -108,20 +125,45 @@ if (useVad == "true") {
                     $"{chunksSkipped} skipped ({pctSaved:F1}% compute saved)");
 }
 
-static string DecodeTokens(Generator generator, TokenizerStream tokenizerStream) {
+static string DecodeTokens(Generator generator, TokenizerStream tokenizerStream, string timestampLevel,
+                           StringBuilder allWordTranscript) {
   string text = "";
+  bool timestampsEnabled = timestampLevel != "off";
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
-    var tokens = generator.GetNextTokens();
-    if (tokens.Length > 0) {
+    if (!timestampsEnabled) {
+      var tokens = generator.GetNextTokens();
+      if (tokens.Length == 0)
+        continue;
       string tokenText = tokenizerStream.Decode(tokens[0]);
       if (!string.IsNullOrEmpty(tokenText)) {
         Console.Write(tokenText);
         text += tokenText;
       }
+    } else {
+      var tokens = generator.GetNextTokensWithMetadata();
+      foreach (var token in tokens) {
+        var result = tokenizerStream.DecodeWithMetadata(token);
+        string timestampedText = FormatTimestampRecords(result, timestampLevel is "segment" or "all");
+        if (timestampLevel == "all")
+          allWordTranscript.Append(FormatTimestampRecords(result, false));
+        Console.Write(timestampedText);
+        text += timestampedText;
+      }
     }
   }
   return text;
+}
+
+static string FormatTimestampRecords(TokenMetadataOutput result, bool useSegments) {
+  if (result.TimestampMetadata == null) return "";
+  var records = useSegments ? result.TimestampMetadata.Segments : result.TimestampMetadata.Words;
+  return string.Concat(records.Select(record => {
+    string text = useSegments ? record.Text : record.Text.Trim();
+    string separator = useSegments && (text.Length == 0 || !char.IsWhiteSpace(text[0])) ? " " : "";
+    string suffix = useSegments ? "" : " ";
+    return $"[{record.StartTime:F2} - {record.StopTime:F2}]{separator}{text}{suffix}";
+  }));
 }
 
 static float[] LoadAudio(string path, int targetSampleRate) {
