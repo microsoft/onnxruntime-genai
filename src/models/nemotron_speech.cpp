@@ -94,6 +94,7 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   blank_id = config.model.blank_id;
   max_symbols_per_step = config.model.max_symbols_per_step;
   blank_penalty = config.search.blank_penalty;
+  timestamp_level = config.model.timestamp_level;
 
   // Vocab size from top-level config
   vocab_size = config.model.vocab_size;
@@ -440,6 +441,7 @@ NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
     : TransducerState{params, model},
       nemotron_model_{model} {
   nemotron_config_ = model.nemotron_config_;
+  timestamps_enabled_ = nemotron_config_.TimestampsEnabled();
   // Until audio is fed via SetExtraInputs/SetInputs, the stream is idle.
   chunk_done_ = true;
 
@@ -461,14 +463,41 @@ DeviceSpan<float> NemotronSpeechState::Run(int /*total_length*/,
       "Use Generator::GenerateNextToken() with set_inputs.");
 }
 
-void NemotronSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+int64_t GetNemotronChunkStartSample(const std::vector<ExtraInput>& extra_inputs) {
   for (const auto& input : extra_inputs) {
-    if (input.name == Config::Defaults::AudioFeaturesName || input.name == nemotron_config_.enc_in_audio) {
-      current_mel_ = input.tensor;
-      need_encoder_run_ = true;
-      chunk_done_ = false;
+    if (input.name == "chunk_start_sample") {
+      if (!input.tensor || !input.tensor->ort_tensor_) {
+        throw std::runtime_error("Nemotron chunk_start_sample must be a scalar int64 tensor");
+      }
+      const auto& origin = *input.tensor->ort_tensor_;
+      const auto info = origin.GetTensorTypeAndShapeInfo();
+      if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 || info->GetElementCount() != 1) {
+        throw std::runtime_error("Nemotron chunk_start_sample must be a scalar int64 tensor");
+      }
+      const auto start_sample = *origin.GetTensorData<int64_t>();
+      if (start_sample < 0) {
+        throw std::runtime_error("Nemotron chunk_start_sample must be non-negative");
+      }
+      return start_sample;
     }
   }
+  throw std::runtime_error("Nemotron timestamp-enabled audio input is missing chunk_start_sample");
+}
+
+void NemotronSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  std::shared_ptr<Tensor> mel;
+  for (const auto& input : extra_inputs) {
+    if (input.name == Config::Defaults::AudioFeaturesName || input.name == nemotron_config_.enc_in_audio) {
+      mel = input.tensor;
+    }
+  }
+  if (!mel) return;
+  if (timestamps_enabled_) {
+    chunk_start_sample_ = GetNemotronChunkStartSample(extra_inputs);
+  }
+  current_mel_ = std::move(mel);
+  need_encoder_run_ = true;
+  chunk_done_ = false;
 }
 
 OrtValue* NemotronSpeechState::GetInput(const char* name) {
@@ -514,10 +543,12 @@ void NemotronSpeechState::ResetStreamingState() {
   encoded_output_.reset();
   encoded_len_ = 0;
   time_step_ = 0;
+  chunk_start_sample_ = 0;
   symbol_step_ = 0;
   need_encoder_run_ = false;
   chunk_done_ = true;
   last_tokens_.clear();
+  last_token_intervals_.clear();
 }
 
 void NemotronSpeechState::RunEncoder() {
@@ -573,6 +604,9 @@ void NemotronSpeechState::StepToken() {
   }
 
   last_tokens_.clear();
+  if (timestamps_enabled_) {
+    last_token_intervals_.clear();
+  }
 
   auto enc_info = encoded_output_->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
@@ -649,6 +683,12 @@ void NemotronSpeechState::StepToken() {
     prediction_state_->lstm_state_.lstm_cell_state.reset(prediction_state_->outputs_[2]);
     prediction_state_->outputs_[2] = nullptr;
 
+    const int64_t token_frame = timestamps_enabled_
+                                    ? GetNemotronGlobalFrame(chunk_start_sample_, time_step_,
+                                                             nemotron_config_.hop_length,
+                                                             nemotron_config_.subsampling_factor)
+                                    : 0;
+
     symbol_step_++;
     if (symbol_step_ >= nemotron_config_.max_symbols_per_step) {
       time_step_++;
@@ -657,6 +697,9 @@ void NemotronSpeechState::StepToken() {
 
     last_tokens_.push_back(static_cast<int32_t>(best_token));
     all_tokens_.push_back(static_cast<int32_t>(best_token));
+    if (timestamps_enabled_) {
+      last_token_intervals_.push_back({token_frame, token_frame + 1});
+    }
     return;
   }
 

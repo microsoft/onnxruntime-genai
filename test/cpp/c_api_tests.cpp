@@ -187,7 +187,6 @@ TEST(CAPITests, TokenizerCAPI) {
 TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
 #if TEST_PHI2
   const char* input_string = "She sells sea shells by the sea shore.";
-
   auto config = OgaConfig::Create(PHI2_PATH);
   auto tokenizer_from_config = OgaTokenizer::Create(*config);
   auto tokenizer_from_path = OgaTokenizer::Create(PHI2_PATH);
@@ -201,6 +200,102 @@ TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
   auto out_string = tokenizer_from_path->Decode(input_sequences->SequenceData(0), input_sequences->SequenceCount(0));
   ASSERT_STREQ(input_string, out_string);
 #endif
+}
+
+TEST(CAPITests, TokenizerStreamTimestampInitialization) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({"model":{
+    "type":"nemotron_speech",
+    "timestamp_level":"all",
+    "segment_separators":["."],
+    "sample_rate":100,
+    "hop_length":10,
+    "subsampling_factor":1
+  }})");
+  auto tokenizer = OgaTokenizer::Create(*config);
+  auto timestamp_stream = OgaTokenizerStream::Create(*tokenizer);
+
+  EXPECT_EQ(timestamp_stream->FinalizeMetadata().timestampMetadata->word_count, 0U);
+  EXPECT_EQ(timestamp_stream->FinalizeMetadata().timestampMetadata->segment_count, 0U);
+
+  EXPECT_THROW(timestamp_stream->Decode(0), std::runtime_error);
+  timestamp_stream->Reset();
+  EXPECT_NO_THROW(timestamp_stream->FinalizeMetadata());
+  timestamp_stream->Reset();
+  EXPECT_NO_THROW(timestamp_stream->Decode(0));
+}
+
+TEST(CAPITests, TokenizerStreamDisabledMetadata) {
+  auto model_config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  model_config->Overlay(R"({"model":{"type":"nemotron_speech","sample_rate":100,"hop_length":10,"subsampling_factor":1}})");
+  auto tokenizer = OgaTokenizer::Create(*model_config);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
+  auto sequences = OgaSequences::Create();
+  tokenizer->Encode("Hello.", *sequences);
+  const auto token = sequences->Get(0)[0];
+  EXPECT_EQ(stream->FinalizeMetadata().timestampMetadata, nullptr);
+  stream->Reset();
+  EXPECT_EQ(stream->DecodeWithMetadata({token, 0, {}}).timestampMetadata, nullptr);
+  stream->Reset();
+  EXPECT_NO_THROW(stream->Decode(token));
+}
+
+TEST(CAPITests, TokenizerMetadataRecordOwnsInterval) {
+  std::vector<OgaTokenMetadataInput> records{{42, 1, {2, 7}}, {43, 0, {}}};
+  auto copied = records;
+  records[0].token_acoustic_frame_interval = {99, 100};
+  records.clear();
+  records.shrink_to_fit();
+  auto moved = std::move(copied);
+  ASSERT_EQ(moved.size(), 2U);
+  EXPECT_EQ(moved[0].token_id, 42);
+  ASSERT_EQ(moved[0].has_token_acoustic_frame_interval, 1);
+  EXPECT_EQ(moved[0].token_acoustic_frame_interval.start, 2);
+  EXPECT_EQ(moved[0].token_acoustic_frame_interval.stop, 7);
+  EXPECT_EQ(moved[1].has_token_acoustic_frame_interval, 0);
+
+  auto model_config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  model_config->Overlay(R"({"model":{"type":"nemotron_speech","timestamp_level":"all","sample_rate":100,"hop_length":10,"subsampling_factor":1}})");
+  auto tokenizer = OgaTokenizer::Create(*model_config);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
+  moved[0].token_id = tokenizer->ToTokenId("H");
+  stream->DecodeWithMetadata(moved[0]);
+  const auto& result = stream->FinalizeMetadata();
+  ASSERT_EQ(result.timestampMetadata->word_count, 1U);
+  EXPECT_EQ(result.timestampMetadata->words[0].start_frame, 2);
+  EXPECT_EQ(result.timestampMetadata->words[0].stop_frame, 7);
+}
+
+TEST(CAPITests, TokenizerMetadataReadsCurrentGeneratorStep) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model_config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  model_config->Overlay(R"({"model":{"type":"nemotron_speech","sample_rate":100,"hop_length":10,"subsampling_factor":1}})");
+  auto tokenizer = OgaTokenizer::Create(*model_config);
+  auto plain = OgaTokenizerStream::Create(*tokenizer);
+  auto metadata_stream = OgaTokenizerStream::Create(*tokenizer);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto prompt = OgaSequences::Create();
+  constexpr std::array<int32_t, 4> prompt_tokens{0, 0, 0, 52};
+  prompt->Append(prompt_tokens.data(), prompt_tokens.size());
+  generator->AppendTokenSequences(*prompt);
+  for (size_t step = 0; step < 3 && !generator->IsDone(); ++step) {
+    generator->GenerateNextToken();
+    const auto tokens = generator->GetNextTokens();
+    ASSERT_EQ(tokens.size(), 1U);
+    const auto records = generator->GetNextTokensWithMetadata();
+    ASSERT_EQ(records.size(), tokens.size());
+    const auto token = records[0];
+    EXPECT_EQ(token.token_id, tokens[0]);
+    EXPECT_EQ(token.has_token_acoustic_frame_interval, 0);
+    const auto& result = metadata_stream->DecodeWithMetadata(token);
+    EXPECT_STREQ(result.text, plain->Decode(tokens[0]));
+    EXPECT_EQ(result.timestampMetadata, nullptr);
+  }
+  EXPECT_EQ(metadata_stream->FinalizeMetadata().timestampMetadata, nullptr);
+  metadata_stream->Reset();
+  EXPECT_EQ(metadata_stream->FinalizeMetadata().timestampMetadata, nullptr);
 }
 
 TEST(CAPITests, EncodeBatchEmptyInputThrows) {
@@ -567,6 +662,17 @@ TEST(CAPITests, MarianBatchWithBeamsIOContract) {
   ASSERT_EQ(next_tokens.size(), expected_tokens.size());
   for (size_t beam = 0; beam < expected_tokens.size(); ++beam)
     EXPECT_EQ(next_tokens[beam], expected_tokens[beam]) << "beam " << beam;
+  auto tokenizer_config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  tokenizer_config->Overlay(R"({"model":{"type":"nemotron_speech","timestamp_level":"word","sample_rate":100,"hop_length":10,"subsampling_factor":1}})");
+  auto tokenizer = OgaTokenizer::Create(*tokenizer_config);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
+  const auto metadata_tokens = generator->GetNextTokensWithMetadata();
+  ASSERT_EQ(metadata_tokens.size(), expected_tokens.size());
+  for (size_t index = 0; index < metadata_tokens.size(); ++index) {
+    const auto token = metadata_tokens[index];
+    EXPECT_EQ(token.token_id, expected_tokens[index]);
+    EXPECT_THROW(stream->DecodeWithMetadata(token), std::runtime_error);
+  }
 }
 
 TEST(CAPITests, EndToEndPhi) {

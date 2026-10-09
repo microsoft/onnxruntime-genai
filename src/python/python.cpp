@@ -318,6 +318,45 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
   return d;
 }
 
+struct PyTokenMetadataTimestampRecord {
+  std::string text;
+  int64_t start_frame;
+  int64_t stop_frame;
+  double start_time;
+  double stop_time;
+};
+
+struct PyTokenMetadataTimestamp {
+  std::vector<PyTokenMetadataTimestampRecord> words;
+  std::vector<PyTokenMetadataTimestampRecord> segments;
+};
+
+struct PyTokenMetadataOutput {
+  std::string text;
+  std::optional<PyTokenMetadataTimestamp> timestamp_metadata;
+};
+
+PyTokenMetadataOutput ToMetadata(const OgaTokenMetadataOutput& result) {
+  PyTokenMetadataOutput output{result.text, std::nullopt};
+  if (!result.timestampMetadata) return output;
+
+  const auto copy_records = [](const OgaTokenMetadataTimestampRecord* source, size_t count) {
+    std::vector<PyTokenMetadataTimestampRecord> records;
+    records.reserve(count);
+    for (size_t index = 0; index < count; ++index) {
+      const auto& value = source[index];
+      records.push_back({value.text, value.start_frame, value.stop_frame, value.start_time, value.stop_time});
+    }
+    return records;
+  };
+
+  const auto& timestamps = *result.timestampMetadata;
+  output.timestamp_metadata.emplace(
+      PyTokenMetadataTimestamp{copy_records(timestamps.words, timestamps.word_count),
+                               copy_records(timestamps.segments, timestamps.segment_count)});
+  return output;
+}
+
 struct PyGenerator {
   PyGenerator(const OgaModel& model, PyGeneratorParams& params) {
     generator_ = OgaGenerator::Create(model, *params.params_);
@@ -325,6 +364,10 @@ struct PyGenerator {
 
   pybind11::array_t<int32_t> GetNextTokens() {
     return ToPython(generator_->GetNextTokens());
+  }
+
+  std::vector<OgaTokenMetadataInput> GetNextTokensWithMetadata() {
+    return generator_->GetNextTokensWithMetadata();
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
@@ -495,8 +538,33 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            pybind11::arg("enable_ff_tokens") = false)
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
+  pybind11::class_<OgaTokenMetadataInput>(m, "TokenMetadataInput", "Emitted token with an optional acoustic interval stored by value.")
+      .def_readonly("token_id", &OgaTokenMetadataInput::token_id)
+      .def_property_readonly("token_acoustic_frame_interval", [](const OgaTokenMetadataInput& token) -> std::optional<std::pair<int64_t, int64_t>> {
+        if (!token.has_token_acoustic_frame_interval) return std::nullopt;
+        return std::make_pair(token.token_acoustic_frame_interval.start, token.token_acoustic_frame_interval.stop);
+      });
+
+  pybind11::class_<PyTokenMetadataTimestampRecord>(m, "TokenMetadataTimestampRecord")
+      .def_readonly("text", &PyTokenMetadataTimestampRecord::text)
+      .def_readonly("start_frame", &PyTokenMetadataTimestampRecord::start_frame)
+      .def_readonly("stop_frame", &PyTokenMetadataTimestampRecord::stop_frame)
+      .def_readonly("start_time", &PyTokenMetadataTimestampRecord::start_time)
+      .def_readonly("stop_time", &PyTokenMetadataTimestampRecord::stop_time);
+
+  pybind11::class_<PyTokenMetadataTimestamp>(m, "TokenMetadataTimestamp")
+      .def_readonly("words", &PyTokenMetadataTimestamp::words)
+      .def_readonly("segments", &PyTokenMetadataTimestamp::segments);
+
+  pybind11::class_<PyTokenMetadataOutput>(m, "TokenMetadataOutput")
+      .def_readonly("text", &PyTokenMetadataOutput::text)
+      .def_readonly("timestamp_metadata", &PyTokenMetadataOutput::timestamp_metadata);
+
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
-      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
+      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); })
+      .def("decode_with_metadata", [](OgaTokenizerStream& stream, const OgaTokenMetadataInput& token) { return ToMetadata(stream.DecodeWithMetadata(token)); }, pybind11::arg("token"))
+      .def("finalize_metadata", [](OgaTokenizerStream& stream) { return ToMetadata(stream.FinalizeMetadata()); })
+      .def("reset", &OgaTokenizerStream::Reset);
 
   pybind11::class_<OgaNamedTensors>(m, "NamedTensors")
       .def(pybind11::init([]() { return OgaNamedTensors::Create(); }))
@@ -658,6 +726,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("snapshot_state", &PyGenerator::SnapshotState)
       .def("set_hidden_states", &PyGenerator::SetHiddenStates)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
+      .def("get_next_tokens_with_metadata", &PyGenerator::GetNextTokensWithMetadata)
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
       .def("set_runtime_option", &PyGenerator::SetRuntimeOption)

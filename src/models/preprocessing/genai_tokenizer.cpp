@@ -4,6 +4,8 @@
 #include "genai_tokenizer.h"
 
 #include "models/model.h"
+#include "models/model_type.h"
+#include "models/transducer_state.h"
 #include "models/preprocessing/tokenizer_tag_utils.h"
 #include "tensor.h"
 
@@ -42,13 +44,78 @@ std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, in
 TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
     : tokenizer_{tokenizer.shared_from_this()} {
   CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
+  InitializeDefaultMetadataState();
+}
+
+void TokenizerStream::InitializeDefaultMetadataState() {
+  if (tokenizer_->metadata_config_.timestamps.level != Config::TimestampLevel::Off) {
+    EnsureMetadataState();
+  }
+}
+
+void TokenizerStream::EnsureMetadataState() {
+  if (metadata_state_) return;
+  auto state = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(tokenizer_->metadata_config_));
+  const OrtxMetadataConfig producer_config{state->TimestampsEnabled()};
+  CheckResult(OrtxSetDetokenizerCacheMetadataConfig(cache_, &producer_config));
+  metadata_state_ = std::move(state);
 }
 
 const std::string& TokenizerStream::Decode(int32_t token) {
+  if (decode_mode_ == DecodeMode::Metadata) {
+    throw std::runtime_error("Cannot mix text and metadata decoding before Reset");
+  }
+  if (metadata_state_) {
+    const OrtxMetadataConfig producer_config{false};
+    CheckResult(OrtxSetDetokenizerCacheMetadataConfig(cache_, &producer_config));
+    metadata_state_.reset();
+  }
+  decode_mode_ = DecodeMode::Text;
   const char* string;
   CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
   chunk_ = string;
   return chunk_;
+}
+
+TokenizerStream::~TokenizerStream() = default;
+
+const OgaTokenMetadataOutput& TokenizerStream::DecodeWithMetadata(const OgaTokenMetadataInput& token) {
+  if (decode_mode_ == DecodeMode::Text)
+    throw std::runtime_error("Cannot mix text and metadata decoding before Reset");
+  EnsureMetadataState();
+
+  // Validate before advancing the Extensions decoder so rejected input consumes nothing.
+  metadata_state_->ValidateInput(token);
+
+  // Extensions supplies word token spans; the stream pairs them with buffered frame intervals.
+  const char* text = nullptr;
+  const OrtxMetadata* metadata = nullptr;
+  CheckResult(OrtxDetokenizeCachedWithMetadata(tokenizer_->tokenizer_, cache_, token.token_id, &text, &metadata));
+  const auto& result = metadata_state_->ProcessDecoded(token, text, *metadata);
+  decode_mode_ = DecodeMode::Metadata;
+  return result;
+}
+
+const OgaTokenMetadataOutput& TokenizerStream::FinalizeMetadata() {
+  if (decode_mode_ == DecodeMode::Text)
+    throw std::runtime_error("Cannot mix text and metadata decoding before Reset");
+  EnsureMetadataState();
+
+  // Flush pending token spans without injecting another token or timing record.
+  const OrtxMetadata* metadata = nullptr;
+  CheckResult(OrtxFinalizeDetokenizeCachedWithMetadata(cache_, &metadata));
+  const auto& result = metadata_state_->ProcessFinalized(*metadata);
+  decode_mode_ = DecodeMode::Metadata;
+  return result;
+}
+
+void TokenizerStream::Reset() {
+  metadata_state_.reset();
+  OrtxDispose(&cache_.p_);
+  CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
+  chunk_.clear();
+  decode_mode_ = DecodeMode::Unset;
+  InitializeDefaultMetadataState();
 }
 
 Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_token_id},
@@ -59,12 +126,20 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
                                              bor_token_id_{config.model.bor_token_id},
                                              eor_token_id_{config.model.eor_token_id} {
   // Default tokenizer options
-  const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
-  const char* values[] = {"false", "true"};
+  const bool timestamps_enabled = config.model.timestamp_level != Config::TimestampLevel::Off;
+  const char* keys[] = {"add_special_tokens", "skip_special_tokens", "track_timestamp_metadata"};
+  const char* values[] = {"false", "true", timestamps_enabled ? "true" : "false"};
 
   // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
+  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 3));
+
+  metadata_config_.timestamps = TimestampTokenizerConfig{timestamps_enabled ? config.model.timestamp_level : Config::TimestampLevel::Off,
+                                                         config.model.segment_separators,
+                                                         config.model.segment_gap_threshold_seconds,
+                                                         config.model.sample_rate,
+                                                         config.model.hop_length,
+                                                         config.model.subsampling_factor};
 
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback.

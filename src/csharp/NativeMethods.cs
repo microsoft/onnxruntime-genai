@@ -167,6 +167,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                 out IntPtr /* const int32_t** */ outTokenIds,
                                                                                 out UIntPtr /* size_t* */ outTokenCount);
 
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaGenerator_GetNextTokensWithMetadata(IntPtr generator, out IntPtr tokens, out UIntPtr tokenCount);
+
         // This function is used to generate the next token in the sequence using the greedy search algorithm.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken(IntPtr /* OgaGenerator* */ generator);
@@ -376,6 +379,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamDecode(IntPtr /* const OgaTokenizerStream* */ tokenizerStream,
                                                                               int /* int32_t */ token,
                                                                               out IntPtr /* const char** */ outStr);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenizerStreamDecodeWithMetadata(IntPtr tokenizerStream, in NativeTokenMetadataInput token, out IntPtr result);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenizerStreamFinalizeMetadata(IntPtr tokenizerStream, out IntPtr result);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamReset(IntPtr /* OgaTokenizerStream* */ tokenizerStream);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateTensorFromBuffer(IntPtr /* data* */ data,

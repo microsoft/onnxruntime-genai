@@ -14,6 +14,61 @@
 
 namespace Generators::test {
 
+TEST(ConfigTest, ParsesTimestampConfiguration) {
+  Config config;
+
+  OverlayConfig(config, R"({"model":{
+    "type":"nemotron_speech",
+    "timestamp_level":"all",
+    "sample_rate":16000,
+    "hop_length":160,
+    "subsampling_factor":8,
+    "segment_separators":[".","!?"] ,
+    "segment_gap_threshold_seconds":1.25
+  }})");
+
+  EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::All);
+  EXPECT_EQ(config.model.segment_separators, (std::vector<std::string>{".", "!?"}));
+  EXPECT_EQ(config.model.segment_gap_threshold_seconds, 1.25);
+}
+
+TEST(ConfigTest, ParsesDisabledTimestampGap) {
+  Config config;
+  config.model.segment_gap_threshold_seconds = 1.0;
+
+  OverlayConfig(config, R"({"model":{"segment_gap_threshold_seconds":null}})");
+
+  EXPECT_FALSE(config.model.segment_gap_threshold_seconds.has_value());
+}
+
+TEST(ConfigTest, RejectsInvalidTimestampConfiguration) {
+  for (const char* json : {
+           R"({"model":{"timestamp_level":"token"}})",
+           R"({"model":{"segment_gap_threshold_frames":12}})",
+           R"({"model":{"segment_gap_threshold_seconds":-1}})"}) {
+    Config config;
+    EXPECT_THROW(OverlayConfig(config, json), std::runtime_error);
+  }
+}
+
+TEST(ConfigTest, RejectsInvalidTimestampOverlayWithoutChangingConfig) {
+  Config config;
+  for (const auto& overlay : {
+           R"({"model":{"type":"nemotron_speech","timestamp_level":"word"}})",
+           R"({"model":{"type":"gpt2","timestamp_level":"word","sample_rate":100,"hop_length":10,"subsampling_factor":1}})",
+           R"({"model":{"type":"nemotron_speech","timestamp_level":"segment","sample_rate":16000,"hop_length":160,"subsampling_factor":8,"segment_gap_threshold_seconds":1e20}})"}) {
+    EXPECT_THROW(OverlayConfig(config, overlay), std::runtime_error);
+    EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::Off);
+  }
+}
+
+TEST(ConfigTest, AcceptsZeroTimestampGap) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"segment_gap_threshold_seconds":0}})");
+  ASSERT_TRUE(config.model.segment_gap_threshold_seconds.has_value());
+  EXPECT_EQ(GetSegmentGapThresholdFrames(config.model.segment_gap_threshold_seconds, 100, 10, 1), 0);
+}
+
 TEST(ConfigTest, ParsesStaticBatching) {
   Config config;
 

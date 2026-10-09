@@ -730,6 +730,15 @@ OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithMetadata(const OgaGenerator* generator, const OgaTokenMetadataInput** out, size_t* out_count) {
+  OGA_TRY
+  const auto tokens = generator->GetNextTokensWithMetadata();
+  *out = tokens.data();
+  *out_count = tokens.size();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length) {
   OGA_TRY
   generator->RewindToLength(new_length);
@@ -1190,6 +1199,28 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModa
 OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t token, const char** out) {
   OGA_TRY
   *out = p->Decode(token).c_str();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadata(
+    OgaTokenizerStream* stream, const OgaTokenMetadataInput* token, const OgaTokenMetadataOutput** out) {
+  OGA_TRY
+  *out = &stream->DecodeWithMetadata(*token);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadata(OgaTokenizerStream* stream, const OgaTokenMetadataOutput** out) {
+  OGA_TRY
+  *out = &stream->FinalizeMetadata();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream* stream) {
+  OGA_TRY
+  stream->Reset();
   return nullptr;
   OGA_CATCH
 }

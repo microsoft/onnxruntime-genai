@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "leakcheck.h"
+#include "ort_genai_c.h"
 #include "make_string.h"
 #include "models/onnxruntime_api.h"
 #include "smartptrs.h"
@@ -139,6 +140,7 @@ struct Generator : LeakChecked<Generator> {
   // Internal continuous-decoding path for tokens already resident on the model device.
   void AppendTokens(DeviceSpan<int32_t> input_ids);
   void GenerateNextToken();
+  std::span<const OgaTokenMetadataInput> GetNextTokensWithMetadata() const;
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   void SnapshotState();                    // Snapshot recurrent state for speculative rollback (e.g. MTP)
   // Lossless multi-token MTP: commit the accepted prefix without a replay forward by cropping the
@@ -182,6 +184,7 @@ struct Generator : LeakChecked<Generator> {
   [[no_unique_address]]
 #endif
   GenerationTelemetry generation_telemetry_;
+  mutable std::vector<OgaTokenMetadataInput> next_tokens_with_metadata_;
   void LogGeneratorCreate(const GeneratorParams& params);
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
