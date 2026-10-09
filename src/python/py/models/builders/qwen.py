@@ -542,23 +542,21 @@ class Qwen35TextModel(Model):
         """
         basename = f"/model/layers.{layer_id}/linear_attn"
 
-        qkv_name = f"{basename}/qkv_proj/MatMul"
-        self.make_matmul(attention.in_proj_qkv, qkv_name, root_input)
+        qkv_name = self.make_matmul(attention.in_proj_qkv, f"{basename}/qkv_proj/MatMul", root_input)
 
-        z_name = f"{basename}/z_proj/MatMul"
-        self.make_matmul(attention.in_proj_z, z_name, root_input)
+        z_name = self.make_matmul(attention.in_proj_z, f"{basename}/z_proj/MatMul", root_input)
 
         # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
         # ~0.1% of the model, so they stay dense regardless of which loader supplied them.
         b_name = f"{basename}/b_proj/MatMul"
         self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
         self.exclude_node_from_quantization(b_name)
-        self.make_matmul(attention.in_proj_b, b_name, root_input)
+        b_name = self.make_matmul(attention.in_proj_b, b_name, root_input)
 
         a_name = f"{basename}/a_proj/MatMul"
         self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
         self.exclude_node_from_quantization(a_name)
-        self.make_matmul(attention.in_proj_a, a_name, root_input)
+        a_name = self.make_matmul(attention.in_proj_a, a_name, root_input)
 
         conv_input = f"{qkv_name}/output_0"
         if not self.use_paged_attention:
@@ -682,8 +680,7 @@ class Qwen35TextModel(Model):
             epsilon=self.layernorm_attrs["epsilon"],
         )
 
-        o_name = f"{basename}/out_proj/MatMul"
-        self.make_matmul(attention.out_proj, o_name, f"{gated_norm_name}/output_0")
+        o_name = self.make_matmul(attention.out_proj, f"{basename}/out_proj/MatMul", f"{gated_norm_name}/output_0")
 
         self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
 
@@ -944,6 +941,11 @@ class Qwen35MoEModel(MTPModel):
 
         if self.mtp_attrs["build"] and extra_options.get("exclude_mtp", False):
             print("Skipping the MTP head: exclude_mtp is set.")
+            self.mtp_attrs["build"] = False
+
+        quant_method = getattr(config, "quantization_config", {}).get("quant_method", "")
+        if self.mtp_attrs["build"] and quant_method == "quark":
+            print("Skipping the MTP head: Quark pre-quantized checkpoints do not include MTP weights.")
             self.mtp_attrs["build"] = False
 
         if not self.mtp_attrs["build"]:
