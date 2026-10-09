@@ -1124,6 +1124,15 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerEncodeLiteral(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences) {
+  OGA_TRY
+  if (!tokenizer || !str || !sequences)
+    throw std::invalid_argument("tokenizer, text, and sequences must not be null.");
+  sequences->emplace_back(tokenizer->EncodeLiteral(str));
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer* tokenizer, const char** strings, size_t count, OgaTensor** out) {
   OGA_TRY
   if (count > 0 && strings == nullptr)

@@ -113,6 +113,16 @@ std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   return {tokens, tokens + count};
 }
 
+std::vector<int32_t> Tokenizer::EncodeLiteral(const char* text) const {
+  OrtxPtr<OrtxTokenId2DArray> ids;
+  CheckResult(OrtxTokenizeLiteral(tokenizer_, &text, 1, ids.Address()));
+  const extTokenId_t* tokens;
+  size_t count;
+  CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));
+  if (count == 0) return {};
+  return {tokens, tokens + count};
+}
+
 std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   // The detokenizer dies with SIGFPE on an empty sequence, which a generation that stops on its
   // first token produces.

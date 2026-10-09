@@ -425,6 +425,10 @@ struct OgaTokenizer : OgaAbstract {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
 
+  void EncodeLiteral(const char* str, OgaSequences& sequences) const {
+    OgaCheckResult(OgaTokenizerEncodeLiteral(this, str, &sequences));
+  }
+
   std::unique_ptr<OgaTensor> EncodeBatch(const char** strings, size_t count) const {
     OgaTensor* out;
     OgaCheckResult(OgaTokenizerEncodeBatch(this, strings, count, &out));

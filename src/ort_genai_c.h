@@ -951,6 +951,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer*
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
 /**
+ * Encodes null-terminated UTF-8 text without recognizing registered added/special
+ * token strings or inserting automatic control tokens, and appends one sequence on success.
+ * Returns an error if literal text requires added/special IDs or an unknown-token fallback.
+ * Does not modify tokenizer options. OgaTokenizerEncode retains its existing behavior.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeLiteral(const OgaTokenizer*, const char* str, OgaSequences* sequences);
+
+/**
  * Batch encode an array of strings and return a single tensor output
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const char** strings, size_t count, OgaTensor** out);
