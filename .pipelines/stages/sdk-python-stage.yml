@@ -186,7 +186,6 @@ stages:
           winml_sdk_version: ${{ parameters.winml_sdk_version }}
           core_artifact: 'core-win-x64-winml-cmake-pkg'
           python_versions: ${{ parameters.python_versions }}
-      - template: jobs/steps/compliant-and-cleanup-step.yml
 
     - job: python_win_arm64_winml
       displayName: 'python · win-arm64 · winml'
@@ -227,4 +226,3 @@ stages:
           winml_sdk_version: ${{ parameters.winml_sdk_version }}
           core_artifact: 'core-win-arm64-winml-cmake-pkg'
           python_versions: ${{ parameters.python_versions }}
-      - template: jobs/steps/compliant-and-cleanup-step.yml
