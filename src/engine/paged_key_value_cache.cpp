@@ -882,7 +882,12 @@ void PagedKeyValueCache::SealCheckpointedPrefix(
     table.sealed_blocks_ = full_blocks;
     table.sealed_identity_ = std::move(registration.identity);
   } else {
-    table.sealing_stopped_ = registration.StopsSealing();
+    // A duplicate checkpoint at this boundary is usable by a future request, but this request has
+    // already computed a private physical history and may diverge before its next checkpoint. Keep
+    // the whole private suffix retryable so the later endpoint can publish as its own exact
+    // physical variant. True hash collisions remain permanently unreachable.
+    table.sealing_stopped_ =
+        registration.status == PrefixCacheRegistrationStatus::HashCollision;
   }
 }
 
@@ -910,8 +915,10 @@ bool PagedKeyValueCache::CanSealPrefixCheckpoint(
       tokens.subspan(table.sealed_blocks_ * block_size,
                      token_count - table.sealed_blocks_ * block_size),
       table.sealed_identity_);
-  table.sealing_stopped_ = status == PrefixCacheRegistrationStatus::Duplicate ||
-                           status == PrefixCacheRegistrationStatus::HashCollision;
+  // A concurrent request may duplicate this checkpoint and then diverge before its next one.
+  // Retain its private blocks and retry the entire suffix at that later boundary.
+  table.sealing_stopped_ =
+      status == PrefixCacheRegistrationStatus::HashCollision;
   return status == PrefixCacheRegistrationStatus::Indexed;
 }
 
@@ -983,12 +990,25 @@ size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
   return prefix_cache_->ReclaimCheckpoints(checkpoints_needed);
 }
 
+bool PagedKeyValueCache::ReclaimPrefixCheckpoint(
+    const FixedStatePrefixCheckpoint* checkpoint) {
+  return prefix_cache_->ReclaimCheckpoint(checkpoint);
+}
+
 size_t PagedKeyValueCache::ReclaimablePrefixCheckpoints() const {
   return prefix_cache_->ReclaimableCheckpoints();
 }
 
-const FixedStatePrefixCheckpoint* PagedKeyValueCache::ReclaimablePrefixCheckpoint() const {
-  return prefix_cache_->ReclaimableCheckpoint();
+const FixedStatePrefixCheckpoint* PagedKeyValueCache::ReclaimablePrefixCheckpoint(
+    const void* request_id) const {
+  std::shared_ptr<const BlockIdentity> current_path;
+  if (request_id) {
+    const auto table_index = block_table_index_->Find(request_id);
+    if (table_index && *table_index < block_tables_.size()) {
+      current_path = block_tables_[*table_index].sealed_identity_;
+    }
+  }
+  return prefix_cache_->ReclaimableCheckpoint(current_path);
 }
 
 bool PagedKeyValueCache::RequiresPrefixCheckpoint() const {

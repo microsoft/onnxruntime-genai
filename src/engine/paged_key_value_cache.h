@@ -132,8 +132,10 @@ struct PagedKeyValueCache {
   void DropUnleasedDraftCheckpoints();
   bool ReclaimDraftCheckpoint();
   size_t ReclaimPrefixCheckpoints(size_t checkpoints_needed);
+  bool ReclaimPrefixCheckpoint(const FixedStatePrefixCheckpoint* checkpoint);
   size_t ReclaimablePrefixCheckpoints() const;
-  const FixedStatePrefixCheckpoint* ReclaimablePrefixCheckpoint() const;
+  const FixedStatePrefixCheckpoint* ReclaimablePrefixCheckpoint(
+      const void* request_id = nullptr) const;
   bool PrefixCachingEnabled() const;
   bool RequiresPrefixCheckpoint() const;
   size_t BlockSize() const { return block_pool_->BlockSize(); }
