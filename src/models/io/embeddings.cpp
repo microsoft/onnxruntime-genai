@@ -102,40 +102,54 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
 
   if (SessionCanAccess(*state_.p_session_device_, consumer_device)) {
     // Share the input embeddings OrtValue* from other with the output embedding for this.
-    staging_ = nullptr;
     consumer_ = nullptr;
-    staging_bytes_ = consumer_bytes_ = {};
+    consumer_device_ = nullptr;
+    consumer_bytes_ = {};
+    host_view_ = nullptr;
     state_.outputs_[index_] = consumer;
     return;
   }
 
   // The consumer allocated its input on a device this session has no EP for. Binding it as an
-  // output would have ORT write host bytes over that device pointer, so write a staging buffer on
-  // this session's own device instead and copy across in CopyToConsumer() once the session has run.
-  if (consumer != consumer_) {
-    // The decoder reallocated for a new sequence length: size the staging buffer to match and rewrap
-    // both sides once here, so steady-state decoding reuses the wrappers and their host mirrors.
-    auto consumer_shape = consumer->GetTensorTypeAndShapeInfo()->GetShape();
-    if (!staging_ || staging_shape_ != consumer_shape) {
-      staging_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), consumer_shape, type_);
-      staging_shape_ = std::move(consumer_shape);
-      staging_bytes_ = ByteWrapTensor(*state_.p_session_device_, *staging_);
-    }
+  // output would have ORT write host bytes over that device pointer, so this session writes the
+  // buffer's host mirror instead, and CopyToConsumer() uploads it once the session has run.
+  if (consumer != consumer_ || recycle_mirror_) {
+    // Wrapped once per decoder buffer, so that decode steps reuse the wrapper and its mirror, unless
+    // the device recycles mirrors. Then every step takes a fresh one: replacing the wrapper hands the
+    // previous mirror back to a pool that reuses it only once its upload has completed, so nothing
+    // has to wait for that upload, whereas reusing a mirror drains the whole stream, including the
+    // decoder's input updates queued since (see CpuEmbedding::Workspace::Prepare).
+    auto info = consumer->GetTensorTypeAndShapeInfo();
+    auto shape = info->GetShape();
+    consumer_bytes_ = ByteWrapTensor(consumer_device, *consumer);
+    auto mirror = consumer_bytes_.empty() ? std::span<uint8_t>{} : consumer_bytes_.CpuSpan();
+    host_view_ = OrtValue::CreateTensor(*OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault),
+                                        mirror.data(), mirror.size_bytes(), shape, info->GetElementType());
     consumer_ = consumer;
     consumer_device_ = &consumer_device;
-    consumer_bytes_ = ByteWrapTensor(consumer_device, *consumer);
+    recycle_mirror_ = consumer_device.RecyclesHostMirrorsAfterUpload(mirror.size_bytes());
   }
-  state_.outputs_[index_] = staging_.get();
+  state_.outputs_[index_] = host_view_.get();
 }
 
 void Embeddings::CopyToConsumer() {
   if (!consumer_ || consumer_bytes_.empty())
     return;
 
-  consumer_bytes_.CopyFrom(staging_bytes_);
-  // A copy onto a device is queued on its stream; wait for it so the next token cannot rewrite the
-  // host mirror while the transfer is still reading it.
-  consumer_device_->Synchronize();
+  // Queued on the consumer device's stream ahead of the consumer's run. Nothing waits for it here,
+  // so that it does not hold back that run. A recycled mirror is never written again; any other is,
+  // so WaitForUpload waits for this upload first.
+  consumer_bytes_.CopyCpuToDevice();
+  if (!recycle_mirror_)
+    upload_device_ = consumer_device_;
+}
+
+void Embeddings::WaitForUpload() {
+  if (!upload_device_)
+    return;
+
+  upload_device_->Synchronize();
+  upload_device_ = nullptr;
 }
 
 }  // namespace Generators
