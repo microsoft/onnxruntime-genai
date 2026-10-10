@@ -585,8 +585,9 @@ def _make_minimal_mtp_embedding_model(*, tied_quantized=False, tied_unquantized=
     model.make_reshape = make_reshape
     model.make_transpose = make_transpose
     model.make_node = make_node
-    model.make_tied_quantized_embedding_input_names = lambda: (
+    model.make_tied_quantized_embedding_input_names = lambda _lm_head: (
         8,
+        32,
         "lm_head.MatMul.weight_Q8G32",
         "lm_head.MatMul.weight_scale",
         None,
