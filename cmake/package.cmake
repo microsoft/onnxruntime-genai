@@ -71,6 +71,11 @@ if(USE_GUIDANCE)
 else()
   set(_genai_export_use_guidance 0)
 endif()
+if(ENABLE_TELEMETRY)
+  set(_genai_export_enable_telemetry 1)
+else()
+  set(_genai_export_enable_telemetry 0)
+endif()
 
 target_compile_definitions(onnxruntime-genai INTERFACE
   $<INSTALL_INTERFACE:USE_CUDA=${_genai_export_use_cuda}>

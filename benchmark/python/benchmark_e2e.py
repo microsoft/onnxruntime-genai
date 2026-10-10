@@ -20,12 +20,20 @@ import os
 import subprocess
 import threading
 import time
+from contextlib import suppress
 
 import numpy as np
 import onnxruntime_genai as og
 import pandas as pd
 import psutil
 from metrics import BenchmarkRecord
+from telemetry_utils import (
+    emit_benchmark_telemetry,
+    get_telemetry,
+    normalize_execution_provider,
+    sanitize_model_identifier,
+    shutdown_telemetry,
+)
 from tqdm import tqdm
 
 peak_cpu_memory = 0.0
@@ -103,7 +111,9 @@ def get_target_pip_package_version(target_pip_package_name_list):
 
 def aggregate_measurements(measurements, aggregation):
     if not measurements:
-        raise ValueError("No measurements to aggregate (empty timing list). Check --repetitions / warmup / generation lengths.")
+        raise ValueError(
+            "No measurements to aggregate (empty timing list). Check --repetitions / warmup / generation lengths."
+        )
     if aggregation == "mean":
         return float(np.mean(measurements))
     if aggregation == "median":
@@ -213,17 +223,17 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
     peak_gpu_memory = 0.0
     peak_cpu_memory = 0.0
 
+    monitor_threads = [threading.Thread(target=monitor_cpu_memory)]
     if IS_NVIDIA_SYSTEM:
-        monitor_thread = threading.Thread(target=monitor_gpu_memory)
-    else:
-        monitor_thread = threading.Thread(target=monitor_cpu_memory)
-
-    monitor_thread.start()
-
-    metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length)
-
-    stop_monitoring = True
-    monitor_thread.join()
+        monitor_threads.append(threading.Thread(target=monitor_gpu_memory))
+    for monitor_thread in monitor_threads:
+        monitor_thread.start()
+    try:
+        metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length)
+    finally:
+        stop_monitoring = True
+        for monitor_thread in monitor_threads:
+            monitor_thread.join()
 
     if IS_NVIDIA_SYSTEM:
         metrics.append(peak_gpu_memory)
@@ -246,7 +256,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
-            provider_to_append = "WebGpuExecutionProvider" if args.execution_provider == "webgpu" else args.execution_provider
+            provider_to_append = (
+                "WebGpuExecutionProvider" if args.execution_provider == "webgpu" else args.execution_provider
+            )
             if args.verbose:
                 print(f"Setting model to {provider_to_append}")
             config.append_provider(provider_to_append)
@@ -257,6 +269,18 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     model_creation_latency_s = time.perf_counter() - model_creation_start_time
     if args.verbose:
         print("Model loaded")
+
+    model_session_id = None
+    with suppress(Exception):
+        telemetry = get_telemetry()
+        model_session_id = telemetry.allocate_model_session_id()
+        telemetry.log_model_load(
+            model_name=sanitize_model_identifier(args.model_name),
+            execution_provider=normalize_execution_provider(args.execution_provider),
+            total_load_time_ms=model_creation_latency_s * 1000,
+            session_id=model_session_id,
+        )
+
     tokenizer_creation_start_time = time.perf_counter()
     tokenizer = og.Tokenizer(model)
     tokenizer_creation_latency_s = time.perf_counter() - tokenizer_creation_start_time
@@ -470,9 +494,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         generator_creation_latency_s * 1000 if generator_creation_latency_s is not None else None
     )
     first_warmup_append_tokens_latency_ms = (
-        first_warmup_append_tokens_latency_s * 1000
-        if first_warmup_append_tokens_latency_s is not None
-        else None
+        first_warmup_append_tokens_latency_s * 1000 if first_warmup_append_tokens_latency_s is not None else None
     )
     print(f"Model Creation Latency: {model_creation_latency_ms} ms")
     print(f"Tokenizer Creation Latency: {tokenizer_creation_latency_ms} ms")
@@ -500,7 +522,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     per_token_prompt_thrpt = batch_size * (1000 / per_token_prompt_latency_ms)
 
     # Time to first token = prompt prefill + first-token sampling
-    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times)]
+    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times, strict=True)]
     ttft_ms = aggregate_measurements(ttft_times, args.aggregation) * 1000
     std_ttft_ms = float(np.std(ttft_times)) * 1000
     print(f"{aggregation_label} Time to First Token: {ttft_ms} ms")
@@ -556,6 +578,31 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         wall_clock_thrpt,
         wall_clock_time,
     ]
+
+    with suppress(Exception):
+        emit_benchmark_telemetry(
+            model_name=args.model_name,
+            precision=args.precision,
+            execution_provider=args.execution_provider,
+            batch_size=batch_size,
+            prompt_length=prompt_length,
+            tokens_generated=generation_length,
+            tokenization_latency_ms=tokenization_latency_ms,
+            tokenization_throughput=tokenization_thrpt,
+            prompt_processing_latency_ms=per_token_prompt_latency_ms,
+            prompt_processing_throughput=per_token_prompt_thrpt,
+            token_generation_latency_ms=token_gen_latency_ms,
+            token_generation_throughput=token_gen_thrpt,
+            sampling_latency_ms=sampling_latency_ms,
+            sampling_throughput=sampling_thrpt,
+            wall_clock_time_ms=wall_clock_time * 1000,
+            wall_clock_throughput=wall_clock_thrpt,
+            time_to_first_token_ms=ttft_ms,
+            peak_memory_gpu_mb=peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
+            peak_memory_cpu_mb=peak_cpu_memory * 1024,
+            session_id=model_session_id,
+        )
+
     return metrics
 
 
@@ -598,7 +645,7 @@ def main(args):
     elif args.execution_provider == "webgpu":
         print("WebGPU EP selected. Attempting to import 'onnxruntime-ep-webgpu' for registration...")
         try:
-            import onnxruntime_ep_webgpu as webgpu_ep
+            import onnxruntime_ep_webgpu as webgpu_ep  # noqa: PLC0415
         except ImportError as exc:
             raise ValueError(
                 "WebGPU EP selected but 'onnxruntime-ep-webgpu' is not installed. "
@@ -735,4 +782,7 @@ if __name__ == "__main__":
     assert is_max_lengths_valid, (
         "len(args.max_lengths) is either a combination of args.prompt_lengths and args.generation_lengths or 1 that broadcasts for all"
     )
-    main(args)
+    try:
+        main(args)
+    finally:
+        shutdown_telemetry()
