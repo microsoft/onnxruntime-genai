@@ -965,6 +965,10 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
   return strategy_->GetStats();
 }
 
+bool RewindSplitsPrompt(size_t new_length, size_t prompt_length) {
+  return new_length > 0 && new_length < prompt_length;
+}
+
 void Generator::RewindToLength(size_t new_length) {
   const auto& model_type = model_->config_->model.type;
   // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
@@ -972,9 +976,11 @@ void Generator::RewindToLength(size_t new_length) {
   // Fail clearly here before search_ is dereferenced below.
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type))
     throw std::runtime_error("RewindTo is not supported for streaming ASR models (" + model_type + ").");
-  if (model_type == "whisper" || model_type == "phi3v" || model_type == "decoder-pipeline" ||
-      ModelType::IsLFM2(model_type) || model_type == "lfm2_vl" || model_type == "lfm2_audio")
+  if (model_type == "whisper" || model_type == "decoder-pipeline")
     throw std::runtime_error("RewindTo is currently not supported for " + model_type + ".");
+  // LFM2 conv state cannot be cropped; only a full reset is possible.
+  if ((ModelType::IsLFM2(model_type) || model_type == "lfm2_vl" || model_type == "lfm2_audio") && new_length != 0)
+    throw std::runtime_error("RewindTo is only supported with new_length=0 for " + model_type + ".");
   const size_t current_length = search_->GetSequenceLength();
   if (new_length > current_length)
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");
@@ -985,6 +991,12 @@ void Generator::RewindToLength(size_t new_length) {
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
   if (search_->params_->search.num_beams > 1)
     throw std::runtime_error("RewindToLength is not supported with beam search");
+  if (RewindSplitsPrompt(new_length, state_->PromptLength()))
+    throw std::runtime_error("Cannot rewind to a length inside the prompt; rewind to 0 instead");
+  if (!state_->CanRewindTo(new_length))
+    throw std::runtime_error(
+        "Cannot rewind to " + std::to_string(new_length) +
+        ": this model's decoder state does not support rewinding to that length");
   const int64_t rewound_token_count =
       static_cast<int64_t>(current_length - new_length) *
       static_cast<int64_t>(search_->params_->BatchBeamSize());
@@ -1020,6 +1032,12 @@ DeviceSpan<float> Generator::GetLogits() {
 
 void Generator::SnapshotState() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  // After a rewind the state holds exactly the sequence; otherwise stale logits mean the newest token was never run.
+  if (!computed_logits_ && last_action_ != Action::rewound && search_->GetSequenceLength() > 0) {
+    GetLogits();
+    if (!computed_logits_)
+      throw std::runtime_error("SnapshotState: the model state is not current with the sequence; call GetLogits first.");
+  }
   state_->SnapshotState(search_->GetSequenceLength());
 }
 

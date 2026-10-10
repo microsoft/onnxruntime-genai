@@ -1278,12 +1278,44 @@ def test_lfm2_audio_rejects_beam_search(test_data_path, tmp_path, num_clips):
         og.Generator(model, params).set_inputs(inputs)
 
 
-def test_lfm2_audio_rejects_rewind(test_data_path, tmp_path):
+def test_lfm2_audio_rewind_to_zero_replays_prompt(test_data_path, tmp_path):
+    num_tokens = 4
     clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5))
-    generator, _ = _generate(_model_path(test_data_path), f"{AUDIO_MARKER}Hi", og.Audios.open(clip), num_tokens=1)
-    sequence = generator.get_sequence(0).copy()
+    generator, inputs = _generate(
+        _model_path(test_data_path), f"{AUDIO_MARKER}Hi", og.Audios.open(clip), num_tokens=num_tokens
+    )
+    expected = generator.get_sequence(0).copy()
+    prompt = inputs["input_ids"].as_numpy()[0]
 
-    # The conv state cannot be rewound; the generator must refuse before touching the sequence.
-    with pytest.raises(RuntimeError, match="RewindTo is currently not supported for lfm2_audio"):
-        generator.rewind_to(0)
-    np.testing.assert_array_equal(generator.get_sequence(0), sequence)
+    # The conv state cannot be cropped; a partial rewind must be refused before touching the sequence.
+    with pytest.raises(RuntimeError, match="RewindTo is only supported with new_length=0 for lfm2_audio"):
+        generator.rewind_to(len(prompt) + 1)
+    np.testing.assert_array_equal(generator.get_sequence(0), expected)
+
+    generator.rewind_to(0)
+    generator.append_tokens(prompt)
+    for _ in range(num_tokens):
+        generator.generate_next_token()
+    np.testing.assert_array_equal(generator.get_sequence(0), expected)
+
+
+def test_lfm2_audio_speech_rewind_to_zero_drops_earlier_frames(test_data_path, tmp_path):
+    model = og.Model(os.fspath(_speech_model(test_data_path, tmp_path)))
+    inputs = model.create_multimodal_processor()("Say something.", audios=None)
+    prompt = inputs["input_ids"].as_numpy()[0]
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=len(prompt) + 30, audio_interleaved=True, audio_top_k=1)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    while not generator.is_done():
+        generator.generate_next_token()
+    expected = generator.get_sequence(0).copy()
+    expected_codes = generator.get_output("audio_codes").copy()
+    assert expected_codes.shape[0] > 0, "the fixture must reach speech for this test to mean anything"
+
+    generator.rewind_to(0)
+    generator.append_tokens(prompt)
+    while not generator.is_done():
+        generator.generate_next_token()
+    np.testing.assert_array_equal(generator.get_sequence(0), expected)
+    np.testing.assert_array_equal(generator.get_output("audio_codes"), expected_codes)

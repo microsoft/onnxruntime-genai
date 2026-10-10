@@ -2319,7 +2319,7 @@ TEST(CAPITests, GreedySearchLfm2Fp32CAPI) {
   ASSERT_LE(sequence_length, max_length);
 }
 
-TEST(CAPITests, RewindLfm2Fp32ThrowsCAPI) {
+TEST(CAPITests, RewindLfm2Fp32CAPI) {
   std::vector<int32_t> input_ids{0, 0, 195, 731};
 
   int max_length = 10;
@@ -2333,9 +2333,14 @@ TEST(CAPITests, RewindLfm2Fp32ThrowsCAPI) {
 
   // Generate a few tokens
   generator->GenerateNextToken();
+  generator->GenerateNextToken();
 
-  // RewindTo should throw for LFM2 because conv state cannot be rewound
-  EXPECT_THROW(generator->RewindTo(0), std::runtime_error);
+  // Conv state cannot be cropped, so a partial rewind is refused.
+  EXPECT_THROW(generator->RewindTo(input_ids.size() + 1), std::runtime_error);
+
+  // A full rewind resets the conv state.
+  EXPECT_NO_THROW(generator->RewindTo(0));
+  EXPECT_EQ(generator->GetSequenceCount(0), 0u);
 }
 #endif
 
