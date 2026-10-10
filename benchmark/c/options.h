@@ -13,7 +13,8 @@ using PromptNumberOfTokensOrContent = std::variant<size_t, std::string>;
 
 struct Options {
   std::string model_path;
-  std::string execution_provider{"cpu"};
+  std::string execution_provider{"follow_config"};
+  std::string ep_library_path;
   PromptNumberOfTokensOrContent prompt_num_tokens_or_content{size_t{16}};
   size_t num_tokens_to_generate{128};
   size_t batch_size{1};
