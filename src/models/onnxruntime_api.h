@@ -544,6 +544,7 @@ struct OrtEpDevice {
   std::string Name() const;
   std::string Vendor() const;
   const OrtHardwareDevice* Device() const;
+  const OrtMemoryInfo* GetMemoryInfo(OrtDeviceMemoryType memory_type) const;  ///< Wraps OrtApi::EpDevice_MemoryInfo
 
   Ort::Abstract make_abstract;
 };
@@ -576,6 +577,10 @@ struct OrtEnv {
   /// nullptr if none exists. Wraps OrtApi::GetSharedAllocator. The returned allocator is owned by
   /// the OrtEnv — do NOT delete it.
   Ort::Allocator* GetSharedAllocator(const OrtMemoryInfo& mem_info) const;
+
+  /// \brief Release an EP-advertised shared allocator matching ep_device + mem_type. Wraps
+  /// OrtApi::ReleaseSharedAllocator. A no-op (success) when no matching shared allocator exists.
+  void ReleaseSharedAllocator(const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type);
 
   /// \brief Copy tensors between devices. Wraps OrtApi::CopyTensors
   /// \param src_tensors Array of source OrtValue tensors
