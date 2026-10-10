@@ -421,14 +421,11 @@ struct OgaTokenizer : OgaAbstract {
     return token_id;
   }
 
-  // Encode and EncodeLiteral follow the C API's encoding-only concurrency rules:
+  // Encode follows the C API's encoding-only concurrency rules:
   // distinct output sequences, no concurrent option updates or other tokenizer operations.
-  void Encode(const char* str, OgaSequences& sequences) const {
-    OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
-  }
-
-  void EncodeLiteral(const char* str, OgaSequences& sequences) const {
-    OgaCheckResult(OgaTokenizerEncodeLiteral(this, str, &sequences));
+  void Encode(const char* str, OgaSequences& sequences, bool literal = false) const {
+    const auto encode = literal ? OgaTokenizerEncodeLiteral : OgaTokenizerEncode;
+    OgaCheckResult(encode(this, str, &sequences));
   }
 
   std::unique_ptr<OgaTensor> EncodeBatch(const char** strings, size_t count) const {

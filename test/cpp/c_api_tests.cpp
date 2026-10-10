@@ -341,7 +341,7 @@ TEST_F(LiteralTokenizerApiTest, EncodesControlMarkersAsLiteralText) {
     SCOPED_TRACE(marker);
     const std::string text = "control " + marker + " control";
     auto sequences = OgaSequences::Create();
-    tokenizer_->EncodeLiteral(text.c_str(), *sequences);
+    tokenizer_->Encode(text.c_str(), *sequences, true);
     ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*sequences));
     EXPECT_STREQ(tokenizer_->Decode(sequences->SequenceData(0), sequences->SequenceCount(0)), text.c_str());
   }
@@ -351,10 +351,10 @@ TEST_F(LiteralTokenizerApiTest, PreservesLegacyEncodingAndOptions) {
   for (const auto& [marker, id] : markers_) {
     SCOPED_TRACE(marker);
     auto literal = OgaSequences::Create();
-    tokenizer_->EncodeLiteral(marker.c_str(), *literal);
+    tokenizer_->Encode(marker.c_str(), *literal, true);
     ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*literal));
     auto legacy = OgaSequences::Create();
-    tokenizer_->Encode(marker.c_str(), *legacy);
+    tokenizer_->Encode(marker.c_str(), *legacy, false);
     ASSERT_EQ(legacy->SequenceCount(0), 1);
     EXPECT_EQ(legacy->SequenceData(0)[0], id);
   }
@@ -365,7 +365,7 @@ TEST_F(LiteralTokenizerApiTest, EmptyLiteralDoesNotInsertAutomaticTokens) {
   const char* values[] = {"true"};
   tokenizer_->UpdateOptions(keys, values, 1);
   auto sequences = OgaSequences::Create();
-  tokenizer_->EncodeLiteral("", *sequences);
+  tokenizer_->Encode("", *sequences, true);
   ASSERT_EQ(sequences->Count(), 1);
   EXPECT_EQ(sequences->SequenceCount(0), 0);
 }
@@ -382,9 +382,9 @@ TEST_F(LiteralTokenizerApiTest, EmptyLegacyEncodingHasNoTokensWhenDisabled) {
 
 TEST_F(LiteralTokenizerApiTest, RejectsInvalidInputWithoutAppendingSequence) {
   auto sequences = OgaSequences::Create();
-  EXPECT_THROW(tokenizer_->EncodeLiteral(nullptr, *sequences), std::runtime_error);
-  EXPECT_THROW(tokenizer_->EncodeLiteral("\xff", *sequences), std::runtime_error);
-  EXPECT_THROW(tokenizer_->EncodeLiteral("control\xff", *sequences), std::runtime_error);
+  EXPECT_THROW(tokenizer_->Encode(nullptr, *sequences, true), std::runtime_error);
+  EXPECT_THROW(tokenizer_->Encode("\xff", *sequences, true), std::runtime_error);
+  EXPECT_THROW(tokenizer_->Encode("control\xff", *sequences, true), std::runtime_error);
   EXPECT_EQ(sequences->Count(), 0);
   std::unique_ptr<OgaResult> result(OgaTokenizerEncodeLiteral(tokenizer_.get(), "control", nullptr));
   ASSERT_NE(result, nullptr);
@@ -395,7 +395,7 @@ TEST_F(LiteralTokenizerApiTest, ConcurrentLiteralCallsDoNotChangeLegacyRecogniti
   auto literal_worker = [&] {
     for (int i = 0; i < 32; ++i) {
       auto sequences = OgaSequences::Create();
-      ASSERT_NO_THROW(tokenizer_->EncodeLiteral(marker.c_str(), *sequences));
+      ASSERT_NO_THROW(tokenizer_->Encode(marker.c_str(), *sequences, true));
       ASSERT_NO_FATAL_FAILURE(ExpectNoControlTokens(*sequences));
     }
   };
@@ -426,7 +426,7 @@ TEST_F(LiteralTokenizerApiTest, RealModelGeneratesFromLiteralTokens) {
   params->SetSearchOptionBool("do_sample", false);
   auto generator = OgaGenerator::Create(*model, *params);
   auto input = OgaSequences::Create();
-  generation_tokenizer->EncodeLiteral("!", *input);
+  generation_tokenizer->Encode("!", *input, true);
   ASSERT_EQ(input->Count(), 1);
   ASSERT_GT(input->SequenceCount(0), 0);
   EXPECT_STREQ(generation_tokenizer->Decode(input->SequenceData(0), input->SequenceCount(0)), "!");
