@@ -673,6 +673,16 @@ void PrefixCache::DropUnleasedDraftCheckpoints() {
   }
 }
 
+bool PrefixCache::ReclaimDraftCheckpoint() {
+  for (auto* entry : recency_) {
+    if (entry->draft_checkpoint && entry->draft_checkpoint.use_count() == 1) {
+      entry->draft_checkpoint.reset();
+      return true;
+    }
+  }
+  return false;
+}
+
 size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {
   size_t reclaimed = 0;
   while (reclaimed < checkpoints_needed) {

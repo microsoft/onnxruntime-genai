@@ -172,6 +172,9 @@ bool TryGreedyTokensToDevice(
 Engine::Engine(std::shared_ptr<Model> model)
     : Engine(model, CreateDependencies(model)) {}
 
+Engine::Engine(std::shared_ptr<Model> model, const EngineOptions& options)
+    : Engine(model, CreateDependencies(model, options)) {}
+
 Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     : model_{std::move(model)},
       cache_manager_{std::move(dependencies.cache_manager)},
@@ -296,7 +299,12 @@ void ValidateMtpModelCompatibility(const Config& config,
   }
 }
 
-EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
+EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model,
+                                              const EngineOptions& options) {
+  if (options.dflash2_max_snapshots &&
+      *options.dflash2_max_snapshots > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+    throw std::out_of_range("dflash2_max_snapshots must be between 0 and 2147483647.");
+  }
   // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so
   // it cannot resume a half-written prompt. Reject a model that configures chunking here rather
   // than surfacing it once a Request is already being admitted.
@@ -429,7 +437,8 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
                            dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes,
                            dflash2_prefix_checkpoint_bytes,
-                           &dflash2_prefix_checkpoints_enabled);
+                           &dflash2_prefix_checkpoints_enabled,
+                           options.dflash2_max_snapshots);
   if (dflash2_model && !dflash2_drafter) {
     const size_t paged_block_size =
         static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
@@ -445,6 +454,9 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
               static_cast<size_t>(dflash2.block_size), dflash2_max_batch_size),
           dflash2_max_batch_size);
     }
+  }
+  if (dflash2_drafter) {
+    dflash2_drafter->SetPrefixCheckpointCapacity(cache_manager->DraftCheckpointCapacity());
   }
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
@@ -561,7 +573,10 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
       continue;
     }
     try {
-      cache_manager_->DropUnleasedDraftCheckpoints();
+      if (dflash2_drafter_->AvailablePrefixCheckpoints() == 0 &&
+          !cache_manager_->ReclaimDraftCheckpoint()) {
+        continue;
+      }
       auto checkpoint = dflash2_drafter_->CapturePrefix(feed.request, entry.target_cache_slots);
       if (checkpoint && !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
         cache_manager_->RecordPrefixPublicationRefusal();

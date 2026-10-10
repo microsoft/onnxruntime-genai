@@ -1235,6 +1235,56 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
+TEST(CAPITests, EngineOptionsValidateSnapshotLimits) {
+  auto options = OgaEngineOptions::Create();
+  for (const size_t limit : {size_t{0}, size_t{1}, size_t{4}, size_t{2147483647}}) {
+    EXPECT_NO_THROW(options->SetDflash2MaxSnapshots(limit));
+  }
+  EXPECT_THROW(options->SetDflash2MaxSnapshots(size_t{2147483648}), std::runtime_error);
+  std::unique_ptr<OgaResult> null_options{
+      OgaEngineOptionsSetDflash2MaxSnapshots(nullptr, 1)};
+  ASSERT_NE(null_options, nullptr);
+  EXPECT_STREQ(null_options->GetError(), "options must not be null.");
+  std::unique_ptr<OgaResult> null_out{OgaCreateEngineOptions(nullptr)};
+  ASSERT_NE(null_out, nullptr);
+  EXPECT_STREQ(null_out->GetError(), "out must not be null.");
+
+  OgaEngine* engine{};
+  std::unique_ptr<OgaResult> null_model{
+      OgaCreateEngineWithOptions(nullptr, options.get(), &engine)};
+  ASSERT_NE(null_model, nullptr);
+  EXPECT_EQ(engine, nullptr);
+  EXPECT_STREQ(null_model->GetError(), "model must not be null.");
+  OgaDestroyEngineOptions(nullptr);
+}
+
+TEST(CAPITests, EngineConstructionCopiesOptionsAndPreservesDefaultEntryPoint) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto options = OgaEngineOptions::Create();
+  auto unset = OgaEngine::Create(*model, *options);
+  options->SetDflash2MaxSnapshots(0);
+  auto disabled = OgaEngine::Create(*model, *options);
+  options->SetDflash2MaxSnapshots(4);
+  auto overridden = OgaEngine::Create(*model, *options);
+  options.reset();
+  auto defaults = OgaEngine::Create(*model);
+  OgaEngine* raw{};
+  OgaCheckResult(OgaCreateEngineWithOptions(model.get(), nullptr, &raw));
+  std::unique_ptr<OgaEngine> null_options{raw};
+  for (auto* engine : {unset.get(), disabled.get(), overridden.get(), defaults.get(), null_options.get()}) {
+    EXPECT_EQ(engine->GetCapabilities()->ConfiguredMaxBatchSize(), 8u);
+    auto request = engine->CreateRequest();
+    const std::array<int32_t, 3> prompt{5, 9, 13};
+    auto turn_options = request->CreateTurnOptions();
+    turn_options->SetMaxGeneratedTokens(1);
+    request->BeginTurn(prompt, turn_options.get());
+    const auto event = RunOne(*engine);
+    EXPECT_NE(event.flags & OgaEngineEventFlag_Token, 0u);
+    EXPECT_EQ(event.token, 21);
+    request->Close();
+  }
+}
+
 TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto engine = OgaEngine::Create(*model);

@@ -40,12 +40,13 @@ typedef struct OgaEngine OgaEngine;
 typedef struct OgaEngineEvent OgaEngineEvent;
 typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
 typedef struct OgaRequest OgaRequest;
+typedef struct OgaEngineOptions OgaEngineOptions;
 typedef struct OgaRequestOptions OgaRequestOptions;
 typedef struct OgaTurnOptions OgaTurnOptions;
 typedef struct OgaTurnUsage OgaTurnUsage;
 ```
 
-Every new Engine API object is opaque. `OgaRequestOptions` and `OgaTurnOptions` can evolve through
+Every new Engine API object is opaque. `OgaEngineOptions`, `OgaRequestOptions`, and `OgaTurnOptions` can evolve through
 setters without public field-presence rules. `OgaEngineEvent` and `OgaTurnUsage` expose data only
 through getters, so the API publishes no layout, size, alignment, version, or stride contract.
 `OgaEngineEventBuffer` owns the event objects and exposes borrowed views.
@@ -53,6 +54,27 @@ through getters, so the API publishes no layout, size, alignment, version, or st
 Request creation takes no generation parameters. The Engine derives each Request's private search
 configuration from its own model, forcing a single sequence and a single beam, so no caller-supplied
 `GeneratorParams` field can reach the Engine and be silently ignored.
+
+### Engine options
+
+```c
+OgaResult* OgaCreateEngineOptions(OgaEngineOptions** out);
+void OgaDestroyEngineOptions(OgaEngineOptions* options);
+OgaResult* OgaEngineOptionsSetDflash2MaxSnapshots(
+    OgaEngineOptions* options, size_t max_snapshots);
+OgaResult* OgaCreateEngineWithOptions(
+    OgaModel* model, const OgaEngineOptions* options, OgaEngine** out);
+```
+
+`OgaEngineOptions` is an opaque, reusable, caller-owned handle for Engine-wide resource
+policy. Construction copies its values without retaining the handle or changing the
+Model configuration. An explicit snapshot limit overrides the selected runtime-profile
+and base configuration defaults; null options or an unset limit preserve those defaults.
+The limit accepts `0` through `2147483647`, with `0` disabling only drafter snapshots.
+The effective capacity remains bounded by the shared cache memory budget and fixed-state
+checkpoint capacity. Invalid setter values fail without changing the options.
+Snapshot capacity cannot be changed on a live Engine and is not Request or Turn policy.
+`OgaCreateEngine` remains equivalent to `OgaCreateEngineWithOptions(model, NULL, out)`.
 
 ### Request options
 
@@ -932,6 +954,8 @@ comparison. No separate Request ID or lookup API is planned.
 
 ### C++
 
+- RAII `OgaEngineOptions`, with `SetDflash2MaxSnapshots(value)` and
+  `OgaEngine::Create(model, options)` for explicit Engine resource overrides.
 - RAII `OgaRequestOptions` and `OgaTurnOptions`, the latter created from its Request.
 - `OgaEngine::CreateRequest(const OgaRequestOptions* = nullptr)`.
 - RAII `OgaEngineEventBuffer`, created once with `OgaEngine::CreateEventBuffer(capacity)`.
@@ -947,6 +971,8 @@ comparison. No separate Request ID or lookup API is planned.
 
 ### Python
 
+- `EngineOptions.set_dflash2_max_snapshots(value)` and `Engine(model, *, options=None)`
+  configure Engine-wide snapshot capacity independently of Model creation.
 - `RequestOptions.set_max_session_tokens(value)` configures the cumulative Request limit.
 - `Engine.create_request(*, options=None) -> Request`. `options` is keyword-only, so an older
   positional `create_request(params)` call fails loudly instead of binding generation parameters the

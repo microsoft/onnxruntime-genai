@@ -207,16 +207,75 @@ sliding-window KV rings and auxiliary caches that mirror every target block when
 `prefix_caching` is explicitly set to `true`. Existing configurations that omit
 the setting keep loading with caching disabled for those layouts, and builders
 emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
-can coexist with target prefix caching. For a windowed DFlash 2 drafter, one
+can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
 optional ring checkpoint can be attached to the exact indexed target boundary
 after its fixed-state checkpoint and the complete drafter proposal succeed.
 The ring is restored into newly allocated drafter blocks before a cached
-request joins at a nonzero position. An unleased older ring checkpoint may be
-replaced at a later boundary without evicting target blocks or fixed state.
+request joins at a nonzero position. Set
+`engine.dynamic_batching.dflash2_max_snapshots` to provide the default maximum number of
+retained DFlash 2 ring snapshots for a hybrid target with fixed state and prefix
+caching enabled. It defaults to `1`; `0` disables only drafter
+snapshots, not target prefix caching. Values must be integers from `0` through
+`2147483647`. The effective capacity is capped by the target fixed-state checkpoint
+capacity (`max_batch_size`) and the shared cache memory budget, reserving at least
+one target block. This applies to both explicit `num_blocks` and automatic
+`gpu_utilization_factor` sizing; insufficient memory reduces the snapshot count
+rather than exhausting the target pool. The setting is also supported in runtime-profile
+overlays. Snapshots are captured lazily. When the pool is full, only one unleased
+older ring checkpoint is replaced at a later boundary, without evicting target
+blocks or fixed state. Leased snapshots are never overwritten.
 If the matching draft checkpoint is absent, the request retains the full
 target hit and runs target-only until the windowed drafter has rebuilt its context.
 Full-attention DSpark remains target-only
 after a nonzero-position prefix hit.
+
+Applications can override this default when constructing an Engine, without editing
+the package or reloading the Model. The precedence is an explicit `EngineOptions`
+value, then the selected runtime profile, then the base configuration (default `1`).
+An unset option preserves the resolved configuration; explicitly setting `0` disables
+drafter snapshots. All values retain the same memory-budget and fixed-state capacity
+limits.
+
+```python
+options = og.EngineOptions()
+options.set_dflash2_max_snapshots(4)
+engine = og.Engine(model, options=options)
+```
+
+In C++, use `OgaEngineOptions::Create()`, `SetDflash2MaxSnapshots(4)`, and
+`OgaEngine::Create(model, *options)`. The equivalent C functions are
+`OgaCreateEngineOptions`, `OgaEngineOptionsSetDflash2MaxSnapshots`, and
+`OgaCreateEngineWithOptions`; release the options with `OgaDestroyEngineOptions`.
+Options are copied during construction, so later changes or destruction do not
+affect the Engine. The existing `OgaCreateEngine` and `og.Engine(model)` entry points
+continue to use configuration defaults.
+
+This is Engine-wide resource policy, not a property of the ONNX graph or a per-session,
+per-Request, or per-Turn setting. Engines using the same Model may choose different
+snapshot limits; the override does not change the Model configuration or other Engines.
+The pool is not resized during active request processing.
+
+For example, retain up to four snapshots on a larger device while preserving
+the one-snapshot base default:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 512,
+      "max_batch_size": 8,
+      "dflash2_max_snapshots": 1
+    }
+  },
+  "runtime_profiles": [{
+    "id": "larger-snapshot-pool",
+    "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
+    "overlay": {
+      "engine": {"dynamic_batching": {"dflash2_max_snapshots": 4}}
+    }
+  }]
+}
+```
 
 For operator-run boundary, request-order, branching, lease, cancellation, and
 bounded-pool checks on the intended GPU stack, see

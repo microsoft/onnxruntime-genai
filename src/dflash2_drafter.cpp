@@ -535,9 +535,20 @@ size_t Dflash2Drafter::PrefixCheckpointBytes(const Config& config, size_t paged_
 
 bool CanReserveDflash2PrefixCheckpoint(size_t target_budget_bytes, size_t reserved_bytes,
                                        size_t snapshot_bytes, size_t target_block_bytes) {
-  return target_budget_bytes > reserved_bytes &&
-         snapshot_bytes < target_budget_bytes - reserved_bytes &&
-         target_block_bytes <= target_budget_bytes - reserved_bytes - snapshot_bytes;
+  return Dflash2PrefixCheckpointCapacity(
+             target_budget_bytes, reserved_bytes, snapshot_bytes, target_block_bytes, 1) != 0;
+}
+
+size_t Dflash2PrefixCheckpointCapacity(size_t target_budget_bytes, size_t reserved_bytes,
+                                       size_t snapshot_bytes, size_t target_block_bytes,
+                                       size_t max_checkpoints) {
+  if (snapshot_bytes == 0 || target_block_bytes == 0 ||
+      target_budget_bytes <= reserved_bytes ||
+      target_budget_bytes - reserved_bytes < target_block_bytes) {
+    return 0;
+  }
+  const size_t available = target_budget_bytes - reserved_bytes - target_block_bytes;
+  return std::min(max_checkpoints, available / snapshot_bytes);
 }
 
 void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destination_blocks,
@@ -818,9 +829,25 @@ bool Dflash2Drafter::CanCapturePrefix(const Request* request, size_t token_count
          it->second.blocks.size() == ring_blocks_;
 }
 
+void Dflash2Drafter::SetPrefixCheckpointCapacity(size_t capacity) {
+  if (AvailablePrefixCheckpoints() != prefix_checkpoints_.size()) {
+    throw std::logic_error("Cannot resize the DFlash 2 prefix snapshot pool while snapshots are leased.");
+  }
+  prefix_checkpoints_.resize(capacity);
+}
+
+size_t Dflash2Drafter::AvailablePrefixCheckpoints() const noexcept {
+  return static_cast<size_t>(std::count_if(
+      prefix_checkpoints_.begin(), prefix_checkpoints_.end(),
+      [](const auto& checkpoint) { return checkpoint.expired(); }));
+}
+
 std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
     const Request* request, size_t token_count) {
-  if (!CanCapturePrefix(request, token_count) || !prefix_checkpoint_.expired()) {
+  const auto slot = std::find_if(
+      prefix_checkpoints_.begin(), prefix_checkpoints_.end(),
+      [](const auto& checkpoint) { return checkpoint.expired(); });
+  if (!CanCapturePrefix(request, token_count) || slot == prefix_checkpoints_.end()) {
     return nullptr;
   }
   const auto it = requests_.find(request);
@@ -856,7 +883,7 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
     throw;
   }
   model_->p_device_kvcache_->Synchronize();
-  prefix_checkpoint_ = checkpoint;
+  *slot = checkpoint;
   return checkpoint;
 }
 

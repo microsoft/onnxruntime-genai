@@ -57,7 +57,8 @@ struct CacheManager {
                                               size_t auxiliary_bytes_per_block = 0,
                                               size_t auxiliary_reserved_memory_bytes = 0,
                                               size_t optional_draft_checkpoint_bytes = 0,
-                                              bool* draft_checkpoint_enabled = nullptr);
+                                              bool* draft_checkpoint_enabled = nullptr,
+                                              std::optional<size_t> dflash2_max_snapshots = std::nullopt);
 
   virtual bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const = 0;
 
@@ -129,6 +130,8 @@ struct CacheManager {
     return false;
   }
   virtual void DropUnleasedDraftCheckpoints() {}
+  virtual bool ReclaimDraftCheckpoint() { return false; }
+  virtual size_t DraftCheckpointCapacity() const noexcept { return 0; }
   virtual void RecordPrefixPublicationRefusal() noexcept {}
   virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
 
@@ -198,8 +201,10 @@ struct PagedCacheManager : CacheManager {
   PagedCacheManager(std::shared_ptr<Model> model,
                     size_t auxiliary_bytes_per_block = 0,
                     size_t auxiliary_reserved_memory_bytes = 0,
-                    size_t optional_draft_checkpoint_bytes = 0);
-  bool DraftCheckpointEnabled() const noexcept { return draft_checkpoint_enabled_; }
+                    size_t optional_draft_checkpoint_bytes = 0,
+                    std::optional<size_t> dflash2_max_snapshots = std::nullopt);
+  bool DraftCheckpointEnabled() const noexcept { return draft_checkpoint_capacity_ != 0; }
+  size_t DraftCheckpointCapacity() const noexcept override { return draft_checkpoint_capacity_; }
 
   bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const override;
 
@@ -257,6 +262,9 @@ struct PagedCacheManager : CacheManager {
   void DropUnleasedDraftCheckpoints() override {
     key_value_cache_->DropUnleasedDraftCheckpoints();
   }
+  bool ReclaimDraftCheckpoint() override {
+    return key_value_cache_->ReclaimDraftCheckpoint();
+  }
   void RecordPrefixPublicationRefusal() noexcept override {
     key_value_cache_->RecordPrefixPublicationRefusal();
   }
@@ -287,7 +295,7 @@ struct PagedCacheManager : CacheManager {
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<PagedKeyValueCache> key_value_cache_;
   std::unique_ptr<FixedStatePool> fixed_state_pool_;
-  bool draft_checkpoint_enabled_{};
+  size_t draft_checkpoint_capacity_{};
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
 };
 

@@ -79,6 +79,7 @@ typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
+typedef struct OgaEngineOptions OgaEngineOptions;
 typedef struct OgaEngineCapabilities OgaEngineCapabilities;
 typedef struct OgaEngineEvent OgaEngineEvent;
 typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
@@ -1258,6 +1259,32 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, 
  * \return OgaResult containing the error message if the engine creation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** out);
+
+/**
+ * \brief Creates an Engine with caller-selected runtime resource options.
+ *
+ * Options are copied during construction and may be destroyed or reused afterward.
+ * Explicit options override selected runtime-profile and base config defaults without
+ * changing the Model. A null options pointer is equivalent to OgaCreateEngine.
+ * Model ownership and owner-thread requirements are the same as OgaCreateEngine.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngineWithOptions(
+    OgaModel* model, const OgaEngineOptions* options, OgaEngine** out);
+
+/** \brief Creates runtime Engine options with all overrides unset. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngineOptions(OgaEngineOptions** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyEngineOptions(OgaEngineOptions* options);
+
+/**
+ * \brief Overrides the maximum retained windowed DFlash 2 prefix snapshots for an Engine.
+ *
+ * Accepts 0 through 2147483647. Zero disables drafter snapshots, not target prefix caching.
+ * Omitting this setter uses the resolved model config default. The effective capacity is
+ * capped by the shared cache memory budget and target fixed-state checkpoint capacity.
+ * This is Engine-wide resource policy, not a per-Request or per-Turn setting.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineOptionsSetDflash2MaxSnapshots(
+    OgaEngineOptions* options, size_t max_snapshots);
 
 /**
  * \brief Returns a caller-owned snapshot of the Engine's configured runtime capabilities.

@@ -180,3 +180,10 @@ for index, node in enumerate(windowed.graph.node):
         break
 onnx.checker.check_model(windowed)
 onnx.save(windowed, Path(__file__).with_name("dflash2.onnx"))
+
+# The composite target exposes FP16 auxiliary hidden states.
+fp16_aux = onnx.ModelProto()
+fp16_aux.CopyFrom(windowed)
+fp16_aux.graph.input[0].type.tensor_type.elem_type = TensorProto.FLOAT16
+onnx.checker.check_model(fp16_aux)
+onnx.save(fp16_aux, Path(__file__).with_name("dflash2-fp16-aux.onnx"))

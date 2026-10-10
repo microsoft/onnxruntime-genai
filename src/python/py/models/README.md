@@ -158,6 +158,29 @@ merge recursively; arrays replace whole. The validator rejects absent engine or
 speculative capabilities, invalid allocation and draft limits, provider changes,
 and changes to graph-required session options.
 
+`runtime_config.engine.dynamic_batching.dflash2_max_snapshots` limits retained
+windowed DFlash 2 prefix snapshots for a hybrid target with fixed state and prefix
+caching enabled. It defaults to `1`, accepts integers from `0`
+through `2147483647`, and uses `0` to disable drafter snapshots without disabling
+target prefix caching. The runtime caps the count by the shared cache memory
+budget and target checkpoint capacity (`max_batch_size`). The same field is
+accepted in `runtime_profiles[].overlay.engine.dynamic_batching`. For a supported
+paged DFlash 2 export, use either form in the structured builder invocation:
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i target_checkpoint -o output -p int4 -e cuda \
+  --builder_config_version 2 --extra_options use_paged_attention=true \
+  --drafter_options '{"drafter_type":"dflash2","path":"drafter_checkpoint"}' \
+  --runtime_config '{"engine":{"dynamic_batching":{"dflash2_max_snapshots":4}}}'
+
+# From source, at the repository root:
+python src/python/py/models/builder.py -i target_checkpoint -o output -p int4 -e cuda \
+  --builder_config_version 2 --extra_options use_paged_attention=true \
+  --drafter_options '{"drafter_type":"dflash2","path":"drafter_checkpoint"}' \
+  --runtime_config '{"runtime_profiles":[{"id":"larger-snapshot-pool","eligibility":{"minimum_total_device_memory_bytes":34359738368},"overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":4}}}}]}'
+```
+
 For memory-dependent INT4/INT8 KV-cache graphs that share external weights, use
 the [KV-cache variant authoring workflow](../../../../docs/ModelBuilderConfiguration.md#authoring-kv-cache-variants).
 The supported `KVCacheVariant` API requires source and output graphs in the same

@@ -947,6 +947,120 @@ TEST(PagedKeyValueCacheManifestTest, OptionalDraftCheckpointDoesNotExhaustHybrid
   EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
 }
 
+TEST(PagedKeyValueCacheManifestTest, DraftSnapshotCountIsLimitedByConfigBudgetAndTargetCheckpoints) {
+  auto model = LoadSyntheticCompositeModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 4;
+  batching.num_blocks = 8;
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  for (const auto [requested, expected] :
+       {std::pair<size_t, size_t>{0, 0}, {1, 1}, {3, 3}, {100, 4}}) {
+    batching.dflash2_max_snapshots = requested;
+    auto manager = CacheManager::Create(model, 0, 0, block_bytes);
+    EXPECT_EQ(manager->DraftCheckpointCapacity(), expected);
+    EXPECT_EQ(manager->Snapshot().total_blocks, 8u - expected);
+  }
+  batching.dflash2_max_snapshots = 100;
+  auto manager = CacheManager::Create(model, 0, 0, 3 * block_bytes);
+  EXPECT_EQ(manager->DraftCheckpointCapacity(), 2u);
+  EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
+  manager.reset();
+
+  batching.prefix_caching = false;
+  manager = CacheManager::Create(model, 0, 0, block_bytes);
+  EXPECT_EQ(manager->DraftCheckpointCapacity(), 0u);
+  EXPECT_EQ(manager->Snapshot().total_blocks, 8u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, EngineSnapshotOverridesTakePrecedenceWithoutChangingModelDefaults) {
+  auto model = LoadSyntheticCompositeModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 4;
+  batching.num_blocks = 8;
+  batching.dflash2_max_snapshots = 1;
+  OverlayConfig(*model->config_, R"({"runtime_profiles":[{
+    "id":"snapshot-default","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":2}}}
+  }]})");
+  ApplyRuntimeProfile(*model->config_, 32ull * 1024 * 1024 * 1024);
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+
+  EngineOptions options;
+  auto defaults = CacheManager::Create(model, 0, 0, block_bytes, nullptr,
+                                       options.dflash2_max_snapshots);
+  EXPECT_EQ(defaults->DraftCheckpointCapacity(), 2u);
+
+  options.dflash2_max_snapshots = 0;
+  auto disabled = CacheManager::Create(model, 0, 0, block_bytes, nullptr,
+                                       options.dflash2_max_snapshots);
+  EXPECT_EQ(disabled->DraftCheckpointCapacity(), 0u);
+  EXPECT_EQ(disabled->Snapshot().total_blocks, 8u);
+
+  options.dflash2_max_snapshots = 3;
+  auto larger = CacheManager::Create(model, 0, 0, block_bytes, nullptr,
+                                     options.dflash2_max_snapshots);
+  options.dflash2_max_snapshots = 0;
+  EXPECT_EQ(larger->DraftCheckpointCapacity(), 3u);
+  EXPECT_EQ(larger->Snapshot().total_blocks, 5u);
+  EXPECT_EQ(defaults->DraftCheckpointCapacity(), 2u);
+  EXPECT_EQ(model->config_->engine.dynamic_batching->dflash2_max_snapshots, 2u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, EngineSnapshotOverrideStillHonorsBudgetAndTargetCapacity) {
+  auto model = LoadSyntheticCompositeModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 4;
+  batching.num_blocks = 8;
+  batching.dflash2_max_snapshots = 0;
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  auto target_limited = CacheManager::Create(model, 0, 0, block_bytes, nullptr, 100);
+  EXPECT_EQ(target_limited->DraftCheckpointCapacity(), 4u);
+  EXPECT_EQ(target_limited->Snapshot().total_blocks, 4u);
+
+  auto budget_limited = CacheManager::Create(model, 0, 0, 3 * block_bytes, nullptr, 100);
+  EXPECT_EQ(budget_limited->DraftCheckpointCapacity(), 2u);
+  EXPECT_EQ(budget_limited->Snapshot().total_blocks, 2u);
+  EXPECT_EQ(batching.dflash2_max_snapshots, 0u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, EngineConstructionAppliesSnapshotOptionsToCacheAndDrafter) {
+  auto model = LoadSyntheticCompositeModel();
+  auto& draft = model->config_->model.dflash2;
+  draft.filename = (fs::path{".."} / "synthetic-dspark" / "dflash2-fp16-aux.onnx").string();
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.mask_token_id = 31;
+  draft.sliding_window = 8;
+  draft.main_aux_hidden_states = "hidden_states";
+
+  EngineOptions options;
+  options.dflash2_max_snapshots = 3;
+  auto larger = Engine::CreateDependencies(model, options);
+  ASSERT_NE(larger.dflash2_drafter, nullptr);
+  EXPECT_EQ(larger.cache_manager->DraftCheckpointCapacity(), 3u);
+  EXPECT_EQ(larger.dflash2_drafter->AvailablePrefixCheckpoints(), 3u);
+
+  options.dflash2_max_snapshots = 0;
+  auto disabled = Engine::CreateDependencies(model, options);
+  ASSERT_NE(disabled.dflash2_drafter, nullptr);
+  EXPECT_EQ(disabled.cache_manager->DraftCheckpointCapacity(), 0u);
+  EXPECT_EQ(disabled.dflash2_drafter->AvailablePrefixCheckpoints(), 0u);
+
+  auto defaults = Engine::CreateDependencies(model);
+  ASSERT_NE(defaults.dflash2_drafter, nullptr);
+  EXPECT_EQ(defaults.cache_manager->DraftCheckpointCapacity(), 1u);
+  EXPECT_EQ(defaults.dflash2_drafter->AvailablePrefixCheckpoints(), 1u);
+  EXPECT_EQ(larger.cache_manager->DraftCheckpointCapacity(), 3u);
+  EXPECT_EQ(model->config_->engine.dynamic_batching->dflash2_max_snapshots, 1u);
+}
+
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {
   auto model = LoadSyntheticPagedModel();
   auto& decoder = model->config_->model.decoder;
