@@ -73,7 +73,8 @@ void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_sl
 constexpr int kMaxFastReplayTransitions = 8;
 constexpr int kMaxFastReplayKeyWidth = 256;
 void LaunchReplayStateUpdates(const void* descs, int fast_count, int generic_count,
-                              int fast_blocks_per_descriptor, cudaStream_t stream);
+                              int fast_blocks_per_descriptor, bool bounded_indexer_replay,
+                              cudaStream_t stream);
 int ReplayGatedDeltaNetBlocks(int heads, int value_width);
 
 // Small copies as kernels. On WDDM every switch between a copy-engine operation (cudaMemcpyAsync,

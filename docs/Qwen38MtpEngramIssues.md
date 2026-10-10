@@ -1172,6 +1172,36 @@ these rejected source changes. The next priority is attribution and
 optimization of large dense decode projections, rather than further
 overlap-dependent GEMV work.
 
+#### Four-K-lane NVFP4 K-packed tile (rejected)
+
+A separate follow-up reduced the K-lane subgroup from eight to four and
+expanded the K-packed CTA tile from 16 to 32 output columns, leaving the
+128-thread block size unchanged. This changes the dot-product reduction
+partition, so exact greedy-sequence equivalence is not claimed. The
+targeted three-token MTP-window parity case passes against the
+dequantized fallback, and both full Engine variants completed all
+measured 512-token requests with zero MTP failures.
+
+The comparison used the same candidate provider binary with the
+four-lane environment flag off/on, width-two MTP, exact 8,192/512 policy,
+CUDA graphs, both sparse-prefill tensor-core flags and decoder/head
+tuning. Two batches with reversed variant order measured eight requests
+per variant:
+
+| Variant | Pooled E2E TPS | Decode TPS |
+|---|---:|---:|
+| Original eight K lanes | 104.508 | 132.793 |
+| Four K lanes / 32-column tile | 103.539 | 131.208 |
+
+The candidate is 0.93% lower in E2E and 1.19% lower in decode throughput.
+Acceptance also differed (76.42% control versus 74.49% candidate), so the
+full-request comparison is not a pure kernel measurement. Matched
+profiled per-call gate/up duration rose from 39.58 to 40.78 us; down
+duration fell from 20.91 to 20.36 us. One targeted MTP-window parity
+case passed. The mixed result does not justify keeping this geometry. Its
+flag and kernel changes were removed, and the CUDA provider was rebuilt
+from the original source.
+
 #### Dense-projection attribution and higher split-K parallelism
 
 A temporary, graph-disabled MatMul diagnostic captured 16,000 synchronized
@@ -1236,6 +1266,699 @@ hashes and actual split grids. Temporary numerical reference arrays are
 removed after validation. Peak memory has not been remeasured for this
 candidate; the previous sampled memory result applies to the original
 configuration only.
+
+#### Per-row NVFP4 loop scheduling and MTP FP8 scale hoisting
+
+The next two experiments use the published split-K provider as control,
+not the older 100.48-TPS provider. All requests retain the exact 8,192
+uncached input / 512 greedy output policy, width two, tensor flags,
+decoder/head tuning and graphs. Each invocation excludes one warmup;
+all five measured requests are retained. Profiles are separate.
+
+First, a two-way unroll directive on the raw K-packed NVFP4 reduction
+loop tries to expose independent weight/activation loads without changing
+per-row arithmetic. Seventy-two FP16/BF16, bias/no-bias and routing-overlap
+cases match control bitwise, including CUDA graphs. Small-operator
+screening improves, but twenty full requests in control/candidate then
+candidate/control order regress **102.289 -> 100.828 E2E TPS (-1.43%)**
+and **129.260 -> 126.965 decode TPS**. Verification rounds total
+2,181 -> 2,241. This does not isolate a hardware regression from
+acceptance variability, but it does not demonstrate the required E2E
+benefit. The directive is removed; no NVFP4 source change is retained.
+
+Second, FP8 MTP GEMV resolves expert/output-row weight and scale addresses
+once before its K loop. For block size 128, it loads each lane's shared
+block scale once for four successive K elements, retaining the same
+FP16/BF16 weight rounding and FP32 FMA order. Other block sizes use a
+generic path. The weight-row helper is shared with the existing GEMM
+decoder, which retains its mathematical operation. Draft width,
+scheduling, activation selection and token selection are unchanged.
+
+An initial twenty-request comparison improves 100.722 -> 101.828 E2E TPS.
+A second reversed-order batch retains every sample, bringing the complete
+comparison to forty measured requests:
+
+| Provider | Requests | Pooled E2E TPS | Decode TPS | Mean TTFT |
+|---|---:|---:|---:|---:|
+| Fresh published split-K control | 20 | 100.382 | 126.303 | 1.054653 s |
+| MTP scale-hoisting candidate | 20 | 102.163 | 129.097 | 1.053310 s |
+
+Observed gains are **1.77% E2E and 2.21% decode**. Candidate invocation
+TPS values are 102.513, 101.152, 103.914 and 101.124. Two adjacent
+candidate/control pairs are slightly negative, while both twenty-request
+batches pool positively; this is not a per-request or per-pair guarantee.
+Total verification rounds differ 4,443 -> 4,404, so the full-request gain
+cannot be assigned solely to kernel speed.
+
+Fresh 64-token profiles compare the same projection/route shapes:
+
+| FP8 projection / routes | Control mean GPU us | Candidate mean GPU us |
+|---|---:|---:|
+| Gate/up / 10 | 114.436 | 64.655 |
+| Gate/up / 20 | 197.169 | 111.935 |
+| Gate/up / 30 | 285.578 | 154.991 |
+| Down / 10 | 53.363 | 32.839 |
+| Down / 20 | 98.784 | 55.715 |
+| Down / 30 | 145.265 | 81.363 |
+
+Registers decrease 40 -> 30 per thread. Launch counts differ; raw
+cumulative profile totals are not equal-work speedup evidence.
+Thirty-six full-QMoE FP16/BF16 cases with all three scale types and
+optional bias match control bitwise through graph capture/replay.
+Four targeted C++ tests pass. The new direct projection test exercises
+432 combinations of FP16/BF16 activation, float/FP16/BF16 scales,
+plain/split/block-fused weights, block sizes 64/128, K=127/128/257,
+GEMV/GEMM and eager/graph replay, including row remapping and N tails.
+
+Candidate provider SHA256:
+`58232a5fa7f74ed561172638aab575f23a791812eb0d3cb4d487372dc42446c2`.
+The original isolated split-K provider remains unchanged:
+`c5e49b2f0adbb0e52fbda61664bd9c3c10b11a0ef17f4b3147a8ee5c238dac5b`.
+The local production build contains only the retained MTP candidate.
+Source, tests and results documentation are local and uncommitted/unpushed.
+No new general model-quality or full-sequence-equivalence claim is made,
+and peak memory has not been remeasured.
+
+Local artifacts include `test_nvfp4_unroll.sh`, `test_mtp_scale_hoist.sh`,
+`repeat_mtp_scale_hoist.sh`, `analyze_nvfp4_mtp_followup.py` and
+`nvfp4-mtp-followup-results.json`, numerical comparison reports, raw
+request JSONs and separate profiles. The analyzer asserts exact prompt,
+policy, loaded provider paths, draft accounting and zero failures for
+all sixty measured requests. Temporary reference arrays are removed
+after validation.
+
+#### MTP projection/activation fusion and eight-warp geometry (rejected)
+
+Two further draft-path experiments compare against the retained isolated
+scale-hoisting runtime. Each has an independent fresh control, twenty
+measured exact 8,192/512 requests, control/candidate/candidate/control
+ordering, one excluded warmup per five-request invocation and unchanged
+width-two policy. All samples are retained.
+
+The first fuses split FP8 gate/up GEMV with SiLU/multiply when there is
+no FC1 bias, the projection uses GEMV and N is divisible by four.
+Warp leaders stage projection values through shared FP16/BF16 memory,
+preserving the original intermediate rounding, activation clamp and
+lane FMA/reduction order. A block barrier permits paired gate/up output
+without writing the projection to global memory. An actual-model
+64-token profile confirms the fused specialization is selected and no
+separate FP8 activation kernel is launched. Thirty-six full-QMoE
+FP16/BF16 graph cases, with all scale types and optional down bias,
+match the scale-hoisting runtime bitwise. Nevertheless the fresh
+full-request pool is **102.615 -> 102.577 E2E TPS (-0.037%)** and
+**129.825 -> 129.727 decode TPS**. This is no demonstrated improvement,
+not a conclusive slowdown. Verification rounds differ 2,196 -> 2,184.
+The fusion API, dispatch, kernel specialization and temporary candidate
+test additions are removed.
+
+The second keeps one warp per output column and identical arithmetic
+but doubles FP8 GEMV blocks from four to eight warps (128 -> 256 threads,
+four -> eight output columns). Thirty-six graph cases match control
+bitwise. Actual-model profiles confirm 256-thread blocks, 30 registers
+and halved column-grid sizes; GPU means are not better than the earlier
+scale-hoisting profile. The fresh pool falls **101.904 -> 100.680 E2E TPS
+(-1.20%)**, with decode **128.695 -> 126.717 TPS**. Verification rounds
+differ 2,205 -> 2,240, so the E2E difference is not exclusively hardware
+execution cost. This geometry change is also removed.
+
+The retained scale-hoisting source and its four targeted C++ tests are
+restored and rebuilt successfully. Its original measured isolated
+package remains unchanged. The restored build SHA256 is
+`7b7f89b69fb46ae491f311e9cb27eebb97929871d2919511fc1882a58a1268d3`;
+this rebuilt binary must not be confused with the original measured
+scale-hoisting provider SHA256
+`58232a5fa7f74ed561172638aab575f23a791812eb0d3cb4d487372dc42446c2`.
+No additional optimization or scheduler/token-selection changes are
+retained from these two experiments.
+
+Local evidence is preserved in `test_mtp_silu_fusion.sh`,
+`test_mtp_eight_warps.sh`, the numerical/throughput JSONs, separate
+candidate profiles, `analyze_mtp_candidates.py` and
+`mtp-candidates-results.json`. The analyzer checks all forty measured
+requests for exact policy, prompt, library paths, draft accounting and
+zero failures, and asserts the actual candidate dispatch. Temporary
+numerical reference arrays are removed after comparison. These results
+and the previous scale-hoisting source remain local/uncommitted, not
+pushed.
+
+#### MTP medium-width dense and same-warp gate/up candidates (rejected)
+
+Inspection of the actual `mtp.onnx` graph confirmed two 2560-by-2560
+input projections, a 10240-by-320 final mixing projection and the
+2560-by-248320 vocabulary projection. The benchmark uses Engine;
+its greedy device selection consumes FP32 logits. No logits-cast
+or selection-policy change was made.
+
+The first candidate widened existing small-N split-K eligibility from
+1024 to 4096 columns, leaving autotuning to choose the implementation.
+Six FP16 projection cases (M=1/2/3 for K=10240,N=320 and K=N=2560)
+matched the tuned reference exactly. Graph-replay tuner timings for
+the newly eligible N=2560 cases were 10.080/10.400/11.104 us for
+split-K GEMV versus 7.648/7.712/7.200 us for cuBLAS. cuBLAS won all
+six shapes. The eligibility change was removed without a full-request
+benchmark; it cannot establish an E2E gain.
+
+The second candidate placed both gate and up accumulators in the same
+warp, sharing activation loads and applying SiLU after the two warp
+reductions. Unlike the previous shared-memory fusion, it required no
+barrier or shared projection buffer. It preserved weight and projection
+FP16/BF16 rounding, scale-hoisted FMA order, clamps and activation
+arithmetic. Dispatch was restricted to split gate/up, no FC1 bias,
+128-element scales and GEMV; all other cases retained their old path.
+
+All 36 full-QMoE FP16/BF16, scale-type and bias combinations matched
+the retained scale-hoisting runtime bitwise in eager and CUDA graph
+replay. Twenty exact 8192-input/512-output requests ran sequentially
+control/candidate/candidate/control, with five measured requests after
+one excluded warmup in each invocation:
+
+| Variant | Pooled E2E TPS | Decode TPS | Mean TTFT (s) | Draft rounds |
+|---|---:|---:|---:|---:|
+| Retained scale-hoisting control | 101.680 | 128.306 | 1.052704 | 2,221 |
+| Same-warp paired SiLU | 101.848 | 128.568 | 1.052510 | 2,210 |
+
+The observed +0.165% E2E result is inconclusive, particularly with
+11 fewer draft rounds. A separate 64-output-token profile confirmed
+that the new kernel was selected and removed the activation launch.
+Ten-route gate/up took 106.381 us in that trace versus 64.655 us in
+the earlier retained-runtime shape-matched trace; 20/30-route timings
+were also worse. These are different trace samples, not additive
+wall-time savings or a fresh equal-work paired profile. The new kernel
+used 34 registers per thread versus 30 for the retained GEMV.
+No additional full-request gain is retained.
+
+Both candidates were completely removed. The retained scale-hoisting
+provider and test target were rebuilt, and all four targeted FP8 C++
+tests passed. Original measured runtime packages and model files remain
+unchanged. New results remain local/uncommitted, not pushed.
+
+Local evidence includes `mtp-medium-{control,candidate}-micro.json`
+and their verbose tuner logs, `test_mtp_paired_silu.sh`,
+`analyze_mtp_paired_silu.py`, `mtp-paired-silu-results.json`,
+the exact-request JSONs, candidate CUDA profile and restore build/test
+logs. Temporary reference arrays were removed after comparison.
+
+#### Fresh retained-runtime bottleneck profile (2026-10-09)
+
+Reprofiled the original measured `mtp-scale-hoist-python` runtime,
+provider SHA256
+`58232a5fa7f74ed561172638aab575f23a791812eb0d3cb4d487372dc42446c2`.
+The model, width-two overlay, both tensor-prefill flags, greedy policy
+and exact 8192-input/512-output workload are unchanged. Each capture
+follows one excluded warmup and uses a fresh Engine. Separate Nsight
+Systems captures cover prefill through the first token and decode from
+after the first token through token 512, with CUDA graph-node tracing.
+These are different requests; their kernel sums cannot be combined into
+one measured request wall time.
+
+A separate unprofiled three-request check achieves **101.099 E2E TPS**
+and **127.421 decode TPS**, mean TTFT **1.053966 s** and mean request
+time **5.064319 s**. All requests generate exactly 512 tokens with zero
+MTP failures. This fresh timing check does not replace the earlier
+40-request comparison establishing the retained 102.163-TPS result.
+Do not use profiler-instrumented request TPS as inference throughput:
+capture start/stop and graph-node tracing substantially inflate timings.
+
+Prefill records 3388 kernel executions, summing to 1019.840 ms:
+
+| Prefill category | GPU kernel sum (ms) | Share of kernel sum |
+|---|---:|---:|
+| Sparse attention | 237.202 | 23.26% |
+| NVFP4 weight dequantization | 149.723 | 14.68% |
+| Grouped MoE GEMM | 119.184 | 11.69% |
+| Gated delta recurrent attention | 116.664 | 11.44% |
+| Dense GEMM/GEMV and split-K setup | 91.301 | 8.95% |
+| Sparse indexer | 83.707 | 8.21% |
+| Hyperconnection mixing and normalization | 83.613 | 8.20% |
+| Causal convolution | 12.453 | 1.22% |
+
+Decode records 650517 kernel executions, summing to 3473.011 ms:
+
+| Decode category | GPU kernel sum (ms) | Share of kernel sum |
+|---|---:|---:|
+| Dense GEMM/GEMV and split-K setup | 1086.507 | 31.28% |
+| Raw NVFP4 MoE gate/up and down | 642.435 | 18.50% |
+| Sparse attention | 405.495 | 11.68% |
+| Pointwise elementwise | 247.183 | 7.12% |
+| MoE routing, activation and finalization | 200.109 | 5.76% |
+| Hyperconnection mixing and normalization | 192.410 | 5.54% |
+| Sparse indexer | 189.266 | 5.45% |
+| Tensor splits | 122.144 | 3.52% |
+| Gated delta recurrent attention | 105.300 | 3.03% |
+| FP8 MTP MoE | 64.135 | 1.85% |
+| Speculative state rollback/replay | 55.712 | 1.60% |
+| Causal convolution | 51.321 | 1.48% |
+| Logits selection and dtype conversion | 21.800 | 0.63% |
+
+Shares use disjoint kernel-name categories, not request wall time.
+Dense includes vector/small-M/cuBLAS projections and split-K counter
+clears; other nongrouped CUTLASS GEMMs remain a separate category.
+Generic library names cannot establish exact ONNX node attribution.
+
+Actionable details and priorities:
+
+1. **Dense projections and surrounding small kernels:** largest decode
+   family. Small-N three-row vector GEMV alone takes 164.959 ms; tinygemm2
+   takes 154.950 ms. Pointwise, tensor splits and hyperconnection kernels
+   add another 561.737 ms across 304706 executions. Investigate eligible
+   producer/consumer fusion and exact shape/node attribution rather than
+   repeating the rejected eligibility-only expansions.
+2. **Raw NVFP4 MoE:** gate/up takes 420.108 ms and down 222.328 ms.
+   This remains substantially larger than FP8 draft MoE; investigate
+   different loading/reuse layouts, not the already rejected loop
+   unroll or pairing geometries.
+3. **Short-query sparse attention:** tiled kernel takes 349.817 ms
+   and reduce kernel 55.678 ms. The main tile computation dominates;
+   optimize useful candidate work and query/head reuse before focusing
+   only on its reduction.
+4. **Prefill dequantization and recurrent attention:** 96 NVFP4
+   dequantization calls take 149.723 ms; chunked gated-delta kernels
+   take 116.597 ms. A fused quantized prefill path or bounded reuse
+   is worth investigating, but caching all expanded weights is not
+   recommended without a memory budget.
+5. **Indexer merge:** tile-top-K merge alone takes 119.014 ms,
+   approximately 63% of the indexer family. Target merging traffic
+   and launch count rather than already-live-work-bounded scoring.
+6. **Speculative rollback:** generic replay takes 50.029 ms across
+   92 calls (543.792 us/call); fast gated-delta replay adds 5.684 ms.
+   The indexer replay branch iterates over full state capacity, not
+   merely live key length. Investigate a bounded replay specialization
+   while preserving buffer-bank, reset and inactive-tail semantics.
+
+The vocabulary-shaped `nvjet_sm90_hsh_512x8...` launch (grid 2x66,
+661 calls) totals 190.155 ms, about 5.48% of the decode kernel sum.
+Earlier model diagnostics associate it with the vocabulary projection,
+but the current generic kernel name alone does not prove exact node
+identity. It is important but is not the majority of dense compute.
+GenAI FP16-to-FP32 logits conversion totals only 1.535 ms across
+647 calls; removing that conversion alone is not a leading opportunity.
+The broader 21.800-ms selection/conversion category also includes
+internal ORT casts and device top-1/top-K kernels.
+
+The decode GPU activity span is 3947.051 ms. Merging kernel, memcpy
+and memset intervals yields 88.81% timeline coverage and 441.771 ms
+of uncovered gaps; gaps over 10 us account for 270.173 ms. This is
+not SM occupancy, proof of CPU bottleneck, or a recoverable-speedup
+estimate. CUDA stream-sync APIs accumulate 2530.220 ms, largely
+overlapping GPU execution; graph-launch APIs accumulate 894.911 ms
+under graph-node instrumentation. Neither should be added to kernel
+time or interpreted as independent host overhead. Decode D2D copies
+total 29.115 ms. Some on-demand graph setup/tuning remains in the
+capture (nine graph instantiations and 6.747 ms of tuner cache flushes),
+so this is not a graph-setup-free steady-state microbenchmark.
+
+Evidence is preserved locally in `profile_qwen_final.sh`,
+`analyze_qwen_final_profile.py`, `qwen_final_20261009_bottlenecks.json`,
+the prefill/decode `.nsys-rep` and SQLite captures, exact-request JSONs
+and separate unprofiled benchmark. The analyzer asserts provider
+identity, prompt, policy, overlay, loaded libraries, output counts and
+zero MTP failures. No source or model optimization was applied.
+
+#### Adjacent shared-expert SiLU graph fusion (rejected)
+
+The user approved source optimization and isolated model-graph
+experiments, with the original model left untouched. Inspection of
+dense projection consumers identified shared-expert gate projections
+followed by `Mul(x, Sigmoid(x))`. The first candidate reuses the existing
+`com.microsoft::ScaledSiLU` operator with alpha=1. It replaces 48 pairs
+in the base graph and one pair in the MTP graph, preserving graph
+inputs, outputs, initializer metadata and all other nodes. It does not
+fuse the MatMul epilogue or remove the larger MatMul/Sigmoid/
+HyperConnectionPreMix chains.
+
+The candidate has independently copied external weight files rather
+than shared writable weight links. All three external weight files
+match the originals byte-for-byte. The source model/configuration and
+the retained `mtp-scale-hoist-python` runtime are unchanged. The stock
+ONNX checker validates the base graph; both original and candidate MTP
+graphs fail identically on the original standard-domain
+`SimplifiedLayerNormalization` node. ONNX Runtime successfully loads
+and executes both graphs with MTP and CUDA graphs.
+
+Sixteen numerical cases cover FP16/FP32, rows 1/2/3/8192, 640 features,
+positive/negative extremes and eager/graph execution. All cases pass
+the fixed rtol=0.002, atol=0.00001 thresholds, and repeated graph outputs
+are unchanged. Maximum differences versus separate Sigmoid/Mul are
+0.0001220703125 for FP16 and 0.0000007405178621411324 for FP32.
+The existing fused operator uses slightly different sigmoid arithmetic,
+so this is not universally bitwise-equivalent. Local numerical checks
+are not broader model-quality validation.
+
+Twenty exact 8192-input/512-output requests run in
+control/candidate/candidate/control order, five measured requests
+after one excluded warmup per invocation:
+
+| Variant | E2E TPS | Decode TPS | Mean TTFT (s) | Draft rounds |
+|---|---:|---:|---:|---:|
+| Retained control | 101.857 | 128.594 | 1.052899 | 2,221 |
+| Adjacent SiLU fusion | 100.874 | 127.045 | 1.053412 | 2,240 |
+
+Candidate invocations reach 102.010 and 99.763 E2E TPS versus control
+101.368 and 102.350. The pooled -0.965% result shows no demonstrated
+gain. Candidate acceptance/round counts also change, so the whole
+difference is not assigned to kernel cost. All runs finish with 512
+tokens and zero MTP failures. Control outputs already vary among
+requests; token hashes cannot establish model-level equivalence here.
+
+A separate full-decode CUDA graph-node trace confirms the fused kernel
+is selected: 11629 ScaledSiLU calls use an eight-block grid absent from
+the control trace, consistent with three-row, 640-feature SiLU.
+The candidate trace uses 236 draft rounds versus 216 in the earlier
+control profile, so raw total Sigmoid/ScaledSiLU durations are not an
+equal-work speedup comparison.
+
+The candidate is rejected and is not selected in retained benchmark
+settings. No runtime source edits, installed-package changes or
+original model edits are made. Further work should target the larger
+projection-to-hyperconnection gate chains with preserved sigmoid
+rounding, rather than promoting this numerically different small fusion.
+
+Local evidence is preserved in `test_dense_adjacent_silu.py`,
+`benchmark_dense_adjacent_silu.sh`, `analyze_dense_adjacent_silu.py`,
+`dense-adjacent-silu-results.json`, the 16-case validation JSON, exact
+request JSONs and separate decode profile. The rejected graph copies
+remain isolated under `qwen-dense-adjacent-silu-model`; the retained
+default model remains `qwen_38_flash_nvfp4_engine`. The analyzer checks
+unchanged initializer metadata and unaffected nodes, exact benchmark
+policy, library paths, provider hash, output counts, failure counts
+and candidate kernel dispatch. No new changes are pushed.
+
+#### Sigmoid and hyperconnection premix fusion (not retained)
+
+A temporary opt-in `gate_sigmoid=1` attribute on HyperConnectionPreMix
+accepted FP16 gate logits, reproduced the CUDA Sigmoid branch arithmetic,
+rounded the sigmoid to FP16, then used the existing FP32 mixing order.
+Default raw-gate behavior was unchanged. CPU support and explicit
+WebGPU rejection accompanied the experimental CUDA mode; all these
+source/schema changes were subsequently removed.
+
+An isolated model removed 97 base-model and three MTP sigmoid nodes.
+External weights were independently copied after the new runtime's
+path validation rejected links escaping the candidate directory.
+The initial interrupted benchmark is not part of the comparison.
+Original model files, configuration and measured runtime remain
+unchanged. This fuses the consumer, not the MatMul epilogue.
+
+Each variant passed 80 bitwise eager/graph checks against separate
+Sigmoid/PreMix: FP16 gates, FP16/FP32 streams, rows 1/2/3/8192,
+hidden sizes 2560 and 7, and branch/singleton/feature/flattened layouts.
+Numerical validation does not establish broader model quality.
+
+| Variant/comparison | Control E2E TPS | Candidate E2E TPS | Interpretation |
+|---|---:|---:|---|
+| All-row fusion, twenty measured requests | 102.125 | 102.105 | Flat; candidate TTFT 1.070 s versus 1.054 s |
+| Decode-only fusion, first twenty requests | 101.058 | 102.538 | Observed +1.46%; rounds 2230 versus 2202 |
+| Decode-only independent reversed-order repeat | 101.998 | 102.023 | Observed +0.024%; rounds 2198 versus 2218 |
+| Decode-only pooled forty requests | 101.526 | 102.280 | Observed +0.74%; rounds 4428 versus 4420 |
+
+All requests use the exact 8192-input/512-output greedy width-two policy,
+one excluded warmup per invocation, original tensor-attention flags and
+loaded-library checks. Every measured request completes with zero MTP
+failures. Acceptance variability prevents assigning pooled changes
+entirely to fusion.
+
+The decode-only variant used fusion for up to three rows and the
+original sigmoid implementation plus scratch gate storage for larger
+inputs. This removed the all-row TTFT penalty. Matched same-input CUDA
+graph microprofiles show separate Sigmoid+PreMix kernel sums
+3.141/3.235/3.373 us versus fused 2.784/2.802/2.966 us for rows 1/2/3,
+approximately 11-13% lower. These are kernel sums, not request-wall
+savings. The all-row full-decode trace confirms the fused specialization
+is selected; it does not establish a repeatable E2E benefit.
+
+The added operator mode and model requirement are not retained because
+the request gain does not clearly reproduce. Source rollback restores
+all eight modified schema/kernel files while preserving the earlier
+FP8 scale-hoisting work. Core library, Python extension and CUDA provider
+are rebuilt. All 13 existing HyperConnectionOpsTest tests pass in
+onnxruntime_provider_test. An initial test invocation used the wrong
+runner and executed zero tests; it is not counted as validation.
+
+Local evidence includes `validate_hc_sigmoid.py`,
+`benchmark_hc_sigmoid.sh`, `benchmark_hc_sigmoid_decode.sh`,
+`profile_hc_sigmoid_micro.py`, `analyze_hc_sigmoid.py`,
+`hc-sigmoid-results.json`, exact-request JSONs, isolated graph/runtime
+copies, profiles and restore logs. The rejected graph requires its
+experimental runtime and must not be used with restored libraries.
+No new optimization or model configuration is selected or pushed.
+
+#### Dense INT4 projection screening (synthetic, no model changes)
+
+The next experiment tests the retained runtime's existing MatMulNBits
+path rather than adding a kernel or quantizing the original model.
+Actual ONNX projection dimensions are reproduced using deterministic
+synthetic normally distributed FP16 weights/activations:
+K,N=(2560,7168), (2560,6144), (6144,2560), (2560,248320), with M=1/2/3.
+Quantization uses the packaged quantize_matmul_4bits helper, symmetric
+zero point 8, FP16 block scales, bits=4, blocks 64/128 and accuracy_level=0.
+FP16 MatMul retains production GEMM autotuning.
+
+Both timing screens use the original measured scale-hoisting provider
+SHA256 58232a5fa7f74ed561172638aab575f23a791812eb0d3cb4d487372dc42446c2.
+Each timed case follows four warmup graph runs and captures 30 replays
+in hot and cache-flush modes. The second screen measures INT4 before
+FP16 and reverses block order; numerical metrics match the first screen
+exactly. CUDA/NVTX traces verify all attributed executions are graph
+nodes. Median sums of kernel duration per replay exclude setup,
+autotuning, host calls, synchronization and the flush itself. Host-loop
+timings are retained only diagnostically and are not used for speedups.
+
+Cache-flush mode writes 256 MiB with cudaMemsetAsync and synchronizes
+the device before each replay to avoid cross-stream ordering ambiguity.
+It is intended to evict weight cache contents, not a measurement of
+cache hit rate or a faithful reproduction of production scheduling.
+Vocabulary weights exceed cache capacity even in the hot case.
+
+| Projection K -> N | Block-128 M=1 speedup | M=2 speedup | M=3 speedup |
+|---|---:|---:|---:|
+| 2560 -> 7168 | 2.05-2.08x | 1.20-1.21x | 1.21-1.23x |
+| 2560 -> 6144 | 1.99-2.01x | 1.14-1.16x | 1.69-1.73x |
+| 6144 -> 2560 | 1.61-1.65x | 0.62x | 1.15-1.16x |
+| 2560 -> 248320 | 1.97x | 1.69x | 1.37x |
+
+Both runs agree on the main outcomes. The vocabulary projection takes
+292-294 us in FP16 versus 148-149 us for INT4 M=1, 173-174 us for M=2,
+and 214-215 us for M=3. Block 128 is generally slightly faster than 64,
+at the cost of slightly larger quantization error. The attention-output
+projection with M=2 regresses from about 14.8 us to 23.8-24.0 us; do not
+convert all dense projections indiscriminately. Hot-cache results and
+full block-64 results are retained in the machine-readable reports.
+
+Profiled INT4 dispatch uses MatMulFloat4BitsKernelM1 and
+MatMulFloat4BatchedKernel, not an assumed native INT4 tensor-core
+implementation. Reported packed-weight-plus-scale storage improves
+3.88x at block 128 and 3.76x at block 64. This excludes allocator
+overhead, workspaces, temporary dequantization and duplicated packing;
+it is not a measured model GPU-memory reduction.
+
+All 48 quantized comparisons (24 per screen) pass unchanged
+rtol=0.02, atol=0.002 checks against separately dequantized FP16
+weights executed with GPU MatMul. Maximum absolute difference from
+that reference is 0.00091552734375. Quantized and FP16 outputs remain
+bitwise stable across repeated graph replays. Comparing instead to the
+original unquantized FP16 outputs shows approximately 9.19-10.40%
+relative L2 error for these random cases. That error comes primarily
+from weight quantization and is not evidence of acceptable language
+model quality or MTP acceptance.
+
+Conclusion: lower-bit dense execution is a viable operator-level
+direction, especially for the vocabulary head, but no model-quality,
+prefill, acceptance or E2E result is established. A selective isolated
+weight-calibration/model-quality experiment is the next gate.
+No original model files, runtime libraries or runtime source are edited.
+
+Local evidence: `benchmark_int4_projections.py`,
+`int4_projection_nvtx.cc` (a small NVTX-only instrumentation wrapper),
+`analyze_int4_projections.py`, both screen/repeat JSONs and Nsight
+reports/SQLite files, and `int4-projection-comparison.json`. The
+instrumentation library is built using existing g++ and the installed
+Nsight headers; no new package dependencies or model artifacts are added.
+The analyzer checks runtime identity, 36 timed cases per screen, 72
+NVTX ranges per screen, graph dispatch and 30 replays per cache mode.
+
+#### Sparse indexer live-key radix selection (retained opt-in)
+
+Instead of merging a capacity-sized padded tree, the eligible short-QSA
+path can reuse `QsaPartialTopKKernel` with packed scored keys as input.
+The existing scoring kernel and its 32-key sorted tiles are unchanged.
+Radix selection scans only the causally visible key count and sorts
+at most 512 selected keys. When the threshold bucket is fully selected,
+the selector terminates finer passes exactly: lowering the bucket's
+lower bound by one makes the strict-greater gather include the entire
+bucket without introducing any additional score.
+
+No score is recomputed. Equal-score keys within each sorted tile are
+still encountered in ascending original-index order, and tile order is
+ascending, preserving stable ties at the threshold. Selection rewrites
+the score row only after gathering all required keys. The existing
+emitter, state update, overflow handling, output shapes and workspace
+allocation remain unchanged. The original float-score selector keeps
+its existing behavior through a compile-time specialization.
+
+The new environment flag `ORT_PACKED_SPARSE_INDEXER_RADIX_TOPK=1` is
+off by default and cached on the first eligible launch for each type.
+It applies only to the existing hierarchical-QSA eligibility:
+1-64 packed rows, at least 2048 state blocks, four 128-channel heads,
+compression ratio four and a bounded top-K greater than 32 and at
+most 512 blocks. Other paths and the default hierarchy are unchanged.
+Weights and model files are never edited.
+
+Forty exact 8192/512 Engine requests use the production width-two
+overlay and tensor-core flags with the retained scale-hoisting control:
+
+| Comparison | Control E2E TPS | Candidate E2E TPS | Change |
+|---|---:|---:|---:|
+| Control/candidate/candidate/control, twenty measured requests | 100.546 | 101.753 | +1.200% |
+| Candidate/control/control/candidate, independent twenty requests | 100.844 | 101.540 | +0.690% |
+| Pooled twenty per variant | 100.695 | 101.646 | +0.945% |
+
+Pooled decode is 126.875 -> 128.494 TPS (+1.276%); mean TTFT is
+1.057019 -> 1.060150 s. Rounds are 4470 -> 4442 and evaluated-draft
+acceptance is 5744/7805 (73.59%) -> 5769/7806 (73.90%).
+Every request emits 512 tokens with zero MTP failures. Retained control
+outputs already vary, so the entire observed E2E margin is not assigned
+to faster selection.
+
+Matched synthetic graph profiles use thirty warmed replays per range:
+
+| Live blocks | Rows | Control selection us | Radix selection us |
+|---:|---:|---:|---:|
+| 2048 | 1 | 35.456 | 22.592 |
+| 2048 | 2 | 37.424 | 25.344 |
+| 2048 | 3 | 42.144 | 27.184 |
+| 4096 | 1 | 38.672 | 29.184 |
+| 4096 | 2 | 41.536 | 32.896 |
+| 4096 | 3 | 45.072 | 32.591 |
+
+Eleven merge kernels become one selector. Timings are median summed
+GPU selection durations, excluding host dispatch, copies and setup;
+they are not equal-work full-model causal attribution. A version without
+the exact early exit only reduced 2048-block selection to
+33.983/33.903/35.391 us and was not Engine-benchmarked.
+
+Measured opt-in validation passes 336 FP16/FP32 and 168 BF16 bitwise
+graph-boundary cases, plus 336 disabled-mode cases. Each enabled case
+checks three graph replays; the earlier selector also passes 56
+FP16/FP32 eager cases including 65532 live blocks and 64 packed rows.
+The final source widens packed row-stride arithmetic and expands
+C++ boundary coverage to 2047/2049/2051 live blocks and one/three rows.
+The rebuilt final package again passes all 504 enabled graph cases and
+four C++ tests with the flag on, plus four with it off.
+VS Code test discovery found no C++ tests, so the actual provider runner
+is used; zero-discovery is not counted as validation.
+
+Measured candidate provider SHA256 is
+`bb229374ad840ae8e595c7d76e3d597fbb6dbd92ca0a3bed975f45eb8c53db8b`.
+Final validation provider SHA256 is
+`8452f0c87e2318f31e01a738c6a036902d8a3b68c1f250296f408a6285a99aa2`.
+Three additional exact Engine requests on that final package pass with
+103.523 E2E / 131.191 decode TPS and zero failures. They are unpaired,
+not pooled into the gain estimate and not claimed as a new record.
+The first orchestration shell failed after writing all twenty request
+records due to a script edit while execution was active; the analyzer
+validates every completed record, and the independent repeat/profile
+orchestration completes successfully.
+
+Disposition: retain the source locally as an opt-in optimization; no
+default flag, original model/runtime replacement or push. Long-context
+performance is not established, despite numerical long-context checks.
+Evidence is in `indexer-radix-optin-results.json`, separate
+`indexer-radix-optin-python` and `indexer-radix-final-python` packages,
+Engine request JSONs, matched microprofiles and expanded test logs.
+`analyze_indexer_local_merge.py --kind radix-optin --repeat --profile
+--final-validation --disposition retained-opt-in` validates protocol,
+runtime identities, graph comparisons, final-build execution and results.
+
+#### Sparse indexer local merge fusion (rejected)
+
+The final profile attributed 119.014 ms of summed decode GPU time to
+hierarchical indexer merges. An isolated provider fused the first five
+32-to-1024-key merge levels into one CTA with shared-memory ping-pong
+storage; upper levels and emission remained unchanged. The numerical
+scoring, packed sort keys and stable ties were preserved.
+
+All 336 FP16/FP32 cases matched control bitwise, including random/tied
+scores, capacities 2051/4097, live-count boundaries around 32/512/1024/2048,
+one/two/three rows, empty/overflow outputs and three graph replays.
+Twenty exact 8192/512 Engine requests in control/candidate/candidate/control
+order measured 101.784 control versus 101.322 candidate E2E TPS (-0.454%).
+There were no MTP failures; rounds were 2216 versus 2243, so request
+variation also contributes to this comparison.
+
+Matched 30-replay profiles reduced merge launches from eleven to seven.
+At 2048 live blocks, median summed merge time was
+35.392/37.504/42.048 us control versus 39.792/40.271/41.088 us candidate
+for one/two/three rows. At 4096 blocks, it was
+38.624/41.664/45.232 versus 42.624/43.520/44.031 us.
+One- and two-row regressions make this unsuitable for retention.
+The fused kernel/dispatch was removed from active source. Evidence and
+the isolated provider remain in `indexer-local-merge-results.json`,
+`indexer-local-merge-rejected.cu`, exact Engine request JSONs and matched
+microprofiles. No model changes or push were made.
+
+#### Actual-weight INT4 MTP vocabulary head (Engine, not promoted)
+
+The user selected draft-head-only quantization, preserving target
+weights, and explicitly confirmed Engine execution. The isolated
+`qwen-mtp-int4-head-model` replaces only the MTP `/lm_head/MatMul`
+with MatMulNBits: K=2560, N=248320, bits=4, block_size=128,
+accuracy_level=0, FP16 scales and symmetric zero point 8. The packaged
+quantizer processes the original FP16 weight in bounded column chunks.
+This is uncalibrated round-to-nearest quantization, not GPTQ/AWQ.
+Packed weights plus scales occupy 327782400 bytes versus 1271398400
+bytes for the original head.
+
+The MTP configuration removes only `lm_head.MatMul.weight` from shared
+initializers; it otherwise preserves the original configuration, including
+ep.cuda.fpa_intb_gemm=1. Target graph bytes, other MTP nodes, original
+initializer metadata and graph inputs/outputs are checked unchanged.
+External weight files and the target graph are independently copied;
+the original model is never edited. The FP16 head remains in the target
+external file, so no model-file or peak-memory saving is claimed.
+
+An attempted legacy Generator hidden-state diagnostic failed with
+the compact recurrent-state contract before producing any data. It is
+excluded from validation. All measured requests use the existing
+`benchmark_qwen_mtp.py` Engine path, exactly 8192 uncached input tokens,
+512 greedy output tokens, width two, production overlay/tensor flags
+and retained scale-hoisting runtime.
+
+| Batch | Control E2E TPS | INT4 E2E TPS | Change |
+|---|---:|---:|---:|
+| Control/candidate/candidate/control, twenty measured requests | 101.414 | 102.472 | +1.043% |
+| Candidate/control/control/candidate, independent twenty requests | 103.036 | 102.884 | -0.147% |
+| Pooled twenty requests per variant | 102.218 | 102.677 | +0.449% |
+
+Candidate invocation pools are 101.890, 103.061, 102.450 and 103.322
+E2E TPS. Pooled decode throughput is 129.183 control versus 129.937
+candidate TPS; mean TTFT is 1.053234 versus 1.053775 s. Evaluated-draft
+acceptance is 5799/7755 (74.78%) control versus 5775/7763 (74.39%)
+candidate, with 4410 versus 4435 rounds. All measured requests finish
+with 512 tokens and zero MTP failures.
+
+A separate full-decode profile confirms the quantized draft path:
+M1 MatMulFloat4BitsKernel averages 145.911 us across 277 calls;
+M2/M3 MatMulFloat4BatchedKernel averages 169.957/210.815 us across
+40/125 calls. The FP16 vocabulary-shaped kernel remains for the target,
+averaging 286.949 us across 225 calls. These timings verify dispatch,
+not equal-work causal E2E attribution.
+
+The candidate is not promoted: the first gain does not clearly reproduce,
+and the pooled margin is small. Draft acceptance is measured only for the
+benchmark prompt; no real-hidden-state logit/top-1 agreement dataset or
+broader language-quality evaluation is available. Unchanged target
+weights do not establish identical emitted tokens, particularly with
+existing control output variability. Calibration or broader acceptance
+evaluation would be required before treating this as production-ready.
+
+Evidence is retained in `create_mtp_int4_head.py`,
+`benchmark_mtp_int4_head.sh`, `analyze_mtp_int4_head.py`,
+`mtp-int4-head-results.json`, exact Engine request JSONs, decode profile
+and the isolated model/quantization manifest. The analyzer asserts
+graph/config scope, runtime hash and library paths, policy, token counts,
+draft accounting, zero failures and actual INT4/FP16 mixed dispatch.
+Original model/runtime and default benchmark model remain unchanged.
+No source optimization or new configuration is pushed.
 
 #### Vector K/V staging, opt-in tensor attention and 100 E2E TPS
 
@@ -1475,6 +2198,36 @@ mixed-width fallback validation failure.
 The 100 end-to-end TPS target requires at most 5.12 seconds per request.
 The latest decode interval alone is approximately 6.90 seconds, so reducing
 prefill alone cannot meet this target.
+
+#### Bounded sparse-indexer state replay (opt-in)
+
+The GenAI CUDA replay kernel ordinarily scans the full fixed capacities of
+the sparse-indexer key and auxiliary buffers. With
+`ORT_GENAI_CUDA_BOUNDED_INDEXER_REPLAY=1`, kind-4 replay copies only the
+active key prefix and new auxiliary-buffer prefix. This relies on the
+shared indexer state being append-only: separately committed lengths keep
+inactive tails invisible until a later transition overwrites them.
+The flag is disabled by default; other state kinds keep their existing
+replay path.
+
+Validation used separate control and candidate Engine packages with
+byte-identical ORT and GenAI libraries. Two reversed-order batches each
+measured ten exact 8,192-input / 512-output requests on one H200 with
+width-two MTP, the production overlay and sparse-prefill tensor-core flags.
+The pooled control reached 101.117 E2E / 127.354 decode TPS; the candidate
+reached 102.803 / 130.119 TPS (+1.67% E2E). Mean TTFT was 1.051 versus
+1.053 seconds. All requests generated 512 tokens without MTP failures.
+Acceptance changed from 73.58% to 74.49% (4,462 to 4,421 rounds), so the
+whole request-level gain is not assigned to replay.
+
+A separate matched decode profile measured 100
+`ReplayStateUpdatesKernel` calls at 54.56 ms total for control and 3.68 ms
+for the candidate (545.6 versus 36.8 us/call, 93.3% lower). The four
+`CudaFixedStatePoolTest.*` cases pass, including active-key and
+active-buffer updates and preservation of inactive destination tails.
+Paired output IDs are not identical, while independent repeats within
+each variant also diverge early; no full-sequence or model-quality
+equivalence claim is made. The optimization remains opt-in.
 
 ### Historical INT4 export
 
