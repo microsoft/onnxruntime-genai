@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "models/preprocessing/lfm2_vl_image_processor.h"
+#include "models/threadpool.h"
 
 // LFM2-VL splits an image into 16x16 encoder patches and the projector then pixel-unshuffles that
 // grid by 2, so the decoder sees one token per 32x32 pixel block. These tests pin the two things
@@ -92,7 +93,7 @@ TEST(Lfm2VlImagePatchesTest, FlattensPatchesInYXChannelOrderFromPaddedBatch) {
   for (size_t i = 0; i < image.size(); ++i) image[i] = static_cast<float>(i);
 
   std::vector<float> patches(geometry.num_patches * patch * patch * channels, -1.0f);
-  WriteLfm2VlImagePatches(image.data(), channels, padded_height, padded_width, geometry, patch, patches.data());
+  WriteLfm2VlImagePatches(nullptr, image.data(), channels, padded_height, padded_width, geometry, patch, patches.data());
 
   for (int64_t row = 0; row < geometry.patch_rows; ++row) {
     for (int64_t col = 0; col < geometry.patch_cols; ++col) {
@@ -106,6 +107,31 @@ TEST(Lfm2VlImagePatchesTest, FlattensPatchesInYXChannelOrderFromPaddedBatch) {
         }
       }
     }
+  }
+}
+
+TEST(Lfm2VlImagePatchesTest, ParallelWorkersMatchSequentialOutput) {
+  constexpr int64_t channels = 3, height = 512, width = 512, patch = 16;
+  const Lfm2VlImageGeometry geometry =
+      ComputeLfm2VlImageGeometry(height, width, patch, kDownsampleFactor);
+
+  std::vector<float> image(static_cast<size_t>(channels * height * width));
+  for (size_t i = 0; i < image.size(); ++i) {
+    image[i] = static_cast<float>(i % 251);
+  }
+
+  const size_t output_size =
+      static_cast<size_t>(geometry.num_patches * patch * patch * channels);
+  std::vector<float> expected(output_size);
+  WriteLfm2VlImagePatches(nullptr, image.data(), channels, height, width, geometry,
+                          patch, expected.data());
+
+  for (size_t worker_count : {1U, 3U}) {
+    ThreadPool pool{worker_count};
+    std::vector<float> actual(output_size);
+    WriteLfm2VlImagePatches(&pool, image.data(), channels, height, width, geometry,
+                            patch, actual.data());
+    EXPECT_EQ(actual, expected);
   }
 }
 

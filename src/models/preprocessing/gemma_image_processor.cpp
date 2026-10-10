@@ -113,7 +113,7 @@ std::unique_ptr<NamedTensors> GemmaImageProcessor::Process(const Tokenizer& toke
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
   named_tensors->emplace(std::string(Config::Defaults::TokenTypeIdsName), std::make_shared<Tensor>(std::move(token_type_ids)));
 
-  EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
+  EmplaceProcessedTensor(thread_pool_, *named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
 
   named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
 
