@@ -1119,6 +1119,8 @@ OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer,
 
 OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences) {
   OGA_TRY
+  if (!tokenizer || !str || !sequences)
+    throw std::invalid_argument("tokenizer, text, and sequences must not be null.");
   sequences->emplace_back(tokenizer->Encode(str));
   return nullptr;
   OGA_CATCH
