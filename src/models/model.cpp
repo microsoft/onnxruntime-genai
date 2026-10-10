@@ -46,7 +46,7 @@
 #include "ep/qnn/interface.h"
 #include "ep/ryzenai/interface.h"
 #include "session_options.h"
-
+#include <iostream>
 namespace Generators {
 
 namespace {

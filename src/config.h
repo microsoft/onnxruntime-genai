@@ -282,7 +282,8 @@ struct Config {
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
-      // Vision pipeline support (patch embed -> vision attn -> patch merger)
+      // Qwen vision uses patch embed -> attention -> merger; Gemma 4 uses encoder -> projector
+      // with either a flat decoder or decoder.pipeline.
       struct PipelineModel {
         std::string filename;
         std::optional<SessionOptions> session_options;
