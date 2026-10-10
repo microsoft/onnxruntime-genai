@@ -116,8 +116,8 @@ class VideoChatFlashQwenModel(QwenModel):
 class Qwen35TextModel(Model):
     def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep):
         uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
-        if uses_gated_delta_net and ep != "cuda":
-            raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
+        if uses_gated_delta_net and ep not in ("cuda", "webgpu"):
+            raise ValueError("GatedDeltaNet exports require the CUDA or WebGPU execution provider")
         if uses_gated_delta_net and state_window:
             raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
 
@@ -1303,6 +1303,7 @@ class Qwen35MoEModel(MTPModel):
             lm_head_quant=self.block_drafter_lm_head_quant(),
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
+            include_attention_metadata=True,
             compute_dtype=self.dflash2_attrs["compute_dtype"],
             fuse_qkv=self.dflash2_attrs["fuse_qkv"],
         )
@@ -1503,6 +1504,7 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
+            include_attention_metadata=True,
             embed_quant=self.block_drafter_embed_quant(),
             lm_head_quant=self.block_drafter_lm_head_quant(),
         )
