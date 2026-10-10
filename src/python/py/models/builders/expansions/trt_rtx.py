@@ -71,20 +71,18 @@ class TRT_RTX:
         # position_ids -> Gather(T/H/W) -> select cos/sin cache columns --+
         # root_input -> Reshape(heads) -> rotate pairs <-----------------+
         #                            +-> unrotated tail -> Concat -> Flatten
-        if self.use_paged_attention:
-            raise ValueError("TRT-RTX MRoPE expansion requires non-paged attention")
         dtype = kwargs["dtype"]
         num_heads = kwargs["num_heads"]
         rotary_dim = self.rope_attrs["rotary_embedding_dim"] or self.head_size
         owners = self.get_mrope_owners(rotary_dim)
         leading = list(self.values[root_input].shape)[:-1]
         positions = self.make_mrope_positions(name, kwargs["position_ids"], leading)
-        axes = self.make_expansion_constant(f"{name}/head_axis", [2])
+        axes = self.make_expansion_constant(f"{name}/head_axis", [len(leading)])
         cos, sin = [
             self.make_mrope_cache(name, kind, kwargs[f"{kind}_cache_name"], positions, owners, axes, dtype, leading)
             for kind in ("cos", "sin")
         ]
-        reshape = self.make_expansion_constant(f"{name}/head_shape", [0, 0, num_heads, self.head_size])
+        reshape = self.make_expansion_constant(f"{name}/head_shape", [*([0] * len(leading)), num_heads, self.head_size])
         self.make_reshape(f"{name}/Reshape", [root_input, reshape], dtype, [*leading, num_heads, self.head_size])
         heads = f"{name}/Reshape/output_0"
         rotated = self.make_mrope_rotation(name, heads, cos, sin, dtype, [*leading, num_heads, rotary_dim])
@@ -189,7 +187,9 @@ class TRT_RTX:
                 f"{name}/ConcatTail", [rotated, f"{name}/Tail/output_0"], dtype, [*shape[:-1], self.head_size], axis=-1
             )
             rotated = f"{name}/ConcatTail/output_0"
-        flat_shape = self.make_expansion_constant(f"{name}/flat_shape", [0, 0, shape[-2] * self.head_size])
+        flat_shape = self.make_expansion_constant(
+            f"{name}/flat_shape", [*([0] * (len(shape) - 2)), shape[-2] * self.head_size]
+        )
         self.make_node("Reshape", [rotated, flat_shape], [output], name=name)
         self.make_value(output, dtype, [*shape[:-2], shape[-2] * self.head_size])
 
@@ -355,3 +355,59 @@ class TRT_RTX:
 
         self.make_node("Mul", inputs=make_mul_1_inputs, outputs=[output_0], name=make_mul_1_name)
         self.make_value(output_0, dtype=io_dtype, shape=shape)
+
+    def make_causal_conv_with_state(self, name, **kwargs):
+        inputs = [
+            kwargs["root_input"],
+            kwargs["weight"],
+            kwargs["bias"],
+            kwargs["past_conv_state"],
+        ]
+        output = f"{name}/output_0"
+
+        attributes = {
+            "ndim": kwargs.get("ndim", 1),
+            "activation": kwargs.get("activation", "silu"),
+        }
+        if self.context_length_attrs["state_window"]:
+            attributes["state_window"] = self.context_length_attrs["state_window"]
+
+        self.make_node(
+            "CausalConvWithState",
+            inputs=inputs,
+            outputs=[output, kwargs["present_conv_state"]],
+            name=name,
+            domain="com.microsoft",
+            **attributes,
+        )
+        self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
+
+    def make_linear_attention(self, name, **kwargs):
+        inputs = [
+            kwargs["q_path"],
+            kwargs["k_path"],
+            kwargs["v_path"],
+            kwargs["past_recurrent_state"],
+            kwargs["decay"],
+            kwargs["beta"],
+        ]
+        output = f"{name}/output_0"
+
+        attributes = {
+            "q_num_heads": kwargs["q_num_heads"],
+            "kv_num_heads": kwargs["kv_num_heads"],
+            "update_rule": kwargs.get("update_rule", "gated_delta"),
+            "scale": kwargs.get("scale", 1.0),
+        }
+        if self.context_length_attrs["state_window"]:
+            attributes["state_window"] = self.context_length_attrs["state_window"]
+
+        self.make_node(
+            "LinearAttention",
+            inputs=inputs,
+            outputs=[output, kwargs["present_recurrent_state"]],
+            name=name,
+            domain="com.microsoft",
+            **attributes,
+        )
+        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.linear_value_dim])
