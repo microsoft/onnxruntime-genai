@@ -9,6 +9,7 @@ import argparse
 import gc
 import hashlib
 import importlib
+import importlib.util
 import json
 import math
 import os
@@ -363,6 +364,33 @@ def token_digest(tokens):
     return hashlib.sha256(json.dumps(list(tokens), separators=(",", ":")).encode("ascii")).hexdigest()
 
 
+def select_scenarios(specs, scenarios, names):
+    if names is None:
+        return specs, scenarios
+    unknown = set(names) - {scenario.name for scenario in scenarios}
+    if unknown:
+        raise ValueError(f"Unknown scenario(s) for this profile: {', '.join(sorted(unknown))}. Use --plan-only.")
+    selected = [scenario for scenario in scenarios if scenario.name in names]
+    needed = {name for scenario in selected for action in scenario.actions for name in action.prompts}
+    return {name: spec for name, spec in specs.items() if name in needed}, selected
+
+
+def token_difference(actual, expected):
+    if actual == expected:
+        return None
+    index = next(
+        (index for index, pair in enumerate(zip(actual, expected, strict=False)) if pair[0] != pair[1]),
+        min(len(actual), len(expected)),
+    )
+    return {
+        "index": index,
+        "actual_token": actual[index] if index < len(actual) else None,
+        "expected_token": expected[index] if index < len(expected) else None,
+        "actual_length": len(actual),
+        "expected_length": len(expected),
+    }
+
+
 def check_result(row, reference, profile, rule, previous, generated, warm_ratio=None, cold_ttft=None):
     if rule not in ("safe", "cold", "warm", "exact-warm", "evicted"):
         raise ValueError(f"Unknown cache check: {rule}.")
@@ -378,13 +406,12 @@ def check_result(row, reference, profile, rule, previous, generated, warm_ratio=
     if not checks["safety"]:
         errors.append(f"{name}: unsafe cached-token boundary {cached} for prompt length {length}.")
     expected = reference[: len(row["tokens"])] if row["cancelled"] else reference
-    if row["tokens"] != expected:
-        divergence = next(
-            (index for index, pair in enumerate(zip(row["tokens"], expected, strict=False)) if pair[0] != pair[1]),
-            min(len(row["tokens"]), len(expected)),
-        )
+    row["parity_difference"] = token_difference(row["tokens"], expected)
+    if row["parity_difference"] is not None:
         checks["parity"] = False
-        errors.append(f"{name}: greedy output differs from cache-disabled reference at token {divergence}.")
+        errors.append(
+            f"{name}: greedy output differs from cache-disabled reference at token {row['parity_difference']['index']}."
+        )
     if checks["generation_coverage"] is False:
         errors.append(f"{name}: expected {generated} generated tokens, received {len(row['tokens'])}.")
     if rule == "cold":
@@ -644,12 +671,17 @@ def run_profile(og, np, args, source_config, profile, specs, scenarios, draft_mo
         )
     )
     prompts, template_thinks = materialize_prompts(tokenizer, specs, body, args.user_prompt)
+    prompt_records = {name: {**asdict(specs[name]), "sha256": token_digest(tokens)} for name, tokens in prompts.items()}
+    if args.include_prompt_tokens:
+        for name, tokens in prompts.items():
+            prompt_records[name]["tokens"] = list(tokens)
     entry = {
         "profile": asdict(profile),
         "draft_mode": draft_mode,
         "reference_overlay": overlay,
         "corpus_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
-        "prompts": {name: {**asdict(specs[name]), "sha256": token_digest(tokens)} for name, tokens in prompts.items()},
+        "prompts": prompt_records,
+        "selected_scenarios": [scenario.name for scenario in scenarios],
         "references": [],
         "reference_stability": {},
         "reference_failures": [],
@@ -811,6 +843,16 @@ def parser():
     result.add_argument("--output", type=Path, default=Path("prefix-cache-qa-results.json"))
     result.add_argument("--suites", nargs="+", choices=SUITES, default=list(SUITES))
     result.add_argument(
+        "--scenarios",
+        nargs="+",
+        help="Run only these exact scenario names from the selected suites; unknown names fail for every profile.",
+    )
+    result.add_argument(
+        "--include-prompt-tokens",
+        action="store_true",
+        help="Record exact prompt token IDs in the report for reproductions; these may contain sensitive content.",
+    )
+    result.add_argument(
         "--lengths",
         type=positive_int,
         nargs="+",
@@ -885,17 +927,20 @@ def main(argv=None):
             for chunk in (args.chunk_sizes or [None])
         ]
         plans = [
-            make_plan(
-                profile,
-                args.lengths,
-                args.suites,
-                args.seed,
-                args.random_cases,
-                args.pressure_requests,
-                args.generated_tokens,
-                args.pressure_num_blocks,
-                args.alternation_split,
-                args.alternation_rounds,
+            select_scenarios(
+                *make_plan(
+                    profile,
+                    args.lengths,
+                    args.suites,
+                    args.seed,
+                    args.random_cases,
+                    args.pressure_requests,
+                    args.generated_tokens,
+                    args.pressure_num_blocks,
+                    args.alternation_split,
+                    args.alternation_rounds,
+                ),
+                args.scenarios,
             )
             for profile in profiles
         ]
@@ -940,6 +985,7 @@ def main(argv=None):
         "platform": platform.platform(),
         "python": sys.version,
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "coverage": "selected-scenarios" if args.scenarios else "selected-suites",
         "profiles": [],
     }
     save_report(args.output, report)
