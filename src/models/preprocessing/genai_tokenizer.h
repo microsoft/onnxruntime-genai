@@ -40,7 +40,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::unique_ptr<TokenizerStream> CreateStream() const;
 
   void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options);
-  std::vector<int32_t> Encode(const char* text, bool literal = false) const;
+  std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
   std::string ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const;
   std::string ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
@@ -63,6 +63,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
+  bool literal_ = false;
   int32_t bos_token_id_;
   std::vector<int32_t> eos_token_id_;
   int32_t pad_token_id_;

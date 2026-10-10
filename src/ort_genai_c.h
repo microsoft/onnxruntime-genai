@@ -863,6 +863,16 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  *
  * Supported options:
  *
+ * - `literal`
+ *   - Purpose: Encodes text without interpreting registered added/special token
+ *     strings or inserting automatic control tokens. Applies to single and batch
+ *     encoding, including processor calls using this tokenizer.
+ *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
+ *   - Default: `"false"`, preserving existing encoding behavior.
+ *   - When enabled, overrides automatic insertion from `add_special_tokens`
+ *     without changing that option. Returns an error for invalid UTF-8 or text
+ *     requiring added/special IDs or unknown-token fallbacks.
+ *
  * - `add_special_tokens`
  *   - Purpose: Controls whether to add special tokens (e.g., BOS/EOS) during tokenization.
  *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
@@ -880,6 +890,8 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  *
  * Future tokenizer options may be added without changing this API signature.
  * Passing unknown keys will result in an error.
+ * Option updates must not overlap with encoding or other tokenizer operations.
+ * Use separate tokenizer instances when concurrent callers need different modes.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
     OgaTokenizer* tokenizer,
@@ -948,28 +960,22 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer*
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
  * when it is no longer needed.
  *
- * May run concurrently with OgaTokenizerEncode or OgaTokenizerEncodeLiteral on
- * the same tokenizer under the encoding-only concurrency rules documented below.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
-
-/**
- * Encodes null-terminated UTF-8 text without recognizing registered added/special
- * token strings or inserting automatic control tokens, and appends one sequence on success.
- * Returns an error if literal text requires added/special IDs or an unknown-token fallback.
- * Does not modify tokenizer options. OgaTokenizerEncode retains its existing behavior.
+ * Uses the tokenizer's `literal` option. Successful calls append one sequence,
+ * including an empty sequence for empty literal input. Errors leave the output
+ * sequences unchanged. Input strings must be null-terminated UTF-8.
  *
- * Thread safety: OgaTokenizerEncode and OgaTokenizerEncodeLiteral may run
- * concurrently on the same tokenizer. Each concurrent call must use a distinct
+ * Thread safety: OgaTokenizerEncode calls may run concurrently on the same
+ * tokenizer with fixed options. Each concurrent call must use a distinct
  * OgaSequences output, which must not be accessed or destroyed until that call
  * completes. Keep the tokenizer alive until all encoding calls finish.
  * Do not update tokenizer options or run other operations on that tokenizer
  * while encoding calls are in progress.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeLiteral(const OgaTokenizer*, const char* str, OgaSequences* sequences);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
 /**
  * Batch encode an array of strings and return a single tensor output
+ * using the tokenizer's `literal` option. Padding retains the model's pad token ID.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const char** strings, size_t count, OgaTensor** out);
 
