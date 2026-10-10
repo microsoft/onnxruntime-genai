@@ -276,7 +276,7 @@ def test_official_fp8_repository_uses_shared_cache(fp8_checkpoint, monkeypatch):
 
 @pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT])
 @pytest.mark.parametrize("checkpoint_fixture", ["checkpoint", "fp8_checkpoint"])
-@pytest.mark.parametrize("scale_dtype", [None, ir.DataType.FLOAT])
+@pytest.mark.parametrize("scale_dtype", [None, ir.DataType.FLOAT, ir.DataType.FLOAT16])
 def test_native_engram_preserves_or_widens_bf16_scale(request, checkpoint_fixture, tmp_path, io_dtype, scale_dtype):
     checkpoint_path = request.getfixturevalue(checkpoint_fixture)
     loader = load_fp8(checkpoint_path) if checkpoint_fixture == "fp8_checkpoint" else load(checkpoint_path)
@@ -296,6 +296,9 @@ def test_native_engram_preserves_or_widens_bf16_scale(request, checkpoint_fixtur
     if scale_dtype == ir.DataType.FLOAT:
         expected_tensor = expected_tensor.float()
         expected_dtype = ir.DataType.FLOAT
+    elif scale_dtype == ir.DataType.FLOAT16:
+        expected_tensor = expected_tensor.half()
+        expected_dtype = ir.DataType.FLOAT16
     expected_scale = expected_tensor.view(torch.uint8).numpy().tobytes()
     assert scale.data_type == int(expected_dtype)
     assert scale.raw_data == expected_scale

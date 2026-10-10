@@ -94,7 +94,9 @@ def test_dense_composite_with_mtp_uses_dense_components(monkeypatch):
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
 
 
-def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch):
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+@pytest.mark.parametrize("prune_lm_head", [False, True])
+def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch, ep, prune_lm_head):
     monkeypatch.setitem(Qwen4ExpModel.__init__.__globals__, "Qwen4ExpTextModel", FakeQwen4ExpComponent)
     monkeypatch.setitem(Qwen4ExpModel.make_mtp_model.__globals__, "Qwen4ExpMTPTextModel", FakeQwen4ExpComponent)
     text_config = SimpleNamespace(
@@ -108,9 +110,13 @@ def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch):
         SimpleNamespace(text_config=text_config),
         ir.DataType.FLOAT16,
         ir.DataType.FLOAT16,
-        "cuda",
+        ep,
         None,
-        {},
+        {
+            "use_paged_attention": True,
+            "prune_lm_head": prune_lm_head,
+            "mtp_quant_config": '{"io_dtype":"fp16","weights":{"type":"int4"},"moe":{"type":"none"}}',
+        },
     )
 
     assert isinstance(model.decoder, FakeQwen4ExpComponent)
@@ -121,6 +127,32 @@ def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch):
     assert model.decoder.emit_pre_final_hidden_states is True
     assert model.decoder.output_shapes["hidden_states"] == ["batch_size", "sequence_length", 8]
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
+    assert model.decoder.extra_options["prune_lm_head"] is prune_lm_head
+    assert model.mtp.extra_options["prune_lm_head"] is prune_lm_head
+    assert model.mtp.extra_options["use_paged_attention"] is True
+
+
+def test_qwen4_exp_mtp_rejects_nonpaged_pruning():
+    model = object.__new__(Qwen4ExpModel)
+    config = SimpleNamespace(text_config=SimpleNamespace(mtp_num_hidden_layers=1))
+    with pytest.raises(ValueError, match="prune_lm_head"):
+        model.make_mtp_init(config, {"prune_lm_head": True})
+
+
+@pytest.mark.parametrize("prune_lm_head", [False, True])
+def test_qwen4_exp_mtp_config_emits_logits_indices(tmp_path, monkeypatch, prune_lm_head):
+    model = object.__new__(Qwen4ExpModel)
+    model.decoder = SimpleNamespace(num_kv_heads=2, head_size=256)
+    model.mtp = SimpleNamespace(use_paged_attention=True, prune_lm_head=prune_lm_head)
+    model.mtp_attrs = {"shared_initializers": []}
+    monkeypatch.setattr(model, "configure_paged_sessions", lambda config: None)
+    config_path = tmp_path / "genai_config.json"
+    config_path.write_text(json.dumps({"model": {"decoder": {}}}))
+
+    model.add_mtp_to_genai_config(str(tmp_path))
+
+    inputs = json.loads(config_path.read_text())["model"]["mtp"]["inputs"]
+    assert (inputs.get("logits_indices") == "logits_indices") is prune_lm_head
 
 
 def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):

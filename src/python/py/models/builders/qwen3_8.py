@@ -2273,8 +2273,10 @@ class Qwen4ExpModel(MTPModel):
         if num_mtp_layers != 1:
             raise ValueError(f"Qwen4-Exp MTP export requires exactly one MTP layer, got {num_mtp_layers}.")
         incompatible_options = [
-            option for option in ("exclude_lm_head", "prune_lm_head") if extra_options.get(option, False)
+            option for option in ("exclude_lm_head",) if extra_options.get(option, False)
         ]
+        if extra_options.get("prune_lm_head", False) and not extra_options.get("use_paged_attention", False):
+            incompatible_options.append("prune_lm_head")
         if incompatible_options:
             raise ValueError("Qwen4-Exp MTP export cannot be combined with " + ", ".join(incompatible_options) + ".")
         decoder_options["include_hidden_states"] = True
@@ -2293,7 +2295,7 @@ class Qwen4ExpModel(MTPModel):
         self.resolve_mtp_model_config(extra_options)
         mtp_options = self.mtp_attrs["extra_options"]
         for option in (
-            "use_paged_attention", "paged_block_size", "enable_webgpu_graph",
+            "use_paged_attention", "prune_lm_head", "paged_block_size", "enable_webgpu_graph",
             "gpu_utilization_factor", "max_batch_size", "state_update_capacity",
             "max_draft_tokens", "indexshare_mtp",
         ):
@@ -2342,7 +2344,7 @@ class Qwen4ExpModel(MTPModel):
             language_model.layers[ple_layer_id].ple,
             self.config.text_config,
             self.decoder.io_dtype,
-            scale_dtype=ir.DataType.FLOAT,
+            scale_dtype=ir.DataType.FLOAT16 if self.decoder.io_dtype == ir.DataType.FLOAT16 else ir.DataType.FLOAT,
         )
         engram_model.save_model(output_dir)
         table = ir.load(os.path.join(output_dir, engram_model.filename)).graph.initializers[table_name].const_value
@@ -2507,6 +2509,8 @@ class Qwen4ExpModel(MTPModel):
                 if name in ("ep.cuda.fpa_intb_gemm", "session.use_device_allocator_for_initializers")
             },
         }
+        if self.mtp.use_paged_attention and self.mtp.prune_lm_head:
+            genai_config["model"]["mtp"]["inputs"]["logits_indices"] = "logits_indices"
         self.add_shared_initializers_to_genai_config(genai_config)
         if "index_share" in self.mtp_attrs:
             metadata = self.mtp_attrs["index_share"]
