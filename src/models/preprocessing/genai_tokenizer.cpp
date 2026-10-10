@@ -103,19 +103,10 @@ void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values
   CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, const_cast<const char**>(keys), const_cast<const char**>(values), num_options));
 }
 
-std::vector<int32_t> Tokenizer::Encode(const char* text) const {
+std::vector<int32_t> Tokenizer::Encode(const char* text, bool literal) const {
   OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenize(tokenizer_, &text, 1, ids.Address()));
-
-  const extTokenId_t* tokens;
-  size_t count;
-  CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));
-  return {tokens, tokens + count};
-}
-
-std::vector<int32_t> Tokenizer::EncodeLiteral(const char* text) const {
-  OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenizeLiteral(tokenizer_, &text, 1, ids.Address()));
+  const auto tokenize = literal ? OrtxTokenizeLiteral : OrtxTokenize;
+  CheckResult(tokenize(tokenizer_, &text, 1, ids.Address()));
   const extTokenId_t* tokens;
   size_t count;
   CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));

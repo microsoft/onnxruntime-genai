@@ -370,6 +370,16 @@ TEST_F(LiteralTokenizerApiTest, EmptyLiteralDoesNotInsertAutomaticTokens) {
   EXPECT_EQ(sequences->SequenceCount(0), 0);
 }
 
+TEST_F(LiteralTokenizerApiTest, EmptyLegacyEncodingHasNoTokensWhenDisabled) {
+  const char* keys[] = {"add_special_tokens"};
+  const char* values[] = {"false"};
+  tokenizer_->UpdateOptions(keys, values, 1);
+  auto sequences = OgaSequences::Create();
+  tokenizer_->Encode("", *sequences);
+  ASSERT_EQ(sequences->Count(), 1);
+  EXPECT_EQ(sequences->SequenceCount(0), 0);
+}
+
 TEST_F(LiteralTokenizerApiTest, RejectsInvalidInputWithoutAppendingSequence) {
   auto sequences = OgaSequences::Create();
   EXPECT_THROW(tokenizer_->EncodeLiteral(nullptr, *sequences), std::runtime_error);
