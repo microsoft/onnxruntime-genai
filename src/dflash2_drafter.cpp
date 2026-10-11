@@ -567,6 +567,25 @@ void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destina
     throw std::logic_error("DFlash 2 ring checkpoint has incompatible cache blocks.");
   }
   const size_t block_bytes = source_bytes.size() / source_pool_blocks;
+  const auto source_device = source.p_device_->GetType();
+  const auto destination_device = destination.p_device_->GetType();
+  const bool to_host = source_device == DeviceType::CUDA && destination_device == DeviceType::CPU;
+  const bool to_device = source_device == DeviceType::CPU && destination_device == DeviceType::CUDA;
+  if (to_host || to_device) {
+    auto* device = to_host ? source.p_device_ : destination.p_device_;
+    auto* source_data = static_cast<const uint8_t*>(source.GetRawData());
+    auto* destination_data = static_cast<uint8_t*>(destination.GetMutableRawData());
+    for (size_t i = 0; i < source_blocks.size(); ++i) {
+      const void* from = source_data + static_cast<size_t>(source_blocks[i]) * block_bytes;
+      void* to = destination_data + static_cast<size_t>(destination_blocks[i]) * block_bytes;
+      if (to_host) {
+        device->CopyDeviceToHost(to, from, block_bytes);
+      } else {
+        device->CopyHostToDevice(to, from, block_bytes);
+      }
+    }
+    return;
+  }
   for (size_t i = 0; i < source_blocks.size(); ++i) {
     destination_bytes.subspan(static_cast<size_t>(destination_blocks[i]) * block_bytes, block_bytes)
         .CopyFrom(source_bytes.subspan(static_cast<size_t>(source_blocks[i]) * block_bytes, block_bytes));
@@ -830,12 +849,36 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
   checkpoint->caches.reserve(caches_.size());
   std::vector<int32_t> contiguous(ring_blocks_);
   std::iota(contiguous.begin(), contiguous.end(), 0);
+  const bool host_snapshot = model_->p_device_kvcache_->GetType() == DeviceType::CUDA;
+  auto* snapshot_device = host_snapshot ? GetDeviceInterface(DeviceType::CPU)
+                                        : model_->p_device_kvcache_;
+  if (host_snapshot) {
+    prefix_host_buffers_.reserve(caches_.size());
+    checkpoint->host_buffers.reserve(caches_.size());
+  }
   for (const auto& cache : caches_) {
-    auto copy = std::make_unique<Tensor>(model_->p_device_kvcache_, cache_type_);
+    auto copy = std::make_unique<Tensor>(snapshot_device, cache_type_);
     auto shape = cache->GetShape();
     shape.front() = static_cast<int64_t>(ring_blocks_);
     try {
-      copy->CreateTensor(shape);
+      if (host_snapshot) {
+        size_t bytes = Ort::SizeOf(cache_type_);
+        for (const auto dimension : shape) {
+          bytes = CheckedMultiply(bytes, static_cast<size_t>(dimension),
+                                  "DFlash 2 host checkpoint bytes");
+        }
+        const size_t layer = checkpoint->caches.size();
+        if (prefix_host_buffers_.size() == layer) {
+          prefix_host_buffers_.push_back(model_->p_device_kvcache_->AllocatePinnedHost(bytes));
+        }
+        auto memory = prefix_host_buffers_.at(layer);
+        auto value = OrtValue::CreateTensor(snapshot_device->GetAllocator().GetInfo(),
+                                            memory.get(), bytes, shape, cache_type_);
+        checkpoint->host_buffers.push_back(std::move(memory));
+        copy = std::make_unique<Tensor>(std::move(value));
+      } else {
+        copy->CreateTensor(shape);
+      }
     } catch (const Ort::Exception& error) {
       // ORT reports allocator failures through its status API, not std::bad_alloc.
       if (error.GetOrtErrorCode() != ORT_FAIL &&

@@ -21,6 +21,7 @@ struct Request;
 struct Dflash2PrefixCheckpoint {
   size_t token_count{};
   size_t ring_blocks{};
+  std::vector<std::shared_ptr<void>> host_buffers;
   std::vector<std::unique_ptr<Tensor>> caches;
 };
 
@@ -216,6 +217,8 @@ struct Dflash2Drafter {
   bool Admit(const Feed& feed);
   bool RestorePrefix(const Feed& feed);
   std::weak_ptr<const Dflash2PrefixCheckpoint> prefix_checkpoint_;
+  // One reusable ring. Checkpoints share ownership so a lease may outlive the drafter.
+  std::vector<std::shared_ptr<void>> prefix_host_buffers_;
   // Grows a request's block list so positions [0, positions) are addressable. A windowed drafter
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);

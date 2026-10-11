@@ -1870,13 +1870,32 @@ pool is sized for `max_batch_size` rings and its footprint is independent of con
 automatic sizing, that pool is allocated before the target measures free memory. When `num_blocks`
 is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
 by that baseline target block count before either cache pool is allocated.
-A windowed DFlash 2 model with hybrid target prefix caching reserves one
-additional ring's bytes for its optional checkpoint, independent of context
-length. Readers lease the immutable snapshot through admission; replacing it
-cannot overwrite an in-flight adopter. If the budget cannot leave at least one
-target paged block after the auxiliary pool and snapshot reservation, the
+A windowed DFlash 2 model with hybrid target prefix caching retains one
+additional ring for its optional checkpoint, independent of context length.
+On CUDA, this ring uses reusable pinned CPU memory rather than GPU memory;
+active drafter cache blocks remain on the GPU. Capture downloads only the
+selected ring blocks, and admission uploads them into the request's active ring.
+Both operations synchronize before publishing state. Other providers retain
+device-local snapshots and their existing GPU-budget accounting.
+Readers lease the immutable snapshot through admission; replacing it cannot
+overwrite an in-flight adopter, and a lease keeps its host storage alive even
+after the drafter is destroyed. Host buffers are reused only after the previous
+snapshot's last lease ends. CUDA snapshots are not charged to the GPU KV budget;
+their bounded pinned-memory footprint is one ring. Allocation failure leaves
+target-only prefix reuse available.
+If the budget cannot leave at least one target paged block after the auxiliary
+pool and any device-local snapshot reservation, the
 optional checkpoint is disabled and the existing target-only prefix behavior
-is retained. A full-attention block
+is retained.
+
+CPU snapshots add transfer latency to capture and prefix-hit startup, not
+per-token host transfers during steady-state decoding. Capture still occurs at
+eligible prefill-step endpoints, so long prefills can pay that transfer cost
+repeatedly. Publication cadence, fixed-state checkpoint capacity, and the
+single DFlash snapshot limit are unchanged. In particular, moving the snapshot
+does not retain drafting state for multiple alternating histories.
+
+A full-attention block
 drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
 query-spill bytes are charged against the same budget before target capacity is selected, using the
 cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same

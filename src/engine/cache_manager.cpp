@@ -397,6 +397,8 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   }
   if (optional_draft_checkpoint_bytes != 0 && hybrid_prefix_caching &&
       auxiliary_bytes_per_block == 0) {
+    const size_t device_checkpoint_bytes =
+        model_->p_device_kvcache_->GetType() == DeviceType::CUDA ? 0 : optional_draft_checkpoint_bytes;
     const auto& batching = *model_->config_->engine.dynamic_batching;
     const size_t target_block_bytes = PagedKeyValueCacheBytesPerBlock(model_);
     size_t budget = 0;
@@ -410,8 +412,8 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
       budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
     }
     if (CanReserveDflash2PrefixCheckpoint(budget, auxiliary_reserved_memory_bytes,
-                                          optional_draft_checkpoint_bytes, target_block_bytes)) {
-      auxiliary_reserved_memory_bytes += optional_draft_checkpoint_bytes;
+                                          device_checkpoint_bytes, target_block_bytes)) {
+      auxiliary_reserved_memory_bytes += device_checkpoint_bytes;
       draft_checkpoint_enabled_ = true;
     }
   }

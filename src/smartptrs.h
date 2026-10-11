@@ -369,6 +369,17 @@ struct DeviceInterface {
   // after an upload never waits for the device, so a caller can take a fresh mirror per upload
   // instead of synchronizing before it reuses one. Keep last for vtable ABI stability.
   virtual bool RecyclesHostMirrorsAfterUpload(size_t /*bytes*/) const { return false; }
+  // Host storage must remain alive until all enqueued ranged transfers have completed.
+  // Keep these methods last for vtable ABI stability.
+  virtual std::shared_ptr<void> AllocatePinnedHost(size_t /*bytes*/) {
+    throw std::logic_error("Device does not support pinned host allocation.");
+  }
+  virtual void CopyDeviceToHost(void* /*host*/, const void* /*device*/, size_t /*bytes*/) {
+    throw std::logic_error("Device does not support ranged device-to-host copies.");
+  }
+  virtual void CopyHostToDevice(void* /*device*/, const void* /*host*/, size_t /*bytes*/) {
+    throw std::logic_error("Device does not support ranged host-to-device copies.");
+  }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
