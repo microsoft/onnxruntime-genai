@@ -54,6 +54,13 @@ struct Qwen38Plane {
   void (*head_prep)(void*, const void*, int, int, const void*, void*, void*, void*, void*);
   void (*head_post)(void*, const void*, void*);
   void (*or_status)(void*, const void*, int, void*);
+  // fast prefill (optional: nullptr in planes built before v12)
+  int (*memcpy2d_d2d)(void*, size_t, const void*, size_t, size_t, size_t, void*){};
+  int (*stream_create)(void**){};
+  int (*stream_destroy)(void*){};
+  void (*ple_rows)(void*, const void*, const void*, int, const void*, void*, void*){};
+  void (*pool_keys)(void*, const void*, int, const void*, const void*, const void*, int, float, int, void*){};
+  void (*transpose_f32)(void*, const void*, void*, int, int){};
 };
 
 // Device allocation owned by RAII.
@@ -117,6 +124,53 @@ struct Qwen38PleTable {
   std::vector<Mapping> mappings_;
 };
 
+// Device copy of every initializer that several sessions of the stack have in common (decode/fold, head, dense prefill,
+// head KV prefill): loaded once from the files of a text manifest (tools/qwen38_graph/build_package_v12.py), handed to each
+// session through AddInitializer (ORT uses a user supplied initializer in place when it is on the session's device).
+struct Qwen38WeightPool {
+  Qwen38WeightPool(Qwen38Plane& plane, const std::string& manifest_path, const std::string& root,
+                   const OrtMemoryInfo& memory_info, int threads = 8);
+  ~Qwen38WeightPool();
+  Qwen38WeightPool(const Qwen38WeightPool&) = delete;
+  Qwen38WeightPool& operator=(const Qwen38WeightPool&) = delete;
+
+  // Adds the shared initializers of one session label ("target", "head_r2", "dense", "head_kv", ...) to its options.
+  size_t AddTo(OrtSessionOptions& options, const std::string& label) const;
+  bool HasLabel(const std::string& label) const { return sessions_.count(label) != 0; }
+  size_t bytes{};
+  double seconds{};
+
+ private:
+  struct Entry {
+    int dtype{};
+    uint64_t offset{};
+    uint64_t length{};
+    std::vector<int64_t> shape;
+    std::string file;
+    uint8_t* ptr{};
+    std::unique_ptr<OrtValue> value;
+  };
+  Qwen38Plane& plane_;
+  std::vector<Entry> entries_;
+  std::map<std::string, std::vector<std::pair<std::string, int>>> sessions_;
+};
+
+// Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
+struct Qwen38QsaConstants {
+  struct Set {
+    std::map<int, const uint8_t*> knorm;  // per QSA layer (bf16 [128])
+    const uint8_t* cos{};                 // bf16 [max_pos, width]
+    const uint8_t* sin{};
+    int width{};
+  };
+  Qwen38QsaConstants(Qwen38Plane& plane, const std::string& index_path, const std::string& root, void* stream);
+  Set target, head;
+  float epsilon{};
+
+ private:
+  PlaneBuffer buffer_;
+};
+
 struct Qwen38CycleResult {
   int64_t pred0{};
   int64_t pred1{};
@@ -153,6 +207,9 @@ struct Qwen38GraphEngine {
   size_t Length() const { return length_; }
   int32_t PendingToken() const { return pending_; }
   bool DecodeStarted() const { return decode_started_; }
+  bool Fold() const { return fold_; }
+  bool FastPrefill() const { return fast_ != nullptr; }
+  void CheckErrorBits();                                 // fold: device error bits of the whole decode (ctl[5])
 
   // --- decode ---
   bool mtp_enabled() const { return mtp_enabled_; }
@@ -207,6 +264,21 @@ struct Qwen38GraphEngine {
 
   void BuildTarget();
   void BuildHead();
+  void BuildHeadState();
+  void BuildHeadR2();
+  void CallHeadR2(const int64_t tokens[2], const int64_t positions[2], const uint8_t* hidden0, const uint8_t* hidden1,
+                  int commit_rows);
+  void HeadPrefillFold();
+  void FoldFirstDraft();
+  void EnqueueFold();
+  void BuildFastPrefill();
+  void StepPrefill(std::span<const int32_t> tokens);
+  void FastAppend(std::span<const int32_t> tokens);
+  void FastHandoff();
+  void FastHeadKvPrefill();
+  void FastReset();
+  void MutedPrefillBegin();
+  void MutedPrefillEnd();
   std::unique_ptr<DevTensor> MakeTensor(void* ptr, std::vector<int64_t> shape, ONNXTensorElementDataType type);
   DevTensor* NewDeviceTensor(std::map<std::string, std::unique_ptr<DevTensor>>& owner, const std::string& name,
                              std::vector<int64_t> shape, ONNXTensorElementDataType type);
@@ -268,9 +340,54 @@ struct Qwen38GraphEngine {
   struct HeadBank {
     PlaneBuffer arena;
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
-  } head_banks_[2];
+  } head_banks_[3];  // two ping-pong banks (S=1/S=2 head sessions) or the three ring phases (fold)
   int head_length_{};
   int head_turn_{};
+  int head_cur_{};  // fold: head ring phase
+
+  // fold (v12): the target session is the fold model (verify + head + glue); the standalone R=2 head session serves the
+  // prompt context (pair calls) and the first draft
+  bool fold_{};
+  struct HeadR2Session {
+    OrtSession* session{};
+    SessionInfo info;
+    std::map<std::string, std::unique_ptr<DevTensor>> tensors;
+    uint8_t* tokens{};
+    uint8_t* positions{};
+    uint8_t* hidden{};
+    uint8_t* committed{};
+    uint8_t* next_token{};
+    uint8_t* status{};
+    size_t status_count{};
+    Direction dirs[3];
+  } head_r2_;
+  std::map<std::string, std::unique_ptr<DevTensor>> fold_tensors_;  // fold.* inputs (device control block)
+  PlaneBuffer fold_ptrs_;
+
+  // fast prefill (dense session + hand-off); null when not configured
+  struct FastPrefillState {
+    OrtSession* dense{};
+    SessionInfo dense_info;
+    std::vector<std::string> dense_inputs, dense_outputs;
+    OrtSession* head_kv{};
+    SessionInfo head_kv_info;
+    int chunk{8192};
+    Qwen38QsaConstants* consts{};
+
+    PlaneBuffer ones, idx, ples, raw_keys, scratch;  // ones: attention mask; idx: logits_indices; ples: PLE rows of a chunk
+    std::deque<PlaneBuffer> zero_buffers;
+    std::map<std::string, std::unique_ptr<OrtValue>> initial;  // zero-length / zero initial states of the dense model
+    std::map<std::string, std::unique_ptr<OrtValue>> states;   // dense `past` inputs (outputs of the previous chunk)
+    size_t dense_length{};
+    std::unique_ptr<OrtValue> logits;
+    std::unique_ptr<OrtRunOptions> run_options;
+
+    struct Timings {
+      double dense{}, handoff{}, head{};
+    } timings;
+  };
+  std::unique_ptr<FastPrefillState> fast_;
+  std::vector<float> last_logits_host_;
 
   // host state
   int cur_{};
@@ -297,7 +414,11 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<OrtSession> session_target_;
   std::unique_ptr<OrtSessionOptions> head_session_options_;
   std::unique_ptr<OrtSession> session_head_s1_, session_head_s2_;
+  std::unique_ptr<OrtSessionOptions> head_r2_session_options_, dense_session_options_, head_kv_session_options_;
+  std::unique_ptr<OrtSession> session_head_r2_, session_dense_, session_head_kv_;
   std::unique_ptr<Qwen38Plane> plane_;
+  std::unique_ptr<Qwen38WeightPool> pool_;
+  std::unique_ptr<Qwen38QsaConstants> qsa_constants_;
   std::unique_ptr<Qwen38GraphEngine> engine_;
 };
 

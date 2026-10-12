@@ -759,7 +759,35 @@ struct Config {
         bool skip_refeed{false};   // experiment: on accept feed only the last row to the head (lower acceptance)
       } mtp;
 
-      bool IsConfigured() const noexcept { return !head.filename_s1.empty(); }
+      // Folded decode cycle (v12 stack): the MTP head lives inside the verify graph, one graph launch per cycle.
+      // model.decoder is then the fold model (verify S=2 body + head + glue) run with graph ids target_graph_id + phase;
+      // head_r2 is the standalone R=2 head session used for the prompt context (pair calls) and the first draft.
+      struct Fold {
+        bool enabled{false};
+        int target_graph_id{71};  // 3 ids (ring phases)
+        struct HeadR2 {
+          std::string filename;
+          int graph_id{81};  // 3 ids
+          std::optional<SessionOptions> session_options;
+        } head_r2;
+      } fold;
+
+      // Fast prompt prefill: dense chunked prefill session + hand-off of its state to the packed decode state
+      // + batched KV-only head prefill. The dense/head_kv/decode sessions share one device copy of every identical
+      // initializer (weights_pool, built by tools/qwen38_graph/build_package_v12.py).
+      struct Prefill {
+        bool enabled{false};
+        int chunk{8192};
+        std::string weights_pool;  // text manifest of the shared initializers (qwen38_weights_pool 1)
+        std::string constants;     // text index + binary of the QSA hand-off constants (qwen38_qsa_consts 1)
+        struct Model {
+          std::string filename;
+          std::optional<SessionOptions> session_options;
+        } dense, head_kv;
+        std::vector<int> warmup_lengths{8192, 2048, 512, 128, 37};
+      } prefill;
+
+      bool IsConfigured() const noexcept { return !head.filename_s1.empty() || !fold.head_r2.filename.empty(); }
     } qwen38_graph;
 
     // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
