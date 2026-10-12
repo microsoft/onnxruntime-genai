@@ -108,7 +108,12 @@ file(GLOB python_srcs CONFIGURE_DEPENDS
 )
 find_package(Python COMPONENTS Interpreter Development)
 pybind11_add_module(python ${python_srcs})
-target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
+target_include_directories(python PRIVATE ${ORT_HEADER_DIR} ${SRC_ROOT})
+if(TARGET onnxruntime-genai-obj)
+  target_include_directories(
+    python PRIVATE
+    "$<TARGET_PROPERTY:onnxruntime-genai-obj,INCLUDE_DIRECTORIES>")
+endif()
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai)
 
