@@ -82,7 +82,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public TokenMetadataInput[] GetNextTokensWithMetadata()
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_GetNextTokensWithMetadataV2(
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GetNextTokensWithMetadata(
                 _generatorHandle, out IntPtr tokens, out UIntPtr tokenCount));
             // Copy the borrowed native records before another generator operation replaces them.
             int count = checked((int)tokenCount.ToUInt64());

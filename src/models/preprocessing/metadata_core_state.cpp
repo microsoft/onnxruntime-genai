@@ -40,7 +40,7 @@ MetadataCoreState::MetadataCoreState(const MetadataCoreConfig& config) : config_
     throw std::runtime_error("Diarization decoding requires positive acoustic timing parameters");
 }
 
-void MetadataCoreState::ValidateInput(const OgaTokenMetadataInputV2& token) const {
+void MetadataCoreState::ValidateInput(const OgaTokenMetadataInput& token) const {
   if (AlignmentEnabled()) {
     if (!token.has_token_acoustic_frame_interval)
       throw std::runtime_error("Enabled timestamps require generation timing metadata");
@@ -52,8 +52,8 @@ void MetadataCoreState::ValidateInput(const OgaTokenMetadataInputV2& token) cons
     if (!token.has_speaker_evidence)
       throw std::runtime_error("Enabled diarization requires generation speaker evidence");
     const auto& evidence = token.speaker_evidence;
-    (void)ort_extensions::AggregateWordSpeaker(evidence.start_probability_sums, evidence.stop_probability_sums,
-                                               evidence.start_frame_count, evidence.stop_frame_count);
+    (void)ort_extensions::TokenizerDiarization::AggregateWordSpeaker(evidence.start_probability_sums, evidence.stop_probability_sums,
+                                                                     evidence.start_frame_count, evidence.stop_frame_count);
     if (!pending_tokens_.empty()) {
       const auto& previous = pending_tokens_.back().speaker_evidence;
       if (evidence.start_frame_count < previous.start_frame_count ||
@@ -76,7 +76,7 @@ void MetadataCoreState::BeginResult(const char* text) {
   result_ = {text_.c_str(), nullptr};
 }
 
-void MetadataCoreState::AddRecord(std::vector<OgaTokenMetadataTimestampRecordV2>& records, std::string_view text,
+void MetadataCoreState::AddRecord(std::vector<OgaTokenMetadataTimestampRecord>& records, std::string_view text,
                                   OgaTokenMetadataAcousticFrameInterval interval, int speaker) {
   // A deque keeps earlier c_str() pointers valid as later words/segments complete in this call.
   record_texts_.emplace_back(text);
@@ -143,9 +143,9 @@ void MetadataCoreState::ConsumeCompletedWords(const OrtxTimestampMetadata& metad
     const auto& last = pending_tokens_[word.stop_token_index - first_pending_token_index_ - 1];
     int speaker = -1;
     if (config_.diarization)
-      speaker = ort_extensions::AggregateWordSpeaker(first.speaker_evidence.start_probability_sums,
-                                                     last.speaker_evidence.stop_probability_sums, first.speaker_evidence.start_frame_count,
-                                                     last.speaker_evidence.stop_frame_count);
+      speaker = ort_extensions::TokenizerDiarization::AggregateWordSpeaker(first.speaker_evidence.start_probability_sums,
+                                                                           last.speaker_evidence.stop_probability_sums, first.speaker_evidence.start_frame_count,
+                                                                           last.speaker_evidence.stop_frame_count);
     PublishWord(word.text, {first.token_acoustic_frame_interval.start, last.token_acoustic_frame_interval.stop}, speaker);
   }
 
@@ -159,7 +159,7 @@ void MetadataCoreState::ConsumeCompletedWords(const OrtxTimestampMetadata& metad
   }
 }
 
-const OgaTokenMetadataOutputV2& MetadataCoreState::PublishResult() {
+const OgaTokenMetadataOutput& MetadataCoreState::PublishResult() {
   if (AlignmentEnabled()) {
     timestamp_result_ = {word_records_.data(), word_records_.size(), segment_records_.data(), segment_records_.size()};
     result_.timestampMetadata = &timestamp_result_;
@@ -167,8 +167,8 @@ const OgaTokenMetadataOutputV2& MetadataCoreState::PublishResult() {
   return result_;
 }
 
-const OgaTokenMetadataOutputV2& MetadataCoreState::ProcessDecoded(
-    const OgaTokenMetadataInputV2& token, const char* text, const OrtxMetadata& metadata) {
+const OgaTokenMetadataOutput& MetadataCoreState::ProcessDecoded(
+    const OgaTokenMetadataInput& token, const char* text, const OrtxMetadata& metadata) {
   BeginResult(text);
   if (AlignmentEnabled()) {
     if (!metadata.timestampMetadata) throw std::runtime_error("Tokenizer metadata is missing timestamp data");
@@ -179,7 +179,7 @@ const OgaTokenMetadataOutputV2& MetadataCoreState::ProcessDecoded(
   return PublishResult();
 }
 
-const OgaTokenMetadataOutputV2& MetadataCoreState::ProcessFinalized(const OrtxMetadata& metadata) {
+const OgaTokenMetadataOutput& MetadataCoreState::ProcessFinalized(const OrtxMetadata& metadata) {
   BeginResult("");
   if (AlignmentEnabled()) {
     // Finalization contributes no interval, but Extensions may now release trailing words.

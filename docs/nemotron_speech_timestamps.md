@@ -237,9 +237,10 @@ At EOF, call processor `Flush()` repeatedly until it returns no input, running
 inference and decoding for every returned input. Then call `FinalizeMetadata()`
 once. There is no additional drain or diarization-specific finalizer. For a new
 recording recreate processor/generator and reset or recreate the tokenizer stream.
-Native V2 records have `has_timestamp` and nullable `speaker_label`; Python/C#
-use optional timing and `speaker_label`/`SpeakerLabel`. V1 native record layouts
-remain unchanged, and diarization requires the V2 native entry points.
+Native records have `has_timestamp` and nullable `speaker_label`; Python/C#
+use optional timing and `speaker_label`/`SpeakerLabel`. Timestamps and diarization
+use the same original metadata types and entry points. The extended native record
+layouts require matching headers and binaries; rebuild existing native callers.
 
 For a two-repository development build, configure GenAI with
 `-DFETCHCONTENT_SOURCE_DIR_ONNXRUNTIME_EXTENSIONS=/path/to/onnxruntime-extensions`.

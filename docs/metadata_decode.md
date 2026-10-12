@@ -60,26 +60,26 @@ Timestamp- or diarization-enabled decoding rejects absent timing before consumin
 fully disabled decoding accepts the record and skips timing retention.
 Plain `GetNextTokens()` still returns IDs only and is unchanged.
 
-The C getter `OgaGenerator_GetNextTokensWithMetadataV2` returns a borrowed array of
+The C getter `OgaGenerator_GetNextTokensWithMetadata` returns a borrowed array of
 records valid until the next generator operation or destruction. Each record stores
 its interval inline; `has_token_acoustic_frame_interval == 0` means timing is absent.
 Copying a record by value also copies its interval, so the copy survives subsequent
 generator operations and generator destruction.
 
-The C++ wrapper returns a vector of copied `OgaTokenMetadataInputV2` records. Python
+The C++ wrapper returns a vector of copied `OgaTokenMetadataInput` records. Python
 binds the same value type as `TokenMetadataInput` and exposes timing as a tuple or
 `None`. C# copies the record into a managed `TokenMetadataInput` with a nullable
 `(long start, long stop)` tuple. The C decoder takes a pointer to a whole
-`OgaTokenMetadataInputV2`; the wrappers pass their copied values for the decode call.
+`OgaTokenMetadataInput`; the wrappers pass their copied values for the decode call.
 Callers still pass the returned token object directly to decoding. Reading result
 fields does not advance decoding.
 
-`OgaTokenMetadataOutputV2` contains decoded `text` and nullable `timestampMetadata`. Timestamp
+`OgaTokenMetadataOutput` contains decoded `text` and nullable `timestampMetadata`. Timestamp
 data contains `words`/`word_count` and `segments`/`segment_count`, with text, frame,
 and second intervals in each record. No per-field native getter calls are required.
-The C entry points are `OgaTokenizerStreamDecodeWithMetadataV2` and
-`OgaTokenizerStreamFinalizeMetadataV2`. The original V1 C entry points and record strides
-remain available for timestamp-only consumers. C# returns `TokenMetadataOutput` with `Text` and nullable
+The C entry points are `OgaTokenizerStreamDecodeWithMetadata` and
+`OgaTokenizerStreamFinalizeMetadata` for both timestamps and diarization.
+C# returns `TokenMetadataOutput` with `Text` and nullable
 `TokenMetadataTimestamp`. Python returns an owned `TokenMetadataOutput` with `.text` and
 `.timestamp_metadata` (None when disabled); the timestamp object contains `.words` and
 `.segments` lists of `TokenMetadataTimestampRecord` objects. Words and segments remain
@@ -196,19 +196,27 @@ revision must be updated once that API is committed and available.
 
 ## Speaker attribution
 
-The V2 token record adds a presence flag and inline speaker-evidence boundary
+The token record includes a presence flag and inline speaker-evidence boundary
 snapshots: eight cumulative probability sums at the start and stop boundaries,
 plus their evaluated-frame counts. Tokens still decode once. Zero-token audio
 chunks contribute internally; they require no metadata-only input or drain call.
 `MetadataCoreState` retains evidence with token intervals until Extensions' pending
-token watermark releases it. Extensions performs word aggregation and segment
-boundary decisions; there is no additional metadata-state object.
+token watermark releases it. Extensions' `TokenizerDiarization` class provides
+speaker aggregation and speaker-change detection. Its methods are stateless;
+buffer ownership remains in `MetadataCoreState`. Timestamp-only segment helpers
+remain separate, and there is no additional metadata-state lifecycle.
 
-V2 output records include `has_timestamp` and nullable `speaker_label`. Diarization
+Output records include `has_timestamp` and nullable `speaker_label`. Diarization
 with timestamps off returns speaker-turn segments under the same metadata member,
 with timing absent. Python timing fields become `None`, and C# timing fields become
 nullable; labels are `.speaker_label` and `.SpeakerLabel`. Do not interpret zero
 native timing values as presence: inspect `has_timestamp`.
+
+There is one metadata contract for all feature combinations. The original C
+records include the speaker-evidence, timestamp-presence, and speaker-label
+fields; their layouts differ from the timestamp-only draft. Rebuild native callers
+against matching headers and binaries, and upgrade managed bindings together
+with the native library. No runtime layout negotiation or legacy conversion is provided.
 
 See [Nemotron streaming diarization](nemotron_speech_timestamps.md#streaming-diarization)
 for graph requirements, shared VAD, right-context, and finalization.

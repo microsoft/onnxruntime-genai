@@ -51,7 +51,7 @@ TEST(NemotronDiarization, MetadataConfigurationsAndTurnBoundaries) {
       const auto tokens = tokenizer->Encode("Hello world.");
       std::string transcript, records;
       size_t count = 0;
-      const auto collect = [&](const OgaTokenMetadataOutputV2& result) {
+      const auto collect = [&](const OgaTokenMetadataOutput& result) {
         transcript += result.text;
         if (!diarization && level == Generators::Config::TimestampLevel::Off) {
           EXPECT_EQ(result.timestampMetadata, nullptr);
@@ -73,7 +73,7 @@ TEST(NemotronDiarization, MetadataConfigurationsAndTurnBoundaries) {
         }
       };
       for (size_t i = 0; i < tokens.size(); ++i) {
-        OgaTokenMetadataInputV2 token{tokens[i], 1, {static_cast<int64_t>(i), static_cast<int64_t>(i + 1)}, 0, {}};
+        OgaTokenMetadataInput token{tokens[i], 1, {static_cast<int64_t>(i), static_cast<int64_t>(i + 1)}, 0, {}};
         if (diarization) {
           token.has_speaker_evidence = 1;
           token.speaker_evidence.start_frame_count = static_cast<int64_t>(i);
@@ -101,9 +101,9 @@ TEST(NemotronDiarization, MetadataConfigurationsAndTurnBoundaries) {
 TEST(NemotronDiarization, RejectsInvalidProbabilityWindows) {
   const double zeros[8]{};
   const double invalid[8]{2};
-  EXPECT_THROW(ort_extensions::AggregateWordSpeaker(zeros, invalid, 0, 1), std::runtime_error);
-  EXPECT_THROW(ort_extensions::AggregateWordSpeaker(zeros, zeros, 0, 0), std::runtime_error);
-  EXPECT_EQ(ort_extensions::AggregateWordSpeaker(zeros, zeros, 0, 1), 0);
+  EXPECT_THROW(ort_extensions::TokenizerDiarization::AggregateWordSpeaker(zeros, invalid, 0, 1), std::runtime_error);
+  EXPECT_THROW(ort_extensions::TokenizerDiarization::AggregateWordSpeaker(zeros, zeros, 0, 0), std::runtime_error);
+  EXPECT_EQ(ort_extensions::TokenizerDiarization::AggregateWordSpeaker(zeros, zeros, 0, 1), 0);
 }
 
 TEST(NemotronDiarization, SpeakerChangesCompleteTurnsAndInvalidInputConsumesNothing) {
@@ -119,7 +119,7 @@ TEST(NemotronDiarization, SpeakerChangesCompleteTurnsAndInvalidInputConsumesNoth
   const auto boundary = tokenizer->Encode("Hello").size();
   std::array<double, 8> sums{};
   std::vector<std::string> texts, speakers;
-  const auto collect = [&](const OgaTokenMetadataOutputV2& result) {
+  const auto collect = [&](const OgaTokenMetadataOutput& result) {
     ASSERT_NE(result.timestampMetadata, nullptr);
     for (size_t i = 0; i < result.timestampMetadata->segment_count; ++i) {
       const auto& record = result.timestampMetadata->segments[i];
@@ -129,7 +129,7 @@ TEST(NemotronDiarization, SpeakerChangesCompleteTurnsAndInvalidInputConsumesNoth
     }
   };
   for (size_t i = 0; i < tokens.size(); ++i) {
-    OgaTokenMetadataInputV2 token{tokens[i], 1, {static_cast<int64_t>(i), static_cast<int64_t>(i + 1)}, 1, {}};
+    OgaTokenMetadataInput token{tokens[i], 1, {static_cast<int64_t>(i), static_cast<int64_t>(i + 1)}, 1, {}};
     std::copy(sums.begin(), sums.end(), token.speaker_evidence.start_probability_sums);
     token.speaker_evidence.start_frame_count = static_cast<int64_t>(i);
     token.speaker_evidence.stop_frame_count = static_cast<int64_t>(i + 1);
@@ -178,8 +178,8 @@ TEST(NemotronDiarization, StreamingGraphStateAndLookahead) {
     auto last = state.Evidence(6);
     EXPECT_EQ(last.stop_frame_count, (step + 1) * 56);
     EXPECT_EQ(first.start_frame_count, step == 0 ? 0 : step * 56 - 8);
-    EXPECT_NO_THROW(ort_extensions::AggregateWordSpeaker(first.start_probability_sums, last.stop_probability_sums,
-                                                         first.start_frame_count, last.stop_frame_count));
+    EXPECT_NO_THROW(ort_extensions::TokenizerDiarization::AggregateWordSpeaker(first.start_probability_sums, last.stop_probability_sums,
+                                                                               first.start_frame_count, last.stop_frame_count));
   }
   EXPECT_TRUE(*state.GetInput("past_is_compressed")->GetTensorData<bool>());
   EXPECT_EQ(*state.GetInput("past_num_cache_frames")->GetTensorData<int64_t>(), 264);

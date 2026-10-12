@@ -94,23 +94,38 @@ typedef struct OgaTokenMetadataAcousticFrameInterval {
   int64_t stop;
 } OgaTokenMetadataAcousticFrameInterval;
 
-/** One emitted token with an optional acoustic interval stored by value.
+/** Cumulative speaker-probability sums and evaluated-frame counts at word-window boundaries. */
+typedef struct OgaTokenMetadataSpeakerEvidence {
+  double start_probability_sums[8];
+  double stop_probability_sums[8];
+  int64_t start_frame_count;
+  int64_t stop_frame_count;
+} OgaTokenMetadataSpeakerEvidence;
+
+/** One emitted token with optional acoustic alignment and speaker evidence stored by value.
  * The generator's returned array is borrowed, but individual records may be copied.
- * A zero presence field means timing is unavailable or disabled.
+ * A zero presence field means that feature is unavailable or disabled.
+ * Use matching headers and native binaries; metadata layouts have no runtime version negotiation.
  */
 typedef struct OgaTokenMetadataInput {
   int32_t token_id;
   int32_t has_token_acoustic_frame_interval;
   OgaTokenMetadataAcousticFrameInterval token_acoustic_frame_interval;
+  int32_t has_speaker_evidence;
+  OgaTokenMetadataSpeakerEvidence speaker_evidence;
 } OgaTokenMetadataInput;
 
-/** Completed word or segment with its text, frame bounds, and times in seconds. */
+/** Completed word or segment with text, optional timestamp bounds, and an optional speaker label. */
 typedef struct OgaTokenMetadataTimestampRecord {
   const char* text;
   int64_t start_frame;
   int64_t stop_frame;
   double start_time;
   double stop_time;
+  /** Nonzero when frame bounds and times are present. */
+  int32_t has_timestamp;
+  /** NULL when diarization is disabled. */
+  const char* speaker_label;
 } OgaTokenMetadataTimestampRecord;
 
 /** Word and segment events completed by the current decode/finalize call, not cumulative history. */
@@ -129,51 +144,6 @@ typedef struct OgaTokenMetadataOutput {
   const char* text;
   const OgaTokenMetadataTimestamp* timestampMetadata;
 } OgaTokenMetadataOutput;
-
-/** Version 2 metadata preserves the version 1 C record layouts and entry points. */
-typedef struct OgaTokenMetadataSpeakerEvidence {
-  double start_probability_sums[8];
-  double stop_probability_sums[8];
-  int64_t start_frame_count;
-  int64_t stop_frame_count;
-} OgaTokenMetadataSpeakerEvidence;
-
-typedef struct OgaTokenMetadataInputV2 {
-  int32_t token_id;
-  int32_t has_token_acoustic_frame_interval;
-  OgaTokenMetadataAcousticFrameInterval token_acoustic_frame_interval;
-  int32_t has_speaker_evidence;
-  OgaTokenMetadataSpeakerEvidence speaker_evidence;
-} OgaTokenMetadataInputV2;
-
-typedef struct OgaTokenMetadataTimestampRecordV2 {
-  const char* text;
-  int64_t start_frame;
-  int64_t stop_frame;
-  double start_time;
-  double stop_time;
-  int32_t has_timestamp;
-  const char* speaker_label;
-} OgaTokenMetadataTimestampRecordV2;
-
-typedef struct OgaTokenMetadataTimestampV2 {
-  const OgaTokenMetadataTimestampRecordV2* words;
-  size_t word_count;
-  const OgaTokenMetadataTimestampRecordV2* segments;
-  size_t segment_count;
-} OgaTokenMetadataTimestampV2;
-
-typedef struct OgaTokenMetadataOutputV2 {
-  const char* text;
-  const OgaTokenMetadataTimestampV2* timestampMetadata;
-} OgaTokenMetadataOutputV2;
-
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithMetadataV2(
-    const OgaGenerator*, const OgaTokenMetadataInputV2** out, size_t* out_count);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadataV2(
-    OgaTokenizerStream*, const OgaTokenMetadataInputV2*, const OgaTokenMetadataOutputV2** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadataV2(
-    OgaTokenizerStream*, const OgaTokenMetadataOutputV2** out);
 
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
@@ -1152,7 +1122,8 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
-/** Decode a generated token record. Enabled timestamps require a present, valid interval.
+/** Decode a generated token record. Timestamps or diarization require a valid acoustic interval.
+ * Enabled diarization also requires valid speaker evidence.
  * Uses the tokenizer's model-derived metadata settings.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadata(OgaTokenizerStream*, const OgaTokenMetadataInput* token, const OgaTokenMetadataOutput** out);

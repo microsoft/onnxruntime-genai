@@ -79,11 +79,7 @@ const std::string& TokenizerStream::Decode(int32_t token) {
 
 TokenizerStream::~TokenizerStream() = default;
 
-bool TokenizerStream::DiarizationEnabled() const {
-  return tokenizer_->metadata_config_.diarization;
-}
-
-const OgaTokenMetadataOutputV2& TokenizerStream::DecodeWithMetadata(const OgaTokenMetadataInputV2& token) {
+const OgaTokenMetadataOutput& TokenizerStream::DecodeWithMetadata(const OgaTokenMetadataInput& token) {
   if (decode_mode_ == DecodeMode::Text)
     throw std::runtime_error("Cannot mix text and metadata decoding before Reset");
   EnsureMetadataState();
@@ -100,7 +96,7 @@ const OgaTokenMetadataOutputV2& TokenizerStream::DecodeWithMetadata(const OgaTok
   return result;
 }
 
-const OgaTokenMetadataOutputV2& TokenizerStream::FinalizeMetadata() {
+const OgaTokenMetadataOutput& TokenizerStream::FinalizeMetadata() {
   if (decode_mode_ == DecodeMode::Text)
     throw std::runtime_error("Cannot mix text and metadata decoding before Reset");
   EnsureMetadataState();
@@ -111,27 +107,6 @@ const OgaTokenMetadataOutputV2& TokenizerStream::FinalizeMetadata() {
   const auto& result = metadata_state_->ProcessFinalized(*metadata);
   decode_mode_ = DecodeMode::Metadata;
   return result;
-}
-
-const OgaTokenMetadataOutput& TokenizerStream::LegacyMetadata(const OgaTokenMetadataOutputV2& result) {
-  legacy_words_.clear();
-  legacy_segments_.clear();
-  legacy_result_ = {result.text, nullptr};
-  if (result.timestampMetadata) {
-    const auto copy = [](const OgaTokenMetadataTimestampRecordV2* source, size_t count,
-                         std::vector<OgaTokenMetadataTimestampRecord>& target) {
-      for (size_t i = 0; i < count; ++i) {
-        const auto& r = source[i];
-        if (!r.has_timestamp) throw std::runtime_error("Diarization-only metadata requires the version 2 API");
-        target.push_back({r.text, r.start_frame, r.stop_frame, r.start_time, r.stop_time});
-      }
-    };
-    copy(result.timestampMetadata->words, result.timestampMetadata->word_count, legacy_words_);
-    copy(result.timestampMetadata->segments, result.timestampMetadata->segment_count, legacy_segments_);
-    legacy_timestamps_ = {legacy_words_.data(), legacy_words_.size(), legacy_segments_.data(), legacy_segments_.size()};
-    legacy_result_.timestampMetadata = &legacy_timestamps_;
-  }
-  return legacy_result_;
 }
 
 void TokenizerStream::Reset() {

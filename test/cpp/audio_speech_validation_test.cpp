@@ -410,7 +410,7 @@ TEST_F(MetadataCoreStateTests, ZeroAndSubFrameGapsSplitWordsEvenOnSharedFrames) 
     std::vector<std::string> words;
     std::vector<std::string> segments;
     auto word_stream = tokenizer->CreateStream();
-    const auto collect = [&](const OgaTokenMetadataOutputV2& result) {
+    const auto collect = [&](const OgaTokenMetadataOutput& result) {
       ASSERT_NE(result.timestampMetadata, nullptr);
       for (size_t i = 0; i < result.timestampMetadata->word_count; ++i)
         words.emplace_back(result.timestampMetadata->words[i].text);
@@ -642,7 +642,7 @@ TEST_F(MetadataCoreStateTests, EmptyFinalizationAndInputValidation) {
   EXPECT_THROW(generator->GetNextTokensWithMetadata(), std::runtime_error);
   source->last_token_intervals_.clear();
   EXPECT_THROW(generator->GetNextTokensWithMetadata(), std::runtime_error);
-  const OgaTokenMetadataInputV2 token{tokens[0], 0, {}};
+  const OgaTokenMetadataInput token{tokens[0], 0, {}};
   EXPECT_THROW(stream->DecodeWithMetadata(token), std::runtime_error);
   EXPECT_NO_THROW(stream->DecodeWithMetadata({tokens[0], 1, valid_interval}));
   const auto& final = stream->FinalizeMetadata();

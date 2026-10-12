@@ -732,16 +732,6 @@ OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator
 
 OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithMetadata(const OgaGenerator* generator, const OgaTokenMetadataInput** out, size_t* out_count) {
   OGA_TRY
-  const auto tokens = generator->GetNextTokensWithMetadataLegacy();
-  *out = tokens.data();
-  *out_count = tokens.size();
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithMetadataV2(
-    const OgaGenerator* generator, const OgaTokenMetadataInputV2** out, size_t* out_count) {
-  OGA_TRY
   if (!generator || !out || !out_count) throw std::runtime_error("Generator and metadata outputs must not be null");
   const auto tokens = generator->GetNextTokensWithMetadata();
   *out = tokens.data();
@@ -1218,33 +1208,12 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadata(
     OgaTokenizerStream* stream, const OgaTokenMetadataInput* token, const OgaTokenMetadataOutput** out) {
   OGA_TRY
   if (!stream || !token || !out) throw std::runtime_error("Metadata arguments must not be null");
-  if (stream->DiarizationEnabled()) throw std::runtime_error("Diarization requires the version 2 metadata API");
-  *out = &stream->LegacyMetadata(stream->DecodeWithMetadata({token->token_id,
-      token->has_token_acoustic_frame_interval, token->token_acoustic_frame_interval, 0, {}}));
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadata(OgaTokenizerStream* stream, const OgaTokenMetadataOutput** out) {
-  OGA_TRY
-  if (!stream || !out) throw std::runtime_error("Metadata arguments must not be null");
-  if (stream->DiarizationEnabled()) throw std::runtime_error("Diarization requires the version 2 metadata API");
-  *out = &stream->LegacyMetadata(stream->FinalizeMetadata());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadataV2(
-    OgaTokenizerStream* stream, const OgaTokenMetadataInputV2* token, const OgaTokenMetadataOutputV2** out) {
-  OGA_TRY
-  if (!stream || !token || !out) throw std::runtime_error("Metadata arguments must not be null");
   *out = &stream->DecodeWithMetadata(*token);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadataV2(
-    OgaTokenizerStream* stream, const OgaTokenMetadataOutputV2** out) {
+OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadata(OgaTokenizerStream* stream, const OgaTokenMetadataOutput** out) {
   OGA_TRY
   if (!stream || !out) throw std::runtime_error("Metadata arguments must not be null");
   *out = &stream->FinalizeMetadata();

@@ -961,7 +961,7 @@ void Generator::GenerateNextToken() {
   generation_telemetry_.OnTokenGenerated(active_token_count);
 }
 
-std::span<const OgaTokenMetadataInputV2> Generator::GetNextTokensWithMetadata() const {
+std::span<const OgaTokenMetadataInput> Generator::GetNextTokensWithMetadata() const {
   // Pair each emitted ID with its model-provided interval without advancing generation.
   next_tokens_with_metadata_.clear();
   if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
@@ -995,15 +995,6 @@ std::span<const OgaTokenMetadataInputV2> Generator::GetNextTokensWithMetadata() 
       next_tokens_with_metadata_.push_back({token_id, 0, {}});
   }
   return next_tokens_with_metadata_;
-}
-
-std::span<const OgaTokenMetadataInput> Generator::GetNextTokensWithMetadataLegacy() const {
-  if (model_->config_->model.diarization.Enabled())
-    throw std::runtime_error("Diarization requires the version 2 metadata API");
-  legacy_tokens_with_metadata_.clear();
-  for (const auto& token : GetNextTokensWithMetadata())
-    legacy_tokens_with_metadata_.push_back({token.token_id, token.has_token_acoustic_frame_interval, token.token_acoustic_frame_interval});
-  return legacy_tokens_with_metadata_;
 }
 
 SpeculativeStats Generator::GetSpeculativeStats() const {

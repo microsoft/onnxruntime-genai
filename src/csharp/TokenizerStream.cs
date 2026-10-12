@@ -29,14 +29,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             if (token == null) throw new ArgumentNullException(nameof(token));
             var nativeToken = token.NativeToken;
-            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamDecodeWithMetadataV2(
+            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamDecodeWithMetadata(
                 _tokenizerStreamHandle, in nativeToken, out IntPtr result));
             return CopyMetadata(result);
         }
 
         public TokenMetadataOutput FinalizeMetadata()
         {
-            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamFinalizeMetadataV2(
+            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamFinalizeMetadata(
                 _tokenizerStreamHandle, out IntPtr result));
             return CopyMetadata(result);
         }

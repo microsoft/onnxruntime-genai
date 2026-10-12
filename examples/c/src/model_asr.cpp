@@ -152,10 +152,10 @@ std::vector<float> LoadWav(const std::string& path, int target_sample_rate) {
   throw std::runtime_error("No data chunk found in WAV file");
 }
 
-void PrintMetadata(const OgaTokenMetadataOutputV2& result) {
+void PrintMetadata(const OgaTokenMetadataOutput& result) {
   if (!result.timestampMetadata) return;
   const auto& metadata = *result.timestampMetadata;
-  const auto print = [](const OgaTokenMetadataTimestampRecordV2* records, size_t count) {
+  const auto print = [](const OgaTokenMetadataTimestampRecord* records, size_t count) {
     for (size_t i = 0; i < count; ++i) {
       const auto& r = records[i];
       if (r.has_timestamp) std::cout << '[' << r.start_time << " - " << r.stop_time << "] ";
