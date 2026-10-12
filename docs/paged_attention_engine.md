@@ -157,8 +157,35 @@ fixed-state checkpoints.
 
 Hybrid prefix caching does not reduce the configured prefill chunk size. A
 checkpoint is attached only when a successful step's committed endpoint is
-block-aligned; paged-only descendants remain indexed but are not adoptable by a
-hybrid request. After adoption, prefill resumes at that checkpoint and may
+block-aligned and a checkpoint row is available. Newly completed blocks remain
+private until that checkpoint can be published with the entire new suffix;
+partial chunks and exhausted checkpoint capacity do not index orphan blocks.
+Failed suffix publication rolls back its new identities without changing the
+request's committed state. When replacing a retained checkpoint, suffix metadata,
+checkpoint ownership metadata, and tensor-copy views are allocated before
+reclaiming its row, so a metadata allocation failure preserves the earlier hit.
+When prompts branch between fixed-state checkpoints, an identical intermediate KV
+block can belong to an older suffix that the new request cannot adopt. With
+capacity for multiple checkpoints, the index may retain distinct physical
+histories for the same logical tokens. Logical identity verifies token content;
+physical ancestry identifies the exact KV chain that belongs with a checkpoint.
+Physical variants share immutable logical token metadata rather than retaining
+duplicate token arrays. Paged-only identities store their tokens directly and
+do not allocate a separate logical-identity chain.
+A hybrid match selects a complete checkpointed history, never a mixture of
+blocks from different histories.
+
+Checkpoint reclamation prefers intermediate checkpoints in the publishing
+history before independent deep endpoints. This allows two warm branches to
+remain reusable without increasing the configured block or checkpoint budgets.
+A usable checkpoint at the same complete logical boundary still prevents
+redundant publication. When only one checkpoint or insufficient block capacity
+is available, publication stages its replacement before retiring an unleased
+conflicting suffix. Active block owners, pending fixed-state matches, and leased
+draft snapshots protect the old history. Metadata or capture-allocation failure
+preserves earlier hits; a later publication may retry after capacity or leases
+change. Recomputed private KV is never spliced into a different physical history.
+After adoption, prefill resumes at that checkpoint and may
 process the full configured chunk, so later checkpoint positions can shift
 relative to the original request's chunk boundaries. A match pins both its
 paged blocks and fixed checkpoint through reservation. The fixed reservation
@@ -167,6 +194,12 @@ and its baseline committed-token count is the same as the paged match. Existing
 prepare/publish ordering then advances both components atomically; rollback
 discards the provisional fixed row, releases adopted paged references, and
 restores the request cursor.
+
+A windowed DFlash2 drafter without a matching optional draft checkpoint can ingest
+the recomputed target suffix into a fresh ring. Drafting and draft-checkpoint
+capture remain disabled until that ring holds a complete attention window.
+Full-attention drafters still require their entire prefix; their admission behavior
+is unchanged.
 
 The implementation applies only to newly admitted requests and does not splice
 a prefix into resident continuation turns. It still rejects target
@@ -181,8 +214,15 @@ The ring is restored into newly allocated drafter blocks before a cached
 request joins at a nonzero position. An unleased older ring checkpoint may be
 replaced at a later boundary without evicting target blocks or fixed state.
 If the matching draft checkpoint is absent, the request retains the full
-target hit and runs target-only. Full-attention DSpark remains target-only
+target hit and runs target-only until the windowed drafter has rebuilt its context.
+Full-attention DSpark remains target-only
 after a nonzero-position prefix hit.
+
+For operator-run boundary, request-order, branching, lease, cancellation, and
+bounded-pool checks on the intended GPU stack, see
+[Prefix-cache validation](prefix-cache-validation.md). The dedicated runner
+compares exact greedy output against cache-disabled references and checks
+post-release reuse progress independently of timing.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
@@ -572,10 +612,13 @@ token budget. The proposal width an automatic drafter aims for is model/Engine c
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
-proposals remain deterministic. A turn that enables guidance, a `repetition_penalty` other than 1,
-no-repeat-ngram processing, or a not-yet-met minimum generated token count is not draft-eligible,
-because the verification rows do not reproduce those logits processors. Eligibility is per turn: the
-next turn that drops those options can draft again. Passing an empty sequence clears a pending
+proposals remain deterministic. Whole-turn guidance, a `repetition_penalty` other than 1,
+no-repeat-ngram processing, or a not-yet-met minimum generated token count makes a turn
+ineligible for drafts, because the verification rows do not reproduce those logits processors.
+Delimited guidance permits drafts outside its constrained regions: proposals stop before the
+opening marker, drafts pause inside the region, and resume after the closing marker. Automatic
+MTP drafting remains disabled throughout a delimited turn. Eligibility is per turn: the next turn
+that drops an ineligible option can draft again. Passing an empty sequence clears a pending
 proposal.
 
 For a decode with K scheduled drafts, the packed input is the request's one unprocessed token

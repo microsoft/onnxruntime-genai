@@ -71,6 +71,10 @@ struct DecoderOnlyPipelineState : State {
                    DeviceSpan<int32_t> next_indices, bool is_last_chunk);
 
  protected:
+  // Virtual hook called before a pipeline stage gathers its inputs.
+  // Allows derived classes to update managed inputs for the stage about to run.
+  virtual void OnStageStart(size_t stage_id) {}
+
   // Virtual hook called after each pipeline stage completes, before next stage starts.
   // Allows derived classes to modify stage outputs (e.g., inject vision embeddings).
   // stage_id: ID of the stage that just completed

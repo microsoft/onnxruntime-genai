@@ -955,7 +955,7 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   next_aux.GetByteSpan().Zero();
   const std::array target_only{Dflash2Drafter::Feed{
       .request = peer, .aux_row_count = 1, .first_position = 24, .anchor_token = 13, .draft_eligible = true, .wants_drafts = true}};
-  ASSERT_FALSE(drafter.Propose(next_aux, target_only, proposals));
+  ASSERT_TRUE(drafter.Propose(next_aux, target_only, proposals));
   EXPECT_TRUE(proposals.front().empty());
   EXPECT_TRUE(drafter.CanCapturePrefix(source, 24));
   EXPECT_FALSE(drafter.CanCapturePrefix(source, 23));
@@ -965,6 +965,7 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
     checkpoint.reset();
   }
   ASSERT_FALSE(indexed_checkpoint.expired());
+  drafter.Release(peer);
 
   const std::array uninterrupted{Dflash2Drafter::Feed{
       .request = source, .aux_row_count = 1, .first_position = 24, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
@@ -1070,6 +1071,49 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   invalid->caches.resize(checkpoint->caches.size());
   damaged.front().prefix_checkpoint = std::move(invalid);
   EXPECT_THROW(drafter.Propose(next_aux, damaged, proposals), std::logic_error);
+}
+
+TEST(Dflash2ConfigTest, MissingWindowedPrefixRebuildsBeforeDraftingOrCheckpointing) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.sliding_window = 8;
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
+  int request_id = 0;
+  auto* request = reinterpret_cast<Request*>(&request_id);
+  Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  aux.CreateTensor(std::array<int64_t, 2>{4, 1});
+  aux.GetByteSpan().Zero();
+  std::vector<std::vector<int32_t>> proposals;
+  for (size_t position = 24; position < 36; position += 4) {
+    const std::array feeds{Dflash2Drafter::Feed{
+        .request = request, .aux_row_count = 4, .first_position = position, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+    ASSERT_TRUE(drafter.Propose(aux, feeds, proposals));
+    ASSERT_EQ(proposals.size(), 1u);
+    if (position < 32) {
+      EXPECT_TRUE(proposals.front().empty());
+      EXPECT_FALSE(drafter.CanCapturePrefix(request, position + 4));
+      EXPECT_EQ(drafter.CapturePrefix(request, position + 4), nullptr);
+    } else {
+      EXPECT_FALSE(proposals.front().empty());
+      EXPECT_TRUE(drafter.CanCapturePrefix(request, position + 4));
+      EXPECT_NE(drafter.CapturePrefix(request, position + 4), nullptr);
+    }
+  }
+  drafter.ReleaseAll();
+  const std::array restarted{Dflash2Drafter::Feed{
+      .request = request, .aux_row_count = 4, .first_position = 64, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_TRUE(drafter.Propose(aux, restarted, proposals));
+  EXPECT_TRUE(proposals.front().empty());
+  EXPECT_FALSE(drafter.CanCapturePrefix(request, 68));
 }
 
 TEST(Dflash2ConfigTest, CapturesAndRestoresExtendedWindowedPrefix) {
@@ -1422,10 +1466,12 @@ TEST(Dflash2ConfigTest, ReplacesProposalBufferWhenTheElementTypeChanges) {
   EXPECT_EQ(slot->GetElementCount(), 4u);
 }
 
-TEST(Dflash2ConfigTest, JoinsOnlyFromAnEligibleTurnAtSequenceStart) {
+TEST(Dflash2ConfigTest, JoinsEligibleTurnsAtZeroOrWithWindowedContext) {
   EXPECT_TRUE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/0));
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/0));
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/1));
+  EXPECT_TRUE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/1, /*context_window=*/12));
+  EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/1, /*context_window=*/12));
 }
 
 TEST(Dflash2ConfigTest, RingCheckpointPreservesLogicalSlotsAcrossPhysicalRemapping) {

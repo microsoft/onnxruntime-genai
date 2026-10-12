@@ -524,6 +524,17 @@ class Model:
             self.make_skip_simplified_layer_norm = TRT_RTX.make_skip_simplified_layer_norm.__get__(self, self.__class__)
             self.make_skip_layer_norm = TRT_RTX.make_skip_layer_norm.__get__(self, self.__class__)
             self.make_simplified_layer_norm = TRT_RTX.make_simplified_layer_norm.__get__(self, self.__class__)
+            # TRT-RTX does not support these fused Qwen operators. Keep their unfused graphs.
+            self.make_gated_add = TRT_RTX.make_gated_add.__get__(self, self.__class__)
+            self.make_linear_attention_gate = TRT_RTX.make_linear_attention_gate.__get__(self, self.__class__)
+            self.make_gated_rms_norm = TRT_RTX.make_gated_rms_norm.__get__(self, self.__class__)
+            self.make_mrotary_embedding = TRT_RTX.make_mrotary_embedding.__get__(self, self.__class__)
+            self.make_expansion_constant = TRT_RTX.make_expansion_constant.__get__(self, self.__class__)
+            self.get_mrope_owners = TRT_RTX.get_mrope_owners.__get__(self, self.__class__)
+            self.make_mrope_positions = TRT_RTX.make_mrope_positions.__get__(self, self.__class__)
+            self.make_mrope_cache = TRT_RTX.make_mrope_cache.__get__(self, self.__class__)
+            self.make_mrope_rotation = TRT_RTX.make_mrope_rotation.__get__(self, self.__class__)
+            self.make_mrope_output = TRT_RTX.make_mrope_output.__get__(self, self.__class__)
 
         elif self.ep == "dml":
             from .expansions import DML
@@ -1451,6 +1462,11 @@ class Model:
             # Prepacked nodes take the fpA_intB path unconditionally. This flag also selects that
             # kernel family for raw-layout nodes and prepack-pass skips.
             session_options["ep.cuda.fpa_intb_gemm"] = "1"
+        if self.ep == "cuda" and self.matmul_attrs["weights_prepacked"] > 0:
+            # MatMulNBitsFusion folds a following Add into optional bias input 5, but offline-
+            # prepacked weights force the fpA_intB path, which does not support bias. Keep the
+            # builder's separate Add nodes intact.
+            session_options["optimization.disable_specified_optimizers"] = "MatMulNBitsFusion"
         if self.extra_options.get("use_device_allocator_for_initializers", False):
             session_options["session.use_device_allocator_for_initializers"] = "1"
 

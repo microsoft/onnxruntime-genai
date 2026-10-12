@@ -10,6 +10,7 @@ import json
 import logging
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -227,8 +228,14 @@ def test_engine_run_releases_gil(model):
         # worker can acquire the GIL here only while the native Engine Run has explicitly released
         # it.
         sys.setswitchinterval(10.0)
+        deadline = time.monotonic() + 5.0
         allow_worker.set()
-        engine.run(event_buffer)
+        # Releasing the GIL does not guarantee that the OS schedules the worker during one
+        # short Run call. Keep offering native calls without a Python wait or thread switch.
+        while True:
+            engine.run(event_buffer)
+            if worker_progressed.is_set() or time.monotonic() >= deadline:
+                break
         assert worker_progressed.is_set()
     finally:
         sys.setswitchinterval(previous_switch_interval)

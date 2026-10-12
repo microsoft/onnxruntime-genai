@@ -87,7 +87,7 @@ class GenAiTelemetry {
   // Call only when LogModelLoadStart returned true.
   void LogModelLoad(uint32_t session_id, const ModelLoadInfo& info);
   void LogModelLoadEnd(uint32_t session_id, bool is_success, double load_time_ms,
-                       const std::string& error_message = "");
+                       std::string_view error_message = "");
 
   // GeneratorCreate: Emitted when a generator is created (GenAI-specific).
   void LogGeneratorCreate(uint32_t session_id, uint32_t generator_id,
@@ -100,7 +100,7 @@ class GenAiTelemetry {
   // input_modality is the modality actually used for this request (grouped):
   // text / vision / audio / multimodal.
   void LogGeneration(uint32_t session_id, uint32_t generator_id, int64_t prompt_tokens,
-                     const std::string& input_modality, const GenerateEndInfo& info,
+                     std::string_view input_modality, const GenerateEndInfo& info,
                      int64_t start_timestamp_ms, int64_t end_timestamp_ms);
 
   // AdapterActivated: Emitted when a LoRA adapter is activated for a generator.
@@ -110,9 +110,9 @@ class GenAiTelemetry {
 
   // RuntimeError: Emitted on failures.
   void LogRuntimeError(uint32_t session_id,
-                       const std::string& error_type,
-                       const std::string& error_message,
-                       const std::string& context);
+                       std::string_view error_type,
+                       std::string_view error_message,
+                       std::string_view context);
 
  private:
   GenAiTelemetry() = default;

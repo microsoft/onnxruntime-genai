@@ -62,10 +62,18 @@ struct TurnOptions {
   // an already-configured turn, cleared). Bounds and UTF-8 validity are enforced by
   // OgaTurnOptionsSetStopStrings (via StopStringMatcher) before this is populated.
   std::vector<std::string> stop_strings;
-  // Copied grammar for this turn. Both empty means the turn is unguided; guidance is never
+  // Copied whole-turn grammar. Both empty means no whole-turn guidance; guidance is never
   // inherited from a previous turn or from model/Request state.
   std::string guidance_type;
   std::string guidance_data;
+  // The marker-scoped grammar is owned by these options and is mutually exclusive with
+  // whole-turn guidance. Keeping all three values together prevents partial configurations.
+  struct DelimitedGuidance {
+    int32_t opening_token;
+    int32_t closing_token;
+    std::string grammar;
+  };
+  std::optional<DelimitedGuidance> delimited_guidance;
 
   void ValidateOwnerThread() const;
   // Restores every option to its unset state, leaving the bound Request alone.
@@ -523,7 +531,8 @@ struct Request : std::enable_shared_from_this<Request>,
    *        handing the logits to the search, and applying the logits processors.
    */
   void PrepareGeneration(DeviceSpan<float> logits, bool guidance_applied = false);
-  bool HasGuidance() const { return guidance_logits_processor_ != nullptr; }
+  bool HasGuidance() const;
+  bool HasDelimitedGuidance() const;
   std::span<const uint32_t> GetReadyGuidanceMask();
 
   /**

@@ -47,6 +47,12 @@ struct Qwen2_5_VL_PipelineModel : public DecoderOnlyPipelineModel {
 
   // Vision pipeline shared across states (sessions reused).
   std::unique_ptr<QwenVisionPipeline> vision_pipeline_;
+
+  // Single-ONNX vision encoder, for models that export the encoder as one graph
+  // (e.g. Gemma-4) instead of Qwen's three-stage pipeline. Exactly one of
+  // vision_pipeline_ and vision_session_ is populated by the constructor.
+  std::unique_ptr<OrtSessionOptions> vision_session_options_;
+  std::unique_ptr<OrtSession> vision_session_;
 };
 
 struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
@@ -56,17 +62,47 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
+  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
+
  protected:
+  void OnStageStart(size_t stage_id) override;
   void OnStageComplete(size_t stage_id) override;
 
  private:
   void InjectVisionEmbeddings(const std::string& embeddings_output_name);
 
+  // Runs a single-ONNX vision encoder and publishes image_features_value_.
+  void RunSingleSessionVision(const std::vector<ExtraInput>& extra_inputs);
+
+  // Runs whichever vision path this model was configured with, at most once.
+  void RunVision(const std::vector<ExtraInput>& extra_inputs);
+
+  // Registers image_features/audio_features as managed pipeline inputs.
+  void InitializeFeatureInputs();
+
+  // Selects the image feature rows belonging to the embedding stage's current token window.
+  void UpdateImageFeatureInput();
+
+  // Creates an empty feature tensor matching the embedding input's rank, width, and dtype.
+  std::unique_ptr<OrtValue> CreateEmptyFeatureInput(const std::string& name) const;
+
+  int32_t GetImageTokenId() const;
+
   const Qwen2_5_VL_PipelineModel& vl_model_;
   bool vision_ran_{false};
   std::unique_ptr<OrtValue> image_features_value_;
-  std::vector<float> image_features_buffer_;  // backing storage for OrtValue
-  size_t image_embed_consumed_{0};            // Track how many vision embeddings we've injected
+  std::vector<float> image_features_buffer_;       // backing storage for OrtValue
+  std::unique_ptr<OrtValue> vision_output_owner_;  // keeps the encoder's output alive when
+                                                   // image_features_value_ is a reshaped view of it
+  size_t image_embed_consumed_{0};                 // Track how many vision embeddings we've injected
+  bool embedding_merges_features_{false};          // embedding graph does the merge, so skip injection
+  size_t image_feature_input_index_{SIZE_MAX};
+  size_t audio_feature_input_index_{SIZE_MAX};
+  size_t image_feature_offset_{0};
+  std::unique_ptr<OrtValue> image_feature_input_;
+  std::unique_ptr<OrtValue> image_feature_cast_;
+  std::unique_ptr<OrtValue> audio_feature_input_;
 };
 
 }  // namespace Generators
