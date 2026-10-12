@@ -77,6 +77,11 @@ def main():
             name: os.environ.get(name, "0")
             for name in ("ORT_SPARSE_PREFILL_TENSOR_CORE_QK", "ORT_SPARSE_PREFILL_TENSOR_CORE_PV")
         },
+        "moe_prefill_flags": {
+            name: os.environ.get(name, "0")
+            for name in ("ORT_QMOE_NVFP4_PACKED_PREFILL", "ORT_QMOE_NVFP4_FUSED_SWIGLU",
+                         "ORT_QMOE_NVFP4_REUSE_ROUTING_SCRATCH", "ORT_QMOE_NVFP4_TILED_DOWN_OUTPUT")
+        },
         "model": str(model_path),
         "ort_version": ort.__version__,
         "genai_distributions": {

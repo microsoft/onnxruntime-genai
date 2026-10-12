@@ -2,6 +2,13 @@
 
 For the latest lower-memory result and a short summary of all changes, see
 [approximately 100 E2E TPS below 80 GiB sampled](README_MEMORY.md).
+The latest optional gate/up + SwiGLU fusion measures 100.58 independent
+E2E TPS / 133.60 decode TPS at 79.75 GiB sampled peak. It preserves all
+128 paired output streams, but remains unqualified on actual 80 GiB
+hardware.
+For the complete memory-candidate environment-variable block, flag
+dependencies and configuration variants, see
+[runtime environment](README_MEMORY.md#complete-runtime-environment).
 
 This directory contains the Engine benchmark, exact configuration overlay,
 launcher and pooled-result validator used to reproduce the optimized

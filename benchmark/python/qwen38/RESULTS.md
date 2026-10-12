@@ -1,7 +1,9 @@
 # Qwen3.8 Flash NVFP4 Optimization Results
 
-The latest memory candidate reaches **99.79 independent E2E TPS**,
-**133.33 decode TPS**, and **79.95 GiB sampled peak**. See the
+The latest optional fused-epilogue memory candidate reaches **100.58
+independent E2E TPS**, **133.60 decode TPS**, and **79.75 GiB sampled
+peak**; its unfused predecessor measured 99.79 / 133.33 TPS and 79.95 GiB.
+See the
 [short optimization summary](README_MEMORY.md) for the selected changes,
 portable graph preparation and important context/memory limits.
 The sections below are a chronological experiment log: descriptions such
@@ -9,6 +11,202 @@ as "local", "uncommitted" and "not pushed" record status at measurement
 time. Successful runtime changes and default-off diagnostic paths are now
 included on `asonawane/qwen-38-flash-100-e2e`; rejected model exports,
 binary snapshots and local raw evidence are not published.
+The fused epilogue, routing scratch reuse and tiled-down source follow-ups
+are also published on this branch. Later references to local/pending
+publication describe their status at measurement time; isolated runtime
+binaries and raw evidence remain local.
+
+## Fused NVFP4 gate/up + SwiGLU follow-up
+
+### Tiled down-output memory tradeoff
+
+`ORT_QMOE_NVFP4_TILED_DOWN_OUTPUT=1` (default-off) requires supported
+packed NVFP4 prefill and fused gate/up SwiGLU. Gate/up gathers original
+input rows using the existing permutation maps, avoiding expanded-input
+materialization. Down projection operates on 1,024-column slices, then
+reduces each slice deterministically in original top-k rank order before
+reusing its storage. It retains GEMM activation-dtype rounding, bias,
+FP32 reduction and output rounding; no atomic additions are used.
+Integer/decode/unsupported fallback and default execution are unchanged.
+
+The common input/down-output reservation shrinks from 200 to 80 MiB
+for 4,096 rows/top-10/hidden 2,560, an exact **120 MiB workspace saving**.
+With routing scratch reuse, a fresh same-GPU memory comparison measures:
+
+| Metric | Current fused + reuse control | + Tiled down |
+|---|---:|---:|
+| Sampled device-wide peak | 79.7322 GiB | **79.5760 GiB** |
+| Peak bytes | 85,611,839,488 | **85,444,067,328** |
+| Final paired pooled E2E TPS | 100.25 | 102.19 |
+| Final paired pooled decode TPS | 133.22 | 137.56 |
+| Final paired mean TTFT | 1.271 s | 1.295 s |
+
+**The throughput difference is not an established improvement.** The
+final timing-order-reversed comparison retains both five-request
+candidate invocations (100.0220 and 104.4605 TPS) and controls (100.2494
+and 100.2525 TPS). Decode timing varies substantially despite unchanged
+output hashes and 225 Engine steps, while prefill is about 24 ms slower.
+All samples are retained; no cause is assigned to the decode variation.
+Earlier independent 1,024-column candidate screens reached 101.1411
+and **99.9963** TPS; fresh controls reached 104.2027 and 100.0896.
+These screens are recorded separately, not silently excluded or pooled
+into the final comparison. There is no strict at-least-100 guarantee.
+
+A 512-column prototype saved 160 MiB workspace but measured 99.8055
+versus 100.3062 E2E TPS and 1.304 versus 1.273 s TTFT. The larger
+1,024-column alternative is retained as an opt-in memory tradeoff, not
+a replacement for the lower-latency untiled path.
+
+Memory diagnostics run separately, through loading/warmup/measured
+execution, on otherwise idle GPU7. Device-wide saving is 160 MiB,
+including allocator-pool effects; sampled headroom below 80 GiB is
+434.19 MiB. Maximum sample gap is 0.11429 seconds for tiled output and
+0.12910 seconds for control. These are sampled peaks, not a hard cap
+or actual 80 GiB/concurrent-workload qualification.
+
+173 CUDA tests pass, including exact FP16/BF16 tiled/untiled outputs,
+aligned workspace savings, 512 experts, hidden dimensions below the
+tile width, column/row tails, biased/unbiased projections, empty experts,
+fused-flag eligibility, CUDA graph capture/replay and prior integer
+regressions. Fresh paired 128-case runs match every token stream and
+preserve all 110 control-correct answers, with no MTP/empty/repetition
+failures. The same two 32-case suites remain 26/32 below their standalone
+90% gate; parity passes, not that absolute threshold.
+
+Local evidence: `tiled_down4096_{0,1}_1.json`,
+`tiled_down1024_4096_{1,control_1,candidate_2,control_2}.json`,
+`tiled_down1024_final_{control,candidate}_{1,2}.json`,
+`gpu_memory_tiled_down1024_4096_{0,1}_results.json`, and
+`quality_tiled_down1024_{0,1}_*.json`. Isolated provider:
+`nvfp4-packed-tiled-down1024-python`. Original weights, graph capacities,
+installed runtimes and production defaults remain untouched.
+Follow-up source changes remain local pending publication.
+After a loop-increment overflow guard, the final provider was rebuilt
+into `nvfp4-packed-tiled-down1024-final-python`. All 43 tiled-output,
+empty-expert and fallback tests passed again. A separate five-request
+repeat reached 104.64 E2E / 142.13 decode TPS with 1.298 s TTFT and
+identical output; this does not remove the earlier timing variability.
+A final-source memory repeat reproduced exactly 85,444,067,328 bytes
+(79.5760 GiB), with maximum sample gap 0.12906 seconds. Evidence:
+`tiled_down1024_final_source.json` and
+`gpu_memory_tiled_down1024_final_source_results.json`.
+
+### Subsequent input-gather and routing-workspace experiments
+
+Direct input gathering was implemented behind a temporary default-off
+flag, with per-tile cached source-row indices feeding asynchronous shared
+input loads. 121 focused tests passed, including exact FP16/BF16 parity,
+fused/unfused epilogues, row tiles, empty experts, graph replay and
+fallbacks. Serial same-GPU timing-order-reversed pools, ten measured
+requests per configuration, showed **100.49 -> 99.95 E2E TPS** and
+**1.267 -> 1.289 s TTFT**. Output hashes matched. The experiment saves no
+workspace because expanded-input storage already aliases down output.
+**Rejected:** direct-gather source changes were removed; the isolated
+runtime and raw timing evidence remain local.
+
+The retained alternative uses `ORT_QMOE_NVFP4_REUSE_ROUTING_SCRATCH=1`
+(default-off) to reuse sorting counters/cumulative counts/blocked rows
+after their last same-stream sorting kernel. These overlap expanded
+input/down-output storage; live maps and expert/tile offsets do not.
+The reservation uses the larger aligned size, preserving shapes whose
+sorting storage is larger than the activation buffer. Integer execution,
+decode and fallback remain unchanged.
+
+At 4,096 rows / 512 experts / top-10 / hidden 2,560 this saves exactly
+**8,404,992 bytes**, about **8.02 MiB**, of packed workspace.
+
+| Metric | Fresh fused control | Fused + routing reuse |
+|---|---:|---:|
+| Independent pooled E2E TPS | 100.01 | **100.28** |
+| Independent pooled decode TPS | 132.78 | **133.20** |
+| Mean TTFT | 1.271 s | **1.269 s** |
+| Separate sampled device-wide peak | 79.7479 GiB | **79.7322 GiB** |
+
+Two independent five-request invocations per side, one warmup excluded,
+in control/candidate/candidate/control order on GPU7. Candidate invocations:
+100.3232 and 100.2449 E2E TPS. Controls: 99.8042 and 100.2227.
+The tiny timing difference does **not** establish a speedup. All
+benchmark output hashes match and MTP failure counters are zero.
+
+Separate same-GPU memory runs: control 85,628,616,704 bytes, candidate
+85,611,839,488 bytes; **16 MiB device-wide sampled saving** and about
+274 MiB below 80 GiB. Candidate maximum sample gap 0.12019 seconds;
+control 0.13082 seconds. Sampling can miss transients; actual 80 GiB
+hardware and concurrent workloads remain unqualified.
+
+Validation: **137 CUDA tests passed**, including exact workspace savings,
+512-expert dimensions, scratch/input size orderings, FP16/BF16, biases,
+fused/unfused paths, empty experts, tails, multi-row tiling, graph replay
+and integer regressions. Fresh paired quality runs matched all 128 token
+streams exactly and preserved all 110 control-correct answers, with no
+MTP/empty-output/repetition failures. Both 32-case suites remain 26/32,
+below their standalone 90% threshold; answer preservation passes, not
+that absolute gate. These are observed custom suites, not an untouched
+held-out benchmark.
+
+Local evidence: `gather_input4096_{control,candidate}_{1,2}.json`,
+`reuse_routing4096_{control,candidate}_{1,2}.json`,
+`gpu_memory_reuse_routing4096_{0,1}_results.json`,
+`quality_reuse_routing_{0,1}_*.json`. The retained provider is
+`nvfp4-packed-reuse-routing-python`; rejected direct gathering is
+`nvfp4-packed-gather-input-python`. Follow-up code remains local pending
+publication. Installed runtimes, original weights, graph capacities and
+production launcher defaults are unchanged.
+
+### Earlier fused-epilogue measurements
+
+`ORT_QMOE_NVFP4_FUSED_SWIGLU=1` is default-off and applies only to the
+existing supported packed NVFP4 prefill route. The epilogue preserves
+FP16/BF16 rounding of GEMM output before bias, then applies identical
+alpha/beta/limit activation semantics. It writes the activated input for
+the down projection directly, removing one intermediate and activation
+launch. Integer prefill, unsupported fallback and decode are unchanged.
+
+For 4,096 rows, top-10 and intermediate 640, packed workspace shrinks by
+exactly 104,857,600 bytes (100 MiB). Tests assert the exact aligned byte
+reduction, not just numerical output.
+
+| Metric | Fresh unfused control | Fused candidate |
+|---|---:|---:|
+| Independent E2E TPS, ten requests each | 99.54 | **100.58** |
+| Independent decode TPS | 132.92 | **133.60** |
+| Mean TTFT | 1.299 s | **1.266 s** |
+| Separate sampled device-wide peak | 79.9432 GiB | **79.7498 GiB** |
+
+Same binary/model/GPU, serial five-request invocations, one excluded
+warmup each. Fused pools: 100.7094 and 100.4430 E2E TPS; controls:
+99.9199 and 99.1709. These are observed timings, not guarantees.
+TTFT falls by about 33 ms (2.6%); E2E improves about 1.0%.
+Decode arithmetic is unchanged, so its timing difference should not be
+attributed to fusion. All benchmark output hashes match.
+
+Separate memory runs include loading, warmup and inference. Fused peak:
+85,630,713,856 bytes, about 256 MiB below 80 GiB; fresh unfused peak:
+85,838,331,904 bytes. The 198 MiB device-wide difference includes
+allocator-pool effects. Maximum fused sample gap: 0.12497 seconds.
+No hard memory cap or actual 80 GiB qualification is claimed.
+
+Validation: 103 focused CUDA tests pass, including FP16/BF16 exact
+fused/unfused parity, ordinary/custom/tightly clamped SwiGLU, biases,
+tails, empty experts, multi-row tiling, graph capture/replay, existing
+integer regressions and fallback routing. Fresh paired quality runs
+match all 128 token streams and preserve all 110 control-correct
+answers. The 32-case suites score 26/32 in both configurations, below
+their standalone 90% gate: parity passes, not that absolute threshold.
+Original weights and the bounded graph/request ceiling are unchanged.
+
+Local evidence: `fused_swiglu4096_{independent,control}_{1,2}.json`,
+`gpu_memory_fused_swiglu4096{,_control}_results.json`, and
+`quality_fused_swiglu_{0,1}_{int4_activation_extended_suite,int2_separate_validation_suite,int3_fresh_validation_suite}.json`.
+The retained experimental provider is `nvfp4-packed-fused-swiglu-python`;
+installed runtimes and production launcher defaults remain untouched.
+After indentation cleanup, the final source was rebuilt into
+`nvfp4-packed-fused-swiglu-final-python`. All 103 tests passed again,
+and an additional independent five-request repeat reached 100.29 E2E /
+133.15 decode TPS with 1.267 s TTFT and identical benchmark output.
+That repeat is separate from the initial ten-request pool above.
+The new follow-up is local pending publication; the historical log below
+remains unchanged.
 
 Measured on one H200, batch one, greedy decoding, with exactly **8,192
 uncached input tokens and 512 generated tokens**. End-to-end (E2E)
