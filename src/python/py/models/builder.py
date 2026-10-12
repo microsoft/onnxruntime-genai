@@ -56,13 +56,15 @@ from builders import (
     PhiModel,
     Qwen3Model,
     Qwen3VLTextModel,
+    Qwen4ExpModel,
+    Qwen4ExpTextModel,
     Qwen25VLTextModel,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from builders.qwen import Qwen35Model, Qwen35MoEModel
+from builders.qwen3_5 import Qwen35Model, Qwen35MoEModel
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
@@ -172,10 +174,10 @@ def check_extra_options(
         "prune_lm_head",
         "use_paged_attention",
         "windowed_kv_cache",
-        "use_device_allocator_for_initializers",
+        "text_only",
         "enable_cuda_fpa_intb_gemm",
-        "fuse_mlp_gate_up",
         "exclude_mtp",
+        "indexshare_mtp",
     ]
 
     for key in bools:
@@ -219,20 +221,17 @@ def check_extra_options(
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
         extra_options["state_update_capacity"] = state_update_capacity
 
-    if "max_draft_tokens" in extra_options:
-        # Keep this limit synchronized with Speculative_Element::kMaxDraftTokens in src/config.cpp
-        # and the model-builder README.
-        max_draft_tokens_limit = 16
-        message = f"max_draft_tokens must be an integer between 1 and {max_draft_tokens_limit}."
+    for option, draft_tokens_limit in (("max_draft_tokens", 16), ("indexshare_max_draft_tokens", 7)):
+        if option not in extra_options:
+            continue
+        message = f"{option} must be an integer between 1 and {draft_tokens_limit}."
         try:
-            # Parsed from text so a fractional value is rejected instead of truncated; the runtime
-            # treats speculative.max_draft_tokens as integral.
-            max_draft_tokens = int(str(extra_options["max_draft_tokens"]).strip())
+            max_draft_tokens = int(str(extra_options[option]).strip())
         except (TypeError, ValueError) as e:
             raise ValueError(message) from e
-        if not 1 <= max_draft_tokens <= max_draft_tokens_limit:
+        if not 1 <= max_draft_tokens <= draft_tokens_limit:
             raise ValueError(message)
-        extra_options["max_draft_tokens"] = max_draft_tokens
+        extra_options[option] = max_draft_tokens
 
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
@@ -318,15 +317,7 @@ def check_extra_options(
 
     for key in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
         if key in extra_options:
-            extra_options[key] = int(extra_options[key])
-
-    if extra_options.get("qmoe_weights_prepacked", -1) not in (-1, 0, 1):
-        raise ValueError(f"qmoe_weights_prepacked must be -1, 0, or 1, got {extra_options['qmoe_weights_prepacked']}.")
-
-    if extra_options.get("matmulnbits_weights_prepacked", 0) not in (0, 1, 2):
-        raise ValueError(
-            f"matmulnbits_weights_prepacked must be 0, 1, or 2, got {extra_options['matmulnbits_weights_prepacked']}."
-        )
+            raise ValueError(f"{key} has been removed; weight packing is determined by the execution provider and GPU SM.")
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
@@ -413,6 +404,11 @@ def check_extra_options(
         extra_options["num_hidden_layers"] = num_hidden_layers
 
     quantization_config = getattr(config, "quantization_config", {})
+    if quantization_config.get("quant_method") == "fp8":
+        if getattr(config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text"}:
+            raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8.")
+        if execution_provider not in {"cuda", "webgpu"}:
+            raise ValueError("Native Qwen3.8 FP8 checkpoint export requires the CUDA or WebGPU EP.")
     if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}:
         if execution_provider != "cuda":
             raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
@@ -446,6 +442,10 @@ def check_extra_options(
                 "are separate weights). Sharing them would corrupt the exported model. Remove "
                 "shared_embeddings=true from --extra_options for this model."
             )
+
+    embedding_quant_type = extra_options.get("embedding_quant_type")
+    if embedding_quant_type is not None and embedding_quant_type not in {"int4", "int8"}:
+        raise ValueError("embedding_quant_type must be one of: int4, int8")
 
         op_types_to_quantize = extra_options.get("op_types_to_quantize", ())
 
@@ -792,6 +792,8 @@ def create_model(
             onnx_model.model_type = "qwen3_5_moe_text"
         else:
             onnx_model.model_type = "qwen3_5_moe"
+    elif config.architectures[0] == "Qwen4ExpForConditionalGeneration":
+        onnx_model = Qwen4ExpModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
@@ -914,13 +916,11 @@ def get_args():
                     WebGPU requires hidden_size and moe_intermediate_size to be divisible by qmoe_block_size.
                     Raw block-wise INT4 QMoE requires both dimensions to be even.
                     Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
-                qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
-                    -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.
-                    Default is -1.
-                matmulnbits_weights_prepacked = 0/1/2: Specify the CUDA MatMulNBits (int4/int8) weight layout.
-                    0 exports raw blockwise weights, 1 exports the SM80/Ampere fpA_intB prepacked layout, and 2 exports the SM90/Hopper fpA_intB prepacked layout.
-                    Only applies to the CUDA EP. Eligible prepacked nodes select fpA_intB automatically; the builder enables it for any ineligible nodes left in raw layout.
-                    Default is 0.
+                CUDA weight packing is automatic from the active NVIDIA GPU: MatMulNBits uses
+                    mode 1 on SM80-class GPUs and mode 2 on SM90-class GPUs. Integer QMoE uses
+                    mode 1 on both because its CUDA kernel uses the SM80 layout even on SM90.
+                    Other EPs, unavailable NVIDIA GPUs, and pre-SM80 GPUs use mode 0 (raw).
+                    Ineligible MatMulNBits projections stay raw. Packing is not configurable.
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
                 op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
@@ -957,6 +957,8 @@ def get_args():
                     For models with multiple components, each component is exported to its own ONNX model.
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                text_only = Export only the standalone text model for Qwen4-Exp conditional-generation checkpoints.
+                    Includes token embeddings in model.onnx and omits the vision and multimodal embedding graphs.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.
                     Default behavior is to use the authentication token stored by `huggingface-cli login`.
                     If false, authentication with Hugging Face will be disabled.
@@ -1018,15 +1020,15 @@ def get_args():
                     The fused drafter omits the q_row_map input, so it requires a runtime that
                     treats q_row_map as optional; older runtimes reject the exported package.
                 fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
-                    MatMul or MatMulNBits followed by Split. Default is false. Applies before
+                    MatMul or MatMulNBits followed by Split. Default is true. Applies before
                     target weight quantization and requires unpacked, unadapted gate/up
                     floating-point projections.
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
                     small dynamic-convolution and candidate-selector projections dense. The body
-                    uses the raw blockwise layout by default. On CUDA, a drafter quantization
-                    format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
+                    uses the target's automatic hardware-specific packing policy. CUDA emits
+                    the corresponding fpA-intB layout for
                     projections the kernel supports (N % 64 for int4, N % 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
                     Body activations and KV caches remain bf16; this option does not quantize the
@@ -1047,17 +1049,12 @@ def get_args():
                     quadratically with this value, so larger values should be benchmarked carefully.
                 mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
                     structured QuantConfig schema independently from the main model.
-                linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
-                    Qwen3.5/3.8 exports. Default is linear_attention. Paged exports always use GatedDeltaNet and
-                    ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and supports fp16
-                    or bf16 I/O.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
                     Must be an integer from 0 through 8 and requires use_paged_attention=true. This experimental
                     contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
-                    Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require
-                    state_window=0.
+                    Qwen3.5/3.8 exports use GatedDeltaNet and require state_window=0.
                     Requires ONNX Runtime kernels that implement this attribute.
                 enable_cuda_fpa_intb_gemm = Select the CUDA fpA_intB MatMulNBits kernel family
                     for weights exported in the default raw blockwise layout. Default is false.
@@ -1117,6 +1114,8 @@ def get_args():
                     Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
                     Only valid for models that tie their input and output embeddings (tie_word_embeddings=true in
                     config.json). Setting shared_embeddings=true for a model with tie_word_embeddings=false raises a ValueError.
+                embedding_quant_type = Quantization type for an independent token embedding: int4 or int8.
+                    This does not tie the token embedding to the LM head. Defaults to the model precision.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
@@ -1126,10 +1125,6 @@ def get_args():
                 enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
                     If enabled, the model structure will be optimized for WebGPU graph execution.
                     This affects attention mask reformatting and position IDs handling.
-                use_device_allocator_for_initializers = Write `session.use_device_allocator_for_initializers=1` into
-                    the decoder's session options. Default is false. Initializers then bypass the arena, so the
-                    originals a kernel replaces during PrePack (notably the fpA_intB MatMulNBits layout conversion)
-                    are returned to the driver instead of being retained as free arena blocks.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
                 moe_quant_type = int2/int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.

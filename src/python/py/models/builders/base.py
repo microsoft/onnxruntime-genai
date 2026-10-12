@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import os
 import subprocess
@@ -18,6 +19,7 @@ from collections.abc import Sequence
 import numpy as np
 import onnx_ir as ir
 import torch
+from builder_config import serialize_genai_config
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -25,6 +27,7 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     QuantFormat,
     RTNWeightOnlyQuantConfig,
 )
+from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
@@ -40,12 +43,14 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
 )
 
-from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
-
-
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.extra_options = extra_options
+        self.hf_load_config = (
+            copy.deepcopy(config)
+            if "num_hidden_layers" in extra_options and hasattr(config, "text_config")
+            else None
+        )
         self.make_config_init(config)
 
         # Context length attributes from config
@@ -262,6 +267,9 @@ class Model:
         # Store names of nodes already created
         self.node_names = set()
 
+        # Initializers that should be saved outside the model's default external data file.
+        self.external_data_files = {}
+
         # Mask-specific variables
         # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
         self.mask_attrs = {
@@ -396,10 +404,13 @@ class Model:
         self.make_kv_cache_init()
 
         # MLP-specific variables
+        fuse_gate_up = str(extra_options.get("fuse_mlp_gate_up", True)).lower()
+        if fuse_gate_up not in ("true", "false"):
+            raise ValueError("fuse_mlp_gate_up must be true or false.")
         self.mlp_attrs = {
             "use_proj": True,                                # Use projection style for MLP (GateProj/UpProj/DownProj)
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
-            "fuse_gate_up": extra_options.get("fuse_mlp_gate_up", False),  # Fuse gate/up projections before quantization
+            "fuse_gate_up": fuse_gate_up == "true",  # Fuse gate/up projections before quantization
             "output_0": "",                                  # Output 0 for MLP subgraph
         }
 
@@ -426,16 +437,20 @@ class Model:
         # prepacks the weights into the fpA_intB mixed-GEMM layout so the kernel can consume them directly:
         # 0 = off (raw blockwise layout), 1 = SM80/Ampere fpA_intB layout (weight_prepacked=1),
         # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
-        # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
+        # keep the raw blockwise layout. The execution provider and active NVIDIA GPU SM determine the mode.
         self.matmul_attrs["weights_prepacked"] = self.quant_config.runtime.matmulnbits_weights_prepacked
 
         self.quant_attrs = {
             "accuracy_level": self.quant_config.weights.accuracy_level,                    # ORT quantization accuracy level for MatMulNBits
             "qmoe_block_size": self.quant_config.moe.block_size,                           # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig)
+            "qmoe_weights_prepacked": self.quant_config.moe.weights_prepacked,
             "matmul_block_size": int(self.quant_config.weights.block_size),                # MatMulNBits block size
             "bits": 8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4,  # Dense MatMulNBits weight bit-width (int4 vs int8 precision)
             "is_symmetric": self.quant_config.weights.symmetric,                           # Use symmetric zero-centered weight quantization
             "op_types_to_quantize": self.quant_config.weights.op_types,                    # Operator types eligible for weight quantization
+            "embedding_bits": resolve_dtype(self.extra_options["embedding_quant_type"]).bits
+            if self.extra_options.get("embedding_quant_type")
+            else (8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4),
             "nodes_to_exclude": nodes_to_exclude,                                          # Node names excluded from weight quantization
             "use_qdq": self.quant_config.runtime.use_qdq,                                  # Create QuantizeLinear/DequantizeLinear nodes for quantized weights instead of using MatMulNBits.
         }
@@ -1006,7 +1021,7 @@ class Model:
             self.make_initializer(make_kv_cache_scale(v_scales_per_layer, scale_index, layer_id), v_scale_name)
 
     def make_quant_config_init(self):
-        self.quant_config = self.extra_options.get("_quant_config", None)
+        self.quant_config = copy.deepcopy(self.extra_options.get("_quant_config", None))
         if self.quant_config is None:
             self.quant_config = QuantConfig.from_extra_options(
                 extra_options=self.extra_options,
@@ -1015,6 +1030,20 @@ class Model:
             )
         elif not isinstance(self.quant_config, QuantConfig):
             raise TypeError("_quant_config must be a QuantConfig instance")
+        self.make_weight_packing_init()
+
+    def make_weight_packing_init(self):
+        """Resolve CUDA layouts from the active GPU; integer QMoE uses SM80 packing on SM90 too."""
+        packing_mode = 0
+        if self.ep == "cuda" and torch.version.hip is None:
+            try:
+                if torch.cuda.is_available():
+                    major = torch.cuda.get_device_capability(torch.cuda.current_device())[0]
+                    packing_mode = 2 if major >= 9 else int(major >= 8)
+            except (RuntimeError, AssertionError):
+                packing_mode = 0
+        self.quant_config.moe.weights_prepacked = int(packing_mode > 0)
+        self.quant_config.runtime.matmulnbits_weights_prepacked = packing_mode
 
     def make_moe_attrs_init(self, config):
         num_experts = (
@@ -1092,8 +1121,7 @@ class Model:
 
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
-        # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
-        # raw [E, N, K/pack] weights and let the CUDA runtime PrePack hook transform them).
+        # with CPU/WebGPU/TRT-RTX. The execution provider and active NVIDIA GPU SM determine the mode.
         self.moe_attrs["weights_prepacked"] = self.quant_config.moe.weights_prepacked
         if mixed_width or uses_int2:
             self.moe_attrs["weights_prepacked"] = 0
@@ -1365,6 +1393,12 @@ class Model:
             outputs["state_update_conv_value_names"] = "state_update.%d.conv_value"
         if "state_update.recurrent_capsule" in self.output_names:
             outputs["state_update_recurrent_capsule_names"] = "state_update.%d.recurrent_capsule"
+        if "state_update.ple_tokens" in self.output_names:
+            outputs["state_update_ple_token_names"] = "state_update.%d.ple_tokens"
+        if "state_update.ple_conv_value" in self.output_names:
+            outputs["state_update_ple_conv_value_names"] = "state_update.%d.ple_conv_value"
+        if "state_update.indexer" in self.output_names:
+            outputs["state_update_indexer_names"] = "state_update.%d.indexer"
 
         genai_config = {
             "model": {
@@ -1462,13 +1496,12 @@ class Model:
             # Prepacked nodes take the fpA_intB path unconditionally. This flag also selects that
             # kernel family for raw-layout nodes and prepack-pass skips.
             session_options["ep.cuda.fpa_intb_gemm"] = "1"
+        session_options["session.use_device_allocator_for_initializers"] = "1"
         if self.ep == "cuda" and self.matmul_attrs["weights_prepacked"] > 0:
             # MatMulNBitsFusion folds a following Add into optional bias input 5, but offline-
             # prepacked weights force the fpA_intB path, which does not support bias. Keep the
             # builder's separate Add nodes intact.
             session_options["optimization.disable_specified_optimizers"] = "MatMulNBitsFusion"
-        if self.extra_options.get("use_device_allocator_for_initializers", False):
-            session_options["session.use_device_allocator_for_initializers"] = "1"
 
         if self.use_paged_attention:
             dynamic_batching = {
@@ -1506,7 +1539,7 @@ class Model:
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
-            json.dump(genai_config, f, indent=4)
+            f.write(serialize_genai_config(genai_config))
 
     def update_genai_config(self, genai_config):
         """
@@ -1919,7 +1952,7 @@ class Model:
         CUDA mixed-GEMM kernel consumes directly; it does not change the numeric values and
         is independent of the quantization method (default/rtn/k_quant) and bit width
         (int4/int8) used to produce them. This lets any `algo_config` (e.g. `k_quant`)
-        be combined with `matmulnbits_weights_prepacked > 0`.
+        be combined with automatic hardware-specific prepacking.
 
         Eligibility mirrors the runtime fpA_intB kernel: bits in {4, 8}, block_size supported
         by the target layout (SM80 -> {32, 64, 128}, SM90 -> {64, 128}), K % block_size == 0,
@@ -1932,7 +1965,8 @@ class Model:
         if self.ep != "cuda" or prepack_mode <= 0 or not self.quant_attrs["is_symmetric"]:
             return
 
-        from onnx import helper as onnx_helper, numpy_helper  # noqa: PLC0415
+        from onnx import helper as onnx_helper  # noqa: PLC0415
+        from onnx import numpy_helper
 
         force_arch = 90 if prepack_mode == 2 else 80
         allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
@@ -1940,17 +1974,13 @@ class Model:
 
         candidates = 0
         prepacked = 0
-        skipped_block_sizes = set()
+        redundant_zero_points = set()
 
         for node in model_proto.graph.node:
             if node.op_type != "MatMulNBits" or node.domain != "com.microsoft":
                 continue
             attrs = {a.name: a for a in node.attribute}
             if "weight_prepacked" in attrs:
-                continue
-            # Skip asymmetric weights: a non-empty zero-point input (4th input) means the
-            # weights are not symmetric, which the fpA_intB prepacked path does not target.
-            if len(node.input) > 3 and node.input[3]:
                 continue
             if not all(key in attrs for key in ("bits", "block_size", "K", "N")):
                 continue
@@ -1967,8 +1997,6 @@ class Model:
                 and n % (32 if bits == 8 else 64) == 0
             )
             if not fpa_intb_eligible:
-                if block_size not in allowed_block_sizes:
-                    skipped_block_sizes.add(block_size)
                 continue
 
             init = initializers.get(node.input[1])
@@ -1978,21 +2006,18 @@ class Model:
             packed = CudaQuantizer.prepack_matmulnbits_weight(numpy_helper.to_array(init), n, k, bits, force_arch)
             init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
             node.attribute.append(onnx_helper.make_attribute("weight_prepacked", prepack_mode))
+            if len(node.input) > 3 and node.input[3]:
+                redundant_zero_points.add(node.input[3])
+                node.input[3] = ""
             prepacked += 1
 
-        if candidates and not prepacked:
-            reason = (
-                f"block_size {sorted(skipped_block_sizes)} is not one of {list(allowed_block_sizes)} "
-                f"for the SM{force_arch} layout"
-                if skipped_block_sizes
-                else "no node met the fpA_intB K/N alignment"
-            )
-            raise ValueError(
-                f"matmulnbits_weights_prepacked={prepack_mode} prepacked 0 of {candidates} MatMulNBits "
-                f"nodes: {reason}. Choose a compatible block_size, use "
-                "matmulnbits_weights_prepacked=1 (SM80 layout, accepts block_size 32), or 0 to "
-                "prepack at session creation instead."
-            )
+        if redundant_zero_points:
+            referenced_initializers = {name for node in model_proto.graph.node for name in node.input if name}
+            for index in reversed(range(len(model_proto.graph.initializer))):
+                initializer = model_proto.graph.initializer[index]
+                if initializer.name in redundant_zero_points and initializer.name not in referenced_initializers:
+                    del model_proto.graph.initializer[index]
+
         if candidates:
             print(f"Prepacked {prepacked}/{candidates} MatMulNBits weights into the SM{force_arch} fpA_intB layout.")
 
@@ -2060,15 +2085,25 @@ class Model:
         # Make sure all nodes are topologically sorted
         model.graph.sort()
 
-        # Save ONNX model with only one external data file and delete any existing duplicate copies
+        # Save ONNX model and delete any existing duplicate copies.
         out_path = os.path.join(out_dir, self.filename)
         data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
+        separate_external_data = getattr(self, "external_data_files", {})
+        external_data_tensors = getattr(self, "external_data_tensors", {})
+        if external_data_tensors.keys() - separate_external_data.keys():
+            raise ValueError("External data tensors must have a configured external data file")
+        external_data_paths = {
+            os.path.join(out_dir, relative_path)
+            for initializer_name, relative_path in separate_external_data.items()
+            if initializer_name not in external_data_tensors
+        }
         if os.path.exists(out_path):
             print(f"Overwriting {out_path}")
             os.remove(out_path)
-        if os.path.exists(data_path):
-            print(f"Overwriting {data_path}")
-            os.remove(data_path)
+        for external_data_path in [data_path, *sorted(external_data_paths)]:
+            if os.path.exists(external_data_path):
+                print(f"Overwriting {external_data_path}")
+                os.remove(external_data_path)
 
         with tqdm() as pbar:
             total_set = False
@@ -2083,13 +2118,61 @@ class Model:
                 pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
             Model.stamp_build_metadata(model)
-            ir.save(
-                model,
-                out_path,
-                external_data=os.path.basename(data_path),
-                size_threshold_bytes=0,
-                callback=callback,
-            )
+            if not separate_external_data:
+                ir.save(
+                    model,
+                    out_path,
+                    external_data=os.path.basename(data_path),
+                    size_threshold_bytes=0,
+                    callback=callback,
+                )
+            else:
+                initializers = [
+                    initializer
+                    for graph in model.graphs()
+                    for initializer in graph.initializers.values()
+                    if initializer.const_value is not None
+                ]
+                initializers_by_name = {initializer.name: initializer for initializer in initializers}
+                missing_initializers = separate_external_data.keys() - initializers_by_name.keys()
+                if missing_initializers:
+                    raise ValueError(
+                        f"Initializers configured for separate external data were not found: {sorted(missing_initializers)}"
+                    )
+
+                original_tensors = [initializer.const_value for initializer in initializers]
+                try:
+                    grouped_initializers = {}
+                    for initializer_name, relative_path in separate_external_data.items():
+                        if initializer_name in external_data_tensors:
+                            external_tensor = external_data_tensors[initializer_name]
+                            if external_tensor.location != relative_path:
+                                raise ValueError(f"External data location mismatch for {initializer_name}")
+                            initializers_by_name[initializer_name].const_value = external_tensor
+                            continue
+                        grouped_initializers.setdefault(relative_path, []).append(initializers_by_name[initializer_name])
+
+                    separately_saved_names = set(separate_external_data)
+                    grouped_initializers[os.path.basename(data_path)] = [
+                        initializer
+                        for initializer in initializers
+                        if initializer.name not in separately_saved_names
+                    ]
+                    pbar.total = len(initializers)
+                    total_set = True
+                    for relative_path, initializer_group in grouped_initializers.items():
+                        external_tensors = ir.external_data.convert_tensors_to_external(
+                            [initializer.const_value for initializer in initializer_group],
+                            base_dir=out_dir,
+                            relative_path=relative_path,
+                            callback=callback,
+                        )
+                        for initializer, external_tensor in zip(initializer_group, external_tensors, strict=True):
+                            initializer.const_value = external_tensor
+                    ir.save(model, out_path)
+                finally:
+                    for initializer, tensor in zip(initializers, original_tensors, strict=True):
+                        initializer.const_value = tensor
 
         # Delete temporary cache dir if empty. The MTP head shares the main model's
         # cache dir and saves afterwards, so it may already be gone.
@@ -2151,7 +2234,17 @@ class Model:
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
-    def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
+    def make_node(
+        self,
+        op_type,
+        inputs: Sequence[str],
+        outputs: Sequence[str],
+        *,
+        name: str,
+        domain="",
+        metadata_props: dict[str, str] | None = None,
+        **kwargs,
+    ):
         assert name, "Node name must be provided"
         if name in self.node_names:
             # Note:
@@ -2173,7 +2266,15 @@ class Model:
         # Resolve values from names
         input_values = [self.make_value(name) for name in inputs]
         output_values = [self.make_value(name) for name in outputs]
-        node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
+        node = ir.node(
+            op_type,
+            inputs=input_values,
+            attributes=kwargs,
+            domain=domain,
+            outputs=output_values,
+            name=name,
+            metadata_props=metadata_props,
+        )
         self.model.graph.append(node)
         self.node_names.add(name)
 
@@ -2274,8 +2375,8 @@ class Model:
         self.make_value(outputs[0], dtype, shape=shape)
         self.make_value(outputs[1], ir.DataType.INT64, shape=shape)
 
-    def make_reshape(self, name, inputs, dtype, shape):
-        output = f"{name}/output_0"
+    def make_reshape(self, name, inputs, dtype, shape, output_name=None):
+        output = f"{name}/output_0" if output_name is None else output_name
         self.make_node("Reshape", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
@@ -2531,6 +2632,7 @@ class Model:
         state_update_capacity = kwargs.get("state_update_capacity", 0)
         if state_update_capacity:
             inputs.append(kwargs["state_update_capture_count"])
+            inputs.append(kwargs.get("state_update_active", ""))
 
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
@@ -2538,7 +2640,10 @@ class Model:
         if state_update_capacity:
             outputs.append(kwargs["state_update_value"])
 
-        attributes = {"activation": kwargs.get("activation", "silu")}
+        attributes = {
+            "activation": kwargs.get("activation", "silu"),
+            "dilation": kwargs.get("dilation", 1),
+        }
         if state_update_capacity:
             attributes["state_update_capacity"] = state_update_capacity
         self.make_node(
@@ -2740,7 +2845,8 @@ class Model:
         seq_dim = kwargs.get("seq_dim", "sequence_length")
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
-        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim))
+        output_shape = kwargs.get("output_shape", self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim))
+        self.make_value(output, self.io_dtype, shape=output_shape)
 
         return name
 
@@ -2935,53 +3041,50 @@ class Model:
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_packed_matmul_class(self, q_matmul, k_matmul, v_matmul):
+    def make_packed_matmul_class(self, *matmuls):
         if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
-            return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
+            return self.make_packed_matmul_float_class(*matmuls)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
-            return self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)
+            return self.make_packed_matmul_int4_class(*matmuls)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_packed_matmul_float_class(self, q_matmul, k_matmul, v_matmul, **kwargs):
-        # N_q = num_attention_heads * head_size, N_kv = num_key_value_heads * head_size, H = hidden_size
-        # Combine 3 MatMuls of shape N_q x H, N_kv x H, N_kv x H into 1 packed MatMul of shape (N_q+N_kv+N_kv)xH
-        #
-        # Note: Packed MatMul is of shape (N_q+N_kv+N_kv)xH instead of Hx(N_q+N_kv+N_kv) because `make_matmul` will
-        # apply a transpose before saving
-        N_q, H = q_matmul.weight.shape
-        N_kv, _ = k_matmul.weight.shape
+    def make_packed_matmul_float_class(self, *matmuls, **kwargs):
+        if not matmuls:
+            raise ValueError("Packed MatMul requires at least one projection.")
 
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
-                self.weight = torch.cat([q_matmul.weight, k_matmul.weight, v_matmul.weight], dim=0).reshape(
-                    N_q + N_kv + N_kv, H
-                )
+                self.weight = torch.cat([matmul.weight for matmul in matmuls], dim=0)
 
         matmul = PackedMatMul()
         return matmul
 
-    def make_packed_matmul_int4_class(self, q_matmul, k_matmul, v_matmul):
-        if not hasattr(q_matmul, "qweight"):
-            return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
+    def make_packed_matmul_int4_class(self, *matmuls):
+        if not matmuls:
+            raise ValueError("Packed MatMul requires at least one projection.")
+        if not hasattr(matmuls[0], "qweight"):
+            return self.make_packed_matmul_float_class(*matmuls)
+
+        first = matmuls[0]
+        if any(matmul.bits != first.bits for matmul in matmuls[1:]):
+            raise ValueError("All MatMuls must have the same bits for packed MatMul.")
+        if any(matmul.group_size != first.group_size for matmul in matmuls[1:]):
+            raise ValueError("All MatMuls must have the same group size for packed MatMul.")
 
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
-                if q_matmul.bits != k_matmul.bits or q_matmul.bits != v_matmul.bits:
-                    raise ValueError("All MatMuls must have the same bits for packed MatMul.")
-                if q_matmul.group_size != k_matmul.group_size or q_matmul.group_size != v_matmul.group_size:
-                    raise ValueError("All MatMuls must have the same group size for packed MatMul.")
-                self.qweight = torch.cat([q_matmul.qweight, k_matmul.qweight, v_matmul.qweight], dim=0)
-                self.scales = torch.cat([q_matmul.scales, k_matmul.scales, v_matmul.scales], dim=0)
-                self.qzeros = torch.cat([q_matmul.qzeros, k_matmul.qzeros, v_matmul.qzeros], dim=0)
-                self.g_idx = q_matmul.g_idx
+                self.qweight = torch.cat([matmul.qweight for matmul in matmuls], dim=0)
+                self.scales = torch.cat([matmul.scales for matmul in matmuls], dim=0)
+                self.qzeros = torch.cat([matmul.qzeros for matmul in matmuls], dim=0)
+                self.g_idx = first.g_idx
 
-                self.in_features = q_matmul.in_features
-                self.out_features = q_matmul.out_features + k_matmul.out_features + v_matmul.out_features
-                self.bits = q_matmul.bits
-                self.group_size = q_matmul.group_size
+                self.in_features = first.in_features
+                self.out_features = sum(matmul.out_features for matmul in matmuls)
+                self.bits = first.bits
+                self.group_size = first.group_size
 
         matmul = PackedMatMul()
         return matmul
@@ -3067,6 +3170,11 @@ class Model:
                 outputs=[gather_output],
                 name=gather_name,
                 domain="com.microsoft",
+                metadata_props=(
+                    {"layer_ann": "cpu_embedding"}
+                    if getattr(self, "use_cpu_embedding_gather", False)
+                    else None
+                ),
                 bits=bits,
                 block_size=block_size,
                 gather_axis=0,
@@ -3101,13 +3209,63 @@ class Model:
             gather_output = f"{gather_name}/output_0"
             self.make_node("Gather", inputs=[transpose_output, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
 
+        elif (
+            getattr(self, "quant_attrs", {}).get("embedding_bits") == 8
+            and "Gather" in self.quant_attrs["op_types_to_quantize"]
+            and f"{basename}/Gather" not in self.quant_attrs["nodes_to_exclude"]
+        ):
+            if not self.quant_attrs["is_symmetric"]:
+                raise NotImplementedError("Direct INT8 embedding quantization currently requires is_symmetric=true.")
+
+            block_size = int(self.quant_attrs["matmul_block_size"])
+            signed_weight, scales = CudaQuantizer.symmetric_blockwise_quantize(
+                embedding,
+                bits=8,
+                block_size=block_size,
+            )
+            quantized_weight = (signed_weight.to(torch.int16) + 128).to(torch.uint8)
+            weight_name = "model.embed_tokens.weight_Q8"
+            scales_name = "model.embed_tokens.weight_scales"
+            self.make_initializer(quantized_weight, weight_name)
+            self.make_initializer(scales, scales_name, to=self.io_dtype)
+
+            gather_name = f"{basename}/GatherBlockQuantized"
+            gather_output = f"{gather_name}/output_0"
+            self.make_node(
+                "GatherBlockQuantized",
+                inputs=[weight_name, self.input_names["input_ids"], scales_name],
+                outputs=[gather_output],
+                name=gather_name,
+                domain="com.microsoft",
+                metadata_props=(
+                    {"layer_ann": "cpu_embedding"}
+                    if getattr(self, "use_cpu_embedding_gather", False)
+                    else None
+                ),
+                bits=8,
+                block_size=block_size,
+                gather_axis=0,
+                quantize_axis=1,
+            )
+
         else:
             weight = "model.embed_tokens.weight"
             self.make_initializer(embedding, weight, to=self.io_dtype)
 
             gather_name = f"{basename}/Gather"
             gather_output = f"{gather_name}/output_0"
-            self.make_node("Gather", inputs=[weight, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
+            metadata_props = (
+                {"layer_ann": "cpu_embedding"}
+                if getattr(self, "use_cpu_embedding_gather", False)
+                else None
+            )
+            self.make_node(
+                "Gather",
+                inputs=[weight, self.input_names["input_ids"]],
+                outputs=[gather_output],
+                name=gather_name,
+                metadata_props=metadata_props,
+            )
 
         return gather_output
 
@@ -4397,21 +4555,41 @@ class Model:
         dt_bias = kwargs.get("dt_bias", "")
         if bool(a_log) != bool(dt_bias):
             raise ValueError("a_log and dt_bias must be set together")
-        if a_log:
+        state_update_capacity = kwargs.get("state_update_capacity", 0)
+        if a_log or state_update_capacity:
             inputs.extend([a_log, dt_bias])
+        if state_update_capacity:
+            inputs.extend(
+                [
+                    kwargs["state_update_capture_count"],
+                    kwargs["state_update_active"],
+                ]
+            )
 
         output = f"{name}/output_0"
         final_state = kwargs["final_state"]
+        outputs = [output, final_state]
+        if state_update_capacity:
+            outputs.append(kwargs["state_update_capsule"])
+        attributes = self.make_gated_delta_net_attributes(kwargs)
+        if state_update_capacity:
+            attributes["state_update_capacity"] = state_update_capacity
         self.make_node(
             "GatedDeltaNet",
             inputs=inputs,
-            outputs=[output, final_state],
+            outputs=outputs,
             name=name,
             domain="com.microsoft",
-            **self.make_gated_delta_net_attributes(kwargs),
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
+        if state_update_capacity:
+            self.make_value(
+                kwargs["state_update_capsule"],
+                ir.DataType.FLOAT,
+                shape=kwargs["state_update_capsule_shape"],
+            )
 
     def make_varlen_gated_delta_net(self, name, **kwargs):
         """Emit packed GatedDeltaNet with optional compact transition capsules."""
@@ -5226,17 +5404,17 @@ class Model:
         #    DownProjMatMul
 
         if hasattr(mlp.gate_proj, "base_layer") or hasattr(mlp.up_proj, "base_layer"):
-            raise ValueError("fuse_mlp_gate_up does not support adapted gate/up projections.")
+            raise ValueError("MLP gate/up fusion does not support adapted gate/up projections.")
         if getattr(mlp.gate_proj, "quant_type", "none") != "none" or getattr(
             mlp.up_proj, "quant_type", "none"
         ) != "none":
-            raise ValueError("fuse_mlp_gate_up requires unpacked gate/up projections.")
+            raise ValueError("MLP gate/up fusion requires unpacked gate/up projections.")
         if not mlp.gate_proj.weight.is_floating_point() or not mlp.up_proj.weight.is_floating_point():
-            raise ValueError("fuse_mlp_gate_up requires floating-point gate/up projections.")
+            raise ValueError("MLP gate/up fusion requires floating-point gate/up projections.")
         expected_shape = (self.intermediate_size, self.hidden_size)
         if tuple(mlp.gate_proj.weight.shape) != expected_shape or tuple(mlp.up_proj.weight.shape) != expected_shape:
             raise ValueError(
-                f"fuse_mlp_gate_up requires gate/up weights with shape {expected_shape}, got "
+                f"MLP gate/up fusion requires gate/up weights with shape {expected_shape}, got "
                 f"{tuple(mlp.gate_proj.weight.shape)} and {tuple(mlp.up_proj.weight.shape)}."
             )
 
@@ -5248,8 +5426,8 @@ class Model:
         up_excluded = getattr(mlp.up_proj, "exclude_from_quantization", False) or up_basename in excluded_nodes
         if gate_excluded != up_excluded:
             raise ValueError(
-                "fuse_mlp_gate_up cannot preserve a quantization exclusion that applies to only one of "
-                f"'{gate_basename}' and '{up_basename}'. Exclude both projections or disable fusion."
+                "MLP gate/up fusion cannot preserve a quantization exclusion that applies to only one of "
+                f"'{gate_basename}' and '{up_basename}'. Exclude both projections."
             )
 
         gate_bias = mlp.gate_proj.bias
@@ -5257,7 +5435,7 @@ class Model:
         for name, bias in (("gate", gate_bias), ("up", up_bias)):
             if bias is not None and tuple(bias.shape) != (self.intermediate_size,):
                 raise ValueError(
-                    f"fuse_mlp_gate_up requires the {name} bias to have shape "
+                    f"MLP gate/up fusion requires the {name} bias to have shape "
                     f"({self.intermediate_size},), got {tuple(bias.shape)}."
                 )
         bias_exists = (gate_bias is not None and torch.count_nonzero(gate_bias) > 0) or (
@@ -5421,6 +5599,8 @@ class Model:
                     f"{self.moe_attrs['quant_type']}."
                 )
             self.moe_attrs["block_size"] = experts.block_size
+            if native_quant_type == "nvfp4":
+                self.moe_attrs["weights_prepacked"] = -1
             if experts.weights_prepacked is not None:
                 self.moe_attrs["weights_prepacked"] = experts.weights_prepacked
             self.make_initializer(experts.gate_up_qweight, gate_up_name)
@@ -5631,26 +5811,15 @@ class Model:
         if "block_size" in self.moe_attrs:
             extra_kwargs["block_size"] = self.moe_attrs["block_size"]
 
-        if is_fp4:
+        if is_fp4 or quant_type == "fp8":
             # Select the MXFP4/NVFP4 kernel path; integer QMoE leaves quant_type at its default.
             extra_kwargs["quant_type"] = quant_type
-
         for attr_name in ("fc1_expert_weight_bits", "fc2_expert_weight_bits", "fc3_expert_weight_bits"):
             if attr_name in self.moe_attrs:
                 extra_kwargs[attr_name] = self.moe_attrs[attr_name]
 
-        # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout
-        # (see make_qmoe_weights, which produces the matching bytes):
-        #   -1       -> omit the attribute; the op treats weights as already
-        #               CUTLASS-prepacked, which is what the builder ships for CUDA.
-        #   1        -> weights are CUTLASS-prepacked (explicit form of the above).
-        #   0        -> weights are raw [E, N, K/pack]; the runtime PrePack hook
-        #               transforms them at load time.
-        # It is only meaningful for integer (INT4/INT8) CUDA QMoE and requires an ONNX Runtime build with
-        # the com.microsoft QMoE PrePack hook, so non-CUDA exports omit it and keep their own blockwise
-        # QMoE layout. Build separate ONNX files when CPU/WebGPU/TRT-RTX and CUDA QMoE exports are needed.
-        weights_prepacked = self.moe_attrs.get("weights_prepacked")
-        if weights_prepacked != -1 and self.ep == "cuda" and not is_fp4:
+        weights_prepacked = self.moe_attrs.get("weights_prepacked", -1)
+        if weights_prepacked != -1 and self.ep == "cuda" and (not is_fp4 or quant_type == "nvfp4"):
             extra_kwargs["weights_prepacked"] = weights_prepacked
 
         self.make_node(
@@ -6156,7 +6325,19 @@ class Model:
             )
 
         else:
-            extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
+            extra_kwargs = {}
+            if "num_hidden_layers" in self.extra_options:
+                hf_config = self.hf_load_config
+                if hasattr(hf_config, "text_config"):
+                    hf_config.num_hidden_layers = self.num_layers
+                    hf_config.text_config.num_hidden_layers = self.num_layers
+                    if getattr(hf_config, "layer_types", None) is not None:
+                        hf_config.layer_types = hf_config.layer_types[: self.num_layers]
+                    if getattr(hf_config.text_config, "layer_types", None) is not None:
+                        hf_config.text_config.layer_types = hf_config.text_config.layer_types[: self.num_layers]
+                    extra_kwargs["config"] = hf_config
+                else:
+                    extra_kwargs["num_hidden_layers"] = self.num_layers
 
             # Get auto class to load PyTorch model based on model type
             auto_class_map = {
@@ -6175,9 +6356,13 @@ class Model:
                 "qwen3_5": Qwen3_5ForConditionalGeneration,
                 "Whisper": AutoModelForSpeechSeq2Seq,
             }
+            if "qwen4_exp" in self.model_type.lower():
+                from transformers import Qwen4ExpForConditionalGeneration
+
+                auto_class_map["qwen4_exp"] = Qwen4ExpForConditionalGeneration
             auto_class = AutoModelForCausalLM
             for k, v in auto_class_map.items():
-                if k in self.model_type:
+                if k.lower() in self.model_type.lower():
                     auto_class = v
                     break
 

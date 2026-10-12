@@ -27,7 +27,8 @@ sys.path.insert(0, str(MODELS_DIR))
 
 
 def _load_base_module():
-    sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package = sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package.__path__ = [str(MODELS_DIR)]
     builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
     builders_package.__path__ = [str(BUILDERS_DIR)]
 
@@ -435,6 +436,52 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
     assert _FakeQuantizer.captured is not None
     assert _FakeQuantizer.captured["bits"] == bits
     assert result == "quantized-proto"
+
+
+@pytest.mark.parametrize("mode,block_size,expected", [(1, 32, 1), (2, 64, 2), (2, 32, 0)])
+def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mode, block_size, expected):
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.matmul_attrs = {"weights_prepacked": mode}
+    model.quant_attrs = {"is_symmetric": True}
+
+    weight = np.zeros((64, 1, block_size // 2), dtype=np.uint8)
+    node = onnx.helper.make_node(
+        "MatMulNBits",
+        ["input", "weight", "scale", "zero_point"],
+        ["output"],
+        domain="com.microsoft",
+        bits=4,
+        block_size=block_size,
+        K=block_size,
+        N=64,
+    )
+    graph = onnx.helper.make_graph(
+        [node],
+        "test",
+        [],
+        [],
+        [
+            onnx.numpy_helper.from_array(weight, "weight"),
+            onnx.numpy_helper.from_array(np.full((64, 1), 8, dtype=np.uint8), "zero_point"),
+        ],
+    )
+    model_proto = onnx.helper.make_model(graph)
+    monkeypatch.setattr(
+        base_module.CudaQuantizer,
+        "prepack_matmulnbits_weight",
+        lambda value, n, k, bits, force_arch: value,
+    )
+
+    model.prepack_matmulnbits_weights(model_proto)
+
+    attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in model_proto.graph.node[0].attribute}
+    assert attrs.get("weight_prepacked", 0) == expected
+    assert model_proto.graph.node[0].input[3] == ("" if expected else "zero_point")
+    assert ("zero_point" in {initializer.name for initializer in model_proto.graph.initializer}) == (not expected)
+    if not expected:
+        np.testing.assert_array_equal(onnx.numpy_helper.to_array(model_proto.graph.initializer[0]), weight)
+    model_proto.SerializeToString()
 
 
 def _make_matmul_chain(node_names, width=64):

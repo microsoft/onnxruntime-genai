@@ -14,6 +14,7 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from transformers import LlamaConfig
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
@@ -38,6 +39,85 @@ Qwen25VLTextModel = qwen_module.Qwen25VLTextModel
 Qwen3VLTextModel = qwen_module.Qwen3VLTextModel
 Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen35MoETextModel = qwen_module.Qwen35MoETextModel
+
+
+def test_base_mlp_fusion_is_always_enabled():
+    config = LlamaConfig(
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+        max_position_embeddings=128,
+        architectures=["LlamaForCausalLM"],
+    )
+
+    model = Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", "", {})
+
+    assert model.mlp_attrs["fuse_gate_up"] is True
+
+
+@pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "trt-rtx"])
+@pytest.mark.parametrize("capability,mode", [((7, 5), 0), ((8, 0), 1), ((8, 6), 1), ((8, 9), 1), ((9, 0), 2)])
+def test_base_weight_packing_uses_selected_gpu(monkeypatch, provider, capability, mode):
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+    queried_devices = []
+
+    def get_capability(device):
+        queried_devices.append(device)
+        return capability
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", get_capability)
+    source_config = base_module.QuantConfig.from_dict({})
+    model = Model.__new__(Model)
+    model.ep = provider
+    model.onnx_dtype = ir.DataType.INT4
+    model.extra_options = {"_quant_config": source_config}
+
+    model.make_quant_config_init()
+
+    expected_mode = mode if provider == "cuda" else 0
+    assert queried_devices == ([3] if provider == "cuda" else [])
+    assert model.quant_config.runtime.matmulnbits_weights_prepacked == expected_mode
+    assert model.quant_config.moe.weights_prepacked == int(expected_mode > 0)
+    assert source_config.moe.weights_prepacked == -1
+    assert source_config.runtime.matmulnbits_weights_prepacked == 0
+
+
+@pytest.mark.parametrize("available,hip", [(False, None), (True, "6.0")])
+def test_base_weight_packing_requires_nvidia_cuda(monkeypatch, available, hip):
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: available)
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.quant_config = base_module.QuantConfig.from_dict({})
+
+    model.make_weight_packing_init()
+
+    assert model.quant_config.runtime.matmulnbits_weights_prepacked == 0
+    assert model.quant_config.moe.weights_prepacked == 0
+
+
+def test_base_weight_packing_handles_detection_failure(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+
+    def fail_capability(device):
+        raise RuntimeError("CUDA driver unavailable")
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", fail_capability)
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.quant_config = base_module.QuantConfig.from_dict({})
+
+    model.make_weight_packing_init()
+
+    assert model.quant_config.runtime.matmulnbits_weights_prepacked == 0
+    assert model.quant_config.moe.weights_prepacked == 0
 
 
 def test_base_matmul_honors_module_quantization_exclusion(monkeypatch):
@@ -373,7 +453,6 @@ def test_qwen35_configures_interleaved_partial_mrope(monkeypatch):
     assert model.rope_attrs["mrope_layout"] == 1
     assert model.rope_attrs["rotary_embedding_dim"] == 32
     assert model.rope_attrs["cast"] == {"use_fp32": True, "root_input": True, "output_0": True}
-    assert model.linear_attn_op == "linear_attention"
     assert not model.is_fused_rope_supported()
 
 
@@ -431,6 +510,7 @@ def test_qwen35_genai_config_includes_recurrent_cache_names(monkeypatch, tmp_pat
 
     assert decoder["inputs"]["past_conv_names"] == "past.%d.conv"
     assert decoder["inputs"]["past_recurrent_names"] == "past.%d.recurrent"
+    assert decoder["session_options"]["session.use_device_allocator_for_initializers"] == "1"
     assert decoder["outputs"]["present_conv_names"] == "present.%d.conv"
     assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"
     assert model_config["bot_token_id"] == 10
@@ -632,6 +712,7 @@ def test_qwen35_attention_output_proj_gates_before_base_projection(
     model.attention_attrs = {
         "op_type": "GroupQueryAttention",
         "gate_path": "gate",
+        "o_path": "/model/layers.3/attn/GroupQueryAttention/output_0",
     }
     calls = []
 
@@ -756,8 +837,8 @@ def test_linear_attention_gate_emitter():
     ]
 
 
-def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
-    model = Qwen35TextModel.__new__(Qwen35TextModel)
+def test_qwen38_gated_delta_net_expansion_uses_linear_attention_gate(monkeypatch):
+    model = qwen_module.Qwen4ExpTextModel.__new__(qwen_module.Qwen4ExpTextModel)
     model.io_dtype = ir.DataType.FLOAT16
     model.linear_key_dim = 8
     model.linear_value_dim = 16
@@ -770,7 +851,7 @@ def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
     initializers = []
     gate_calls = []
     monkeypatch.setattr(model, "make_split", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(model, "make_l2_normalize", lambda name, _input: f"{name}/output_0")
+    monkeypatch.setattr(model, "make_l2_normalize_expansion", lambda name, _input: f"{name}/output_0")
     monkeypatch.setattr(model, "make_mul", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         model,
@@ -783,7 +864,7 @@ def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
         lambda name, **kwargs: gate_calls.append((name, kwargs)),
     )
 
-    outputs = model.make_linear_attention_normalize_and_gate(
+    outputs = model.make_gated_delta_net_gates_expansion(
         3,
         attention,
         "conv_output",
