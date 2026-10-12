@@ -68,8 +68,9 @@ def _export_model(output_dir, precision, ep, paged=True, structured=False, model
 def _cache_shape(node_arg, paged=True, head_size=None):
     shape = node_arg.shape
     if node_arg.name.endswith((".conv", ".recurrent")):
+        assert len(shape) == 4, f"Unexpected fixed state rank for {node_arg.name}: {shape}"
         assert all(isinstance(dim, int) for dim in shape[1:]), f"Unexpected fixed state shape: {shape}"
-        return (1, *shape[1:])
+        return (1, shape[1], shape[2], shape[3])
     if not paged:
         return (1, shape[1], 0, head_size)
     assert len(shape) == 4, f"Unexpected paged KV-cache shape for {node_arg.name}: {shape}"
