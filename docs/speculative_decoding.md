@@ -201,7 +201,9 @@ preserving cold-head behavior for existing exports. When enabled, the main outpu
 must expose `[1, S, H]` with one hidden row per prompt token. The runtime primes the
 head with `tokens[:, 1:]` paired with `main_hidden[:, :-1]`, leaving its cache at
 prompt length minus one. Chunked prefill carries the previous chunk's final hidden
-row into the next head call; a one-token prompt needs no head prefill.
+row into the next head call; a one-token prompt needs no head prefill. This is a
+standalone `MtpGenerator` option; Engine-hosted MTP uses a different packed 2-D
+hidden-state contract.
 
 See [examples/python/qwen-3.6-mtp.md](../examples/python/qwen-3.6-mtp.md) for the full export
 recipe and [examples/python/qwen-3.6-mtp.py](../examples/python/qwen-3.6-mtp.py) for a runnable

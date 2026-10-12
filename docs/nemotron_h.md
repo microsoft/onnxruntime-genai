@@ -108,3 +108,12 @@ do not establish readiness of that published head. Short token agreement
 and a loadable package are insufficient to clear full numerical and longer
 generation gates. Keep the exporter package's `runtime_unvalidated` status
 until those gates and real-weight runtime generation pass.
+
+A native CUDA probe of that same pinned export reached 257 total tokens with
+ordinary greedy decoding, but N1 MTP diverged at token index 51. A subsequent
+64-token control confirmed the same divergence for both N1 and N2. A separate
+target-only diagnostic reproduced the difference without running the head:
+with the same 50-token cached prefix, width 1 predicted token 20166 while widths
+2 and 3 predicted token 9314 for the first row. Target single-token versus wide
+forward consistency remains a blocking numerical gate, not a reason to add
+compensating head alignment or acceptance logic.
