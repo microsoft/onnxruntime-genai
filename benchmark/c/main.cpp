@@ -261,9 +261,8 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   auto prompt_sequences = OgaSequences::Create();
   if (opts.use_random_tokens) {
-    std::random_device rd;
-    std::mt19937 rng(rd());
-    std::uniform_int_distribution<int32_t> dist(0, 99);
+    std::mt19937 rng(0);
+    std::uniform_int_distribution<int32_t> dist(1, 99);
     for (size_t i = 0; i < opts.batch_size; ++i) {
       std::vector<int32_t> random_tokens(num_prompt_tokens);
       std::generate(random_tokens.begin(), random_tokens.end(), [&]() {
@@ -311,7 +310,7 @@ void RunBenchmark(const benchmark::Options& opts) {
     if (opts.verbose && i == 0) {
       // show prompt and output on first iteration
       if (opts.use_random_tokens) {
-        std::cout << "[PROMPT] random token IDs in [0, 99], batch_size=" << opts.batch_size
+        std::cout << "[PROMPT] random token IDs in [1, 99], batch_size=" << opts.batch_size
                   << ", tokens per sequence=" << num_prompt_tokens << "\n";
       } else {
         std::cout << "[PROMPT BEGIN]" << prompt << "[PROMPT END]\n";
