@@ -277,3 +277,7 @@ N1/N2, chunk sizes 0/1/2, short prompts and reset. Greedy acceptance/rejection
 assertions remain strict; sampling coverage checks execution/lifetime behavior,
 not distribution parity. The coupled 23 public/35 engine controls and the expanded
 zero-error CUDA memcheck pass, as does the default-SDK CUDA build and wheel.
+
+The Nemotron `ModelType` classification assertions now reside in the internal
+`engine_unit_tests` target rather than public-API `unit_tests`. The assertions are
+unchanged; the same 58 coupled cases now pass as 22 public and 36 internal tests.
