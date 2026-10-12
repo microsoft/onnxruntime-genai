@@ -101,7 +101,7 @@ set(JAVA_DEPENDS onnxruntime-genai)
 set(GRADLE_EXECUTABLE "${JAVA_SRC_ROOT}/gradlew")
 
 file(GLOB_RECURSE genai4j_gradle_files "${JAVA_SRC_ROOT}/*.gradle")
-file(GLOB_RECURSE genai4j_srcs "${JAVA_SRC_ROOT}/src/main/java/ai/onnxruntime-genai/*.java")
+file(GLOB_RECURSE genai4j_srcs "${JAVA_SRC_ROOT}/src/main/java/ai/onnxruntime/genai/*.java")
 
 # set gradle options that are used with multiple gradle commands
 if(WIN32)

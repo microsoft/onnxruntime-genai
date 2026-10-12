@@ -5,6 +5,6 @@ import org.junit.platform.launcher.TestPlan;
 
 public class GenAITestExecutionListener implements TestExecutionListener {
   public void testPlanExecutionFinished(TestPlan testPlan) {
-    GenAI.shutdown();
+    GenAI.shutdownIfLoaded();
   }
 }
