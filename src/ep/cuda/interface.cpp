@@ -657,9 +657,7 @@ struct CudaBatchedSampler final : BatchedSampler {
 };
 
 struct CudaInterfaceImplBase : DeviceInterface {
-  CudaInterfaceImplBase() {
-    g_stream.Create();
-  }
+  CudaInterfaceImplBase() = default;
 
   ~CudaInterfaceImplBase() {
   }
@@ -667,6 +665,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
+    CUDA_CHECK(cudaSetDevice(allocator.GetInfo().GetDeviceId()));
+    g_stream.Create();
   }
 
   Ort::Allocator& GetAllocator() override {

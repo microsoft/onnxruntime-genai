@@ -353,15 +353,18 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const std::vector<std::string> providers{provider_name};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
+  session_options->AddConfigEntry("session.disable_cpu_ep_fallback", "1");
 
-  const auto trivial_model = GetTrivialModel();
-  allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
+  const auto bootstrap_model = GetAllocatorBootstrapModel();
+  allocator.session_ =
+      OrtSession::Create(GetOrtEnv(), bootstrap_model.data(), bootstrap_model.size(), session_options.get());
 
-  // Bind the allocator to the selected device rather than assuming device 0.
-  allocator.device_id_ = device.GetDeviceId(user_provider_options);
   try {
-    auto memory_info = device.GetMemoryInfo();
-    allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
+    const OrtMemoryInfo* output_memory_info{};
+    Ort::ThrowOnError(Ort::api->SessionGetMemoryInfoForOutputs(
+        allocator.session_.get(), &output_memory_info, 1));
+    allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *output_memory_info);
+    allocator.device_id_ = allocator.allocator_->GetInfo().GetDeviceId();
   } catch (const Ort::Exception& e) {
     throw std::runtime_error("Failed to create allocator for " + to_string(type) + ": " + std::string(e.what()));
   }
