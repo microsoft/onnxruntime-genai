@@ -117,8 +117,8 @@ to 2048. Both limits are positive and independent.
 
 ### Prefix caching
 
-Dynamic batching reuses complete prompt blocks from earlier requests by default.
-Set `engine.dynamic_batching.prefix_caching` to `false` to disable it. A lookup
+Dynamic batching does not cache prefixes by default.
+Set `engine.dynamic_batching.prefix_caching` to `true` to opt in. A lookup
 compares both the token contents and the complete parent-block identity; hash
 equality alone is never accepted as a match. The final prompt token always runs
 through the model, and partial blocks are never shared.
@@ -207,12 +207,87 @@ sliding-window KV rings and auxiliary caches that mirror every target block when
 `prefix_caching` is explicitly set to `true`. Existing configurations that omit
 the setting keep loading with caching disabled for those layouts, and builders
 emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
-can coexist with target prefix caching. For a windowed DFlash 2 drafter, one
+can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
 optional ring checkpoint can be attached to the exact indexed target boundary
 after its fixed-state checkpoint and the complete drafter proposal succeed.
 The ring is restored into newly allocated drafter blocks before a cached
-request joins at a nonzero position. An unleased older ring checkpoint may be
-replaced at a later boundary without evicting target blocks or fixed state.
+request joins at a nonzero position.
+
+### Tiered DFlash snapshot storage
+
+Draft snapshots require a separate opt-in byte budget. Configure
+`engine.dynamic_batching.dflash2_snapshot_cache` with any combination of
+`vram_bytes`, `ram_bytes`, and `disk_bytes`; omitted limits default to zero and
+disable that tier. These limits cover **DFlash ring payloads only**, not retained
+target KV, hybrid fixed-state checkpoints, active drafter rings, or total process
+memory. Target KV and fixed state remain device-resident under their existing
+budgets. CPU execution supports RAM and disk; VRAM storage requires CUDA.
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "prefix_caching": true,
+      "dflash2_max_snapshots": 8,
+      "dflash2_snapshot_cache": {
+        "vram_bytes": 104857600,
+        "ram_bytes": 209715200,
+        "disk_bytes": 419430400
+      }
+    }
+  }
+}
+```
+
+`dflash2_max_snapshots` defaults to one and is an additional count cap across all
+tiers, not an alternative to byte budgets. Zero disables snapshots. The count is
+also capped by the hybrid fixed-state checkpoint capacity (`max_batch_size`).
+Snapshot counts must be integers from zero through 2147483647; byte limits must
+be non-negative exact integers no greater than 9007199254740991 and fit the
+platform's `size_t`. Prefix caching may be enabled without enabling any draft
+snapshot tier.
+
+`PrefixSnapshotCache` owns storage policy, while `PrefixCache` owns prefix identity.
+New snapshots enter the fastest tier with available capacity. Under pressure,
+unleased least-recently-used payloads are demoted from VRAM to RAM to disk;
+when no lower tier can retain them they are evicted. Committed restoration
+refreshes eviction recency; it does not promote a payload to a faster tier.
+At the count cap, the oldest unleased snapshot is replaced, reusing compatible
+storage in its current tier without reusing the old checkpoint identity. A leased snapshot cannot
+move or be overwritten, and its bytes continue counting against its tier.
+If all suitable capacity is leased, publication is refused and counted in the
+existing prefix-publication refusal metric.
+
+VRAM snapshot capacity is rounded down to whole rings and reserved from the
+shared target/drafter KV budget before target sizing. It is reduced when necessary
+to preserve at least one target block, for both `num_blocks` and automatic sizing.
+RAM and disk do not consume that GPU reserve. CUDA RAM payloads use pinned memory.
+Capture and restore transfer only selected ring blocks and synchronize before
+publication. Tier moves copy into separately budgeted destination storage before
+releasing the source. A failed move leaves its source intact; completed independent
+demotions remain valid even if a later operation fails.
+
+Disk spill files are uniquely owned, Engine-local temporary payloads, never a persistent
+cache. `directory` optionally names an existing parent directory; otherwise the
+system temporary directory is used. Only the manager's own generated files and
+directories are removed after their final owners release them. A lease may outlive
+the drafter, including its disk storage. Disk transfer scratch is bounded to
+one reusable 1 MiB buffer per cache manager and is separate from retained payload budgets;
+tensor/index metadata and filesystem allocation overhead are also excluded.
+Disk I/O failures propagate explicitly; cleanup failures are logged as warnings.
+Spill directories request owner-only filesystem permissions. Windows inherits
+the parent directory's ACL, so a custom parent must restrict access appropriately.
+
+Runtime-profile overlays accept `prefix_caching`, `dflash2_max_snapshots`, and
+`dflash2_snapshot_cache`. A profile's snapshot-cache object replaces the base
+object completely, so omitted tier limits disable those tiers in that profile.
+
+The storage manager is deliberately independent of token identity and tensor
+semantics. Extending it to target KV and fixed state requires a coordinated
+checkpoint bundle, physical-block reallocation on restore, per-component lease
+protection, and transactional publication of the complete bundle. This PR does
+not offload those components or claim its draft budgets bound the entire prefix.
+
 If the matching draft checkpoint is absent, the request retains the full
 target hit and runs target-only until the windowed drafter has rebuilt its context.
 Full-attention DSpark remains target-only

@@ -13,16 +13,15 @@
 #include "models/cpu_embedding.h"
 #include "engine/graph_annotation_ids.h"
 #include "decoding/speculative_sampling.h"
+#include "engine/prefix-snapshot-cache.h"
 
 namespace Generators {
 
 struct Request;
 
-struct Dflash2PrefixCheckpoint {
+struct Dflash2PrefixCheckpoint : PrefixSnapshotCache::Entry {
   size_t token_count{};
   size_t ring_blocks{};
-  std::vector<std::shared_ptr<void>> host_buffers;
-  std::vector<std::unique_ptr<Tensor>> caches;
 };
 
 void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destination_blocks,
@@ -216,9 +215,7 @@ struct Dflash2Drafter {
   // Whether the drafter can carry this feed's request, admitting it to the pool when it can.
   bool Admit(const Feed& feed);
   bool RestorePrefix(const Feed& feed);
-  std::weak_ptr<const Dflash2PrefixCheckpoint> prefix_checkpoint_;
-  // One reusable ring. Checkpoints share ownership so a lease may outlive the drafter.
-  std::vector<std::shared_ptr<void>> prefix_host_buffers_;
+  std::unique_ptr<PrefixSnapshotCache> prefix_snapshot_cache_;
   // Grows a request's block list so positions [0, positions) are addressable. A windowed drafter
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);

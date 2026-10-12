@@ -158,6 +158,13 @@ merge recursively; arrays replace whole. The validator rejects absent engine or
 speculative capabilities, invalid allocation and draft limits, provider changes,
 and changes to graph-required session options.
 
+Prefix caching is opt-in at runtime. Structured `runtime_config.engine.dynamic_batching`
+accepts `prefix_caching`, `dflash2_max_snapshots`, and `dflash2_snapshot_cache`.
+The latter specifies independent VRAM, RAM, and ephemeral disk budgets for draft
+ring snapshots, not target KV or fixed state. The count setting remains an
+additional cap. See [tiered snapshot configuration](../../../../docs/paged_attention_engine.md#tiered-dflash-snapshot-storage)
+for limits, policy, and a complete runtime JSON example.
+
 For memory-dependent INT4/INT8 KV-cache graphs that share external weights, use
 the [KV-cache variant authoring workflow](../../../../docs/ModelBuilderConfiguration.md#authoring-kv-cache-variants).
 The supported `KVCacheVariant` API requires source and output graphs in the same

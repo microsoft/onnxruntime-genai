@@ -843,6 +843,7 @@ TEST(PagedKeyValueCacheManifestTest, RemovalReusesCommittedSlidingWindowCapacity
 
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsSlidingWindowCache) {
   auto model = LoadSyntheticPagedModel();
+  model->config_->engine.dynamic_batching->prefix_caching = true;
   model->config_->engine.dynamic_batching->prefix_caching_explicitly_set = true;
   auto& decoder = model->config_->model.decoder;
   decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
@@ -862,7 +863,7 @@ TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowC
   decoder.inputs.block_table_windowed = decoder.inputs.block_table;
   model->config_->search.chunk_size = 4;
 
-  EXPECT_TRUE(model->config_->engine.dynamic_batching->prefix_caching);
+  EXPECT_FALSE(model->config_->engine.dynamic_batching->prefix_caching);
   EXPECT_FALSE(ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0));
   auto cache = MakePagedCache(model);
 
@@ -883,6 +884,7 @@ TEST(PagedKeyValueCacheManifestTest, SingleBlockPoolKeepsPrefixCachingEnabled) {
   auto model = LoadSyntheticPagedModel();
   auto& batching = *model->config_->engine.dynamic_batching;
   batching.num_blocks = 1;
+  batching.prefix_caching = true;
 
   auto cache = MakePagedCache(model);
 
@@ -893,6 +895,7 @@ TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsDsparkAuxiliaryState) {
   auto model = LoadSyntheticPagedModel();
   auto& batching = *model->config_->engine.dynamic_batching;
   batching.prefix_caching_explicitly_set = true;
+  batching.prefix_caching = true;
   model->config_->model.dflash2.filename = "dspark.onnx";
   model->config_->model.dflash2.is_dspark = true;
 
@@ -942,9 +945,10 @@ TEST(PagedKeyValueCacheManifestTest, OptionalDraftCheckpointDoesNotExhaustHybrid
   EXPECT_EQ(manager->Snapshot().total_blocks, 4u);
   manager.reset();
 
+  batching.dflash2_snapshot_cache.ram_bytes = 2 * block_bytes;
   manager = CacheManager::Create(model, 0, 0, 2 * block_bytes, &enabled);
   EXPECT_TRUE(enabled);
-  EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
+  EXPECT_EQ(manager->Snapshot().total_blocks, 4u);
 }
 
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {

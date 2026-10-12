@@ -129,6 +129,8 @@ struct CacheManager {
     return false;
   }
   virtual void DropUnleasedDraftCheckpoints() {}
+  // Effective Engine-local reservation; the configured model limit remains unchanged.
+  virtual size_t DraftCheckpointVramBytes() const noexcept { return 0; }
   virtual void RecordPrefixPublicationRefusal() noexcept {}
   virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
 
@@ -200,6 +202,7 @@ struct PagedCacheManager : CacheManager {
                     size_t auxiliary_reserved_memory_bytes = 0,
                     size_t optional_draft_checkpoint_bytes = 0);
   bool DraftCheckpointEnabled() const noexcept { return draft_checkpoint_enabled_; }
+  size_t DraftCheckpointVramBytes() const noexcept override { return draft_checkpoint_vram_bytes_; }
 
   bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const override;
 
@@ -288,6 +291,7 @@ struct PagedCacheManager : CacheManager {
   std::unique_ptr<PagedKeyValueCache> key_value_cache_;
   std::unique_ptr<FixedStatePool> fixed_state_pool_;
   bool draft_checkpoint_enabled_{};
+  size_t draft_checkpoint_vram_bytes_{};
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
 };
 

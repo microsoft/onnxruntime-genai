@@ -133,7 +133,10 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
       match.token_count = token_count;
       match.blocks = std::move(blocks);
       match.fixed_state_checkpoint = endpoint->checkpoint;
-      match.draft_checkpoint = endpoint->draft_checkpoint;
+      if (endpoint->draft_checkpoint &&
+          endpoint->draft_checkpoint->state != PrefixSnapshotCache::State::Evicted) {
+        match.draft_checkpoint = endpoint->draft_checkpoint;
+      }
     }
     if (!match.fixed_state_checkpoint) {
       return {};
@@ -640,7 +643,8 @@ bool PrefixCache::CanAttachDraftCheckpoint(
   }
   const auto* entry = FindEntry(identity);
   return entry && entry->checkpoint && entry->checkpoint->TokenCount() == token_count &&
-         !entry->draft_checkpoint;
+         (!entry->draft_checkpoint ||
+          entry->draft_checkpoint->state == PrefixSnapshotCache::State::Evicted);
 }
 
 std::shared_ptr<const FixedStatePrefixCheckpoint> PrefixCache::DraftBoundary(
