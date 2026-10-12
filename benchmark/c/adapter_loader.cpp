@@ -184,7 +184,7 @@ std::vector<ParsedSafetensorsTensor> ParseSafetensorsHeader(std::string_view hea
     ++pos;
 
     if (name != "__metadata__") {
-      tensors.push_back(ParsedSafetensorsTensor{.name = name});
+      tensors.push_back(ParsedSafetensorsTensor{name, {}, {}, {}});
     }
 
     while (pos < header.size()) {
