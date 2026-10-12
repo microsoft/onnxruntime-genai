@@ -156,3 +156,9 @@ checkpoint still fails the full 257-token control: N1 first diverges at index
 70 with 86/131 accepted drafts, and N2 at index 100 with 107/179. All three
 sequences contain 257 tokens. Component corrections do not clear this
 generation gate; the supplied full-model reference scorecard was not rerun.
+
+The final provider also corrects negative-branch cancellation in CUDA Sigmoid,
+used by the pinned decoder's 23 FP32 router nodes. Its four independent
+precision regressions and the same 21 public, 34 engine and eight CUDA fixture
+cases pass. No full-checkpoint result after that correction is claimed:
+the 70/100 divergence above was measured before the Sigmoid correction.
