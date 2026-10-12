@@ -222,8 +222,23 @@ one target block. This applies to both explicit `num_blocks` and automatic
 `gpu_utilization_factor` sizing; insufficient memory reduces the snapshot count
 rather than exhausting the target pool. The setting is also supported in runtime-profile
 overlays. Snapshots are captured lazily. When the pool is full, only one unleased
-older ring checkpoint is replaced at a later boundary, without evicting target
-blocks or fixed state. Leased snapshots are never overwritten.
+ring checkpoint is replaced at a later boundary, without evicting target
+blocks or fixed state. Selection deliberately follows target block eviction
+order, not snapshot capture age: descendants precede ancestors on the same
+physical path. For snapshots at tokens 4 and 8, the token-8 snapshot is removed
+first, preserving the shorter prefix for broader reuse. A longer target hit
+can therefore lose its draft snapshot and need drafter context rebuilding.
+Leased snapshots are skipped and never overwritten.
+Increasing the snapshot limit trades target-cache capacity for draft reuse.
+The budget guarantees only one remaining target block, not that a previously
+fitting prompt still fits or that a cached prefix plus a private suffix can
+coexist. For example, increasing the limit from 1 to 4 can shrink an eight-block
+target pool to one block; such a pool cannot retain a full cached block and
+execute the remaining prompt token at the same time. Reduce the snapshot limit
+or increase the cache budget when target admission becomes constrained.
+With `og.set_log_options(enabled=True)`, Engine construction logs the requested
+and effective snapshot counts, actual target block count, block size, target
+cache bytes, and draft snapshot reservation bytes under `engine_cache`.
 If the matching draft checkpoint is absent, the request retains the full
 target hit and runs target-only until the windowed drafter has rebuilt its context.
 Full-attention DSpark remains target-only
@@ -1930,12 +1945,19 @@ automatic sizing, that pool is allocated before the target measures free memory.
 is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
 by that baseline target block count before either cache pool is allocated.
 A windowed DFlash 2 model with hybrid target prefix caching reserves one
-additional ring's bytes for its optional checkpoint, independent of context
-length. Readers lease the immutable snapshot through admission; replacing it
-cannot overwrite an in-flight adopter. If the budget cannot leave at least one
-target paged block after the auxiliary pool and snapshot reservation, the
-optional checkpoint is disabled and the existing target-only prefix behavior
-is retained. A full-attention block
+additional ring per retained snapshot, independent of context length. The
+maximum comes from the Engine construction override or
+`engine.dynamic_batching.dflash2_max_snapshots` (default `1`, with `0` disabling
+draft snapshots), capped by target fixed-state checkpoint capacity. The shared
+memory budget can reduce that count, including to zero, so at least one target
+paged block remains after the auxiliary pool and snapshot reservations.
+More snapshots can substantially reduce target capacity and reject prompts
+that fitted with a smaller limit; the one-block minimum is not an admission
+guarantee. Engine construction logs the effective count and target-cache size
+when logging is enabled. Readers lease immutable snapshots through admission;
+replacement cannot overwrite an in-flight adopter. Without a matching draft
+snapshot, the target prefix still hits and the drafter rebuilds its context.
+A full-attention block
 drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
 query-spill bytes are charged against the same budget before target capacity is selected, using the
 cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same

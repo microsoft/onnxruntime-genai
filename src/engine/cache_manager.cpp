@@ -11,6 +11,7 @@
 #include <string>
 
 #include "../models/model_state_manifest.h"
+#include "../logging.h"
 #include "dflash2_drafter.h"
 
 namespace Generators {
@@ -423,6 +424,18 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   key_value_cache_ = std::make_unique<PagedKeyValueCache>(
       model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
       hybrid_prefix_caching, prefix_checkpoint_capacity);
+  if (optional_draft_checkpoint_bytes != 0 && g_log.enabled) {
+    const auto& batching = *model_->config_->engine.dynamic_batching;
+    const size_t target_blocks = key_value_cache_->Snapshot().total_blocks;
+    Log("engine_cache",
+        "DFlash 2 snapshots: requested=%zu, effective=%zu; target cache: blocks=%zu, "
+        "block_size=%zu, bytes=%zu; draft snapshot reservation: bytes=%zu",
+        dflash2_max_snapshots.value_or(batching.dflash2_max_snapshots),
+        draft_checkpoint_capacity_, target_blocks,
+        static_cast<size_t>(batching.block_size),
+        target_blocks * PagedKeyValueCacheBytesPerBlock(model_),
+        draft_checkpoint_capacity_ * optional_draft_checkpoint_bytes);
+  }
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
 }
 

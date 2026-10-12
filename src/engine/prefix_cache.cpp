@@ -674,6 +674,8 @@ void PrefixCache::DropUnleasedDraftCheckpoints() {
 }
 
 bool PrefixCache::ReclaimDraftCheckpoint() {
+  // Deliberately share block eviction order: descendants precede their ancestors, preserving
+  // shorter reusable prefixes rather than the oldest capture time. Leased rings are skipped.
   for (auto* entry : recency_) {
     if (entry->draft_checkpoint && entry->draft_checkpoint.use_count() == 1) {
       entry->draft_checkpoint.reset();
