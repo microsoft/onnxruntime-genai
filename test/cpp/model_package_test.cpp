@@ -21,6 +21,16 @@ namespace {
 
 namespace fs_std = std::filesystem;
 
+#if ORT_API_VERSION >= 31
+TEST(ModelPackageApiTests, UsesStableRuntimeTable) {
+  Ort::InitApi();
+  const auto& api = Ort::GetModelPackageApi();
+  EXPECT_EQ(&api, Ort::api->GetModelPackageApi());
+  EXPECT_NE(api.CreateModelPackageContext, nullptr);
+  EXPECT_NE(api.ModelPackageComponent_GetSelectedVariantFolderPath, nullptr);
+}
+#endif
+
 // Creates a fresh, empty per-test directory under the build's temp area.
 fs_std::path MakeTempDir(const std::string& suffix) {
   static int counter = 0;

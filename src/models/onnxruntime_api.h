@@ -88,9 +88,8 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
 #endif
 
-// Single gate for OrtModelPackageApi support: API version 28+ and the experimental header
-// available. The OrtModelPackage* wrappers below and model_package.{h,cpp} key off this.
-#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+// Model packages use the stable API in 1.31+, or the earlier experimental entries.
+#if ORT_API_VERSION >= 31 || (ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API)
 #define ORT_GENAI_HAS_MODEL_PACKAGE 1
 #else
 #define ORT_GENAI_HAS_MODEL_PACKAGE 0
@@ -146,6 +145,7 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
+inline int api_version{};
 
 /// <summary>
 /// This returns a reference to the ORT C Model Editor API. Used if building or augmenting a model at runtime.
@@ -238,6 +238,7 @@ inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
   for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
     api = ort_api_base->GetApi(i);
     if (api) {
+      api_version = i;
       LOG_INFO("ORT API Version %d was found.", i);
       break;
     }
@@ -351,6 +352,7 @@ inline void InitApi() {
 #else   // defined(__linux__) || defined(MACOS_USE_DLOPEN)
   ort_api_base_fn = &OrtGetApiBase;
   api = ort_api_base_fn()->GetApi(ORT_API_VERSION);
+  api_version = api == nullptr ? 0 : ORT_API_VERSION;
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
 #endif  // defined(__linux__) || defined(MACOS_USE_DLOPEN)
@@ -1544,6 +1546,9 @@ struct OrtModelPackageComponentContext;
 
 namespace Ort {
 
+#if ORT_API_VERSION >= 31
+using ModelPackageApi = ::OrtModelPackageApi;
+#else
 /// Typed function-pointer cache for the OrtModelPackageApi experimental entries genai uses.
 /// Each pointer is resolved once by name; null means the loaded ORT build lacks that entry.
 struct ModelPackageApi {
@@ -1574,6 +1579,7 @@ struct ModelPackageApi {
   OrtExperimental_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn
       ModelPackageComponent_GetSelectedVariantFolderPath{nullptr};
 };
+#endif
 
 /// Returns the lazily-resolved model package API function pointers. Throws if the loaded
 /// ONNX Runtime build does not expose the experimental functions genai requires.
