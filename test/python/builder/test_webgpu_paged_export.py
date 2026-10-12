@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import multiprocessing
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -25,17 +27,24 @@ _DECODE_TOKENS = np.asarray([4], dtype=np.int64)
 _BUILDER_PATH = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builder.py"
 
 
-def _export_model(output_dir, precision, ep, paged=True):
+def _export_model(output_dir, precision, ep, paged=True, structured=False):
     extra_options = ["prune_lm_head=true", "hf_token=false"]
+    runtime_options = []
     if paged:
         extra_options += [
             "use_paged_attention=true",
             "paged_block_size=256",
             "paged_chunk_size=256",
-            f"num_blocks={_NUM_BLOCKS}",
             "max_batch_size=2",
             "max_scheduled_tokens=256",
         ]
+        if structured:
+            runtime_options = [
+                "--runtime_config",
+                json.dumps({"engine": {"dynamic_batching": {"num_blocks": _NUM_BLOCKS}}}),
+            ]
+        else:
+            extra_options.append(f"num_blocks={_NUM_BLOCKS}")
     subprocess.run(
         [
             sys.executable,
@@ -48,6 +57,7 @@ def _export_model(output_dir, precision, ep, paged=True):
             precision,
             "-e",
             ep,
+            *runtime_options,
             "--extra_options",
             *extra_options,
         ],
@@ -149,19 +159,82 @@ def _assert_logits_match(actual, expected):
     np.testing.assert_allclose(actual, expected, rtol=3e-2, atol=1.5e-1)
 
 
-def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path):
+def _run_accumulation_probe(output_dir, batching, max_batch_size, explicit_value):
+    assert register_webgpu_plugin()
+    config = og.Config(str(output_dir))
+    config.overlay(json.dumps({"engine": {batching: {"max_batch_size": max_batch_size}}}))
+    if explicit_value is not None:
+        config.set_provider_option("webgpu", "enableMatmulFp32Accumulation", explicit_value)
+    model = og.Model(config)
+    if batching == "dynamic_batching":
+        assert len(_run_engine(model, [[1, 2, 3]], 1)[0]) == 1
+    else:
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=4)
+        generator = og.Generator(model, params)
+        generator.append_tokens(np.asarray([[1, 2, 3]], dtype=np.int32))
+        generator.generate_next_token()
+        assert len(generator.get_sequence(0)) == 4
+
+
+@pytest.fixture(scope="module", params=["dynamic_batching", "static_batching"])
+def accumulation_model(request, tmp_path_factory):
+    if not register_webgpu_plugin():
+        pytest.skip("onnxruntime-ep-webgpu plugin package is not installed.")
+    output_dir = tmp_path_factory.mktemp(f"accumulation-{request.param}")
+    paged = request.param == "dynamic_batching"
+    _export_model(output_dir, "fp16", "webgpu", paged=paged, structured=paged)
+    return output_dir, request.param
+
+
+@pytest.mark.parametrize("max_batch_size", [1, 2])
+@pytest.mark.parametrize("explicit_value", [None, "0", "1"], ids=["default", "explicit-off", "explicit-on"])
+def test_webgpu_genai_session_accumulation(accumulation_model, tmp_path, monkeypatch, max_batch_size, explicit_value):
+    output_dir, batching = accumulation_model
+    shader_path = tmp_path / "shaders.wgsl"
+    monkeypatch.setenv("ORT_WEBGPU_EP_SHADER_DUMP_FILE", str(shader_path))
+    process = multiprocessing.get_context("spawn").Process(
+        target=_run_accumulation_probe,
+        args=(output_dir, batching, max_batch_size, explicit_value),
+    )
+    process.start()
+    process.join()
+    exitcode = process.exitcode
+    process.close()
+    assert exitcode == 0
+    shaders = re.findall(
+        r"=== WebGPU Shader code \[MatMul,.*? Start ===\n(.*?)\n=== WebGPU Shader code \[MatMul,.*? End ===",
+        shader_path.read_text(encoding="utf-8"),
+        flags=re.DOTALL,
+    )
+    fp16_shaders = [shader for shader in shaders if "alias a_element_t = f16;" in shader]
+    assert fp16_shaders, "GenAI inference did not compile any FP16 WebGPU MatMul shaders"
+    uses_fp32 = any("var acc: array<vec4<f32>" in shader for shader in fp16_shaders)
+    expected = explicit_value == "1" if explicit_value is not None else max_batch_size > 1
+    assert uses_fp32 == expected
+
+
+@pytest.fixture(scope="module")
+def webgpu_plugin():
     if not register_webgpu_plugin():
         pytest.skip("onnxruntime-ep-webgpu plugin package is not installed.")
     webgpu_ep = importlib.import_module("onnxruntime_ep_webgpu")
-
     webgpu_provider = webgpu_ep.get_ep_name()
     ort.register_execution_provider_library(webgpu_provider, webgpu_ep.get_library_path())
+    return webgpu_ep
+
+
+@pytest.mark.parametrize("structured", [False, True], ids=["legacy", "structured-runtime"])
+def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path, structured, webgpu_plugin):
+    webgpu_ep = webgpu_plugin
+    webgpu_provider = webgpu_ep.get_ep_name()
 
     output_dir = tmp_path / "webgpu-paged"
-    _export_model(output_dir, "fp16", "webgpu")
+    _export_model(output_dir, "fp16", "webgpu", structured=structured)
 
     config = json.loads((output_dir / "genai_config.json").read_text(encoding="utf-8"))
     assert config["engine"]["dynamic_batching"]["num_blocks"] == _NUM_BLOCKS
+    assert "gpu_utilization_factor" not in config["engine"]["dynamic_batching"]
     assert config["model"]["decoder"]["num_hidden_layers"] == _NUM_HIDDEN_LAYERS
     assert config["model"]["decoder"]["inputs"]["attention_metadata"] == "attention_metadata"
 
@@ -229,3 +302,32 @@ def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path):
     isolated = [_run_engine(engine_model, [prompt], max_new_tokens)[0] for prompt in prompts]
     assert all(len(tokens) == max_new_tokens for tokens in isolated)
     assert _run_engine(engine_model, prompts, max_new_tokens) == isolated
+
+
+def test_webgpu_paged_export_requires_final_num_blocks(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_BUILDER_PATH),
+            "-m",
+            _MODEL_ID,
+            "-o",
+            str(tmp_path),
+            "-p",
+            "fp16",
+            "-e",
+            "webgpu",
+            "--runtime_config",
+            json.dumps({"engine": {"dynamic_batching": {"gpu_utilization_factor": 0.6}}}),
+            "--extra_options",
+            "use_paged_attention=true",
+            f"num_blocks={_NUM_BLOCKS}",
+            "config_only=true",
+            "hf_token=false",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "WebGPU paged attention requires num_blocks to be a positive integer" in result.stderr

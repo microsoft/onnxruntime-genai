@@ -280,8 +280,11 @@ def check_extra_options(
             raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
-        if execution_provider == "webgpu" and "num_blocks" not in extra_options:
-            raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
+        if execution_provider == "webgpu":
+            runtime_batching = extra_options.get("_runtime_config", {}).get("engine", {}).get("dynamic_batching", {})
+            num_blocks = runtime_batching.get("num_blocks", extra_options.get("num_blocks"))
+            if isinstance(num_blocks, bool) or not isinstance(num_blocks, int) or num_blocks <= 0:
+                raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
 
         if "gpu_utilization_factor" in extra_options:
             try:
@@ -837,6 +840,10 @@ def create_model(
         with open(config_path, encoding="utf-8") as config_file:
             genai_config = json.load(config_file)
         genai_config = apply_runtime_config(genai_config, runtime_config)
+        if execution_provider == "webgpu" and extra_options.get("use_paged_attention", False):
+            num_blocks = genai_config.get("engine", {}).get("dynamic_batching", {}).get("num_blocks")
+            if isinstance(num_blocks, bool) or not isinstance(num_blocks, int) or num_blocks <= 0:
+                raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
         with open(config_path, "w", encoding="utf-8") as config_file:
             json.dump(genai_config, config_file, indent=4)
 

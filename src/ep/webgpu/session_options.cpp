@@ -26,8 +26,6 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   if (fp32_accumulation_option == session_provider_options.options.end()) {
     session_provider_options.options.emplace_back("enableMatmulFp32Accumulation",
                                                   enable_fp32_accumulation ? "1" : "0");
-  } else {
-    fp32_accumulation_option->second = enable_fp32_accumulation ? "1" : "0";
   }
 
   // Graph capture applies to the decoder only. Auxiliary embedding and vision sessions pass

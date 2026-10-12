@@ -1153,6 +1153,28 @@ def test_webgpu_paged_attention_requires_num_blocks(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("legacy_num_blocks", [None, "4"])
+def test_webgpu_paged_attention_accepts_runtime_num_blocks(monkeypatch, legacy_num_blocks):
+    options = {
+        "use_paged_attention": "true",
+        "_runtime_config": {"engine": {"dynamic_batching": {"num_blocks": 8}}},
+    }
+    if legacy_num_blocks is not None:
+        options["num_blocks"] = legacy_num_blocks
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+
+@pytest.mark.parametrize("num_blocks", [0, -1, False, 1.5, "8"])
+def test_webgpu_paged_attention_rejects_invalid_runtime_num_blocks(monkeypatch, num_blocks):
+    options = {
+        "use_paged_attention": "true",
+        "num_blocks": "8",
+        "_runtime_config": {"engine": {"dynamic_batching": {"num_blocks": num_blocks}}},
+    }
+    with pytest.raises(ValueError, match="num_blocks"):
+        _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+
 def test_paged_attention_normalizes_engine_options(monkeypatch):
     extra_options = {
         "use_paged_attention": "true",

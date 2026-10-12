@@ -399,7 +399,10 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true prune_lm_head=true
 ```
 
-WebGPU requires a fixed cache capacity:
+WebGPU requires a fixed cache capacity. Set `num_blocks` through legacy extra
+options or `runtime_config.engine.dynamic_batching.num_blocks`. Structured
+runtime settings take precedence, and the final configuration must retain a
+positive integer block count.
 
 ```bash
 # From wheel:
@@ -407,6 +410,10 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true num_blocks=1024
+```
+
+```bash
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu --runtime_config '{"engine":{"dynamic_batching":{"num_blocks":1024}}}' --extra_options use_paged_attention=true
 ```
 
 #### Build a DFlash 2 Block Drafter
