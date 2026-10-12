@@ -32,6 +32,10 @@ class ModelStateManifest {
 
   static void ValidateConfig(const Config::Model::Decoder& decoder);
   static void ValidateDynamicEngineCompatibility(const Config::Model::Decoder& decoder);
+  // Disabled indexer replay still binds full state and capture-control tensors. Resolve its
+  // unused payload capacity from this session, not an independently exported target's manifest.
+  static void ResolveDisabledIndexerCapacity(
+      Config::Model::Decoder& decoder, const ModelStateMetadata& metadata);
   void ValidateSession(const ModelStateMetadata& metadata) const;
 
   // Read-only access to the validated decoder state groups, in declaration order. Owners of a

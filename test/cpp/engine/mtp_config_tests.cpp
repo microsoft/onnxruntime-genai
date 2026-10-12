@@ -1,11 +1,13 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -261,6 +263,7 @@ TEST(MtpDecoderConfigTest, ProjectsOneLayerFixedIndexerStateForTheHead) {
   decoder.head_size = 256;
   decoder.hidden_size = 2560;
   decoder.state_update_capacity = 7;
+  decoder.inputs.logits_indices = "target_selected_rows";
   decoder.inputs.past_indexer_kv_buffer_names = "past.%d.indexer_kv_buffer";
   decoder.inputs.past_indexer_state_lengths_names = "past.%d.indexer_state_lengths";
   decoder.outputs.present_indexer_kv_buffer_names = "present.%d.indexer_kv_buffer";
@@ -297,11 +300,66 @@ TEST(MtpDecoderConfigTest, ProjectsOneLayerFixedIndexerStateForTheHead) {
   EXPECT_EQ(indexer.state_update->capacity, 7);
   EXPECT_FALSE(indexer.state_update->enabled);
   EXPECT_EQ(indexer.state_update->compress_ratio, 4);
-  EXPECT_EQ(head.state_update_capacity, 7);
+  EXPECT_EQ(head.state_update_capacity, 0);
+  EXPECT_TRUE(head.inputs.logits_indices.empty());
   EXPECT_EQ(head.inputs.past_indexer_kv_buffer_names,
             "past.%d.indexer_kv_buffer");
   EXPECT_EQ(head.outputs.state_update_indexer_names,
             "state_update.%d.indexer");
+}
+
+TEST(MtpDecoderConfigTest, ResolvesDisabledHeadIndexerCapacityIndependentOfTarget) {
+  for (const auto& [target_capacity, head_capacity, indexed] :
+       std::array<std::tuple<int, int, bool>, 6>{{{4, 4, false}, {4, 4, true}, {8, 4, false}, {8, 4, true}, {8, 8, false}, {8, 8, true}}}) {
+    SCOPED_TRACE(::testing::Message() << "target=" << target_capacity << " head=" << head_capacity
+                                      << " indexed=" << indexed);
+    Config config;
+    auto& decoder = config.model.decoder;
+    decoder.num_hidden_layers = 1;
+    decoder.hidden_size = 8;
+    decoder.state_update_capacity = target_capacity;
+    decoder.inputs.logits_indices = indexed ? "target_selected_rows" : "";
+    decoder.inputs.past_indexer_kv_buffer_names = "past.%d.buffer";
+    decoder.inputs.past_indexer_state_lengths_names = "past.%d.lengths";
+    decoder.outputs.present_indexer_kv_buffer_names = "present.%d.buffer";
+    decoder.outputs.present_indexer_state_lengths_names = "present.%d.lengths";
+    decoder.outputs.state_update_indexer_names = "capture.%d.indexer";
+    decoder.inputs.state_update_active.clear();
+    decoder.state_groups = std::vector<Config::Model::Decoder::StateGroup>{
+        {Config::Model::Decoder::StateGroupKind::PagedKeyValue, {0}, std::nullopt},
+        {Config::Model::Decoder::StateGroupKind::FixedIndexer, {0}, Config::Model::Decoder::StateUpdate{target_capacity, true, 0, 4}}};
+    auto& mtp = config.model.mtp;
+    mtp.filename = "head.onnx";
+    mtp.num_key_value_heads = 1;
+    mtp.head_size = 2;
+    mtp.inputs.past_indexer_names = "past.%d.indexer";
+    mtp.outputs.present_indexer_names = "present.%d.indexer";
+    auto head_config = CreateMtpDecoderConfig(config);
+    auto& head = head_config->model.decoder;
+    FakeModelStateMetadata metadata;
+    const auto pair = [&](const std::string& input, const std::string& output,
+                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape) {
+      metadata.AddInput(input, type, shape);
+      metadata.AddOutput(output, type, shape);
+    };
+    const auto half = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+    pair("past_key_values.0.key", "present.0.key", half, {-1, 4, 1, 2});
+    pair("past_key_values.0.value", "present.0.value", half, {-1, 4, 1, 2});
+    pair("past.0.indexer", "present.0.indexer", half, {-1, 32, 2});
+    pair("past.0.buffer", "present.0.buffer", half, {-1, 7, 2});
+    pair("past.0.lengths", "present.0.lengths", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1, 2});
+    metadata.AddInput(head.inputs.state_update_capture_count,
+                      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1});
+    metadata.AddOutput("capture.0.indexer", half, {-1, head_capacity, 2});
+    EXPECT_NO_THROW(ModelStateManifest::ResolveDisabledIndexerCapacity(head, metadata));
+    EXPECT_EQ((*head.state_groups)[1].state_update->capacity, head_capacity);
+    EXPECT_FALSE((*head.state_groups)[1].state_update->enabled);
+    EXPECT_EQ(head.state_update_capacity, 0);
+    EXPECT_TRUE(head.inputs.logits_indices.empty());
+    EXPECT_EQ(config.model.decoder.state_update_capacity, target_capacity);
+    EXPECT_EQ((*config.model.decoder.state_groups)[1].state_update->capacity, target_capacity);
+    EXPECT_NO_THROW(ModelStateManifest{head}.ValidateSession(metadata));
+  }
 }
 
 // A per-token quantized target declares scale name templates on its decoder. The MTP projection

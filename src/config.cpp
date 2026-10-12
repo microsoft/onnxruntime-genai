@@ -137,6 +137,9 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.head_size = mtp.head_size;
 
   decoder.inputs.input_ids = mtp.inputs.input_ids;
+  // The head has no selected-logits input contract; target-only row selection must not leak into
+  // its one-row projection even when the target uses an indexed LM head.
+  decoder.inputs.logits_indices.clear();
   decoder.inputs.hidden_states = mtp.inputs.hidden_states;
   decoder.inputs.position_ids = mtp.inputs.position_ids;
   decoder.inputs.past_key_names = mtp.inputs.past_key_names;
@@ -164,6 +167,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.layer_types.assign(static_cast<size_t>(mtp.num_hidden_layers), "full_attention");
   decoder.conv_cache_size = 0;
   decoder.sliding_window.reset();
+  decoder.state_update_capacity = 0;
   if (!mtp.inputs.past_indexer_names.empty() ||
       !mtp.outputs.present_indexer_names.empty()) {
     if (mtp.inputs.past_indexer_names.empty() ||
@@ -190,7 +194,6 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
         {Config::Model::Decoder::StateGroupKind::PagedKeyValue, {0}, std::nullopt},
         std::move(projected_indexer)};
   } else {
-    decoder.state_update_capacity = 0;
     decoder.state_groups.reset();
   }
   decoder.pipeline.clear();
