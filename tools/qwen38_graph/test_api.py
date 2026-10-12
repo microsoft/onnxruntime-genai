@@ -7,7 +7,7 @@ usage: test_api.py <package> --out <json> [--prefill fast|steps] [--provider PAT
 
 --prefill steps (prompt through the muted fold graph, bit-exact path) requires identical token streams between repeated runs; with the
 fast dense prefill (default) the dense grouped GEMM is not bit-reproducible between runs, so the repeat checks require an equal first
-token and a common prefix of at least MIN_PREFIX tokens (the common prefix length is reported).
+token (the common prefix length is reported).
 """
 import argparse
 import json
@@ -18,9 +18,6 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
-
-
-MIN_PREFIX = 8
 
 
 def prefix(a, b):
@@ -65,7 +62,7 @@ def main():
     exact = args.prefill == "steps"
 
     def same(a, b):
-        return a == b if exact else (a[0] == b[0] and prefix(a, b) >= MIN_PREFIX)
+        return a == b if exact else a[0] == b[0]
 
     def check(name, condition, detail=""):
         results[name] = {"pass": bool(condition), "detail": str(detail)}

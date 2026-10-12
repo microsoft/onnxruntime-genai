@@ -460,6 +460,7 @@ int qg_memcpy2d_d2d(void* dst, size_t dpitch, const void* src, size_t spitch, si
 }
 int qg_stream_create(void** s) { return (int)cudaStreamCreateWithFlags((cudaStream_t*)s, cudaStreamNonBlocking); }
 int qg_stream_destroy(void* s) { return (int)cudaStreamDestroy((cudaStream_t)s); }
+int qg_pci_bus_id(char* buf, int len, int device) { return (int)cudaDeviceGetPCIBusId(buf, len, device); }
 int qg_stream_sync(cudaStream_t s) { return (int)cudaStreamSynchronize(s); }
 int qg_device_sync() { return (int)cudaDeviceSynchronize(); }
 int qg_mem_info(size_t* free_bytes, size_t* total_bytes) { return (int)cudaMemGetInfo(free_bytes, total_bytes); }

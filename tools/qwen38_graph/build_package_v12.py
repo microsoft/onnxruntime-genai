@@ -178,6 +178,8 @@ def main() -> None:
     parser.add_argument("--no-pool", action="store_true", help="do not share initializers between the sessions (does not fit one GPU with prefill)")
     parser.add_argument("--stop-token-ids", default="248046,248044")
     parser.add_argument("--chunk", type=int, default=8192)
+    parser.add_argument("--cpu-affinity", default="auto",
+                        help='model.qwen38_graph.cpu_affinity: "auto" (CPUs local to the GPU), a CPU list such as "48-95", or "" (off)')
     parser.add_argument("--copy", action="store_true")
     parser.add_argument("--skip-ple", action="store_true")
     for name, default in LIBS.items():
@@ -233,6 +235,7 @@ def main() -> None:
         "ple_table": "ple_table.txt",
         "kv_capacity": bp.KV_CAPACITY,
         "warmup": not args.no_warmup,
+        "cpu_affinity": args.cpu_affinity,
         "mtp": {"enabled": True, "prefill_head": True},
         "fold": {"enabled": True, "target_graph_id": 71,
                  "head_r2": {"filename": "head_r2/model.onnx", "graph_id": 81}},

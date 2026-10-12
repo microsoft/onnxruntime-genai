@@ -121,6 +121,7 @@ folder). Layout: `genai_config.json`, `target/` (fold model), `head_r2/`, `dense
 | `model.qwen38_graph.prefill.{dense,head_kv}.{filename,session_options}` | dense prefill model (contrib ops, no graph capture) and KV-only head model |
 | `model.qwen38_graph.prefill.chunk` | dense prefill chunk (8192); `warmup_lengths`: prompt lengths run once at model load (arena growth, first-use costs) |
 | `model.qwen38_graph.prefill.weights_pool` | text manifest of the initializers that several sessions share: loaded once into CUDA memory (8 threads, pinned staging) and passed to every session with `AddInitializer` (float8 handled by the C API) |
+| `model.qwen38_graph.cpu_affinity` | `""` (off), `"auto"` (CPUs local to the GPU's PCI device, from sysfs) or a CPU list (`"48-95"`): pins the thread that runs `generate_next_token` for the duration of the generator (restored when it is deleted). The cycle loop is latency bound; a thread on the far socket costs about 3 % per cycle (section 6.4). `build_package_v12.py --cpu-affinity` writes it (default `auto`) |
 | `model.qwen38_graph.prefill.constants` | key-norm weights and rotary tables of the PackedQSAIndexer state conversion |
 
 ### 6.2 What runs where

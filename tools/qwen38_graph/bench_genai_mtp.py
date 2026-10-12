@@ -65,6 +65,8 @@ def main():
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--no-mtp", action="store_true")
     parser.add_argument("--no-head-prefill", action="store_true")
+    parser.add_argument("--graph-overlay", default=None, help="JSON merged into model.qwen38_graph (e.g. '{\"cpu_affinity\": \"auto\"}')")
+    parser.add_argument("--prefill", default=None, choices=("fast", "steps"), help="v12 package: fast dense prefill or the muted fold graph steps")
     parser.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
     args = parser.parse_args()
     if args.out.exists():
@@ -73,6 +75,10 @@ def main():
     og.register_execution_provider_library("CUDAExecutionProvider", args.provider)
     config = og.Config(args.model)
     graph = {"mtp": {"enabled": not args.no_mtp, "prefill_head": not args.no_head_prefill}}
+    if args.prefill:
+        graph["prefill"] = {"enabled": args.prefill == "fast"}
+    if args.graph_overlay:
+        graph.update(json.loads(args.graph_overlay))
     config.overlay(json.dumps({"model": {"qwen38_graph": graph}}))
     model = og.Model(config)
 

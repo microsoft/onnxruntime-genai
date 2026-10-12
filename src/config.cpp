@@ -2497,6 +2497,8 @@ struct Qwen38Graph_Element : JSON::Element {
       v_.head_s2_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "warmup") {
       v_.warmup = JSON::Get<bool>(value);
+    } else if (name == "cpu_affinity") {
+      v_.cpu_affinity = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

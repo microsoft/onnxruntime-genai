@@ -6,6 +6,7 @@
 #include "qwen38_graph.h"
 
 #include <dlfcn.h>
+#include <sched.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -114,6 +115,7 @@ Qwen38Plane::Qwen38Plane(const std::string& path) {
   load_optional(ple_rows, "mtp_ple_rows");
   load_optional(pool_keys, "mtp_pool_keys");
   load_optional(transpose_f32, "mtp_transpose_f32");
+  load_optional(pci_bus_id, "qg_pci_bus_id");
   if (sizeof_params() != static_cast<int>(sizeof(Qwen38PleParams)))
     throw std::runtime_error("qwen38_graph: plane library PleParams layout differs from the host definition");
 }
@@ -991,6 +993,56 @@ void Qwen38GraphEngine::EnqueueFold() {
   inflight_ = true;
 }
 
+// The cycle loop is latency bound: a thread on the other socket pays a slower pinned-memory round trip per cycle (about 0.27 ms of
+// an 7.7 ms cycle was measured). cpu_affinity "auto" pins the calling thread to the CPUs local to the GPU's PCI device.
+void Qwen38GraphEngine::ApplyHostAffinity() {
+  const std::string& spec = model_.config_->model.qwen38_graph.cpu_affinity;
+  if (spec.empty()) return;
+  std::string list = spec;
+  if (spec == "auto") {
+    if (!plane_.pci_bus_id) return;
+    char bus[64] = {};
+    if (plane_.pci_bus_id(bus, sizeof(bus), 0) != 0) return;
+    std::string id(bus);
+    std::transform(id.begin(), id.end(), id.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::ifstream in("/sys/bus/pci/devices/" + id + "/local_cpulist");
+    if (!in || !std::getline(in, list)) return;
+  }
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  std::istringstream tokens(list);
+  std::string item;
+  while (std::getline(tokens, item, ',')) {
+    const size_t dash = item.find('-');
+    try {
+      const int lo = std::stoi(item.substr(0, dash));
+      const int hi = dash == std::string::npos ? lo : std::stoi(item.substr(dash + 1));
+      for (int cpu = lo; cpu <= hi && cpu < CPU_SETSIZE; ++cpu) CPU_SET(cpu, &set);
+    } catch (const std::exception&) {
+      throw std::runtime_error("qwen38_graph: invalid cpu_affinity '" + spec + "'");
+    }
+  }
+  if (CPU_COUNT(&set) == 0) return;
+  cpu_set_t previous;
+  const bool have_previous = sched_getaffinity(0, sizeof(previous), &previous) == 0;
+  if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+    if (Verbose()) std::cerr << "[qwen38_graph] sched_setaffinity failed" << std::endl;
+    return;
+  }
+  if (have_previous && saved_affinity_.empty())
+    saved_affinity_.assign(reinterpret_cast<unsigned char*>(&previous), reinterpret_cast<unsigned char*>(&previous) + sizeof(previous));
+  if (Verbose()) std::cerr << "[qwen38_graph] thread pinned to CPUs " << list << std::endl;
+}
+
+// Best effort: restores the affinity the calling thread had before ApplyHostAffinity (generator teardown).
+void Qwen38GraphEngine::RestoreHostAffinity() {
+  if (saved_affinity_.size() != sizeof(cpu_set_t)) return;
+  cpu_set_t previous;
+  std::memcpy(&previous, saved_affinity_.data(), sizeof(previous));
+  sched_setaffinity(0, sizeof(previous), &previous);
+  saved_affinity_.clear();
+}
+
 void Qwen38GraphEngine::CheckErrorBits() {
   if (!fold_ || !decode_started_) return;
   const int64_t bits = ReadCtl(5);
@@ -1032,6 +1084,7 @@ void Qwen38GraphEngine::BeginDecode(bool run_cycles) {
   if (decode_started_) return;
   if (length_ == 0) throw std::runtime_error("qwen38_graph: GenerateNextToken called before AppendTokens");
   decode_started_ = true;
+  ApplyHostAffinity();
   if (fold_) {
     if (!run_cycles) return;
     ClearHead();
@@ -1299,6 +1352,7 @@ Qwen38GraphState::~Qwen38GraphState() {
       engine_->Drain();
     } catch (...) {
     }
+    engine_->RestoreHostAffinity();
     engine_->Release();
   }
 }
