@@ -1908,6 +1908,11 @@ Because these buffers are allocated after the cache has chosen its block count, 
 their bytes from the automatic free-memory budget before the paged cache is sized. An explicit
 `engine.dynamic_batching.num_blocks` is left alone: pinning the pool means owning that budget.
 
+Before allocation or byte reservation, the shared graph-buffer planner rejects zero or
+overflowing packed batch-row counts and position-plane products exceeding `int64_t`
+tensor dimensions. These checks protect both sizing paths and do not change graph capture
+behavior for valid configurations.
+
 ### Buffers and lifetime
 
 Graph buffers are allocated once at configured limits and reshaped as static views, so their device
