@@ -212,14 +212,6 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
 
       verify_argmax_device_ = main_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_ + 1);
       (void)verify_argmax_device_.CpuSpan();
-
-      // Both sessions and all MTP-side CUDA operations use the shared GenAI stream. Let the CPU
-      // enqueue the chained head work and the main verify without an EP-end stream fence; the
-      // target argmax/logits readback below is the explicit synchronization before CPU acceptance.
-      // Scope this to the persistent device-input path: host-token, sampling, N=1, and non-CUDA
-      // generators retain their existing per-Run synchronization behavior.
-      main_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
-      mtp_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
     }
     merged_tokens_.resize(static_cast<size_t>(num_speculative_tokens_) + 1);
     // Per-size [1,j,H] hidden buffers (j=1..N+1) so the post-verify head refeed of the j accepted
@@ -636,6 +628,14 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (primed_)
     throw std::runtime_error("MtpGenerator: AppendTokens can only be called once");
 
+  const bool async_device_drafts = num_speculative_tokens_ > 1 && device_draft_chain_ && !sampling_;
+  if (async_device_drafts) {
+    // Host-token prefill allocates temporary upload buffers, including after Reset().
+    // Enable asynchronous execution only once all prompt chunks have finished consuming them.
+    main_->SetRuntimeOption("disable_synchronize_execution_providers", "0");
+    mtp_->SetRuntimeOption("disable_synchronize_execution_providers", "0");
+  }
+
   // Chunked prefill: bounds the ORT activation arena of the prompt forward (see the constructor).
   // Off (single forward) when the chunk size is 0 or the prompt fits in one chunk.
   const size_t total = input_ids.size();
@@ -711,6 +711,12 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   }
   has_pending_draft_ = false;
   pending_refeed_count_ = -1;
+  if (async_device_drafts) {
+    // The draft/verify inputs now use persistent buffers on the shared CUDA stream;
+    // target argmax/logits readback synchronizes before CPU acceptance.
+    main_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
+    mtp_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
+  }
   primed_ = true;
 }
 
@@ -1032,9 +1038,14 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     // bonus + its hidden from THIS forward keeps the carried state consistent with the committed
     // sequence (the a==0 case degenerates to the exact N=1 single-token decode re-run).
     main_->RewindToLength(length_);
-    verify_tokens_[0] = t;
-    for (int k = 0; k < a; ++k) verify_tokens_[k + 1] = drafts_[k];
-    main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), a + 1));
+    if (device_verify_input) {
+      // Reuse the committed prefix of the persistent verify input, not a temporary host upload.
+      main_->AppendTokens(verify_tokens_device_.subspan(0, static_cast<size_t>(a + 1)));
+    } else {
+      verify_tokens_[0] = t;
+      for (int k = 0; k < a; ++k) verify_tokens_[k + 1] = drafts_[k];
+      main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), a + 1));
+    }
     stats_.target_forward_passes++;
     OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
     ArgmaxMainRows(a, 1, &next_token_);         // main's token after the committed prefix

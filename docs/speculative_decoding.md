@@ -213,6 +213,14 @@ is rejected explicitly even if its declared sequence dimension is symbolic.
 Only these validation forwards bypass graph capture; later decode/verify buffers
 and capture eligibility are unchanged.
 
+For greedy CUDA multi-draft generation, host-token prompt forwards finish
+synchronously before temporary input uploads can be released or shifted
+hidden-state buffers can be replaced. Execution becomes asynchronous only after
+all prompt chunks finish, when token inputs use persistent device buffers.
+Reset repeats this boundary.
+Rejected CUDA multi-draft rounds also replay the accepted prefix from the
+persistent verify-token buffer rather than creating a temporary host upload.
+
 See [examples/python/qwen-3.6-mtp.md](../examples/python/qwen-3.6-mtp.md) for the full export
 recipe and [examples/python/qwen-3.6-mtp.py](../examples/python/qwen-3.6-mtp.py) for a runnable
 example.

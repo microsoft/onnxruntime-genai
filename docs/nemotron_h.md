@@ -247,3 +247,21 @@ with newer build headers. Its negotiated API version is 30: both rejection tests
 pass, and the stable-table success-only test skips explicitly. That success test
 genuinely fails before its version guard. This checks the API gate, not general
 GenAI generation or model-package loading on the older runtime.
+
+A further review identifies asynchronous greedy CUDA N2 prompt forwards using
+temporary host-token uploads. Automatic asynchronous execution now starts only
+after both sessions finish every prompt chunk; reset repeats that synchronous
+prefill boundary. Rejection replay also reuses the persistent verify-token prefix
+instead of making a temporary host upload. A CUDA regression records actual
+Run/RunWithBinding options across chunk sizes 0/1/2, one-token prompts and reset:
+it fails before the fix and passes afterward, while later device-token draft
+forwards remain asynchronous. The current coupled suites pass 23 public and
+35 engine cases against the final ORT provider. Compute Sanitizer memcheck reports
+zero errors for the new CUDA regression; this is not full-checkpoint parity.
+
+An isolated CI-compatibility build also compiles the complete CUDA source, tests
+and Python extension and produces a wheel using the default ORT 1.26.0 SDK rather
+than the custom ORT install. This host control uses CUDA 13, Python 3.10 and
+`86-real` code generation, not the Azure job's CUDA 12.8/manylinux/Python 3.12
+environment. The protected Azure integration failures remain unattributed:
+their public annotations expose only generic exit codes, not actual errors.
