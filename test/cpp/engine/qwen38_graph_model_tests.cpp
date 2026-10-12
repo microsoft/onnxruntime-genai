@@ -104,6 +104,10 @@ TEST(Qwen38GraphConfigTest, RejectsUnknownKeys) {
   EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"head":{"unknown":"x"}}}})"), std::exception);
 }
 
+TEST(Qwen38GraphConfigTest, TypeIsRegisteredAsALanguageModel) {
+  EXPECT_TRUE(ModelType::IsLLM("qwen38_flash_graph"));
+}
+
 TEST(Qwen38GraphConfigTest, HeadProviderOptionsBecomeProviders) {
   Config config;
   OverlayConfig(config, R"({"model":{"qwen38_graph":{"head":{"filename_s1":"h.onnx","session_options":{
