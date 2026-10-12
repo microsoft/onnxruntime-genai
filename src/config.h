@@ -138,6 +138,7 @@ struct Config {
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
     std::optional<std::string> custom_ops_library;
+    std::vector<std::string> custom_ops_libraries;  // Additional custom-op libraries, registered after custom_ops_library
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
@@ -864,6 +865,8 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // the main model's device, batching and paged-attention contract, but replaces model-specific
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
+// Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

@@ -684,12 +684,20 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
     }
   }
 
-  // Register custom ops libraries only if explicitly configured
+  // Register custom ops libraries only if explicitly configured. custom_ops_library comes first, then every entry of
+  // custom_ops_libraries in order. All entries pass the allow-list checks before any of them is registered.
+  std::vector<std::string> custom_ops_libraries;
   if (config_session_options.custom_ops_library.has_value()) {
+    custom_ops_libraries.push_back(config_session_options.custom_ops_library.value());
+  }
+  custom_ops_libraries.insert(custom_ops_libraries.end(), config_session_options.custom_ops_libraries.begin(),
+                              config_session_options.custom_ops_libraries.end());
+  std::vector<fs::path> validated_custom_ops_libraries;
+  for (const std::string& configured_library : custom_ops_libraries) {
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
 
-    std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
+    std::string custom_library_file_prefix = configured_library;
 
     std::filesystem::path custom_library_path{custom_library_file_prefix};
 
@@ -786,7 +794,9 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
     }
 
     // Convert to fs::path for proper wide string handling on Windows
-    fs::path custom_ops_lib_path(custom_library_file_prefix);
+    validated_custom_ops_libraries.emplace_back(custom_library_file_prefix);
+  }
+  for (const fs::path& custom_ops_lib_path : validated_custom_ops_libraries) {
     session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
   }
 
