@@ -41,6 +41,9 @@ class ModelPackageApiTests : public ::testing::Test {
 };
 
 TEST_F(ModelPackageApiTests, UsesStableRuntimeTable) {
+  if (Ort::api_version < 31) {
+    GTEST_SKIP() << "The negotiated runtime does not support the stable model package API.";
+  }
   const auto& api = Ort::GetModelPackageApi();
   EXPECT_EQ(&api, Ort::api->GetModelPackageApi());
   EXPECT_NE(api.CreateModelPackageContext, nullptr);

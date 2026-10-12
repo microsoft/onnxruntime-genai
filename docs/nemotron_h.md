@@ -237,3 +237,13 @@ final ORT provider but passes 0/8 direct upstream comparisons and 168/240
 FP32-equation comparisons, leaving 72 failures. This is not a fix or a published
 exporter candidate; the original decoder/head graphs remain unchanged and the
 full-checkpoint gates remain open.
+
+The same private graph with TF32 disabled still fails 71/240 FP32-equation
+comparisons: all 60 prefill comparisons pass, but cached-step failures remain.
+Neither this precision policy nor the initial-node change is adopted as a fix.
+
+The ModelPackage API guards also execute against the authentic ORT 1.30 release
+with newer build headers. Its negotiated API version is 30: both rejection tests
+pass, and the stable-table success-only test skips explicitly. That success test
+genuinely fails before its version guard. This checks the API gate, not general
+GenAI generation or model-package loading on the older runtime.
