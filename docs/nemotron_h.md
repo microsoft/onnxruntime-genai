@@ -160,5 +160,10 @@ generation gate; the supplied full-model reference scorecard was not rerun.
 The final provider also corrects negative-branch cancellation in CUDA Sigmoid,
 used by the pinned decoder's 23 FP32 router nodes. Its four independent
 precision regressions and the same 21 public, 34 engine and eight CUDA fixture
-cases pass. No full-checkpoint result after that correction is claimed:
-the 70/100 divergence above was measured before the Sigmoid correction.
+cases pass. A fresh unchanged-export control against this exact final provider,
+with CUDA TF32 and graph capture disabled, still fails ordinary/MTP equivalence:
+N1 first diverges at index 90 with 90/126 accepted drafts, and N2 at index 119
+with 119/167. Ordinary, N1 and N2 sequences all contain 257 tokens. These are
+zero-based indices including the 40-token prompt. The 70/100 divergence above
+was measured before the Sigmoid correction; neither result clears the longer
+generation gate or reruns the supplied full-model reference scorecard.
