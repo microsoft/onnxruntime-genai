@@ -138,11 +138,11 @@ folder). Layout: `genai_config.json`, `target/` (fold model), `head_r2/`, `dense
 
 ### 6.3 Properties and limits
 
-* Decode is lossless: with `prefill.enabled=false` the tokens are identical to the research no-MTP greedy hashes (12/12) and to the Python fold runner.
+* Decode is lossless: with `prefill.enabled=false` the tokens are identical to the research no-MTP greedy hashes (12/12) and to the Python fold runner (12/12 benchmark runs: tokens and cycle counts). Measured (H200, merged provider): 244 / 240 / 231 TPS at 2k / 8k / 32k natural text (7.74 / 7.92 / 8.11 ms per cycle, equal to the Python fold runner), TTFT 0.30 / 0.76 / 3.2 s at 2k / 8k / 32k, 0.13 s for 250-token prompts.
 * The fast prefill is **tolerance level** (dense vs packed numerics; the dense grouped GEMM is not bit-reproducible between runs, so two runs of the same
   prompt - in this port and in the Python `PrefillEngine` - can diverge after tens of tokens). First tokens agree; see REPORT_V12.md.
 * Greedy only, batch 1, one active generator per model, no `append_tokens` after `generate_next_token`, `rewind_to(0)` only; `max_length <= 33024`.
-* GPU memory: 88 GB after load, about 114-116 GB with 32k context (141 GB card). The dense session arena is not released between requests.
+* GPU memory: 113.4 GiB (116 GB) from the end of model load (the warm-up of the 8192-token chunk reserves the dense arena) through 32k-context decode (141 GB card). The dense session arena is not released between requests.
 * Tests: `test_plane_kernels.py` (kernel level vs the python/torch implementations), `gate_v12.py` (token gates), `bench_ttft_genai.py`,
   `bench_genai_mtp.py`, `test_api.py`.
 
