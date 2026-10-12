@@ -129,3 +129,14 @@ Neither experiment establishes a production precision policy or HuggingFace
 parity. A further private normalization-unfusion control with graph optimization
 disabled timed out during loading at 600 seconds, before generation; its
 numerical result is untested. The published export was not modified.
+
+A subsequent isolated normalization probe identifies a separate CUDA operator
+issue: standard ONNX `RMSNormalization` must round the standardized value to
+the input type before applying its scale. Correcting this stage boundary
+matches an independent two-stage reference exactly for the tested FP16/BF16
+component cases. Historical `SkipSimplifiedLayerNormalization` semantics remain
+unchanged, including the pinned export's pre-fused nodes; this component fix
+does not establish full-checkpoint parity or replace the earlier HuggingFace
+scorecard. With the corrected standard RMS kernel and CUDA TF32 disabled, the
+unchanged export again reaches 257 ordinary tokens, but N1 and N2 MTP both
+diverge at index 64, accepting 87/129 and 122/169 drafts respectively.
