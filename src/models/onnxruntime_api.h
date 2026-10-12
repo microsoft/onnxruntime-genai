@@ -1581,8 +1581,8 @@ struct ModelPackageApi {
 };
 #endif
 
-/// Returns the lazily-resolved model package API function pointers. Throws if the loaded
-/// ONNX Runtime build does not expose the experimental functions genai requires.
+/// Returns the stable model package table or lazily-resolved experimental function pointers.
+/// Throws if the loaded ONNX Runtime build does not expose the required API.
 const ModelPackageApi& GetModelPackageApi();
 
 }  // namespace Ort
