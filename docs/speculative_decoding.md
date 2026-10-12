@@ -205,6 +205,10 @@ row into the next head call; a one-token prompt needs no head prefill. This is a
 standalone `MtpGenerator` option; Engine-hosted MTP uses a different packed 2-D
 hidden-state contract.
 
+Fixed output shapes are checked before the target prompt forward, and concrete
+output shapes are checked before head prefill. A last-row-only hidden output is
+rejected explicitly instead of failing later with an opaque output-binding error.
+
 See [examples/python/qwen-3.6-mtp.md](../examples/python/qwen-3.6-mtp.md) for the full export
 recipe and [examples/python/qwen-3.6-mtp.py](../examples/python/qwen-3.6-mtp.py) for a runnable
 example.

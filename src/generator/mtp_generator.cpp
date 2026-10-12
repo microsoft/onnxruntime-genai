@@ -593,12 +593,15 @@ int32_t MtpGenerator::DraftTwo(OrtValue* hidden, int32_t tok0, int32_t tok1) {
   return ArgmaxRow(logits.data(), vocab_size_);
 }
 
-void MtpGenerator::PrefillHead(cpu_span<const int32_t> tokens, OrtValue* hidden, bool has_previous_chunk) {
-  const auto shape = hidden->GetTensorTypeAndShapeInfo()->GetShape();
-  if (shape.size() != 3 || shape[0] != 1 || shape[1] != static_cast<int64_t>(tokens.size()) ||
-      shape[2] != hidden_size_) {
+void MtpGenerator::ValidatePrefillHiddenShape(std::span<const int64_t> shape, size_t prompt_length) const {
+  if (shape.size() != 3 || (shape[0] >= 0 && shape[0] != 1) ||
+      (shape[1] >= 0 && shape[1] != static_cast<int64_t>(prompt_length)) || shape[2] != hidden_size_) {
     throw std::runtime_error("MTP head prefill requires one hidden-state row per prompt token.");
   }
+}
+
+void MtpGenerator::PrefillHead(cpu_span<const int32_t> tokens, OrtValue* hidden, bool has_previous_chunk) {
+  ValidatePrefillHiddenShape(hidden->GetTensorTypeAndShapeInfo()->GetShape(), tokens.size());
   const size_t offset = has_previous_chunk ? 0 : 1;
   const size_t rows = tokens.size() - offset;
   if (rows == 0) return;
@@ -636,6 +639,11 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   const bool prefill_head = main_model_.config_->model.mtp.prefill_head &&
                             total < static_cast<size_t>(max_length_);
   auto append_chunk = [&](cpu_span<const int32_t> tokens, bool has_previous_chunk) {
+    if (prefill_head) {
+      ValidatePrefillHiddenShape(
+          main_model_.session_info_.GetOutputShape(main_model_.config_->model.mtp.main_hidden_states),
+          tokens.size());
+    }
     main_->AppendTokens(tokens);
     if (prefill_head) {
       OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.mtp.main_hidden_states.c_str());

@@ -33,7 +33,7 @@ std::vector<int32_t> ExpectedTokens(const std::vector<int32_t>& prompt) {
   return result;
 }
 
-std::unique_ptr<OgaModel> LoadModel(const char* component, const char* provider) {
+std::unique_ptr<OgaModel> LoadModel(const char* component, const char* provider, const char* overlay = nullptr) {
   const auto path = std::filesystem::path(MODEL_PATH) / "nemotron-h" / component;
   auto config = OgaConfig::Create(path.string().c_str());
   config->ClearProviders();
@@ -41,7 +41,31 @@ std::unique_ptr<OgaModel> LoadModel(const char* component, const char* provider)
     config->AppendProvider(provider);
     config->SetProviderOption(provider, "enable_cuda_graph", "0");
   }
+  if (overlay != nullptr) config->Overlay(overlay);
   return OgaModel::Create(*config);
+}
+
+void CheckIncompletePromptSeed(const char* provider) {
+  auto main = LoadModel("decoder", provider, R"({
+    "model": {
+      "decoder": {"outputs": {"hidden_states": "last_mtp_seed"}},
+      "mtp": {"main_hidden_states": "last_mtp_seed"}
+    }
+  })");
+  auto head = LoadModel("mtp", provider);
+  auto params = OgaGeneratorParams::Create(*main);
+  params->SetSearchOption("max_length", kMaxLength);
+  params->SetSearchOptionBool("past_present_share_buffer", false);
+  auto generator = OgaMtpGenerator::Create(*main, *head, *params);
+  const std::vector<int32_t> prompt{1, 2, 3};
+  try {
+    generator->AppendTokens(prompt.data(), prompt.size());
+    FAIL() << "Expected incomplete prompt hidden states to be rejected";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("requires one hidden-state row per prompt token"),
+              std::string::npos)
+        << error.what();
+  }
 }
 
 void CheckDecoder(const char* provider) {
@@ -112,6 +136,10 @@ TEST(NemotronHybridTests, CpuMtpChunkedPrefillRollback) {
   CheckMtp(nullptr, 2, 2);
 }
 
+TEST(NemotronHybridTests, CpuRejectsIncompletePromptSeed) {
+  CheckIncompletePromptSeed(nullptr);
+}
+
 #if USE_CUDA
 TEST(NemotronHybridTests, CudaMixedStateAndReset) {
   CheckDecoder("cuda");
@@ -128,6 +156,10 @@ TEST(NemotronHybridTests, CudaMtpMultipleDraftRollback) {
 TEST(NemotronHybridTests, CudaMtpChunkedPrefillRollback) {
   CheckMtp("cuda", 1, 1);
   CheckMtp("cuda", 2, 2);
+}
+
+TEST(NemotronHybridTests, CudaRejectsIncompletePromptSeed) {
+  CheckIncompletePromptSeed("cuda");
 }
 #endif
 
