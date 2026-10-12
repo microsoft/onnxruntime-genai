@@ -19,18 +19,6 @@ Gemma4EmbeddingState::Gemma4EmbeddingState(const MultiModalLanguageModel& model,
   }
 }
 
-void Gemma4EmbeddingState::SetExtraInputs(int64_t num_images, int64_t num_image_tokens, int64_t num_audio_tokens) {
-  EmbeddingState::SetExtraInputs(num_images, num_image_tokens, num_audio_tokens);
-  if (!model_.speech_session_ &&
-      model_.session_info_.HasInput(model_.config_->model.embedding.inputs.audio_features)) {
-    audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,
-                                                           model_.config_->model.embedding.inputs.audio_features,
-                                                           -1, 0);
-    audio_features_->Add();
-    audio_features_->AllocateEmptyFeatures();
-  }
-}
-
 void Gemma4EmbeddingState::ReuseBuffersInDecoder(DecoderState& decoder) {
   EmbeddingState::ReuseBuffersInDecoder(decoder);
   if (per_layer_inputs_) {

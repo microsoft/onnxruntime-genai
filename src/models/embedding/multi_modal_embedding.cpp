@@ -32,6 +32,12 @@ void EmbeddingState::SetExtraInputs(const int64_t num_images, const int64_t num_
                                                            model_.config_->model.embedding.inputs.audio_features,
                                                            -1, num_audio_tokens_);
     audio_features_->Add();
+  } else if (model_.session_info_.HasInput(model_.config_->model.embedding.inputs.audio_features)) {
+    audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,
+                                                           model_.config_->model.embedding.inputs.audio_features,
+                                                           -1, 0);
+    audio_features_->Add();
+    audio_features_->AllocateEmptyFeatures();
   }
 }
 
