@@ -233,6 +233,7 @@ struct RecordingCacheManager : CacheManager {
         // Replay any scripted fixed-state slots so a test can force the Engine's plan/reservation
         // consistency guard to fire without a real fixed-state pool.
         fixed_state_slots_ = cache.scripted_fixed_slots_;
+        fixed_state_bindings_ = cache.scripted_fixed_bindings_;
         fixed_state_staging_bytes_ = cache.scripted_fixed_staging_bytes_;
         fixed_state_new_slot_count_ =
             cache.scripted_fixed_new_slot_count_;
@@ -244,6 +245,10 @@ struct RecordingCacheManager : CacheManager {
 
       std::span<const FixedStateSlotHandle> FixedStateSlots() const override {
         return fixed_state_slots_;
+      }
+
+      std::span<const FixedStateBinding> FixedStateBindings() const override {
+        return fixed_state_bindings_;
       }
 
       size_t FixedStateStagingBytes() const override {
@@ -293,6 +298,7 @@ struct RecordingCacheManager : CacheManager {
       RecordingCacheManager& cache_;
       std::vector<std::shared_ptr<Request>> newly_admitted_;
       std::vector<FixedStateSlotHandle> fixed_state_slots_;
+      std::vector<FixedStateBinding> fixed_state_bindings_;
       size_t fixed_state_staging_bytes_{};
       size_t fixed_state_new_slot_count_{};
       bool throw_prepare_{};
@@ -339,6 +345,9 @@ struct RecordingCacheManager : CacheManager {
   }
   void SetMaxDraftTokensPerStep(size_t token_count) {
     max_draft_tokens_per_step_ = token_count;
+  }
+  void SetFixedStateBindings(std::vector<FixedStateBinding> bindings) {
+    scripted_fixed_bindings_ = std::move(bindings);
   }
   void ThrowPlanningBadAllocOnce() { throw_planning_bad_alloc_ = true; }
   void ThrowPlanningBadAllocAlways() { always_throw_planning_bad_alloc_ = true; }
@@ -416,6 +425,7 @@ struct RecordingCacheManager : CacheManager {
   std::vector<std::shared_ptr<Request>> allocated_;
   std::optional<FixedStateResourcePlan> scripted_fixed_plan_;
   std::vector<FixedStateSlotHandle> scripted_fixed_slots_;
+  std::vector<FixedStateBinding> scripted_fixed_bindings_;
   size_t scripted_fixed_staging_bytes_{};
   size_t scripted_fixed_new_slot_count_{};
 };
@@ -835,14 +845,18 @@ inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> 
 }
 
 inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
-                                             int32_t forced_token) {
+                                             int32_t forced_token,
+                                             int64_t hidden_states_width = 0) {
+  if (hidden_states_width == 0) {
+    hidden_states_width = model->config_->model.decoder.hidden_size;
+  }
   auto cache = std::make_shared<RecordingCacheManager>(model, /*capacity=*/8);
   cache->SetMaxDraftTokensPerStep(3);
   auto* cache_observer = cache.get();
   auto scheduler = Scheduler::Create(model, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(
       model, cache, forced_token);
-  executor->EnableHiddenStatesOutput(model->config_->model.decoder.hidden_size);
+  executor->EnableHiddenStatesOutput(hidden_states_width);
   auto* executor_observer = executor.get();
 
   auto mtp_model = std::make_shared<DecoderOnly_Model>(
@@ -852,8 +866,7 @@ inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
   auto* mtp_cache_observer = mtp_cache.get();
   auto mtp_executor = std::make_unique<RecordingModelExecutor>(
       mtp_model, mtp_cache, forced_token);
-  mtp_executor->EnableHiddenStatesOutput(
-      mtp_model->config_->model.decoder.hidden_size);
+  mtp_executor->EnableHiddenStatesOutput(hidden_states_width);
   auto* mtp_executor_observer = mtp_executor.get();
 
   EngineDependencies dependencies{

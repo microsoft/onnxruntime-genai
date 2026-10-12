@@ -133,6 +133,7 @@ struct Config {
     std::optional<int> inter_op_num_threads;
     std::optional<bool> enable_cpu_mem_arena;
     std::optional<bool> enable_mem_pattern;
+    std::optional<bool> use_deterministic_compute;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
@@ -257,6 +258,23 @@ struct Config {
       } outputs;
     } embedding;
 
+    struct Engram {
+      std::string filename;
+      size_t cache_capacity{4096};
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
+      struct Inputs {
+        std::string input_ids{Defaults::InputIdsName};
+        std::string past_tokens{"past_ple_tokens"};
+      } inputs;
+
+      struct Outputs {
+        std::string embeddings{"engram_embeddings"};
+        std::string present_tokens{"present_ple_tokens"};
+      } outputs;
+    } engram;
+
     struct Vision {
       std::string filename;
       std::optional<SessionOptions> session_options;
@@ -269,11 +287,12 @@ struct Config {
       // and these values are unused.
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
-      int num_visual_tokens{0};  // Fixed visual tokens per image; must be > 0 for videochat_flash_qwen
-      int patch_size{14};        // Qwen2.5-VL uses 14, Qwen3-VL uses 16
-      int window_size{0};        // Used by CalculateWindowIndex() in QNN pipeline only.
-                                 // 0 = auto-compute as patch_size * spatial_merge_size * 2
-                                 // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
+      int num_visual_tokens{0};        // Fixed visual tokens per image; must be > 0 for videochat_flash_qwen
+      int patch_size{14};              // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+      int window_size{0};              // Used by CalculateWindowIndex() in QNN pipeline only.
+                                       // 0 = auto-compute as patch_size * spatial_merge_size * 2
+                                       // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
+      int num_position_embeddings{0};  // Qwen4Exp learned position-table size.
 
       // LFM2-VL: patch-sequence length every image is padded to so one batch shares a vision run.
       // 0 = pad to the longest image in the batch. Shipped models: max_image_tokens * downsample_factor^2 = 1024.
@@ -300,6 +319,11 @@ struct Config {
         std::string image_sizes{Defaults::ImageSizesName};
         std::string image_grid_thw{Defaults::ImageSizesName};          // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
+        std::string pos_embed_indices;                                 // Qwen4Exp position interpolation indices
+        std::string pos_embed_weights;                                 // Qwen4Exp position interpolation weights
+        std::string vision_cos;                                        // Qwen4Exp vision rotary cosine values
+        std::string vision_sin;                                        // Qwen4Exp vision rotary sine values
+        std::string vision_attention_bias;                             // Qwen4Exp packed vision attention bias
       } inputs;
 
       struct Outputs {
@@ -491,6 +515,7 @@ struct Config {
       // Hybrid SSM+Attention (LFM2) parameters
       std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
       int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
+      int64_t ple_token_pad_id{};
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
@@ -513,12 +538,16 @@ struct Config {
         PagedKeyValue,
         FixedConv,
         FixedRecurrent,
+        FixedPle,
+        FixedIndexer,
       };
 
       enum class StateUpdateKind {
         Invalid,
         CausalConv,
         GatedDeltaNet,
+        Ple,
+        Indexer,
       };
 
       static constexpr int MaxStateUpdateCapacity = 8;
@@ -527,6 +556,7 @@ struct Config {
         int capacity{};
         bool enabled{true};
         int key_head_count{};
+        int compress_ratio{};
       };
 
       struct StateGroup {
@@ -541,6 +571,7 @@ struct Config {
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};
+        std::string engram_embeddings;
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
@@ -569,6 +600,11 @@ struct Config {
         std::string logits_indices;
         std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
         std::string past_recurrent_names{Defaults::PastRecurrentName};
+        std::string past_ple_token_names;
+        std::string past_ple_conv_names;
+        std::string past_indexer_names;
+        std::string past_indexer_kv_buffer_names;
+        std::string past_indexer_state_lengths_names;
         std::string state_update_capture_count{Defaults::StateUpdateCaptureCountName};  // Per-sequence capture count
         std::string state_update_active{Defaults::StateUpdateActiveName};               // Capture enable flag
 
@@ -599,8 +635,18 @@ struct Config {
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{Defaults::PresentConvName};  // Conv cache output name template (LFM2)
         std::string present_recurrent_names{Defaults::PresentRecurrentName};
+        std::string present_ple_token_names;
+        std::string present_ple_conv_names;
+        std::string present_indexer_names;
+        std::string present_indexer_kv_buffer_names;
+        std::string present_indexer_state_lengths_names;
+        std::string state_update_indexer_value_names;
+        std::string state_update_indexer_row_names;
         std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
         std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
+        std::string state_update_ple_token_names;
+        std::string state_update_ple_conv_value_names;
+        std::string state_update_indexer_names;
         std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
         // Residual streams tapped at model.dflash2.aux_hidden_state_layers, concatenated on the
         // last axis. Empty unless the model was exported with aux_hidden_state_layers.
@@ -645,6 +691,16 @@ struct Config {
     // hidden-state output and the head's feedback output.
     struct Mtp {
       bool enabled{true};
+      struct IndexShare {
+        bool enabled{false};
+        int base_capacity{};
+        int max_draft_tokens{};
+        std::string indices_input{"past_indices"};
+        std::string counts_input{"past_counts"};
+        std::string indices_output;
+        std::string counts_output;
+        std::string status_output{"indexer_status"};
+      } index_share;
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
@@ -669,6 +725,9 @@ struct Config {
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        std::string past_indexer_names;
+        std::string past_sequence_length;
+        std::string logits_indices;
       } inputs;
 
       struct Outputs {
@@ -676,6 +735,7 @@ struct Config {
         std::string hidden_states{"hidden_states_out"};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_indexer_names;
       } outputs;
 
       bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
@@ -769,6 +829,7 @@ struct Config {
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
+    bool adaptive_chunking{};          // Select a tuned prefill chunk size when chunk_size is not explicitly set.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
     bool audio_interleaved{};          // LFM2-Audio: alternate text tokens and audio frames by count (interleaved mode) rather than switching on <|audio_start|>.
     float audio_temperature{1.0f};     // LFM2-Audio: temperature the audio codes are sampled with. 0 takes the most likely code.

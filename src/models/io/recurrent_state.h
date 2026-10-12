@@ -31,13 +31,16 @@ struct RecurrentState {
   // the ops read back. On a partial-accept MTP step the controller crops the live state to the
   // accepted length by copying slot `position` into slot W-1 -- no full-cost main-model replay
   // forward, and no extra graph outputs to bind or keep alive across CUDA-graph capture.
-  bool IsWindowed() const { return state_window_ > 1; }
+  bool IsWindowed() const {
+    return state_window_ > 1 && !state_update_capsules_.empty();
+  }
   int64_t StateWindow() const { return state_window_; }
   void SetForwardLength(int sequence_length);  // Record this step's seq_len (maps position -> slot).
   void CropToPosition(size_t position);        // Copy window slot for `position` -> slot W-1.
 
   bool IsEmpty() const { return layer_indices_.empty(); }
   int GraphCaptureVariant() const { return graph_buffer_variant_; }
+  bool UsesGraphCaptureDoubleBuffer() const { return graph_double_buffer_; }
 
   // ORT captures a CUDA graph by re-running the model inside a single user-visible Run()
   // until the EP reports capture complete (InferenceSession::RunImpl recursion, driven by
@@ -70,6 +73,11 @@ struct RecurrentState {
   std::vector<std::unique_ptr<OrtValue>> pasts_;
   std::vector<std::unique_ptr<OrtValue>> presents_;
   std::vector<std::unique_ptr<OrtValue>> snapshot_;  // Lazily-allocated copy of the live state for speculative rollback.
+  std::vector<std::unique_ptr<OrtValue>> state_update_capsules_;
+  std::unique_ptr<OrtValue> state_update_capture_count_;
+  std::unique_ptr<OrtValue> state_update_active_;
+  std::vector<size_t> state_update_key_head_counts_;
+  size_t state_update_capacity_{};
   bool snapshot_valid_{false};                       // Whether snapshot_ holds a valid captured state.
   size_t snapshot_position_{};                       // Sequence length represented by snapshot_.
 

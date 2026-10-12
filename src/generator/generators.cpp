@@ -528,6 +528,8 @@ bool GeneratorParams::GetSearchBool(std::string_view name) const {
     return search.early_stopping;
   } else if (name == "past_present_share_buffer") {
     return search.past_present_share_buffer;
+  } else if (name == "adaptive_chunking") {
+    return search.adaptive_chunking;
   } else {
     throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchBool.");
   }
@@ -759,6 +761,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
       else if (name.find("audio") != std::string::npos)
         used_audio = true;
     }
+
     append_input_modality = (used_vision && used_audio) ? "multimodal"
                             : used_vision               ? "vision"
                             : used_audio                ? "audio"
@@ -802,6 +805,9 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
     set_extra_inputs_ = false;
   }
 
+  if (!model_->config_->model.engram.filename.empty()) {
+    input_ids.CopyDeviceToCpu();
+  }
   search_->AppendTokens(input_ids);
   computed_logits_ = false;
   ComputeLogits(input_ids);

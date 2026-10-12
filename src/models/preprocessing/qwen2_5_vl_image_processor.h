@@ -20,6 +20,13 @@ struct QwenImageProcessor : Processor {
   ONNXTensorElementDataType pixel_values_type_;
   int64_t spatial_merge_size_;
   int64_t patch_size_{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+  int64_t qwen4exp_position_grid_size_{};
+  int64_t qwen4exp_head_dim_{};
+  std::string qwen4exp_pos_embed_indices_name_;
+  std::string qwen4exp_pos_embed_weights_name_;
+  std::string qwen4exp_vision_cos_name_;
+  std::string qwen4exp_vision_sin_name_;
+  std::string qwen4exp_vision_attention_bias_name_;
 };
 
 }  // namespace Generators

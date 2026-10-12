@@ -9,6 +9,7 @@ import os
 import platform
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -1003,14 +1004,19 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
 
     if build_dir.exists():
         log.info(f"Removing existing build directory: {build_dir}")
-        shutil.rmtree(build_dir)
+        def remove_readonly(function, path, _):
+            os.chmod(path, stat.S_IWRITE)
+            function(path)
+
+        shutil.rmtree(build_dir, onexc=remove_readonly)
 
     build_dir.mkdir()
 
     samples_to_build = ["-DMODEL_QA=ON", "-DMODEL_CHAT=ON", "-DMODEL_MM=ON", "-DWHISPER=ON", "-DMODEL_ASR=ON"]
 
-    ort_include_dir = REPO_ROOT / "ort" / "include"
-    ort_lib_dir = REPO_ROOT / "ort" / "lib"
+    ort_root = args.ort_home if args.ort_home else REPO_ROOT / "ort"
+    ort_include_dir = ort_root / "include"
+    ort_lib_dir = ort_root / "lib"
     oga_include_dir = REPO_ROOT / "src"
     oga_lib_dir = args.build_dir
     if util.is_windows():

@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <condition_variable>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -34,11 +36,16 @@
 #include "engine_test_doubles.h"
 #include "engine/scheduled_requests.h"
 #include "decoding/speculative_sampling.h"
+#include "models/preprocessing/genai_tokenizer.h"
 
 namespace Generators {
 namespace test {
 
 struct EngineRunTestAccess {
+  static State& DecoderState(ScheduledRequests& scheduled_requests) {
+    return *scheduled_requests.decoder_state_;
+  }
+
   static void PublishDraftResults(
       Engine& engine, std::span<Request* const> requests,
       const std::vector<std::vector<TargetTokenSelection>>& distributions) {
@@ -156,6 +163,269 @@ class ScopedFailingCheckpointDevice final : public DeviceInterface {
   std::function<bool()> failure_predicate_;
   size_t failure_count_{};
 };
+
+class NativeTensorReference {
+ public:
+  NativeTensorReference(const std::filesystem::path& path, bool compare)
+      : compare_{compare} {
+    if (compare) {
+      input_.open(path, std::ios::binary);
+      if (!input_) throw std::runtime_error("Cannot open native tensor reference.");
+    } else {
+      output_.open(path, std::ios::binary | std::ios::trunc);
+      if (!output_) throw std::runtime_error("Cannot create native tensor reference.");
+    }
+  }
+
+  void Record(std::string_view name, std::span<const uint8_t> bytes) {
+    const std::string header = std::string{name} + " " + std::to_string(bytes.size()) + "\n";
+    if (total_bytes_ + header.size() + bytes.size() > 100ull * 1024 * 1024 * 1024)
+      throw std::runtime_error("Native tensor reference exceeds 100 GiB limit.");
+    if (compare_) {
+      std::string expected_header;
+      std::getline(input_, expected_header);
+      if (expected_header + "\n" != header)
+        throw std::runtime_error("Native reference record mismatch: " + std::string{name});
+      std::vector<uint8_t> expected(std::min<size_t>(bytes.size(), 1024 * 1024));
+      for (size_t offset = 0; offset < bytes.size(); offset += expected.size()) {
+        const size_t count = std::min(expected.size(), bytes.size() - offset);
+        input_.read(reinterpret_cast<char*>(expected.data()), count);
+        if (static_cast<size_t>(input_.gcount()) != count)
+          throw std::runtime_error("Truncated native reference: " + std::string{name});
+        const auto difference = std::mismatch(expected.begin(), expected.begin() + count,
+                                              bytes.begin() + offset);
+        if (difference.first != expected.begin() + count)
+          throw std::runtime_error("Native tensor mismatch: " + std::string{name} +
+                                   " byte " + std::to_string(offset + difference.first - expected.begin()));
+      }
+    } else {
+      output_.write(header.data(), header.size());
+      output_.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+      if (!output_) throw std::runtime_error("Native tensor reference write failed.");
+    }
+    total_bytes_ += header.size() + bytes.size();
+    ++records_;
+  }
+
+  void Tensor(const Model& model, std::string name, OrtValue& value,
+              size_t offset = 0, std::optional<size_t> count = std::nullopt) {
+    const auto info = value.GetTensorTypeAndShapeInfo();
+    const size_t size = Ort::SizeOf(info->GetElementType()) * info->GetElementCount();
+    const size_t length = count.value_or(size);
+    if (offset > size || length > size - offset)
+      throw std::runtime_error("Native capture tensor range exceeds storage.");
+    name += " type=" + std::to_string(info->GetElementType()) + " shape=";
+    for (const int64_t dimension : info->GetShape()) name += std::to_string(dimension) + ",";
+    auto bytes = std::span<uint8_t>{value.GetTensorMutableData<uint8_t>() + offset, length};
+    if (value.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU) {
+      auto device_bytes = model.p_device_->WrapMemory<uint8_t>(bytes);
+      Record(name, device_bytes.CopyDeviceToCpu());
+    } else {
+      Record(name, bytes);
+    }
+  }
+
+  void Finish() {
+    if (compare_ && input_.peek() != std::char_traits<char>::eof())
+      throw std::runtime_error("Native reference contains unmatched trailing records.");
+    output_.flush();
+    std::cout << "NATIVE_REFERENCE records=" << records_ << " bytes=" << total_bytes_ << '\n';
+  }
+
+ private:
+  bool compare_{};
+  std::ifstream input_;
+  std::ofstream output_;
+  uint64_t total_bytes_{};
+  size_t records_{};
+};
+
+class NativeCaptureExecutor : public ModelExecutor {
+ public:
+  NativeCaptureExecutor(std::shared_ptr<Model> model,
+                        std::shared_ptr<CacheManager> cache,
+                        std::unique_ptr<ModelExecutor> executor,
+                        NativeTensorReference& reference, std::string role)
+      : model_{std::move(model)}, cache_{std::move(cache)}, executor_{std::move(executor)}, reference_{reference}, role_{std::move(role)} {}
+
+  bool SupportsDraftVerification() const override {
+    return executor_->SupportsDraftVerification();
+  }
+
+  void Decode(ScheduledRequests& requests, ExecutionContext& context) override {
+    const std::string prefix = role_ + "/" + std::to_string(step_++);
+    for (const auto& binding : context.fixed_state_bindings)
+      reference_.Tensor(*model_, prefix + "/committed/" + binding.input_name, *binding.input);
+    const auto snapshot = cache_->Snapshot();
+    State* cache_state = cache_->Cache();
+    if (cache_state && !snapshot.requests.empty()) {
+      if (requests.size() != 1 || snapshot.requests.size() != 1 ||
+          !snapshot.window_blocks.requests.empty())
+        throw std::runtime_error("Native capture requires one non-windowed request.");
+      const auto& committed = snapshot.requests.front();
+      for (size_t index = 0; index < cache_state->inputs_.size(); ++index) {
+        OrtValue* value = cache_state->inputs_[index];
+        const auto info = value->GetTensorTypeAndShapeInfo();
+        const auto shape = info->GetShape();
+        if (shape.size() != 4) continue;
+        if (static_cast<size_t>(shape[1]) != snapshot.block_size)
+          throw std::runtime_error("Native capture encountered unexpected KV layout.");
+        const size_t slot_bytes = shape[2] * shape[3] * Ort::SizeOf(info->GetElementType());
+        size_t remaining = committed.used_slots;
+        for (size_t block = 0; remaining; ++block) {
+          const size_t slots = std::min(remaining, snapshot.block_size);
+          reference_.Tensor(*model_, prefix + "/committed/" + cache_state->input_names_[index] + "/logical-block-" + std::to_string(block),
+                            *value, committed.block_ids.at(block) * snapshot.block_size * slot_bytes,
+                            slots * slot_bytes);
+          remaining -= slots;
+        }
+      }
+    }
+    executor_->Decode(requests, context);
+    State& state = EngineRunTestAccess::DecoderState(requests);
+    bool found_logits = false;
+    for (size_t index = 0; index < state.outputs_.size(); ++index) {
+      if (std::string_view{state.output_names_[index]} == model_->config_->model.decoder.outputs.logits) {
+        reference_.Tensor(*model_, prefix + "/logits", *state.outputs_[index]);
+        found_logits = true;
+      }
+    }
+    if (!found_logits) throw std::runtime_error("Native capture could not find raw decoder logits.");
+  }
+
+ private:
+  std::shared_ptr<Model> model_;
+  std::shared_ptr<CacheManager> cache_;
+  std::unique_ptr<ModelExecutor> executor_;
+  NativeTensorReference& reference_;
+  std::string role_;
+  size_t step_{};
+};
+
+TEST(EngineNativeCaptureTest, StreamedBytesDetectMismatch) {
+  const auto path = std::filesystem::temp_directory_path() /
+                    ("genai-native-reference-" + std::to_string(std::random_device{}()) + ".bin");
+  const std::array<uint8_t, 3> original{1, 2, 3};
+  {
+    NativeTensorReference reference{path, false};
+    reference.Record("tensor", original);
+    reference.Finish();
+  }
+  {
+    NativeTensorReference reference{path, true};
+    EXPECT_NO_THROW(reference.Record("tensor", original));
+    EXPECT_NO_THROW(reference.Finish());
+  }
+  {
+    NativeTensorReference reference{path, true};
+    const std::array<uint8_t, 3> changed{1, 4, 3};
+    EXPECT_THROW(reference.Record("tensor", changed), std::runtime_error);
+  }
+  std::filesystem::remove(path);
+}
+
+size_t NativeCaptureCount(const char* value, size_t fallback) {
+  if (!value || !*value) return fallback;
+  const std::string_view text{value};
+  size_t count{};
+  const auto parsed = std::from_chars(text.data(), text.data() + text.size(), count);
+  if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || count == 0 || count > 262144)
+    throw std::runtime_error("Native capture count must be an integer between 1 and 262144.");
+  return count;
+}
+
+TEST(EngineNativeCaptureTest, CaptureCountsRejectInvalidValues) {
+  EXPECT_EQ(NativeCaptureCount(nullptr, 512), 512u);
+  EXPECT_EQ(NativeCaptureCount("", 512), 512u);
+  EXPECT_EQ(NativeCaptureCount("2048", 512), 2048u);
+  EXPECT_EQ(NativeCaptureCount("262144", 512), 262144u);
+  for (const char* value : {"0", "-1", " 512", "512x", "262145", "18446744073709551616"})
+    EXPECT_THROW(NativeCaptureCount(value, 512), std::runtime_error);
+}
+
+TEST(EngineNativeCaptureTest, RealModelLifecycleLogitsAndCommittedState) {
+  const char* model_path = std::getenv("GENAI_NATIVE_CAPTURE_MODEL");
+  const char* reference_path = std::getenv("GENAI_NATIVE_CAPTURE_REFERENCE");
+  if (!model_path || !*model_path || !reference_path || !*reference_path)
+    GTEST_SKIP() << "Set GENAI_NATIVE_CAPTURE_MODEL and GENAI_NATIVE_CAPTURE_REFERENCE for actual-model validation.";
+  const size_t prompt_tokens = NativeCaptureCount(std::getenv("GENAI_NATIVE_CAPTURE_PROMPT_TOKENS"), 512);
+  const size_t session_tokens = NativeCaptureCount(std::getenv("GENAI_NATIVE_CAPTURE_SESSION_TOKENS"), 4096);
+  ASSERT_LE(prompt_tokens + 512, session_tokens);
+  std::cout << "NATIVE_BOUNDS prompt=" << prompt_tokens << " session=" << session_tokens << " width=3\n";
+  const char* compare = std::getenv("GENAI_NATIVE_CAPTURE_COMPARE");
+  NativeTensorReference reference{reference_path, compare && std::string_view{compare} == "1"};
+  auto config = CreateConfig(GetOrtEnv(), model_path);
+  const char* overlay = std::getenv("GENAI_NATIVE_CAPTURE_CONFIG_OVERLAY");
+  if (overlay && *overlay) {
+    OverlayConfig(*config, overlay);
+    std::cout << "NATIVE_CONFIG_OVERLAY " << overlay << '\n';
+  }
+  config->speculative.max_draft_tokens = 3;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto dependencies = Engine::CreateDependencies(model);
+  dependencies.model_executor = std::make_unique<NativeCaptureExecutor>(
+      model, dependencies.cache_manager, std::move(dependencies.model_executor), reference, "target");
+  if (dependencies.mtp_model_executor)
+    dependencies.mtp_model_executor = std::make_unique<NativeCaptureExecutor>(
+        dependencies.mtp_model, dependencies.mtp_cache_manager,
+        std::move(dependencies.mtp_model_executor), reference, "mtp");
+  auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+  auto request = CreateEngineRequest(engine, session_tokens);
+  Tokenizer tokenizer{*model->config_};
+  std::string text;
+  for (size_t repeat = 0; repeat < prompt_tokens; ++repeat)
+    text += "Write a Python function that merges sorted integer lists without modifying either input. ";
+  auto prompt = tokenizer.Encode(text.c_str());
+  ASSERT_GE(prompt.size(), prompt_tokens);
+  prompt.resize(prompt_tokens);
+  const auto continuation = tokenizer.Encode("\nContinue with an explanation of time complexity.");
+  auto turn = [&](std::string label, std::span<const int32_t> tokens, size_t limit, bool cancel = false) {
+    TurnOptions options;
+    options.do_sample = false;
+    options.max_generated_tokens = limit;
+    const uint64_t turn_id = request->BeginTurn(tokens, options);
+    size_t emitted = 0;
+    bool cancelled = false;
+    bool finished = false;
+    while (engine->HasPendingRequests()) {
+      const auto event = RunOne(*engine);
+      if (event.flags & EngineEventFlagFailed) throw std::runtime_error("Native capture request failed.");
+      const std::array<uint64_t, 5> values{event.turn_id, event.flags,
+                                           static_cast<uint64_t>(static_cast<uint32_t>(event.token)),
+                                           static_cast<uint64_t>(event.finish_reason),
+                                           static_cast<uint64_t>(request->ProcessedSequenceLength())};
+      reference.Record(label + "/event",
+                       std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(values.data()), sizeof(values)});
+      if (event.flags & EngineEventFlagToken) ++emitted;
+      if (event.flags & EngineEventFlagTurnFinished) finished = true;
+      if (cancel && !cancelled && emitted >= 6) {
+        if (!engine->CancelRequest(request, turn_id)) throw std::runtime_error("Native capture cancellation failed.");
+        cancelled = true;
+      }
+    }
+    if (!finished || !emitted || (cancel && !cancelled))
+      throw std::runtime_error("Native capture lifecycle coverage incomplete.");
+    return turn_id;
+  };
+  turn("initial", prompt, 32);
+  turn("continuation", continuation, 24);
+  const auto discarded = turn("discarded", continuation, 16);
+  request->RewindToStartOfTurn(discarded);
+  turn("after_rewind", continuation, 24);
+  turn("cancelled", continuation, 64, true);
+  turn("after_cancel", continuation, 24);
+  turn("final_state_probe", continuation, 1);
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_GT(stats.partial_accept_rounds, 0u);
+  EXPECT_GT(stats.zero_accept_rounds, 0u);
+  EXPECT_GT(stats.full_accept_rounds, 0u);
+  EXPECT_EQ(stats.mtp_failures, 0u);
+  EXPECT_EQ(stats.standard_fallback_steps, 0u);
+  std::cout << "NATIVE_ROUNDS partial=" << stats.partial_accept_rounds << " zero="
+            << stats.zero_accept_rounds << " full=" << stats.full_accept_rounds << '\n';
+  engine->CloseRequest(request);
+  reference.Finish();
+}
 
 class TestBarrier {
  public:
@@ -2477,8 +2747,8 @@ TEST_F(EngineRunTest, FailedTurnDiscardsPendingDraftsAndTheNextTurnPolicyGoverns
   }
   EXPECT_EQ(reused->PendingDraftTokenCount(), 0u);
 
-  // The next turn masks end-of-stream until it has generated three tokens, one of the policies that
-  // makes a turn ineligible for drafting at all.
+  // The next turn masks end-of-stream until it has generated three tokens. Old proposals must
+  // still be discarded even though the new turn can verify fresh drafts with its own EOS floor.
   engine.executor->SetVerifyRowTokens({});
   engine.executor->SetForcedToken(eos);
   const size_t prefix_commits_before = engine.cache->prefix_commits.size();
@@ -2488,7 +2758,7 @@ TEST_F(EngineRunTest, FailedTurnDiscardsPendingDraftsAndTheNextTurnPolicyGoverns
   floored_turn.max_generated_tokens = 3;
   reused->BeginTurn(std::vector<int32_t>{7}, floored_turn);
   EXPECT_EQ(reused->PendingDraftTokenCount(), 0u);
-  EXPECT_NE(reused->DraftTokenValidationError(), nullptr);
+  EXPECT_EQ(reused->DraftTokenValidationError(), nullptr);
   EXPECT_THROW(reused->SetDraftTokens(std::vector<int32_t>{21, 22, 23}),
                std::runtime_error);
 
@@ -2512,6 +2782,65 @@ TEST_F(EngineRunTest, FailedTurnDiscardsPendingDraftsAndTheNextTurnPolicyGoverns
   }
   EXPECT_EQ(reused->FinishReason(), GenerationFinishReason::TurnLimit);
   EXPECT_EQ(engine.cache->prefix_commits.size(), prefix_commits_before);
+}
+
+TEST_F(EngineRunTest, SpeculativeMinimumMasksEosPerVerificationRow) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 11 ? 12 : 11;
+  for (const bool sampled : {false, true}) {
+    for (const bool bonus_below_floor : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "sampled=" << sampled
+                                        << ", bonus_below_floor=" << bonus_below_floor);
+      auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+      engine.cache->SetMaxDraftTokensPerStep(3);
+      TurnOptions options;
+      options.do_sample = sampled;
+      if (sampled) {
+        options.top_k = 2;
+        options.top_p = 0.0f;
+        options.seed = 13;
+      }
+      options.min_generated_tokens = bonus_below_floor ? 4 : 3;
+      options.max_generated_tokens = 8;
+      auto request = CreateRequestWithPrompt(engine.engine, Prompt(10), options);
+      ASSERT_EQ(RunOne(*engine.engine).token, filler);
+      ASSERT_EQ(request->DraftTokenValidationError(), nullptr);
+
+      std::vector<int32_t> drafts{filler, filler};
+      if (!bonus_below_floor) {
+        drafts.push_back(eos);
+      }
+      request->SetDraftTokens(drafts);
+      std::vector<float> row(model_->config_->model.vocab_size, -1000.0f);
+      row[eos] = 1000.0f;
+      row[filler] = 100.0f;
+      engine.executor->SetVerifyRowLogits(
+          std::vector<std::vector<float>>(drafts.size() + 1, row));
+      std::array<EngineEvent, 8> events;
+      const size_t count = engine.engine->Run(events);
+      EXPECT_EQ(count, bonus_below_floor ? 3u : 2u);
+      for (size_t i = 0; i < count; ++i) {
+        EXPECT_TRUE(events[i].flags & EngineEventFlagToken);
+        EXPECT_EQ(events[i].token, filler);
+      }
+      EXPECT_EQ(request->TurnGeneratedTokens(), options.min_generated_tokens);
+      EXPECT_EQ(request->IsTurnComplete(), !bonus_below_floor);
+      if (!bonus_below_floor) {
+        EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+      }
+      ASSERT_EQ(engine.cache->prefix_commits.size(), 1u);
+      EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
+
+      if (bonus_below_floor) {
+        engine.executor->SetVerifyRowLogits({});
+        engine.executor->SetForcedToken(eos);
+        const auto terminal = RunOne(*engine.engine);
+        EXPECT_TRUE(terminal.flags & EngineEventFlagTurnFinished);
+        EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+        EXPECT_EQ(request->TurnGeneratedTokens(), 4u);
+      }
+    }
+  }
 }
 
 TEST_F(EngineRunTest, SampledSpeculativeRunKeepsAcceptedPrefixAndCorrection) {
@@ -3177,6 +3506,111 @@ TEST_F(EngineRunTest, MtpPlanningFailureCommitsTargetStepWithoutDrafts) {
   EXPECT_GT(request->PendingDraftTokenCount(), 0u);
   EXPECT_GT(engine.mtp_executor->decode_calls, draft_calls_before_abort);
   EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps, 1u);
+}
+
+TEST_F(EngineRunTest, MtpUsesExportedHiddenStateWidth) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  const int64_t exported_hidden_width = model_->config_->model.decoder.hidden_size * 2;
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5, exported_hidden_width);
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
+
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  EXPECT_NE(storage.front().flags & EngineEventFlagFailed, EngineEventFlagFailed);
+  EXPECT_GT(request->PendingDraftTokenCount(), 0u);
+  EXPECT_GT(engine.mtp_executor->decode_calls, 0);
+}
+
+TEST_F(EngineRunTest, MtpChainCarriesFixedStateWithoutOverwritingCommitState) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
+  const std::array<int64_t, 2> shape{1, 1};
+  auto input = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                     shape, Ort::TypeToTensorType<float>);
+  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                      shape, Ort::TypeToTensorType<float>);
+  input->GetTensorMutableData<float>()[0] = 0.0f;
+  output->GetTensorMutableData<float>()[0] = -1.0f;
+  FixedStateBinding binding{};
+  binding.input = input.get();
+  binding.output = output.get();
+  engine.mtp_cache->SetFixedStateBindings({binding});
+  std::vector<float> observed_inputs;
+  std::vector<const OrtValue*> chain_inputs;
+  std::vector<const OrtValue*> chain_outputs;
+  std::vector<size_t> chain_domains;
+  engine.mtp_executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_EQ(context.fixed_state_bindings.size(), 1u);
+    const auto& current = context.fixed_state_bindings.front();
+    if (context.fixed_state_binding_domain != 0) {
+      ASSERT_NE(context.plan, nullptr);
+      EXPECT_TRUE(context.plan->graph_capture_eligible);
+      chain_inputs.push_back(current.input);
+      chain_outputs.push_back(current.output);
+      chain_domains.push_back(context.fixed_state_binding_domain);
+    }
+    observed_inputs.push_back(current.input->GetTensorData<float>()[0]);
+    current.output->GetTensorMutableData<float>()[0] =
+        static_cast<float>(observed_inputs.size());
+  });
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(request->PendingDraftTokenCount(), 3u);
+  EXPECT_EQ(observed_inputs, (std::vector<float>{0.0f, 1.0f, 2.0f}));
+  EXPECT_EQ(input->GetTensorData<float>()[0], 0.0f);
+  EXPECT_EQ(output->GetTensorData<float>()[0], 1.0f);
+  ASSERT_EQ(chain_inputs.size(), 2u);
+  EXPECT_EQ(chain_outputs[0], chain_inputs[1]);
+  EXPECT_EQ(chain_outputs[1], chain_inputs[0]);
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(chain_inputs.size(), 4u);
+  EXPECT_EQ(chain_inputs[0], chain_inputs[2]);
+  EXPECT_EQ(chain_inputs[1], chain_inputs[3]);
+  EXPECT_EQ(chain_outputs[0], chain_outputs[2]);
+  EXPECT_EQ(chain_outputs[1], chain_outputs[3]);
+  EXPECT_EQ(chain_domains, (std::vector<size_t>{1, 2, 1, 2}));
+}
+
+TEST_F(EngineRunTest, MtpChainSelectsFixedStateRowsForDifferentDraftWidths) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
+  const std::array<int64_t, 2> shape{2, 1};
+  auto input = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                     shape, Ort::TypeToTensorType<float>);
+  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                      shape, Ort::TypeToTensorType<float>);
+  input->GetTensorMutableData<float>()[0] = 10.0f;
+  input->GetTensorMutableData<float>()[1] = 20.0f;
+  FixedStateBinding binding{};
+  binding.input = input.get();
+  binding.output = output.get();
+  engine.mtp_cache->SetFixedStateBindings({binding});
+  std::vector<std::vector<float>> observed_inputs;
+  engine.mtp_executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_EQ(context.fixed_state_bindings.size(), 1u);
+    const auto& current = context.fixed_state_bindings.front();
+    const size_t rows = current.input->GetTensorTypeAndShapeInfo()->GetElementCount();
+    const auto* values = current.input->GetTensorData<float>();
+    observed_inputs.emplace_back(values, values + rows);
+    for (size_t row = 0; row < rows; ++row) {
+      current.output->GetTensorMutableData<float>()[row] = values[row] + 1.0f;
+    }
+  });
+  TurnOptions short_turn;
+  short_turn.max_generated_tokens = 4;
+  auto first = CreateRequestWithPrompt(engine.engine, Prompt(10), short_turn);
+  auto second = CreateRequestWithPrompt(engine.engine, Prompt(20));
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(first->PendingDraftTokenCount(), 2u);
+  ASSERT_EQ(second->PendingDraftTokenCount(), 3u);
+  EXPECT_EQ(observed_inputs, (std::vector<std::vector<float>>{{10.0f, 20.0f}, {11.0f, 21.0f}, {22.0f}}));
+  EXPECT_EQ(output->GetTensorData<float>()[0], 11.0f);
+  EXPECT_EQ(output->GetTensorData<float>()[1], 21.0f);
 }
 
 TEST_F(EngineRunTest, PersistentMtpFailureKeepsTheRequestAdvancing) {

@@ -80,7 +80,9 @@ unset(_msec_plat_lc)
 # --- /Qspectre  Spectre variant 1 mitigations ---
 # Generator expressions restrict this to C/C++ only — CUDA nvcc does not
 # accept /Qspectre and will error if it is passed to it.
-add_compile_options(
-  "$<$<COMPILE_LANGUAGE:C>:/Qspectre>"
-  "$<$<COMPILE_LANGUAGE:CXX>:/Qspectre>"
-)
+if(ENABLE_MSVC_SPECTRE)
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:C>:/Qspectre>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/Qspectre>"
+  )
+endif()
