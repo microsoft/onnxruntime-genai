@@ -227,7 +227,7 @@ blocks or fixed state. Selection deliberately follows target block eviction
 order, not snapshot capture age: descendants precede ancestors on the same
 physical path. For snapshots at tokens 4 and 8, the token-8 snapshot is removed
 first, preserving the shorter prefix for broader reuse. A longer target hit
-can therefore lose its draft snapshot and need drafter context rebuilding.
+can therefore lose its draft snapshot and initially run without DFlash drafts.
 Leased snapshots are skipped and never overwritten.
 Increasing the snapshot limit trades target-cache capacity for draft reuse.
 The budget guarantees only one remaining target block, not that a previously
@@ -240,7 +240,15 @@ With `og.set_log_options(enabled=True)`, Engine construction logs the requested
 and effective snapshot counts, actual target block count, block size, target
 cache bytes, and draft snapshot reservation bytes under `engine_cache`.
 If the matching draft checkpoint is absent, the request retains the full
-target hit and runs target-only until the windowed drafter has rebuilt its context.
+target hit, but cannot immediately resume DFlash drafting at that boundary.
+An eligible windowed drafter with a free ring can start ingesting auxiliary
+hidden states from target tokens executed **after** the cached boundary. It
+does not replay or reconstruct the skipped prefix. DFlash drafts remain disabled
+until those newly executed tokens cover its required context window
+(`model.dflash2.sliding_window + model.dflash2.block_size`). Only then can
+drafting resume, subject to the normal turn eligibility and generation limits.
+A short request may finish before reaching that threshold and use no DFlash
+drafts at all. A matching snapshot avoids this warm-up.
 Full-attention DSpark remains target-only
 after a nonzero-position prefix hit.
 
@@ -1956,7 +1964,10 @@ that fitted with a smaller limit; the one-block minimum is not an admission
 guarantee. Engine construction logs the effective count and target-cache size
 when logging is enabled. Readers lease immutable snapshots through admission;
 replacement cannot overwrite an in-flight adopter. Without a matching draft
-snapshot, the target prefix still hits and the drafter rebuilds its context.
+snapshot, the target prefix still hits, but DFlash cannot draft immediately.
+It can ingest newly executed target tokens into a fresh windowed ring and resume
+drafting only after those tokens fill the required context window; a short
+request can remain target-only throughout. The skipped prefix is not rebuilt.
 A full-attention block
 drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
 query-spill bytes are charged against the same budget before target capacity is selected, using the
@@ -1974,8 +1985,11 @@ ingest-only, because retaining its cache is what lets a later greedy turn resume
 Rewind releases any tracked DFlash/DSpark state, including its cache blocks. On replay, a request
 that was previously sampled or admission-denied can try to join again if its new position-zero
 step is draft-eligible and capacity is available. A nonzero-position hit also joins a windowed
-DFlash 2 drafter when its exact target boundary still has a draft checkpoint and a free ring.
-Otherwise it remains target-only; rewind does not guarantee renewed drafting.
+DFlash 2 drafter immediately when its exact target boundary still has a draft checkpoint and a
+free ring. Without a matching checkpoint, an eligible windowed drafter can claim a free ring but
+must ingest a full required context window of newly executed target tokens before proposing
+drafts. Full-attention DSpark cannot join at a nonzero position without its prior context.
+Rewind therefore does not guarantee renewed drafting.
 
 ## Backpressure and fairness
 
