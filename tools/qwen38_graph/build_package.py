@@ -111,6 +111,9 @@ def main() -> None:
     parser.add_argument("--tokenizer-from", type=Path, default=TOKENIZER_FROM)
     parser.add_argument("--no-mtp", action="store_true", help="default to plain S=1 graph decode (mtp.enabled=false); the head stays packaged")
     parser.add_argument("--no-warmup", action="store_true")
+    parser.add_argument("--stop-token-ids", default="248046,248044",
+                        help="comma separated stop tokens written to genai_config.json (<|im_end|>, <|endoftext|>); use an unreachable id "
+                        "(e.g. 248319) for a fixed-length/ignore-EOS benchmark package")
     parser.add_argument("--copy", action="store_true", help="copy instead of hard-linking")
     parser.add_argument("--skip-ple", action="store_true", help="do not (re)write ple_table.txt")
     for name, default in {**TARGET_LIBS, **HEAD_EXTRA_LIBS}.items():
@@ -154,7 +157,7 @@ def main() -> None:
             "type": "qwen38_flash_graph",
             "bos_token_id": 248044,
             "pad_token_id": 248044,
-            "eos_token_id": [248046, 248044],
+            "eos_token_id": [int(x) for x in args.stop_token_ids.split(",")],
             "vocab_size": 248320,
             "context_length": KV_CAPACITY - 4,
             "decoder": {

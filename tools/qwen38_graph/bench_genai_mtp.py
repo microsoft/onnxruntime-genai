@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 """vLLM-protocol decode benchmark of the GenAI qwen38_flash_graph model (modelled on CG/mtp_runner/bench_mtp.py).
 
-Exact prompt lengths, 256 new tokens, EOS ignored, natural text from the vLLM source pool (frozen under runs/), 1 warmup +
+Exact prompt lengths, 256 new tokens, EOS ignored (package built with build_package.py --stop-token-ids 248319), natural text from the vLLM source pool (frozen under runs/), 1 warmup +
 3 measured runs on distinct prompts (seeds 1000+n for the warmup, i*7+n for run i), TPS = (n-1) generated tokens / (time of the
 last token - time of the first token), through the public Generator API:
     generator.append_tokens(prompt); while not generator.is_done(): generator.generate_next_token(); generator.get_next_tokens()
@@ -11,6 +11,7 @@ last token - time of the first token), through the public Generator API:
 usage: bench_genai_mtp.py <package> --out <json> [--contexts 2048,8192,32768] [--kind text] [--no-mtp] [--reps 3] [--new 256]
 """
 import argparse
+import hashlib
 import json
 import os
 import statistics
@@ -18,13 +19,12 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import onnxruntime_genai as og
 
 RUNNER = Path("/home/tianlei/git/eval_runs/qwen38_cuda_graph_20261010_01/mtp_runner")
 sys.path.insert(0, str(RUNNER))
 import prompts  # noqa: E402
-
-NEVER_EOS = 248319
 
 
 def decode_once(model, prompt, new):
@@ -35,11 +35,13 @@ def decode_once(model, prompt, new):
     generator.append_tokens(prompt)
     t_append = time.perf_counter()
     count = 0
+    tokens = []
     t_first = t_last = None
     while not generator.is_done():
         generator.generate_next_token()
-        generator.get_next_tokens()
+        token = generator.get_next_tokens()[0]
         now = time.perf_counter()
+        tokens.append(int(token))
         if t_first is None:
             t_first = now
         t_last = now
@@ -47,7 +49,7 @@ def decode_once(model, prompt, new):
     stats = generator.get_speculative_stats()
     del generator
     decode_s = t_last - t_first
-    return {"tokens": count, "prefill_append_s": t_append - t0, "first_token_s": t_first - t0, "decode_s": decode_s,
+    return {"tokens": count, "hash": hashlib.sha256(np.asarray(tokens, dtype="<i4").tobytes()).hexdigest(), "prefill_append_s": t_append - t0, "first_token_s": t_first - t0, "decode_s": decode_s,
             "tps": (count - 1) / decode_s, "cycles": stats["rounds"], "accepted": stats["draft_tokens_accepted"],
             "accept_rate": stats["draft_tokens_accepted"] / stats["rounds"] if stats["rounds"] else None,
             "ms_per_cycle": decode_s / stats["rounds"] * 1e3 if stats["rounds"] else None}
@@ -71,7 +73,7 @@ def main():
     og.register_execution_provider_library("CUDAExecutionProvider", args.provider)
     config = og.Config(args.model)
     graph = {"mtp": {"enabled": not args.no_mtp, "prefill_head": not args.no_head_prefill}}
-    config.overlay(json.dumps({"model": {"eos_token_id": [NEVER_EOS], "qwen38_graph": graph}}))
+    config.overlay(json.dumps({"model": {"qwen38_graph": graph}}))
     model = og.Model(config)
 
     result = {"args": {k: str(v) for k, v in vars(args).items()}, "contexts": {}}

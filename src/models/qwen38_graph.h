@@ -143,7 +143,12 @@ struct Qwen38GraphEngine {
 
   // --- prompt ingestion (pluggable: the single entry point a faster prefill replaces) ---
   void Reset();                                          // zero all state, length 0
-  void PrefillChunk(std::span<const int32_t> tokens);    // S=2 steps; leaves the argmax of the last row in PendingToken()
+  // Ingests prompt tokens by S=2 graph steps (odd tail commits one row). Contract for a replacement (faster) prefill, per
+  // chunk: advance the committed recurrent bank (cur_), the in-place KV/index/position store and the PLE context
+  // (ctx_commit_) to length_ + n; append the prompt tokens to d_tokens_ / prompt_tokens_; if keep_hidden_, write the target
+  // hidden row of every token to d_prompt_hidden_ (the head is prefilled from it); leave the hidden row of the last token in
+  // d_last_hidden_, its argmax in PendingToken() and its logits row reachable through LastLogits().
+  void PrefillChunk(std::span<const int32_t> tokens);
   void LastLogits(std::span<float> out) const;           // fp32 copy of the logits row of the last prompt token
   size_t Length() const { return length_; }
   int32_t PendingToken() const { return pending_; }

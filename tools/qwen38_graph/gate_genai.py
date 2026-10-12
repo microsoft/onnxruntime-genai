@@ -9,7 +9,8 @@ Tokens are collected through the standard GenAI loop (append_tokens / generate_n
 cross-checked against generator.get_sequence().
 
 usage: gate_genai.py <package> --out <json> [--no-mtp] [--ignore-eos] [--cases text,prose,random,chat]
-       --ignore-eos reproduces the research "fixed length" mode (EOS is an ordinary token) by moving the stop token out of reach.
+       --ignore-eos selects the research "fixed length" reference hashes; run it on a package built with
+       build_package.py --stop-token-ids 248319 (EOS is then an ordinary token; config overlays append to the stop list).
 """
 import argparse
 import hashlib
@@ -32,7 +33,6 @@ CHAT_QUESTIONS = [
     "Name the three primary colors in one short sentence.",
     "Write the word hello.",
 ]
-NEVER_EOS = 248319  # a token id the model does not stop on; keeps the config valid (< vocab_size)
 
 
 def token_hash(tokens):
@@ -78,8 +78,6 @@ def main():
     overlay = {}
     if args.no_mtp:
         overlay.setdefault("model", {})["qwen38_graph"] = {"mtp": {"enabled": False}}
-    if args.ignore_eos:
-        overlay.setdefault("model", {})["eos_token_id"] = [NEVER_EOS]
     if overlay:
         config.overlay(json.dumps(overlay))
     model = og.Model(config)
