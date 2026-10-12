@@ -409,7 +409,7 @@ def scrub_value_for_telemetry(value):
                     safe_key = f"[unsupported:{type(key).__name__}]"
             if safe_key:
                 safe_child = (
-                    "[path]" if isinstance(key, str) and _is_secret_key(key) else scrub_value_for_telemetry(child)
+                    "[redacted]" if isinstance(key, str) and _is_secret_key(key) else scrub_value_for_telemetry(child)
                 )
                 entries.append((safe_key, safe_child))
         return dict(sorted(entries, key=lambda entry: entry[0]))
@@ -418,7 +418,7 @@ def scrub_value_for_telemetry(value):
         redact_next = False
         for child in value:
             if redact_next:
-                result.append("[path]")
+                result.append("[redacted]")
                 redact_next = False
             else:
                 result.append(scrub_value_for_telemetry(child))
@@ -429,7 +429,7 @@ def scrub_value_for_telemetry(value):
         redact_next = False
         for child in value:
             if redact_next:
-                result.append("[path]")
+                result.append("[redacted]")
                 redact_next = False
             else:
                 result.append(scrub_value_for_telemetry(child))
@@ -450,7 +450,7 @@ def normalize_execution_provider(value):
 
 
 def sanitize_model_identifier(value):
-    """Preserve model IDs while replacing local paths with ``[path]``."""
+    """Redact path-shaped identifiers and bare filenames without filesystem I/O."""
     if isinstance(value, os.PathLike):
         return "[path]"
     if not isinstance(value, str) or not value:
@@ -464,10 +464,7 @@ def sanitize_model_identifier(value):
     if not (is_windows_path or is_posix_path or is_explicit_relative_path or is_unprefixed_path):
         if value.count("/") == 1:
             return value
-        try:
-            if not os.path.exists(value):
-                return value
-        except (OSError, ValueError):
+        if not posixpath.splitext(value)[1] and not value.startswith("."):
             return value
 
     return "[path]"

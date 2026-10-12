@@ -552,6 +552,52 @@ class TestTelemetryPackaging(unittest.TestCase):
 
 
 class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
+    def test_model_identifiers_are_scrubbed_without_filesystem_probes(self):
+        from telemetry.path_utils import sanitize_model_identifier
+
+        cases = (
+            ("phi-3-mini", "phi-3-mini"),
+            ("microsoft/phi-3.5-mini", "microsoft/phi-3.5-mini"),
+            ("model.onnx", "[path]"),
+            ("weights.safetensors", "[path]"),
+            ("checkpoint.gguf", "[path]"),
+            ("config.json", "[path]"),
+            (".private-model", "[path]"),
+            ("private/model/weights", "[path]"),
+            ("./private-model", "[path]"),
+            ("../private-model", "[path]"),
+            (r"C:\private\model.onnx", "[path]"),
+            (r"\\server\share\model.onnx", "[path]"),
+            ("/private/model", "[path]"),
+            (Path("private-model"), "[path]"),
+            ("invalid\0identifier", "invalid\0identifier"),
+            ("", ""),
+            (None, None),
+            (True, True),
+            (32, 32),
+        )
+        with patch("telemetry.path_utils.os.path.exists", side_effect=AssertionError("Unexpected filesystem probe")):
+            for value, expected in cases:
+                with self.subTest(value=value):
+                    self.assertEqual(sanitize_model_identifier(value), expected)
+
+    def test_model_identifier_redaction_does_not_depend_on_working_directory(self):
+        from telemetry.path_utils import sanitize_model_identifier
+
+        cases = ("phi-3-mini", "model.onnx", ".private-model", "microsoft/phi-3-mini")
+        before = [sanitize_model_identifier(value) for value in cases]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for value in cases:
+                candidate = Path(temp_dir, value)
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                candidate.touch()
+            previous_dir = os.getcwd()
+            try:
+                os.chdir(temp_dir)
+                self.assertEqual([sanitize_model_identifier(value) for value in cases], before)
+            finally:
+                os.chdir(previous_dir)
+
     @staticmethod
     def _load_helper():
         import importlib.util
@@ -1084,10 +1130,10 @@ class TestPathRedaction(unittest.TestCase):
             ],
         )
         self.assertEqual(scrubbed["a-benign"], "n/a")
-        self.assertEqual(scrubbed["clientApiKey"], "[path]")
-        self.assertEqual(scrubbed["headers.authorization"], "[path]")
+        self.assertEqual(scrubbed["clientApiKey"], "[redacted]")
+        self.assertEqual(scrubbed["headers.authorization"], "[redacted]")
         self.assertEqual(scrubbed["m-value"], "token=[path]")
-        self.assertEqual(scrubbed["refresh_token"], "[path]")
+        self.assertEqual(scrubbed["refresh_token"], "[redacted]")
         self.assertEqual(scrubbed["z-url"], "[path]")
 
         values = [
@@ -1120,11 +1166,11 @@ class TestPathRedaction(unittest.TestCase):
                     "python",
                     "builder.py",
                     "--api-key",
-                    "[path]",
+                    "[redacted]",
                     "--password",
-                    "[path]",
+                    "[redacted]",
                 ],
-                "cmd": ("--client-secret", "[path]"),
+                "cmd": ("--client-secret", "[redacted]"),
             },
         )
 
@@ -1422,7 +1468,7 @@ class TestPathRedaction(unittest.TestCase):
             self.assertEqual(attributes["pathlike"], "[path]")
             self.assertEqual(attributes["pathlike_key"]["[path]"], "value")
             self.assertEqual(attributes["nested"]["paths"], ["[path]"])
-            self.assertEqual(attributes["[path]"], "[path]")
+            self.assertEqual(attributes["[path]"], "[redacted]")
             self.assertEqual(attributes["nested"]["[path]"], "value")
 
     def test_public_helpers_never_propagate_failures(self):

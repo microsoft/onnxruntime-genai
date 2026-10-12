@@ -24,6 +24,10 @@ Routine model, generation, adapter, and process information events use determini
 
 Python model-builder events are emitted only after a successful build. Operator counts and types come from the in-memory graph and may differ from the saved graph after quantization.
 
+Python telemetry replaces structured secret values, including separate command-line secret arguments, with `[redacted]`. Free-text redaction uses the shared `[path]` marker for paths and other sensitive content.
+
+Model identifiers are scrubbed without probing the filesystem: explicit paths, bare dotted names (including filenames), and dot-prefixed names are replaced with `[path]`, while namespaced model IDs such as `microsoft/phi-3.5-mini` are preserved. A bare name without path syntax is treated as a model ID regardless of whether a same-named local file or directory exists; callers should pass a `Path` object or an explicit relative path for local inputs.
+
 For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
 
 ### Disabling Telemetry
