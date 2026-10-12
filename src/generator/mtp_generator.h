@@ -55,6 +55,7 @@ struct MtpGenerator {
 
  private:
   void RunRound();
+  void PrefillHead(cpu_span<const int32_t> tokens, OrtValue* hidden, bool has_previous_chunk);
 
   // Run the MTP head on a single (hidden_state, token) pair. When `need_draft` is true, returns the
   // head's greedy drafted next token; when false, only advances the head's KV cache (skipping the

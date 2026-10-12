@@ -1113,6 +1113,8 @@ struct Mtp_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "enabled") {
       v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "prefill_head") {
+      v_.prefill_head = JSON::Get<bool>(value);
     } else if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
     } else if (name == "num_hidden_layers") {

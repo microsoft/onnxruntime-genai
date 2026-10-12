@@ -1,0 +1,110 @@
+# Nemotron-H exported graphs on CUDA
+
+The `nemotron_h` model type uses the decoder-only runtime with sparse attention
+KV discovery and fixed convolution/SSM state management. It is distinct from
+the dense `nemotron` and the transducer `nemotron_speech` model types. This is
+runtime support for already-exported ONNX graphs, not a new Python model-builder
+architecture or support for native NVFP4 checkpoints.
+
+## Nemotron 3.5 Lightning BF16 interface
+
+The experimental Mobius paired task `nemotron-h-mtp` exports
+`decoder/model.onnx` and `mtp/model.onnx`. The pinned BF16 checkpoint is
+`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` at revision
+`a9904d24bcc1d289a1950fa9d2b978c47cf903b9`.
+
+Configure the target decoder with `num_hidden_layers: 52`, `hidden_size: 2688`,
+`num_attention_heads: 32`, `num_key_value_heads: 2`, and `head_size: 128`.
+Its vocabulary size is 131072 and its pinned context limit is 262144. A short
+generation `max_length` does not change that model context limit.
+
+The target exposes attention KV at global layers 5, 12, 19, 26, 33 and 42.
+The runtime discovers these indices from the session; do not renumber the
+cache tensors or allocate attention KV for every layer. Omit `decoder.layer_types`:
+the convolution-cache path for LFM2 treats every non-attention layer as a
+convolution layer, which is not the contract of cacheless Nemotron MoE layers.
+
+Configure the Mamba cache and the post-final-normalization seed explicitly:
+
+```json
+{
+  "inputs": {
+    "past_conv_names": "past_key_values.%d.conv_state",
+    "past_recurrent_names": "past_key_values.%d.ssm_state"
+  },
+  "outputs": {
+    "present_conv_names": "present.%d.conv_state",
+    "present_recurrent_names": "present.%d.ssm_state",
+    "hidden_states": "mtp_seed"
+  }
+}
+```
+
+These fields belong under `model.decoder`. Each Mamba layer has a BF16
+`[batch,6144,3]` convolution carry and a **FP32** `[batch,64,128,64]` SSM carry.
+Their types come from the session independently; do not cast the SSM carry
+to the model's BF16 activation type.
+
+## Optional MTP head
+
+Use the existing [MTP generator](speculative_decoding.md), not a separate
+draft-model acceptance implementation. The main configuration maps:
+
+```json
+{
+  "prefill_head": true,
+  "filename": "mtp/model.onnx",
+  "num_hidden_layers": 1,
+  "num_key_value_heads": 2,
+  "head_size": 128,
+  "main_hidden_states": "mtp_seed",
+  "outputs": { "hidden_states": "mtp_hidden" }
+}
+```
+
+This block belongs under `model.mtp`; filenames are relative to the
+configuration's package directory. Load the head as a separate model whose
+decoder has one attention-cache layer, hidden size 2688, two KV heads and head
+size 128, with `inputs.hidden_states: "hidden_states"` and
+`outputs.hidden_states: "mtp_hidden"`. Its `model.type` can also be
+`nemotron_h`. The physical graph also contains a cacheless MoE block.
+
+The controller pairs target `h_i` with token `t_(i+1)` to predict `t_(i+2)`.
+`prefill_head: true` initializes prompt context using `tokens[:, 1:]` with
+`mtp_seed[:, :-1]`, including shifted alignment across prefill chunks.
+The target must emit the complete prompt hidden sequence, not only its final row.
+The head owns independent layer-0 attention KV; neither target attention KV
+nor target convolution/SSM carry is a head input. The serialized graphs have
+separate embedding and LM-head copies, so do not declare shared initializers
+unless a different export explicitly provides that ABI.
+
+Begin with `max_draft_tokens: 1`, greedy search, batch size 1 and one beam.
+Beam search is rejected for discovered recurrent-state models because their
+state manager does not perform beam reordering. The unwindowed export requires
+snapshot/restore and replay on rejected verification, not KV-only cropping.
+For dynamic concatenating cache exports, set
+`search.past_present_share_buffer: false` and disable CUDA graph capture.
+Shared-buffer and captured execution require an export with that cache
+contract and independent validation; a configuration boolean does not provide it.
+
+## Validation boundary
+
+The checked-in weight-free fixture exercises sparse global layer indices,
+mixed BF16/FP32 carry, post-normalization hidden/token alignment, reused-state
+generation, reset, and accepted/rejected one- and multi-token MTP rounds on
+CPU and CUDA. An independently carried token counter checks target KV length
+and the head's one-token-lag cache, so incorrect cropping or borrowed target
+KV changes the expected output. It is a controller/state regression, not
+pretrained-model parity.
+
+Regenerate this fixture with NumPy and `onnx-ir` installed:
+`python test/models/nemotron-h/generate_model.py`. No checkpoint download is needed.
+
+At the published Mobius PR #761 head
+`e3d01a7712f38deb962e7107752da7fb668a7054`, the supplied full decoder scorecard
+still fails 141 of 240 comparisons against the unchanged finite,
+NRMSE <= 0.03 and cosine >= 0.999 gates. Later unpublished exporter candidates
+do not establish readiness of that published head. Short token agreement
+and a loadable package are insufficient to clear full numerical and longer
+generation gates. Keep the exporter package's `runtime_unvalidated` status
+until those gates and real-weight runtime generation pass.

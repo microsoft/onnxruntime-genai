@@ -73,6 +73,20 @@ TEST(MtpConfigTest, EnablesMtpByDefault) {
   config.model.mtp.filename = "mtp.onnx";
   EXPECT_TRUE(config.model.mtp.enabled);
   EXPECT_TRUE(config.model.mtp.IsEnabled());
+  EXPECT_FALSE(config.model.mtp.prefill_head);
+}
+
+TEST(MtpConfigTest, AcceptsHeadPrefillToggleThroughPublicApi) {
+  for (const auto& value : {std::string("true"), std::string("false")}) {
+    const auto root = WriteMtpConfig("hidden_states", "\"prefill_head\": " + value + ", ",
+                                     "_prefill_" + value);
+    EXPECT_NO_THROW(OgaConfig::Create(root.string().c_str()));
+  }
+}
+
+TEST(MtpConfigTest, RejectsNonBooleanHeadPrefill) {
+  const auto root = WriteMtpConfig("hidden_states", "\"prefill_head\": \"true\", ", "_bad_prefill");
+  EXPECT_THROW(OgaConfig::Create(root.string().c_str()), std::exception);
 }
 
 TEST(MtpConfigTest, AcceptsDisabledMtpToggleThroughPublicApi) {

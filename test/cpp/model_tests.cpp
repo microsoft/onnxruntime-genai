@@ -40,6 +40,14 @@ TEST(ModelTests, TextPipelineType) {
   EXPECT_TRUE(Generators::ModelType::IsPipe("decoder-pipeline"));
 }
 
+TEST(ModelTests, NemotronHybridTextType) {
+  EXPECT_TRUE(Generators::ModelType::IsLLM("nemotron_h"));
+  EXPECT_TRUE(Generators::ModelType::IsLLM("nemotron"));
+  EXPECT_FALSE(Generators::ModelType::IsLFM2("nemotron_h"));
+  EXPECT_FALSE(Generators::ModelType::IsTransducer("nemotron_h"));
+  EXPECT_FALSE(Generators::ModelType::IsLLM("nemotron_speech"));
+}
+
 TEST(ModelTests, QwenVisionEmbeddingShapeValidation) {
   EXPECT_NO_THROW(Generators::ValidateVisionEmbeddingShapes(
       std::array<int64_t, 3>{1, 1437, 4096}, 1437 * 4096,

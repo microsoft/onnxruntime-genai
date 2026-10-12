@@ -195,6 +195,14 @@ The head is loaded as a standalone `og.Model` from its own folder, whose `genai_
 declares `model.decoder.inputs.hidden_states` (and, for `N > 1` chaining, an extra
 `hidden_states_out` output produced by exporting with `mtp_emit_hidden=true`).
 
+For heads that require independently cached prompt context, set
+`model.mtp.prefill_head: true` in the main configuration. The default is `false`,
+preserving cold-head behavior for existing exports. When enabled, the main output
+must expose `[1, S, H]` with one hidden row per prompt token. The runtime primes the
+head with `tokens[:, 1:]` paired with `main_hidden[:, :-1]`, leaving its cache at
+prompt length minus one. Chunked prefill carries the previous chunk's final hidden
+row into the next head call; a one-token prompt needs no head prefill.
+
 See [examples/python/qwen-3.6-mtp.md](../examples/python/qwen-3.6-mtp.md) for the full export
 recipe and [examples/python/qwen-3.6-mtp.py](../examples/python/qwen-3.6-mtp.py) for a runnable
 example.

@@ -645,6 +645,7 @@ struct Config {
     // hidden-state output and the head's feedback output.
     struct Mtp {
       bool enabled{true};
+      bool prefill_head{false};
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;

@@ -593,6 +593,39 @@ int32_t MtpGenerator::DraftTwo(OrtValue* hidden, int32_t tok0, int32_t tok1) {
   return ArgmaxRow(logits.data(), vocab_size_);
 }
 
+void MtpGenerator::PrefillHead(cpu_span<const int32_t> tokens, OrtValue* hidden, bool has_previous_chunk) {
+  const auto shape = hidden->GetTensorTypeAndShapeInfo()->GetShape();
+  if (shape.size() != 3 || shape[0] != 1 || shape[1] != static_cast<int64_t>(tokens.size()) ||
+      shape[2] != hidden_size_) {
+    throw std::runtime_error("MTP head prefill requires one hidden-state row per prompt token.");
+  }
+  const size_t offset = has_previous_chunk ? 0 : 1;
+  const size_t rows = tokens.size() - offset;
+  if (rows == 0) return;
+
+  auto shifted = std::make_shared<Tensor>(
+      mtp_model_.p_device_inputs_,
+      mtp_model_.session_info_.GetInputDataType(mtp_model_.config_->model.decoder.inputs.hidden_states));
+  const std::array<int64_t, 3> shifted_shape{1, static_cast<int64_t>(rows), hidden_size_};
+  shifted->CreateTensor(shifted_shape);
+  auto destination = shifted->GetByteSpan();
+  const size_t row_bytes = hidden_slice_->GetByteSpan().size();
+  size_t first_row = 0;
+  if (has_previous_chunk) {
+    // Pair the chunk's first token with the previous chunk's final target hidden.
+    destination.subspan(0, row_bytes).CopyFrom(hidden_slice_->GetByteSpan());
+    first_row = 1;
+  }
+  const size_t bytes = (rows - first_row) * row_bytes;
+  if (bytes != 0) {
+    destination.subspan(first_row * row_bytes, bytes)
+        .CopyFrom(ByteWrapTensor(*main_model_.p_device_, *hidden).subspan(0, bytes));
+  }
+  mtp_->SetHiddenStates(shifted);
+  mtp_->AppendTokens(cpu_span<const int32_t>(tokens.data() + offset, rows));
+  head_len_ += rows;
+}
+
 void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (primed_)
     throw std::runtime_error("MtpGenerator: AppendTokens can only be called once");
@@ -600,16 +633,26 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   // Chunked prefill: bounds the ORT activation arena of the prompt forward (see the constructor).
   // Off (single forward) when the chunk size is 0 or the prompt fits in one chunk.
   const size_t total = input_ids.size();
+  const bool prefill_head = main_model_.config_->model.mtp.prefill_head &&
+                            total < static_cast<size_t>(max_length_);
+  auto append_chunk = [&](cpu_span<const int32_t> tokens, bool has_previous_chunk) {
+    main_->AppendTokens(tokens);
+    if (prefill_head) {
+      OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.mtp.main_hidden_states.c_str());
+      PrefillHead(tokens, hidden, has_previous_chunk);
+      ExtractHiddenPosition(hidden, static_cast<int>(tokens.size()) - 1);
+    }
+  };
   size_t tail = total;
   if (prefill_chunk_ > 0 && total > static_cast<size_t>(prefill_chunk_)) {
     const size_t chunk = static_cast<size_t>(prefill_chunk_);
     for (size_t off = 0; off < total; off += chunk) {
       const size_t n = std::min(chunk, total - off);
-      main_->AppendTokens(cpu_span<const int32_t>(input_ids.data() + off, n));
+      append_chunk(cpu_span<const int32_t>(input_ids.data() + off, n), off != 0);
       tail = n;  // outputs below are read from the final chunk's forward
     }
   } else {
-    main_->AppendTokens(input_ids);
+    append_chunk(input_ids, false);
   }
   length_ = input_ids.size();
   sequence_.assign(input_ids.begin(), input_ids.end());
