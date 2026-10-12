@@ -164,7 +164,54 @@ def test_telemetry_loading_prefers_the_wheel_package(monkeypatch, builder_teleme
     monkeypatch.setattr(importlib, "import_module", import_module)
 
     assert builder_telemetry.load_telemetry_module("path_utils") is module
-    assert calls == ["onnxruntime_genai.telemetry.path_utils"]
+    assert calls == ["onnxruntime_genai", "onnxruntime_genai.telemetry.path_utils"]
+
+
+def test_telemetry_disabled_wheel_does_not_load_source_telemetry(monkeypatch, builder_telemetry):
+    wheel = types.ModuleType("onnxruntime_genai")
+    wheel.__path__ = []
+    monkeypatch.setitem(sys.modules, "onnxruntime_genai", wheel)
+    monkeypatch.setitem(sys.modules, "onnxruntime_genai.telemetry", None)
+    real_import_module = importlib.import_module
+    imports = []
+
+    def import_module(name):
+        imports.append(name)
+        return real_import_module(name)
+
+    monkeypatch.setattr(importlib, "import_module", import_module)
+    before = list(sys.path)
+
+    with pytest.raises(ModuleNotFoundError) as error:
+        builder_telemetry.load_telemetry_module()
+
+    assert error.value.name == "onnxruntime_genai.telemetry"
+    assert imports == ["onnxruntime_genai", "onnxruntime_genai.telemetry"]
+    assert sys.path == before
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ImportError("native library unavailable"),
+        ModuleNotFoundError("dependency unavailable", name="missing_dependency"),
+    ],
+)
+def test_wheel_dependency_failures_do_not_enable_source_telemetry(monkeypatch, builder_telemetry, error):
+    imports = []
+
+    def import_module(name):
+        imports.append(name)
+        raise error
+
+    monkeypatch.setattr(importlib, "import_module", import_module)
+    before = list(sys.path)
+
+    with pytest.raises(type(error)):
+        builder_telemetry.load_telemetry_module()
+
+    assert imports == ["onnxruntime_genai"]
+    assert sys.path == before
 
 
 def test_telemetry_fallback_restores_source_path(monkeypatch, builder_telemetry):

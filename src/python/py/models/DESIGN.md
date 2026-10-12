@@ -48,6 +48,9 @@ in `model_builder_telemetry.py`. This helper uses only the Python standard libra
 at import time, so standalone exports do not require the native GenAI package or
 working telemetry dependencies. `builder.py` only initializes the helper, reports
 completed exports, and performs bounded CLI shutdown.
+Source telemetry is loaded only when the top-level GenAI package is absent;
+an installed telemetry-disabled wheel or a broken wheel dependency does not
+enable source telemetry.
 
 ## Implementation Details
 

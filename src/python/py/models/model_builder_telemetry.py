@@ -21,8 +21,10 @@ class ModelBuilderTelemetry:
     def load_telemetry_module(self, name=""):
         suffix = f".{name}" if name else ""
         try:
-            return importlib.import_module(f"onnxruntime_genai.telemetry{suffix}")
-        except Exception:
+            importlib.import_module("onnxruntime_genai")
+        except ModuleNotFoundError as error:
+            if error.name != "onnxruntime_genai":
+                raise
             # Source usage must not require the native onnxruntime_genai package.
             telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
             path_added = telemetry_root not in sys.path
@@ -33,6 +35,7 @@ class ModelBuilderTelemetry:
             finally:
                 if path_added and telemetry_root in sys.path:
                     sys.path.remove(telemetry_root)
+        return importlib.import_module(f"onnxruntime_genai.telemetry{suffix}")
 
     def get_telemetry(self):
         try:
