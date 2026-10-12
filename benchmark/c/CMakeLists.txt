@@ -1,6 +1,15 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+include(FetchContent)
+
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.12.0
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 set(model_benchmark_srcs
   ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/options.h
@@ -29,7 +38,11 @@ target_include_directories(model_benchmark PRIVATE
   ${ORT_HEADER_DIR}
 )
 
-target_link_libraries(model_benchmark PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
+target_link_libraries(model_benchmark PRIVATE
+  onnxruntime-genai
+  nlohmann_json::nlohmann_json
+  ${ONNXRUNTIME_LIB}
+)
 
 target_link_directories(model_benchmark PRIVATE ${ORT_LIB_DIR})
 

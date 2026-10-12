@@ -3,151 +3,18 @@
 
 #include "adapter_loader.h"
 
-#include <charconv>
-#include <cctype>
 #include <cstdint>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
-#include <string_view>
+#include <utility>
+
+#include <nlohmann/json.hpp>
 
 #include "ort_genai.h"
 
 namespace benchmark {
 namespace {
-
-void SkipWhitespace(std::string_view header, size_t& pos) {
-  while (pos < header.size() && std::isspace(static_cast<unsigned char>(header[pos]))) {
-    ++pos;
-  }
-}
-
-std::string ParseJsonString(std::string_view header, size_t& pos) {
-  if (pos >= header.size() || header[pos] != '"') {
-    throw std::runtime_error("Expected JSON string.");
-  }
-  ++pos;
-  std::string value;
-  while (pos < header.size()) {
-    const char c = header[pos++];
-    if (c == '"') {
-      return value;
-    }
-    if (c == '\\') {
-      if (pos >= header.size()) {
-        throw std::runtime_error("Invalid escape sequence in JSON string.");
-      }
-      value.push_back(header[pos++]);
-    } else {
-      value.push_back(c);
-    }
-  }
-  throw std::runtime_error("Unterminated JSON string.");
-}
-
-void SkipJsonValue(std::string_view header, size_t& pos) {
-  SkipWhitespace(header, pos);
-  if (pos >= header.size()) {
-    throw std::runtime_error("Unexpected end of JSON.");
-  }
-
-  const char c = header[pos];
-  if (c == '"') {
-    ParseJsonString(header, pos);
-    return;
-  }
-  if (c == '{') {
-    size_t depth = 0;
-    do {
-      if (pos >= header.size()) {
-        break;
-      }
-      if (header[pos] == '"') {
-        ParseJsonString(header, pos);
-        continue;
-      }
-      if (header[pos] == '{') {
-        ++depth;
-      } else if (header[pos] == '}') {
-        --depth;
-      }
-      ++pos;
-    } while (pos < header.size() && depth > 0);
-    if (depth != 0) {
-      throw std::runtime_error("Unterminated JSON object.");
-    }
-    return;
-  }
-  if (c == '[') {
-    size_t depth = 0;
-    do {
-      if (pos >= header.size()) {
-        break;
-      }
-      if (header[pos] == '"') {
-        ParseJsonString(header, pos);
-        continue;
-      }
-      if (header[pos] == '[') {
-        ++depth;
-      } else if (header[pos] == ']') {
-        --depth;
-      }
-      ++pos;
-    } while (pos < header.size() && depth > 0);
-    if (depth != 0) {
-      throw std::runtime_error("Unterminated JSON array.");
-    }
-    return;
-  }
-
-  while (pos < header.size() &&
-         header[pos] != ',' && header[pos] != '}' && header[pos] != ']' &&
-         !std::isspace(static_cast<unsigned char>(header[pos]))) {
-    ++pos;
-  }
-}
-
-std::vector<int64_t> ParseInt64Array(std::string_view header, size_t& pos) {
-  if (pos >= header.size() || header[pos] != '[') {
-    throw std::runtime_error("Expected JSON array.");
-  }
-  ++pos;
-  std::vector<int64_t> values;
-  SkipWhitespace(header, pos);
-  if (pos < header.size() && header[pos] == ']') {
-    ++pos;
-    return values;
-  }
-
-  while (pos < header.size()) {
-    SkipWhitespace(header, pos);
-    size_t number_end = pos;
-    while (number_end < header.size() &&
-           (std::isdigit(static_cast<unsigned char>(header[number_end])) || header[number_end] == '-')) {
-      ++number_end;
-    }
-    int64_t value{};
-    const auto number_view = header.substr(pos, number_end - pos);
-    const auto [ptr, ec] = std::from_chars(number_view.data(), number_view.data() + number_view.size(), value);
-    if (ec != std::errc{} || ptr != number_view.data() + number_view.size()) {
-      throw std::runtime_error("Failed to parse JSON array number.");
-    }
-    values.push_back(value);
-    pos = number_end;
-    SkipWhitespace(header, pos);
-    if (pos < header.size() && header[pos] == ',') {
-      ++pos;
-      continue;
-    }
-    if (pos < header.size() && header[pos] == ']') {
-      ++pos;
-      return values;
-    }
-    throw std::runtime_error("Malformed JSON array.");
-  }
-  throw std::runtime_error("Unterminated JSON array.");
-}
 
 struct ParsedSafetensorsTensor {
   std::string name;
@@ -156,77 +23,68 @@ struct ParsedSafetensorsTensor {
   std::vector<int64_t> data_offsets;
 };
 
-std::vector<ParsedSafetensorsTensor> ParseSafetensorsHeader(std::string_view header) {
-  std::vector<ParsedSafetensorsTensor> tensors;
-  size_t pos = 0;
-  SkipWhitespace(header, pos);
-  if (pos >= header.size() || header[pos] != '{') {
+std::vector<int64_t> ParseInt64Array(const nlohmann::json& value,
+                                     const char* field,
+                                     const std::string& tensor_name) {
+  if (!value.is_array()) {
+    throw std::runtime_error("Safetensors field '" + std::string(field) +
+                             "' must be an array for tensor: " + tensor_name);
+  }
+
+  std::vector<int64_t> values;
+  values.reserve(value.size());
+  for (const auto& item : value) {
+    if (item.is_number_unsigned()) {
+      const auto number = item.get<uint64_t>();
+      if (number > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        throw std::runtime_error("Integer overflow in safetensors field '" +
+                                 std::string(field) + "' for tensor: " + tensor_name);
+      }
+      values.push_back(static_cast<int64_t>(number));
+    } else if (item.is_number_integer()) {
+      values.push_back(item.get<int64_t>());
+    } else {
+      throw std::runtime_error("Safetensors field '" + std::string(field) +
+                               "' must contain integers for tensor: " + tensor_name);
+    }
+  }
+  return values;
+}
+
+std::vector<ParsedSafetensorsTensor> ParseSafetensorsHeader(const std::string& header) {
+  nlohmann::json root;
+  try {
+    root = nlohmann::json::parse(header);
+  } catch (const nlohmann::json::exception& e) {
+    throw std::runtime_error("Failed to parse safetensors JSON header: " + std::string(e.what()));
+  }
+
+  if (!root.is_object()) {
     throw std::runtime_error("Safetensors header must be a JSON object.");
   }
-  ++pos;
 
-  while (pos < header.size()) {
-    SkipWhitespace(header, pos);
-    if (pos < header.size() && header[pos] == '}') {
-      break;
-    }
-
-    const std::string name = ParseJsonString(header, pos);
-    SkipWhitespace(header, pos);
-    if (pos >= header.size() || header[pos] != ':') {
-      throw std::runtime_error("Malformed safetensors header entry.");
-    }
-    ++pos;
-    SkipWhitespace(header, pos);
-    if (pos >= header.size() || header[pos] != '{') {
+  std::vector<ParsedSafetensorsTensor> tensors;
+  for (auto it = root.begin(); it != root.end(); ++it) {
+    const std::string& name = it.key();
+    const auto& entry = it.value();
+    if (!entry.is_object()) {
       throw std::runtime_error("Malformed safetensors tensor entry.");
     }
-    ++pos;
 
-    if (name != "__metadata__") {
-      tensors.push_back(ParsedSafetensorsTensor{name, {}, {}, {}});
+    if (name == "__metadata__") {
+      continue;
     }
 
-    while (pos < header.size()) {
-      SkipWhitespace(header, pos);
-      if (pos < header.size() && header[pos] == '}') {
-        ++pos;
-        break;
-      }
-
-      const std::string field = ParseJsonString(header, pos);
-      SkipWhitespace(header, pos);
-      if (pos >= header.size() || header[pos] != ':') {
-        throw std::runtime_error("Malformed safetensors tensor field.");
-      }
-      ++pos;
-      SkipWhitespace(header, pos);
-
-      if (name != "__metadata__") {
-        auto& tensor = tensors.back();
-        if (field == "dtype") {
-          tensor.dtype = ParseJsonString(header, pos);
-        } else if (field == "shape") {
-          tensor.shape = ParseInt64Array(header, pos);
-        } else if (field == "data_offsets") {
-          tensor.data_offsets = ParseInt64Array(header, pos);
-        } else {
-          SkipJsonValue(header, pos);
-        }
-      } else {
-        SkipJsonValue(header, pos);
-      }
-
-      SkipWhitespace(header, pos);
-      if (pos < header.size() && header[pos] == ',') {
-        ++pos;
-      }
+    ParsedSafetensorsTensor tensor{};
+    tensor.name = name;
+    try {
+      tensor.dtype = entry.at("dtype").get<std::string>();
+      tensor.shape = ParseInt64Array(entry.at("shape"), "shape", name);
+      tensor.data_offsets = ParseInt64Array(entry.at("data_offsets"), "data_offsets", name);
+    } catch (const nlohmann::json::exception& e) {
+      throw std::runtime_error("Malformed safetensors tensor entry '" + name + "': " + e.what());
     }
-
-    SkipWhitespace(header, pos);
-    if (pos < header.size() && header[pos] == ',') {
-      ++pos;
-    }
+    tensors.push_back(std::move(tensor));
   }
 
   return tensors;
