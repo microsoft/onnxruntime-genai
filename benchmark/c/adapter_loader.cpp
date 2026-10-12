@@ -365,7 +365,8 @@ void BindAdapterToGenerator(OgaGenerator& generator, BoundAdapter& bound_adapter
     if (tensor.is_fp16) {
       auto ort_tensor = OgaTensor::Create(
           const_cast<uint16_t*>(tensor.f16_data.data()),
-          tensor.shape,
+          tensor.shape.data(),
+          tensor.shape.size(),
           OgaElementType_float16);
       generator.SetModelInput(tensor.name.c_str(), *ort_tensor);
       bound_adapter.ort_tensors.push_back(std::move(ort_tensor));
@@ -375,7 +376,8 @@ void BindAdapterToGenerator(OgaGenerator& generator, BoundAdapter& bound_adapter
     if (tensor.is_uint8) {
       auto ort_tensor = OgaTensor::Create(
           const_cast<uint8_t*>(tensor.u8_data.data()),
-          tensor.shape,
+          tensor.shape.data(),
+          tensor.shape.size(),
           OgaElementType_uint8);
       generator.SetModelInput(tensor.name.c_str(), *ort_tensor);
       bound_adapter.ort_tensors.push_back(std::move(ort_tensor));
@@ -384,7 +386,8 @@ void BindAdapterToGenerator(OgaGenerator& generator, BoundAdapter& bound_adapter
 
     auto ort_tensor = OgaTensor::Create(
         const_cast<int8_t*>(tensor.data.data()),
-        tensor.shape,
+        tensor.shape.data(),
+        tensor.shape.size(),
         OgaElementType_int8);
     generator.SetModelInput(tensor.name.c_str(), *ort_tensor);
     bound_adapter.ort_tensors.push_back(std::move(ort_tensor));
