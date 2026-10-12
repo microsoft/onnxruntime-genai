@@ -73,6 +73,9 @@ The controller pairs target `h_i` with token `t_(i+1)` to predict `t_(i+2)`.
 `prefill_head: true` initializes prompt context using `tokens[:, 1:]` with
 `mtp_seed[:, :-1]`, including shifted alignment across prefill chunks.
 The target must emit the complete prompt hidden sequence, not only its final row.
+Both fixed and symbolic incomplete outputs report the explicit MTP contract
+error. Prompt validation allocates the selected output on the session device
+before checking its actual shape, rather than pre-binding the expected row count.
 The head owns independent layer-0 attention KV; neither target attention KV
 nor target convolution/SSM carry is a head input. The serialized graphs have
 separate embedding and LM-head copies, so do not declare shared initializers
@@ -217,3 +220,20 @@ the coupled provider suites pass 227 cases with 13 existing skips, and the same
 21 public, 34 engine and eight independent CUDA fixture cases pass. The
 full-checkpoint measurements above remain explicitly tied to the earlier
 post-QuickGelu provider; no new full-model pass is inferred from this follow-up.
+
+A GenAI review regression also reproduces a symbolic last-row-only output
+failing inside ORT because its decoder buffer was pre-bound to the full prompt
+length. Prompt validation now allocates that selected output on the session
+device, checks its actual shape, and copies valid output into the stable buffer.
+CUDA copies finish before the temporary allocation is released. Both fixed and
+symbolic incomplete seeds are rejected explicitly with and without chunking.
+Against the final ORT provider above, 23 public tests, 34 engine tests and eight
+independent CUDA fixture cases pass. Full symbolic seeds retain accepted/rejected
+N1/N2 generation, chunk alignment, one-token prompts and reset coverage.
+
+A private precision control changes only the initial standard RMS node to
+multiply its scale in FP32 before the final BF16 cast. It completes against the
+final ORT provider but passes 0/8 direct upstream comparisons and 168/240
+FP32-equation comparisons, leaving 72 failures. This is not a fix or a published
+exporter candidate; the original decoder/head graphs remain unchanged and the
+full-checkpoint gates remain open.

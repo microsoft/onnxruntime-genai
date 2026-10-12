@@ -176,6 +176,12 @@ def generate_target(path: Path) -> None:
             output(graph.logits(prediction), "logits", ir.DataType.BFLOAT16, ["batch", "sequence", 16]),
             seed,
             output(graph.slice(seed, -1, 2**63 - 1, 1), "last_mtp_seed", ir.DataType.BFLOAT16, ["batch", 1, 4]),
+            output(
+                graph.slice(seed, -1, 2**63 - 1, 1),
+                "symbolic_last_mtp_seed",
+                ir.DataType.BFLOAT16,
+                ["batch", "output_sequence", 4],
+            ),
             output(present_conv, "present.0.conv_state", ir.DataType.BFLOAT16, ["batch", 4, 3]),
             output(present_ssm, "present.0.ssm_state", ir.DataType.FLOAT, ["batch", 1, 2, 2]),
             output(graph.cache(tokens, key), "present.3.key", ir.DataType.BFLOAT16, ["batch", 1, "total_sequence", 2]),

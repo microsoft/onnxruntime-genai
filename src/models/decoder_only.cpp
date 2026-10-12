@@ -76,7 +76,8 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   // each captured length getting its own annotation id / static buffers.
   const int seq_len = static_cast<int>(input_ids_.GetShape()[1]);
   const bool graph_capture_this_run =
-      params_->use_graph_capture && seq_len >= 1 && seq_len <= params_->max_graph_capture_length;
+      params_->use_graph_capture && !HasOutputShapeRequirement() &&
+      seq_len >= 1 && seq_len <= params_->max_graph_capture_length;
   const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
 
   // ORT captures by re-running the model inside this one Run(), which over-applies an

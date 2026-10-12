@@ -16,6 +16,9 @@
 namespace Generators {
 
 namespace {
+constexpr char kPrefillHiddenShapeError[] =
+    "MTP head prefill requires one hidden-state row per prompt token.";
+
 // Greedy argmax over a contiguous vocab row of fp32 logits on the CPU.
 int32_t ArgmaxRow(const float* row, int vocab_size) {
   int32_t best = 0;
@@ -596,7 +599,7 @@ int32_t MtpGenerator::DraftTwo(OrtValue* hidden, int32_t tok0, int32_t tok1) {
 void MtpGenerator::ValidatePrefillHiddenShape(std::span<const int64_t> shape, size_t prompt_length) const {
   if (shape.size() != 3 || (shape[0] >= 0 && shape[0] != 1) ||
       (shape[1] >= 0 && shape[1] != static_cast<int64_t>(prompt_length)) || shape[2] != hidden_size_) {
-    throw std::runtime_error("MTP head prefill requires one hidden-state row per prompt token.");
+    throw std::runtime_error(kPrefillHiddenShapeError);
   }
 }
 
@@ -643,9 +646,14 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
       ValidatePrefillHiddenShape(
           main_model_.session_info_.GetOutputShape(main_model_.config_->model.mtp.main_hidden_states),
           tokens.size());
+      const std::array<int64_t, 3> shape{1, static_cast<int64_t>(tokens.size()), hidden_size_};
+      main_->state_->RequireOutputShape(
+          main_model_.config_->model.mtp.main_hidden_states, shape, kPrefillHiddenShapeError);
     }
     main_->AppendTokens(tokens);
     if (prefill_head) {
+      if (main_->state_->HasOutputShapeRequirement())
+        throw std::runtime_error("MTP head prefill requires a decoder that supports output shape validation.");
       OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.mtp.main_hidden_states.c_str());
       PrefillHead(tokens, hidden, has_previous_chunk);
       ExtractHiddenPosition(hidden, static_cast<int>(tokens.size()) - 1);

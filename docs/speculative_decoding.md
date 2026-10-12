@@ -206,8 +206,12 @@ standalone `MtpGenerator` option; Engine-hosted MTP uses a different packed 2-D
 hidden-state contract.
 
 Fixed output shapes are checked before the target prompt forward, and concrete
-output shapes are checked before head prefill. A last-row-only hidden output is
-rejected explicitly instead of failing later with an opaque output-binding error.
+output shapes are checked before head prefill. For each validated prompt chunk,
+the hidden output is allocated on the session device without a pre-bound shape,
+then checked before copying into its stable decoder buffer. A last-row-only output
+is rejected explicitly even if its declared sequence dimension is symbolic.
+Only these validation forwards bypass graph capture; later decode/verify buffers
+and capture eligibility are unchanged.
 
 See [examples/python/qwen-3.6-mtp.md](../examples/python/qwen-3.6-mtp.md) for the full export
 recipe and [examples/python/qwen-3.6-mtp.py](../examples/python/qwen-3.6-mtp.py) for a runnable

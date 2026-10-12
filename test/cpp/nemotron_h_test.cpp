@@ -45,26 +45,37 @@ std::unique_ptr<OgaModel> LoadModel(const char* component, const char* provider,
   return OgaModel::Create(*config);
 }
 
-void CheckIncompletePromptSeed(const char* provider) {
-  auto main = LoadModel("decoder", provider, R"({
+void CheckIncompletePromptSeed(const char* provider, bool symbolic = false) {
+  const char* overlay = symbolic ? R"({
+    "model": {
+      "decoder": {"outputs": {"hidden_states": "symbolic_last_mtp_seed"}},
+      "mtp": {"main_hidden_states": "symbolic_last_mtp_seed"}
+    }
+  })"
+                                 : R"({
     "model": {
       "decoder": {"outputs": {"hidden_states": "last_mtp_seed"}},
       "mtp": {"main_hidden_states": "last_mtp_seed"}
     }
-  })");
-  auto head = LoadModel("mtp", provider);
-  auto params = OgaGeneratorParams::Create(*main);
-  params->SetSearchOption("max_length", kMaxLength);
-  params->SetSearchOptionBool("past_present_share_buffer", false);
-  auto generator = OgaMtpGenerator::Create(*main, *head, *params);
-  const std::vector<int32_t> prompt{1, 2, 3};
-  try {
-    generator->AppendTokens(prompt.data(), prompt.size());
-    FAIL() << "Expected incomplete prompt hidden states to be rejected";
-  } catch (const std::runtime_error& error) {
-    EXPECT_NE(std::string(error.what()).find("requires one hidden-state row per prompt token"),
-              std::string::npos)
-        << error.what();
+  })";
+  for (int chunk_size : {0, 2}) {
+    SCOPED_TRACE(chunk_size);
+    auto main = LoadModel("decoder", provider, overlay);
+    auto head = LoadModel("mtp", provider);
+    auto params = OgaGeneratorParams::Create(*main);
+    params->SetSearchOption("max_length", kMaxLength);
+    params->SetSearchOptionBool("past_present_share_buffer", false);
+    if (chunk_size != 0) params->SetSearchOption("chunk_size", chunk_size);
+    auto generator = OgaMtpGenerator::Create(*main, *head, *params);
+    const std::vector<int32_t> prompt{1, 2, 3};
+    try {
+      generator->AppendTokens(prompt.data(), prompt.size());
+      FAIL() << "Expected incomplete prompt hidden states to be rejected";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("requires one hidden-state row per prompt token"),
+                std::string::npos)
+          << error.what();
+    }
   }
 }
 
@@ -140,6 +151,10 @@ TEST(NemotronHybridTests, CpuRejectsIncompletePromptSeed) {
   CheckIncompletePromptSeed(nullptr);
 }
 
+TEST(NemotronHybridTests, CpuRejectsSymbolicIncompletePromptSeed) {
+  CheckIncompletePromptSeed(nullptr, true);
+}
+
 #if USE_CUDA
 TEST(NemotronHybridTests, CudaMixedStateAndReset) {
   CheckDecoder("cuda");
@@ -160,6 +175,10 @@ TEST(NemotronHybridTests, CudaMtpChunkedPrefillRollback) {
 
 TEST(NemotronHybridTests, CudaRejectsIncompletePromptSeed) {
   CheckIncompletePromptSeed("cuda");
+}
+
+TEST(NemotronHybridTests, CudaRejectsSymbolicIncompletePromptSeed) {
+  CheckIncompletePromptSeed("cuda", true);
 }
 #endif
 
