@@ -47,6 +47,8 @@ def main():
     parser.add_argument("--new", type=int, default=256)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--python-ref", type=Path, help="ref_v12.py json of the same mode (fixed|eos)")
+    parser.add_argument("--no-research-hash", action="store_true",
+                        help="v12b: the stored research hashes are the pre-v12b numerics; the gate is then the python reference only (research equality stays in the output)")
     parser.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
     args = parser.parse_args()
     if args.out.exists():
@@ -99,7 +101,9 @@ def main():
                     entry["python"][key] = {"hash": p[key]["hash"], "identical": pt == tokens, "identical_prefix": common_prefix(pt, tokens),
                                             "first_equal": p[key]["first"] == tokens[0], "n": len(pt)}
         if args.prefill == "steps":
-            ok &= entry["equals_research_hash"] and entry["sequence_matches_next_tokens"]
+            ok &= (entry["equals_research_hash"] or args.no_research_hash) and entry["sequence_matches_next_tokens"]
+            if args.no_research_hash and "old" not in entry.get("python", {}):
+                ok = False
             if "old" in entry.get("python", {}):
                 ok &= entry["python"]["old"]["identical"]
         results.append(entry)

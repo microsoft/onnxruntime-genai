@@ -765,6 +765,7 @@ struct Config {
       struct Fold {
         bool enabled{false};
         int target_graph_id{71};  // 3 ids (ring phases)
+        bool force_reject{false};  // test hook: every draft is replaced by a different token before the verify (each cycle commits the greedy token only)
         struct HeadR2 {
           std::string filename;
           int graph_id{81};  // 3 ids

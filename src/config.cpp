@@ -2399,6 +2399,8 @@ struct Qwen38GraphFold_Element : JSON::Element {
       v_.enabled = JSON::Get<bool>(value);
     } else if (name == "target_graph_id") {
       v_.target_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "force_reject") {
+      v_.force_reject = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

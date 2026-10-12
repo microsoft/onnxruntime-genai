@@ -252,6 +252,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   skip_refeed_ = q.mtp.skip_refeed;
   keep_hidden_ = mtp_enabled_ && prefill_head_;
   fold_ = q.fold.enabled;
+  force_reject_ = q.fold.force_reject;
   if (fold_ && !mtp_enabled_) throw std::runtime_error("qwen38_graph: the fold stack requires model.qwen38_graph.mtp.enabled");
   stream_ = model_.p_device_->GetCudaStream();
   plane_.Check(plane_.set_device(0), "cudaSetDevice");
@@ -978,7 +979,16 @@ void Qwen38GraphEngine::FoldFirstDraft() {
   WriteCtl(7, {&head_length, 1});
 }
 
+// Test hook: the verify of the next cycle sees a draft that differs from the head's (the python draft_hook), so the cycle
+// commits exactly the greedy token of verify row 0. A coincidence with that token is accepted by the graph and stays valid.
+void Qwen38GraphEngine::ForceRejectDraft() {
+  SyncStream();
+  const int64_t forced = (ReadCtl(2) + 1) % vocab_;
+  WriteCtl(2, {&forced, 1});
+}
+
 void Qwen38GraphEngine::EnqueueFold() {
+  if (force_reject_) ForceRejectDraft();
   if (length_ + 2 > static_cast<size_t>(capacity_)) throw std::runtime_error("qwen38_graph: KV capacity reached");
   const uint8_t* ctl = ctl_.data();
   PrepRow(2, 0, ctl, ctl + 8, 0, ctx_commit_.data(), ctx_a_.data());

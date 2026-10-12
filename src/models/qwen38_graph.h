@@ -271,6 +271,7 @@ struct Qwen38GraphEngine {
   void HeadPrefillFold();
   void FoldFirstDraft();
   void EnqueueFold();
+  void ForceRejectDraft();
   void BuildFastPrefill();
   void StepPrefill(std::span<const int32_t> tokens);
   void FastAppend(std::span<const int32_t> tokens);
@@ -348,6 +349,7 @@ struct Qwen38GraphEngine {
   // fold (v12): the target session is the fold model (verify + head + glue); the standalone R=2 head session serves the
   // prompt context (pair calls) and the first draft
   bool fold_{};
+  bool force_reject_{};  // fold test hook (config fold.force_reject)
   struct HeadR2Session {
     OrtSession* session{};
     SessionInfo info;

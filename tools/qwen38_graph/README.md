@@ -146,3 +146,23 @@ folder). Layout: `genai_config.json`, `target/` (fold model), `head_r2/`, `dense
 * Tests: `test_plane_kernels.py` (kernel level vs the python/torch implementations), `gate_v12.py` (token gates), `bench_ttft_genai.py`,
   `bench_genai_mtp.py`, `test_api.py`.
 
+
+## 7. The v12b stack (accurate bf16 Sigmoid)
+
+v12b = the v12 package with the CUDA EP provider `a5ce286d...` (accurate bf16 `Sigmoid`, branch `qwen38-prefill-fix` 453ac97a68) and the fused libraries
+`libqwen_fused_{attn,hc,gemm}_r5.so` (research report `qwen38_cuda_graph_20261010_01/REPORT_V12B.md`). Bundles, head / fold / DSA / indexer libraries and the GenAI
+code are unchanged; the v12 libraries and provider emulated the buggy sigmoid at two sites, v12b is accurate at all six.
+
+```bash
+source eval_runs/qwen38_genai_mtp_20261012_01/env_v12b.sh                 # GPU=4 default; QWEN_PROVIDER = <pkg>/provider/libonnxruntime_providers_cuda.so
+$PYTHON tools/qwen38_graph/build_package_v12b.py --out <pkg>               # = build_package_v12.py with the r5 libraries + the fixed provider linked into <pkg>/provider/
+$PYTHON tools/qwen38_graph/build_package_v12b.py --out <pkg_fixed> --stop-token-ids 248319     # benchmark package (EOS ignored)
+```
+`build_package_v12b.py` takes every argument of `build_package_v12.py` plus `--v12b-dir` (research work dir with `lib/*_r5.so`, `runtime_fixed/`) and `--provider`.
+The provider is a plugin library, so one process = one provider path: `og.register_execution_provider_library("CUDAExecutionProvider", "<pkg>/provider/libonnxruntime_providers_cuda.so")`
+(`smoke.py`, `test_api.py`, ... read it from `$QWEN_PROVIDER`). The GenAI Python / C++ package and `libqwen38_plane.so` are the v12 ones (the same `libonnxruntime.so` 1.31 sits next to the provider).
+
+Test hook: `model.qwen38_graph.fold.force_reject` (overlay `{"model":{"qwen38_graph":{"fold":{"force_reject":true}}}}`, default false) replaces the draft of every cycle by a different token
+before the verify (the python `draft_hook`), so every cycle commits exactly the greedy token of verify row 0 = no-MTP greedy decode of the same graph (about 3.8 ms per token slower, a host sync per cycle).
+It is what `mmlu_genai_eval.py --check-items ... --force-reject` uses to check that the MTP(1) stream equals the plain greedy stream (use `prefill.enabled=false` for a bit-exact common start state).
+`gate_v12.py --no-research-hash` gates against the python v12b runner only (the stored research hashes predate the v12b numerics).
