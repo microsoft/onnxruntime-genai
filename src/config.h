@@ -139,6 +139,7 @@ struct Config {
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
     std::optional<std::string> custom_ops_library;
+    std::vector<std::string> custom_ops_libraries;  // Additional custom-op libraries, registered after custom_ops_library
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
@@ -729,6 +730,38 @@ struct Config {
       bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
     } mtp;
 
+    // Qwen3.8-Flash CUDA-graph decode stack with a built-in MTP(1) self-speculative loop
+    // (model.type "qwen38_flash_graph"). The target session is model.decoder; the head sessions,
+    // the CUDA data-plane library and the PLE table are described here. All paths are relative to
+    // the model folder.
+    struct Qwen38Graph {
+      struct Head {
+        std::string filename_s1;  // S=1 draft graph
+        std::string filename_s2;  // S=2 refeed graph
+        std::optional<SessionOptions> session_options;
+      } head;
+
+      std::string plane_library;  // libqwen38_plane.so (CUDA data plane, dlopen-ed)
+      std::string ple_table;      // JSON describing the host-registered FP8 PLE shards
+
+      int kv_capacity{33028};
+      // First CUDA-graph annotation id of each session/row-count family; consecutive ids are used for the ring phases.
+      int target_s1_graph_id{41};  // 3 ids
+      int target_s2_graph_id{51};  // 3 ids
+      int head_s1_graph_id{61};    // 2 ids
+      int head_s2_graph_id{63};    // 2 ids
+
+      bool warmup{true};  // Run the graph warm-up (captures every graph id) when the engine is created
+
+      struct Mtp {
+        bool enabled{true};        // false: plain S=1 graph decode (no draft/verify)
+        bool prefill_head{true};   // feed the prompt hidden rows to the head (vLLM does the same)
+        bool skip_refeed{false};   // experiment: on accept feed only the last row to the head (lower acceptance)
+      } mtp;
+
+      bool IsConfigured() const noexcept { return !head.filename_s1.empty(); }
+    } qwen38_graph;
+
     // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
     // reads the main model's auxiliary hidden states, predicts a whole block of tokens at once,
     // and returns a candidate lattice that the Engine walks greedily. model.dspark is a config
@@ -902,6 +935,8 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // the main model's device, batching and paged-attention contract, but replaces model-specific
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
+// Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

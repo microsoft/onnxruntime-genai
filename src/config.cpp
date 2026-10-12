@@ -81,12 +81,17 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
   if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
   if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
   if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
+  if (child.custom_ops_libraries.empty()) child.custom_ops_libraries = parent.custom_ops_libraries;
   if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
   InheritNamedStrings(parent.config_entries, child.config_entries);
   InheritProviderOptions(parent, child);
 }
 
 }  // namespace
+
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child) {
+  InheritSessionOptions(parent, child);
+}
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
@@ -368,6 +373,17 @@ GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
   }
 }
 
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
@@ -404,12 +420,16 @@ struct SessionOptions_Element : JSON::Element {
     if (name == "provider_options") {
       return provider_options_;
     }
+    if (name == "custom_ops_libraries") {
+      return custom_ops_libraries_;
+    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
+  StringArray_Element custom_ops_libraries_{v_.custom_ops_libraries};
 };
 
 struct RunOptions_Element : JSON::Element {
@@ -648,17 +668,6 @@ struct DecoderOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
-};
-
-struct StringArray_Element : JSON::Element {
-  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
-  }
-
- private:
-  std::vector<std::string>& v_;
 };
 
 struct IntArray_Element : JSON::Element {
@@ -2309,6 +2318,89 @@ struct Engram_Element : JSON::Element {
   EngramOutputs_Element outputs_{v_.outputs};
 };
 
+struct Qwen38GraphHead_Element : JSON::Element {
+  explicit Qwen38GraphHead_Element(Config::Model::Qwen38Graph::Head& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename_s1") {
+      v_.filename_s1 = JSON::Get<std::string_view>(value);
+    } else if (name == "filename_s2") {
+      v_.filename_s2 = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Qwen38Graph::Head& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+};
+
+struct Qwen38GraphMtp_Element : JSON::Element {
+  explicit Qwen38GraphMtp_Element(Config::Model::Qwen38Graph::Mtp& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "prefill_head") {
+      v_.prefill_head = JSON::Get<bool>(value);
+    } else if (name == "skip_refeed") {
+      v_.skip_refeed = JSON::Get<bool>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Qwen38Graph::Mtp& v_;
+};
+
+struct Qwen38Graph_Element : JSON::Element {
+  explicit Qwen38Graph_Element(Config::Model::Qwen38Graph& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "plane_library") {
+      v_.plane_library = JSON::Get<std::string_view>(value);
+    } else if (name == "ple_table") {
+      v_.ple_table = JSON::Get<std::string_view>(value);
+    } else if (name == "kv_capacity") {
+      v_.kv_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "target_s1_graph_id") {
+      v_.target_s1_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "target_s2_graph_id") {
+      v_.target_s2_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "head_s1_graph_id") {
+      v_.head_s1_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "head_s2_graph_id") {
+      v_.head_s2_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "warmup") {
+      v_.warmup = JSON::Get<bool>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "head") return head_;
+    if (name == "mtp") return mtp_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Qwen38Graph& v_;
+  Qwen38GraphHead_Element head_{v_.head};
+  Qwen38GraphMtp_Element mtp_{v_.mtp};
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v)
       : v_{v}, block_drafter_alias_{v_.dflash2.configured_alias_is_dspark} {}
@@ -2440,6 +2532,9 @@ struct Model_Element : JSON::Element {
     if (name == "mtp") {
       return mtp_;
     }
+    if (name == "qwen38_graph") {
+      return qwen38_graph_;
+    }
     if (name == "dflash2" || name == "dspark") {
       // DSpark replaces DFlash's candidate selector with a Markov head but emits the same lattice.
       const bool is_dspark = name == "dspark";
@@ -2470,6 +2565,7 @@ struct Model_Element : JSON::Element {
   VAD_Element vad_{v_.vad};
   Moonshine_Element moonshine_{v_.moonshine};
   Mtp_Element mtp_{v_.mtp};
+  Qwen38Graph_Element qwen38_graph_{v_.qwen38_graph};
   Dflash2_Element dflash2_{v_.dflash2};
   std::optional<bool> block_drafter_alias_;
 };
@@ -3459,6 +3555,11 @@ void ValidateModelPaths(const Config& config) {
   ValidateConfigPath(m.moonshine.cross_kv_filename, "model.moonshine.cross_kv_filename");
   ValidateConfigPath(m.moonshine.decoder_kv_filename, "model.moonshine.decoder_kv_filename");
 
+  ValidateConfigPath(m.qwen38_graph.head.filename_s1, "model.qwen38_graph.head.filename_s1");
+  ValidateConfigPath(m.qwen38_graph.head.filename_s2, "model.qwen38_graph.head.filename_s2");
+  ValidateConfigPath(m.qwen38_graph.plane_library, "model.qwen38_graph.plane_library");
+  ValidateConfigPath(m.qwen38_graph.ple_table, "model.qwen38_graph.ple_table");
+
   ValidateConfigPath(m.decoder.filename, "model.decoder.filename");
   for (const auto& stage : m.decoder.pipeline) {
     ValidateConfigPath(stage.filename, "model.decoder.pipeline.filename");
@@ -3523,6 +3624,12 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   if (model.draft) {
     for (const auto& provider_option : model.draft->session_options.provider_options) {
       model.draft->session_options.providers.push_back(provider_option.name);
+    }
+  }
+
+  if (model.qwen38_graph.head.session_options.has_value()) {
+    for (const auto& provider_option : model.qwen38_graph.head.session_options->provider_options) {
+      model.qwen38_graph.head.session_options->providers.push_back(provider_option.name);
     }
   }
 
