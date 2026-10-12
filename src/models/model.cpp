@@ -992,6 +992,8 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       model_filename == config_->model.decoder.filename) {
     SessionInfo decoder_session_info;
     decoder_session_info.Add(*session);
+    ModelStateManifest::ResolveDisabledIndexerCapacity(
+        config_->model.decoder, decoder_session_info);
     ModelStateManifest{config_->model.decoder}.ValidateSession(decoder_session_info);
   }
 
