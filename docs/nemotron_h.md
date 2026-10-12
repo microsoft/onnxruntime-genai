@@ -117,3 +117,15 @@ with the same 50-token cached prefix, width 1 predicted token 20166 while widths
 2 and 3 predicted token 9314 for the first row. Target single-token versus wide
 forward consistency remains a blocking numerical gate, not a reason to add
 compensating head alignment or acceptance logic.
+
+Layer-boundary probes at that prefix first locate a BF16 activation difference
+at MoE layer 17, following small FP32 router MatMul reduction differences with
+identical input rows and unchanged selected experts. These differences amplify
+in later layers, but do not establish the cause of every subsequent mismatch.
+Disabling CUDA TF32 removes that isolated activation difference; the full
+257-token control still diverges at indices 208 (N1) and 109 (N2).
+A private graph using FP64 router MatMuls also fails, at indices 105 and 90.
+Neither experiment establishes a production precision policy or HuggingFace
+parity. A further private normalization-unfusion control with graph optimization
+disabled timed out during loading at 600 seconds, before generation; its
+numerical result is untested. The published export was not modified.
