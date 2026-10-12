@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""End-to-end WebGPU PagedAttention export coverage for Qwen 2.5 0.5B."""
+"""End-to-end WebGPU paged attention and hybrid-state export coverage for Qwen."""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ _DECODE_TOKENS = np.asarray([4], dtype=np.int64)
 _BUILDER_PATH = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builder.py"
 
 
-def _export_model(output_dir, precision, ep, paged=True, structured=False):
-    extra_options = ["prune_lm_head=true", "hf_token=false"]
+def _export_model(output_dir, precision, ep, paged=True, structured=False, model_id=_MODEL_ID, model_options=()):
+    extra_options = ["prune_lm_head=true", "hf_token=false", *model_options]
     runtime_options = []
     if paged:
         extra_options += [
@@ -50,7 +50,7 @@ def _export_model(output_dir, precision, ep, paged=True, structured=False):
             sys.executable,
             str(_BUILDER_PATH),
             "-m",
-            _MODEL_ID,
+            model_id,
             "-o",
             str(output_dir),
             "-p",
@@ -65,8 +65,13 @@ def _export_model(output_dir, precision, ep, paged=True, structured=False):
     )
 
 
-def _cache_shape(node_arg):
+def _cache_shape(node_arg, paged=True, head_size=None):
     shape = node_arg.shape
+    if node_arg.name.endswith((".conv", ".recurrent")):
+        assert all(isinstance(dim, int) for dim in shape[1:]), f"Unexpected fixed state shape: {shape}"
+        return (1, *shape[1:])
+    if not paged:
+        return (1, shape[1], 0, head_size)
     assert len(shape) == 4, f"Unexpected paged KV-cache shape for {node_arg.name}: {shape}"
     assert shape[1] in ("block_size", 256), f"Unexpected PagedAttention block size for {node_arg.name}: {shape}"
     assert isinstance(shape[2], int) and isinstance(shape[3], int), (
@@ -81,23 +86,32 @@ def _cache_dtype(node_arg):
 
 
 def _make_inputs(session, tokens, past_length, caches):
-    inputs = {
-        "input_ids": tokens,
-        "cumulative_sequence_lengths": np.asarray([0, len(tokens)], dtype=np.int32),
-        "past_sequence_lengths": np.asarray([past_length], dtype=np.int32),
-        "block_table": np.asarray([[0]], dtype=np.int32),
-        "attention_metadata": np.asarray(
-            [len(tokens), past_length + len(tokens), past_length + len(tokens)], dtype=np.int32
-        ),
-    }
-    if any(node_arg.name == "logits_indices" for node_arg in session.get_inputs()):
+    input_names = {node_arg.name for node_arg in session.get_inputs()}
+    paged = "cumulative_sequence_lengths" in input_names
+    if paged:
+        inputs = {
+            "input_ids": tokens,
+            "cumulative_sequence_lengths": np.asarray([0, len(tokens)], dtype=np.int32),
+            "past_sequence_lengths": np.asarray([past_length], dtype=np.int32),
+            "block_table": np.asarray([[0]], dtype=np.int32),
+            "attention_metadata": np.asarray(
+                [len(tokens), past_length + len(tokens), past_length + len(tokens)], dtype=np.int32
+            ),
+        }
+    else:
+        inputs = {
+            "input_ids": tokens[np.newaxis, :],
+            "attention_mask": np.ones((1, past_length + len(tokens)), dtype=np.int64),
+        }
+    if "position_ids" in input_names:
+        positions = np.tile(np.arange(past_length, past_length + len(tokens), dtype=np.int64), (3, 1))
+        inputs["position_ids"] = positions if paged else positions[:, np.newaxis, :]
+    if "logits_indices" in input_names:
         inputs["logits_indices"] = np.asarray([len(tokens) - 1], dtype=np.int32)
     for node_arg in session.get_inputs():
-        if not node_arg.name.startswith("past_key_values."):
+        if not node_arg.name.startswith(("past_key_values.", "past.")):
             continue
-        inputs[node_arg.name] = caches.get(
-            node_arg.name, np.zeros(_cache_shape(node_arg), dtype=_cache_dtype(node_arg))
-        )
+        inputs[node_arg.name] = caches[node_arg.name]
     return inputs
 
 
@@ -106,9 +120,9 @@ def _run_step(session, tokens, past_length, caches):
     output_names = [node_arg.name for node_arg in session.get_outputs()]
     output_by_name = dict(zip(output_names, outputs, strict=True))
     next_caches = {
-        input_name: output_by_name[input_name.replace("past_key_values", "present")]
+        input_name: output_by_name[input_name.replace("past_key_values.", "present.").replace("past.", "present.")]
         for input_name in caches
-        if input_name.replace("past_key_values", "present") in output_by_name
+        if input_name.replace("past_key_values.", "present.").replace("past.", "present.") in output_by_name
     }
     assert next_caches, "Exported model did not return any paged KV caches"
     return output_by_name["logits"], next_caches
@@ -331,3 +345,56 @@ def test_webgpu_paged_export_requires_final_num_blocks(tmp_path):
     )
     assert result.returncode != 0
     assert "WebGPU paged attention requires num_blocks to be a positive integer" in result.stderr
+
+
+def test_webgpu_qwen35_paged_export_runs_prefill_and_decode(tmp_path, webgpu_plugin):
+    model_id = "Qwen/Qwen3.5-0.8B"
+    output_dir = tmp_path / "qwen35-webgpu-paged"
+    cpu_output_dir = tmp_path / "qwen35-cpu-reference"
+    model_options = ("exclude_mtp=true",)
+    _export_model(output_dir, "fp16", "webgpu", structured=True, model_id=model_id, model_options=model_options)
+    _export_model(cpu_output_dir, "fp32", "cpu", paged=False, model_id=model_id, model_options=model_options)
+
+    config = json.loads((output_dir / "genai_config.json").read_text(encoding="utf-8"))
+    session_options = ort.SessionOptions()
+    session_options.enable_profiling = True
+    session_options.profile_file_prefix = str(tmp_path / "qwen35-webgpu-profile")
+    session_options.add_session_config_entry("ep.webgpuexecutionprovider.enableMatmulFp32Accumulation", "1")
+    provider = webgpu_plugin.get_ep_name()
+    devices = [device for device in ort.get_ep_devices() if device.ep_name == provider]
+    assert devices, "No registered WebGPU device found"
+    session_options.add_provider_for_devices([devices[0]], {})
+    webgpu_session = ort.InferenceSession(
+        str(output_dir / config["model"]["decoder"]["filename"]), sess_options=session_options
+    )
+    cpu_config = json.loads((cpu_output_dir / "genai_config.json").read_text(encoding="utf-8"))
+    cpu_session = ort.InferenceSession(
+        str(cpu_output_dir / cpu_config["model"]["decoder"]["filename"]), providers=["CPUExecutionProvider"]
+    )
+    webgpu_caches = {
+        node_arg.name: np.zeros(_cache_shape(node_arg), dtype=_cache_dtype(node_arg))
+        for node_arg in webgpu_session.get_inputs()
+        if node_arg.name.startswith(("past_key_values.", "past."))
+    }
+    cpu_caches = {
+        node_arg.name: np.zeros(
+            _cache_shape(node_arg, paged=False, head_size=cpu_config["model"]["decoder"]["head_size"]),
+            dtype=_cache_dtype(node_arg),
+        )
+        for node_arg in cpu_session.get_inputs()
+        if node_arg.name.startswith(("past_key_values.", "past."))
+    }
+    past_length = 0
+    for tokens in (_PREFILL_TOKENS, _DECODE_TOKENS):
+        webgpu_logits, webgpu_caches = _run_step(webgpu_session, tokens, past_length, webgpu_caches)
+        cpu_logits, cpu_caches = _run_step(cpu_session, tokens, past_length, cpu_caches)
+        _assert_logits_match(webgpu_logits, cpu_logits)
+        past_length += len(tokens)
+
+    with open(webgpu_session.end_profiling(), encoding="utf-8") as profile_file:
+        profile = json.load(profile_file)
+    for operator in ("GatedDeltaNet", "VarlenCausalConvWithState", "PagedAttention"):
+        assert any(
+            operator in event.get("name", "") and event.get("args", {}).get("provider") == provider
+            for event in profile
+        ), f"{operator} was not assigned to WebGPU"
