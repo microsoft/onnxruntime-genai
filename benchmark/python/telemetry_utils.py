@@ -5,6 +5,7 @@
 
 """Source/wheel compatibility import for benchmark telemetry privacy helpers."""
 
+import importlib
 import os
 import sys
 from contextlib import contextmanager, suppress
@@ -37,12 +38,21 @@ def get_telemetry():
     if _telemetry_state["instance"] is not None:
         return _telemetry_state["instance"]
     try:
-        from onnxruntime_genai.telemetry import GenAITelemetry  # noqa: PLC0415
-    except ImportError:
+        importlib.import_module("onnxruntime_genai")
+    except ModuleNotFoundError as error:
+        if error.name != "onnxruntime_genai":
+            raise
         with _source_path():
-            from telemetry import GenAITelemetry  # noqa: PLC0415
+            telemetry_module = importlib.import_module("telemetry")
+    else:
+        try:
+            telemetry_module = importlib.import_module("onnxruntime_genai.telemetry")
+        except ModuleNotFoundError as error:
+            if error.name != "onnxruntime_genai.telemetry":
+                raise
+            return None
 
-    _telemetry_state["instance"] = GenAITelemetry()
+    _telemetry_state["instance"] = telemetry_module.GenAITelemetry()
     return _telemetry_state["instance"]
 
 
@@ -77,7 +87,10 @@ def emit_benchmark_telemetry(
     session_id,
 ):
     """Emit one benchmark event using already-aggregated benchmark metrics."""
-    get_telemetry().log_benchmark(
+    telemetry = get_telemetry()
+    if telemetry is None:
+        return
+    telemetry.log_benchmark(
         model_name=sanitize_model_identifier(model_name),
         precision=precision,
         backend="onnxruntime-genai",

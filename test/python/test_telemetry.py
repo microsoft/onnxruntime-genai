@@ -710,6 +710,104 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
             if source_index is not None:
                 sys.path.insert(source_index, source_root)
 
+    def test_telemetry_disabled_wheel_does_not_load_source_telemetry(self):
+        import types
+
+        module = self._load_helper()
+        wheel = types.ModuleType("onnxruntime_genai")
+        wheel.__path__ = []
+        with (
+            patch.dict(sys.modules, {"onnxruntime_genai": wheel, "onnxruntime_genai.telemetry": None}),
+            patch.object(module, "_source_path") as source_path,
+        ):
+            self.assertIsNone(module.get_telemetry())
+            self.assertIsNone(module.get_telemetry())
+            module.shutdown_telemetry()
+        source_path.assert_not_called()
+        self.assertIsNone(module._telemetry_state["instance"])
+
+    def test_telemetry_enabled_wheel_does_not_load_source_telemetry(self):
+        import types
+
+        module = self._load_helper()
+        wheel = types.ModuleType("onnxruntime_genai")
+        wheel.__path__ = []
+        wheel_telemetry = types.ModuleType("onnxruntime_genai.telemetry")
+        wheel_telemetry.GenAITelemetry = MagicMock()
+        with (
+            patch.dict(sys.modules, {"onnxruntime_genai": wheel, "onnxruntime_genai.telemetry": wheel_telemetry}),
+            patch.object(module, "_source_path") as source_path,
+        ):
+            telemetry = module.get_telemetry()
+            self.assertIs(module.get_telemetry(), telemetry)
+        source_path.assert_not_called()
+        wheel_telemetry.GenAITelemetry.assert_called_once_with()
+        self.assertIs(telemetry, wheel_telemetry.GenAITelemetry.return_value)
+
+    def test_broken_wheel_dependencies_do_not_enable_source_telemetry(self):
+        module = self._load_helper()
+        for error in (
+            ImportError("native library unavailable"),
+            ModuleNotFoundError("dependency unavailable", name="missing_dependency"),
+        ):
+            with (
+                self.subTest(error=error),
+                patch.object(module.importlib, "import_module", side_effect=error),
+                patch.object(module, "_source_path") as source_path,
+                self.assertRaises(type(error)),
+            ):
+                module.get_telemetry()
+            source_path.assert_not_called()
+
+    def test_disabled_benchmark_telemetry_does_not_collect_event_details(self):
+        module = self._load_helper()
+        with (
+            patch.object(module, "get_telemetry", return_value=None),
+            patch.object(module, "sanitize_model_identifier") as sanitize,
+        ):
+            module.emit_benchmark_telemetry(
+                model_name="model",
+                precision="fp16",
+                execution_provider="cpu",
+                batch_size=1,
+                prompt_length=16,
+                tokens_generated=8,
+                tokenization_latency_ms=1,
+                tokenization_throughput=1,
+                prompt_processing_latency_ms=1,
+                prompt_processing_throughput=1,
+                token_generation_latency_ms=1,
+                token_generation_throughput=1,
+                sampling_latency_ms=1,
+                sampling_throughput=1,
+                wall_clock_time_ms=1,
+                wall_clock_throughput=1,
+                time_to_first_token_ms=1,
+                peak_memory_gpu_mb=0,
+                peak_memory_cpu_mb=0,
+                session_id=None,
+            )
+        sanitize.assert_not_called()
+
+    def test_e2e_telemetry_reports_total_prompt_latency(self):
+        import ast
+
+        benchmark_path = Path(__file__).parents[2] / "benchmark" / "python" / "benchmark_e2e.py"
+        tree = ast.parse(benchmark_path.read_text(encoding="utf-8"))
+        emit = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "emit_benchmark_telemetry"
+        )
+        latency = next(keyword.value for keyword in emit.keywords if keyword.arg == "prompt_processing_latency_ms")
+        code = compile(ast.Expression(body=latency), str(benchmark_path), "eval")
+        self.assertEqual(
+            eval(code, {"prompt_latency_ms": 320.0, "per_token_prompt_latency_ms": 20.0}),
+            320.0,
+        )
+
 
 class TestActionFastPath(unittest.TestCase):
     def test_disabled_action_skips_stack_inspection(self):
