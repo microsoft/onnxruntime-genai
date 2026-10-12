@@ -724,6 +724,30 @@ struct CudaInterfaceImplBase : DeviceInterface {
     CUDA_CHECK(::cudaStreamSynchronize(GetStream()));
   }
 
+  std::shared_ptr<void> AllocatePinnedHost(size_t bytes) override {
+    void* memory = nullptr;
+    const auto status = ::cudaHostAlloc(&memory, bytes, cudaHostAllocDefault);
+    if (status == cudaErrorMemoryAllocation) {
+      throw std::bad_alloc{};
+    }
+    CUDA_CHECK(status);
+    return std::shared_ptr<void>(memory, [](void* pointer) {
+      const auto release_status = ::cudaFreeHost(pointer);
+      if (release_status != cudaSuccess) {
+        Log("cuda", "Failed to release pinned host storage: ") << ::cudaGetErrorString(release_status) << '\n';
+        std::terminate();
+      }
+    });
+  }
+
+  void CopyDeviceToHost(void* host, const void* device, size_t bytes) override {
+    CUDA_CHECK(::cudaMemcpyAsync(host, device, bytes, cudaMemcpyDeviceToHost, GetStream()));
+  }
+
+  void CopyHostToDevice(void* device, const void* host, size_t bytes) override {
+    CUDA_CHECK(::cudaMemcpyAsync(device, host, bytes, cudaMemcpyHostToDevice, GetStream()));
+  }
+
   void* GetCudaStream() override {
     return GetStream();
   }

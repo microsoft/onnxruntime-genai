@@ -398,6 +398,11 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   if (optional_draft_checkpoint_bytes != 0 && hybrid_prefix_caching &&
       auxiliary_bytes_per_block == 0) {
     const auto& batching = *model_->config_->engine.dynamic_batching;
+    const auto& limits = batching.dflash2_snapshot_cache;
+    const size_t count = std::min(batching.dflash2_max_snapshots, prefix_checkpoint_capacity);
+    if (limits.vram_bytes != 0 && model_->p_device_kvcache_->GetType() != DeviceType::CUDA) {
+      throw std::runtime_error("A VRAM prefix snapshot budget requires a CUDA device.");
+    }
     const size_t target_block_bytes = PagedKeyValueCacheBytesPerBlock(model_);
     size_t budget = 0;
     if (batching.num_blocks) {
@@ -409,11 +414,18 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
       model_->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
       budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
     }
-    if (CanReserveDflash2PrefixCheckpoint(budget, auxiliary_reserved_memory_bytes,
-                                          optional_draft_checkpoint_bytes, target_block_bytes)) {
-      auxiliary_reserved_memory_bytes += optional_draft_checkpoint_bytes;
-      draft_checkpoint_enabled_ = true;
-    }
+    const size_t available = budget > auxiliary_reserved_memory_bytes &&
+                                     budget - auxiliary_reserved_memory_bytes >= target_block_bytes
+                                 ? budget - auxiliary_reserved_memory_bytes - target_block_bytes
+                                 : 0;
+    const size_t vram_count = std::min({count, limits.vram_bytes / optional_draft_checkpoint_bytes,
+                                        available / optional_draft_checkpoint_bytes});
+    draft_checkpoint_vram_bytes_ = vram_count * optional_draft_checkpoint_bytes;
+    auxiliary_reserved_memory_bytes += draft_checkpoint_vram_bytes_;
+    draft_checkpoint_enabled_ = count != 0 &&
+                                (draft_checkpoint_vram_bytes_ >= optional_draft_checkpoint_bytes ||
+                                 limits.ram_bytes >= optional_draft_checkpoint_bytes ||
+                                 limits.disk_bytes >= optional_draft_checkpoint_bytes);
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.

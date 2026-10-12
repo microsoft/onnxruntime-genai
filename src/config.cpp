@@ -2528,6 +2528,31 @@ struct Speculative_Element : JSON::Element {
   Config::Speculative& v_;
 };
 
+uint64_t ParseRuntimeProfileMemoryBytes(JSON::Value& value, std::string_view name);
+
+struct SnapshotCache_Element : JSON::Element {
+  explicit SnapshotCache_Element(Config::Engine::DynamicBatching::SnapshotCache& v) : v_{v} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "directory") {
+      v_.directory = JSON::Get<std::string_view>(value);
+      return;
+    }
+    if (name != "vram_bytes" && name != "ram_bytes" && name != "disk_bytes") {
+      throw JSON::unknown_value_error{};
+    }
+    const auto bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    if (bytes > std::numeric_limits<size_t>::max()) {
+      throw std::out_of_range(std::string{name} + " exceeds size_t");
+    }
+    if (name == "vram_bytes") v_.vram_bytes = static_cast<size_t>(bytes);
+    if (name == "ram_bytes") v_.ram_bytes = static_cast<size_t>(bytes);
+    if (name == "disk_bytes") v_.disk_bytes = static_cast<size_t>(bytes);
+  }
+
+ private:
+  Config::Engine::DynamicBatching::SnapshotCache& v_;
+};
+
 struct DynamicBatching_Element : JSON::Element {
   explicit DynamicBatching_Element(std::optional<Config::Engine::DynamicBatching>& v) : v_{v} {}
 
@@ -2563,13 +2588,25 @@ struct DynamicBatching_Element : JSON::Element {
     } else if (name == "prefix_caching") {
       v_->prefix_caching = JSON::Get<bool>(value);
       v_->prefix_caching_explicitly_set = true;
+    } else if (name == "dflash2_max_snapshots") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value < 0) throw std::out_of_range("dflash2_max_snapshots must be >= 0");
+      v_->dflash2_max_snapshots = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
   }
 
+  Element& OnObject(std::string_view name) override {
+    if (name != "dflash2_snapshot_cache") throw JSON::unknown_value_error{};
+    if (!v_) v_ = Config::Engine::DynamicBatching{};
+    snapshot_cache_ = std::make_unique<SnapshotCache_Element>(v_->dflash2_snapshot_cache);
+    return *snapshot_cache_;
+  }
+
  private:
   std::optional<Config::Engine::DynamicBatching>& v_;
+  std::unique_ptr<SnapshotCache_Element> snapshot_cache_;
 };
 
 struct StaticBatching_Element : JSON::Element {
@@ -2652,9 +2689,14 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
   explicit RuntimeProfileDynamicBatching_Element(Config::RuntimeProfile::Overlay::DynamicBatching& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "prefix_caching") {
+      v_.prefix_caching = JSON::Get<bool>(value);
+      return;
+    }
     const auto parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
-    if (parsed <= 0) {
-      throw std::out_of_range(std::string{name} + " must be > 0");
+    if (parsed < 0 || (parsed == 0 && name != "dflash2_max_snapshots")) {
+      throw std::out_of_range(std::string{name} +
+                              (name == "dflash2_max_snapshots" ? " must be >= 0" : " must be > 0"));
     }
     if (name == "num_blocks") {
       v_.num_blocks = static_cast<size_t>(parsed);
@@ -2662,13 +2704,23 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
       v_.max_batch_size = static_cast<size_t>(parsed);
     } else if (name == "max_scheduled_tokens") {
       v_.max_scheduled_tokens = static_cast<size_t>(parsed);
+    } else if (name == "dflash2_max_snapshots") {
+      v_.dflash2_max_snapshots = static_cast<size_t>(parsed);
     } else {
       throw JSON::unknown_value_error{};
     }
   }
 
+  Element& OnObject(std::string_view name) override {
+    if (name != "dflash2_snapshot_cache") throw JSON::unknown_value_error{};
+    v_.dflash2_snapshot_cache.emplace();
+    snapshot_cache_ = std::make_unique<SnapshotCache_Element>(*v_.dflash2_snapshot_cache);
+    return *snapshot_cache_;
+  }
+
  private:
   Config::RuntimeProfile::Overlay::DynamicBatching& v_;
+  std::unique_ptr<SnapshotCache_Element> snapshot_cache_;
 };
 
 struct RuntimeProfileDecoder_Element : JSON::Element {
@@ -2935,7 +2987,8 @@ void ValidateRuntimeProfiles(const Config& config) {
                          "runtime profile '" + profile.id + "' model.decoder.filename");
     }
     if (!profile.overlay.model.decoder_filename && !batching.num_blocks && !batching.max_batch_size &&
-        !batching.max_scheduled_tokens && !search.chunk_size &&
+        !batching.max_scheduled_tokens && !batching.prefix_caching &&
+        !batching.dflash2_max_snapshots && !batching.dflash2_snapshot_cache && !search.chunk_size &&
         !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
@@ -3331,7 +3384,8 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   }
   const auto& batching = selected->overlay.dynamic_batching;
   const bool has_batching_overlay = batching.num_blocks || batching.max_batch_size ||
-                                    batching.max_scheduled_tokens;
+                                    batching.max_scheduled_tokens || batching.prefix_caching ||
+                                    batching.dflash2_max_snapshots || batching.dflash2_snapshot_cache;
   if (has_batching_overlay && !config.engine.dynamic_batching) {
     throw std::runtime_error("runtime profile '" + selected->id +
                              "' requires engine.dynamic_batching in the base config");
@@ -3345,6 +3399,12 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     if (batching.num_blocks) effective.num_blocks = batching.num_blocks;
     if (batching.max_batch_size) effective.max_batch_size = *batching.max_batch_size;
     if (batching.max_scheduled_tokens) effective.max_scheduled_tokens = *batching.max_scheduled_tokens;
+    if (batching.prefix_caching) {
+      effective.prefix_caching = *batching.prefix_caching;
+      effective.prefix_caching_explicitly_set = true;
+    }
+    if (batching.dflash2_max_snapshots) effective.dflash2_max_snapshots = *batching.dflash2_max_snapshots;
+    if (batching.dflash2_snapshot_cache) effective.dflash2_snapshot_cache = *batching.dflash2_snapshot_cache;
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;

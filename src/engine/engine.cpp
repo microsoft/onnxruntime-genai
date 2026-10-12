@@ -430,6 +430,10 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
                            dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes,
                            dflash2_prefix_checkpoint_bytes,
                            &dflash2_prefix_checkpoints_enabled);
+  if (dflash2_model) {
+    dflash2_model->config_->engine.dynamic_batching->dflash2_snapshot_cache.vram_bytes =
+        cache_manager->DraftCheckpointVramBytes();
+  }
   if (dflash2_model && !dflash2_drafter) {
     const size_t paged_block_size =
         static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
@@ -561,9 +565,8 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
       continue;
     }
     try {
-      cache_manager_->DropUnleasedDraftCheckpoints();
       auto checkpoint = dflash2_drafter_->CapturePrefix(feed.request, entry.target_cache_slots);
-      if (checkpoint && !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
+      if (!checkpoint || !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
         cache_manager_->RecordPrefixPublicationRefusal();
       }
     } catch (const std::bad_alloc&) {

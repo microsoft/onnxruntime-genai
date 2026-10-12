@@ -58,11 +58,11 @@ TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 321u);
 }
 
-TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToEnabled) {
+TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToDisabled) {
   const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
+  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
   EXPECT_FALSE(
       config.engine.dynamic_batching->prefix_caching_explicitly_set);
 }
@@ -75,6 +75,67 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
   EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
   EXPECT_TRUE(
       config.engine.dynamic_batching->prefix_caching_explicitly_set);
+}
+
+TEST(DynamicBatchingConfigTest, SnapshotTiersDefaultOffAndAcceptIndependentBudgets) {
+  const auto defaults = LoadDynamicConfig(R"({"max_batch_size":4})");
+  EXPECT_FALSE(defaults.engine.dynamic_batching->dflash2_snapshot_cache.Enabled());
+  EXPECT_EQ(defaults.engine.dynamic_batching->dflash2_max_snapshots, 1u);
+  const auto config = LoadDynamicConfig(R"({
+    "prefix_caching": true,
+    "dflash2_max_snapshots": 8,
+    "dflash2_snapshot_cache": {
+      "vram_bytes": 4294967296, "ram_bytes": 8589934592, "disk_bytes": 17179869184,
+      "directory": "spill"
+    }
+  })");
+  const auto& batching = *config.engine.dynamic_batching;
+  EXPECT_TRUE(batching.prefix_caching);
+  EXPECT_EQ(batching.dflash2_max_snapshots, 8u);
+  EXPECT_EQ(batching.dflash2_snapshot_cache.vram_bytes, 4294967296ull);
+  EXPECT_EQ(batching.dflash2_snapshot_cache.ram_bytes, 8589934592ull);
+  EXPECT_EQ(batching.dflash2_snapshot_cache.disk_bytes, 17179869184ull);
+  EXPECT_EQ(batching.dflash2_snapshot_cache.directory, "spill");
+}
+
+TEST(DynamicBatchingConfigTest, RejectsInvalidSnapshotBudgetsAndCount) {
+  for (const auto* value : {"-1", "1.5", "true", "\"16\"", "9007199254740992"}) {
+    for (const auto* tier : {"vram_bytes", "ram_bytes", "disk_bytes"}) {
+      EXPECT_THROW(LoadDynamicConfig(std::string{R"({"dflash2_snapshot_cache":{")"} +
+                                     tier + "\":" + value + "}}"),
+                   std::runtime_error);
+    }
+  }
+  for (const auto* value : {"-1", "1.5", "true", "2147483648"}) {
+    EXPECT_THROW(LoadDynamicConfig(std::string{R"({"dflash2_max_snapshots":)"} +
+                                   value + "}"),
+                 std::runtime_error);
+  }
+  EXPECT_NO_THROW(LoadDynamicConfig(R"({"dflash2_max_snapshots":0})"));
+}
+
+TEST(DynamicBatchingConfigTest, RuntimeProfileReplacesSnapshotPolicyAndCanDisableCount) {
+  auto config = LoadDynamicConfig(R"({
+    "prefix_caching":true,
+    "dflash2_max_snapshots":8,
+    "dflash2_snapshot_cache":{"vram_bytes":1024,"ram_bytes":2048}
+  })");
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"disk-only",
+    "eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{
+      "prefix_caching":false,"dflash2_max_snapshots":0,
+      "dflash2_snapshot_cache":{"disk_bytes":4096}
+    }}}
+  }]})");
+  ApplyRuntimeProfile(config, uint64_t{0});
+  const auto& batching = *config.engine.dynamic_batching;
+  EXPECT_FALSE(batching.prefix_caching);
+  EXPECT_TRUE(batching.prefix_caching_explicitly_set);
+  EXPECT_EQ(batching.dflash2_max_snapshots, 0u);
+  EXPECT_EQ(batching.dflash2_snapshot_cache.vram_bytes, 0u);
+  EXPECT_EQ(batching.dflash2_snapshot_cache.ram_bytes, 0u);
+  EXPECT_EQ(batching.dflash2_snapshot_cache.disk_bytes, 4096u);
 }
 
 TEST(CpuEmbeddingConfigTest, PrefaultDefaultsOnAndCanBeDisabled) {
