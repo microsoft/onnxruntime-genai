@@ -106,6 +106,8 @@ NemotronStreamingProcessor::NemotronStreamingProcessor(Model& model)
       nemotron_config_.sample_rate,
       nemotron_config_.preemph, nemotron_config_.log_eps};
   mel_extractor_ = nemo_mel::NemoStreamingMelExtractor{mel_cfg};
+  if (nemotron_config_.diarization_enabled)
+    diarization_mel_extractor_ = std::make_unique<nemo_mel::NemoStreamingMelExtractor>(mel_cfg);
 
   // Initialize mel pre-encode cache (time-major ring buffer, zeros for first chunk)
   mel_pre_encode_cache_.assign(
@@ -121,6 +123,7 @@ NemotronStreamingProcessor::~NemotronStreamingProcessor() = default;
 std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* audio_data, size_t num_samples) {
   // Append incoming audio to accumulation buffer
   audio_buffer_.insert(audio_buffer_.end(), audio_data, audio_data + num_samples);
+  if (nemotron_config_.diarization_enabled) return ProcessDiarization(false);
 
   const size_t chunk_size = static_cast<size_t>(nemotron_config_.chunk_samples);
 
@@ -155,25 +158,71 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* a
 }
 
 std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Flush() {
+  if (nemotron_config_.diarization_enabled) return ProcessDiarization(true);
   if (audio_buffer_.empty()) {
     return nullptr;
   }
-
   const size_t chunk_size = static_cast<size_t>(nemotron_config_.chunk_samples);
   const size_t consumed_tail_samples = audio_buffer_.size();
   const bool timestamps_enabled = nemotron_config_.TimestampsEnabled();
-  audio_buffer_.resize(chunk_size, 0.0f);  // Pad with silence
-
+  audio_buffer_.resize(chunk_size, 0.0f);
   auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
   audio_buffer_.clear();
   auto result = std::make_unique<NamedTensors>();
   result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
-  // When timestamp feature is enabled, track the current chunk's start time.
   if (timestamps_enabled) {
     AddTimestampChunkOrigin(*result, consumed_samples_);
     consumed_samples_ += static_cast<int64_t>(consumed_tail_samples);
   }
   return result;
+}
+
+std::unique_ptr<NamedTensors> NemotronStreamingProcessor::ProcessDiarization(bool final) {
+  const size_t central_samples = static_cast<size_t>(nemotron_config_.chunk_samples);
+  const size_t right_samples = static_cast<size_t>(model_.config_->model.diarization.right_context) * 1280;
+  const size_t feature_context = static_cast<size_t>(nemotron_config_.fft_size / 2);
+  while (!audio_buffer_.empty() && (final || audio_buffer_.size() >= central_samples + right_samples + feature_context)) {
+    const size_t valid = std::min(central_samples, audio_buffer_.size());
+    if (ShouldDropChunk(audio_buffer_.data(), valid)) {
+      audio_buffer_.erase(audio_buffer_.begin(), audio_buffer_.begin() + static_cast<ptrdiff_t>(valid));
+      consumed_samples_ += static_cast<int64_t>(valid);
+      continue;
+    }
+    const int central_frames = static_cast<int>((valid + 159) / 160);
+    const int64_t lookahead = audio_buffer_.size() > central_samples
+                                  ? model_.config_->model.diarization.right_context
+                                  : 0;
+    const int frames = central_frames + static_cast<int>(lookahead) * 8;
+    std::vector<float> preview_audio(static_cast<size_t>(frames) * 160 + feature_context, 0.0f);
+    std::copy_n(audio_buffer_.data(), std::min(preview_audio.size(), audio_buffer_.size()), preview_audio.data());
+    auto preview_extractor = *diarization_mel_extractor_;
+    auto [preview_mel, preview_frames] = preview_extractor.Process(preview_audio.data(), preview_audio.size());
+    if (preview_frames < frames) throw std::runtime_error("Diarization mel extraction returned insufficient frames");
+    auto features = OrtValue::CreateTensor<float>(model_.allocator_cpu_, std::array<int64_t, 3>{1, 128, frames});
+    auto* feature_data = features->GetTensorMutableData<float>();
+    for (int mel = 0; mel < 128; ++mel)
+      std::copy_n(preview_mel.data() + static_cast<size_t>(mel) * preview_frames, frames, feature_data + mel * frames);
+    // Only central audio advances persistent feature state; preview context remains future audio.
+    (void)diarization_mel_extractor_->Process(audio_buffer_.data(), valid);
+    std::vector<float> asr_audio(central_samples, 0.0f);
+    std::copy_n(audio_buffer_.data(), valid, asr_audio.data());
+    auto result = std::make_unique<NamedTensors>();
+    result->emplace(Config::Defaults::AudioFeaturesName,
+                    std::make_shared<Tensor>(BuildMelTensor(asr_audio.data(), central_samples)));
+    result->emplace("diarization_features", std::make_shared<Tensor>(std::move(features)));
+    const auto add_scalar = [&](const char* name, int64_t value) {
+      auto tensor = OrtValue::CreateTensor<int64_t>(model_.allocator_cpu_, std::array<int64_t, 1>{1});
+      *tensor->GetTensorMutableData<int64_t>() = value;
+      result->emplace(name, std::make_shared<Tensor>(std::move(tensor)));
+    };
+    AddTimestampChunkOrigin(*result, consumed_samples_);
+    add_scalar("diarization_lookahead", lookahead);
+    add_scalar("chunk_valid_samples", static_cast<int64_t>(valid));
+    audio_buffer_.erase(audio_buffer_.begin(), audio_buffer_.begin() + static_cast<ptrdiff_t>(valid));
+    consumed_samples_ += static_cast<int64_t>(valid);
+    return result;
+  }
+  return nullptr;
 }
 
 std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {

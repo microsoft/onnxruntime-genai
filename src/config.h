@@ -154,7 +154,6 @@ struct Config {
     Off,      // Do not collect or return timestamp metadata.
     Word,     // Return completed word records.
     Segment,  // Return completed segment records while constructing words internally.
-    All,      // Return completed word and segment records; character records are out of scope.
   };
 
   struct Model {
@@ -204,7 +203,7 @@ struct Config {
     int blank_id{};
     int max_symbols_per_step{};
 
-    // Controls timestamp output: off, completed words, completed segments, or words and segments.
+    // Controls public timestamp output, independently of internal diarization alignment.
     TimestampLevel timestamp_level{TimestampLevel::Off};
     // Punctuation strings that complete a segment. An empty list disables punctuation segmentation.
     std::vector<std::string> segment_separators{".", "?", "!"};
@@ -383,6 +382,14 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
     } vad;
+
+    struct Diarization {
+      std::string filename;
+      int right_context{4};  // Additional 80 ms encoder frames.
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+      bool Enabled() const { return !filename.empty(); }
+    } diarization;
 
     struct Moonshine {
       std::string frontend_filename;

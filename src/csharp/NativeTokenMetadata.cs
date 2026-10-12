@@ -18,6 +18,19 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         internal int TokenId;
         internal int HasTokenAcousticFrameInterval;
         internal NativeTokenMetadataAcousticFrameInterval TokenAcousticFrameInterval;
+        internal int HasSpeakerEvidence;
+        internal NativeTokenMetadataSpeakerEvidence SpeakerEvidence;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NativeTokenMetadataSpeakerEvidence
+    {
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)]
+        internal double[] StartProbabilitySums;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)]
+        internal double[] StopProbabilitySums;
+        internal long StartFrameCount;
+        internal long StopFrameCount;
     }
 
     /// <summary>Native per-call text and optional timestamp payload borrowed from the stream.</summary>
@@ -47,5 +60,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         internal long StopFrame;
         internal double StartTime;
         internal double StopTime;
+        internal int HasTimestamp;
+        internal IntPtr SpeakerLabel;
     }
 }

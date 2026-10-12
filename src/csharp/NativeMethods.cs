@@ -168,7 +168,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                 out UIntPtr /* size_t* */ outTokenCount);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaGenerator_GetNextTokensWithMetadata(IntPtr generator, out IntPtr tokens, out UIntPtr tokenCount);
+        public static extern IntPtr OgaGenerator_GetNextTokensWithMetadataV2(IntPtr generator, out IntPtr tokens, out UIntPtr tokenCount);
 
         // This function is used to generate the next token in the sequence using the greedy search algorithm.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -381,10 +381,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                               out IntPtr /* const char** */ outStr);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenizerStreamDecodeWithMetadata(IntPtr tokenizerStream, in NativeTokenMetadataInput token, out IntPtr result);
+        public static extern IntPtr OgaTokenizerStreamDecodeWithMetadataV2(IntPtr tokenizerStream, in NativeTokenMetadataInput token, out IntPtr result);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenizerStreamFinalizeMetadata(IntPtr tokenizerStream, out IntPtr result);
+        public static extern IntPtr OgaTokenizerStreamFinalizeMetadataV2(IntPtr tokenizerStream, out IntPtr result);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamReset(IntPtr /* OgaTokenizerStream* */ tokenizerStream);

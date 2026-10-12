@@ -130,6 +130,51 @@ typedef struct OgaTokenMetadataOutput {
   const OgaTokenMetadataTimestamp* timestampMetadata;
 } OgaTokenMetadataOutput;
 
+/** Version 2 metadata preserves the version 1 C record layouts and entry points. */
+typedef struct OgaTokenMetadataSpeakerEvidence {
+  double start_probability_sums[8];
+  double stop_probability_sums[8];
+  int64_t start_frame_count;
+  int64_t stop_frame_count;
+} OgaTokenMetadataSpeakerEvidence;
+
+typedef struct OgaTokenMetadataInputV2 {
+  int32_t token_id;
+  int32_t has_token_acoustic_frame_interval;
+  OgaTokenMetadataAcousticFrameInterval token_acoustic_frame_interval;
+  int32_t has_speaker_evidence;
+  OgaTokenMetadataSpeakerEvidence speaker_evidence;
+} OgaTokenMetadataInputV2;
+
+typedef struct OgaTokenMetadataTimestampRecordV2 {
+  const char* text;
+  int64_t start_frame;
+  int64_t stop_frame;
+  double start_time;
+  double stop_time;
+  int32_t has_timestamp;
+  const char* speaker_label;
+} OgaTokenMetadataTimestampRecordV2;
+
+typedef struct OgaTokenMetadataTimestampV2 {
+  const OgaTokenMetadataTimestampRecordV2* words;
+  size_t word_count;
+  const OgaTokenMetadataTimestampRecordV2* segments;
+  size_t segment_count;
+} OgaTokenMetadataTimestampV2;
+
+typedef struct OgaTokenMetadataOutputV2 {
+  const char* text;
+  const OgaTokenMetadataTimestampV2* timestampMetadata;
+} OgaTokenMetadataOutputV2;
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithMetadataV2(
+    const OgaGenerator*, const OgaTokenMetadataInputV2** out, size_t* out_count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadataV2(
+    OgaTokenizerStream*, const OgaTokenMetadataInputV2*, const OgaTokenMetadataOutputV2** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadataV2(
+    OgaTokenizerStream*, const OgaTokenMetadataOutputV2** out);
+
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
  */

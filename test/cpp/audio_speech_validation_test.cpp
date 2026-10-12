@@ -69,7 +69,7 @@ TEST(AudioSpeechValidationTests, NemotronEncoderOutputRankValidation) {
 TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
   Generators::Config config;
   config.model.type = "nemotron_speech";
-  config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config.model.timestamp_level = Generators::Config::TimestampLevel::Segment;
   config.model.sample_rate = 16000;
   config.model.hop_length = 160;
   config.model.subsampling_factor = 8;
@@ -78,7 +78,7 @@ TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
 
   Generators::NemotronConfig nemotron_config;
   EXPECT_NO_THROW(nemotron_config.PopulateFromConfig(config));
-  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::All);
+  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::Segment);
   EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(config.model), 13);
 }
 
@@ -158,7 +158,7 @@ TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path.string();
 
   auto config = std::make_unique<Generators::Config>(model_path, "");
-  config->model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config->model.timestamp_level = Generators::Config::TimestampLevel::Word;
   const auto chunk_samples = static_cast<size_t>(config->model.chunk_samples);
   ASSERT_GT(chunk_samples, 1U);
   // The downloaded CUDA export uses standard ONNX operators; run this metadata test on CPU too.
@@ -296,7 +296,7 @@ class MetadataCoreStateTests : public testing::Test {
   void SetUp() override {
     Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
     config.model.type = "nemotron_speech";
-    config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+    config.model.timestamp_level = Generators::Config::TimestampLevel::Word;
     config.model.sample_rate = 100;
     config.model.hop_length = 10;
     config.model.subsampling_factor = 1;
@@ -305,7 +305,7 @@ class MetadataCoreStateTests : public testing::Test {
     tokens = tokenizer->Encode("Hello world.");
     ASSERT_GT(tokens.size(), 1U);
     model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-    model->config_->model.timestamp_level = Generators::Config::TimestampLevel::All;
+    model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Word;
     params = std::make_shared<Generators::GeneratorParams>(*model);
     generator = std::make_unique<Generators::Generator>(*model, *params);
     auto transducer = std::make_unique<TestTransducerState>(*params, *model);
@@ -352,6 +352,13 @@ TEST_F(MetadataCoreStateTests, DecodeProcessesMetadataOncePerStep) {
   std::string transcript;
   std::string words;
   std::string segments;
+  Generators::Config segment_config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
+  segment_config.model.type = "nemotron_speech";
+  segment_config.model.timestamp_level = Generators::Config::TimestampLevel::Segment;
+  segment_config.model.sample_rate = 100;
+  segment_config.model.hop_length = 10;
+  segment_config.model.subsampling_factor = 1;
+  auto segment_stream = std::make_shared<Generators::Tokenizer>(segment_config)->CreateStream();
 
   for (size_t index = 0; index < tokens.size(); ++index) {
     const auto& expected = stream->DecodeWithMetadata({tokens[index], 1, interval});
@@ -366,8 +373,9 @@ TEST_F(MetadataCoreStateTests, DecodeProcessesMetadataOncePerStep) {
       EXPECT_DOUBLE_EQ(word.start_time, 0.4);
       EXPECT_DOUBLE_EQ(word.stop_time, 0.5);
     }
-    for (size_t segment_index = 0; segment_index < expected.timestampMetadata->segment_count; ++segment_index)
-      segments += expected.timestampMetadata->segments[segment_index].text;
+    const auto& segment_result = segment_stream->DecodeWithMetadata({tokens[index], 1, interval});
+    for (size_t segment_index = 0; segment_index < segment_result.timestampMetadata->segment_count; ++segment_index)
+      segments += segment_result.timestampMetadata->segments[segment_index].text;
   }
 
   const auto& final = stream->FinalizeMetadata();
@@ -377,8 +385,9 @@ TEST_F(MetadataCoreStateTests, DecodeProcessesMetadataOncePerStep) {
     EXPECT_EQ(word.start_frame, 4);
     EXPECT_EQ(word.stop_frame, 5);
   }
-  for (size_t index = 0; index < final.timestampMetadata->segment_count; ++index)
-    segments += final.timestampMetadata->segments[index].text;
+  const auto& segment_final = segment_stream->FinalizeMetadata();
+  for (size_t index = 0; index < segment_final.timestampMetadata->segment_count; ++index)
+    segments += segment_final.timestampMetadata->segments[index].text;
   EXPECT_EQ(transcript, "Hello world.");
   EXPECT_EQ(words, transcript);
   EXPECT_EQ(segments, transcript);
@@ -391,7 +400,7 @@ TEST_F(MetadataCoreStateTests, ZeroAndSubFrameGapsSplitWordsEvenOnSharedFrames) 
   for (const double threshold : {0.0, 0.01}) {
     Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
     config.model.type = "nemotron_speech";
-    config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+    config.model.timestamp_level = Generators::Config::TimestampLevel::Segment;
     config.model.sample_rate = 100;
     config.model.hop_length = 10;
     config.model.subsampling_factor = 1;
@@ -400,7 +409,8 @@ TEST_F(MetadataCoreStateTests, ZeroAndSubFrameGapsSplitWordsEvenOnSharedFrames) 
     auto stream = std::make_shared<Generators::Tokenizer>(config)->CreateStream();
     std::vector<std::string> words;
     std::vector<std::string> segments;
-    const auto collect = [&](const OgaTokenMetadataOutput& result) {
+    auto word_stream = tokenizer->CreateStream();
+    const auto collect = [&](const OgaTokenMetadataOutputV2& result) {
       ASSERT_NE(result.timestampMetadata, nullptr);
       for (size_t i = 0; i < result.timestampMetadata->word_count; ++i)
         words.emplace_back(result.timestampMetadata->words[i].text);
@@ -411,9 +421,16 @@ TEST_F(MetadataCoreStateTests, ZeroAndSubFrameGapsSplitWordsEvenOnSharedFrames) 
         EXPECT_EQ(segment.stop_frame, 5);
       }
     };
-    for (const auto token : tokens)
+    for (const auto token : tokens) {
       collect(stream->DecodeWithMetadata({token, 1, interval}));
+      const auto& result = word_stream->DecodeWithMetadata({token, 1, interval});
+      for (size_t i = 0; i < result.timestampMetadata->word_count; ++i)
+        words.emplace_back(result.timestampMetadata->words[i].text);
+    }
     collect(stream->FinalizeMetadata());
+    const auto& trailing_words = word_stream->FinalizeMetadata();
+    for (size_t i = 0; i < trailing_words.timestampMetadata->word_count; ++i)
+      words.emplace_back(trailing_words.timestampMetadata->words[i].text);
     ASSERT_GE(words.size(), 2U);
     EXPECT_EQ(segments, words);
   }
@@ -422,7 +439,7 @@ TEST_F(MetadataCoreStateTests, ZeroAndSubFrameGapsSplitWordsEvenOnSharedFrames) 
 TEST_F(MetadataCoreStateTests, FrameGapCompletesPriorSegmentBeforeNextWord) {
   Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
   config.model.type = "nemotron_speech";
-  config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config.model.timestamp_level = Generators::Config::TimestampLevel::Segment;
   config.model.sample_rate = 100;
   config.model.hop_length = 10;
   config.model.subsampling_factor = 1;
@@ -431,11 +448,9 @@ TEST_F(MetadataCoreStateTests, FrameGapCompletesPriorSegmentBeforeNextWord) {
   auto stream = std::make_shared<Generators::Tokenizer>(config)->CreateStream();
   std::vector<std::string> segments;
   std::vector<std::pair<int64_t, int64_t>> bounds;
-  size_t completed_words = 0;
   for (size_t index = 0; index < tokens.size(); ++index) {
     const int64_t frame = index == 0 ? 0 : 8;
     const auto& result = stream->DecodeWithMetadata({tokens[index], 1, {frame, frame + 1}});
-    completed_words += result.timestampMetadata->word_count;
     for (size_t i = 0; i < result.timestampMetadata->segment_count; ++i) {
       const auto& segment = result.timestampMetadata->segments[i];
       segments.emplace_back(segment.text);
@@ -443,8 +458,6 @@ TEST_F(MetadataCoreStateTests, FrameGapCompletesPriorSegmentBeforeNextWord) {
     }
   }
   const auto& trailing = stream->FinalizeMetadata();
-  completed_words += trailing.timestampMetadata->word_count;
-  EXPECT_EQ(completed_words, 2U);
   for (size_t i = 0; i < trailing.timestampMetadata->segment_count; ++i) {
     const auto& segment = trailing.timestampMetadata->segments[i];
     segments.emplace_back(segment.text);
@@ -554,8 +567,7 @@ TEST_F(MetadataCoreStateTests, GeneratorOmitsTimingWhenDisabled) {
   }
   EXPECT_EQ(enabled->FinalizeMetadata().timestampMetadata->word_count, 0U);
   for (const auto level : {Generators::Config::TimestampLevel::Word,
-                           Generators::Config::TimestampLevel::Segment,
-                           Generators::Config::TimestampLevel::All}) {
+                           Generators::Config::TimestampLevel::Segment}) {
     model->config_->model.timestamp_level = level;
     source->SetTimestampsEnabled(true);
     EXPECT_THROW(generator->GetNextTokensWithMetadata(), std::runtime_error);
@@ -630,7 +642,7 @@ TEST_F(MetadataCoreStateTests, EmptyFinalizationAndInputValidation) {
   EXPECT_THROW(generator->GetNextTokensWithMetadata(), std::runtime_error);
   source->last_token_intervals_.clear();
   EXPECT_THROW(generator->GetNextTokensWithMetadata(), std::runtime_error);
-  const OgaTokenMetadataInput token{tokens[0], 0, {}};
+  const OgaTokenMetadataInputV2 token{tokens[0], 0, {}};
   EXPECT_THROW(stream->DecodeWithMetadata(token), std::runtime_error);
   EXPECT_NO_THROW(stream->DecodeWithMetadata({tokens[0], 1, valid_interval}));
   const auto& final = stream->FinalizeMetadata();

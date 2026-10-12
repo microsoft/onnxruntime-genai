@@ -76,6 +76,11 @@ FetchContent_Declare(
 )
 set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)
+if(NOT EXISTS "${onnxruntime_extensions_SOURCE_DIR}/shared/api/tokenizer_speech_metadata.h")
+  message(FATAL_ERROR
+    "Streaming speech metadata requires the companion Extensions changes. "
+    "Set FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME_EXTENSIONS to that checkout until its dependency revision is published.")
+endif()
 
 list(APPEND EXTERNAL_LIBRARIES
   onnxruntime_extensions

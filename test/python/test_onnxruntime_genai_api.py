@@ -82,7 +82,7 @@ def test_tokenizer_stream_timestamp_initialization(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
     config.overlay(json.dumps({"model": {
-        "type": "nemotron_speech", "timestamp_level": "all", "segment_separators": ["."],
+        "type": "nemotron_speech", "timestamp_level": "word", "segment_separators": ["."],
         "sample_rate": 100, "hop_length": 10, "subsampling_factor": 1,
     }}))
     tokenizer = og.Tokenizer(config)

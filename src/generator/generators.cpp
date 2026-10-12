@@ -961,13 +961,16 @@ void Generator::GenerateNextToken() {
   generation_telemetry_.OnTokenGenerated(active_token_count);
 }
 
-std::span<const OgaTokenMetadataInput> Generator::GetNextTokensWithMetadata() const {
+std::span<const OgaTokenMetadataInputV2> Generator::GetNextTokensWithMetadata() const {
   // Pair each emitted ID with its model-provided interval without advancing generation.
   next_tokens_with_metadata_.clear();
   if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
     const auto tokens = transducer->GetStepTokens();
     const bool timestamps_enabled = transducer->TimestampsEnabled();
     const auto intervals = timestamps_enabled ? transducer->GetStepTokenIntervals() : std::span<const OgaTokenMetadataAcousticFrameInterval>{};
+    const auto evidence = transducer->GetStepSpeakerEvidence();
+    if (!evidence.empty() && evidence.size() != tokens.size())
+      throw std::runtime_error("Generator speaker-evidence count does not match emitted tokens");
     if (timestamps_enabled && intervals.size() != tokens.size())
       throw std::runtime_error("Generator timing count does not match emitted tokens");
     next_tokens_with_metadata_.reserve(tokens.size());
@@ -978,7 +981,12 @@ std::span<const OgaTokenMetadataInput> Generator::GetNextTokensWithMetadata() co
         // The interval at this index was emitted with this token, not looked up by vocabulary ID.
         next_tokens_with_metadata_.push_back({tokens[index], 1, intervals[index]});
       }
+      if (!evidence.empty()) {
+        next_tokens_with_metadata_.back().has_speaker_evidence = 1;
+        next_tokens_with_metadata_.back().speaker_evidence = evidence[index];
+      }
     }
+
   } else {
     // Ordinary search provides IDs but no acoustic frame positions.
     const auto tokens = search_->GetNextTokens().CopyDeviceToCpu();
@@ -987,6 +995,15 @@ std::span<const OgaTokenMetadataInput> Generator::GetNextTokensWithMetadata() co
       next_tokens_with_metadata_.push_back({token_id, 0, {}});
   }
   return next_tokens_with_metadata_;
+}
+
+std::span<const OgaTokenMetadataInput> Generator::GetNextTokensWithMetadataLegacy() const {
+  if (model_->config_->model.diarization.Enabled())
+    throw std::runtime_error("Diarization requires the version 2 metadata API");
+  legacy_tokens_with_metadata_.clear();
+  for (const auto& token : GetNextTokensWithMetadata())
+    legacy_tokens_with_metadata_.push_back({token.token_id, token.has_token_acoustic_frame_interval, token.token_acoustic_frame_interval});
+  return legacy_tokens_with_metadata_;
 }
 
 SpeculativeStats Generator::GetSpeculativeStats() const {

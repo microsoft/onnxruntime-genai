@@ -206,7 +206,7 @@ TEST(CAPITests, TokenizerStreamTimestampInitialization) {
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   config->Overlay(R"({"model":{
     "type":"nemotron_speech",
-    "timestamp_level":"all",
+    "timestamp_level":"word",
     "segment_separators":["."],
     "sample_rate":100,
     "hop_length":10,
@@ -241,7 +241,7 @@ TEST(CAPITests, TokenizerStreamDisabledMetadata) {
 }
 
 TEST(CAPITests, TokenizerMetadataRecordOwnsInterval) {
-  std::vector<OgaTokenMetadataInput> records{{42, 1, {2, 7}}, {43, 0, {}}};
+  std::vector<OgaTokenMetadataInputV2> records{{42, 1, {2, 7}}, {43, 0, {}}};
   auto copied = records;
   records[0].token_acoustic_frame_interval = {99, 100};
   records.clear();
@@ -255,7 +255,7 @@ TEST(CAPITests, TokenizerMetadataRecordOwnsInterval) {
   EXPECT_EQ(moved[1].has_token_acoustic_frame_interval, 0);
 
   auto model_config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  model_config->Overlay(R"({"model":{"type":"nemotron_speech","timestamp_level":"all","sample_rate":100,"hop_length":10,"subsampling_factor":1}})");
+  model_config->Overlay(R"({"model":{"type":"nemotron_speech","timestamp_level":"word","sample_rate":100,"hop_length":10,"subsampling_factor":1}})");
   auto tokenizer = OgaTokenizer::Create(*model_config);
   auto stream = OgaTokenizerStream::Create(*tokenizer);
   moved[0].token_id = tokenizer->ToTokenId("H");
@@ -264,6 +264,43 @@ TEST(CAPITests, TokenizerMetadataRecordOwnsInterval) {
   ASSERT_EQ(result.timestampMetadata->word_count, 1U);
   EXPECT_EQ(result.timestampMetadata->words[0].start_frame, 2);
   EXPECT_EQ(result.timestampMetadata->words[0].stop_frame, 7);
+}
+
+TEST(CAPITests, LegacyTimestampMetadataRetainsItsRecordLayout) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({"model":{"type":"nemotron_speech","timestamp_level":"word","sample_rate":100,"hop_length":10,"subsampling_factor":1}})");
+  auto tokenizer = OgaTokenizer::Create(*config);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
+  const OgaTokenMetadataInput token{42, 1, {2, 7}};
+  const OgaTokenMetadataOutput* result{};
+  EXPECT_NO_THROW(OgaCheckResult(OgaTokenizerStreamDecodeWithMetadata(stream.get(), &token, &result)));
+  EXPECT_NO_THROW(OgaCheckResult(OgaTokenizerStreamFinalizeMetadata(stream.get(), &result)));
+  ASSERT_NE(result->timestampMetadata, nullptr);
+  ASSERT_EQ(result->timestampMetadata->word_count, 1U);
+  EXPECT_EQ(result->timestampMetadata->words[0].start_frame, 2);
+  EXPECT_EQ(result->timestampMetadata->words[0].stop_frame, 7);
+}
+
+TEST(CAPITests, LegacyDiarizationCallsRejectBeforeAdvancingMetadata) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({"model":{"type":"nemotron_speech","timestamp_level":"word",
+    "sample_rate":16000,"hop_length":160,"subsampling_factor":8,"num_mels":128,
+    "fft_size":512,"win_length":400,"preemph":0.97,"log_eps":0.0000000596046448,
+    "chunk_samples":8960,"diarization":{"filename":"unused.onnx"}}})");
+  auto tokenizer = OgaTokenizer::Create(*config);
+  auto stream = OgaTokenizerStream::Create(*tokenizer);
+  const OgaTokenMetadataInput old_token{42, 1, {2, 3}};
+  const OgaTokenMetadataOutput* old_result{};
+  EXPECT_THROW(OgaCheckResult(OgaTokenizerStreamDecodeWithMetadata(stream.get(), &old_token, &old_result)),
+               std::runtime_error);
+  OgaTokenMetadataInputV2 token{42, 1, {2, 3}, 1, {}};
+  token.speaker_evidence.stop_frame_count = 1;
+  token.speaker_evidence.stop_probability_sums[0] = 1;
+  stream->DecodeWithMetadata(token);
+  EXPECT_THROW(OgaCheckResult(OgaTokenizerStreamFinalizeMetadata(stream.get(), &old_result)), std::runtime_error);
+  const auto& result = stream->FinalizeMetadata();
+  ASSERT_EQ(result.timestampMetadata->word_count, 1U);
+  EXPECT_STREQ(result.timestampMetadata->words[0].speaker_label, "speaker_0");
 }
 
 TEST(CAPITests, TokenizerMetadataReadsCurrentGeneratorStep) {

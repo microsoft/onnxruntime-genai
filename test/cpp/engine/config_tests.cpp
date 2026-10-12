@@ -19,7 +19,7 @@ TEST(ConfigTest, ParsesTimestampConfiguration) {
 
   OverlayConfig(config, R"({"model":{
     "type":"nemotron_speech",
-    "timestamp_level":"all",
+    "timestamp_level":"segment",
     "sample_rate":16000,
     "hop_length":160,
     "subsampling_factor":8,
@@ -27,7 +27,7 @@ TEST(ConfigTest, ParsesTimestampConfiguration) {
     "segment_gap_threshold_seconds":1.25
   }})");
 
-  EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::All);
+  EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::Segment);
   EXPECT_EQ(config.model.segment_separators, (std::vector<std::string>{".", "!?"}));
   EXPECT_EQ(config.model.segment_gap_threshold_seconds, 1.25);
 }
@@ -44,6 +44,7 @@ TEST(ConfigTest, ParsesDisabledTimestampGap) {
 TEST(ConfigTest, RejectsInvalidTimestampConfiguration) {
   for (const char* json : {
            R"({"model":{"timestamp_level":"token"}})",
+           R"({"model":{"timestamp_level":"all"}})",
            R"({"model":{"segment_gap_threshold_frames":12}})",
            R"({"model":{"segment_gap_threshold_seconds":-1}})"}) {
     Config config;

@@ -33,8 +33,10 @@ struct TokenizerStream : LeakChecked<TokenizerStream> {
   TokenizerStream(const TokenizerStream&) = delete;
   TokenizerStream& operator=(const TokenizerStream&) = delete;
 
-  const OgaTokenMetadataOutput& DecodeWithMetadata(const OgaTokenMetadataInput& token);
-  const OgaTokenMetadataOutput& FinalizeMetadata();
+  const OgaTokenMetadataOutputV2& DecodeWithMetadata(const OgaTokenMetadataInputV2& token);
+  const OgaTokenMetadataOutputV2& FinalizeMetadata();
+  const OgaTokenMetadataOutput& LegacyMetadata(const OgaTokenMetadataOutputV2& result);
+  bool DiarizationEnabled() const;
 
   const std::string& Decode(int32_t token);
   void Reset();
@@ -47,6 +49,9 @@ struct TokenizerStream : LeakChecked<TokenizerStream> {
   std::string chunk_;
   DecodeMode decode_mode_{DecodeMode::Unset};
   std::unique_ptr<MetadataCoreState> metadata_state_;
+  std::vector<OgaTokenMetadataTimestampRecord> legacy_words_, legacy_segments_;
+  OgaTokenMetadataTimestamp legacy_timestamps_{};
+  OgaTokenMetadataOutput legacy_result_{};
 };
 
 // Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model.
