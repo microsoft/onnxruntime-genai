@@ -157,7 +157,7 @@ checkpoint still fails the full 257-token control: N1 first diverges at index
 sequences contain 257 tokens. Component corrections do not clear this
 generation gate; the supplied full-model reference scorecard was not rerun.
 
-The final provider also corrects negative-branch cancellation in CUDA Sigmoid,
+The Sigmoid-stage provider also corrects negative-branch cancellation in CUDA Sigmoid,
 used by the pinned decoder's 23 FP32 router nodes. Its four independent
 precision regressions and the same 21 public, 34 engine and eight CUDA fixture
 cases pass. A fresh unchanged-export control against this exact final provider,
@@ -166,4 +166,27 @@ N1 first diverges at index 90 with 90/126 accepted drafts, and N2 at index 119
 with 119/167. Ordinary, N1 and N2 sequences all contain 257 tokens. These are
 zero-based indices including the 40-token prompt. The 70/100 divergence above
 was measured before the Sigmoid correction; neither result clears the longer
-generation gate or reruns the supplied full-model reference scorecard.
+generation gate. A subsequent unchanged-gate rerun against that provider fails
+139/240 comparisons under both TF32 policies, with maximum NRMSE
+0.10676754207476785 and minimum cosine 0.9942840098112892. The reference uses
+independent FP32 source-checkpoint equations, not a direct HuggingFace
+model-class invocation. CPU placements are verified integer-only.
+
+The later ORT provider at `0acd2ee5ca0d738767d021be52d1e816ad70913b` also
+corrects cancellation and intermediate rounding in fused QuickGelu/SiLU.
+Profiling confirms that the decoder's 23 FP32 Swish gates execute through this
+fused CUDA kernel. The combined provider suites pass 224 cases with 13 existing
+MoE skips; the same 21 public, 34 engine and eight independent CUDA fixture
+cases pass against its exact binary. Its CUDA provider SHA256 is
+`c54d757853ad295a933d20a55435341694fd1e7845695117f0371f27cc9315ea`.
+
+Full-checkpoint gates still fail against that provider. With TF32 and graph
+capture disabled, ordinary, N1 and N2 each contain 257 tokens. N1 first diverges
+at zero-based index 109, accepting 92/125 drafts; N2 at index 92, accepting
+121/165. Indices include the 40-token prompt. Under the original TF32-on policy,
+the unchanged FP32-equation reference gates fail 141/240 comparisons, with
+maximum NRMSE 0.1106184779356323 and minimum cosine 0.9938640906045041.
+Floating-point computation remains CUDA-only. The decoder/head graph hashes
+are unchanged. The earlier 90/119 divergence and 139/240 scorecard failures
+predate QuickGelu's correction; neither historical target-only probes nor
+component improvements establish the cause of these current failures.
