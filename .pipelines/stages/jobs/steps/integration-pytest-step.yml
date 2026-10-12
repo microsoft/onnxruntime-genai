@@ -45,9 +45,9 @@ steps:
         python -m pip install `
           --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ `
           -r test\python\cuda\ort\requirements.txt `
-          onnxruntime-ep-cuda12==0.2.0.dev20260819
+          onnxruntime-ep-cuda12==0.3.0.dev20261009143618
       } else {
-        python -m pip install onnxruntime==1.28.0
+        python -m pip install onnxruntime==1.31.0
       }
       python -m pip install $wheel.FullName
       if ("${{ parameters.ep }}" -eq "webgpu") {
@@ -98,7 +98,7 @@ steps:
           \$PYTHON_EXE -m pip install \
             --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ \
             -r test/python/cuda/ort/requirements.txt \
-            onnxruntime-ep-cuda12==0.2.0.dev20260819
+            onnxruntime-ep-cuda12==0.3.0.dev20261009143618
           \$PYTHON_EXE -m pip install /wheel/*.whl
           nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used,memory.free --format=csv
           \$PYTHON_EXE -m pytest ${{ parameters.testPath }} -sv ${{ parameters.extraPytestArgs }} \
@@ -136,7 +136,7 @@ steps:
       python -m pip install --upgrade pip
       python -m pip install -r test/python/requirements.txt
       python -m pip install pytest
-      python -m pip install onnxruntime==1.28.0
+      python -m pip install onnxruntime==1.31.0
       python -m pip install ${{ parameters.wheelDir }}/*.whl
       if [ "${{ parameters.ep }}" = "webgpu" ]; then
         python -m pip install onnxruntime-ep-webgpu==0.2.1
