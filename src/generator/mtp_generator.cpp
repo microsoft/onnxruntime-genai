@@ -629,11 +629,11 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("MtpGenerator: AppendTokens can only be called once");
 
   const bool async_device_drafts = num_speculative_tokens_ > 1 && device_draft_chain_ && !sampling_;
-  if (async_device_drafts) {
+  if (device_draft_chain_) {
     // Host-token prefill allocates temporary upload buffers, including after Reset().
     // Enable asynchronous execution only once all prompt chunks have finished consuming them.
-    main_->SetRuntimeOption("disable_synchronize_execution_providers", "0");
-    mtp_->SetRuntimeOption("disable_synchronize_execution_providers", "0");
+    main_->state_->SetSynchronousExecutionRequired(true);
+    mtp_->state_->SetSynchronousExecutionRequired(true);
   }
 
   // Chunked prefill: bounds the ORT activation arena of the prompt forward (see the constructor).
@@ -714,6 +714,8 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (async_device_drafts) {
     // The draft/verify inputs now use persistent buffers on the shared CUDA stream;
     // target argmax/logits readback synchronizes before CPU acceptance.
+    main_->state_->SetSynchronousExecutionRequired(false);
+    mtp_->state_->SetSynchronousExecutionRequired(false);
     main_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
     mtp_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
   }

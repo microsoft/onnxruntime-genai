@@ -265,3 +265,15 @@ than the custom ORT install. This host control uses CUDA 13, Python 3.10 and
 `86-real` code generation, not the Azure job's CUDA 12.8/manylinux/Python 3.12
 environment. The protected Azure integration failures remain unattributed:
 their public annotations expose only generic exit codes, not actual errors.
+
+A subsequent configured-options regression reproduces the decoder reapplying
+`disable_synchronize_execution_providers: "1"` after the earlier runtime override.
+Temporary-input synchronization is now an execution constraint applied after
+configured options. CUDA N1 and sampling retain that constraint throughout their
+host-token forwards; greedy N2 releases it only for persistent device inputs.
+An explicit configured `"0"` remains honored during device drafting. The expanded
+regression covers unset/`"0"`/`"1"` configurations, greedy and top-k-1 sampling,
+N1/N2, chunk sizes 0/1/2, short prompts and reset. Greedy acceptance/rejection
+assertions remain strict; sampling coverage checks execution/lifetime behavior,
+not distribution parity. The coupled 23 public/35 engine controls and the expanded
+zero-error CUDA memcheck pass, as does the default-SDK CUDA build and wheel.

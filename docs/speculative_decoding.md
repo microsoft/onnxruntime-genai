@@ -215,9 +215,15 @@ and capture eligibility are unchanged.
 
 For greedy CUDA multi-draft generation, host-token prompt forwards finish
 synchronously before temporary input uploads can be released or shifted
-hidden-state buffers can be replaced. Execution becomes asynchronous only after
+hidden-state buffers can be replaced. Execution can become asynchronous only after
 all prompt chunks finish, when token inputs use persistent device buffers.
 Reset repeats this boundary.
+This lifetime requirement is applied after configured run options, so a model's
+`disable_synchronize_execution_providers: "1"` cannot override it. CUDA N1 and
+sampling paths keep this requirement throughout generation because their
+token-input forwards continue to use temporary host uploads. Other generators'
+run-option behavior is unchanged.
+An explicit configured `"0"` still keeps persistent device drafting synchronous.
 Rejected CUDA multi-draft rounds also replay the accepted prefix from the
 persistent verify-token buffer rather than creating a temporary host upload.
 

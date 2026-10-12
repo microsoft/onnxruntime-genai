@@ -184,6 +184,9 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
+  if (synchronous_execution_required_)
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", "0");
+
   if (output_shape_requirement_) {
     const auto requirement = std::move(*output_shape_requirement_);
     output_shape_requirement_.reset();

@@ -79,6 +79,8 @@ struct State {
   virtual void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
   virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
+  // Temporary input lifetimes take precedence over configured asynchronous run options.
+  void SetSynchronousExecutionRequired(bool required) { synchronous_execution_required_ = required; }
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
 
   void DumpInputs();
@@ -109,6 +111,7 @@ struct State {
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
+  bool synchronous_execution_required_{};
   struct OutputShapeRequirement {
     std::string name;
     std::vector<int64_t> shape;
