@@ -450,7 +450,9 @@ def test_lfm2_moe_executed_graph_matches_hf_routing(tmp_path, routed_scaling_fac
 
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("hidden,inter", [(40, 64), (64, 40)])
-def test_lfm2_qmoe_cpu_executes_partial_blocks(tmp_path, bits, hidden, inter):
+def test_lfm2_qmoe_cpu_executes_partial_blocks(tmp_path, monkeypatch, bits, hidden, inter):
+    # Test the weight layout without the int8 activation quantization used by ORT's 8-bit fast path.
+    monkeypatch.setenv("ORT_QMOE_CPU_QNBIT_GEMM", "fp32")
     model, graph = _executable_model(2, 1, hidden, inter)
     model.moe_attrs.update(op_type="QMoE", expert_weight_bits=bits)
     model.quant_attrs["qmoe_block_size"] = 32
