@@ -194,6 +194,17 @@ void RunBenchmark(const benchmark::Options& opts) {
   auto model = OgaModel::Create(*config);
   const auto model_creation_latency = Clock::now() - model_creation_start;
 
+  // Keep the adapter container alive until all generators have been destroyed.
+  // Adapter loading and activation are outside inference timing.
+  std::unique_ptr<OgaAdapters> adapters;
+  Duration adapter_load_latency{};
+  if (!opts.adapter_path.empty()) {
+    const auto start = Clock::now();
+    adapters = OgaAdapters::Create(*model);
+    adapters->LoadAdapter(opts.adapter_path.c_str(), opts.adapter_name.c_str());
+    adapter_load_latency = Clock::now() - start;
+  }
+
   const auto tokenizer_creation_start = Clock::now();
   auto tokenizer = OgaTokenizer::Create(*model);
   const auto tokenizer_creation_latency = Clock::now() - tokenizer_creation_start;
@@ -227,13 +238,14 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   std::optional<Duration> generator_creation_latency;
   auto create_generator = [&]() {
-    if (generator_creation_latency.has_value()) {
-      return OgaGenerator::Create(*model, *generator_params);
-    }
-
     const auto generator_creation_start = Clock::now();
     auto result = OgaGenerator::Create(*model, *generator_params);
-    generator_creation_latency = Clock::now() - generator_creation_start;
+    if (!generator_creation_latency.has_value()) {
+      generator_creation_latency = Clock::now() - generator_creation_start;
+    }
+    if (adapters) {
+      result->SetActiveAdapter(*adapters, opts.adapter_name.c_str());
+    }
     return result;
   };
 
@@ -428,6 +440,8 @@ void RunBenchmark(const benchmark::Options& opts) {
 
     using MillisecondsFp = std::chrono::duration<float, std::chrono::milliseconds::period>;
     std::cout << "Model Creation Latency: " << MillisecondsFp{model_creation_latency}.count() << " ms\n";
+    std::cout << "LoRA adapter: " << (adapters ? opts.adapter_path : "disabled") << "\n";
+    std::cout << "Adapter Load Latency: " << MillisecondsFp{adapter_load_latency}.count() << " ms\n";
     std::cout << "Tokenizer Creation Latency: " << MillisecondsFp{tokenizer_creation_latency}.count() << " ms\n";
     if (generator_creation_latency.has_value()) {
       std::cout << "Generator Creation Latency: " << MillisecondsFp{*generator_creation_latency}.count() << " ms\n";
@@ -471,6 +485,7 @@ void RunBenchmark(const benchmark::Options& opts) {
     std::cout << "Shared GPU memory usage: " << gpu_mem.shared << " bytes (" << human_bytes(gpu_mem.shared) << ")\n";
     std::cout << "Total GPU memory usage: " << gpu_mem.Total() << " bytes (" << human_bytes(gpu_mem.Total()) << ")\n";
 #endif
+    std::cout.flush();
   }
 }
 
