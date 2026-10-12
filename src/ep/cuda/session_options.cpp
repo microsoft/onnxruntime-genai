@@ -61,6 +61,13 @@ void AppendProviderBridgeExecutionProvider(
   if (use_arena_management) {
     arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, std::size(arena_keys));
     ort_provider_options->UpdateValue("default_memory_arena_cfg", arena_cfg.get());
+    void* configured_arena = nullptr;
+    Ort::ThrowOnError(Ort::api->GetCUDAProviderOptionsByName(
+        ort_provider_options.get(), "default_memory_arena_cfg", &configured_arena));
+    if (configured_arena != arena_cfg.get()) {
+      throw std::runtime_error(
+          "The loaded ONNX Runtime does not support CUDA default_memory_arena_cfg pointer options.");
+    }
   }
 
   session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);

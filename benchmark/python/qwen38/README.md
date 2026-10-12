@@ -1,5 +1,8 @@
 # Reproducing Qwen3.8 Flash NVFP4 100 E2E TPS
 
+For the latest lower-memory result and a short summary of all changes, see
+[approximately 100 E2E TPS below 80 GiB sampled](README_MEMORY.md).
+
 This directory contains the Engine benchmark, exact configuration overlay,
 launcher and pooled-result validator used to reproduce the optimized
 8,192-input / 512-output workload. See [RESULTS.md](RESULTS.md) for all
@@ -110,6 +113,47 @@ python -m pip install --no-deps /actual/path/to/onnxruntime_genai_cuda.whl
 Keep the staged SDK in place: native library RPATHs may reference it.
 Check the reported loaded libraries after running, not merely package
 version numbers. A stock ORT wheel lacks these provider changes.
+
+### Experimental CUDA arena controls
+
+GPU-memory experiments are recorded in [RESULTS.md](RESULTS.md). The
+experimental selected-logits/chunk-eight candidate observes 79.44 GiB
+peak and approximately 130 decode TPS, but increases TTFT to about
+24.5 seconds and reduces E2E throughput to about 18 TPS. It does not
+preserve the baseline's prefill latency, and sampling is not a hard
+memory guarantee. A later default-off packed NVFP4 prefill experiment
+(`ORT_QMOE_NVFP4_PACKED_PREFILL=1`, selected-logits graph and 1,024-token
+scheduler chunks) observes 79.79 GiB and about 129-133 decode TPS /
+85-87 independent E2E TPS. It preserves all control-correct answers on
+the 128 observed quality cases, but still misses 100 E2E TPS and has
+only 0.21 GiB sampled headroom. It is not enabled in the production
+launcher or the existing persisted chunk-eight candidate.
+The subsequent asynchronous packed-prefill pipeline measured **90.52
+independent E2E TPS**, **132.03 decode TPS** and **79.80 GiB sampled
+peak**, preserving all fresh control-correct answers on the same 128
+observed cases. It remains opt-in and still misses the 100 E2E target.
+The latest separate bounded-indexer candidate, with 4,096-token
+scheduling and a 384 MiB NVFP4 packed workspace, reaches **99.79
+independent E2E TPS** / **133.33 decode TPS** at **79.95 GiB sampled
+peak**. All 128 paired output streams matched. It has an actual Engine
+request ceiling of **9,217 total tokens**, is not a 262K-context
+replacement, and has only about **56 MiB sampled headroom**.
+This is approximately 100 TPS, not strict at-least-100 throughput or
+qualification for actual 80 GiB hardware.
+GenAI's CUDA provider
+options accept numeric arena controls (`arena_extend_strategy` is `0`
+for next-power-of-two or `1` for same-as-requested). Fine-grained controls
+require an ORT build supporting the `default_memory_arena_cfg` pointer
+option. The provider factory copies this configuration before GenAI
+releases it. Unknown pointer options now fail explicitly rather than
+silently reporting success.
+
+CUDA forwards arena controls to the global allocator's init session,
+as well as the decoder session. These are still separate pools, not a
+device-wide cap; auxiliary sessions and CUDA contexts also consume GPU
+memory. The global allocator is initialized once per process, so compare
+configurations in fresh processes and confirm actual arena settings in
+verbose logs (`ORTGENAI_ORT_VERBOSE_LOGGING=1`).
 
 ## 3. Run two independent five-request invocations
 

@@ -38,6 +38,7 @@ def main():
     if args.capture_each_decode and (not args.capture_decode_tokens or args.capture_prefill):
         parser.error("--capture-each-decode requires --capture-decode-tokens and excludes --capture-prefill")
     model_path = args.model
+    model_config = json.loads((model_path / "genai_config.json").read_text())
     config = og.Config(str(model_path))
     mode_overlay = {"model": {"mtp": {"enabled": args.mode == "mtp"}}}
     config.overlay(json.dumps(mode_overlay))
@@ -90,7 +91,8 @@ def main():
         "do_sample": False,
         "overlay": overlay,
         "mode_overlay": mode_overlay,
-        "max_draft_tokens": overlay.get("speculative", {}).get("max_draft_tokens", 7)
+        "max_draft_tokens": overlay.get("speculative", {}).get(
+            "max_draft_tokens", model_config.get("speculative", {}).get("max_draft_tokens", 7))
         if args.mode == "mtp" else 0,
         "model_load_seconds": load_seconds,
         "warmup_runs": args.warmup,
