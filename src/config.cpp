@@ -80,12 +80,17 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
   if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
   if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
   if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
+  if (child.custom_ops_libraries.empty()) child.custom_ops_libraries = parent.custom_ops_libraries;
   if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
   InheritNamedStrings(parent.config_entries, child.config_entries);
   InheritProviderOptions(parent, child);
 }
 
 }  // namespace
+
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child) {
+  InheritSessionOptions(parent, child);
+}
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
@@ -336,6 +341,17 @@ GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
   }
 }
 
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
@@ -370,12 +386,16 @@ struct SessionOptions_Element : JSON::Element {
     if (name == "provider_options") {
       return provider_options_;
     }
+    if (name == "custom_ops_libraries") {
+      return custom_ops_libraries_;
+    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
+  StringArray_Element custom_ops_libraries_{v_.custom_ops_libraries};
 };
 
 struct RunOptions_Element : JSON::Element {
@@ -582,17 +602,6 @@ struct DecoderOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
-};
-
-struct StringArray_Element : JSON::Element {
-  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
-  }
-
- private:
-  std::vector<std::string>& v_;
 };
 
 struct IntArray_Element : JSON::Element {
