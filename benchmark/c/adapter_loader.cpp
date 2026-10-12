@@ -59,6 +59,13 @@ void SkipJsonValue(std::string_view header, size_t& pos) {
   if (c == '{') {
     size_t depth = 0;
     do {
+      if (pos >= header.size()) {
+        break;
+      }
+      if (header[pos] == '"') {
+        ParseJsonString(header, pos);
+        continue;
+      }
       if (header[pos] == '{') {
         ++depth;
       } else if (header[pos] == '}') {
@@ -66,11 +73,21 @@ void SkipJsonValue(std::string_view header, size_t& pos) {
       }
       ++pos;
     } while (pos < header.size() && depth > 0);
+    if (depth != 0) {
+      throw std::runtime_error("Unterminated JSON object.");
+    }
     return;
   }
   if (c == '[') {
     size_t depth = 0;
     do {
+      if (pos >= header.size()) {
+        break;
+      }
+      if (header[pos] == '"') {
+        ParseJsonString(header, pos);
+        continue;
+      }
       if (header[pos] == '[') {
         ++depth;
       } else if (header[pos] == ']') {
@@ -78,6 +95,9 @@ void SkipJsonValue(std::string_view header, size_t& pos) {
       }
       ++pos;
     } while (pos < header.size() && depth > 0);
+    if (depth != 0) {
+      throw std::runtime_error("Unterminated JSON array.");
+    }
     return;
   }
 

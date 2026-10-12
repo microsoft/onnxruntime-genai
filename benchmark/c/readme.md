@@ -13,7 +13,7 @@ model_benchmark -i <path to model directory>
 For LoRA models whose ONNX graph expects adapter weights as inputs, place
 `adapter.safetensors` in the model directory or pass
 `--adapter <path>`. The benchmark binds all adapter tensors via
-`SetModelInput` before the first `AppendTokens` call.
+`SetModelInput` before the first `AppendTokenSequences` call.
 
 Folded Gemm LoRA exports use fp16 weights keyed by `*.weight_fp16`, or int8
 weights keyed by `*.weight_quantized` (file and graph input are both int8).
