@@ -1,6 +1,7 @@
 coloredlogs
 flatbuffers
-numpy<2
+numpy
+pybind11-stubgen
 packaging
 protobuf==6.33.5
 sympy
