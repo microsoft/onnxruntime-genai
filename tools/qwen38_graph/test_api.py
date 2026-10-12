@@ -3,7 +3,11 @@
 # Licensed under the MIT License.
 """API behaviour tests of the qwen38_flash_graph model through the public GenAI Python API (one model load).
 
-usage: test_api.py <package> --out <json> [--provider PATH]
+usage: test_api.py <package> --out <json> [--prefill fast|steps] [--provider PATH]
+
+--prefill steps (prompt through the muted fold graph, bit-exact path) requires identical token streams between repeated runs; with the
+fast dense prefill (default) the dense grouped GEMM is not bit-reproducible between runs, so the repeat checks require an equal first
+token and a common prefix of at least MIN_PREFIX tokens (the common prefix length is reported).
 """
 import argparse
 import json
@@ -14,6 +18,14 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
+
+
+MIN_PREFIX = 8
+
+
+def prefix(a, b):
+    n = min(len(a), len(b))
+    return next((i for i in range(n) if a[i] != b[i]), n)
 
 
 def generate(model, prompt, new, chunks=1, generator=None):
@@ -39,14 +51,21 @@ def main():
     parser.add_argument("model")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
+    parser.add_argument("--prefill", default="fast", choices=("fast", "steps"))
     args = parser.parse_args()
     if args.out.exists():
         raise FileExistsError(args.out)
 
     og.register_execution_provider_library("CUDAExecutionProvider", args.provider)
-    model = og.Model(og.Config(args.model))
+    config = og.Config(args.model)
+    config.overlay(json.dumps({"model": {"qwen38_graph": {"prefill": {"enabled": args.prefill == "fast"}}}}))
+    model = og.Model(config)
     tokenizer = og.Tokenizer(model)
     results = {}
+    exact = args.prefill == "steps"
+
+    def same(a, b):
+        return a == b if exact else (a[0] == b[0] and prefix(a, b) >= MIN_PREFIX)
 
     def check(name, condition, detail=""):
         results[name] = {"pass": bool(condition), "detail": str(detail)}
@@ -81,7 +100,7 @@ def main():
     # rewind(0) reuse: same tokens again
     generator.rewind_to(0)
     generator, again = generate(model, prompt, new, generator=generator)
-    check("rewind0_reuse_identical", again == reference)
+    check("rewind0_reuse_identical", same(again, reference), f"common prefix {prefix(again, reference)}")
     del generator
 
     # append after generation started (room below max_length, so the model's own check is the one that fires)
@@ -97,10 +116,10 @@ def main():
 
     # fresh generator after deletion; chunked prefill equals single append
     g2, fresh = generate(model, prompt, new)
-    check("new_generator_after_delete_identical", fresh == reference)
+    check("new_generator_after_delete_identical", same(fresh, reference), f"common prefix {prefix(fresh, reference)}")
     del g2
     g3, chunked = generate(model, prompt, new, chunks=3)
-    check("chunked_append_identical", chunked == reference)
+    check("chunked_append_identical", same(chunked, reference), f"common prefix {prefix(chunked, reference)}")
     del g3
 
     # EOS stop: chat prompt that finishes early (stop token ends the loop, sequence excludes it)

@@ -803,8 +803,8 @@ void Qwen38GraphEngine::StepPrefill(std::span<const int32_t> tokens) {
   plane_.Check(plane_.memcpy_d2h(stage_host_ + 4, last->tokens + 8 * last_row, 8, stream_), "read prediction");
   SyncStream();
   if (ReadCtl(5) != 0) CheckDeviceStatus("prefill", last);
-  MutedPrefillEnd();
   pending_ = static_cast<int32_t>(stage_host_[4]);  // ReadCtl reuses stage_host_[0]; slot 4 is untouched
+  MutedPrefillEnd();                                // (WriteCtl uses stage_host_ + 4)
   last_logits_ptr_ = last->logits;
   last_logits_row_ = last_row;
   length_ += n;

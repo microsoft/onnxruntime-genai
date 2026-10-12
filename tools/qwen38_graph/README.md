@@ -1,5 +1,14 @@
 # Qwen3.8-Flash-Next NVFP4: CUDA-graph decode + MTP(1) in ONNX Runtime GenAI
 
+Two stacks run through the same model type:
+
+* **v12 (current)**: fold decode (the MTP head is inside the verify graph: one graph launch per cycle), composed v12 kernels
+  (attn r3, HC r3, gemm r4, DSA r2 + memset kernel), merged provider `b6a99bf4...`, **fast prefill** (dense chunked prefill session,
+  dense -> packed state hand-off, batched KV-only head prefill, one device copy of the shared weights). Package: `build_package_v12.py`,
+  section 6 below.
+* v11 (previous): S=2 verify graphs + separate S=1/S=2 head graphs, prompt through S=2 graph steps (3.9 ms/token). Package:
+  `build_package.py`, sections 1-5. Unchanged and still supported.
+
 `model.type = "qwen38_flash_graph"` loads the research CUDA-graph stack (target S=1/S=2 graphs, MTP head graphs, CUDA data plane,
 host-registered PLE table) as one GenAI model. Users keep the normal API: `og.Model`, `og.Tokenizer`, `og.Generator`
 (`append_tokens`, `generate_next_token`, `get_next_tokens`, `is_done`, `get_sequence`). Decode is greedy and lossless:
@@ -86,3 +95,54 @@ Environment of the runtime (set by `env.sh`): `ORT_ENABLE_FP4_GEMV=1 ORT_NVFP4_F
 `smoke.py` (usage example), `test_api.py` (API behaviour: sequence/EOS/rewind/lease/unsupported options), `gate_genai.py` (token identity vs
 the research no-MTP reference hashes, chat template), `bench_genai_mtp.py` (vLLM protocol TPS 2k/8k/32k). Results:
 `eval_runs/qwen38_genai_mtp_20261012_01/REPORT.md`.
+
+## 6. The v12 stack (fold decode + fast prefill)
+
+### 6.1 Package
+
+```bash
+source eval_runs/qwen38_genai_mtp_20261012_01/env_v12.sh              # GPU=4 default; merged provider b6a99bf4... (one provider path per process)
+$PYTHON tools/qwen38_graph/build_package_v12.py --out <pkg>            # hard links, ~7 s, no extra disk; --stop-token-ids 248319 for benchmarks
+$PYTHON tools/qwen38_graph/build_package_v12.py --out <pkg> --no-prefill   # fold decode only (prompt through the muted fold graph, S=2 steps)
+```
+Every input is an argument: `--fold-bundle` (fold model, `mtp_runner/fold/bundle/fold_v12all/target`), `--head-r2-bundle` (standalone R=2 head),
+`--dense-bundle` (dense prefill model), `--head-kv-bundle` (KV-only head), `--lib-qsa|fused-ops|fused-attn|fused-hc|fused-gemm|dsa|mtp-head|fold`,
+`--plane-lib`, `--chunk`. Swapping a kernel library or bundle = rebuilding the package (links only; the custom-op libraries must live inside the model
+folder). Layout: `genai_config.json`, `target/` (fold model), `head_r2/`, `dense/`, `head_kv/`, `libs/*.so`, `ple/` + `ple_table.txt`,
+`weights_pool.txt` (shared initializers: 625 tensors, 72.2 GiB), `qsa_consts.{txt,bin}` (hand-off constants), tokenizer files.
+
+`genai_config.json` additions (see `src/config.h`):
+
+| key | meaning |
+| --- | --- |
+| `model.qwen38_graph.fold.{enabled,target_graph_id}` | fold stack: `model.decoder` is the fold model (verify S=2 + head + glue), graph ids `target_graph_id + ring phase` (71-73) |
+| `model.qwen38_graph.fold.head_r2.{filename,graph_id,session_options}` | standalone R=2 head (graph ids 81-83): prompt context by pairs (when no fast prefill) and the first draft |
+| `model.qwen38_graph.prefill.enabled` | fast prefill on/off (overlay `{"model":{"qwen38_graph":{"prefill":{"enabled":false}}}}` = prompt through the muted fold graph) |
+| `model.qwen38_graph.prefill.{dense,head_kv}.{filename,session_options}` | dense prefill model (contrib ops, no graph capture) and KV-only head model |
+| `model.qwen38_graph.prefill.chunk` | dense prefill chunk (8192); `warmup_lengths`: prompt lengths run once at model load (arena growth, first-use costs) |
+| `model.qwen38_graph.prefill.weights_pool` | text manifest of the initializers that several sessions share: loaded once into CUDA memory (8 threads, pinned staging) and passed to every session with `AddInitializer` (float8 handled by the C API) |
+| `model.qwen38_graph.prefill.constants` | key-norm weights and rotary tables of the PackedQSAIndexer state conversion |
+
+### 6.2 What runs where
+
+* **Decode.** One fold graph (ids 71-73) per cycle: verify S=2 body, accept test, head R=2 chain, next draft. The host enqueues the two `k_prep` rows
+  and one graph launch, then spins on the pinned result record that the graph publishes mid-cycle (`Qwen38GraphEngine::EnqueueFold/WaitCycle/Advance`).
+  `Qwen38GraphStrategy` is unchanged (1-2 tokens per `generate_next_token`).
+* **Prefill** (`Qwen38GraphEngine::FastAppend`, called from `AppendTokens`): PLE rows of the chunk by a device kernel (`mtp_ple_rows`), dense session over
+  chunks of 8192 (`logits_indices` = last row, hidden rows written straight into the head-context buffer), host argmax of the last logits row.
+  **Chunked `append_tokens` before the first `generate_next_token` is supported** (the dense state continues across calls). At the first
+  `generate_next_token`: hand-off (`FastHandoff`: KV rows -> fixed store, GDN state transposed into ring bank 0, conv/PLE state copied, raw index keys
+  -> pooled compressed keys + pending rows + lengths by `mtp_pool_keys`), batched head KV prefill (`FastHeadKvPrefill`), first draft (`FoldFirstDraft`).
+* **Warm-up** at model load (`model.qwen38_graph.warmup`): muted fold steps (capture of graph ids 71-73), head R=2 graphs 81-83, then one dummy prompt per
+  `prefill.warmup_lengths` through dense + hand-off + head KV. About 2-3 s.
+
+### 6.3 Properties and limits
+
+* Decode is lossless: with `prefill.enabled=false` the tokens are identical to the research no-MTP greedy hashes (12/12) and to the Python fold runner.
+* The fast prefill is **tolerance level** (dense vs packed numerics; the dense grouped GEMM is not bit-reproducible between runs, so two runs of the same
+  prompt - in this port and in the Python `PrefillEngine` - can diverge after tens of tokens). First tokens agree; see REPORT_V12.md.
+* Greedy only, batch 1, one active generator per model, no `append_tokens` after `generate_next_token`, `rewind_to(0)` only; `max_length <= 33024`.
+* GPU memory: 88 GB after load, about 114-116 GB with 32k context (141 GB card). The dense session arena is not released between requests.
+* Tests: `test_plane_kernels.py` (kernel level vs the python/torch implementations), `gate_v12.py` (token gates), `bench_ttft_genai.py`,
+  `bench_genai_mtp.py`, `test_api.py`.
+
