@@ -190,3 +190,30 @@ Floating-point computation remains CUDA-only. The decoder/head graph hashes
 are unchanged. The earlier 90/119 divergence and 139/240 scorecard failures
 predate QuickGelu's correction; neither historical target-only probes nor
 component improvements establish the cause of these current failures.
+
+A separate direct upstream reference now runs the unmodified
+`transformers==5.19.0` `NemotronHForCausalLM` on CUDA with the same pinned
+checkpoint, BF16 parameters, eager attention and TF32 enabled. All decoder
+weights load without missing or mismatched keys. The Mamba implementation
+uses upstream's PyTorch reference path because `mamba_ssm` is unavailable.
+Four forwards carry the upstream cache independently; logits and final
+normalized hidden are compared against the saved post-QuickGelu native outputs.
+Only 1/8 comparisons passes the unchanged NRMSE/cosine thresholds: prefill
+logits pass, but the hidden seed and every cached-step output fail.
+Maximum NRMSE is 0.11662261092503201, minimum cosine 0.9941554758121095 and
+maximum absolute hidden error 5.5. All sampled logit argmaxes agree; that does
+not clear numerical or generation gates. This direct BF16 reference is
+additional evidence, not a replacement for the 240-output FP32-equation
+scorecard, a full-cache comparison or a full upstream generation test.
+
+An ORT review follow-up at `8c36c6c8e8a7ec43fe503491b82778c2bddce262` fixes
+the default FP32 stash for double-input standard RMSNormalization and preserves
+double precision in scaling. Explicit double stash remains available for
+double inputs/scales; other unsupported stash choices now fail explicitly.
+The strict double-stash regression fails before this fix and passes after it.
+Against provider SHA256
+`068c67babdffb1e14a6ed0c5d32be352ac0bc1be8f3d1de8ca1e87e5dfb812f2`,
+the coupled provider suites pass 227 cases with 13 existing skips, and the same
+21 public, 34 engine and eight independent CUDA fixture cases pass. The
+full-checkpoint measurements above remain explicitly tied to the earlier
+post-QuickGelu provider; no new full-model pass is inferred from this follow-up.
