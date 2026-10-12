@@ -61,7 +61,6 @@ struct Qwen38Plane {
   void (*ple_rows)(void*, const void*, const void*, int, const void*, void*, void*){};
   void (*pool_keys)(void*, const void*, int, const void*, const void*, const void*, int, float, int, void*){};
   void (*transpose_f32)(void*, const void*, void*, int, int){};
-  int (*pci_bus_id)(char*, int, int){};
 };
 
 // Device allocation owned by RAII.
@@ -210,9 +209,7 @@ struct Qwen38GraphEngine {
   bool DecodeStarted() const { return decode_started_; }
   bool Fold() const { return fold_; }
   bool FastPrefill() const { return fast_ != nullptr; }
-  void CheckErrorBits();
-  void ApplyHostAffinity();                              // pin the calling thread (config cpu_affinity)
-  void RestoreHostAffinity();                                 // fold: device error bits of the whole decode (ctl[5])
+  void CheckErrorBits();                                 // fold: device error bits of the whole decode (ctl[5])
 
   // --- decode ---
   bool mtp_enabled() const { return mtp_enabled_; }
@@ -391,7 +388,6 @@ struct Qwen38GraphEngine {
   };
   std::unique_ptr<FastPrefillState> fast_;
   std::vector<float> last_logits_host_;
-  std::vector<unsigned char> saved_affinity_;  // cpu_set_t of the thread before ApplyHostAffinity
 
   // host state
   int cur_{};

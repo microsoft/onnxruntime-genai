@@ -752,9 +752,6 @@ struct Config {
       int head_s2_graph_id{63};    // 2 ids
 
       bool warmup{true};  // Run the graph warm-up (captures every graph id) when the engine is created
-      // CPU affinity of the thread that launches the cycles: "" (off), "auto" (CPUs local to the GPU's PCI device) or a list like
-      // "48-95,0". The cycle loop is latency bound (pinned result record, one graph launch per cycle).
-      std::string cpu_affinity;
 
       struct Mtp {
         bool enabled{true};        // false: plain S=1 graph decode (no draft/verify)
