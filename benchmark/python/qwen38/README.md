@@ -1,5 +1,9 @@
 # Reproducing Qwen3.8 Flash NVFP4 100 E2E TPS
 
+For a self-contained other-VM Copilot handoff covering pinned branches,
+builds, the measured long-context sweep and the separate selected-logits
+experiment, see [README_REPLICATE.md](README_REPLICATE.md).
+
 For the latest lower-memory result and a short summary of all changes, see
 [approximately 100 E2E TPS below 80 GiB sampled](README_MEMORY.md).
 The latest optional gate/up + SwiGLU fusion measures 100.58 independent
