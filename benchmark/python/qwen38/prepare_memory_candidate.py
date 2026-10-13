@@ -11,7 +11,7 @@ import onnx
 from onnx import helper
 
 
-def transform_graph(model, expected_indexers):
+def transform_graph(model, expected_indexers, preserve_context=False):
     initializers = [tensor.SerializeToString() for tensor in model.graph.initializer]
     heads = [node for node in model.graph.node if node.name == "/lm_head/MatMul"]
     if len(heads) != 1 or heads[0].op_type != "MatMul" or list(heads[0].output) != ["logits"]:
@@ -54,14 +54,16 @@ def transform_graph(model, expected_indexers):
         attrs = {attr.name: attr for attr in node.attribute}
         if attrs["compress_ratio"].i != 4 or attrs["state_capacity"].i != 65536:
             raise ValueError(f"Unsupported indexer geometry: {node.name}")
-        attrs["state_capacity"].i = 2560
+        if not preserve_context:
+            attrs["state_capacity"].i = 2560
     updated = 0
     for value in list(model.graph.input) + list(model.graph.output) + list(model.graph.value_info):
         if value.name.endswith(".indexer_key"):
             dims = value.type.tensor_type.shape.dim
             if len(dims) != 3 or dims[1].dim_value != 65536 or dims[2].dim_value != 128:
                 raise ValueError(f"Unsupported indexer tensor: {value.name}")
-            dims[1].dim_value = 2560
+            if not preserve_context:
+                dims[1].dim_value = 2560
             updated += 1
     if updated != 2 * expected_indexers:
         raise ValueError("Indexer input/output shape count does not match nodes")
@@ -69,7 +71,11 @@ def transform_graph(model, expected_indexers):
         raise ValueError("Initializer bytes or metadata changed")
 
 
-def candidate_config(config):
+def candidate_config(config, preserve_context=False):
+    if preserve_context:
+        for component in ("decoder", "mtp"):
+            config["model"][component]["inputs"]["logits_indices"] = "logits_indices"
+        return config
     config["model"]["context_length"] = 10240
     config["search"]["max_length"] = 10240
     for component in ("decoder", "mtp"):
@@ -112,9 +118,14 @@ def file_hash(path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare the experimental batch-one Qwen 8K/512 memory candidate")
+    parser = argparse.ArgumentParser(description="Prepare experimental Qwen selected-logits graphs")
     parser.add_argument("--source", type=Path, required=True, help="Original NVFP4 Engine package")
     parser.add_argument("--destination", type=Path, required=True, help="New model directory (must not exist)")
+    parser.add_argument(
+        "--preserve-context",
+        action="store_true",
+        help="Select logits only; preserve original indexer capacity and all other configuration settings",
+    )
     args = parser.parse_args()
     if not args.source.is_dir() or args.destination.exists():
         parser.error("Source must exist and destination must not exist")
@@ -125,9 +136,9 @@ def main():
     for component, count in (("decoder", 12), ("mtp", 1)):
         filename = config["model"][component]["filename"]
         model = onnx.load(args.source / filename, load_external_data=False)
-        transform_graph(model, count)
+        transform_graph(model, count, preserve_context=args.preserve_context)
         models[filename] = model
-    config = candidate_config(config)
+    config = candidate_config(config, preserve_context=args.preserve_context)
     args.destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["cp", "-aL", "--reflink=auto", str(args.source), str(args.destination)], check=True)
     weights = {}
@@ -145,11 +156,15 @@ def main():
     manifest = {
         "status": "experimental; unqualified on actual 80 GiB hardware",
         "source": str(args.source.resolve()),
-        "configured_context_tokens": 10240,
-        "observed_engine_request_ceiling_tokens": 9217,
-        "required_environment": {"ORT_QMOE_NVFP4_PACKED_PREFILL": "1"},
+        "transformation": "selected logits only" if args.preserve_context else "selected logits and bounded indexers",
+        "configured_context_tokens": config["model"]["context_length"],
+        "observed_engine_request_ceiling_tokens": None if args.preserve_context else 9217,
+        "required_environment": {} if args.preserve_context else {"ORT_QMOE_NVFP4_PACKED_PREFILL": "1"},
         "weight_sha256": weights,
         "limitations": [
+            "Long-context inference and performance are unverified; Engine capacity depends on the cache configuration.",
+            "Source MTP uses SimplifiedLayerNormalization opset 22 unsupported by the stock ONNX checker.",
+        ] if args.preserve_context else [
             "Only batch-one 8192-input/512-output workload was measured.",
             "Measured 99.79 E2E TPS is not a strict at-least-100 guarantee.",
             "Sampled 79.95 GiB peak leaves only about 56 MiB; not a hard cap.",

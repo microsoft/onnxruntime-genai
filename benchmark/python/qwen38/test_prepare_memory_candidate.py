@@ -7,7 +7,7 @@ import sys
 import onnx
 import pytest
 from onnx import TensorProto, helper
-from prepare_memory_candidate import main, transform_graph
+from prepare_memory_candidate import candidate_config, main, transform_graph
 
 
 def graph(indexers):
@@ -51,7 +51,40 @@ def test_rejects_unexpected_indexer_count():
         transform_graph(graph(1), 12)
 
 
-def test_cli_copies_weights_and_persists_config(tmp_path, monkeypatch):
+@pytest.mark.parametrize("indexers", [1, 12])
+def test_preserve_context_keeps_indexer_capacity(indexers):
+    model = graph(indexers)
+    initializers = [tensor.SerializeToString() for tensor in model.graph.initializer]
+    indexer_nodes = [node.SerializeToString() for node in model.graph.node[:-1]]
+    indexer_shapes = [value.SerializeToString() for value in list(model.graph.input) + list(model.graph.output)[:-1]]
+    transform_graph(model, indexers, preserve_context=True)
+    assert [tensor.SerializeToString() for tensor in model.graph.initializer] == initializers
+    assert [node.SerializeToString() for node in model.graph.node[:indexers]] == indexer_nodes
+    assert [value.SerializeToString() for value in list(model.graph.input)[:-1] + list(model.graph.output)[:-1]] == indexer_shapes
+    assert model.graph.node[-2].op_type == "Gather"
+    assert model.graph.input[-1].name == "logits_indices"
+
+
+def test_preserve_context_changes_only_logits_bindings():
+    config = {
+        "model": {
+            "context_length": 262144,
+            "decoder": {"inputs": {"input_ids": "input_ids"}, "session_options": {}},
+            "mtp": {"inputs": {}, "session_options": {}},
+        },
+        "search": {"max_length": 262144},
+        "engine": {"dynamic_batching": {"gpu_utilization_factor": 0.12}},
+        "speculative": {"max_draft_tokens": 3},
+    }
+    original = json.loads(json.dumps(config))
+    result = candidate_config(config, preserve_context=True)
+    for component in ("decoder", "mtp"):
+        assert result["model"][component]["inputs"].pop("logits_indices") == "logits_indices"
+    assert result == original
+
+
+@pytest.mark.parametrize("preserve_context", [False, True])
+def test_cli_copies_weights_and_persists_config(tmp_path, monkeypatch, preserve_context):
     source = tmp_path / "source"
     target = tmp_path / "candidate"
     source.mkdir()
@@ -60,6 +93,7 @@ def test_cli_copies_weights_and_persists_config(tmp_path, monkeypatch):
     (source / "model.onnx.data").write_bytes(b"unchanged external weight fixture")
     config = {
         "model": {
+            "context_length": 262144,
             "decoder": {
                 "filename": "model.onnx",
                 "inputs": {},
@@ -67,18 +101,30 @@ def test_cli_copies_weights_and_persists_config(tmp_path, monkeypatch):
             },
             "mtp": {"filename": "mtp.onnx", "inputs": {}, "session_options": {}},
         },
-        "search": {},
-        "engine": {"dynamic_batching": {}},
-        "speculative": {},
+        "search": {"max_length": 262144},
+        "engine": {"dynamic_batching": {"max_scheduled_tokens": 8192, "gpu_utilization_factor": 0.12}},
+        "speculative": {"max_draft_tokens": 3},
     }
     (source / "genai_config.json").write_text(json.dumps(config))
-    monkeypatch.setattr(sys, "argv", ["prepare", "--source", str(source), "--destination", str(target)])
+    argv = ["prepare", "--source", str(source), "--destination", str(target)]
+    if preserve_context:
+        argv.append("--preserve-context")
+    monkeypatch.setattr(sys, "argv", argv)
     main()
     output = json.loads((target / "genai_config.json").read_text())
-    assert output["model"]["context_length"] == 10240
-    assert output["engine"]["dynamic_batching"]["max_scheduled_tokens"] == 4096
-    assert output["engine"]["dynamic_batching"]["num_blocks"] == 40
-    assert output["speculative"]["max_draft_tokens"] == 2
+    if preserve_context:
+        expected = json.loads(json.dumps(config))
+        for component in ("decoder", "mtp"):
+            expected["model"][component]["inputs"]["logits_indices"] = "logits_indices"
+        assert output == expected
+        manifest = json.loads((target / "memory_candidate_manifest.json").read_text())
+        assert manifest["configured_context_tokens"] == 262144
+        assert manifest["observed_engine_request_ceiling_tokens"] is None
+    else:
+        assert output["model"]["context_length"] == 10240
+        assert output["engine"]["dynamic_batching"]["max_scheduled_tokens"] == 4096
+        assert output["engine"]["dynamic_batching"]["num_blocks"] == 40
+        assert output["speculative"]["max_draft_tokens"] == 2
     assert (target / "model.onnx.data").read_bytes() == (source / "model.onnx.data").read_bytes()
     assert (target / "model.onnx.data").stat().st_ino != (source / "model.onnx.data").stat().st_ino
     assert json.loads((source / "genai_config.json").read_text()) == config

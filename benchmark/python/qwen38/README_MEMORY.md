@@ -113,6 +113,32 @@ python prepare_memory_candidate.py \
 
 ### Complete runtime environment
 
+For an experimental **long-context selected-logits-only** candidate, add
+`--preserve-context` to the preparation command. This inserts the selected-row
+LM-head gather and its decoder/MTP input bindings, but leaves the original
+indexer capacities, context limit, scheduler, cache budget, and all other
+configuration settings unchanged. It is not the bounded 8K memory candidate
+described here. Long-context performance and output equivalence must be
+measured before deployment; do not assume the 8K results apply.
+
+```bash
+python prepare_memory_candidate.py \
+  --source /path/to/qwen_38_flash_nvfp4_engine \
+  --destination /path/to/qwen38-long-context-selected-logits \
+  --preserve-context
+```
+
+Run this from `benchmark/python/qwen38` with `onnx` installed. The destination
+must not exist. Preparation makes an independent copy of external weights
+and verifies their SHA256 hashes; allow sufficient disk space and time.
+Use matching `asonawane/qwen-38-flash-100-e2e` ORT/GenAI builds and point
+your long-context Engine benchmark at the new directory. Keep the same
+prompt, scheduler, MTP width, and cache budget for paired comparisons.
+Ensure the Engine's `max_request_length` admits the prompt plus generation.
+The bundled `benchmark_qwen_mtp.py` remains an 8K/512 benchmark; this option
+does not turn it into a context sweep. No new runtime environment variable
+or kernel rebuild is required when those matching builds are already installed.
+
 Activate the isolated Python environment containing **both matching branch
 builds** first. Set these variables before starting Python/model loading.
 The following block selects the **lowest sampled-memory candidate**,
