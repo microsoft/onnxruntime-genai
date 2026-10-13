@@ -2321,6 +2321,38 @@ tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
+### Static single-slot backend that selects its own tokens
+
+The `qwen38_flash_graph` model type (Qwen3.8-Flash CUDA-graph decode with a built-in MTP(1) loop) runs on the static path
+through a `ModelExecutor` that chooses its own tokens, instead of attaching decoder state with logits. It is a single-slot
+backend: fixed in-place KV, a recurrent-state bank ring and a device-side draft -> verify -> commit loop that cannot be
+paged, batched or cropped to an arbitrary token. `Engine::CreateDependencies` assembles it
+(`src/engine/qwen38_graph_executor.h`):
+
+- `Qwen38GraphCacheManager` holds one row. `StaticBatchScheduler` queues further Requests and recycles the slot when the
+  resident turn is complete. `RewindToStartOfTurn` releases the slot; a continued turn (`BeginTurn` on the resident Request)
+  and the replay after a rewind re-ingest the whole retained history (through the same chunked prefill as a new prompt), because
+  the look-ahead cycle and the bank ring cannot be rolled back. There is no prefix cache.
+- `Qwen38GraphExecutor::SelectsOwnTokens()` is true. One Engine step is one prompt chunk (the size the device asks for,
+  `Qwen38DecodeDevice::PrefillChunkTokens()` = `model.qwen38_graph.prefill.chunk` with the fast prefill, otherwise
+  `model.qwen38_graph.prefill_chunk_tokens`, even; a step that only advances the prompt delivers no event, so `CancelRequest`
+  stays responsive; the dense prefill state continues across the chunks and is handed over to the decode state in the step that
+  ingests the last one) or one whole cycle (with `fold.enabled`: one CUDA-graph launch). The
+  cycle's one or two committed tokens are handed to `ScheduledRequests::StageExecutorTokens`; `GenerateNextTokens` then calls
+  `Request::CommitExternalTokens`, which commits them one by one through `Search::CommitToken` (EOS and the session limit as
+  usual), observes stop strings per appended token, and ends the turn at the first token that reaches the turn limit, the
+  context limit, an EOS or a stop-string match (precedence: stop string, EOS, turn limit, context limit). Tokens after that one
+  are not committed. Stop strings are therefore accepted on this static path; every other static executor still rejects them.
+- The next cycle is enqueued before a step returns, so the GPU runs it while the Engine delivers the previous tokens. A stop
+  string can only be known after delivery, so one cycle may be wasted; the next request, a rewind and Engine teardown wait for it.
+- `ModelExecutor::ValidateTurn` rejects, before any Request mutation, what the device loop cannot do: sampling, repetition
+  penalty, no-repeat n-grams, `min_generated_tokens`, seeds and guidance. `MaxDraftTokensPerStep()` is zero (the caller cannot
+  attach drafts). `GetCapabilities()` reports one row and `max_request_length` = KV capacity - 4.
+- `GetSpeculativeStats()` includes the executor's counters (`ModelExecutor::AddSpeculativeStats`): one round per cycle, one
+  proposed draft per round, accepted drafts, bonus and correction tokens, the acceptance-length histogram.
+- The model's device state is leased to one Engine at a time (`Qwen38GraphModel::AcquireDevice`); a second Engine over the same
+  model fails with a clear error until the first one is destroyed. The model has no Generator API support.
+
 ## Experimental low-level public API shape
 
 The language bindings currently expose the same basic low-level loop. Production hosts are expected to wrap this surface or use its replacement rather than expose it as their stable API:
