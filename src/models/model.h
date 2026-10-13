@@ -69,11 +69,18 @@ struct State {
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 
+  // Allocate this output on the session device for the next forward and validate its
+  // actual shape before copying it into the existing managed buffer.
+  void RequireOutputShape(std::string name, std::span<const int64_t> shape, std::string error);
+  bool HasOutputShapeRequirement() const { return output_shape_requirement_.has_value(); }
+
   void ClearIO();  // Clear all inputs/outputs
 
   virtual void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
   virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
+  // Temporary input lifetimes take precedence over configured asynchronous run options.
+  void SetSynchronousExecutionRequired(bool required) { synchronous_execution_required_ = required; }
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
 
   void DumpInputs();
@@ -104,6 +111,14 @@ struct State {
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
+  bool synchronous_execution_required_{};
+  struct OutputShapeRequirement {
+    std::string name;
+    std::vector<int64_t> shape;
+    std::string error;
+  };
+  std::optional<OutputShapeRequirement> output_shape_requirement_;
+
   // CUDA graph annotation id per captured input length. The decode path captures
   // sequence_length == 1; speculative decoding (MTP) also captures the 2-token verify shape.
   // Each distinct length gets its own annotation id so ORT captures/replays an independent graph

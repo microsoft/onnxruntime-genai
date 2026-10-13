@@ -46,6 +46,12 @@ RecurrentState::RecurrentState(State& state, bool graph_capture_variants_support
 
   if (layer_indices_.empty()) return;
 
+  if (state_.params_->search.num_beams != 1) {
+    throw std::runtime_error(
+        "Beam search is not supported for recurrent-state models: convolution and SSM state "
+        "beam reordering is not implemented.");
+  }
+
   if (g_log.enabled)
     Log("info", "RecurrentState: Auto-discovered " + std::to_string(layer_indices_.size()) + " recurrent layers (indices: " + [&]() {
                       std::string s;

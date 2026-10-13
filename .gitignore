@@ -39,6 +39,9 @@ examples/csharp/ModelChat/models
 !test/models/marian-batch-values/
 !test/models/marian-batch-values/*
 !test/models/mistral3/*
+!/test/models/nemotron-h/
+!/test/models/nemotron-h/decoder/model.onnx
+!/test/models/nemotron-h/mtp/model.onnx
 !test/models/multimodal-decoder-no-input-ids/*
 !test/models/multimodal-decoder-with-input-ids/*
 !test/models/phi3-v/*

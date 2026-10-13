@@ -16,6 +16,9 @@
 namespace Generators {
 
 namespace {
+constexpr char kPrefillHiddenShapeError[] =
+    "MTP head prefill requires one hidden-state row per prompt token.";
+
 // Greedy argmax over a contiguous vocab row of fp32 logits on the CPU.
 int32_t ArgmaxRow(const float* row, int vocab_size) {
   int32_t best = 0;
@@ -209,14 +212,6 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
 
       verify_argmax_device_ = main_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_ + 1);
       (void)verify_argmax_device_.CpuSpan();
-
-      // Both sessions and all MTP-side CUDA operations use the shared GenAI stream. Let the CPU
-      // enqueue the chained head work and the main verify without an EP-end stream fence; the
-      // target argmax/logits readback below is the explicit synchronization before CPU acceptance.
-      // Scope this to the persistent device-input path: host-token, sampling, N=1, and non-CUDA
-      // generators retain their existing per-Run synchronization behavior.
-      main_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
-      mtp_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
     }
     merged_tokens_.resize(static_cast<size_t>(num_speculative_tokens_) + 1);
     // Per-size [1,j,H] hidden buffers (j=1..N+1) so the post-verify head refeed of the j accepted
@@ -593,23 +588,87 @@ int32_t MtpGenerator::DraftTwo(OrtValue* hidden, int32_t tok0, int32_t tok1) {
   return ArgmaxRow(logits.data(), vocab_size_);
 }
 
+void MtpGenerator::ValidatePrefillHiddenShape(std::span<const int64_t> shape, size_t prompt_length) const {
+  if (shape.size() != 3 || (shape[0] >= 0 && shape[0] != 1) ||
+      (shape[1] >= 0 && shape[1] != static_cast<int64_t>(prompt_length)) || shape[2] != hidden_size_) {
+    throw std::runtime_error(kPrefillHiddenShapeError);
+  }
+}
+
+void MtpGenerator::PrefillHead(cpu_span<const int32_t> tokens, OrtValue* hidden, bool has_previous_chunk) {
+  ValidatePrefillHiddenShape(hidden->GetTensorTypeAndShapeInfo()->GetShape(), tokens.size());
+  const size_t offset = has_previous_chunk ? 0 : 1;
+  const size_t rows = tokens.size() - offset;
+  if (rows == 0) return;
+
+  auto shifted = std::make_shared<Tensor>(
+      mtp_model_.p_device_inputs_,
+      mtp_model_.session_info_.GetInputDataType(mtp_model_.config_->model.decoder.inputs.hidden_states));
+  const std::array<int64_t, 3> shifted_shape{1, static_cast<int64_t>(rows), hidden_size_};
+  shifted->CreateTensor(shifted_shape);
+  auto destination = shifted->GetByteSpan();
+  const size_t row_bytes = hidden_slice_->GetByteSpan().size();
+  size_t first_row = 0;
+  if (has_previous_chunk) {
+    // Pair the chunk's first token with the previous chunk's final target hidden.
+    destination.subspan(0, row_bytes).CopyFrom(hidden_slice_->GetByteSpan());
+    first_row = 1;
+  }
+  const size_t bytes = (rows - first_row) * row_bytes;
+  if (bytes != 0) {
+    destination.subspan(first_row * row_bytes, bytes)
+        .CopyFrom(ByteWrapTensor(*main_model_.p_device_, *hidden).subspan(0, bytes));
+  }
+  mtp_->SetHiddenStates(shifted);
+  mtp_->AppendTokens(cpu_span<const int32_t>(tokens.data() + offset, rows));
+  head_len_ += rows;
+}
+
 void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (primed_)
     throw std::runtime_error("MtpGenerator: AppendTokens can only be called once");
 
+  const bool async_device_drafts = num_speculative_tokens_ > 1 && device_draft_chain_ && !sampling_;
+  if (device_draft_chain_) {
+    // Host-token prefill allocates temporary upload buffers, including after Reset().
+    // Enable asynchronous execution only once all prompt chunks have finished consuming them.
+    main_->state_->SetSynchronousExecutionRequired(true);
+    mtp_->state_->SetSynchronousExecutionRequired(true);
+  }
+
   // Chunked prefill: bounds the ORT activation arena of the prompt forward (see the constructor).
   // Off (single forward) when the chunk size is 0 or the prompt fits in one chunk.
   const size_t total = input_ids.size();
+  const bool prefill_head = main_model_.config_->model.mtp.prefill_head &&
+                            total < static_cast<size_t>(max_length_);
+  auto append_chunk = [&](cpu_span<const int32_t> tokens, bool has_previous_chunk) {
+    if (prefill_head) {
+      ValidatePrefillHiddenShape(
+          main_model_.session_info_.GetOutputShape(main_model_.config_->model.mtp.main_hidden_states),
+          tokens.size());
+      const std::array<int64_t, 3> shape{1, static_cast<int64_t>(tokens.size()), hidden_size_};
+      main_->state_->RequireOutputShape(
+          main_model_.config_->model.mtp.main_hidden_states, shape, kPrefillHiddenShapeError);
+    }
+    main_->AppendTokens(tokens);
+    if (prefill_head) {
+      if (main_->state_->HasOutputShapeRequirement())
+        throw std::runtime_error("MTP head prefill requires a decoder that supports output shape validation.");
+      OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.mtp.main_hidden_states.c_str());
+      PrefillHead(tokens, hidden, has_previous_chunk);
+      ExtractHiddenPosition(hidden, static_cast<int>(tokens.size()) - 1);
+    }
+  };
   size_t tail = total;
   if (prefill_chunk_ > 0 && total > static_cast<size_t>(prefill_chunk_)) {
     const size_t chunk = static_cast<size_t>(prefill_chunk_);
     for (size_t off = 0; off < total; off += chunk) {
       const size_t n = std::min(chunk, total - off);
-      main_->AppendTokens(cpu_span<const int32_t>(input_ids.data() + off, n));
+      append_chunk(cpu_span<const int32_t>(input_ids.data() + off, n), off != 0);
       tail = n;  // outputs below are read from the final chunk's forward
     }
   } else {
-    main_->AppendTokens(input_ids);
+    append_chunk(input_ids, false);
   }
   length_ = input_ids.size();
   sequence_.assign(input_ids.begin(), input_ids.end());
@@ -652,6 +711,14 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   }
   has_pending_draft_ = false;
   pending_refeed_count_ = -1;
+  if (async_device_drafts) {
+    // The draft/verify inputs now use persistent buffers on the shared CUDA stream;
+    // target argmax/logits readback synchronizes before CPU acceptance.
+    main_->state_->SetSynchronousExecutionRequired(false);
+    mtp_->state_->SetSynchronousExecutionRequired(false);
+    main_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
+    mtp_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
+  }
   primed_ = true;
 }
 
@@ -973,9 +1040,14 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     // bonus + its hidden from THIS forward keeps the carried state consistent with the committed
     // sequence (the a==0 case degenerates to the exact N=1 single-token decode re-run).
     main_->RewindToLength(length_);
-    verify_tokens_[0] = t;
-    for (int k = 0; k < a; ++k) verify_tokens_[k + 1] = drafts_[k];
-    main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), a + 1));
+    if (device_verify_input) {
+      // Reuse the committed prefix of the persistent verify input, not a temporary host upload.
+      main_->AppendTokens(verify_tokens_device_.subspan(0, static_cast<size_t>(a + 1)));
+    } else {
+      verify_tokens_[0] = t;
+      for (int k = 0; k < a; ++k) verify_tokens_[k + 1] = drafts_[k];
+      main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), a + 1));
+    }
     stats_.target_forward_passes++;
     OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
     ArgmaxMainRows(a, 1, &next_token_);         // main's token after the committed prefix

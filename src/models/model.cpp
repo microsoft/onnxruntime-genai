@@ -134,9 +134,15 @@ void State::DumpOutputs() {
   }
 }
 
+void State::RequireOutputShape(std::string name, std::span<const int64_t> shape, std::string error) {
+  output_shape_requirement_ = OutputShapeRequirement{
+      std::move(name), std::vector<int64_t>(shape.begin(), shape.end()), std::move(error)};
+}
+
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
                 int graph_capture_variant) {
   DurationTrace trace{"State::Run"};
+  graph_capture_this_run = graph_capture_this_run && !HasOutputShapeRequirement();
 
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
@@ -178,8 +184,59 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
-              output_names_.data(), outputs_.data(), output_names_.size());
+  if (synchronous_execution_required_)
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", "0");
+
+  if (output_shape_requirement_) {
+    const auto requirement = std::move(*output_shape_requirement_);
+    output_shape_requirement_.reset();
+    const auto found = std::find_if(output_names_.begin(), output_names_.end(),
+                                    [&](const char* name) { return name == requirement.name; });
+    if (found == output_names_.end())
+      throw std::runtime_error("Required output is not registered: " + requirement.name);
+    const size_t checked_index = static_cast<size_t>(std::distance(output_names_.begin(), found));
+    auto binding = OrtIoBinding::Create(session);
+    for (size_t i = 0; i < input_names_.size(); ++i)
+      binding->BindInput(input_names_[i], *inputs_[i]);
+    auto device_memory = p_session_device_->GetType() == DeviceType::CPU
+                             ? OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault)
+                             : p_session_device_->GetMemoryInfo();
+    auto cpu_memory = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    for (size_t i = 0; i < output_names_.size(); ++i) {
+      if (i == checked_index)
+        binding->BindOutput(output_names_[i], *device_memory);
+      else if (outputs_[i])
+        binding->BindOutput(output_names_[i], *outputs_[i]);
+      else
+        binding->BindOutput(output_names_[i], *cpu_memory);
+    }
+    session.Run(run_options_.get(), *binding);
+    binding->SynchronizeOutputs();
+    auto values = binding->GetOutputValues();
+    if (values.size() != outputs_.size())
+      throw std::runtime_error("Output binding returned an incomplete output inventory.");
+    auto actual_info = values[checked_index]->GetTensorTypeAndShapeInfo();
+    if (actual_info->GetShape() != requirement.shape)
+      throw std::runtime_error(requirement.error);
+    if (outputs_[checked_index]) {
+      auto bound_info = outputs_[checked_index]->GetTensorTypeAndShapeInfo();
+      if (bound_info->GetShape() != requirement.shape ||
+          bound_info->GetElementType() != actual_info->GetElementType())
+        throw std::runtime_error("The validated output does not match its managed buffer.");
+      // Validate the allocated shape before copying back to the stable decoder buffer.
+      auto& destination_device = DeviceForTensor(*outputs_[checked_index], *p_session_device_);
+      ByteWrapTensor(destination_device, *outputs_[checked_index])
+          .CopyFrom(ByteWrapTensor(DeviceForTensor(*values[checked_index], *p_session_device_), *values[checked_index]));
+      // CopyFrom can enqueue a CUDA copy; its temporary source must outlive that copy.
+      destination_device.Synchronize();
+    }
+    for (size_t i = 0; i < outputs_.size(); ++i)
+      if (!outputs_[i])
+        outputs_[i] = values[i].release();
+  } else {
+    session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+                output_names_.data(), outputs_.data(), output_names_.size());
+  }
 
   extra_outputs_.RegisterOutputs();
 

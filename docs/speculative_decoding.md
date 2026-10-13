@@ -195,6 +195,38 @@ The head is loaded as a standalone `og.Model` from its own folder, whose `genai_
 declares `model.decoder.inputs.hidden_states` (and, for `N > 1` chaining, an extra
 `hidden_states_out` output produced by exporting with `mtp_emit_hidden=true`).
 
+For heads that require independently cached prompt context, set
+`model.mtp.prefill_head: true` in the main configuration. The default is `false`,
+preserving cold-head behavior for existing exports. When enabled, the main output
+must expose `[1, S, H]` with one hidden row per prompt token. The runtime primes the
+head with `tokens[:, 1:]` paired with `main_hidden[:, :-1]`, leaving its cache at
+prompt length minus one. Chunked prefill carries the previous chunk's final hidden
+row into the next head call; a one-token prompt needs no head prefill. This is a
+standalone `MtpGenerator` option; Engine-hosted MTP uses a different packed 2-D
+hidden-state contract.
+
+Fixed output shapes are checked before the target prompt forward, and concrete
+output shapes are checked before head prefill. For each validated prompt chunk,
+the hidden output is allocated on the session device without a pre-bound shape,
+then checked before copying into its stable decoder buffer. A last-row-only output
+is rejected explicitly even if its declared sequence dimension is symbolic.
+Only these validation forwards bypass graph capture; later decode/verify buffers
+and capture eligibility are unchanged.
+
+For greedy CUDA multi-draft generation, host-token prompt forwards finish
+synchronously before temporary input uploads can be released or shifted
+hidden-state buffers can be replaced. Execution can become asynchronous only after
+all prompt chunks finish, when token inputs use persistent device buffers.
+Reset repeats this boundary.
+This lifetime requirement is applied after configured run options, so a model's
+`disable_synchronize_execution_providers: "1"` cannot override it. CUDA N1 and
+sampling paths keep this requirement throughout generation because their
+token-input forwards continue to use temporary host uploads. Other generators'
+run-option behavior is unchanged.
+An explicit configured `"0"` still keeps persistent device drafting synchronous.
+Rejected CUDA multi-draft rounds also replay the accepted prefix from the
+persistent verify-token buffer rather than creating a temporary host upload.
+
 See [examples/python/qwen-3.6-mtp.md](../examples/python/qwen-3.6-mtp.md) for the full export
 recipe and [examples/python/qwen-3.6-mtp.py](../examples/python/qwen-3.6-mtp.py) for a runnable
 example.

@@ -21,6 +21,36 @@ namespace {
 
 namespace fs_std = std::filesystem;
 
+#if ORT_API_VERSION >= 31
+class ModelPackageApiTests : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    Ort::InitApi();
+    saved_api_ = Ort::api;
+    saved_api_version_ = Ort::api_version;
+  }
+
+  void TearDown() override {
+    Ort::api = saved_api_;
+    Ort::api_version = saved_api_version_;
+  }
+
+ private:
+  const OrtApi* saved_api_{};
+  int saved_api_version_{};
+};
+
+TEST_F(ModelPackageApiTests, UsesStableRuntimeTable) {
+  if (Ort::api_version < 31) {
+    GTEST_SKIP() << "The negotiated runtime does not support the stable model package API.";
+  }
+  const auto& api = Ort::GetModelPackageApi();
+  EXPECT_EQ(&api, Ort::api->GetModelPackageApi());
+  EXPECT_NE(api.CreateModelPackageContext, nullptr);
+  EXPECT_NE(api.ModelPackageComponent_GetSelectedVariantFolderPath, nullptr);
+}
+#endif
+
 // Creates a fresh, empty per-test directory under the build's temp area.
 fs_std::path MakeTempDir(const std::string& suffix) {
   static int counter = 0;
@@ -97,6 +127,21 @@ std::string CaptureThrowMessage(Fn&& fn) {
   }
   return {};
 }
+
+#if ORT_API_VERSION >= 31
+TEST_F(ModelPackageApiTests, RejectsUninitializedApi) {
+  Ort::api = nullptr;
+  Ort::api_version = 0;
+  EXPECT_EQ(CaptureThrowMessage([] { Ort::GetModelPackageApi(); }),
+            "The stable model package API requires ONNX Runtime 1.31 or later.");
+}
+
+TEST_F(ModelPackageApiTests, RejectsOlderNegotiatedApi) {
+  Ort::api_version = 30;
+  EXPECT_EQ(CaptureThrowMessage([] { Ort::GetModelPackageApi(); }),
+            "The stable model package API requires ONNX Runtime 1.31 or later.");
+}
+#endif
 
 // Produces an ONNX model whose initializers live in a sidecar external-data file, by loading
 // `src_onnx` with optimizations disabled and exporting an optimized copy with external
