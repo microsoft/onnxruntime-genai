@@ -744,6 +744,22 @@ TEST(Dflash2ConfigTest, RejectsWindowedPoolByteOverflow) {
       std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, SnapshotCapacityHonorsConfiguredLimitAndMemoryBudget) {
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 0), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 1), 1u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 4), 4u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 32), 7u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(199, 40, 20, 20, 32), 6u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(79, 40, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 100, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 101, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 0, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 20, 0, 32), 0u);
+  const size_t maximum = std::numeric_limits<size_t>::max();
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, 0, maximum / 2, 1, maximum), 2u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, maximum - 1, maximum, 1, maximum), 0u);
+}
+
 TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
   auto config = MakeDflash2Config();
   config.model.dflash2.is_dspark = true;
@@ -1071,6 +1087,82 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   invalid->caches.resize(checkpoint->caches.size());
   damaged.front().prefix_checkpoint = std::move(invalid);
   EXPECT_THROW(drafter.Propose(next_aux, damaged, proposals), std::logic_error);
+}
+
+TEST(Dflash2ConfigTest, SnapshotPoolRetainsAndRestoresMoreThanTwoBoundaries) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.sliding_window = 8;
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 1u);
+  drafter.SetPrefixCheckpointCapacity(0);
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+  int request_id = 0;
+  auto* request = reinterpret_cast<Request*>(&request_id);
+  Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  aux.CreateTensor(std::array<int64_t, 2>{8, 1});
+  aux.GetByteSpan().Zero();
+  std::vector<std::vector<int32_t>> proposals;
+  const std::array initial{Dflash2Drafter::Feed{
+      .request = request, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_TRUE(drafter.Propose(aux, initial, proposals));
+  EXPECT_EQ(drafter.CapturePrefix(request, 8), nullptr);
+  drafter.SetPrefixCheckpointCapacity(3);
+
+  std::vector<std::shared_ptr<const Dflash2PrefixCheckpoint>> checkpoints;
+  std::vector<std::vector<int32_t>> expected;
+  for (size_t position = 8; position <= 24; position += 8) {
+    auto checkpoint = drafter.CapturePrefix(request, position);
+    ASSERT_NE(checkpoint, nullptr);
+    checkpoints.push_back(std::move(checkpoint));
+    Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+    next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+    next_aux.GetByteSpan().Zero();
+    const std::array next{Dflash2Drafter::Feed{
+        .request = request, .aux_row_count = 1, .first_position = position, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+    ASSERT_TRUE(drafter.Propose(next_aux, next, proposals));
+    ASSERT_FALSE(proposals.front().empty());
+    expected.push_back(proposals.front());
+    if (position < 24) {
+      Tensor remaining{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+      remaining.CreateTensor(std::array<int64_t, 2>{7, 1});
+      remaining.GetByteSpan().Zero();
+      const std::array advance{Dflash2Drafter::Feed{
+          .request = request, .aux_row_count = 7, .first_position = position + 1, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+      ASSERT_TRUE(drafter.Propose(remaining, advance, proposals));
+    }
+  }
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+  EXPECT_EQ(drafter.CapturePrefix(request, 25), nullptr);
+  EXPECT_THROW(drafter.SetPrefixCheckpointCapacity(0), std::logic_error);
+  for (size_t index = 0; index < checkpoints.size(); ++index) {
+    drafter.ReleaseAll();
+    Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+    next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+    next_aux.GetByteSpan().Zero();
+    const std::array restored{Dflash2Drafter::Feed{
+        .request = request, .prefix_checkpoint = checkpoints[index], .aux_row_count = 1, .first_position = checkpoints[index]->token_count, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+    ASSERT_TRUE(drafter.Propose(next_aux, restored, proposals));
+    EXPECT_EQ(proposals.front(), expected[index]);
+  }
+  checkpoints[1].reset();
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 1u);
+  auto reused = drafter.CapturePrefix(request, 25);
+  ASSERT_NE(reused, nullptr);
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+  checkpoints.clear();
+  reused.reset();
+  drafter.SetPrefixCheckpointCapacity(0);
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
 }
 
 TEST(Dflash2ConfigTest, MissingWindowedPrefixRebuildsBeforeDraftingOrCheckpointing) {

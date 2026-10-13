@@ -286,8 +286,9 @@ for the same cache-disabled `churn-5` prompt at zero-based index 34.
 Safety, output-length, cache-count, and separate cache-disabled concurrency
 checks passed in those reported runs; they do not waive exact output parity.
 
-Four failed candidate full runs versus one failed baseline full run remain an
-approval blocker. Baseline/cache-disabled failures show that the scheduler
+Four failed candidate full runs versus one failed baseline full run were raised
+as an approval blocker during review and remain an unexplained qualification
+gap. Baseline/cache-disabled failures show that the scheduler
 patch and prefix adoption are not necessary triggers, but do not explain the
 observed frequency difference, identify the failing operation, or justify a
 "CUDA noise" attribution. Compare raw scores and corresponding fixed/paged
