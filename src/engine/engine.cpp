@@ -8,6 +8,8 @@
 #include "../models/preprocessing/genai_tokenizer.h"
 #include "../stop_string_controller.h"
 #include "decoders/varlen_decoder_io.h"
+#include "../models/qwen38_graph.h"
+#include "qwen38_graph_executor.h"
 
 #include <exception>
 #include <limits>
@@ -387,6 +389,11 @@ void ValidateMtpModelCompatibility(const Config& config,
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
+  // The static CUDA-graph model hosts its own single-slot cache manager and executor; it has no paged or
+  // fixed-state cache, no hosted drafter and no logits to sample.
+  if (auto graph_model = std::dynamic_pointer_cast<Qwen38GraphModel>(model)) {
+    return CreateQwen38GraphDependencies(std::move(graph_model));
+  }
   // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so
   // it cannot resume a half-written prompt. Reject a model that configures chunking here rather
   // than surfacing it once a Request is already being admitted.
@@ -1855,6 +1862,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   ValidateTurnPolicy(policy, options, model_->p_device_scoring_->GetType(),
                      model_->config_->model.vocab_size, turn_prompt_length,
                      request->MaxSessionTokens());
+  model_executor_->ValidateTurn(policy, options);
   // Static batching completes generation through a non-transactional path (RunStatic) that cannot
   // stage, roll back, or replay a stop match, and its sampler RNG state is created once when the
   // Request joins the batch rather than inside a rollback-capable step. Reject both before any
@@ -1863,7 +1871,9 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     if (options.delimited_guidance) {
       throw std::runtime_error("Delimited guidance requires an Engine configured for dynamic batching.");
     }
-    if (!options.stop_strings.empty()) {
+    // An executor that commits its own tokens runs them through Request::CommitExternalTokens, which
+    // observes stop strings token by token and only ever ends the turn, so it has nothing to roll back.
+    if (!options.stop_strings.empty() && !model_executor_->SelectsOwnTokens()) {
       throw std::runtime_error(
           "Stop strings require an Engine configured for dynamic batching.");
     }
@@ -2354,7 +2364,9 @@ void Engine::RunStatic() {
 
     try {
       model_executor_->Decode(scheduled_requests);
-      ++speculative_stats_.target_forward_passes;
+      if (!model_executor_->SelectsOwnTokens()) {
+        ++speculative_stats_.target_forward_passes;
+      }
       scheduled_requests.GenerateNextTokens(step_results_);
     } catch (...) {
       MarkUnhealthyAndThrow(
@@ -3113,6 +3125,7 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
   // would be a data race.
   ValidateOwnerThread();
   auto stats = speculative_stats_;
+  model_executor_->AddSpeculativeStats(stats);
   if (dflash2_drafter_) {
     stats.dflash2_admission_misses = dflash2_drafter_->AdmissionMisses();
   }
@@ -3150,6 +3163,12 @@ EngineCapabilities Engine::GetCapabilities() const {
         model_->config_->engine.static_batching->max_batch_size;
   } else {
     capabilities.configured_max_batch_size = kDefaultStaticBatchSize;
+  }
+  if (!model_->config_->engine.dynamic_batching) {
+    if (const size_t rows = cache_manager_->MaxStaticBatchSize()) {
+      capabilities.configured_max_batch_size = rows;
+    }
+    capabilities.max_request_length = cache_manager_->MaxStaticRequestLength();
   }
   return capabilities;
 }

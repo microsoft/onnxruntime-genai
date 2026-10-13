@@ -214,7 +214,29 @@ Tensor* ScheduledRequests::HiddenStates() const {
   return decoder_state_ ? decoder_state_->HiddenStates() : nullptr;
 }
 
+void ScheduledRequests::StageExecutorTokens(size_t row, std::span<const int32_t> tokens) {
+  if (row >= requests_.size()) {
+    throw std::logic_error("Executor tokens were staged for a row that was not scheduled.");
+  }
+  if (tokens.size() > kMaxGeneratedTokensPerStep) {
+    throw std::logic_error("An executor staged more tokens than one step can report.");
+  }
+  if (executor_tokens_.empty()) {
+    executor_tokens_.resize(requests_.size());
+  }
+  executor_tokens_[row].assign(tokens.begin(), tokens.end());
+}
+
 void ScheduledRequests::GenerateNextTokens(std::vector<RequestStepResult>& results) {
+  if (!executor_tokens_.empty()) {
+    results.assign(requests_.size(), RequestStepResult{});
+    for (size_t row = 0; row < requests_.size(); ++row) {
+      if (!executor_tokens_[row].empty() && IsExecuting(requests_[row]->status_)) {
+        results[row] = requests_[row]->CommitExternalTokens(executor_tokens_[row]);
+      }
+    }
+    return;
+  }
   if (!decoder_state_) {
     throw std::runtime_error("Cannot generate next tokens without the decoder state.");
   }
