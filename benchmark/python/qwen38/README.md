@@ -4,7 +4,11 @@ This directory contains the Engine benchmark, exact configuration overlay,
 launcher and pooled-result validator used to reproduce the optimized
 8,192-input / 512-output workload. See [RESULTS.md](RESULTS.md) for all
 optimization gains and [the detailed log](../../../docs/Qwen38MtpEngramIssues.md)
-for operator validation and rejected experiments.
+for operator validation and rejected experiments. The static-graph Engine
+backend (draft PRs #2725-#2729) is measured with the same 8,192 / 512 protocol
+in [RESULTS.md](RESULTS.md#static-graph-backend-next-to-the-paged-engine); its
+scripts are `tools/qwen38_graph/` of that series; the scripts here do not run it
+(the model type rejects the minimum generated-token count they request).
 
 ## Measured result and requirements
 

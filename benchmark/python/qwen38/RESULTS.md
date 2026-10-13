@@ -131,6 +131,77 @@ For a fresh memory measurement, sample NVML device usage and process RSS
 through loading, warmup and measured requests separately. Do not include
 memory-instrumented request timings in the throughput comparison.
 
+## Static-graph backend next to the paged Engine
+
+A second Engine backend serves the same checkpoint from captured CUDA graphs
+with a fixed-capacity KV cache and a device-side MTP(1) loop (model type
+`qwen38_flash_graph`, draft PRs #2725-#2729). The table uses the protocol of
+this document: one H200, batch one, greedy decoding, exactly **8,192 uncached
+input tokens and 512 generated tokens**, with the prompt text of
+`benchmark_qwen_mtp.py` (the same sentence repeated). The static-graph row
+pools ten requests from two invocations of one warmup plus five measured
+requests each, like the paged result above. TTFT is the time from
+`begin_turn` to the `Engine.run` call that delivers the first token (fast
+prefill included); decode counts the 511 tokens after the first token; E2E is
+512 tokens divided by TTFT plus decode time.
+
+| Metric | Paged Engine (final configuration above) | Static-graph Engine backend |
+|---|---:|---:|
+| **End-to-end throughput** | 100.48 tokens/s | **185.69 tokens/s** (185.79 and 185.59 per invocation; requests 185.07-185.92) |
+| Decode throughput | 126.42 tokens/s | **252.50 tokens/s** |
+| Mean time to first token | 1.05 s | **0.734 s** |
+| Mean request time | 5.10 s | **2.76 s** |
+| Draft acceptance | not reported above | 1.000 (every cycle committed two tokens) |
+
+The same backend on natural text (windows of a long text pool, the vLLM
+benchmark protocol: exact prompt length, 256 generated tokens, EOS ignored,
+one warmup and three measured requests, decode only):
+
+| Prompt tokens | Decode tokens/s | ms per MTP cycle | Draft acceptance | TTFT, median |
+|---:|---:|---:|---:|---:|
+| 2,048 | 249.0 | 7.70 | 0.91-0.95 | 0.298 s |
+| 8,192 | 239.8 | 7.88 | 0.79-0.92 | 0.750 s |
+| 32,768 | 231.5 | 8.07 | 0.88 | 3.150 s |
+
+The 32k decode and the 8.07 ms cycle come from the earlier, six-run
+development measurement on the same stack (median of the runs reported there);
+the 2k and 8k rows were re-measured for this table on the stacked branch
+(`tlwu/20261013/ga-b5-qwen38-qualification-tools`), where ms per cycle matched
+the development run (7.71 / 7.88). Tokens per second follows draft acceptance;
+ms per cycle is the steadier metric. Peak GPU memory of the static-graph
+backend is 113.4 GiB (`nvidia-smi`, 0.5 s samples, 2k-32k decode), compared
+with the 100.09 GiB sampled above; the two samplers differ.
+
+Read the comparison with these caveats:
+
+- **Not a controlled A/B.** The paged result uses the optimized ORT branches
+  and kernels documented here; the static-graph backend uses its own exported
+  graphs, a different CUDA execution-provider build, and separately built
+  custom-op libraries (https://github.com/tianleiwu/qwen38-flash-ops), on a
+  different CUDA toolkit (13.0 versus 13.3.73). The paged run measures width-two
+  MTP; the static-graph loop proposes one draft token per cycle.
+- **The repeated-sentence prompt favors speculation.** Acceptance was 1.000 on
+  it, so 252.5 tokens/s is close to the two-tokens-per-cycle ceiling of the
+  7.9 ms cycle. Natural text accepts 0.79-0.95 and decodes at 232-249 tokens/s.
+  The paged table does not control for acceptance either.
+- **Scope of the static-graph backend:** greedy decoding only, one resident
+  request (others queue), Linux and CUDA only, no prefix cache, sessions up to
+  33,024 tokens. A continued or rewound turn re-ingests its whole history
+  (0.3 s at 2k, 3.2 s at 32k).
+- **The fast prefill is tolerance level**, not bit-reproducible: streams of
+  the same prompt can diverge after tens of tokens. MMLU-Pro (800 items, 8,192
+  new tokens) scored 664/800 on this backend through `og.Engine`, within the
+  noise of the other MTP(1) systems measured in the development report; this is
+  not a model-quality claim for the paged configuration.
+- **Reproduction** needs the custom-op libraries, the exported graphs and a
+  CUDA EP that are not in this repository. `benchmark_qwen_mtp.py` requests a
+  minimum generated-token count to force 512 tokens, which the static-graph
+  backend rejects, so this directory's scripts do not run it. Use
+  `tools/qwen38_graph/bench_engine_mtp.py` and
+  `bench_ttft_engine.py` from #2729, for example
+  `bench_engine_mtp.py <fixed-length package> --out r.json --contexts 8192
+  --new 512 --reps 5 --text-pool <repeated-prompt-text file>`.
+
 ## Detailed records and reproduction
 
 - [Optimization log and experiment details](../../../docs/Qwen38MtpEngramIssues.md)
