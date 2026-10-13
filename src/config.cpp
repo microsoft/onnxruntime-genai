@@ -2435,6 +2435,121 @@ struct Qwen38GraphMtp_Element : JSON::Element {
   Config::Model::Qwen38Graph::Mtp& v_;
 };
 
+struct Qwen38GraphFoldHeadR2_Element : JSON::Element {
+  explicit Qwen38GraphFoldHeadR2_Element(Config::Model::Qwen38Graph::Fold::HeadR2& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "graph_id") {
+      v_.graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Qwen38Graph::Fold::HeadR2& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+};
+
+struct Qwen38GraphFold_Element : JSON::Element {
+  explicit Qwen38GraphFold_Element(Config::Model::Qwen38Graph::Fold& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "target_graph_id") {
+      v_.target_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "force_reject") {
+      v_.force_reject = JSON::Get<bool>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "head_r2") return head_r2_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Qwen38Graph::Fold& v_;
+  Qwen38GraphFoldHeadR2_Element head_r2_{v_.head_r2};
+};
+
+struct Qwen38GraphPrefillModel_Element : JSON::Element {
+  explicit Qwen38GraphPrefillModel_Element(Config::Model::Qwen38Graph::Prefill::Model& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Qwen38Graph::Prefill::Model& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+};
+
+struct Qwen38GraphPrefill_Element : JSON::Element {
+  explicit Qwen38GraphPrefill_Element(Config::Model::Qwen38Graph::Prefill& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "chunk") {
+      v_.chunk = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "weights_pool") {
+      v_.weights_pool = JSON::Get<std::string_view>(value);
+    } else if (name == "constants") {
+      v_.constants = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "dense") return dense_;
+    if (name == "head_kv") return head_kv_;
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "warmup_lengths") {
+      v_.warmup_lengths.clear();
+      return warmup_lengths_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Qwen38Graph::Prefill& v_;
+  Qwen38GraphPrefillModel_Element dense_{v_.dense};
+  Qwen38GraphPrefillModel_Element head_kv_{v_.head_kv};
+  Int_Array_Element warmup_lengths_{v_.warmup_lengths};
+};
+
 struct Qwen38Graph_Element : JSON::Element {
   explicit Qwen38Graph_Element(Config::Model::Qwen38Graph& v) : v_{v} {}
 
@@ -2465,6 +2580,8 @@ struct Qwen38Graph_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     if (name == "head") return head_;
     if (name == "mtp") return mtp_;
+    if (name == "fold") return fold_;
+    if (name == "prefill") return prefill_;
     throw JSON::unknown_value_error{};
   }
 
@@ -2472,6 +2589,8 @@ struct Qwen38Graph_Element : JSON::Element {
   Config::Model::Qwen38Graph& v_;
   Qwen38GraphHead_Element head_{v_.head};
   Qwen38GraphMtp_Element mtp_{v_.mtp};
+  Qwen38GraphFold_Element fold_{v_.fold};
+  Qwen38GraphPrefill_Element prefill_{v_.prefill};
 };
 
 struct Model_Element : JSON::Element {
@@ -3703,6 +3822,11 @@ void ValidateModelPaths(const Config& config) {
 
   ValidateConfigPath(m.qwen38_graph.head.filename_s1, "model.qwen38_graph.head.filename_s1");
   ValidateConfigPath(m.qwen38_graph.head.filename_s2, "model.qwen38_graph.head.filename_s2");
+  ValidateConfigPath(m.qwen38_graph.fold.head_r2.filename, "model.qwen38_graph.fold.head_r2.filename");
+  ValidateConfigPath(m.qwen38_graph.prefill.weights_pool, "model.qwen38_graph.prefill.weights_pool");
+  ValidateConfigPath(m.qwen38_graph.prefill.constants, "model.qwen38_graph.prefill.constants");
+  ValidateConfigPath(m.qwen38_graph.prefill.dense.filename, "model.qwen38_graph.prefill.dense.filename");
+  ValidateConfigPath(m.qwen38_graph.prefill.head_kv.filename, "model.qwen38_graph.prefill.head_kv.filename");
   ValidateConfigPath(m.qwen38_graph.plane_library, "model.qwen38_graph.plane_library");
   ValidateConfigPath(m.qwen38_graph.ple_table, "model.qwen38_graph.ple_table");
 
@@ -3776,6 +3900,15 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   if (model.qwen38_graph.head.session_options.has_value()) {
     for (const auto& provider_option : model.qwen38_graph.head.session_options->provider_options) {
       model.qwen38_graph.head.session_options->providers.push_back(provider_option.name);
+    }
+  }
+
+  for (auto* extra : {&model.qwen38_graph.fold.head_r2.session_options, &model.qwen38_graph.prefill.dense.session_options,
+                      &model.qwen38_graph.prefill.head_kv.session_options}) {
+    if (extra->has_value()) {
+      for (const auto& provider_option : (*extra)->provider_options) {
+        (*extra)->providers.push_back(provider_option.name);
+      }
     }
   }
 
