@@ -215,31 +215,19 @@ On Linux, use `./engine_unit_tests` with the same arguments. This benchmark is
 disabled in ordinary test runs because timings are diagnostic, not portable
 pass/fail thresholds; the lease-safety regressions run normally.
 
-The matrix uses 256-token blocks, histories of 128/512/2,048 blocks
-(32,768/131,072/524,288 tokens), and 1/8/32 checkpoint histories, limiting the
-aggregate pool to 16,384 blocks. Each geometry measures no leases, half the
-histories leased, and all histories leased. The `batch` column is checkpoint
-history count, not a measured execution batch; `matched_blocks` is aggregate
-indexed blocks. Each row checks the exact reclaimable count before timing.
-One calibration query selects 1-10,000 calls per timed sample, targeting about
-250 microseconds per sample. Three warmup samples precede 31 measured samples;
-queries whose calibration takes at least 10 milliseconds use 11 measured
-samples to bound slow baseline runs. Timings are per-call mean/p50/p95
-microseconds, with `ops/sample`, `samples`, and `calls` printed per row.
-The accumulated result must equal the expected reclaimable count multiplied
-by `1 + ops/sample * (3 + samples)`; that includes calibration and warmup, but
-not the separate untimed correctness assertion.
-These token histories exercise metadata; they do not execute a long-context
-model graph or prove that a deployment model supports those context lengths.
+The benchmarks cover dense indexed ancestry, large pools with few cached
+blocks, and leased endpoints sharing evicted ancestors. The shared-evicted case
+reuses every ancestor's physical block ID for an unrelated chain and checks
+both reclaimable counts and actual reclamation: stale identities must not
+protect replacements.
 
-The sparse matrix holds only four blocks per history, with 1/8 histories in
-4,096/65,536/262,144-block pools. Unleased and all-leased queries distinguish
-endpoint-only inspection from the cost of clearing pool-sized scratch.
-The shared-evicted matrix leases 8/32 endpoints sharing 128/512/2,048 missing
-physical ancestors. It first evicts those ancestors while the endpoints remain
-referenced, then leases the endpoints and reuses every evicted physical block
-ID for an unrelated indexed chain. The exact reclaimable-count and reclamation
-checks ensure a stale identity never protects the unrelated replacement.
+Each row checks the exact reclaimable count, then calibrates batched calls,
+warms up, and collects repeated samples. The accumulated result is checked
+across all calls. Output reports per-call mean/p50/p95 microseconds and the
+batch/sample/call counts. The `batch` column counts checkpoint histories, not
+model execution batches; `matched_blocks` counts indexed blocks. These are
+metadata benchmarks, not long-context model execution or context-length
+qualification.
 
 Compare the same benchmark source and Release compiler settings against the
 baseline and candidate. Checkpoint protection uses one preallocated CPU byte
@@ -250,13 +238,10 @@ retained physical ancestor once, deduplicating shared ancestry. Scratch is
 rebuilt for each query because fixed/draft leases can change without a cache
 mutation.
 
-Two costs remain: the first leased endpoint clears one byte for every pool
-block, even in a sparse cache; missing physical ancestors are not marked and
-can be revisited by each leased endpoint. Thus the leased query is bounded by
-pool size plus retained ancestry and repeated missing-ancestry walks, not
-solely by the number of indexed blocks. The shared-evicted matrix exposes that
-limit; this change does not optimize it or replace exact identity validation
-with a block-ID-only check.
+Two costs remain: leased queries clear pool-sized scratch even in a sparse
+cache, and missing physical ancestors can be revisited by each leased
+endpoint. The sparse and shared-evicted cases expose these limits. Do not
+replace exact identity validation with a block-ID-only check to avoid them.
 
 Component timings isolate the scheduler scan, not end-to-end token latency.
 Also run the operator matrix on an available GPU with fixed pool sizing,
@@ -264,58 +249,6 @@ long prompts, multiple requests, retained owners, and repeated uncached
 controls. Compare host RSS and per-process GPU high-water marks through
 alternation/churn; neither the microbenchmark nor a single peak snapshot
 establishes a memory plateau or deployment-device fit.
-
-### Outstanding full-model parity qualification
-
-The ORT 1.31 target-only review of the scheduler change compared baseline
-`2472a360` with candidate `92b91fab` on the same A100, with CUDA graphs disabled,
-1,024 blocks, 512-token chunks, max batch size 32, and 64 generated tokens.
-Each full run covered 34 scenarios, 126 reference turns, and six cache-disabled
-admission controls. Preserve the reviewer's reported failures:
-
-| Paired run | GEMM autotuning | Baseline scenarios | Candidate scenarios |
-|---|---|---|---|
-| Original | On | 34/34 passed | 33/34; 513-token second warm replay failed |
-| Repeat 1 | On | 33/34; 511-token cold request failed | 33/34; 513-token cold request failed |
-| Repeat 2 | On | 34/34 passed | 33/34; 1,537-token second warm replay failed |
-| Off comparison | Off | 34/34 passed | 32/34; boundary-1023 and short-first failed; one reference repeat also failed |
-
-The baseline also showed the token-35 change from `32645` to `32471`, on a
-different prompt. With autotuning off, the candidate produced different outputs
-for the same cache-disabled `churn-5` prompt at zero-based index 34.
-Safety, output-length, cache-count, and separate cache-disabled concurrency
-checks passed in those reported runs; they do not waive exact output parity.
-
-Four failed candidate full runs versus one failed baseline full run were raised
-as an approval blocker during review and remain an unexplained qualification
-gap. Baseline/cache-disabled failures show that the scheduler
-patch and prefix adoption are not necessary triggers, but do not explain the
-observed frequency difference, identify the failing operation, or justify a
-"CUDA noise" attribution. Compare raw scores and corresponding fixed/paged
-state under identical token history at the first divergence before deciding
-whether the issue is independent. Numerical-parity investigation is tracked
-in #2701 and the broader qualification gaps in #2698; neither tracking item
-counts as passing qualification.
-
-A subsequent paired run with the official ORT 1.31 CUDA 13 release and the
-existing Qwen3.8 27B DFlash package passed 34/34 scenarios, all reference
-repeats, and all cache-disabled controls on both revisions. Native process
-maps confirmed that both loaded ORT 1.31, rather than the Python environment's
-older runtime. These target-only runs used the settings above and left the
-model package unchanged.
-
-Separate instrumented 513-token boundary runs also passed on both revisions.
-At zero-based output index 34, raw logits, every fixed conv/recurrent input
-state, and the live INT8 paged KV input contents were bit-identical across
-baseline/candidate and cold/512-token-hit replay comparisons. Physical block
-IDs were normalized through each request's block table, and unwritten tail
-slots were excluded. The unique maximum logit selected token `30` at score
-`23.234375`; this was not a reproduced `32645`/`32471` divergence.
-
-These passing runs do not supersede the failures above or explain their
-frequency. First-divergence scores/state for a failing run, including fresh
-process and autotuning-off comparisons, are still required. Do not describe
-the instrumentation or a passing repeat as a runtime fix.
 
 ## Testing the runner
 
