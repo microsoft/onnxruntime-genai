@@ -24,6 +24,8 @@ The ``decoder-per-token.onnx`` variant returns logits for every packed token
 so Engine-hosted speculative decoding can execute against the same manifest.
 Its fixed outputs are pass-throughs: the original per-run counter is not a
 token transition and cannot be rolled back with compact speculative updates.
+``--num_blocks`` and ``--max_batch_size`` can export smaller graph-compatible
+fixtures for bounded-capacity Engine tests.
 
 Layer assignment (disjoint cover of 6 layers):
 
@@ -41,6 +43,7 @@ import os
 
 import numpy as np
 import onnx
+import create_synthetic_paged_model as synthetic_paged
 from create_synthetic_paged_model import (
     BLOCK_SIZE,
     CONTEXT_LENGTH,
@@ -285,12 +288,22 @@ def create_config(output_dir):
 
 
 def main():
+    global NUM_BLOCKS, MAX_BATCH_SIZE
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output_dir",
         default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-composite"),
     )
-    output_dir = os.path.normpath(parser.parse_args().output_dir)
+    parser.add_argument("--num_blocks", type=int, default=NUM_BLOCKS)
+    parser.add_argument("--max_batch_size", type=int, default=MAX_BATCH_SIZE)
+    args = parser.parse_args()
+    if args.num_blocks <= 0 or args.max_batch_size <= 0:
+        parser.error("--num_blocks and --max_batch_size must be positive")
+    NUM_BLOCKS = args.num_blocks
+    MAX_BATCH_SIZE = args.max_batch_size
+    synthetic_paged.NUM_BLOCKS = args.num_blocks
+    output_dir = os.path.normpath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
     create_decoder(output_dir)
     create_decoder(output_dir, logits_per_token=True)

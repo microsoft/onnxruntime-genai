@@ -1077,10 +1077,14 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
         std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
     std::vector<size_t> claimed_retained_blocks;
     if (entry.prefix_match) {
-      for (const auto& block : entry.prefix_match->blocks) {
-        if (block->RefCount() == 1 &&
-            charged_retained_blocks.count(block->Id()) == 0) {
-          claimed_retained_blocks.push_back(block->Id());
+      for (const size_t block_id :
+           prefix_cache_->ReclaimableBlockIds(entry.prefix_match->blocks)) {
+        // Charge only retained blocks that contribute to available_blocks. A fixed-state or draft
+        // checkpoint lease can protect cache-only ancestry from reclamation; charging that block
+        // again would count it neither as existing capacity nor as available capacity and can
+        // falsely defer an exact-fit adoption.
+        if (charged_retained_blocks.count(block_id) == 0) {
+          claimed_retained_blocks.push_back(block_id);
         }
       }
     }
