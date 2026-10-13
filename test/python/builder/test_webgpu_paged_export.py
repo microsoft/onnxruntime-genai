@@ -70,7 +70,7 @@ def _cache_shape(node_arg, paged=True, head_size=None):
     if node_arg.name.endswith(".conv"):
         assert len(shape) == 3, f"Unexpected convolution state rank for {node_arg.name}: {shape}"
         assert all(isinstance(dim, int) for dim in shape[1:]), f"Unexpected fixed state shape: {shape}"
-        return (1, shape[1], shape[2], 1)
+        return (1, shape[1], shape[2])
     if node_arg.name.endswith(".recurrent"):
         assert len(shape) == 4, f"Unexpected recurrent state rank for {node_arg.name}: {shape}"
         assert all(isinstance(dim, int) for dim in shape[1:]), f"Unexpected fixed state shape: {shape}"
