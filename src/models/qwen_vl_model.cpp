@@ -43,27 +43,6 @@ std::vector<int64_t> SqueezeToRank2(const std::vector<int64_t>& shape) {
   return squeezed;
 }
 
-void ApplyVisionRunOption(OrtRunOptions& options, const char* key, const char* value) {
-  if (strcmp(key, "terminate_session") == 0) {
-    if (strcmp(value, "1") == 0) {
-      options.SetTerminate();
-    } else {
-      options.UnsetTerminate();
-    }
-  } else if (strcmp(key, "enable_profiling") == 0) {
-#if ORT_API_VERSION >= 25
-    if (strcmp(value, "0") == 0) {
-      options.DisableProfiling();
-    } else {
-      const char* prefix = strcmp(value, "1") == 0 ? "onnxruntime_run_profile" : value;
-      options.EnableProfiling(fs::path(prefix).c_str());
-    }
-#endif
-  } else {
-    options.AddConfigEntry(key, value);
-  }
-}
-
 }  // namespace
 
 Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -186,20 +165,8 @@ Qwen2_5_VL_PipelineState::Qwen2_5_VL_PipelineState(const Qwen2_5_VL_PipelineMode
   InitializeFeatureInputs();
   if (vl_model_.vision_projector_session_) {
     const auto& vision = vl_model_.config_->model.vision;
-    auto stage_run_options = [&](size_t index) {
-      auto options = OrtRunOptions::Create();
-      const auto& configured = vision.pipeline[index].run_options.has_value()
-                                   ? vision.pipeline[index].run_options
-                                   : vision.run_options;
-      if (configured) {
-        for (const auto& [key, value] : *configured) {
-          options->AddConfigEntry(key.c_str(), value.c_str());
-        }
-      }
-      return options;
-    };
-    encoder_run_options_ = stage_run_options(0);
-    projector_run_options_ = stage_run_options(1);
+    encoder_run_options_ = CreateVisionStageRunOptions(vision, 0);
+    projector_run_options_ = CreateVisionStageRunOptions(vision, 1);
   }
 }
 

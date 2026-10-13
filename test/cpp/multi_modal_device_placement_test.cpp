@@ -132,6 +132,18 @@ TEST(MultiModalDevicePlacementTests, NonPrimaryVisionDeviceDoesNotReplaceCpuDeco
                std::runtime_error);
 }
 
+TEST(MultiModalDevicePlacementTests, VisionStageRunOptionsValidateAndOverrideInheritedOptions) {
+  Generators::Config::Model::Vision vision;
+  vision.pipeline.resize(2);
+  vision.run_options = Generators::Config::RunOptions{{"terminate_session", "invalid"}};
+  EXPECT_THROW(Generators::CreateVisionStageRunOptions(vision, 0), std::runtime_error);
+  EXPECT_THROW(Generators::CreateVisionStageRunOptions(vision, 1), std::runtime_error);
+
+  vision.pipeline[0].run_options = Generators::Config::RunOptions{};
+  EXPECT_NO_THROW(Generators::CreateVisionStageRunOptions(vision, 0));
+  EXPECT_THROW(Generators::CreateVisionStageRunOptions(vision, 1), std::runtime_error);
+}
+
 TEST(MultiModalDevicePlacementTests, SessionCanAccessOnlyHostOrItsOwnMemory) {
   auto& cpu = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   auto& gpu = *Generators::GetDeviceInterface(Generators::DeviceType::WEBGPU);

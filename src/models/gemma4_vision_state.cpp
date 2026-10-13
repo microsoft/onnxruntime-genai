@@ -193,20 +193,8 @@ DeviceSpan<float> Gemma4VisionState::RunSplitVision() {
     throw std::runtime_error("Gemma 4 split vision requires pixel_values in the encoder");
   }
   const auto& vision = model_.config_->model.vision;
-  auto stage_run_options = [&](size_t index) {
-    auto options = OrtRunOptions::Create();
-    const auto& configured = vision.pipeline[index].run_options.has_value()
-                                 ? vision.pipeline[index].run_options
-                                 : vision.run_options;
-    if (configured) {
-      for (const auto& [key, value] : *configured) {
-        options->AddConfigEntry(key.c_str(), value.c_str());
-      }
-    }
-    return options;
-  };
-  auto encoder_options = stage_run_options(0);
-  auto projector_options = stage_run_options(1);
+  auto encoder_options = CreateVisionStageRunOptions(vision, 0);
+  auto projector_options = CreateVisionStageRunOptions(vision, 1);
   const auto encoder_outputs = model_.vision_session_->GetOutputNames();
   const char* encoder_output_name = encoder_outputs[0].c_str();
   const char* projector_output_name = vision.outputs.image_features.c_str();

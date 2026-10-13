@@ -1647,6 +1647,88 @@ def test_gemma4_pipelined_decoder_runs_split_vision(
             cancelled.set_inputs(inputs)
 
 
+@pytest.mark.parametrize("decoder_layout", ["flat", "pipeline"])
+@pytest.mark.parametrize("option_scope", ["vision", "encoder", "projector"])
+@pytest.mark.parametrize("option_name", ["terminate_session", "enable_profiling"])
+def test_gemma4_split_vision_configured_run_options(
+    test_data_path, tmp_path, decoder_layout, option_scope, option_name
+):
+    """Configured options must reach the selected vision stage through their ORT APIs."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4-split-run-options"
+    if decoder_layout == "pipeline":
+        _write_pipelined_gemma4(onnx, source_model_path, model_path)
+    else:
+        shutil.copytree(source_model_path, model_path)
+        _register_gemma4_image_token(model_path)
+
+    _create_static_batch_vision_pipeline(
+        onnx, model_path / "dummy_vision_encoder.onnx", model_path / "dummy_vision_projector.onnx"
+    )
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if decoder_layout == "flat":
+        config["model"]["speech"] = {"filename": "", "config_filename": ""}
+        config["model"]["vocab_size"] = 8
+        config["model"]["eos_token_id"] = [1]
+        config["model"]["image_token_id"] = GEMMA4_IMAGE_TOKEN_ID
+        config["search"]["past_present_share_buffer"] = False
+        _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx", GEMMA4_IMAGE_TOKEN_ID)
+        _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")
+    _configure_split_vision(config)
+
+    profile_prefix = tmp_path / "configured_vision_profile"
+    configured_value = "1" if option_name == "terminate_session" else os.fspath(profile_prefix)
+    if option_scope == "vision":
+        config["model"]["vision"]["run_options"] = {option_name: configured_value}
+    else:
+        stage_index = 0 if option_scope == "encoder" else 1
+        config["model"]["vision"]["pipeline"][0][option_scope]["run_options"] = {
+            option_name: configured_value
+        }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    image_path = os.fspath(_get_test_media_path(test_data_path, Path("images") / "australia.jpg"))
+    if not os.path.exists(image_path):
+        pytest.skip("Gemma4 test image not available")
+    model = og.Model(os.fspath(model_path))
+    inputs = model.create_multimodal_processor()(
+        GEMMA4_IMAGE_TOKEN + "Describe this image", images=og.Images.open(image_path)
+    )
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096)
+    generator = og.Generator(model, params)
+
+    def run_prompt():
+        generator.set_inputs(inputs)
+        generator.get_output("inputs_embeds")
+        generator.generate_next_token()
+
+    if option_name == "terminate_session":
+        with pytest.raises(RuntimeError, match="[Tt]erminat"):
+            run_prompt()
+    else:
+        try:
+            run_prompt()
+        except RuntimeError as exc:
+            if str(exc) == "enable_profiling requires ONNX Runtime 1.25 or later":
+                pytest.skip(str(exc))
+            raise
+        profiles = list(tmp_path.glob("configured_vision_profile*.json"))
+        assert profiles
+        node_names = {
+            event["name"]
+            for path in profiles
+            for event in json.loads(path.read_text(encoding="utf-8"))
+            if event.get("cat") == "Node"
+        }
+        expected_nodes = ("Identity", "GatherND") if option_scope == "vision" else (
+            ("Identity",) if option_scope == "encoder" else ("GatherND",)
+        )
+        assert all(any(node in name for name in node_names) for node in expected_nodes)
+
+
 def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(
     test_data_path, tmp_path
 ):
