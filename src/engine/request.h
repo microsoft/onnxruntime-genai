@@ -421,6 +421,19 @@ struct Request : std::enable_shared_from_this<Request>,
   RequestStepResult CompleteGeneration();
 
   /**
+   * @brief Commits tokens an executor selected itself, in sequence order, and reports the step.
+   * @param tokens One to kMaxGeneratedTokensPerStep tokens the executor decided to commit.
+   *
+   * Each token goes through Search::CommitToken, so EOS and the session limit follow the ordinary
+   * bookkeeping (an EOS token ends the turn and is not appended). Stop strings observe every
+   * appended token. The turn limit, the context limit and a stop match end the turn at the first
+   * token that reaches them, with the same precedence as StageGeneration (stop string, EOS, turn
+   * limit, context limit); tokens after that one are not committed. The returned step lists the
+   * appended tokens only.
+   */
+  RequestStepResult CommitExternalTokens(std::span<const int32_t> tokens);
+
+  /**
    * @brief Checks if the current generation turn reached a stopping condition.
    * @return True in TurnComplete; the request may still be continued or closed.
    */
