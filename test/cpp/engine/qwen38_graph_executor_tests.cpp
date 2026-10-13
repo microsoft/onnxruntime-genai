@@ -262,6 +262,39 @@ TEST_F(Qwen38GraphEngineTest, StopStringsSpanningTheTwoTokensOfACycleAreMatched)
   EXPECT_EQ(outcome.tokens, (std::vector<int32_t>{device_->TokenAt(5), 5, 6}));
 }
 
+TEST_F(Qwen38GraphEngineTest, EveryDraftRejectedCommitsTheGreedyTokenOfEachCycleOnly) {
+  device_->accept_pattern = {false};  // the fold.force_reject hook: no draft ever survives its verify
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/6);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 6));  // the same stream as with any other accept pattern
+  EXPECT_EQ(device_->CallCount("wait"), 5u);  // the first token comes from the prompt, then one token per cycle
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 5u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 0u);
+  EXPECT_EQ(stats.zero_accept_rounds, 5u);
+  EXPECT_EQ(stats.acceptance_length_histogram[0], 5u);
+  EXPECT_EQ(device_->ledger_length(), 5u + 5u);
+}
+
+TEST_F(Qwen38GraphEngineTest, EveryDraftAcceptedCommitsTwoTokensPerCycle) {
+  device_->accept_pattern = {true};
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/9);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 9));
+  EXPECT_EQ(device_->CallCount("wait"), 4u);  // 1 + 4 * 2 tokens
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_accepted, 4u);
+  EXPECT_EQ(stats.full_accept_rounds, 4u);
+  EXPECT_EQ(device_->ledger_length(), 5u + 8u);
+  EXPECT_EQ(device_->ledger_bank(), static_cast<int>(device_->ledger_length() % 3));
+}
+
 TEST_F(Qwen38GraphEngineTest, WithoutMtpEveryCycleCommitsOneToken) {
   device_ = std::make_shared<ScriptedQwen38Device>(/*capacity=*/68, /*mtp=*/false);
   auto engine = MakeEngine();

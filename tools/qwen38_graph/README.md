@@ -67,6 +67,7 @@ while engine.has_pending_requests():
 | `engine_behaviours.py` | (`--prefill steps\|fast`) stop tokens, limits, stop strings, cancel during prefill/decode, second request queued, continuation, rewind, capability errors, statistics |
 | `bench_ttft_engine.py` | time to first token at several prompt lengths (+ MMLU-Pro prompt ids): begin_turn to the Run that delivers the token |
 | `mmlu_engine_eval.py` | MMLU-Pro 800 through the Engine (shards, resumable) and the MTP == no-MTP stream check (`--check-items`, `--force-reject`) |
+| `engine_prompt_lengths.py` | `run` the same greedy turns for 1 .. 20000-token prompts (dense chunk boundaries 8191/8192/8193, ...) with `--prefill steps` and `--prefill fast`, then `compare` (first token equal, shared prefix) |
 | `test_plane_kernels.py` | kernel tests of the plane's fast prefill kernels against the research implementations |
 | `bench_engine_mtp.py` | vLLM-protocol decode benchmark (exact prompt length, 256 new tokens, 1 warm-up + 3 runs, TPS = 255 tokens / time between first and last token) |
 
