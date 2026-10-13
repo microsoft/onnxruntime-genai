@@ -23,21 +23,16 @@ reservation/leasing, per-row retry counters, tenant multiplexing, and the
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager, suppress
 
+from .storage_paths import StorageDirectory
+
 SCHEMA_VERSION = 3
-
-
-def _chmod_best_effort(path: str, mode: int) -> None:
-    if os.name == "nt" or not path:
-        return
-    # Permission tightening is best-effort on filesystems that do not support chmod.
-    with suppress(OSError):
-        os.chmod(path, mode)
 
 
 class OfflineEventStore:
@@ -56,21 +51,31 @@ class OfflineEventStore:
         self._busy_timeout_ms = busy_timeout_ms
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
+        self._directory: StorageDirectory | None = None
+        self._db_fd: int | None = None
         self._initialize()
 
     def _initialize(self) -> None:
-        parent = os.path.dirname(self._db_path)
-        # sqlite3.connect below reports whether storage can actually be opened.
-        with suppress(Exception):
-            os.makedirs(parent, mode=0o700, exist_ok=True)
-            _chmod_best_effort(parent, 0o700)
         conn = None
         try:
+            self._directory = StorageDirectory(os.path.dirname(self._db_path) or ".", create=True)
+            self._directory.__enter__()
+            name = os.path.basename(self._db_path)
+            suffixes = ("", "-wal", "-shm", "-journal")
+            for suffix in suffixes:
+                self._directory.validate_file(name + suffix)
+            self._db_fd = self._directory.open_file(name, os.O_RDWR | os.O_CREAT)
+            if os.fstat(self._db_fd).st_nlink != 1:
+                raise PermissionError("Telemetry database cannot be a hard link")
             conn = sqlite3.connect(
-                self._db_path,
+                (self._directory.path / name).as_uri() + "?mode=rw",
                 timeout=self._busy_timeout_ms / 1000.0,
                 check_same_thread=False,
+                uri=True,
             )
+            self._directory.verify_file_handle(name, self._db_fd)
+            for suffix in suffixes:
+                self._directory.validate_file(name + suffix)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
@@ -91,10 +96,20 @@ class OfflineEventStore:
             self._conn = conn
             self._harden_permissions()
         except Exception:
+            logging.getLogger(__name__).debug("Telemetry storage initialization failed", exc_info=True)
             if conn is not None:
                 with suppress(Exception):
                     conn.close()
             self._conn = None
+            self._close_storage_handles()
+
+    def _close_storage_handles(self) -> None:
+        if self._db_fd is not None:
+            os.close(self._db_fd)
+            self._db_fd = None
+        if self._directory is not None:
+            self._directory.__exit__(None, None, None)
+            self._directory = None
 
     @contextmanager
     def _bounded_busy_timeout(self, deadline: float | None):
@@ -110,10 +125,16 @@ class OfflineEventStore:
                 self._conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
 
     def _harden_permissions(self) -> None:
-        _chmod_best_effort(os.path.dirname(self._db_path), 0o700)
-        for path in (self._db_path, self._db_path + "-wal", self._db_path + "-shm"):
-            if os.path.exists(path):
-                _chmod_best_effort(path, 0o600)
+        directory = self._directory
+        if directory is None:
+            raise RuntimeError("Telemetry storage directory is not open")
+        name = os.path.basename(self._db_path)
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                fd = directory.open_file(name + suffix, os.O_RDONLY)
+            except FileNotFoundError:
+                continue
+            os.close(fd)
 
     @property
     def is_open(self) -> bool:
@@ -263,3 +284,4 @@ class OfflineEventStore:
                 with suppress(Exception):
                     self._conn.close()
                 self._conn = None
+            self._close_storage_handles()

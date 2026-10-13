@@ -30,6 +30,8 @@ class DrainOutcome(Enum):
 
 
 class DrainResult(NamedTuple):
+    """Rows accepted in this call, pending rows, and the next drain action."""
+
     delivered: int
     left: int
     outcome: DrainOutcome
@@ -127,7 +129,7 @@ class EventUploader:
         if not deleted:
             return DrainResult(0, len(ids), DrainOutcome.DELETE_RETRY)
         self._pending_delete_ids = []
-        return DrainResult(len(ids), 0, DrainOutcome.PROGRESS)
+        return DrainResult(0, 0, DrainOutcome.PROGRESS)
 
     def drain_once(self, deadline: float | None = None) -> DrainResult:
         if self._retain_rows.is_set():
@@ -146,7 +148,7 @@ class EventUploader:
             if not deleted:
                 return DrainResult(0, len(pending_ids), DrainOutcome.DELETE_RETRY)
             self._pending_delete_ids = []
-            return DrainResult(len(pending_ids), 0, DrainOutcome.PROGRESS)
+            return DrainResult(0, 0, DrainOutcome.PROGRESS)
 
         batch_limit = min(self._max_items, self._split_batch_size or self._max_items)
         acknowledged_ids = self._store.get_acknowledged_ids(batch_limit, deadline)
@@ -160,7 +162,7 @@ class EventUploader:
             if not deleted:
                 return DrainResult(0, len(acknowledged_ids), DrainOutcome.DELETE_RETRY)
             self._pending_delete_ids = []
-            return DrainResult(len(acknowledged_ids), 0, DrainOutcome.PROGRESS)
+            return DrainResult(0, 0, DrainOutcome.PROGRESS)
 
         batch = self._store.get_batch_for_upload(batch_limit, deadline)
         if batch is None:
@@ -213,7 +215,8 @@ class EventUploader:
 
         if success:
             self._split_batch_size = None
-            return self._finish_handled_rows(included, deadline)
+            result = self._finish_handled_rows(included, deadline)
+            return result._replace(delivered=len(included))
         if not HttpJsonPostTransport.is_retryable(status):
             if status in {400, 413, 422} and len(included) > 1:
                 self._split_batch_size = max(1, len(included) // 2)

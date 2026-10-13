@@ -1750,12 +1750,6 @@ class TestDeviceId(unittest.TestCase):
         ):
             deviceid._FileStore().store_id("00000000-0000-4000-8000-000000000000")
 
-    def test_permission_tightening_is_best_effort(self):
-        import telemetry.deviceid as deviceid
-
-        with patch.object(Path, "chmod", side_effect=OSError):
-            deviceid._chmod_best_effort(Path(self._tmpdir.name), 0o700)
-
     def test_windows_store_uses_least_privilege_access(self):
         import telemetry.deviceid as deviceid
 
@@ -2395,14 +2389,6 @@ class TestOfflineEventStore(unittest.TestCase):
         self.addCleanup(store.close)
         return store
 
-    def test_empty_permission_path_is_ignored(self):
-        import telemetry.offline_store as store_module
-
-        with patch.object(store_module.os, "name", "posix"), patch.object(store_module.os, "chmod") as mock_chmod:
-            store_module._chmod_best_effort("", 0o700)
-
-        mock_chmod.assert_not_called()
-
     def test_closes_connection_when_initialization_fails(self):
         import telemetry.offline_store as store_module
 
@@ -2509,6 +2495,253 @@ class TestOfflineEventStore(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(s.db_path).st_mode), 0o600)
 
 
+class TestStoragePathSafety(unittest.TestCase):
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
+
+    def _link_directory(self, link, target):
+        if os.name == "nt":
+            import subprocess
+
+            quoted_link = str(link).replace("'", "''")
+            quoted_target = str(target).replace("'", "''")
+            command = f"New-Item -ItemType Junction -Path '{quoted_link}' -Target '{quoted_target}' | Out-Null"
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                capture_output=True,
+                check=True,
+            )
+        else:
+            link.symlink_to(target, target_is_directory=True)
+
+    def test_rejects_leaf_and_intermediate_directory_links_before_writing(self):
+        import telemetry.deviceid as deviceid
+        from telemetry.offline_store import OfflineEventStore
+        from telemetry.process_lock import ProcessDrainLock
+
+        target = self.root / "outside"
+        target.mkdir()
+        link = self.root / "linked"
+        self._link_directory(link, target)
+
+        for base in (link, link / "nested" / "cache"):
+            with self.subTest(base=base):
+                with (
+                    patch("telemetry.deviceid.get_telemetry_base_dir", return_value=base),
+                    self.assertRaises(PermissionError),
+                ):
+                    deviceid._FileStore().store_id("00000000-0000-4000-8000-000000000000")
+                with patch("telemetry.offline_store.sqlite3.connect") as connect:
+                    store = OfflineEventStore(str(base / "queue.db"))
+                self.assertFalse(store.is_open)
+                self.assertIsNone(store._directory)
+                self.assertIsNone(store._db_fd)
+                connect.assert_not_called()
+                self.assertFalse(ProcessDrainLock(str(base / "queue.db.lock")).acquire())
+                self.assertEqual(list(target.iterdir()), [])
+
+    def test_rejects_hard_linked_database_without_modifying_target(self):
+        from telemetry.offline_store import OfflineEventStore
+
+        target = self.root / "outside.db"
+        target.write_bytes(b"private data")
+        directory = self.root / "storage"
+        directory.mkdir()
+        os.link(target, directory / "queue.db")
+        with patch("telemetry.offline_store.sqlite3.connect") as connect:
+            store = OfflineEventStore(str(directory / "queue.db"))
+        self.assertFalse(store.is_open)
+        connect.assert_not_called()
+        self.assertEqual(target.read_bytes(), b"private data")
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks and no-follow open flags")
+    def test_rejects_database_and_sidecar_symlinks_before_connecting(self):
+        from telemetry.offline_store import OfflineEventStore
+
+        target = self.root / "outside"
+        target.write_bytes(b"private data")
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            with self.subTest(suffix=suffix):
+                directory = self.root / ("storage" + suffix)
+                directory.mkdir()
+                (directory / ("queue.db" + suffix)).symlink_to(target)
+                with patch("telemetry.offline_store.sqlite3.connect") as connect:
+                    store = OfflineEventStore(str(directory / "queue.db"))
+                self.assertFalse(store.is_open)
+                connect.assert_not_called()
+                self.assertEqual(target.read_bytes(), b"private data")
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks and no-follow open flags")
+    def test_device_id_open_rejects_a_file_swapped_for_a_symlink(self):
+        import telemetry.deviceid as deviceid
+
+        target = self.root / "outside"
+        target.write_text("00000000-0000-4000-8000-000000000000", encoding="utf-8")
+        directory = self.root / "storage"
+        directory.mkdir()
+        device_file = directory / "deviceid"
+        device_file.write_text("00000000-0000-4000-8000-000000000001", encoding="utf-8")
+        original_open = os.open
+
+        def swap_before_open(name, *args, **kwargs):
+            if name == "deviceid":
+                device_file.unlink()
+                device_file.symlink_to(target)
+            return original_open(name, *args, **kwargs)
+
+        with (
+            patch("telemetry.deviceid.get_telemetry_base_dir", return_value=directory),
+            patch("telemetry.storage_paths.os.open", side_effect=swap_before_open),
+            self.assertRaises(OSError),
+        ):
+            _ = deviceid._FileStore().retrieve_id
+        self.assertEqual(target.read_text(encoding="utf-8"), "00000000-0000-4000-8000-000000000000")
+
+    @unittest.skipIf(os.name == "nt", "Windows pinned handles prevent replacing the open database")
+    def test_database_replacement_during_connect_is_rejected_before_writes(self):
+        import sqlite3
+
+        from telemetry.offline_store import OfflineEventStore
+
+        target = self.root / "outside.db"
+        with sqlite3.connect(target) as connection:
+            connection.execute("CREATE TABLE sentinel(value TEXT)")
+            connection.execute("INSERT INTO sentinel VALUES ('private data')")
+        before = target.read_bytes()
+        directory = self.root / "storage"
+        directory.mkdir()
+        database = directory / "queue.db"
+        original_connect = sqlite3.connect
+
+        def swap_before_connect(*args, **kwargs):
+            database.unlink()
+            database.symlink_to(target)
+            return original_connect(*args, **kwargs)
+
+        with patch("telemetry.offline_store.sqlite3.connect", side_effect=swap_before_connect):
+            store = OfflineEventStore(str(database))
+        self.assertFalse(store.is_open)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertIsNone(store._directory)
+        self.assertIsNone(store._db_fd)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks and no-follow open flags")
+    def test_symlinked_device_id_and_lock_do_not_modify_the_target(self):
+        import telemetry.deviceid as deviceid
+        from telemetry.process_lock import ProcessDrainLock
+
+        target = self.root / "outside"
+        target.write_text("private data", encoding="utf-8")
+        directory = self.root / "storage"
+        directory.mkdir()
+        (directory / "deviceid").symlink_to(target)
+        (directory / "deviceid.lock").symlink_to(target)
+        with (
+            patch("telemetry.deviceid.get_telemetry_base_dir", return_value=directory),
+            self.assertRaises(PermissionError),
+        ):
+            deviceid._FileStore().store_id("00000000-0000-4000-8000-000000000000", replace_existing=True)
+        self.assertFalse(ProcessDrainLock(str(directory / "deviceid.lock")).acquire())
+        self.assertEqual(target.read_text(encoding="utf-8"), "private data")
+
+    @unittest.skipIf(os.name == "nt", "POSIX ownership and permission metadata")
+    def test_rejects_other_user_owned_files(self):
+        from telemetry.storage_paths import StorageDirectory
+
+        filename = self.root / "queue.db"
+        filename.touch()
+        info = list(filename.stat())
+        info[4] = os.geteuid() + 1
+        with (
+            StorageDirectory(self.root) as directory,
+            patch("telemetry.storage_paths.os.stat", return_value=os.stat_result(info)),
+            self.assertRaises(PermissionError),
+        ):
+            directory.validate_file(filename.name)
+
+    @unittest.skipIf(os.name == "nt", "POSIX private-directory permissions")
+    def test_permission_hardening_failure_disables_storage(self):
+        from telemetry.offline_store import OfflineEventStore
+
+        with (
+            patch("telemetry.storage_paths.os.fchmod", side_effect=PermissionError("cannot secure directory")),
+            patch("telemetry.offline_store.sqlite3.connect") as connect,
+        ):
+            store = OfflineEventStore(str(self.root / "queue.db"))
+        self.assertFalse(store.is_open)
+        self.assertIsNone(store._directory)
+        self.assertIsNone(store._db_fd)
+        connect.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "Windows pinned handles prevent replacing the open database")
+    def test_database_replacement_cannot_create_a_redirected_file(self):
+        import sqlite3
+
+        from telemetry.offline_store import OfflineEventStore
+
+        target = self.root / "must-not-be-created.db"
+        directory = self.root / "storage"
+        directory.mkdir()
+        database = directory / "queue.db"
+        original_connect = sqlite3.connect
+
+        def swap_before_connect(*args, **kwargs):
+            database.unlink()
+            database.symlink_to(target)
+            return original_connect(*args, **kwargs)
+
+        with patch("telemetry.offline_store.sqlite3.connect", side_effect=swap_before_connect):
+            store = OfflineEventStore(str(database))
+        self.assertFalse(store.is_open)
+        self.assertFalse(target.exists())
+
+    def test_storage_close_releases_pinned_handles(self):
+        from telemetry.offline_store import OfflineEventStore
+
+        directory = self.root / "storage"
+        directory.mkdir()
+        store = OfflineEventStore(str(directory / "queue.db"))
+        self.assertTrue(store.is_open)
+        store.close()
+        store.close()
+        self.assertIsNone(store._directory)
+        self.assertIsNone(store._db_fd)
+        directory.rename(self.root / "closed-storage")
+
+    @unittest.skipUnless(os.name == "nt", "Windows file-handle delete sharing")
+    def test_open_storage_file_cannot_be_replaced_on_windows(self):
+        from telemetry.storage_paths import StorageDirectory
+
+        filename = self.root / "queue.db"
+        with StorageDirectory(self.root) as directory:
+            fd = directory.open_file(filename.name, os.O_RDWR | os.O_CREAT)
+            try:
+                with self.assertRaises(PermissionError):
+                    filename.unlink()
+            finally:
+                os.close(fd)
+        filename.unlink()
+
+    @unittest.skipUnless(os.name == "nt", "Windows handle-based ownership checks")
+    def test_existing_files_require_owner_validation_on_windows(self):
+        from telemetry.storage_paths import StorageDirectory
+
+        with StorageDirectory(self.root) as directory:
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                with self.subTest(suffix=suffix):
+                    filename = self.root / ("queue.db" + suffix)
+                    filename.write_bytes(b"private data")
+                    with (
+                        patch("telemetry.storage_paths._validate_windows_owner", side_effect=PermissionError),
+                        self.assertRaises(PermissionError),
+                    ):
+                        directory.validate_file(filename.name)
+                    self.assertEqual(filename.read_bytes(), b"private data")
+                    filename.unlink()
+
+
 class TestProcessDrainLock(unittest.TestCase):
     """Test the cross-platform single-drainer advisory lock."""
 
@@ -2582,9 +2815,11 @@ class TestUploaderDrainLogic(unittest.TestCase):
 
         store.delete = flaky_delete
 
-        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.DELETE_RETRY)
+        sent = uploader.drain_once()
+        self.assertEqual((sent.delivered, sent.outcome), (1, DrainOutcome.DELETE_RETRY))
         self.assertEqual(store.count(), 1)
-        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.PROGRESS)
+        cleanup = uploader.drain_once()
+        self.assertEqual((cleanup.delivered, cleanup.outcome), (0, DrainOutcome.PROGRESS))
         self.assertEqual(store.count(), 0)
         uploader._transport.send.assert_called_once()
 
@@ -2604,8 +2839,10 @@ class TestUploaderDrainLogic(unittest.TestCase):
 
         store.acknowledge = flaky_acknowledge
 
-        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.ACKNOWLEDGE_RETRY)
-        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.PROGRESS)
+        sent = uploader.drain_once()
+        self.assertEqual((sent.delivered, sent.outcome), (1, DrainOutcome.ACKNOWLEDGE_RETRY))
+        cleanup = uploader.drain_once()
+        self.assertEqual((cleanup.delivered, cleanup.outcome), (0, DrainOutcome.PROGRESS))
         self.assertEqual(store.count(), 0)
         uploader._transport.send.assert_called_once()
 
@@ -2631,7 +2868,8 @@ class TestUploaderDrainLogic(unittest.TestCase):
         self.addCleanup(restarted.close)
         restarted._transport.send = MagicMock()
 
-        self.assertEqual(restarted.drain_once().outcome, DrainOutcome.PROGRESS)
+        cleanup = restarted.drain_once()
+        self.assertEqual((cleanup.delivered, cleanup.outcome), (0, DrainOutcome.PROGRESS))
         self.assertEqual(reopened.count(), 0)
         restarted._transport.send.assert_not_called()
 
@@ -2703,7 +2941,8 @@ class TestUploaderDrainLogic(unittest.TestCase):
         store, uploader = self._setup()
         store.store(b'{"bad":1}')
         uploader._transport.send = lambda *a, **k: (False, 400)
-        uploader.drain_once()
+        result = uploader.drain_once()
+        self.assertEqual(result.delivered, 0)
         self.assertEqual(store.count(), 0)  # dropped, not retried forever
 
     def test_transient_5xx_retained(self):
@@ -2744,8 +2983,10 @@ class TestUploaderDrainLogic(unittest.TestCase):
         uploader._transport.send = MagicMock(side_effect=send)
 
         self.assertEqual(uploader.drain_once().outcome, DrainOutcome.SPLIT)
-        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.PROGRESS)
-        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.PROGRESS)
+        discarded = uploader.drain_once()
+        delivered = uploader.drain_once()
+        self.assertEqual((discarded.delivered, discarded.outcome), (0, DrainOutcome.PROGRESS))
+        self.assertEqual((delivered.delivered, delivered.outcome), (1, DrainOutcome.PROGRESS))
         self.assertEqual(store.count(), 0)
         self.assertEqual(uploader._transport.send.call_count, 3)
 
@@ -2762,9 +3003,26 @@ class TestUploaderDrainLogic(unittest.TestCase):
             4,
         ):
             result = uploader.drain_once()
-        self.assertEqual((result.delivered, result.left, result.outcome), (1, 0, DrainOutcome.PROGRESS))
+        self.assertEqual((result.delivered, result.left, result.outcome), (0, 0, DrainOutcome.PROGRESS))
         self.assertEqual(store.count(), 0)
         uploader._transport.send.assert_not_called()
+
+    def test_discard_delete_retry_never_counts_as_delivery(self):
+        from telemetry.uploader import DrainOutcome
+
+        store, uploader = self._setup()
+        store.store(b'{"bad":1}')
+        uploader._transport.send = MagicMock(return_value=(False, 400))
+        original_delete = store.delete
+        store.delete = MagicMock(return_value=False)
+
+        discarded = uploader.drain_once()
+        self.assertEqual((discarded.delivered, discarded.outcome), (0, DrainOutcome.DELETE_RETRY))
+        store.delete = original_delete
+        cleanup = uploader.drain_once()
+        self.assertEqual((cleanup.delivered, cleanup.outcome), (0, DrainOutcome.PROGRESS))
+        self.assertEqual(store.count(), 0)
+        uploader._transport.send.assert_called_once()
 
     def test_flush_releases_process_lock(self):
         _, uploader = self._setup()

@@ -21,6 +21,8 @@ import os
 import time
 from contextlib import suppress
 
+from .storage_paths import StorageDirectory
+
 
 class ProcessDrainLock:
     """Non-blocking exclusive advisory lock backed by a sidecar file."""
@@ -42,10 +44,10 @@ class ProcessDrainLock:
         while True:
             fh = None
             try:
-                with suppress(Exception):
-                    os.makedirs(os.path.dirname(self._lock_path), exist_ok=True)
                 # The handle owns the advisory lock and must remain open until release().
-                fh = open(self._lock_path, "a+b")  # noqa: SIM115
+                with StorageDirectory(os.path.dirname(self._lock_path) or ".", create=True) as directory:
+                    fd = directory.open_file(os.path.basename(self._lock_path), os.O_RDWR | os.O_CREAT)
+                fh = os.fdopen(fd, "a+b")
                 if os.name == "nt":
                     import msvcrt  # noqa: PLC0415
 

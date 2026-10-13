@@ -28,6 +28,8 @@ Python telemetry replaces structured secret values, including separate command-l
 
 Model identifiers are scrubbed without probing the filesystem: explicit paths, bare dotted names (including filenames), and dot-prefixed names are replaced with `[path]`, while namespaced model IDs such as `microsoft/phi-3.5-mini` are preserved. A bare name without path syntax is treated as a model ID regardless of whether a same-named local file or directory exists; callers should pass a `Path` object or an explicit relative path for local inputs.
 
+Python file storage rejects symlinked or reparse-point directories and files, and foreign-owned storage, before persisting device IDs or queued events. POSIX uses directory-relative no-follow opens and private permissions; Windows pins validated paths with handles that prohibit deletion while in use. Unsafe SQLite paths disable the local queue and uploader, and storage initialization failures are available through the telemetry module's debug logging.
+
 For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
 
 ### Disabling Telemetry

@@ -9,8 +9,6 @@ import functools
 import hashlib
 import os
 import platform
-import stat
-import tempfile
 import uuid
 from contextlib import suppress
 from enum import Enum
@@ -18,6 +16,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from ..process_lock import ProcessDrainLock
+from ..storage_paths import StorageDirectory
 
 ORT_SUPPORT_DIR = r"Microsoft/DeveloperTools/.onnxruntime"
 _MAX_DEVICE_ID_FILE_SIZE = 256
@@ -48,12 +47,6 @@ def _is_valid_device_id(value: str) -> bool:
     return all(
         char == "-" if index in hyphens else char.lower() in "0123456789abcdef" for index, char in enumerate(value)
     )
-
-
-def _chmod_best_effort(path: Path, mode: int) -> None:
-    # Permission tightening is best-effort on filesystems that do not support chmod.
-    with suppress(OSError):
-        path.chmod(mode)
 
 
 def _resolve_home_dir() -> Path:
@@ -107,25 +100,14 @@ class _FileStore:
     def __init__(self) -> None:
         self._file_path: Path = get_telemetry_base_dir() / "deviceid"
 
-    def _validate_parent(self) -> None:
-        parent_info = self._file_path.parent.lstat()
-        if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
-            raise PermissionError("Device ID storage directory is not a regular directory")
-        if hasattr(os, "geteuid") and parent_info.st_uid != os.geteuid():
-            raise PermissionError("Device ID storage directory is not owned by the current user")
-
     @property
     def retrieve_id(self) -> str:
-        self._validate_parent()
         try:
-            file_info = self._file_path.lstat()
-        except FileNotFoundError:
-            raise FileNotFoundError(f"File {self._file_path.stem} does not exist") from None
-        if stat.S_ISLNK(file_info.st_mode) or not stat.S_ISREG(file_info.st_mode):
-            raise PermissionError(f"File {self._file_path.stem} is not a regular file")
-        try:
-            with self._file_path.open("rb") as device_id_file:
-                raw_value = device_id_file.read(_MAX_DEVICE_ID_FILE_SIZE + 1)
+            with StorageDirectory(self._file_path.parent) as directory:
+                # Atomic publication briefly links two names; reads must not chmod that inode.
+                fd = directory.open_file(self._file_path.name, os.O_RDONLY, allow_shared=True)
+                with os.fdopen(fd, "rb") as device_id_file:
+                    raw_value = device_id_file.read(_MAX_DEVICE_ID_FILE_SIZE + 1)
             if len(raw_value) > _MAX_DEVICE_ID_FILE_SIZE:
                 raise ValueError(f"File {self._file_path.stem} exceeds {_MAX_DEVICE_ID_FILE_SIZE} bytes")
             return raw_value.decode("utf-8").strip()
@@ -133,33 +115,23 @@ class _FileStore:
             raise ValueError(f"File {self._file_path.stem} is not valid UTF-8") from None
 
     def store_id(self, device_id: str, replace_existing: bool = False) -> bool:
-        # create the folder location if it does not exist, owner-only (0700) so other users on the
-        # machine cannot traverse into it to reach the device id.
-        self._file_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._validate_parent()
-        _chmod_best_effort(self._file_path.parent, 0o700)
-
-        fd, temp_path = tempfile.mkstemp(prefix="deviceid.tmp.", dir=self._file_path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
-                temp_file.write(device_id)
-                temp_file.flush()
-                os.fsync(temp_file.fileno())
-            _chmod_best_effort(Path(temp_path), 0o600)
-            if replace_existing:
-                os.replace(temp_path, self._file_path)
-                temp_path = ""
-                return True
+        with StorageDirectory(self._file_path.parent, create=True) as directory:
+            directory.validate_file(self._file_path.name)
+            temporary_name = f"deviceid.tmp.{uuid.uuid4().hex}"
+            fd = directory.open_file(temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
             try:
-                os.link(temp_path, self._file_path)
-            except FileExistsError:
-                return False
-            return True
-        finally:
-            if temp_path:
-                with suppress(OSError):
-                    os.unlink(temp_path)
-            _chmod_best_effort(self._file_path, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+                    temp_file.write(device_id)
+                    temp_file.flush()
+                    os.fsync(temp_file.fileno())
+                try:
+                    directory.publish(temporary_name, self._file_path.name, replace_existing)
+                except FileExistsError:
+                    return False
+                return True
+            finally:
+                with suppress(FileNotFoundError):
+                    directory.unlink(temporary_name)
 
 
 class _WindowsStore:
