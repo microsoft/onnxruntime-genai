@@ -946,6 +946,10 @@ use continuation/replay invariants, tolerant logits or top-k comparisons, and ta
 bitwise token equality across batch compositions is available only when every selected backend is
 batch-invariant.
 
+After logits processing, greedy selection must return a token with a maximum score in the current
+row. Selecting a lower-scoring token or using results from an earlier step is a correctness error,
+not expected floating-point variability.
+
 ### 9. Run the decoder once
 
 `SimpleDecoder::Decode()` calls the ONNX Runtime decoder session once for the complete scheduled batch.
