@@ -7,8 +7,12 @@
 
 import functools
 import hashlib
+import logging
 import os
 import platform
+import re
+import threading
+import time
 import uuid
 from contextlib import suppress
 from enum import Enum
@@ -20,6 +24,8 @@ from ..storage_paths import StorageDirectory
 
 ORT_SUPPORT_DIR = r"Microsoft/DeveloperTools/.onnxruntime"
 _MAX_DEVICE_ID_FILE_SIZE = 256
+_DEVICE_ID_PATTERN = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+_logger = logging.getLogger(__name__)
 
 
 class DeviceIdStatus(Enum):
@@ -30,6 +36,7 @@ class DeviceIdStatus(Enum):
 
 
 _device_id_state = {"device_id": None, "status": DeviceIdStatus.NEW}
+_device_id_lock = threading.Lock()
 
 
 def _fnv1a_hex_bytes(value: bytes) -> str:
@@ -41,12 +48,7 @@ def _fnv1a_hex_bytes(value: bytes) -> str:
 
 
 def _is_valid_device_id(value: str) -> bool:
-    if not isinstance(value, str) or len(value) != 36:
-        return False
-    hyphens = {8, 13, 18, 23}
-    return all(
-        char == "-" if index in hyphens else char.lower() in "0123456789abcdef" for index, char in enumerate(value)
-    )
+    return isinstance(value, str) and _DEVICE_ID_PATTERN.fullmatch(value) is not None
 
 
 def _resolve_home_dir() -> Path:
@@ -255,19 +257,14 @@ class _WindowsDeviceIdMutex:
         self._kernel32 = None
 
 
-def get_device_id() -> str:
-    r"""Get or create a persistent device ID.
+def _initialize_device_id() -> tuple[str, DeviceIdStatus]:
+    r"""Read or publish an ID; the caller owns the process cache.
 
     Storage locations:
         POSIX: $XDG_CACHE_HOME/Microsoft/DeveloperTools/.onnxruntime/deviceid
         macOS: ~/Library/Application Support/Microsoft/DeveloperTools/.onnxruntime/deviceid
         Windows: HKEY_CURRENT_USER\SOFTWARE\Microsoft\DeveloperTools\.onnxruntime\deviceid
     """
-
-    def failed_fallback() -> str:
-        generated = str(uuid.uuid4()).lower()
-        _device_id_state.update({"status": DeviceIdStatus.FAILED, "device_id": generated})
-        return generated
 
     try:
         system = platform.system()
@@ -276,29 +273,33 @@ def get_device_id() -> str:
         elif system in ("Linux", "Darwin") or os.name == "posix":
             store = _FileStore()
         else:
-            return failed_fallback()
+            return str(uuid.uuid4()), DeviceIdStatus.FAILED
     except Exception:
-        return failed_fallback()
+        _logger.debug("Telemetry device-ID storage initialization failed", exc_info=True)
+        return str(uuid.uuid4()), DeviceIdStatus.FAILED
 
     def read_existing() -> tuple[str, str]:
-        try:
-            existing = store.retrieve_id
-        except (FileExistsError, FileNotFoundError):
-            return ("missing", "")
-        except ValueError:
-            return ("invalid", "")
-        except Exception:
-            return ("failed", "")
-        return ("valid", existing) if _is_valid_device_id(existing) else ("invalid", "")
+        deadline = time.monotonic() + 1.0
+        while True:
+            try:
+                existing = store.retrieve_id
+            except (FileExistsError, FileNotFoundError):
+                return ("missing", "")
+            except ValueError:
+                return ("invalid", "")
+            except Exception as error:
+                if getattr(error, "winerror", None) in {32, 33} and time.monotonic() < deadline:
+                    time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+                    continue
+                _logger.debug("Telemetry device-ID retrieval failed", exc_info=True)
+                return ("failed", "")
+            return ("valid", existing) if _is_valid_device_id(existing) else ("invalid", "")
 
     initial_state, existing = read_existing()
     if initial_state == "valid":
-        _device_id_state.update({"status": DeviceIdStatus.EXISTING, "device_id": existing})
-        return existing
+        return existing, DeviceIdStatus.EXISTING
     if initial_state == "failed":
-        generated = str(uuid.uuid4()).lower()
-        _device_id_state.update({"status": DeviceIdStatus.FAILED, "device_id": generated})
-        return generated
+        return str(uuid.uuid4()), DeviceIdStatus.FAILED
 
     lock = None
     acquired = True
@@ -311,45 +312,51 @@ def get_device_id() -> str:
 
     try:
         if not acquired:
+            _logger.debug("Telemetry device-ID publication lock unavailable")
             winner_state, winner = read_existing()
-            generated = winner if winner_state == "valid" else str(uuid.uuid4()).lower()
-            status = DeviceIdStatus.EXISTING if winner_state == "valid" else DeviceIdStatus.FAILED
-            _device_id_state.update({"status": status, "device_id": generated})
-            return generated
+            if winner_state == "valid":
+                return winner, DeviceIdStatus.EXISTING
+            return str(uuid.uuid4()), DeviceIdStatus.FAILED
 
         current_state, current = read_existing()
         if current_state == "valid":
-            _device_id_state.update({"status": DeviceIdStatus.EXISTING, "device_id": current})
-            return current
+            return current, DeviceIdStatus.EXISTING
         if current_state == "failed":
-            generated = str(uuid.uuid4()).lower()
-            _device_id_state.update({"status": DeviceIdStatus.FAILED, "device_id": generated})
-            return generated
+            return str(uuid.uuid4()), DeviceIdStatus.FAILED
 
         corrupted = initial_state == "invalid" or current_state == "invalid"
-        generated = str(uuid.uuid4()).lower()
+        generated = str(uuid.uuid4())
         try:
             stored = store.store_id(generated, replace_existing=corrupted)
         except Exception:
+            _logger.debug("Telemetry device-ID publication failed", exc_info=True)
             stored = False
         if stored:
-            status = DeviceIdStatus.CORRUPTED if corrupted else DeviceIdStatus.NEW
-            _device_id_state.update({"status": status, "device_id": generated})
-            return generated
+            return generated, DeviceIdStatus.CORRUPTED if corrupted else DeviceIdStatus.NEW
 
         winner_state, winner = read_existing()
         if winner_state == "valid":
-            _device_id_state.update({"status": DeviceIdStatus.EXISTING, "device_id": winner})
-            return winner
-        _device_id_state.update({"status": DeviceIdStatus.FAILED, "device_id": generated})
-        return generated
+            return winner, DeviceIdStatus.EXISTING
+        return generated, DeviceIdStatus.FAILED
     finally:
         if lock is not None:
             lock.release()
 
 
+def _get_device_id_and_status() -> tuple[str, DeviceIdStatus]:
+    with _device_id_lock:
+        if _device_id_state["device_id"] is None:
+            device_id, status = _initialize_device_id()
+            _device_id_state.update({"device_id": device_id, "status": status})
+        return _device_id_state["device_id"], _device_id_state["status"]
+
+
+def get_device_id() -> str:
+    """Get the device ID cached for this process, including persistence failures."""
+    return _get_device_id_and_status()[0]
+
+
 def get_hashed_device_id_and_status() -> tuple[str, DeviceIdStatus]:
     """Get the shared hashed device ID and its status."""
-    device_id = _device_id_state["device_id"] if _device_id_state["device_id"] is not None else get_device_id()
-    hashed = hashlib.sha256(device_id.encode("utf-8")).hexdigest() if device_id else ""
-    return f"c:{hashed}" if hashed else "", _device_id_state["status"]
+    device_id, status = _get_device_id_and_status()
+    return f"c:{hashlib.sha256(device_id.encode('utf-8')).hexdigest()}", status

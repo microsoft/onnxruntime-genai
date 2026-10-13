@@ -25,7 +25,7 @@ import unittest
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 _TELEMETRY_SOURCE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
 _TELEMETRY_SOURCE_PATH_ADDED = _TELEMETRY_SOURCE_PATH not in sys.path
@@ -1833,11 +1833,36 @@ class TestDeviceId(unittest.TestCase):
     def test_store_construction_failure_uses_ephemeral_failed_id(self):
         import telemetry.deviceid as deviceid
 
-        with patch("telemetry.deviceid._FileStore", side_effect=RuntimeError("no home")):
+        with patch("telemetry.deviceid._FileStore", side_effect=RuntimeError("no home")) as store:
             generated = deviceid.get_device_id()
+            self.assertEqual(deviceid.get_device_id(), generated)
+            self.assertEqual(deviceid.get_hashed_device_id_and_status()[1], deviceid.DeviceIdStatus.FAILED)
+            store.assert_called_once()
 
         self.assertTrue(deviceid._is_valid_device_id(generated))
         self.assertEqual(deviceid._device_id_state["status"], deviceid.DeviceIdStatus.FAILED)
+
+    def test_device_id_is_initialized_once_across_threads(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        import telemetry.deviceid as deviceid
+
+        raw_id = "00000000-0000-4000-8000-000000000000"
+        error = PermissionError("concurrent replacement")
+        error.winerror = 32
+        backend = MagicMock()
+        with (
+            patch.object(type(backend), "retrieve_id", new_callable=PropertyMock, create=True) as retrieve,
+            patch("telemetry.deviceid._FileStore", return_value=backend) as store,
+        ):
+            retrieve.side_effect = [error, raw_id]
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                results = list(pool.map(lambda _: deviceid.get_hashed_device_id_and_status(), range(24)))
+            self.assertEqual(deviceid.get_device_id(), raw_id)
+            store.assert_called_once()
+            self.assertEqual(retrieve.call_count, 2)
+        expected = ("c:" + hashlib.sha256(raw_id.encode()).hexdigest(), deviceid.DeviceIdStatus.EXISTING)
+        self.assertEqual(results, [expected] * 24)
 
     def test_windows_base_dir_uses_shared_developer_tools_path(self):
         self._get_telemetry_base_dir.cache_clear()
@@ -2677,6 +2702,125 @@ class TestStoragePathSafety(unittest.TestCase):
             )
         else:
             link.symlink_to(target, target_is_directory=True)
+
+    def test_macos_protected_system_aliases_are_canonicalized(self):
+        from telemetry.storage_paths import StorageDirectory
+
+        root = Path(os.path.abspath(os.sep))
+        for name in ("etc", "tmp", "var"):
+            for relative_target in (False, True):
+                with self.subTest(name=name, relative_target=relative_target):
+                    canonical = root / "private" / name
+                    target = str(Path("private") / name) if relative_target else str(canonical)
+                    with (
+                        patch("telemetry.storage_paths.sys.platform", "darwin"),
+                        patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=stat.S_IFLNK, st_uid=0)),
+                        patch.object(
+                            Path, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+                        ),
+                        patch("telemetry.storage_paths.os.readlink", return_value=target),
+                    ):
+                        directory = StorageDirectory(root / name / "user" / "storage")
+                    self.assertEqual(directory.path, canonical / "user" / "storage")
+
+    def test_macos_untrusted_system_aliases_are_rejected(self):
+        from telemetry.storage_paths import StorageDirectory
+
+        root = Path(os.path.abspath(os.sep))
+        for alias_owner, root_owner, root_mode, target in (
+            (1, 0, 0o755, root / "private" / "tmp"),
+            (0, 1, 0o755, root / "private" / "tmp"),
+            (0, 0, 0o777, root / "private" / "tmp"),
+            (0, 0, 0o755, root / "attacker"),
+        ):
+            with (
+                self.subTest(alias_owner=alias_owner, root_owner=root_owner, root_mode=root_mode, target=target),
+                patch("telemetry.storage_paths.sys.platform", "darwin"),
+                patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=stat.S_IFLNK, st_uid=alias_owner)),
+                patch.object(
+                    Path, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFDIR | root_mode, st_uid=root_owner)
+                ),
+                patch("telemetry.storage_paths.os.readlink", return_value=str(target)),
+                self.assertRaisesRegex(PermissionError, "untrusted macOS system alias"),
+            ):
+                StorageDirectory(root / "tmp" / "storage")
+
+    def test_windows_publication_retries_transient_pinned_reader_errors(self):
+        from telemetry.storage_paths import StorageDirectory
+
+        for winerror in (5, 32, 33):
+            with self.subTest(winerror=winerror):
+                error = PermissionError("pinned reader")
+                error.winerror = winerror
+                directory = StorageDirectory(self.root)
+                directory.validate_file = MagicMock()
+                with (
+                    patch("telemetry.storage_paths.os.replace", side_effect=[error, None]) as replace,
+                    patch("telemetry.storage_paths.time.sleep") as sleep,
+                ):
+                    directory.publish("temporary", "deviceid", replace=True)
+                self.assertEqual(replace.call_count, 2)
+                sleep.assert_called_once()
+
+    def test_windows_publication_retry_is_bounded_and_preserves_errors(self):
+        from telemetry.storage_paths import StorageDirectory
+
+        directory = StorageDirectory(self.root)
+        directory.validate_file = MagicMock()
+        for winerror in (None, 5, 32, 33):
+            with self.subTest(winerror=winerror):
+                error = PermissionError("persistent publication failure")
+                if winerror is not None:
+                    error.winerror = winerror
+                with (
+                    patch("telemetry.storage_paths.os.replace", side_effect=error) as replace,
+                    patch("telemetry.storage_paths.time.monotonic", side_effect=[100.0, 101.0]),
+                    patch("telemetry.storage_paths.time.sleep") as sleep,
+                    self.assertRaises(PermissionError) as raised,
+                ):
+                    directory.publish("temporary", "deviceid", replace=True)
+                self.assertIs(raised.exception, error)
+                replace.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_device_id_repair_handles_a_concurrent_pinned_reader(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        import telemetry.deviceid as deviceid
+        from telemetry.storage_paths import StorageDirectory
+
+        filename = self.root / "deviceid"
+        filename.write_text("corrupted", encoding="utf-8")
+        publication_attempted = threading.Event()
+        replace = os.replace
+
+        def signal_replace(*args, **kwargs):
+            try:
+                result = replace(*args, **kwargs)
+            except OSError:
+                publication_attempted.set()
+                raise
+            publication_attempted.set()
+            return result
+
+        with (
+            patch("telemetry.deviceid.platform.system", return_value="Linux"),
+            patch("telemetry.deviceid.get_telemetry_base_dir", return_value=self.root),
+            patch.dict(deviceid._device_id_state, {"device_id": None, "status": deviceid.DeviceIdStatus.NEW}),
+            patch("telemetry.storage_paths.os.replace", side_effect=signal_replace),
+            StorageDirectory(self.root) as directory,
+        ):
+            descriptor = directory.open_file(filename.name, os.O_RDONLY, allow_shared=True)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(deviceid.get_device_id)
+                try:
+                    self.assertTrue(publication_attempted.wait(2))
+                finally:
+                    os.close(descriptor)
+                repaired = future.result(timeout=3)
+            self.assertEqual(deviceid._device_id_state["status"], deviceid.DeviceIdStatus.CORRUPTED)
+            self.assertEqual(filename.read_text(encoding="utf-8"), repaired)
 
     def test_rejects_leaf_and_intermediate_directory_links_before_writing(self):
         import telemetry.deviceid as deviceid

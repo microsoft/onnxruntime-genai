@@ -30,6 +30,8 @@ Model identifiers are scrubbed without probing the filesystem: explicit paths, b
 
 Python file storage rejects symlinked or reparse-point directories and files, and foreign-owned storage, before persisting device IDs or queued events. POSIX uses directory-relative no-follow opens and private permissions; Windows pins validated paths with handles that prohibit deletion while in use. Unsafe SQLite paths disable the local queue and uploader, and storage initialization failures are available through the telemetry module's debug logging.
 
+On macOS, the root-owned system aliases `/etc`, `/tmp`, and `/var` are accepted only when they point to their expected `/private` directories and their parent is protected from non-root writes. All remaining path components retain the no-follow checks; arbitrary user-created symlinks are still rejected.
+
 For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
 
 ### Disabling Telemetry
