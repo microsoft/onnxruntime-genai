@@ -108,4 +108,26 @@ TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveCapturedDecodeBufferAcros
   }
 }
 
+TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveAdditionalFeatureDimension) {
+  Ort::InitApi();
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = Generators::CreateGeneratorParams(*model);
+  PlacementTestState state{*params, *model, nullptr};
+  const auto& name = model->config_->model.decoder.inputs.input_ids;
+
+  Generators::Embeddings embeddings(
+      state, Generators::Embeddings::Mode::Input, name, /*hidden_size=*/256, /*feature_count=*/35);
+  embeddings.Add();
+  embeddings.UpdateSequenceLength(4);
+  EXPECT_EQ(embeddings.GetShape(), (std::vector<int64_t>{1, 4, 35, 256}));
+  EXPECT_EQ(embeddings.Get()->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{1, 4, 35, 256}));
+
+  embeddings.UseChunkView(1, 2);
+  EXPECT_EQ(state.inputs_.back()->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{1, 2, 35, 256}));
+  embeddings.RestoreFullView();
+  EXPECT_EQ(state.inputs_.back(), embeddings.Get());
+}
+
 }  // namespace
