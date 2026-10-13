@@ -9,12 +9,14 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <string>
 #include <string_view>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "engine/prefix_cache.h"
+#include "engine/fixed_state_pool.h"
 #include "engine/scheduler.h"
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
@@ -52,8 +54,10 @@ double Percentile(std::vector<double> samples, double percentile) {
 
 template <typename Operation>
 LatencySummary Measure(Operation&& operation,
-                       size_t operations_per_sample = 1) {
-  for (size_t sample = 0; sample < kWarmupSamples; ++sample) {
+                       size_t operations_per_sample = 1,
+                       size_t measured_samples = kMeasuredSamples,
+                       size_t warmup_samples = kWarmupSamples) {
+  for (size_t sample = 0; sample < warmup_samples; ++sample) {
     for (size_t operation_index = 0;
          operation_index < operations_per_sample; ++operation_index) {
       operation();
@@ -61,8 +65,8 @@ LatencySummary Measure(Operation&& operation,
   }
 
   std::vector<double> samples;
-  samples.reserve(kMeasuredSamples);
-  for (size_t sample = 0; sample < kMeasuredSamples; ++sample) {
+  samples.reserve(measured_samples);
+  for (size_t sample = 0; sample < measured_samples; ++sample) {
     const auto start = Clock::now();
     for (size_t operation_index = 0;
          operation_index < operations_per_sample; ++operation_index) {
@@ -280,6 +284,72 @@ TEST(SchedulerBenchmark,
                 batch_size, 0, latency);
   }
   EXPECT_GT(planned_tokens, 0u);
+}
+
+TEST(PrefixCacheBenchmark, DISABLED_HybridCheckpointReclamationScaling) {
+  constexpr size_t block_size = 256;
+  auto model = LoadSyntheticHybridModel();
+  PrintHeader();
+  for (const size_t history_blocks : {128u, 512u, 2048u}) {
+    for (const size_t histories : {1u, 8u, 32u}) {
+      const size_t total_blocks = history_blocks * histories;
+      if (total_blocks > 16384) {
+        continue;
+      }
+      BlockPool blocks{block_size, total_blocks};
+      PrefixCacheOptions options;
+      options.enabled = true;
+      options.max_blocks = total_blocks;
+      options.requires_checkpoint = true;
+      options.max_checkpoints = histories;
+      FixedStatePool fixed{model, 1, histories};
+      PrefixCache cache{blocks, options};
+      std::vector<std::shared_ptr<const BlockIdentity>> endpoints;
+      const char request_id{};
+      const size_t token_count = history_blocks * block_size;
+      for (size_t history = 0; history < histories; ++history) {
+        const std::array<FixedStateReservationRequest, 1> requests{
+            FixedStateReservationRequest{&request_id, token_count, 0}};
+        {
+          auto reservation = fixed.Reserve(requests);
+          reservation.Commit();
+        }
+        std::vector<int32_t> tokens(token_count);
+        std::iota(tokens.begin(), tokens.end(),
+                  static_cast<int32_t>(history * token_count + 1));
+        auto owned = blocks.AllocateBlocks(token_count);
+        const auto registration = cache.RegisterCheckpointedPrefix(
+            owned, tokens, {}, fixed.CapturePrefixCheckpoint(&request_id));
+        ASSERT_EQ(registration.status, PrefixCacheRegistrationStatus::Indexed);
+        endpoints.push_back(registration.identity);
+        blocks.Free(owned);
+        fixed.Release(fixed.HandleFor(&request_id));
+      }
+      ASSERT_EQ(cache.IndexedBlocks(), total_blocks);
+      std::vector<size_t> lease_counts{0, (histories + 1) / 2};
+      if (histories > 1) {
+        lease_counts.push_back(histories);
+      }
+      for (const size_t leased_histories : lease_counts) {
+        std::vector<std::shared_ptr<const FixedStatePrefixCheckpoint>> leases;
+        for (size_t history = 0; history < leased_histories; ++history) {
+          leases.push_back(cache.DraftBoundary(endpoints[history], token_count));
+          ASSERT_NE(leases.back(), nullptr);
+        }
+        const size_t expected = (histories - leased_histories) * history_blocks;
+        ASSERT_EQ(cache.ReclaimableBlocks(), expected);
+        size_t observed = 0;
+        const auto latency = Measure(
+            [&] { observed += cache.ReclaimableBlocks(); }, 1, 5, 1);
+        EXPECT_EQ(observed, expected * 6);
+        const std::string scenario =
+            std::to_string(history_blocks) + "b/" + std::to_string(leased_histories) + "leased";
+        PrintResult("hybrid-reclaimable", scenario, histories, total_blocks, latency);
+      }
+      EXPECT_EQ(cache.ReclaimableBlocks(), total_blocks);
+      EXPECT_EQ(cache.Reclaim(total_blocks), total_blocks);
+    }
+  }
 }
 
 }  // namespace

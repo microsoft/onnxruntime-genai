@@ -5,6 +5,7 @@
 
 import importlib.util
 import json
+import subprocess
 import sys
 import weakref
 from enum import Enum, IntFlag
@@ -18,6 +19,22 @@ _SPEC = importlib.util.spec_from_file_location("prefix_cache_qa", _SCRIPT)
 qa = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = qa
 _SPEC.loader.exec_module(qa)
+
+
+def test_standalone_import_initializes_optional_provider_discovery():
+    program = """
+import importlib
+import sys
+import types
+
+module = types.ModuleType("prefix_cache_standalone")
+module.__file__ = sys.argv[1]
+sys.modules[module.__name__] = module
+with open(module.__file__, encoding="utf-8") as source:
+    exec(compile(source.read(), module.__file__, "exec"), module.__dict__)
+assert importlib.util.find_spec("prefix_cache_nonexistent_provider") is None
+"""
+    subprocess.run([sys.executable, "-I", "-S", "-c", program, str(_SCRIPT)], check=True)
 
 
 def profile(hybrid=True):
