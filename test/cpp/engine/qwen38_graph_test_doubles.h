@@ -21,6 +21,9 @@ namespace Generators::test {
 //    runs it sees the sequence prompt ++ TokenAt(H), TokenAt(H + 1), ... (H = prompt length) regardless of how the steps
 //    were chunked, and re-ingesting a longer history (a continued turn) keeps producing TokenAt of the next position;
 //  - the drafter is right on the cycles named by `accept_pattern` (cycled), so cycles commit 1 or 2 tokens;
+//  - `dense_prefill` models the fast prefill: chunks of any size advance the ledger at bank 0 (no S=2 pairs), the hand-off
+//    to the decode state happens in BeginDecode(run_cycle = true) and only once all chunks arrived, `preferred_chunk` is
+//    the chunk size the device asks the executor for;
 //  - the pending token / in-flight cycle / ledger bookkeeping follows Qwen38GraphEngine, and misuse (a wait without a
 //    cycle in flight, an advance of something that was not waited for, prefill after decoding started, ...) throws, so the
 //    tests also prove the executor drives the device in a legal order.
@@ -37,10 +40,16 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     return static_cast<int32_t>(10 + (position * 7) % 40);  // never the EOS id 1 or a stop-string token (< 10)
   }
 
+  bool dense_prefill{};
+  size_t preferred_chunk{};
+
   // ---- observation ----
   std::vector<std::string> calls;  // "reset", "prefill:<n>", "begin:<run_cycle>", "wait", "advance:<more>", "drain"
   std::vector<int32_t> ingested;   // tokens received since the last reset, in order
   size_t cycles_enqueued{};
+  size_t handoffs{};        // dense prefill: hand-offs performed (one per BeginDecode with a cycle)
+  size_t handoff_length{};  // prompt length at the last hand-off
+  size_t status_checks{};   // CheckDecodeStatus calls (not in `calls`, which tests compare by suffix)
   bool inflight() const { return inflight_; }
   size_t ledger_length() const { return ledger_.Length(); }
   int ledger_bank() const { return ledger_.Bank(); }
@@ -48,6 +57,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
   // ---- fault injection ----
   bool fail_wait{};
+  bool fail_status_check{};
 
   // ---- Qwen38DecodeDevice ----
   int Capacity() const override { return capacity_; }
@@ -73,22 +83,32 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     if (decoding_) throw std::logic_error("prefill after decoding started");
     if (tokens.empty()) throw std::logic_error("empty prefill chunk");
     ledger_.RequireRoom(tokens.size(), "the prompt", 3);
-    for (size_t i = 0; i < tokens.size();) {
-      const size_t step = i + 1 < tokens.size() ? 2 : 1;
-      ledger_.Advance(step);
-      i += step;
+    if (dense_prefill) {
+      ledger_.AdvancePrompt(tokens.size());
+    } else {
+      for (size_t i = 0; i < tokens.size();) {
+        const size_t step = i + 1 < tokens.size() ? 2 : 1;
+        ledger_.Advance(step);
+        i += step;
+      }
     }
     ingested.insert(ingested.end(), tokens.begin(), tokens.end());
     pending_ = TokenAt(ledger_.Length());
   }
 
   int32_t PendingToken() const override { return pending_; }
+  size_t PrefillChunkTokens() const override { return preferred_chunk; }
 
   void BeginDecode(bool run_cycle) override {
     calls.push_back(std::string("begin:") + (run_cycle ? "1" : "0"));
     if (decoding_) throw std::logic_error("decoding already started");
     if (ledger_.Length() == 0) throw std::logic_error("BeginDecode before the prompt was ingested");
     decoding_ = true;
+    if (run_cycle && dense_prefill) {
+      if (ingested.size() != ledger_.Length()) throw std::logic_error("hand-off before every chunk was ingested");
+      ++handoffs;
+      handoff_length = ledger_.Length();
+    }
     if (run_cycle) Enqueue();
   }
 
@@ -115,6 +135,12 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     ledger_.CheckDeviceLength(record.new_length);
     pending_ = static_cast<int32_t>(record.new_pending);
     if (want_more) Enqueue();
+  }
+
+  void CheckDecodeStatus() override {
+    if (inflight_) throw std::logic_error("status check with a cycle in flight");
+    ++status_checks;
+    if (fail_status_check) throw std::runtime_error("injected device error bits");
   }
 
  private:

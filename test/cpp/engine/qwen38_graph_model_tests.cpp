@@ -99,6 +99,85 @@ TEST(Qwen38GraphConfigTest, ParsesEverySetting) {
   EXPECT_EQ(q.head.session_options->custom_ops_libraries, (std::vector<std::string>{"libs/a.so", "libs/b.so"}));
 }
 
+TEST(Qwen38GraphConfigTest, FoldAndPrefillDefaultToOff) {
+  Config config;
+  const auto& q = config.model.qwen38_graph;
+  EXPECT_FALSE(q.fold.enabled);
+  EXPECT_FALSE(q.fold.force_reject);
+  EXPECT_EQ(q.fold.target_graph_id, 71);
+  EXPECT_EQ(q.fold.head_r2.graph_id, 81);
+  EXPECT_FALSE(q.prefill.enabled);
+  EXPECT_EQ(q.prefill.chunk, 8192);
+  EXPECT_EQ(q.prefill.warmup_lengths, (std::vector<int>{8192, 2048, 512, 128, 37}));
+}
+
+TEST(Qwen38GraphConfigTest, ParsesTheFoldAndPrefillSections) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"type":"qwen38_flash_graph","qwen38_graph":{
+    "plane_library":"libs/libqwen38_plane.so",
+    "ple_table":"ple_table.txt",
+    "fold":{"enabled":true,"target_graph_id":90,"force_reject":true,
+            "head_r2":{"filename":"head_r2/model.onnx","graph_id":95,
+                       "session_options":{"custom_ops_libraries":["libs/a.so"]}}},
+    "prefill":{"enabled":true,"chunk":4096,"weights_pool":"pool.txt","constants":"qsa.txt",
+               "dense":{"filename":"dense/model.onnx","session_options":{"provider_options":[{"cuda":{}}]}},
+               "head_kv":{"filename":"head_kv/model.onnx"},
+               "warmup_lengths":[64,16]}
+  }}})");
+
+  const auto& q = config.model.qwen38_graph;
+  EXPECT_TRUE(q.IsConfigured());  // no head.filename_s1: the fold head_r2 session is enough
+  EXPECT_TRUE(q.fold.enabled);
+  EXPECT_TRUE(q.fold.force_reject);
+  EXPECT_EQ(q.fold.target_graph_id, 90);
+  EXPECT_EQ(q.fold.head_r2.filename, "head_r2/model.onnx");
+  EXPECT_EQ(q.fold.head_r2.graph_id, 95);
+  ASSERT_TRUE(q.fold.head_r2.session_options.has_value());
+  EXPECT_EQ(q.fold.head_r2.session_options->custom_ops_libraries, (std::vector<std::string>{"libs/a.so"}));
+  EXPECT_TRUE(q.prefill.enabled);
+  EXPECT_EQ(q.prefill.chunk, 4096);
+  EXPECT_EQ(q.prefill.weights_pool, "pool.txt");
+  EXPECT_EQ(q.prefill.constants, "qsa.txt");
+  EXPECT_EQ(q.prefill.dense.filename, "dense/model.onnx");
+  ASSERT_TRUE(q.prefill.dense.session_options.has_value());
+  EXPECT_EQ(q.prefill.head_kv.filename, "head_kv/model.onnx");
+  EXPECT_FALSE(q.prefill.head_kv.session_options.has_value());
+  EXPECT_EQ(q.prefill.warmup_lengths, (std::vector<int>{64, 16}));
+}
+
+TEST(Qwen38GraphConfigTest, RejectsUnknownFoldAndPrefillKeys) {
+  Config config;
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"fold":{"unknown":true}}}})"), std::exception);
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"fold":{"head_r2":{"unknown":1}}}}})"), std::exception);
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill":{"unknown":1}}}})"), std::exception);
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill":{"dense":{"unknown":1}}}}})"), std::exception);
+}
+
+TEST(Qwen38GraphConfigTest, FoldAndPrefillPathsMustStayInsideTheModelFolder) {
+  const auto dir = MakeScratchDir("fold_paths");
+  const auto write_config = [&](const std::string& qwen_section) {
+    WriteFile(dir / "genai_config.json",
+              R"({"model":{"type":"qwen38_flash_graph","vocab_size":8,"context_length":16,
+                  "decoder":{"filename":"model.onnx","hidden_size":4,"num_attention_heads":1,"num_hidden_layers":1,
+                             "num_key_value_heads":1,"head_size":4},
+                  "qwen38_graph":)" +
+                  qwen_section + R"(},
+                  "search":{"max_length":16}})");
+  };
+  write_config(R"({"plane_library":"p.so","ple_table":"ple.txt","fold":{"head_r2":{"filename":"r2.onnx"}},
+                   "prefill":{"weights_pool":"pool.txt","constants":"c.txt","dense":{"filename":"d.onnx"},
+                              "head_kv":{"filename":"k.onnx"}}})");
+  EXPECT_NO_THROW(Config(fs::path(dir.string()), {}));
+  for (const char* section : {R"("fold":{"head_r2":{"filename":"../r2.onnx"}})", R"("prefill":{"weights_pool":"/abs/pool.txt"})",
+                              R"("prefill":{"constants":"../c.txt"})", R"("prefill":{"dense":{"filename":"/abs/d.onnx"}})",
+                              R"("prefill":{"head_kv":{"filename":"../k.onnx"}})"}) {
+    write_config(std::string(R"({"plane_library":"p.so","ple_table":"ple.txt",)") + section + "}");
+    EXPECT_THROW(Config(fs::path(dir.string()), {}), std::runtime_error) << section;
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
 TEST(Qwen38GraphConfigTest, RejectsUnknownKeys) {
   Config config;
   EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"unknown":1}}})"), std::exception);
@@ -144,6 +223,75 @@ TEST(Qwen38GraphConfigTest, ModelPathsMustStayInsideTheModelFolder) {
   EXPECT_THROW(Config(fs::path(dir.string()), {}), std::runtime_error);
   write_config(R"({"head":{"filename_s1":"h1.onnx","filename_s2":"/abs/h2.onnx"}})");
   EXPECT_THROW(Config(fs::path(dir.string()), {}), std::runtime_error);
+  std::filesystem::remove_all(dir, ec);
+}
+
+// ---- weight pool manifest and QSA constants index --------------------------------------------
+
+TEST(Qwen38WeightPoolManifestTest, ParsesEntriesAndSessions) {
+  const auto dir = MakeScratchDir("pool");
+  const auto path = WriteFile(dir / "pool.txt",
+                              "qwen38_weights_pool 1\n"
+                              "pool 0 16 1000 64 2 4 8 target/w0.safetensors\n"
+                              "pool 1 2 0 128 3 2 4 8 target/experts.data\n"
+                              "session target model.embed.weight 0\n"
+                              "session target experts.w 1\n"
+                              "session dense model.embed.weight 0\n");
+  const auto manifest = ParseQwen38WeightPoolManifest(path);
+  ASSERT_EQ(manifest.entries.size(), 2u);
+  EXPECT_EQ(manifest.entries[0].dtype, 16);
+  EXPECT_EQ(manifest.entries[0].offset, 1000u);
+  EXPECT_EQ(manifest.entries[0].length, 64u);
+  EXPECT_EQ(manifest.entries[0].shape, (std::vector<int64_t>{4, 8}));
+  EXPECT_EQ(manifest.entries[0].file, "target/w0.safetensors");
+  EXPECT_EQ(manifest.entries[1].shape, (std::vector<int64_t>{2, 4, 8}));
+  ASSERT_EQ(manifest.sessions.at("target").size(), 2u);
+  EXPECT_EQ(manifest.sessions.at("target")[1], (std::pair<std::string, int>{"experts.w", 1}));
+  EXPECT_EQ(manifest.sessions.at("dense").size(), 1u);
+  EXPECT_EQ(manifest.sessions.count("head_kv"), 0u);
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38WeightPoolManifestTest, RejectsMalformedManifests) {
+  const auto dir = MakeScratchDir("pool_bad");
+  const auto parse = [&](const std::string& text) { return ParseQwen38WeightPoolManifest(WriteFile(dir / "p.txt", text)); };
+  EXPECT_THROW(ParseQwen38WeightPoolManifest(dir / "missing.txt"), std::runtime_error);
+  EXPECT_THROW(parse("qwen38_weights_pool 2\n"), std::runtime_error);
+  EXPECT_THROW(parse("qwen38_weights_pool 1\npool 1 16 0 8 1 4 a.bin\n"), std::runtime_error);     // ids must start at 0
+  EXPECT_THROW(parse("qwen38_weights_pool 1\npool 0 16 0 8 1 4 ../a.bin\n"), std::runtime_error);  // escapes the folder
+  EXPECT_THROW(parse("qwen38_weights_pool 1\npool 0 16 0 8 1 4 /abs/a.bin\n"), std::runtime_error);
+  EXPECT_THROW(parse("qwen38_weights_pool 1\npool 0 16 0 8 1 4\n"), std::runtime_error);                       // no file
+  EXPECT_THROW(parse("qwen38_weights_pool 1\npool 0 16 0 8 1 4 a.bin\nsession t n 1\n"), std::runtime_error);  // unknown id
+  EXPECT_NO_THROW(parse("qwen38_weights_pool 1\n"));
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38QsaConstantsIndexTest, ParsesTheIndex) {
+  const auto dir = MakeScratchDir("qsa");
+  const auto path = WriteFile(dir / "qsa.txt",
+                              "qwen38_qsa_consts 1\n"
+                              "file qsa_consts.bin\n"
+                              "epsilon 1e-06\n"
+                              "width 64\n"
+                              "tensor target cos 0 1024\n"
+                              "tensor head knorm.0 1024 256\n");
+  const auto description = ParseQwen38QsaConstantsIndex(path);
+  EXPECT_EQ(description.file, "qsa_consts.bin");
+  EXPECT_FLOAT_EQ(description.epsilon, 1e-6f);
+  EXPECT_EQ(description.width, 64);
+  ASSERT_EQ(description.items.size(), 2u);
+  EXPECT_EQ(description.items[1].set, "head");
+  EXPECT_EQ(description.items[1].name, "knorm.0");
+  EXPECT_EQ(description.items[1].offset, 1024u);
+  EXPECT_EQ(description.items[1].bytes, 256u);
+  EXPECT_THROW(ParseQwen38QsaConstantsIndex(WriteFile(dir / "bad.txt", "qwen38_qsa_consts 2\n")), std::runtime_error);
+  EXPECT_THROW(ParseQwen38QsaConstantsIndex(WriteFile(dir / "bad2.txt", "qwen38_qsa_consts 1\nfile ../x.bin\n")),
+               std::runtime_error);
+  EXPECT_THROW(ParseQwen38QsaConstantsIndex(WriteFile(dir / "bad3.txt", "qwen38_qsa_consts 1\nfile x.bin\ntensor target cos 0\n")),
+               std::runtime_error);
+  std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
 
@@ -230,6 +378,20 @@ TEST(Qwen38DecodeLedgerTest, RingBankFollowsTheCommittedRows) {
   ledger.Reset();
   EXPECT_EQ(ledger.Bank(), 0);
   EXPECT_EQ(ledger.Length(), 0u);
+}
+
+TEST(Qwen38DecodeLedgerTest, DensePromptRowsAdvanceTheLengthAtBankZero) {
+  Qwen38DecodeLedger ledger{64};
+  ledger.AdvancePrompt(8);
+  ledger.AdvancePrompt(5);
+  EXPECT_EQ(ledger.Length(), 13u);
+  EXPECT_EQ(ledger.Bank(), 0);
+  ledger.Advance(2);  // the decode loop continues from the hand-off bank 0
+  EXPECT_EQ(ledger.Length(), 15u);
+  EXPECT_EQ(ledger.Bank(), 2);
+  EXPECT_THROW(ledger.AdvancePrompt(1), std::logic_error);  // a dense chunk after decoding / S=2 steps is a bug
+  EXPECT_EQ(ledger.Length(), 15u);
+  EXPECT_NO_THROW(Qwen38DecodeLedger{8}.RequireRoom(8, "x"));
 }
 
 TEST(Qwen38DecodeLedgerTest, AStepCommitsOneOrTwoRows) {

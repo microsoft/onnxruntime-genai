@@ -47,18 +47,24 @@ class Qwen38DecodeDevice {
   // Waits for every enqueued cycle without clearing anything; must not throw.
   virtual void Drain() noexcept = 0;
 
-  // Ingests prompt tokens (any chunk size) and leaves PendingToken() = the greedy token after the last ingested one.
-  // Only valid before BeginDecode. Synchronous.
+  // Ingests prompt tokens and leaves PendingToken() = the greedy token after the last ingested one. Consecutive calls
+  // continue the same prompt; every chunk but the last has an even size unless PrefillChunkTokens() says otherwise. Only
+  // valid before BeginDecode. Synchronous.
   virtual void PrefillChunk(std::span<const int32_t> tokens) = 0;
   virtual int32_t PendingToken() const = 0;
+  // Size of the prompt chunks the device ingests most efficiently (the fast prefill keeps one dense chunk resident); 0 when
+  // it has no preference. The executor then delivers prompts in chunks of this size, any chunk size being valid.
+  virtual size_t PrefillChunkTokens() const { return 0; }
 
-  // Starts decoding after the prompt: prepares the head and, when `run_cycle`, enqueues the first cycle (so that it is
-  // running before the first token is returned to the caller).
+  // Starts decoding after the prompt: hands the prompt state over to the decode state (fast prefill), prepares the head and,
+  // when `run_cycle`, enqueues the first cycle (so that it is running before the first token is returned to the caller).
   virtual void BeginDecode(bool run_cycle) = 0;
   // Spins on the pinned record of the cycle in flight. Throws when the device reports a validation failure.
   virtual Qwen38CycleRecord WaitCycle() = 0;
   // Commits `record` on the host and, when `want_more`, enqueues the next cycle (look-ahead).
   virtual void Advance(const Qwen38CycleRecord& record, bool want_more) = 0;
+  // Throws when the device accumulated an error over the cycles of the decode. Only called while no cycle is in flight.
+  virtual void CheckDecodeStatus() {}
 
   // Positions at the end of the KV store that are never filled: a verify step writes two rows past the committed length.
   static constexpr int kReservedTail = 4;
@@ -86,6 +92,12 @@ class Qwen38DecodeLedger {
     if (step != 1 && step != 2) throw std::logic_error("qwen38_graph: a step commits 1 or 2 rows, not " + std::to_string(step));
     bank_ = static_cast<int>((static_cast<size_t>(bank_) + step) % kBanks);
     length_ += step;
+  }
+
+  // Commits `rows` prompt rows at once (the dense prefill: no bank rotation, the hand-off writes bank 0).
+  void AdvancePrompt(size_t rows) {
+    if (bank_ != 0) throw std::logic_error("qwen38_graph: a dense prompt chunk needs the committed bank 0");
+    length_ += rows;
   }
 
   // Throws unless `rows` more positions fit. `tail` extra positions must stay free (see kReservedTail).
