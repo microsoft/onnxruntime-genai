@@ -124,7 +124,7 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
         settings.providers.clear();
         settings.provider_options.clear();
       }
-      stage_device = CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/true,
+      stage_device = CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/false,
                                                     /*disable_graph_capture=*/true);
       return CreateSession(ort_env, stage.filename, options.get());
     };

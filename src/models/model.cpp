@@ -598,7 +598,7 @@ Model::~Model() {
 }
 
 // Returns the device the session will run on: CPU when the options name no device-backed provider.
-// Non-primary options get CPU even when they name one, as SetProviderSessionOptions resolves no device for them.
+// Non-primary options report their selected device without updating the model's primary device.
 static DeviceInterface* AppendSessionProviders(Model& model,
                                                const Config::SessionOptions& config_session_options,
                                                OrtSessionOptions& session_options,
@@ -608,11 +608,13 @@ static DeviceInterface* AppendSessionProviders(Model& model,
                                                   config_session_options.provider_options, is_primary_session_options,
                                                   *model.config_, disable_graph_capture);
 
-  if (!model.p_device_) {
-    model.p_device_ = session_device;
-  } else if (session_device != nullptr && session_device->GetType() != model.p_device_->GetType()) {
-    throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
-                             to_string(session_device->GetType()) + " and " + to_string(model.p_device_->GetType()));
+  if (is_primary_session_options) {
+    if (!model.p_device_) {
+      model.p_device_ = session_device;
+    } else if (session_device != nullptr && session_device->GetType() != model.p_device_->GetType()) {
+      throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
+                               to_string(session_device->GetType()) + " and " + to_string(model.p_device_->GetType()));
+    }
   }
 
   return session_device ? session_device : GetDeviceInterface(DeviceType::CPU);

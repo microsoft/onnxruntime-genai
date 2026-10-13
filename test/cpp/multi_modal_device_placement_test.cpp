@@ -14,6 +14,7 @@
 #include "models/model.h"
 #include "models/io/embeddings.h"
 #include "models/io/kv_cache.h"
+#include "models/session_options.h"
 #include "models/vision_stage_io.h"
 #include "search.h"
 
@@ -87,6 +88,48 @@ TEST(MultiModalDevicePlacementTests, VisionPipelineProvidersFollowStageOptions) 
   EXPECT_EQ(config.model.vision.pipeline[0].session_options->providers, (std::vector<std::string>{"cuda"}));
   EXPECT_EQ(config.model.vision.pipeline[1].session_options->providers, (std::vector<std::string>{"DML"}));
   EXPECT_TRUE(config.model.vision.pipeline[1].run_on_cpu);
+}
+
+TEST(MultiModalDevicePlacementTests, NonPrimaryDeviceReportingPreservesDeferredProviders) {
+  PlacementTestModel model;
+  auto options = OrtSessionOptions::Create();
+  Generators::Config::SessionOptions settings;
+  settings.providers = {"cuda"};
+  settings.provider_options = {{"cuda", {}}};
+  EXPECT_EQ(model.CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/false,
+                                                 /*disable_graph_capture=*/true, /*cloned_from_parent=*/false,
+                                                 /*append_providers=*/false),
+            nullptr);
+  EXPECT_EQ(model.p_device_->GetType(), Generators::DeviceType::CPU);
+
+  auto cpu_options = OrtSessionOptions::Create();
+  auto* cpu_device = model.CreateSessionOptionsFromConfig(
+      {}, *cpu_options, /*is_primary_session_options=*/false, /*disable_graph_capture=*/true);
+  EXPECT_EQ(cpu_device->GetType(), Generators::DeviceType::CPU);
+  EXPECT_EQ(model.p_device_->GetType(), Generators::DeviceType::CPU);
+}
+
+TEST(MultiModalDevicePlacementTests, NonPrimaryVisionDeviceDoesNotReplaceCpuDecoder) {
+  if (Generators::FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
+    GTEST_SKIP() << "CUDA plugin is not registered";
+  }
+
+  PlacementTestModel model;
+  Generators::Config::SessionOptions settings;
+  settings.providers = {"cuda"};
+  settings.provider_options = {{"cuda", {}}};
+  auto options = OrtSessionOptions::Create();
+  auto* stage_device = model.CreateSessionOptionsFromConfig(
+      settings, *options, /*is_primary_session_options=*/false, /*disable_graph_capture=*/true);
+  ASSERT_NE(stage_device, nullptr);
+  EXPECT_EQ(stage_device->GetType(), Generators::DeviceType::CUDA);
+  EXPECT_EQ(model.p_device_->GetType(), Generators::DeviceType::CPU);
+
+  auto primary_options = OrtSessionOptions::Create();
+  EXPECT_THROW(model.CreateSessionOptionsFromConfig(settings, *primary_options,
+                                                    /*is_primary_session_options=*/true,
+                                                    /*disable_graph_capture=*/true),
+               std::runtime_error);
 }
 
 TEST(MultiModalDevicePlacementTests, SessionCanAccessOnlyHostOrItsOwnMemory) {

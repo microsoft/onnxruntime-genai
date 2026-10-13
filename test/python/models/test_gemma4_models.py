@@ -1553,11 +1553,20 @@ def test_gemma4_pipelined_decoder_injects_features_when_embedding_has_no_feature
     assert generator.get_next_tokens() == [0]
 
 
-@pytest.mark.parametrize("fixed_patches", [False, True])
-@pytest.mark.parametrize("position_dtype", [np.int32, np.int64])
-def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fixed_patches, position_dtype):
+@pytest.mark.parametrize(
+    "fixed_patches,position_dtype,encoder_provider",
+    [(fixed, dtype, None) for fixed, dtype in itertools.product([False, True], [np.int32, np.int64])]
+    + [(True, np.int32, "cuda")],
+)
+def test_gemma4_pipelined_decoder_runs_split_vision(
+    test_data_path, tmp_path, fixed_patches, position_dtype, encoder_provider
+):
     """A decoder pipeline must also run both vision stages for every image."""
     onnx = pytest.importorskip("onnx")
+    if encoder_provider == "cuda":
+        ort = pytest.importorskip("onnxruntime")
+        if "CUDAExecutionProvider" not in ort.get_available_providers():
+            pytest.skip("CUDA execution provider is not available")
     source_model_path = Path(_get_gemma4_model_path(test_data_path))
     model_path = tmp_path / "gemma4-split-pipeline"
     _write_pipelined_gemma4(onnx, source_model_path, model_path)
@@ -1571,6 +1580,11 @@ def test_gemma4_pipelined_decoder_runs_split_vision(test_data_path, tmp_path, fi
     config_path = model_path / "genai_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     _configure_split_vision(config)
+    if encoder_provider:
+        assert not config["model"]["decoder"]["session_options"]["provider_options"]
+        config["model"]["vision"]["pipeline"][0]["encoder"]["session_options"] = {
+            "provider_options": [{encoder_provider: {}}]
+        }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
     model = og.Model(os.fspath(model_path))
