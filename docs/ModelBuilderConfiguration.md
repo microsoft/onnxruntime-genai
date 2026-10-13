@@ -383,9 +383,8 @@ Allow supported settings under:
   `2147483647` (default `1`). `0` disables windowed DFlash 2 prefix snapshots
   without disabling target prefix caching. The runtime caps the effective
   count by its cache memory budget and target checkpoint capacity (`max_batch_size`).
-  This is an Engine-construction default, not a graph property. An application-supplied
-  `EngineOptions` snapshot limit overrides the selected runtime profile and base value
-  without changing the Model configuration.
+  This is runtime resource policy, not a graph property. The selected runtime profile
+  overrides the base value before Engine construction.
 - `model.<existing-component>.session_options` and `run_options`, including
   supported provider, allocator, threading, and profiling options.
 - `runtime_profiles`, for typed CUDA memory-class overlays applied before model

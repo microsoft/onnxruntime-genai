@@ -985,9 +985,11 @@ TEST(PagedKeyValueCacheManifestTest, SnapshotSizingReportsOneBlockMinimumAndBudg
   const auto previous_logging = g_log.enabled;
   SetLogBool("enabled", true);
   testing::internal::CaptureStderr();
-  auto smaller = CacheManager::Create(model, 0, 0, 2 * block_bytes, nullptr, 1);
-  auto larger = CacheManager::Create(model, 0, 0, 2 * block_bytes, nullptr, 4);
-  auto reduced = CacheManager::Create(model, 0, 0, 3 * block_bytes, nullptr, 4);
+  batching.dflash2_max_snapshots = 1;
+  auto smaller = CacheManager::Create(model, 0, 0, 2 * block_bytes);
+  batching.dflash2_max_snapshots = 4;
+  auto larger = CacheManager::Create(model, 0, 0, 2 * block_bytes);
+  auto reduced = CacheManager::Create(model, 0, 0, 3 * block_bytes);
   const auto log = testing::internal::GetCapturedStderr();
   SetLogBool("enabled", previous_logging);
 
@@ -1010,7 +1012,7 @@ TEST(PagedKeyValueCacheManifestTest, SnapshotSizingReportsOneBlockMinimumAndBudg
             std::string::npos);
 }
 
-TEST(PagedKeyValueCacheManifestTest, EngineSnapshotOverridesTakePrecedenceWithoutChangingModelDefaults) {
+TEST(PagedKeyValueCacheManifestTest, SnapshotRuntimeProfileOverridesBaseConfiguration) {
   auto model = LoadSyntheticCompositeModel();
   auto& batching = *model->config_->engine.dynamic_batching;
   batching.prefix_caching = true;
@@ -1024,46 +1026,36 @@ TEST(PagedKeyValueCacheManifestTest, EngineSnapshotOverridesTakePrecedenceWithou
   ApplyRuntimeProfile(*model->config_, 32ull * 1024 * 1024 * 1024);
   const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
 
-  EngineOptions options;
-  auto defaults = CacheManager::Create(model, 0, 0, block_bytes, nullptr,
-                                       options.dflash2_max_snapshots);
-  EXPECT_EQ(defaults->DraftCheckpointCapacity(), 2u);
-
-  options.dflash2_max_snapshots = 0;
-  auto disabled = CacheManager::Create(model, 0, 0, block_bytes, nullptr,
-                                       options.dflash2_max_snapshots);
-  EXPECT_EQ(disabled->DraftCheckpointCapacity(), 0u);
-  EXPECT_EQ(disabled->Snapshot().total_blocks, 8u);
-
-  options.dflash2_max_snapshots = 3;
-  auto larger = CacheManager::Create(model, 0, 0, block_bytes, nullptr,
-                                     options.dflash2_max_snapshots);
-  options.dflash2_max_snapshots = 0;
-  EXPECT_EQ(larger->DraftCheckpointCapacity(), 3u);
-  EXPECT_EQ(larger->Snapshot().total_blocks, 5u);
-  EXPECT_EQ(defaults->DraftCheckpointCapacity(), 2u);
+  auto cache = CacheManager::Create(model, 0, 0, block_bytes);
+  EXPECT_EQ(cache->DraftCheckpointCapacity(), 2u);
+  EXPECT_EQ(cache->Snapshot().total_blocks, 6u);
   EXPECT_EQ(model->config_->engine.dynamic_batching->dflash2_max_snapshots, 2u);
 }
 
-TEST(PagedKeyValueCacheManifestTest, EngineSnapshotOverrideStillHonorsBudgetAndTargetCapacity) {
+TEST(PagedKeyValueCacheManifestTest, SnapshotRuntimeProfileHonorsBudgetAndTargetCapacity) {
   auto model = LoadSyntheticCompositeModel();
   auto& batching = *model->config_->engine.dynamic_batching;
   batching.prefix_caching = true;
   batching.max_batch_size = 4;
   batching.num_blocks = 8;
   batching.dflash2_max_snapshots = 0;
+  OverlayConfig(*model->config_, R"({"runtime_profiles":[{
+    "id":"large-snapshot-pool","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":100}}}
+  }]})");
+  ApplyRuntimeProfile(*model->config_, 32ull * 1024 * 1024 * 1024);
   const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
-  auto target_limited = CacheManager::Create(model, 0, 0, block_bytes, nullptr, 100);
+  auto target_limited = CacheManager::Create(model, 0, 0, block_bytes);
   EXPECT_EQ(target_limited->DraftCheckpointCapacity(), 4u);
   EXPECT_EQ(target_limited->Snapshot().total_blocks, 4u);
 
-  auto budget_limited = CacheManager::Create(model, 0, 0, 3 * block_bytes, nullptr, 100);
+  auto budget_limited = CacheManager::Create(model, 0, 0, 3 * block_bytes);
   EXPECT_EQ(budget_limited->DraftCheckpointCapacity(), 2u);
   EXPECT_EQ(budget_limited->Snapshot().total_blocks, 2u);
-  EXPECT_EQ(batching.dflash2_max_snapshots, 0u);
+  EXPECT_EQ(model->config_->engine.dynamic_batching->dflash2_max_snapshots, 100u);
 }
 
-TEST(PagedKeyValueCacheManifestTest, EngineConstructionAppliesSnapshotOptionsToCacheAndDrafter) {
+TEST(PagedKeyValueCacheManifestTest, EngineConstructionAppliesSnapshotConfigurationToCacheAndDrafter) {
   auto model = LoadSyntheticCompositeModel();
   auto& draft = model->config_->model.dflash2;
   draft.filename = (fs::path{".."} / "synthetic-dspark" / "dflash2-fp16-aux.onnx").string();
@@ -1077,25 +1069,28 @@ TEST(PagedKeyValueCacheManifestTest, EngineConstructionAppliesSnapshotOptionsToC
   draft.sliding_window = 8;
   draft.main_aux_hidden_states = "hidden_states";
 
-  EngineOptions options;
-  options.dflash2_max_snapshots = 3;
-  auto larger = Engine::CreateDependencies(model, options);
-  ASSERT_NE(larger.dflash2_drafter, nullptr);
-  EXPECT_EQ(larger.cache_manager->DraftCheckpointCapacity(), 3u);
-  EXPECT_EQ(larger.dflash2_drafter->AvailablePrefixCheckpoints(), 3u);
-
-  options.dflash2_max_snapshots = 0;
-  auto disabled = Engine::CreateDependencies(model, options);
-  ASSERT_NE(disabled.dflash2_drafter, nullptr);
-  EXPECT_EQ(disabled.cache_manager->DraftCheckpointCapacity(), 0u);
-  EXPECT_EQ(disabled.dflash2_drafter->AvailablePrefixCheckpoints(), 0u);
-
   auto defaults = Engine::CreateDependencies(model);
   ASSERT_NE(defaults.dflash2_drafter, nullptr);
   EXPECT_EQ(defaults.cache_manager->DraftCheckpointCapacity(), 1u);
   EXPECT_EQ(defaults.dflash2_drafter->AvailablePrefixCheckpoints(), 1u);
+
+  OverlayConfig(*model->config_, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":3}}})");
+  auto larger = Engine::CreateDependencies(model);
+  ASSERT_NE(larger.dflash2_drafter, nullptr);
   EXPECT_EQ(larger.cache_manager->DraftCheckpointCapacity(), 3u);
-  EXPECT_EQ(model->config_->engine.dynamic_batching->dflash2_max_snapshots, 1u);
+  EXPECT_EQ(larger.dflash2_drafter->AvailablePrefixCheckpoints(), 3u);
+
+  OverlayConfig(*model->config_, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":0}}})");
+  auto disabled = Engine::CreateDependencies(model);
+  ASSERT_NE(disabled.dflash2_drafter, nullptr);
+  EXPECT_EQ(disabled.cache_manager->DraftCheckpointCapacity(), 0u);
+  EXPECT_EQ(disabled.dflash2_drafter->AvailablePrefixCheckpoints(), 0u);
+
+  EXPECT_EQ(larger.cache_manager->DraftCheckpointCapacity(), 3u);
+  EXPECT_EQ(larger.dflash2_drafter->AvailablePrefixCheckpoints(), 3u);
+  EXPECT_EQ(defaults.cache_manager->DraftCheckpointCapacity(), 1u);
+  EXPECT_EQ(defaults.dflash2_drafter->AvailablePrefixCheckpoints(), 1u);
+  EXPECT_EQ(model->config_->engine.dynamic_batching->dflash2_max_snapshots, 0u);
 }
 
 class Dflash2SnapshotEngineTest : public ::testing::TestWithParam<size_t> {
@@ -1182,9 +1177,9 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
   }
 
   auto model = LoadModel(true);
-  EngineOptions options;
-  options.dflash2_max_snapshots = limit;
-  auto dependencies = Engine::CreateDependencies(model, options);
+  OverlayConfig(*model->config_, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                                     std::to_string(limit) + "}}}");
+  auto dependencies = Engine::CreateDependencies(model);
   auto cache = dependencies.cache_manager;
   auto* drafter = dependencies.dflash2_drafter.get();
   ASSERT_NE(drafter, nullptr);

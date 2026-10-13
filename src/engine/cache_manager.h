@@ -57,8 +57,7 @@ struct CacheManager {
                                               size_t auxiliary_bytes_per_block = 0,
                                               size_t auxiliary_reserved_memory_bytes = 0,
                                               size_t optional_draft_checkpoint_bytes = 0,
-                                              bool* draft_checkpoint_enabled = nullptr,
-                                              std::optional<size_t> dflash2_max_snapshots = std::nullopt);
+                                              bool* draft_checkpoint_enabled = nullptr);
 
   virtual bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const = 0;
 
@@ -201,8 +200,7 @@ struct PagedCacheManager : CacheManager {
   PagedCacheManager(std::shared_ptr<Model> model,
                     size_t auxiliary_bytes_per_block = 0,
                     size_t auxiliary_reserved_memory_bytes = 0,
-                    size_t optional_draft_checkpoint_bytes = 0,
-                    std::optional<size_t> dflash2_max_snapshots = std::nullopt);
+                    size_t optional_draft_checkpoint_bytes = 0);
   bool DraftCheckpointEnabled() const noexcept { return draft_checkpoint_capacity_ != 0; }
   size_t DraftCheckpointCapacity() const noexcept override { return draft_checkpoint_capacity_; }
 
