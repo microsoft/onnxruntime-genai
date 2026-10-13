@@ -1789,6 +1789,24 @@ OgaResult* OgaEngineGetSpeculativeStats(
   OGA_CATCH
 }
 
+OgaResult* OgaEngineGetPrefixCacheStats(
+    const OgaEngine* engine, OgaPrefixCacheStats* out) {
+  OGA_TRY
+  if (!engine || !out) {
+    throw std::runtime_error("engine and out must not be null.");
+  }
+  *out = {};
+  if (const auto stats = engine->PrefixCacheStats()) {
+    out->enabled = true;
+    out->lookups = stats->lookups;
+    out->hits = stats->hits;
+    out->matched_tokens = stats->matched_tokens;
+    out->evictions = stats->evictions;
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaEngineCreateRequest(
     OgaEngine* engine,
     const OgaRequestOptions* options,

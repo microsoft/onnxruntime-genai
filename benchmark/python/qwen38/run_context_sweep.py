@@ -30,7 +30,7 @@ def file_hash(path):
     return digest.hexdigest()
 
 
-def save_table(rows, destination):
+def save_table(rows, destination, prefix_cache=False):
     lines = [
         "# Optimized asonawane/qwen-38-flash-100-e2e context sweep",
         "",
@@ -41,8 +41,10 @@ def save_table(rows, destination):
         "Runtime: active Python environment; package versions and loaded library hashes recorded in manifest.",
         "Prompt: newly generated repeated Python worker modules; not the unavailable original example prompt.",
         "KV-cache budget: 0.05 for 8K-64K, 0.12 for 128K, matching the completed baseline.",
-        "Use original long-context graphs for measured-table reproduction; selected-logits graphs are a separate experiment.",
+        "Graph variant is determined by --model; use the same model for paired cached/uncached comparisons.",
         "All packed NVFP4, fused SwiGLU, routing reuse, tiled down output, tensor QK/PV and bounded replay flags enabled.",
+        "Repeated-prefix cached workload; cold warmup excluded. 8K may have no reusable checkpoint."
+        if prefix_cache else "Uncached workload: fresh Engine for every request.",
         "",
         "| Requested prompt | Prompt length | MTP | TTFT (ms) | Decode TPS | E2E TPS | MTP acceptance | First-draft acceptance | Proposal yield | Within target | Sampled peak VRAM (MiB) | Status |",
         "|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|---:|:---|",
@@ -66,6 +68,8 @@ def main():
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True, help="New results directory; must not exist")
     parser.add_argument("--gpu", type=int, required=True, help="Physical GPU index from nvidia-smi")
+    parser.add_argument("--indexer-warp-heads", action="store_true", help="Enable experimental warp-local indexer scoring")
+    parser.add_argument("--prefix-cache", action="store_true", help="Enable experimental repeated-prefix MTP workload")
     args = parser.parse_args()
     model = args.model.resolve()
     destination = args.output_dir.resolve()
@@ -91,6 +95,7 @@ def main():
         "ORT_SPARSE_PREFILL_TENSOR_CORE_PV": "1",
         "ORT_GENAI_CUDA_BOUNDED_INDEXER_REPLAY": "1",
         "ORT_QMOE_INT2_FAKE_INT4_ACTIVATIONS": "0",
+        "ORT_PACKED_SPARSE_INDEXER_WARP_HEADS": "1" if args.indexer_warp_heads else "0",
     }
     for name in ("LD_LIBRARY_PATH", "PYTHONPATH"):
         if name in os.environ:
@@ -112,6 +117,7 @@ def main():
         "acceptance_target_percent": [75, 85],
         "memory_caveat": "Device-wide sampling during timing, load and warmup; GPU occupancy checked before each configuration, not continuously.",
         "rows": [],
+        "prefix_cache": args.prefix_cache,
     }
     manifest["loaded_libraries_sha256"] = {}
     (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -140,6 +146,8 @@ def main():
                 prefix = destination / f"context{context}_mtp{width}"
                 overlay = json.loads((ROOT / "width2_overlay.json").read_text())
                 overlay["speculative"]["max_draft_tokens"] = width
+                if args.prefix_cache:
+                    overlay["engine"]["dynamic_batching"]["prefix_caching"] = True
                 if context == 131072:
                     overlay["engine"]["dynamic_batching"]["gpu_utilization_factor"] = 0.12
                 overlay_path = prefix.with_suffix(".overlay.json")
@@ -150,6 +158,8 @@ def main():
                     "--overlay", str(overlay_path), "--prompt-length", str(context),
                     "--warmup", "1", "--repetitions", "3", "--output", str(result_path),
                 ]
+                if args.prefix_cache:
+                    command.append("--prefix-cache")
                 samples = []
                 started = time.monotonic()
                 print(f"Starting context={context} MTP={width}", flush=True)
@@ -193,6 +203,13 @@ def main():
                         assert previous == digest
                     measured = [run for run in result["runs"] if not run["warmup"]]
                     assert len(measured) == 3
+                    if args.prefix_cache:
+                        assert all(run["matches_cold_output"] for run in result["runs"])
+                        prefix_stats = [run["prefix_cache_stats"] for run in measured]
+                        if context > 8192:
+                            assert all(stats["hits"] > 0 and stats["matched_tokens"] > 0 for stats in prefix_stats)
+                        row["prefix_cache_stats"] = prefix_stats
+                        row["cold_ttft_ms"] = result["runs"][0]["ttft_seconds"] * 1000
                     for run in result["runs"]:
                         assert run["output_tokens"] == 512
                         assert run["engine_max_request_length"] >= result["prompt_tokens"] + 512
@@ -227,7 +244,7 @@ def main():
                     })
                 manifest["rows"].append(row)
                 (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-                save_table(manifest["rows"], destination)
+                save_table(manifest["rows"], destination, args.prefix_cache)
                 print(json.dumps(row), flush=True)
     finally:
         if process is not None and process.poll() is None:

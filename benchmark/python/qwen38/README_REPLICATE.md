@@ -5,7 +5,7 @@
 Reproduce the measured **uncached, batch-one Qwen3.8 Flash NVFP4**
 source-code-review/chat context sweep on an otherwise idle H200.
 Run the original graphs first. Do not substitute the short-context memory
-candidate or claim the selected-logits experiment is already validated.
+candidate or treat workload-specific selected-logits validation as universal.
 Do not overwrite another user's environment, model, results, or GPU workload.
 Keep all samples; never filter for acceptance or throughput targets.
 
@@ -20,7 +20,8 @@ The measured GenAI native runtime was built at
 `37e2b4773655427afa493098c7f44cb593cff0fa`. The pinned later GenAI commit
 adds Python scripts/documentation without changing that native runtime.
 Selected-logits preparation was added in separate commit `25ac6ecb`.
-This README is a later documentation-only addition.
+These pins reproduce the historical table. The experimental prefix-cache and
+warp-heads follow-ups below require newer source and freshly rebuilt libraries.
 Do **not** mix these with newer `kvaishnavi/qwen-38-flash` HEADs or stock wheels.
 The API32 compatibility patch used for the kvaishnavi comparison is not
 needed for this pinned optimized runtime.
@@ -203,8 +204,26 @@ or answer-quality equivalence; output hashes differed from the kvaishnavi baseli
 
 This newly published option projects only requested hidden-state rows through
 the LM head. It preserves the original 262144 configured context, indexer
-capacity and other settings. Preparation/tests passed, but **long-context GPU
-performance and output-token parity are not yet verified**.
+capacity and other settings. Preparation/tests passed. A subsequent fresh
+64K/128K MTP-width-three comparison measured the following results, with one
+excluded warmup and three measured 512-token requests per configuration:
+
+| Context | Original TTFT (s) | Selected-logits TTFT (s) | Original E2E TPS | Selected-logits E2E TPS | Sampled VRAM saved |
+|---:|---:|---:|---:|---:|---:|
+| 65536 | 11.747 | 11.630 | 32.42 | 32.68 | 4 GiB |
+| 131072 | 27.733 | 27.510 | 16.13 | 16.24 | 4 GiB |
+
+All six measured candidate token streams exactly matched their paired
+controls. This single control-then-candidate comparison shows a useful
+memory reduction and a small observed latency improvement, not a robust
+speedup guarantee or broad answer-quality qualification. Other context/MTP
+configurations remain unverified for the transformed graphs.
+
+A separate CUDA-profiler capture of 128K candidate prefill attributed 27.3%
+of summed GPU kernel time to sparse indexer scores, 18.5% to sparse paged
+attention, and 26.4% to packed NVFP4 expert GEMMs. These are kernel-time
+shares, not wall-clock speedup predictions. Profiling timings were excluded
+from the paired throughput results.
 
 ```bash
 python "$GENAI_SRC/benchmark/python/qwen38/prepare_memory_candidate.py" \
@@ -231,7 +250,137 @@ token Engine ceiling. That package cannot reproduce the long-context table.
 The historical `run_benchmark.sh` and `benchmark_qwen_mtp.py` are 8K/512 tools,
 not the context-sweep entry point.
 
-## 7. Copilot validation checklist
+## 7. Experimental prefix-cache and warp-heads follow-ups
+
+### Source selection for the follow-up results
+
+Both repositories publish these follow-ups on
+`asonawane/qwen-38-flash-100-e2e`. Unlike historical-table reproduction in
+section 1, select the following source before rebuilding both wheels/SDK
+using section 2:
+
+```bash
+git -C "$ORT_SRC" fetch origin asonawane/qwen-38-flash-100-e2e
+git -C "$GENAI_SRC" fetch origin asonawane/qwen-38-flash-100-e2e
+git -C "$ORT_SRC" switch --detach bfd45538f44fe0e72dbb08350ae98d84bed67f53
+git -C "$GENAI_SRC" switch --detach origin/asonawane/qwen-38-flash-100-e2e
+git -C "$ORT_SRC" submodule update --init --recursive
+git -C "$GENAI_SRC" submodule update --init --recursive
+git -C "$ORT_SRC" rev-parse HEAD
+git -C "$GENAI_SRC" rev-parse HEAD
+```
+
+Record the resolved GenAI commit: the remote branch may move after publication.
+Its source must include the explicit batch-one MTP prefix guard, Python
+`get_prefix_cache_stats()` API, and `--prefix-cache` sweep option.
+The historical GenAI pin does not include these changes.
+
+### Experimental MTP prefix reuse
+
+Explicit `engine.dynamic_batching.prefix_caching=true` now admits batch-one
+MTP target-prefix reuse when no DFlash drafter or sliding-window KV layout
+is present. Implicit/default MTP prefix behavior remains unchanged.
+Target paged KV and fixed-state checkpoints are adopted; each new request
+starts a cold MTP shadow at its first generated token, as in the uncached path.
+This is not restored draft-prefix state and is not qualified for concurrent
+batching or all models.
+
+With the rebuilt GenAI library/Python bindings and warp-heads provider:
+
+```bash
+python "$GENAI_SRC/benchmark/python/qwen38/run_context_sweep.py" \
+  --model /absolute/path/to/long-context-selected-logits-model \
+  --output-dir /absolute/path/to/new-cached-results \
+  --gpu 0 --indexer-warp-heads --prefix-cache
+```
+
+Unlike the historical uncached benchmark, one Engine is shared across the
+cold warmup and repeated identical requests. The cold request is excluded
+from cached timing; cache-fill cost is not free. `get_prefix_cache_stats()`
+records per-request adoption counts and the benchmark requires exact output
+parity with its cold request. Speculative counters are differenced per request,
+not pooled repeatedly from cumulative Engine telemetry.
+
+The completed 20-row local experiment matched all 60 measured outputs to
+their cold requests with zero MTP failures. Adopted tokens per request were
+0/8192/24576/57344/122880 for requested 8K/16K/32K/64K/128K prompts.
+The retained checkpoint leaves the final scheduler chunk to recompute, so
+8K has no cache hit. Full repeated-request results follow. The actual 8K
+prompt has 8190 tokens; all other prompts have exactly the requested length.
+VRAM is device-wide sampled peak including load and warmup, not a hard peak
+guarantee. Acceptance target is 75-85%; no samples were filtered.
+
+| Requested prompt | Prompt length | MTP | TTFT (ms) | Decode TPS | E2E TPS | MTP acceptance | First-draft acceptance | Proposal yield | Within target | Sampled peak VRAM (MiB) | Status |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|---:|:---|
+| 8192 | 8190 | 1 | 1195.55 | 118.96 | 93.24 | 80.21% | 80.21% | 80.21% | yes | 91262 | completed |
+| 8192 | 8190 | 3 | 1197.86 | 135.17 | 102.85 | 71.27% | 75.00% | 53.75% | no | 91268 | completed |
+| 8192 | 8190 | 5 | 1198.44 | 121.15 | 94.53 | 68.30% | 74.43% | 38.17% | no | 91424 | completed |
+| 8192 | 8190 | 7 | 1200.24 | 104.22 | 83.89 | 66.73% | 70.52% | 27.92% | no | 91422 | completed |
+| 16384 | 16384 | 1 | 1247.50 | 114.97 | 89.95 | 76.47% | 76.47% | 76.47% | yes | 91262 | completed |
+| 16384 | 16384 | 3 | 1249.64 | 139.70 | 104.33 | 74.31% | 75.94% | 57.86% | no | 91274 | completed |
+| 16384 | 16384 | 5 | 1251.89 | 130.82 | 99.26 | 72.46% | 74.53% | 43.70% | no | 91416 | completed |
+| 16384 | 16384 | 7 | 1252.68 | 112.31 | 88.23 | 70.52% | 75.16% | 32.51% | no | 91458 | completed |
+| 32768 | 32768 | 1 | 1320.96 | 116.34 | 89.62 | 80.85% | 80.85% | 80.85% | yes | 91262 | completed |
+| 32768 | 32768 | 3 | 1321.83 | 138.61 | 102.23 | 74.31% | 77.01% | 57.86% | no | 91276 | completed |
+| 32768 | 32768 | 5 | 1323.40 | 123.01 | 93.47 | 70.02% | 75.88% | 40.21% | no | 91416 | completed |
+| 32768 | 32768 | 7 | 1319.85 | 109.43 | 85.48 | 69.37% | 80.00% | 31.54% | no | 91440 | completed |
+| 65536 | 65536 | 1 | 1440.96 | 115.72 | 87.42 | 79.93% | 79.93% | 79.93% | yes | 91246 | completed |
+| 65536 | 65536 | 3 | 1444.15 | 133.57 | 97.15 | 72.73% | 77.89% | 56.34% | no | 91292 | completed |
+| 65536 | 65536 | 5 | 1444.73 | 118.66 | 89.02 | 69.69% | 76.16% | 39.39% | no | 91432 | completed |
+| 65536 | 65536 | 7 | 1444.16 | 100.21 | 78.25 | 67.46% | 74.71% | 28.81% | no | 91474 | completed |
+| 131072 | 131072 | 1 | 1670.61 | 111.62 | 81.94 | 78.32% | 78.32% | 78.32% | yes | 96380 | completed |
+| 131072 | 131072 | 3 | 1668.68 | 133.28 | 93.04 | 75.41% | 76.34% | 58.45% | yes | 96398 | completed |
+| 131072 | 131072 | 5 | 1670.77 | 122.48 | 87.63 | 71.60% | 77.91% | 42.70% | no | 96518 | completed |
+| 131072 | 131072 | 7 | 1673.45 | 105.49 | 78.56 | 70.44% | 78.85% | 32.87% | no | 96596 | completed |
+
+MTP-three comparison against the same selected-logits/warp-heads variant
+with fresh uncached Engines:
+
+| Requested context | Uncached TTFT (ms) | Cached TTFT (ms) | Uncached E2E TPS | Cached E2E TPS | E2E gain |
+|---:|---:|---:|---:|---:|:---|
+| 8192 | 1201.22 | 1197.86 | 104.06 | 102.85 | No cache hit |
+| 16384 | 2422.92 | 1249.64 | 84.95 | 104.33 | 1.23x |
+| 32768 | 5009.35 | 1321.83 | 57.70 | 102.23 | 1.77x |
+| 65536 | 10534.68 | 1444.15 | 35.44 | 97.15 | 2.74x |
+| 131072 | 22932.74 | 1668.68 | 18.87 | 93.04 | 4.93x |
+
+These are cached repeated-prefix results, not uncached prefill speedups.
+Changing the prompt, eviction pressure, chunk size, or concurrency requires
+fresh validation.
+
+### Experimental warp-local indexer scoring
+
+ORT commit `bfd45538f44fe0e72dbb08350ae98d84bed67f53` adds default-off
+`ORT_PACKED_SPARSE_INDEXER_WARP_HEADS=1`, retaining query heads within a warp
+to reuse keys and remove scoring barriers. Rebuild the matching CUDA provider
+before testing it. The sweep runner accepts `--indexer-warp-heads` explicitly;
+omitting it keeps the historical reproduction unchanged.
+
+Two fresh flag-off/on comparisons, in opposite execution orders, used the
+same selected-logits model and MTP width three:
+
+| Context | Control TTFT (s), two invocations | Candidate TTFT (s), two invocations | Control E2E TPS | Candidate E2E TPS |
+|---:|---:|---:|---:|---:|
+| 65536 | 11.615 / 11.620 | 10.515 / 10.494 | 33.13 / 32.95 | 35.25 / 35.36 |
+| 131072 | 27.534 / 27.511 | 22.904 / 22.895 | 16.18 / 16.35 | 18.93 / 18.88 |
+
+Standalone FP16/FP32 tests match all outputs exactly across ten geometries
+per type, including 32768 live slots. The first full-model pair matched six
+measured streams. The reverse-order 64K pair also matched; the reverse-order
+128K control differed from both candidates and the earlier control.
+This observed control variability prevents a claim of full-model deterministic
+equivalence or broad quality preservation. No samples were discarded.
+The option remains experimental, not a default change or 100-E2E-TPS solution.
+
+A further controlled 128K pair set `ep.cuda.enable_gemm_auto_tune` to `"0"`
+in both decoder and MTP session options. All three measured token streams
+matched exactly. TTFT was 27.517 seconds flag-off versus 22.935 flag-on;
+decode was 124.16 versus 124.19 TPS and E2E was 16.19 versus 18.93 TPS.
+This supports parity and a prefill-specific gain on that workload, without
+proving that autotuning caused the earlier mismatch. Keep this diagnostic
+separate from the historical tuned table.
+
+## 8. Copilot validation checklist
 
 1. Record source commits, toolchain, GPU, active interpreter and package paths.
 2. Confirm all loaded runtime libraries/hashes in the manifest correspond to

@@ -90,6 +90,24 @@ def make_review_prompt(tokenizer, requested):
     return np.asarray(best, dtype=np.int32)
 
 
+def request_stats_delta(before, after):
+    """Return request counters, omitting Engine-wide derived averages."""
+    gauges = {"active_rounds", "tokens_buffered", "effective_k", "cooldown_remaining"}
+    result = {}
+    for key, value in after.items():
+        if isinstance(value, bool) or key in gauges:
+            result[key] = value
+        elif isinstance(value, int) or key.startswith("total_"):
+            result[key] = value - before[key]
+    previous = before["acceptance_length_histogram"]
+    current = after["acceptance_length_histogram"]
+    result["acceptance_length_histogram"] = [
+        count - (previous[index] if index < len(previous) else 0)
+        for index, count in enumerate(current)
+    ]
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["baseline", "mtp"], required=True)
@@ -99,6 +117,7 @@ def main():
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--prompt-length", type=int, required=True)
+    parser.add_argument("--prefix-cache", action="store_true", help="Reuse one Engine across identical prompt requests")
     parser.add_argument("--capture-decode-tokens", type=int, default=0)
     parser.add_argument("--capture-prefill", action="store_true")
     parser.add_argument("--capture-each-decode", action="store_true")
@@ -121,6 +140,8 @@ def main():
     overlay = json.loads(args.overlay.read_text()) if args.overlay else {}
     if overlay:
         config.overlay(json.dumps(overlay))
+    if args.prefix_cache:
+        config.overlay(json.dumps({"engine": {"dynamic_batching": {"prefix_caching": True}}}))
     cudart = None
     if args.capture_decode_tokens or args.capture_prefill:
         cudart = ctypes.CDLL(args.cuda_runtime)
@@ -173,11 +194,18 @@ def main():
         "warmup_runs": args.warmup,
         "measured_runs": args.repetitions,
         "runs": [],
+        "prefix_cache": args.prefix_cache,
     }
+    shared_engine = og.Engine(model) if args.prefix_cache else None
+    cold_output = None
     for run in range(args.warmup + args.repetitions):
         if args.memory_markers:
             print("MEMORY_PHASE " + ("warmup" if run < args.warmup else "measured") + "_prefill", flush=True)
-        engine = og.Engine(model)
+        engine = shared_engine if shared_engine is not None else og.Engine(model)
+        stats_before = engine.get_speculative_stats()
+        prefix_before = engine.get_prefix_cache_stats() if args.prefix_cache else None
+        if prefix_before is not None and not prefix_before["enabled"]:
+            raise RuntimeError("Prefix-cache benchmark requires an enabled cache")
         capacity = engine.get_capabilities().max_request_length
         print(f"Run {run}: max_request_length={capacity}", flush=True)
         buffer = engine.create_event_buffer(16)
@@ -255,9 +283,16 @@ def main():
         if not finished or len(output_tokens) != 512 or first_time is None or last_time is None:
             raise RuntimeError(f"Expected completed 512-token turn; got {len(output_tokens)}, finished={finished}")
         stats = engine.get_speculative_stats()
+        if args.prefix_cache:
+            stats = request_stats_delta(stats_before, stats)
         if args.mode == "mtp":
             if stats.get("mtp_failures", 0) != 0 or stats.get("draft_tokens_proposed", 0) == 0:
                 raise RuntimeError(f"MTP did not execute successfully: {stats}")
+        if args.prefix_cache:
+            if cold_output is None:
+                cold_output = list(output_tokens)
+            elif output_tokens != cold_output:
+                raise RuntimeError("Prefix-cache replay output differs from the cold request")
         row = {
             "warmup": run < args.warmup,
             "engine_max_request_length": capacity,
@@ -273,6 +308,13 @@ def main():
             "token_ids": output_tokens,
             "output_preview": tokenizer.decode(output_tokens[:64]),
         }
+        if prefix_before is not None:
+            prefix_after = engine.get_prefix_cache_stats()
+            row["prefix_cache_stats"] = {
+                key: prefix_after[key] - prefix_before[key]
+                for key in ("lookups", "hits", "matched_tokens", "evictions")
+            }
+            row["matches_cold_output"] = output_tokens == cold_output
         if args.step_timings:
             row["run_start_ns"] = run_start_ns
             row["run_start_unix_ns"] = run_start_unix_ns
