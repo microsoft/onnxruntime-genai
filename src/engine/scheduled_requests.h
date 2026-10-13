@@ -105,6 +105,11 @@ struct ScheduledRequests {
   std::vector<DeviceSpan<float>> ProcessLogits();
 
   void GenerateNextTokens(std::vector<RequestStepResult>& results);
+  // For a ModelExecutor that selects its own tokens (ModelExecutor::SelectsOwnTokens): stages the tokens
+  // the executor committed for scheduled row `row` (an empty span for a step that only advanced the prompt).
+  // Once any row is staged, GenerateNextTokens commits these tokens through
+  // Request::CommitExternalTokens instead of sampling logits.
+  void StageExecutorTokens(size_t row, std::span<const int32_t> tokens);
   void ScheduleGuidanceMasks() noexcept;
   void BeginTransaction();
   void GenerateNextTokensForTransaction(
@@ -141,6 +146,9 @@ struct ScheduledRequests {
   // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty
   // outside a dynamic step plan.
   std::vector<size_t> draft_token_counts_;
+  // Tokens an executor that selects its own tokens committed this step, per scheduled row. Empty unless
+  // StageExecutorTokens was called.
+  std::vector<std::vector<int32_t>> executor_tokens_;
   std::shared_ptr<Model> model_;
   std::unique_ptr<DecoderIO> decoder_state_;
   std::unique_ptr<ExecutionContext> execution_context_;
