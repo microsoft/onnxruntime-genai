@@ -21,6 +21,11 @@ Qwen38GraphSession::Qwen38GraphSession(std::shared_ptr<Qwen38DecodeDevice> devic
   }
   // S=2 target steps consume token pairs: an odd chunk would shift the pairing of everything after it.
   options_.prefill_chunk_tokens = std::max<size_t>(2, options_.prefill_chunk_tokens & ~size_t{1});
+  // A device with a fast prefill names its own chunk (any size is valid there); a longer chunk is one step without events,
+  // so the preferred size also bounds how long cancellation and Run wait.
+  if (const size_t preferred = device_->PrefillChunkTokens(); preferred > 0) {
+    options_.prefill_chunk_tokens = preferred;
+  }
 }
 
 Qwen38GraphSession::~Qwen38GraphSession() {
@@ -106,6 +111,9 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   // Enqueue the next cycle before returning: the GPU runs it while the Engine delivers these tokens. A stop string can
   // only be known after delivery, so one cycle may be wasted; Reset/Release wait for it.
   device_->Advance(record, /*want_more=*/!ended);
+  if (ended) {
+    device_->CheckDecodeStatus();  // nothing is in flight now: a device that accumulated an error reports it here
+  }
 
   const bool mtp = device_->MtpEnabled();
   ++stats_.rounds;

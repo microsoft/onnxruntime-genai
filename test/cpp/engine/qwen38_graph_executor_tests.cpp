@@ -420,6 +420,167 @@ TEST_F(Qwen38GraphEngineTest, RewindToTheStartOfATurnReleasesTheSlotAndReplaysTh
   EXPECT_EQ(outcome.tokens, Expected(history.size(), 2));
 }
 
+// ---- dense (fast) prefill: chunk streaming and hand-off ---------------------------------------
+
+TEST_F(Qwen38GraphEngineTest, ADeviceWithAPreferredChunkReceivesThePromptInChunksOfThatSizeAndHandsOffOnce) {
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 8;  // replaces prefill_chunk_tokens (4) of the configuration
+  auto engine = MakeEngine();
+  const auto prompt = Prompt(20);
+  auto request = Begin(*engine, prompt, /*max_generated_tokens=*/5);
+
+  std::array<EngineEvent, 8> buffer;
+  EXPECT_EQ(engine->Run(buffer), 0u);  // chunk 1 of 3: no event, no hand-off yet
+  EXPECT_EQ(device_->handoffs, 0u);
+  EXPECT_EQ(engine->Run(buffer), 0u);  // chunk 2
+  EXPECT_EQ(device_->handoffs, 0u);
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(device_->CallCount("prefill:8"), 2u);
+  EXPECT_EQ(device_->CallCount("prefill:4"), 1u);
+  EXPECT_EQ(device_->ingested, prompt);
+  EXPECT_EQ(device_->handoffs, 1u);
+  EXPECT_EQ(device_->handoff_length, 20u);
+  EXPECT_EQ(outcome.tokens, Expected(20, 5));
+}
+
+TEST_F(Qwen38GraphEngineTest, DenseChunksMayHaveAnOddSizeAndTheLastChunkEndsTheStreamExactly) {
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 7;
+  auto engine = MakeEngine();
+  const auto prompt = Prompt(15);
+  auto request = Begin(*engine, prompt, /*max_generated_tokens=*/3);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(device_->CallCount("prefill:7"), 2u);
+  EXPECT_EQ(device_->CallCount("prefill:1"), 1u);
+  EXPECT_EQ(device_->ingested, prompt);
+  EXPECT_EQ(outcome.tokens, Expected(15, 3));
+}
+
+TEST_F(Qwen38GraphEngineTest, ADensePromptShorterThanTheChunkIsOneChunk) {
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 64;
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/2);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(device_->CallCount("prefill:5"), 1u);
+  EXPECT_EQ(outcome.tokens, Expected(5, 2));
+}
+
+TEST_F(Qwen38GraphEngineTest, ADensePromptOfExactlyTheChunkSizeHasNoEmptyTailChunk) {
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 8;
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(16), /*max_generated_tokens=*/2);
+
+  RunToCompletion(*engine, request);
+
+  EXPECT_EQ(device_->CallCount("prefill:8"), 2u);
+  EXPECT_EQ(device_->CallCount("prefill:0"), 0u);
+}
+
+TEST_F(Qwen38GraphEngineTest, ContinuationAndRewindReIngestTheHistoryThroughTheDenseChunksAndHandOffAgain) {
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 4;
+  auto engine = MakeEngine();
+  const auto prompt = Prompt(5);
+  auto request = Begin(*engine, prompt, /*max_generated_tokens=*/3);
+  ASSERT_EQ(RunToCompletion(*engine, request).tokens, Expected(5, 3));
+  ASSERT_EQ(device_->handoffs, 1u);
+
+  TurnOptions options = Limit(2);
+  options.request = request;
+  const uint64_t turn = request->BeginTurn(std::array<int32_t, 2>{30, 31}, options);
+  ASSERT_EQ(RunToCompletion(*engine, request).tokens, Expected(10, 2));
+  EXPECT_EQ(device_->handoffs, 2u);
+  EXPECT_EQ(device_->handoff_length, 10u);  // 5 prompt + 3 generated + 2 follow-up
+
+  request->RewindToStartOfTurn(turn);
+  options = Limit(2);
+  options.request = request;
+  request->BeginTurn(std::array<int32_t, 1>{40}, options);
+  const auto outcome = RunToCompletion(*engine, request);
+  std::vector<int32_t> history = prompt;
+  for (const int32_t token : Expected(5, 3)) history.push_back(token);
+  history.push_back(40);
+  EXPECT_EQ(device_->ingested, history);
+  EXPECT_EQ(device_->handoffs, 3u);
+  EXPECT_EQ(device_->handoff_length, history.size());
+  EXPECT_EQ(outcome.tokens, Expected(history.size(), 2));
+}
+
+TEST_F(Qwen38GraphEngineTest, AFirstTokenThatEndsTheTurnSkipsTheHandOff) {
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 4;
+  device_->overrides[5] = kEos;
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/20);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_TRUE(outcome.tokens.empty());
+  EXPECT_EQ(device_->handoffs, 0u);
+  EXPECT_EQ(device_->CallCount("begin:0"), 1u);
+  EXPECT_EQ(device_->status_checks, 0u);
+}
+
+TEST_F(Qwen38GraphEngineTest, CancelBetweenDenseChunksNeverHandsOffAndTheNextRequestStartsClean) {
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 4;
+  auto engine = MakeEngine();
+  auto first = engine->CreateRequest();
+  TurnOptions first_options;
+  first_options.request = first;
+  const uint64_t turn = first->BeginTurn(Prompt(12), first_options);
+  std::array<EngineEvent, 8> buffer;
+  ASSERT_EQ(engine->Run(buffer), 0u);  // chunk 1 of 3
+  EXPECT_TRUE(engine->CancelRequest(first, turn));
+  while (engine->HasPendingRequests()) engine->Run(buffer);
+  EXPECT_EQ(device_->handoffs, 0u);
+
+  const auto prompt = Prompt(9, 20);
+  auto second = Begin(*engine, prompt, /*max_generated_tokens=*/3);
+  const auto outcome = RunToCompletion(*engine, second);
+  EXPECT_EQ(device_->ingested, prompt);  // the chunk of the cancelled request is gone
+  EXPECT_EQ(device_->handoffs, 1u);
+  EXPECT_EQ(outcome.tokens, Expected(9, 3));
+}
+
+// ---- end-of-decode device status ---------------------------------------------------------------
+
+TEST_F(Qwen38GraphEngineTest, TheDeviceStatusIsCheckedOnceWhenATurnEndsWithNothingInFlight) {
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/7);
+
+  const auto outcome = RunToCompletion(*engine, request);
+
+  EXPECT_EQ(outcome.tokens, Expected(5, 7));
+  EXPECT_EQ(device_->status_checks, 1u);
+}
+
+TEST_F(Qwen38GraphEngineTest, DeviceErrorBitsAtTheEndOfATurnAreReportedAsAnExecutionFailure) {
+  device_->fail_status_check = true;
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), /*max_generated_tokens=*/3);
+
+  std::array<EngineEvent, 8> buffer;
+  bool saw_failure = false;
+  for (int i = 0; i < 100 && engine->HasPendingRequests() && !saw_failure; ++i) {
+    const size_t count = engine->Run(buffer);
+    for (size_t j = 0; j < count; ++j) {
+      if (buffer[j].flags & EngineEventFlagFailed) {
+        saw_failure = true;
+        EXPECT_EQ(buffer[j].error_code, EngineErrorCode::EngineExecutionFailure);
+      }
+    }
+  }
+  EXPECT_TRUE(saw_failure);
+}
+
 // ---- capabilities and errors -----------------------------------------------------------------
 
 TEST_F(Qwen38GraphEngineTest, CapabilitiesAreHonest) {

@@ -49,7 +49,8 @@ struct Qwen38StepResult {
 class Qwen38GraphSession {
  public:
   struct Options {
-    size_t prefill_chunk_tokens{2048};  // rounded down to an even number (S=2 pairs stay aligned), at least 2
+    size_t prefill_chunk_tokens{2048};  // S=2 step prefill: rounded down to an even number (pairs stay aligned), at least 2;
+                                        // replaced by Qwen38DecodeDevice::PrefillChunkTokens() when the device names one
     std::vector<int32_t> stop_tokens;   // EOS ids of the model: a cycle is not followed by another one after one of them
   };
 
