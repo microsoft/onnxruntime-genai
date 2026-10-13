@@ -31,6 +31,7 @@
 #include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
+#include "qwen38_graph.h"
 #include "speculative_decoding.h"
 #include "whisper.h"
 #include "parakeet.h"
@@ -1081,6 +1082,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
+  if (config->model.type == "qwen38_flash_graph")
+    return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
