@@ -446,6 +446,9 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
           dflash2_max_batch_size);
     }
   }
+  if (dflash2_drafter) {
+    dflash2_drafter->SetPrefixCheckpointCapacity(cache_manager->DraftCheckpointCapacity());
+  }
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
 
@@ -561,7 +564,10 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
       continue;
     }
     try {
-      cache_manager_->DropUnleasedDraftCheckpoints();
+      if (dflash2_drafter_->AvailablePrefixCheckpoints() == 0 &&
+          !cache_manager_->ReclaimDraftCheckpoint()) {
+        continue;
+      }
       auto checkpoint = dflash2_drafter_->CapturePrefix(feed.request, entry.target_cache_slots);
       if (checkpoint && !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
         cache_manager_->RecordPrefixPublicationRefusal();
@@ -763,7 +769,9 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       // match: it is true for any committed StopString result exactly like any other finish
       // reason, so this check below already skips proposing a new draft block for it with no
       // stop-specific condition needed.
-      if (!result.token_appended || result.done ||
+      // MTP is intentionally unavailable for scoped turns: its chained proposals may cross
+      // an opener before the target can switch to the grammar cursor.
+      if (!result.token_appended || result.done || entry.request->HasDelimitedGuidance() ||
           entry.request->DraftTokenValidationError() ||
           max_draft_tokens == 0) {
         continue;
@@ -1342,6 +1350,9 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   // Request joins the batch rather than inside a rollback-capable step. Reject both before any
   // Request mutation rather than letting a turn run without the guarantee its options promise.
   if (!dynamic_batching) {
+    if (options.delimited_guidance) {
+      throw std::runtime_error("Delimited guidance requires an Engine configured for dynamic batching.");
+    }
     if (!options.stop_strings.empty()) {
       throw std::runtime_error(
           "Stop strings require an Engine configured for dynamic batching.");
@@ -2562,6 +2573,20 @@ const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
 
 std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
     const TurnOptions& options) const {
+  if (options.delimited_guidance) {
+    if (!options.guidance_type.empty() || !options.guidance_data.empty()) {
+      throw std::invalid_argument("Delimited and whole-turn guidance cannot be combined.");
+    }
+    const auto& region = *options.delimited_guidance;
+    const auto& config = model_->config_->model;
+    auto params = std::make_shared<GeneratorParams>(*model_);
+    params->search.batch_size = 1;
+    params->SetGuidance("lark_grammar", region.grammar, false);
+    auto body = CreateGuidanceLogitsProcessor(std::move(params));
+    return std::make_unique<DelimitedGuidanceLogitsProcessor>(
+        std::move(body), *model_->p_device_, config.vocab_size,
+        config.eos_token_id, region.opening_token, region.closing_token);
+  }
   if (options.guidance_type.empty() && options.guidance_data.empty()) {
     return nullptr;
   }

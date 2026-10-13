@@ -196,6 +196,39 @@ python build.py --config RelWithDebInfo --test
 
 > Note: `build.py` automatically disables the native test phase for `--arm64` and `--arm64ec`. Android and iOS disable CMake unit-test targets during configuration; Android emulator tests are available only for an x86-64 Android build with `--build_java --android_run_emulator`.
 
+### Native shared-library exports
+
+On Linux and Android, `src/exports.map` restricts `onnxruntime-genai` exports to
+the public `Oga*` C API. Apple builds use `src/exported-symbols.lst` for the same
+restriction. C++ consumers use the header-only wrappers over that API;
+GenAI internals and statically linked dependencies, including curl, remain private
+to prevent symbol collisions with libraries loaded by the host process. This
+does not hide symbols in separately shipped shared dependencies. Windows retains
+its explicit `OGA_EXPORT` exports, and CUDA add-on export policies are unchanged.
+
+ELF links also localize definitions from all static archives with
+`--exclude-libs,ALL`, including GCC's implicitly linked `libstdc++_nonshared.a`
+compatibility archive on manylinux. Public APIs must remain in direct or OBJECT
+sources: placing them in STATIC archives would hide them despite the version script.
+
+With `ENABLE_TESTS=ON` on Linux or macOS, check that every public API declared in
+`src/ort_genai_c.h` is exported and no other symbols are exported. The ELF checker
+inspects externally visible definitions only; local symbols left in the dynamic
+symbol table by GCC toolset compatibility objects are not exports:
+
+```bash
+ctest --test-dir build/Linux/Release -R '^SharedLibraryExports$' --output-on-failure
+```
+
+The Linux x64 CPU and CUDA CI jobs run both `SharedLibraryExports` and
+`TelemetryHelpersTests` explicitly, alongside `SharedLibraryArchiveExports` and
+`SharedLibraryArchiveRuntime`, which check strong/weak archive-symbol isolation
+and runtime calls through the public fixture API.
+Windows x64 CPU CI runs `TelemetryHelpersTests`,
+including redaction and environment-read race regressions. Linux and macOS core release jobs also run
+the export checker on the installed library against its installed public header,
+even with `ENABLE_TESTS=OFF`; macOS checks the signed library.
+
 ### Python tests (pytest)
 
 Install the Python test dependencies and the wheel produced by your build:
@@ -211,7 +244,7 @@ The Python tests require model files. From the repository root, point pytest at 
 python -m pytest -sv test/python/test_onnxruntime_genai_api.py -k "test_greedy_search" --test_models test/models
 ```
 
-Drop the `-k` filter to run the whole file. See [`test/python/README.md`](test/python/README.md). Provider-specific tests may require additional dependency files under `test/python/<provider>/`.
+Drop the `-k` filter to run the whole file. See [`test/python/README.md`](../test/python/README.md). Provider-specific tests may require additional dependency files under `test/python/<provider>/`.
 
 ---
 

@@ -797,6 +797,7 @@ struct Config {
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       bool prefix_caching{true};
       bool prefix_caching_explicitly_set{};
+      size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -820,6 +821,9 @@ struct Config {
     struct Eligibility {
       std::optional<uint64_t> minimum_total_device_memory_bytes;
       std::optional<uint64_t> maximum_total_device_memory_bytes;
+      std::optional<uint64_t> minimum_free_device_memory_bytes;
+      std::optional<uint64_t> maximum_free_device_memory_bytes;
+      std::optional<bool> is_integrated;
     } eligibility;
 
     struct Overlay {
@@ -831,6 +835,7 @@ struct Config {
         std::optional<size_t> num_blocks;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
+        std::optional<size_t> dflash2_max_snapshots;
       } dynamic_batching;
 
       struct Search {
@@ -864,6 +869,13 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+struct RuntimeProfileDeviceFacts {
+  uint64_t total_device_memory_bytes{};
+  std::optional<bool> is_integrated;
+  // Unset means unknown: profiles with free-memory bounds do not match.
+  std::optional<uint64_t> free_device_memory_bytes;
+};
+void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
 

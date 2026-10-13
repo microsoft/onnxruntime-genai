@@ -853,8 +853,9 @@ class Qwen35MoETextModel(Qwen35TextModel):
             root_input=f"{moe_name}/output_0",
             scaled_input=shared_output,
             gate=shared_gate,
-            shape=["batch_size", "sequence_length", self.hidden_size],
+            shape=self.make_hidden_state_shape(),
         )
+        self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
         return f"{combine_name}/output_0"
 
     def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
@@ -875,7 +876,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
         gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
         gate_sigmoid_name = f"{basename}_gate/Sigmoid"
         self.make_sigmoid(
-            gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", 1]
+            gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=self.make_hidden_state_shape(last_dim=1)
         )
 
         return shared_output, f"{gate_sigmoid_name}/output_0"
