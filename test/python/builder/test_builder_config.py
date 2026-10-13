@@ -17,14 +17,90 @@ from builder_config import (  # noqa: E402
     apply_runtime_config,
     load_json_object,
     normalize_builder_config,
+    serialize_genai_config,
     validate_model_dependent_config,
 )
+
+
+@pytest.mark.parametrize("values", [
+    [], [1, 2, 3], [[1, 2], []],
+    [{"kind": "paged_kv", "layer_ids": [3, 7]}, {"enabled": True}],
+    ["brackets [ ]", "quote\"", "line\nbreak", None, False, 0.25],
+])
+def test_genai_config_serialization_keeps_arrays_inline(values):
+    config = {"model": {"values": values, "inputs": {"input_ids": "input_ids"}}, "search": {}}
+
+    serialized = serialize_genai_config(config)
+
+    assert json.loads(serialized) == config
+    assert f'        "values": {json.dumps(values)},' in serialized.splitlines()
+    assert '        "inputs": {\n            "input_ids": "input_ids"\n        }' in serialized
+    assert serialized.endswith("\n")
 
 
 def test_legacy_configuration_preserves_options():
     effective = normalize_builder_config("int4", "cuda", {"block_size": "64"})
     assert effective.version == 1
     assert effective.extra_options == {"block_size": "64"}
+
+
+@pytest.mark.parametrize("option", ["use_device_allocator_for_initializers"])
+@pytest.mark.parametrize("value", [True, False, "true", "false"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_always_enabled_options_are_no_longer_configurable(option, value, version):
+    with pytest.raises(ValueError, match="has been removed; this behavior is always enabled"):
+        normalize_builder_config("int4", "cuda", {option: value}, builder_config_version=version)
+
+
+@pytest.mark.parametrize("option", ["fuse_mlp_gate_up", "dflash2_fuse_gate_up"])
+@pytest.mark.parametrize("value", [True, False, "true", "false"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_upstream_fusion_options_are_preserved(option, value, version):
+    effective = normalize_builder_config("int4", "cuda", {option: value}, builder_config_version=version)
+    assert effective.extra_options[option] == value
+
+
+@pytest.mark.parametrize("option", ["qmoe_weights_prepacked", "matmulnbits_weights_prepacked"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_legacy_weight_packing_options_are_removed(option, version):
+    with pytest.raises(ValueError, match="has been removed"):
+        normalize_builder_config("int4", "cuda", {option: 0}, builder_config_version=version)
+
+
+@pytest.mark.parametrize(
+    "section,field",
+    [
+        ("moe", "weights_prepacked"),
+        ("format", "matmulnbits_weights_prepacked"),
+        ("runtime", "matmulnbits_weights_prepacked"),
+    ],
+)
+@pytest.mark.parametrize("component", ["target", "drafter"])
+def test_structured_weight_packing_options_are_removed(section, field, component):
+    options = {"quant_config": {section: {field: 0}}}
+    kwargs = {f"{component}_options": options}
+    if component == "drafter":
+        options["drafter_type"] = "mtp"
+
+    with pytest.raises(ValueError, match="has been removed"):
+        normalize_builder_config("int4", "cuda", **kwargs)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_target_fusion_optimization_reaches_builder(value):
+    effective = normalize_builder_config("int4", "cuda", target_options={"optimizations": {"fuse_mlp_gate_up": value}})
+    assert effective.extra_options["fuse_mlp_gate_up"] is value
+
+
+@pytest.mark.parametrize("drafter_type", ["none", "mtp", "dspark"])
+@pytest.mark.parametrize("value", [True, False])
+def test_drafter_fusion_rejects_unsupported_types(drafter_type, value):
+    with pytest.raises(ValueError, match="not supported"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            drafter_options={"drafter_type": drafter_type, "optimizations": {"fuse_mlp_gate_up": value}},
+        )
 
 
 def test_structured_fields_select_version_two():
@@ -80,6 +156,8 @@ def test_provider_defaults_are_recorded(provider, accuracy_level, moe_block_size
     quant = effective.target_options["quant_config"]
     assert quant["weights"]["accuracy_level"] == accuracy_level
     assert quant["moe"]["block_size"] == moe_block_size
+    assert quant["moe"]["weights_prepacked"] == 0
+    assert quant["format"]["matmulnbits_weights_prepacked"] == 0
     assert quant["format"]["use_qdq"] is (provider == "NvTensorRtRtx")
     assert effective.execution_provider == ("trt-rtx" if provider == "NvTensorRtRtx" else provider)
 
@@ -372,29 +450,32 @@ def test_dflash2_rejects_unsupported_body_block_size(tmp_path, block_size):
         )
 
 
-def test_dflash2_accepts_prepacked_body_weights_on_cuda(tmp_path):
+@pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "NvTensorRtRtx"])
+def test_dflash2_body_packing_is_derived_from_provider(tmp_path, provider):
     effective = normalize_builder_config(
         "int4",
-        "cuda",
+        provider,
         target_options={"attention": {"implementation": "paged"}},
         drafter_options={
             "drafter_type": "dflash2",
             "path": make_drafter_checkpoint(tmp_path),
             "quant_config": {
                 "weights": {"type": "int4", "block_size": 32},
-                "format": {"matmulnbits_weights_prepacked": 1},
             },
         },
     )
 
-    assert effective.drafter_options["quant_config"]["format"]["matmulnbits_weights_prepacked"] == 1
+    quant = effective.drafter_options["quant_config"]
+    assert quant["format"]["matmulnbits_weights_prepacked"] == 0
+    assert quant["moe"]["weights_prepacked"] == 0
 
 
-def test_dflash2_rejects_prepacked_body_weights_off_cuda(tmp_path):
-    with pytest.raises(ValueError, match="prepacked MatMulNBits weights are supported only on CUDA"):
+@pytest.mark.parametrize("provider", ["cuda", "cpu"])
+def test_dflash2_rejects_explicit_packing_controls(tmp_path, provider):
+    with pytest.raises(ValueError, match="weight packing is determined by the execution provider"):
         normalize_builder_config(
             "int4",
-            "cpu",
+            provider,
             target_options={"attention": {"implementation": "paged"}},
             drafter_options={
                 "drafter_type": "dflash2",
@@ -473,25 +554,22 @@ def test_dflash2_int2_fpa_uses_structured_quant_config(tmp_path):
     assert effective.runtime_config["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "1"
 
 
-def test_dflash2_int2_offline_prepack_uses_sm80_layout(tmp_path):
-    effective = normalize_builder_config(
-        "int4",
-        "cuda",
-        target_options={"attention": {"implementation": "paged"}},
-        drafter_options={
-            "drafter_type": "dflash2",
-            "path": make_drafter_checkpoint(tmp_path),
-            "quant_config": {
-                "weights": {"type": "int2", "block_size": 64},
-                "format": {"matmulnbits_weights_prepacked": 1},
+def test_dflash2_int2_offline_prepack_option_remains_removed(tmp_path):
+    with pytest.raises(ValueError, match="has been removed"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {
+                    "weights": {"type": "int2", "block_size": 64},
+                    "format": {"matmulnbits_weights_prepacked": 1},
+                },
             },
-        },
-        runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}}}},
-    )
-
-    quant = effective.extra_options["_drafter_quant_config"]
-    assert quant.format.matmulnbits_weights_prepacked == 1
-    assert effective.runtime_config["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "0"
+            runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}}}},
+        )
 
 
 @pytest.mark.parametrize("block_size", [16, 32, 256])
