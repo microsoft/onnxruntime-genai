@@ -1682,6 +1682,10 @@ def test_gemma4_split_vision_configured_run_options(
     configured_value = "1" if option_name == "terminate_session" else os.fspath(profile_prefix)
     if option_scope == "vision":
         config["model"]["vision"]["run_options"] = {option_name: configured_value}
+        if option_name == "enable_profiling":
+            config["model"]["vision"]["pipeline"][0]["encoder"]["run_options"] = {
+                option_name: os.fspath(tmp_path / "configured_encoder_profile")
+            }
     else:
         config["model"]["vision"]["pipeline"][0][option_scope]["run_options"] = {
             option_name: configured_value
@@ -1722,10 +1726,17 @@ def test_gemma4_split_vision_configured_run_options(
             for event in json.loads(path.read_text(encoding="utf-8"))
             if event.get("cat") == "Node"
         }
-        expected_nodes = ("Identity", "GatherND") if option_scope == "vision" else (
-            ("Identity",) if option_scope == "encoder" else ("GatherND",)
-        )
-        assert all(any(node in name for name in node_names) for node in expected_nodes)
+        expected_node = "Identity" if option_scope == "encoder" else "GatherND"
+        assert any(expected_node in name for name in node_names)
+        if option_scope == "vision":
+            encoder_profiles = list(tmp_path.glob("configured_encoder_profile*.json"))
+            assert encoder_profiles
+            assert any(
+                "Identity" in event["name"]
+                for path in encoder_profiles
+                for event in json.loads(path.read_text(encoding="utf-8"))
+                if event.get("cat") == "Node"
+            )
 
 
 def test_gemma4_pipelined_decoder_rejects_missing_image_features_output(
