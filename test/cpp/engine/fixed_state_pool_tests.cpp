@@ -16,6 +16,7 @@
 #include "dflash2_drafter.h"
 #include "engine_test_helpers.h"
 #include "models/model_state_manifest.h"
+#include "models/utils.h"
 
 namespace Generators {
 namespace test {
@@ -30,14 +31,16 @@ const void* const kRequestC = &kRequestStorageC;
 
 using Request = FixedStateReservationRequest;
 
-class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
+class FixedStateTestDevice final : public DeviceInterface {
  public:
-  explicit OffsetTensorViewsUnsupportedDevice(
+  explicit FixedStateTestDevice(
       DeviceInterface& inner, DeviceType type = DeviceType::CPU,
-      bool supports_transactional_fixed_state = true)
+      bool supports_transactional_fixed_state = true,
+      bool supports_offset_tensor_views = false)
       : inner_{inner},
         type_{type},
-        supports_transactional_fixed_state_{supports_transactional_fixed_state} {}
+        supports_transactional_fixed_state_{supports_transactional_fixed_state},
+        supports_offset_tensor_views_{supports_offset_tensor_views} {}
 
   DeviceType GetType() const override { return type_; }
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
@@ -66,7 +69,7 @@ class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
     return inner_.CreateKeyValueCache(state);
   }
   void Synchronize() override { inner_.Synchronize(); }
-  bool SupportsOffsetTensorViews() const override { return false; }
+  bool SupportsOffsetTensorViews() const override { return supports_offset_tensor_views_; }
   bool SupportsTransactionalFixedState() const override {
     return supports_transactional_fixed_state_;
   }
@@ -75,6 +78,7 @@ class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
   DeviceInterface& inner_;
   DeviceType type_;
   bool supports_transactional_fixed_state_;
+  bool supports_offset_tensor_views_;
 };
 
 class ScopedKeyValueCacheDevice {
@@ -133,6 +137,20 @@ void ExpectInputRow(const FixedStateBinding& binding, size_t row,
   const auto* data = binding.input->GetTensorData<float>() + row * expected.size();
   for (size_t index = 0; index < expected.size(); ++index) {
     EXPECT_FLOAT_EQ(data[index], expected[index]);
+  }
+}
+
+void FillHalfTensor(OrtValue& tensor, float value) {
+  std::fill_n(tensor.GetTensorMutableData<Ort::Float16_t>(), RowElements(tensor),
+              Ort::Float16_t{FastFloat32ToFloat16(value)});
+}
+
+void ExpectHalfInputRow(const FixedStateBinding& binding,
+                        std::span<const float> expected) {
+  ASSERT_EQ(RowElements(*binding.input), expected.size());
+  const auto* data = binding.input->GetTensorData<Ort::Float16_t>();
+  for (size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_FLOAT_EQ(ToFloat32(data[index]), expected[index]);
   }
 }
 
@@ -228,6 +246,14 @@ TEST_F(FixedStatePoolTest, UsesManifestBindingOrderAndSessionGeometry) {
   EXPECT_EQ(reservation.TargetTokens()[0], 1u);
 }
 
+TEST_F(FixedStatePoolTest, StateBankBytesPricesPersistentMtpScratchWithoutAllocating) {
+  EXPECT_EQ(FixedStatePool::StateBankBytes(*model_, 1), 112u);
+  EXPECT_EQ(FixedStatePool::StateBankBytes(*model_, 4), 448u);
+  EXPECT_EQ(FixedStatePool::StateBankBytes(*model_, 0), 0u);
+  EXPECT_THROW(FixedStatePool::StateBankBytes(*model_, std::numeric_limits<size_t>::max()),
+               std::runtime_error);
+}
+
 TEST_F(FixedStatePoolTest, ReusesPreallocatedStagingAcrossReservationBatchSizes) {
   auto pool = MakePool(2);
   std::vector<void*> input_addresses;
@@ -294,6 +320,187 @@ TEST_F(FixedStatePoolTest, FreshRowsGatherZeroAndCommitPublishes) {
   auto requests = One(kRequestA);
   auto reservation = pool->Reserve(requests);
   ExpectInputRows(reservation, 0, 7.0f);  // Committed state is now gathered for the resident request.
+}
+
+TEST(FixedStatePoolComponentsTest, InitializesAndCommitsPleAndIndexerState) {
+  auto model = LoadSyntheticFixedComponentsModel();
+  FixedStateTestDevice cuda_device{*model->p_device_kvcache_, DeviceType::CUDA,
+                                   /*supports_transactional_fixed_state=*/true,
+                                   /*supports_offset_tensor_views=*/true};
+  ScopedKeyValueCacheDevice scoped_device{*model, cuda_device};
+  FixedStatePool pool{model, 1};
+
+  auto requests = One(kRequestA);
+  {
+    auto reservation = pool.Reserve(requests);
+    ASSERT_EQ(reservation.Bindings().size(), 5u);
+    using Kind = Config::Model::Decoder::StateGroupKind;
+    EXPECT_EQ(reservation.Bindings()[0].kind, Kind::FixedPle);
+    EXPECT_STREQ(reservation.Bindings()[0].input_name, "past.0.ple_tokens");
+    EXPECT_STREQ(reservation.Bindings()[1].input_name, "past.0.ple_conv");
+    EXPECT_EQ(reservation.Bindings()[2].kind, Kind::FixedIndexer);
+    EXPECT_STREQ(reservation.Bindings()[2].input_name, "past.1.indexer_key");
+    EXPECT_STREQ(reservation.Bindings()[3].input_name, "past.1.indexer_kv_buffer");
+    EXPECT_STREQ(reservation.Bindings()[4].input_name, "past.1.indexer_state_lengths");
+    EXPECT_EQ(reservation.Bindings()[2].input->GetTensorMutableData<void>(),
+              reservation.Bindings()[2].output->GetTensorMutableData<void>());
+    EXPECT_NE(reservation.Bindings()[3].input->GetTensorMutableData<void>(),
+              reservation.Bindings()[3].output->GetTensorMutableData<void>());
+    EXPECT_NE(reservation.Bindings()[4].input->GetTensorMutableData<void>(),
+              reservation.Bindings()[4].output->GetTensorMutableData<void>());
+
+    const auto& token_binding = reservation.Bindings()[0];
+    const auto* token_input = token_binding.input->GetTensorData<int64_t>();
+    EXPECT_EQ(token_input[0], 7);
+    EXPECT_EQ(token_input[1], 7);
+    std::fill_n(token_binding.output->GetTensorMutableData<int64_t>(), 2, 11);
+
+    const auto& conv_binding = reservation.Bindings()[1];
+    const auto* conv_input = conv_binding.input->GetTensorData<Ort::Float16_t>();
+    EXPECT_TRUE(std::all_of(conv_input, conv_input + RowElements(*conv_binding.input),
+                            [](Ort::Float16_t value) { return ToFloat32(value) == 0.0f; }));
+    FillHalfTensor(*conv_binding.output, 2.0f);
+    for (size_t index = 2; index < 4; ++index) {
+      const auto& binding = reservation.Bindings()[index];
+      const auto elements = RowElements(*binding.input);
+      const auto* input = binding.input->GetTensorData<float>();
+      EXPECT_TRUE(std::all_of(input, input + elements, [](float value) { return value == 0.0f; }));
+      std::fill_n(binding.output->GetTensorMutableData<float>(), elements, 2.0f);
+    }
+    const auto& lengths_binding = reservation.Bindings()[4];
+    const auto* lengths_input = lengths_binding.input->GetTensorData<int32_t>();
+    EXPECT_EQ(lengths_input[0], 0);
+    EXPECT_EQ(lengths_input[1], 0);
+    std::fill_n(lengths_binding.output->GetTensorMutableData<int32_t>(), 2, 3);
+    reservation.Commit();
+  }
+
+  auto resident = pool.Reserve(requests);
+  EXPECT_EQ(resident.Bindings()[2].input->GetTensorMutableData<void>(),
+            resident.Bindings()[2].output->GetTensorMutableData<void>());
+  EXPECT_NE(resident.Bindings()[3].input->GetTensorMutableData<void>(),
+            resident.Bindings()[3].output->GetTensorMutableData<void>());
+  EXPECT_NE(resident.Bindings()[4].input->GetTensorMutableData<void>(),
+            resident.Bindings()[4].output->GetTensorMutableData<void>());
+  const auto* token_input = resident.Bindings()[0].input->GetTensorData<int64_t>();
+  EXPECT_EQ(token_input[0], 11);
+  EXPECT_EQ(token_input[1], 11);
+  ExpectHalfInputRow(resident.Bindings()[1], std::array<float, 12>{
+                                                 2, 2, 2, 2, 2, 2,
+                                                 2, 2, 2, 2, 2, 2});
+  for (size_t index = 2; index < 4; ++index) {
+    const auto& binding = resident.Bindings()[index];
+    const auto elements = RowElements(*binding.input);
+    const auto* input = binding.input->GetTensorData<float>();
+    EXPECT_TRUE(std::all_of(input, input + elements, [](float value) { return value == 2.0f; }));
+  }
+  const auto* lengths_input = resident.Bindings()[4].input->GetTensorData<int32_t>();
+  EXPECT_EQ(lengths_input[0], 3);
+  EXPECT_EQ(lengths_input[1], 3);
+}
+
+TEST(FixedStatePoolComponentsTest, KeepsSeparateIndexerKeyBuffersWhenSharingIsDisabled) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-fixed-components");
+  config->search.past_present_share_buffer = false;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  FixedStateTestDevice cuda_device{*model->p_device_kvcache_, DeviceType::CUDA,
+                                   /*supports_transactional_fixed_state=*/true,
+                                   /*supports_offset_tensor_views=*/true};
+  ScopedKeyValueCacheDevice scoped_device{*model, cuda_device};
+  FixedStatePool pool{model, 1};
+
+  auto reservation = pool.Reserve(One(kRequestA));
+  ASSERT_EQ(reservation.Bindings().size(), 5u);
+  EXPECT_NE(reservation.Bindings()[2].input->GetTensorMutableData<void>(),
+            reservation.Bindings()[2].output->GetTensorMutableData<void>());
+}
+
+TEST(FixedStatePoolComponentsTest, ReplaysPleAndIndexerUpdatesAcrossBlockBoundaryFromZero) {
+  auto model = LoadSyntheticFixedComponentsModel();
+  FixedStatePool pool{model, 1};
+  EXPECT_TRUE(pool.SupportsStateUpdates());
+  EXPECT_EQ(pool.StateUpdateCapacity(), 7u);
+
+  {
+    auto reservation = pool.Reserve(One(kRequestA, 8, 7));
+    auto bindings = reservation.Bindings();
+    ASSERT_EQ(bindings.size(), 5u);
+    auto* token_updates = bindings[0].state_update_value->GetTensorMutableData<int64_t>();
+    for (size_t token = 0; token < 7; ++token) {
+      token_updates[token * 2] = static_cast<int64_t>(100 + token * 2);
+      token_updates[token * 2 + 1] = static_cast<int64_t>(101 + token * 2);
+    }
+    auto* conv_updates = bindings[1].state_update_value->GetTensorMutableData<Ort::Float16_t>();
+    auto* indexer_updates = bindings[2].state_update_value->GetTensorMutableData<float>();
+    for (size_t token = 0; token < 7; ++token) {
+      for (size_t channel = 0; channel < 4; ++channel) {
+        conv_updates[token * 4 + channel] =
+            Ort::Float16_t{FastFloat32ToFloat16(static_cast<float>(token * 10 + channel))};
+      }
+      indexer_updates[token * 2] = static_cast<float>(token * 10);
+      indexer_updates[token * 2 + 1] = static_cast<float>(token * 10 + 1);
+    }
+    reservation.CommitPrefix(0, 8, 5);
+    reservation.Commit();
+  }
+
+  auto resident = pool.Reserve(One(kRequestA, 5));
+  EXPECT_EQ(resident.Bindings()[0].input->GetTensorData<int64_t>()[0], 108);
+  EXPECT_EQ(resident.Bindings()[0].input->GetTensorData<int64_t>()[1], 109);
+  const std::array<float, 12> expected_conv{
+      20, 30, 40, 21, 31, 41, 22, 32, 42, 23, 33, 43};
+  ExpectHalfInputRow(resident.Bindings()[1], expected_conv);
+  const auto* key = resident.Bindings()[2].input->GetTensorData<float>();
+  EXPECT_FLOAT_EQ(key[0], 30);
+  EXPECT_FLOAT_EQ(key[1], 31);
+  const auto* buffer = resident.Bindings()[3].input->GetTensorData<float>();
+  EXPECT_FLOAT_EQ(buffer[0], 40);
+  EXPECT_FLOAT_EQ(buffer[1], 41);
+  const auto* lengths = resident.Bindings()[4].input->GetTensorData<int32_t>();
+  EXPECT_EQ(lengths[0], 1);
+  EXPECT_EQ(lengths[1], 1);
+}
+
+TEST(FixedStatePoolComponentsTest, ReplaysIndexerUpdateAcrossBlockBoundaryFromThree) {
+  auto model = LoadSyntheticFixedComponentsModel();
+  FixedStatePool pool{model, 1};
+  {
+    auto initial = pool.Reserve(One(kRequestA, 3));
+    std::fill_n(initial.Bindings()[0].output->GetTensorMutableData<int64_t>(), 2, 7);
+    FillHalfTensor(*initial.Bindings()[1].output, 0.0f);
+    std::fill_n(initial.Bindings()[2].output->GetTensorMutableData<float>(), 16, 9.0f);
+    auto* buffer = initial.Bindings()[3].output->GetTensorMutableData<float>();
+    std::copy_n(std::array<float, 6>{1, 2, 3, 4, 5, 6}.begin(), 6, buffer);
+    auto* lengths = initial.Bindings()[4].output->GetTensorMutableData<int32_t>();
+    lengths[0] = 2;
+    lengths[1] = 3;
+    initial.Commit();
+  }
+  {
+    auto reservation = pool.Reserve(One(kRequestA, 11, 7));
+    std::fill_n(reservation.Bindings()[0].state_update_value->GetTensorMutableData<int64_t>(), 14, 8);
+    FillHalfTensor(*reservation.Bindings()[1].state_update_value, 0.0f);
+    auto* updates = reservation.Bindings()[2].state_update_value->GetTensorMutableData<float>();
+    for (size_t token = 0; token < 7; ++token) {
+      updates[token * 2] = static_cast<float>(100 + token * 10);
+      updates[token * 2 + 1] = static_cast<float>(101 + token * 10);
+    }
+    reservation.CommitPrefix(0, 8, 3);
+    reservation.Commit();
+  }
+
+  auto resident = pool.Reserve(One(kRequestA, 6));
+  const auto* key = resident.Bindings()[2].input->GetTensorData<float>();
+  EXPECT_FLOAT_EQ(key[4], 100);
+  EXPECT_FLOAT_EQ(key[5], 101);
+  const auto* buffer = resident.Bindings()[3].input->GetTensorData<float>();
+  EXPECT_FLOAT_EQ(buffer[0], 110);
+  EXPECT_FLOAT_EQ(buffer[1], 111);
+  EXPECT_FLOAT_EQ(buffer[2], 120);
+  EXPECT_FLOAT_EQ(buffer[3], 121);
+  const auto* lengths = resident.Bindings()[4].input->GetTensorData<int32_t>();
+  EXPECT_EQ(lengths[0], 3);
+  EXPECT_EQ(lengths[1], 2);
 }
 
 TEST_F(FixedStatePoolTest, SlotReuseGathersZeroAfterRelease) {
@@ -1469,7 +1676,7 @@ TEST_F(FixedStatePoolTest, UnsupportedOffsetViewsUseEquivalentStagingBindings) {
   }
 
   auto fallback_model = LoadSyntheticHybridModel();
-  OffsetTensorViewsUnsupportedDevice fallback_device{
+  FixedStateTestDevice fallback_device{
       *fallback_model->p_device_kvcache_};
   ScopedKeyValueCacheDevice scoped_device{*fallback_model, fallback_device};
   FixedStatePool fallback_pool{fallback_model, 3};
@@ -1483,7 +1690,7 @@ TEST_F(FixedStatePoolTest, GenericDeviceSupportsOrdinaryStagingWithoutStateUpdat
     group.state_update.reset();
   }
   auto generic_model = CreateModel(GetOrtEnv(), std::move(config));
-  OffsetTensorViewsUnsupportedDevice generic_device{
+  FixedStateTestDevice generic_device{
       *generic_model->p_device_kvcache_, DeviceType::DML};
   ScopedKeyValueCacheDevice scoped_device{*generic_model, generic_device};
   FixedStatePool pool{generic_model, 2};
@@ -1515,7 +1722,7 @@ TEST_F(FixedStatePoolTest, RejectsGenericDeviceWithoutTransactionalFixedStateSup
     group.state_update.reset();
   }
   auto generic_model = CreateModel(GetOrtEnv(), std::move(config));
-  OffsetTensorViewsUnsupportedDevice generic_device{
+  FixedStateTestDevice generic_device{
       *generic_model->p_device_kvcache_, DeviceType::DML, false};
   ScopedKeyValueCacheDevice scoped_device{*generic_model, generic_device};
 
@@ -1531,7 +1738,7 @@ TEST_F(FixedStatePoolTest, RejectsGenericDeviceWithoutTransactionalFixedStateSup
 
 TEST_F(FixedStatePoolTest, GenericDeviceRejectsCompactStateReplay) {
   auto replay_model = LoadSyntheticHybridModel();
-  OffsetTensorViewsUnsupportedDevice generic_device{
+  FixedStateTestDevice generic_device{
       *replay_model->p_device_kvcache_, DeviceType::DML};
   ScopedKeyValueCacheDevice scoped_device{*replay_model, generic_device};
 
@@ -1939,6 +2146,38 @@ TEST_F(FixedStatePoolTest, DirectBindingStorageOutlivesPool) {
 }
 
 #if USE_CUDA
+TEST(CudaFixedStatePoolTest, ReplaysHalfSnapshotAtAcceptedPrefix) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto& device = *model->p_device_kvcache_;
+  const std::array<uint16_t, 12> values{
+      0x3c00, 0x4000, 0x4200, 0x4400,
+      0x4500, 0x4600, 0x4700, 0x4800,
+      0x4880, 0x4900, 0x4980, 0x4a00};
+  auto updates = device.Allocate<uint16_t>(values.size());
+  auto destination = device.Allocate<uint16_t>(4);
+  updates.CopyFromCpu(values);
+  destination.CopyFromCpu(std::array<uint16_t, 4>{});
+
+  StateUpdateReplayDesc descriptor{};
+  descriptor.kind = StateUpdateReplayKind::Snapshot;
+  descriptor.value = updates.Span().data();
+  descriptor.destination_state = destination.Span().data();
+  descriptor.state_width = 4;
+  descriptor.capacity = 3;
+  descriptor.kept_count = 2;
+  descriptor.element_size = sizeof(uint16_t);
+  device.ReplayStateUpdates(&descriptor, 1);
+
+  const auto actual = destination.CopyDeviceToCpu();
+  ASSERT_EQ(actual.size(), 4u);
+  for (size_t index = 0; index < actual.size(); ++index) {
+    EXPECT_EQ(actual[index], values[4 + index]);
+  }
+}
+
 TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
   ClearProviders(*config);
@@ -2055,8 +2294,10 @@ TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
         for (size_t k = 0; k < g.key_width; ++k) {
           float s = reference[(h * g.value_width + v) * g.key_width + k];
           for (size_t t = 0; t < g.kept; ++t) {
-            s = std::fma(key[(t * g.key_heads + kh) * g.key_width + k],
-                         delta[(t * g.heads + h) * g.value_width + v], s * decay[t * g.heads + h]);
+            const volatile float scaled_state = s * decay[t * g.heads + h];
+            const volatile float update = key[(t * g.key_heads + kh) * g.key_width + k] *
+                                          delta[(t * g.heads + h) * g.value_width + v];
+            s = scaled_state + update;
           }
           reference[(h * g.value_width + v) * g.key_width + k] = s;
         }
@@ -2070,20 +2311,19 @@ TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
     capsule_device.CopyFromCpu(capsule);
     const float* capsule_base = capsule_device.Span().data();
     descriptors.push_back(StateUpdateReplayDesc{
-        source.Span().data(),
-        destination.Span().data(),
-        nullptr,
-        capsule_base,
-        capsule_base + g.capacity * g.heads,
-        capsule_base + g.capacity * (g.heads + g.key_heads * g.key_width),
-        g.heads,
-        g.value_width,
-        g.key_width,
-        g.key_heads,
-        static_cast<uint32_t>(g.capacity),
-        static_cast<uint32_t>(g.kept),
-        static_cast<uint32_t>(sizeof(float)),
-        StateUpdateReplayKind::GatedDeltaNet,
+        .source_state = source.Span().data(),
+        .destination_state = destination.Span().data(),
+        .decay = capsule_base,
+        .key = capsule_base + g.capacity * g.heads,
+        .delta = capsule_base + g.capacity * (g.heads + g.key_heads * g.key_width),
+        .channel_count = g.heads,
+        .state_width = g.value_width,
+        .key_width = g.key_width,
+        .key_head_count = g.key_heads,
+        .capacity = static_cast<uint32_t>(g.capacity),
+        .kept_count = static_cast<uint32_t>(g.kept),
+        .element_size = static_cast<uint32_t>(sizeof(float)),
+        .kind = StateUpdateReplayKind::GatedDeltaNet,
     });
     keepalive.push_back(source);
     keepalive.push_back(capsule_device);

@@ -621,6 +621,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetGraphOptimizationLevel(GraphOpti
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::SetDeterministicCompute(bool value) {
+  Ort::ThrowOnError(Ort::api->SetDeterministicCompute(this, value));
+  return *this;
+}
+
 inline OrtSessionOptions& OrtSessionOptions::SetOptimizedModelFilePath(const ORTCHAR_T* optimized_model_filepath) {
   Ort::ThrowOnError(Ort::api->SetOptimizedModelFilePath(this, optimized_model_filepath));
   return *this;

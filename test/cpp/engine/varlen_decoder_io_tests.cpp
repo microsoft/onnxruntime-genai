@@ -53,6 +53,20 @@ TEST(VarlenDecoderIOTest, PackedHybridPositionIdsAcceptTokenVectorOrMropeMatrix)
                std::runtime_error);
 }
 
+TEST(VarlenDecoderIOTest, PackedHiddenStatesUseExportedInputWidth) {
+  EXPECT_NO_THROW(ValidatePackedHiddenStatesInputShape(
+    std::array<int64_t, 2>{3, 10240}, 3,
+    std::array<int64_t, 2>{-1, 10240}));
+  EXPECT_THROW(ValidatePackedHiddenStatesInputShape(
+           std::array<int64_t, 2>{3, 2560}, 3,
+           std::array<int64_t, 2>{-1, 10240}),
+         std::runtime_error);
+  EXPECT_THROW(ValidatePackedHiddenStatesInputShape(
+           std::array<int64_t, 2>{2, 10240}, 3,
+           std::array<int64_t, 2>{-1, 10240}),
+         std::runtime_error);
+}
+
 TEST(VarlenDecoderIOTest, EagerMetadataUsesExactStepBounds) {
   StepPlan plan;
   RequestStepPlan first;
@@ -315,6 +329,24 @@ TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {
   EXPECT_EQ(ids.size(), 5u);
 }
 
+TEST(VarlenDecoderIOTest, GraphIdSeparatesMtpScratchBanksFromCommittedState) {
+  GraphAnnotationIds ids;
+  const auto committed = DecodeGraphKey(1, 1, 8, 3);
+  const auto first_bank = DecodeGraphKey(1, 1, 8, 3, 1);
+  const auto second_bank = DecodeGraphKey(1, 1, 8, 3, 2);
+  ASSERT_TRUE(committed.has_value());
+  ASSERT_TRUE(first_bank.has_value());
+  ASSERT_TRUE(second_bank.has_value());
+  const int committed_id = ids.Id(*committed);
+  const int first_id = ids.Id(*first_bank);
+  const int second_id = ids.Id(*second_bank);
+  EXPECT_NE(committed_id, first_id);
+  EXPECT_NE(committed_id, second_id);
+  EXPECT_NE(first_id, second_id);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, 3, 1)), first_id);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, 3, 2)), second_id);
+}
+
 TEST(VarlenDecoderIOTest, GraphIdIsStableForARepeatedShape) {
   GraphAnnotationIds ids;
   const auto key = DecodeGraphKey(/*batch_size=*/2, /*tokens_per_request=*/8,
@@ -433,6 +465,21 @@ TEST(VarlenDecoderIOTest, PacksMetadataInOperatorContractOrder) {
   EXPECT_EQ(packed[0], 3);
   EXPECT_EQ(packed[1], 513);
   EXPECT_EQ(packed[2], 257);
+}
+
+TEST(VarlenDecoderIOTest, PacksSelectedOnlySparseMetadataInOperatorContractOrder) {
+  AttentionMetadataValues metadata;
+  metadata.max_query_len_bound = 3;
+  metadata.max_kv_len_bound = 513;
+  metadata.max_kv_len_lower_bound = 257;
+  const auto packed = PackSparseAttentionMetadata(metadata);
+
+  static_assert(packed.size() == kSparseAttentionMetadataElementCount);
+  EXPECT_EQ(packed[0], 3);
+  EXPECT_EQ(packed[1], 0);
+  EXPECT_EQ(packed[2], 513);
+  EXPECT_EQ(packed[3], 0);
+  EXPECT_EQ(packed[4], 513);
 }
 
 TEST(VarlenDecoderIOTest, RejectsZeroSizedGraphBounds) {
