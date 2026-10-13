@@ -236,8 +236,11 @@ def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
     assert model.values == [("q_rotated", ir.DataType.FLOAT, ["batch_size", "sequence_length", 2048])]
 
 
-def test_qwen35_paged_mrotary_embedding_runs_with_merged_ort_abi(tmp_path):
+@pytest.mark.parametrize("ep", ["cuda", "trt-rtx"])
+def test_qwen35_paged_mrotary_embedding_runs_with_merged_ort_abi(tmp_path, ep):
     model = Model.__new__(Model)
+    model.ep = ep
+    model.make_ep_expansions_init()
     model.use_paged_attention = True
     model.hidden_size = 16
     model.head_size = 8
