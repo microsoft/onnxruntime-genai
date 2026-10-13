@@ -1,0 +1,508 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+//
+// Qwen3.8-Flash-Next NVFP4 (model.type "qwen38_flash_graph"), fast prefill: shared weight pool, dense chunked prefill,
+// dense -> packed state hand-off, batched KV-only head prefill. See qwen38_graph.h and tools/qwen38_graph/README.md.
+#include "generator/generators.h"
+#include "logging.h"
+#include "qwen38_graph.h"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <mutex>
+#include <sstream>
+#include <thread>
+
+namespace Generators {
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+double SecondsSince(Clock::time_point start) {
+  return std::chrono::duration<double>(Clock::now() - start).count();
+}
+
+float Bf16ToFloat(uint16_t bits) {
+  const uint32_t widened = static_cast<uint32_t>(bits) << 16;
+  float value;
+  std::memcpy(&value, &widened, sizeof(value));
+  return value;
+}
+
+}  // namespace
+
+// ------------------------------------------------------------------------------------------------
+// Shared weight pool
+// ------------------------------------------------------------------------------------------------
+Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::path& manifest_path,
+                                   const std::filesystem::path& root, const OrtMemoryInfo& memory_info, int threads)
+    : plane_{plane} {
+  Qwen38WeightPoolManifest manifest = ParseQwen38WeightPoolManifest(manifest_path);
+  sessions_ = std::move(manifest.sessions);
+  for (auto& source : manifest.entries) {
+    Entry entry;
+    entry.dtype = source.dtype;
+    entry.offset = source.offset;
+    entry.length = source.length;
+    entry.shape = std::move(source.shape);
+    entry.file = root / source.file;
+    entries_.push_back(std::move(entry));
+  }
+
+  const auto start = Clock::now();
+  for (auto& entry : entries_) {
+    void* p = nullptr;
+    plane_.Check(plane_.device_alloc(&p, std::max<uint64_t>(entry.length, 16)), "cudaMalloc(weight pool)");
+    entry.ptr = static_cast<uint8_t*>(p);
+    bytes += entry.length;
+    entry.value = OrtValue::CreateTensor(memory_info, entry.ptr, static_cast<size_t>(entry.length), entry.shape,
+                                         static_cast<ONNXTensorElementDataType>(entry.dtype));
+  }
+
+  // Copy the files in parallel: pinned staging buffer per worker, unbuffered reads from the page cache, async H2D on a
+  // private stream.
+  constexpr size_t kStage = size_t{64} << 20;
+  std::atomic<size_t> next{0};
+  std::mutex error_mutex;
+  std::string error;
+  auto worker = [&]() {
+    void* stage = nullptr;
+    void* stream = nullptr;
+    std::map<std::filesystem::path, std::ifstream> files;
+    try {
+      plane_.Check(plane_.host_alloc(&stage, kStage), "cudaHostAlloc(pool stage)");
+      plane_.Check(plane_.stream_create(&stream), "cudaStreamCreate");
+      for (size_t i = next.fetch_add(1); i < entries_.size(); i = next.fetch_add(1)) {
+        Entry& entry = entries_[i];
+        auto [found, inserted] = files.try_emplace(entry.file);
+        std::ifstream& file = found->second;
+        if (inserted) {
+          file.rdbuf()->pubsetbuf(nullptr, 0);
+          file.open(entry.file, std::ios::binary);
+        }
+        if (!file) throw std::runtime_error("qwen38_graph: cannot open the weight file " + entry.file.string());
+        for (uint64_t done = 0; done < entry.length;) {
+          const size_t n = static_cast<size_t>(std::min<uint64_t>(kStage, entry.length - done));
+          file.clear();
+          file.seekg(static_cast<std::streamoff>(entry.offset + done));
+          file.read(static_cast<char*>(stage), static_cast<std::streamsize>(n));
+          if (static_cast<size_t>(file.gcount()) != n)
+            throw std::runtime_error("qwen38_graph: short read of the weight file " + entry.file.string());
+          plane_.Check(plane_.memcpy_h2d(entry.ptr + done, stage, n, stream), "weight upload");
+          plane_.Check(plane_.stream_sync(stream), "weight upload sync");
+          done += n;
+        }
+      }
+    } catch (const std::exception& e) {
+      std::lock_guard<std::mutex> lock(error_mutex);
+      if (error.empty()) error = e.what();
+      next.store(entries_.size());
+    }
+    if (stream) plane_.stream_destroy(stream);
+    if (stage) plane_.host_free(stage);
+  };
+  std::vector<std::thread> workers;
+  for (int t = 0; t < threads; ++t) workers.emplace_back(worker);
+  for (auto& t : workers) t.join();
+  if (!error.empty()) {
+    for (auto& entry : entries_) {
+      entry.value.reset();
+      if (entry.ptr) plane_.device_free(entry.ptr);
+    }
+    entries_.clear();
+    throw std::runtime_error(error);
+  }
+  seconds = SecondsSince(start);
+  if (g_log.enabled)
+    Log("qwen38_graph") << "weight pool: " << entries_.size() << " initializers, " << bytes / double(1 << 30) << " GiB in "
+                        << seconds << " s" << std::endl;
+}
+
+Qwen38WeightPool::~Qwen38WeightPool() {
+  for (auto& entry : entries_) {
+    entry.value.reset();
+    if (entry.ptr) plane_.device_free(entry.ptr);
+  }
+}
+
+size_t Qwen38WeightPool::AddTo(OrtSessionOptions& options, const std::string& label) const {
+  auto it = sessions_.find(label);
+  if (it == sessions_.end()) return 0;
+  for (const auto& [name, id] : it->second) options.AddInitializer(name.c_str(), *entries_[id].value);
+  return it->second.size();
+}
+
+// ------------------------------------------------------------------------------------------------
+// QSA constants
+// ------------------------------------------------------------------------------------------------
+Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem::path& index_path,
+                                       const std::filesystem::path& root, void* stream) {
+  const Qwen38QsaConstantsDescription description = ParseQwen38QsaConstantsIndex(index_path);
+  epsilon = description.epsilon;
+  target.width = head.width = description.width;
+  std::ifstream data(root / description.file, std::ios::binary | std::ios::ate);
+  if (!data) throw std::runtime_error("qwen38_graph: cannot open the QSA constants data " + description.file);
+  const size_t total = static_cast<size_t>(data.tellg());
+  std::vector<uint8_t> host(total);
+  data.seekg(0);
+  data.read(reinterpret_cast<char*>(host.data()), static_cast<std::streamsize>(total));
+  buffer_ = PlaneBuffer(plane, total, stream);
+  plane.Check(plane.memcpy_h2d(buffer_.data(), host.data(), total, stream), "QSA constants upload");
+  plane.Check(plane.stream_sync(stream), "QSA constants sync");  // `host` dies here
+  for (const auto& item : description.items) {
+    if (item.offset + item.bytes > total) throw std::runtime_error("qwen38_graph: QSA constant outside of the data file: " + item.name);
+    Set& set = item.set == "head" ? head : target;
+    const uint8_t* ptr = buffer_.data() + item.offset;
+    if (item.name == "cos")
+      set.cos = ptr;
+    else if (item.name == "sin")
+      set.sin = ptr;
+    else if (item.name.rfind("knorm.", 0) == 0)
+      set.knorm[std::stoi(item.name.substr(6))] = ptr;
+  }
+  if (!target.cos || !head.cos || target.knorm.empty() || head.knorm.empty())
+    throw std::runtime_error("qwen38_graph: incomplete QSA constants " + index_path.string());
+}
+
+// ------------------------------------------------------------------------------------------------
+// Fast prefill state
+// ------------------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kRatio = 4;  // PackedQSAIndexer pooling ratio
+
+int LayerOf(const std::string& name) {
+  const size_t first = name.find('.');
+  const size_t second = name.find('.', first + 1);
+  return std::stoi(name.substr(first + 1, second - first - 1));
+}
+
+std::string TailOf(const std::string& name) {
+  const size_t first = name.find('.');
+  const size_t second = name.find('.', first + 1);
+  return name.substr(second + 1);
+}
+
+}  // namespace
+
+void Qwen38GraphEngine::BuildFastPrefill() {
+  const auto& q = model_.config_->model.qwen38_graph;
+  if (!model_.session_dense_ || !model_.session_head_kv_ || !model_.qsa_constants_)
+    throw std::runtime_error("qwen38_graph: prefill.enabled requires the dense, head_kv sessions and the QSA constants");
+  auto fast = std::make_unique<FastPrefillState>();
+  fast->dense = model_.session_dense_.get();
+  fast->head_kv = model_.session_head_kv_.get();
+  fast->dense_info.Add(*fast->dense);
+  fast->head_kv_info.Add(*fast->head_kv);
+  fast->chunk = q.prefill.chunk;
+  fast->consts = model_.qsa_constants_.get();
+  if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
+  fast->dense_inputs = fast->dense->GetInputNames();
+  fast->dense_outputs = fast->dense->GetOutputNames();
+
+  const size_t slots = static_cast<size_t>(capacity_) + 8;
+  {
+    std::vector<int64_t> ones(slots, 1);
+    fast->ones = PlaneBuffer(plane_, slots * 8, stream_);
+    plane_.Check(plane_.memcpy_h2d(fast->ones.data(), ones.data(), slots * 8, stream_), "ones");
+    SyncStream();
+  }
+  fast->idx = PlaneBuffer(plane_, 8, stream_);
+  fast->ples = PlaneBuffer(plane_, static_cast<size_t>(fast->chunk) * ple_width_ * 2, stream_);
+  fast->raw_keys = PlaneBuffer(plane_, slots * 128 * 2, stream_);
+  fast->scratch = PlaneBuffer(plane_, 256, stream_);
+  if (d_prompt_hidden_.size() == 0) d_prompt_hidden_ = PlaneBuffer(plane_, slots * hidden_width_ * 2, stream_);
+
+  // Initial dense state: zero-length KV / index keys / positions, zero recurrent and conv states.
+  const auto& info = fast->dense_info;
+  for (const auto& name : fast->dense_inputs) {
+    if (name != "past_position_ids" && name.rfind("past_key_values.", 0) != 0) continue;
+    std::vector<int64_t> shape = info.GetInputShape(name);
+    const std::string tail = name == "past_position_ids" ? "positions" : TailOf(name);
+    for (int64_t& d : shape)
+      if (d <= 0) d = 1;
+    if (tail == "positions")
+      shape = {1, 0};
+    else if (tail == "key" || tail == "value")
+      shape[2] = 0;
+    else if (tail == "index_key")
+      shape[1] = 0;
+    const auto type = info.GetInputDataType(name);
+    size_t elements = 1;
+    for (int64_t d : shape) elements *= static_cast<size_t>(d);
+    const size_t bytes = elements * Ort::SizeOf(type);
+    fast->zero_buffers.emplace_back(plane_, std::max<size_t>(bytes, 16), stream_);
+    fast->initial[name] = OrtValue::CreateTensor(*memory_info_, fast->zero_buffers.back().data(), bytes, shape, type);
+  }
+  SyncStream();
+  fast->run_options = OrtRunOptions::Create();
+  fast_ = std::move(fast);
+}
+
+void Qwen38GraphEngine::FastReset() {
+  if (!fast_) return;
+  fast_->states.clear();
+  fast_->logits.reset();
+  fast_->dense_length = 0;
+}
+
+// One call = whole chunk loop over `tokens`, continuing the dense state of earlier calls (chunked AppendTokens).
+void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
+  FastPrefillState& f = *fast_;
+  if (decode_started_) throw std::logic_error("qwen38_graph: PrefillChunk after decoding started");
+  const size_t n = tokens.size();
+  if (n == 0) throw std::logic_error("qwen38_graph: empty prefill chunk");
+  ledger_.RequireRoom(n, "the prompt", 3);
+  const size_t base = ledger_.Length();
+  {
+    std::vector<int64_t> chunk(n);
+    for (size_t i = 0; i < n; ++i) chunk[i] = tokens[i];
+    plane_.Check(plane_.memcpy_h2d(d_tokens_.data() + 8 * base, chunk.data(), n * 8, stream_), "upload prompt");
+    SyncStream();  // the host vector dies here
+  }
+  prompt_tokens_.insert(prompt_tokens_.end(), tokens.begin(), tokens.end());
+  const size_t row_bytes = static_cast<size_t>(hidden_width_) * 2;
+  const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+  const auto bf16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+  const std::string ple_name = "ple_embeddings." + std::to_string(ple_layer_);
+
+  for (size_t lo = 0; lo < n; lo += static_cast<size_t>(f.chunk)) {
+    const size_t m = std::min(static_cast<size_t>(f.chunk), n - lo);
+    const size_t pos = base + lo;  // == f.dense_length
+    plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
+                    ctx_b_.data(), f.ples.data());
+    plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_b_.data(), 16, stream_), "ctx commit");
+    const int64_t last_row = static_cast<int64_t>(m) - 1;
+    plane_.Check(plane_.memcpy_h2d(f.idx.data(), &last_row, 8, stream_), "logits_indices");
+
+    auto binding = OrtIoBinding::Create(*f.dense);
+    std::vector<std::unique_ptr<OrtValue>> views;
+    auto view = [&](void* ptr, std::vector<int64_t> shape, ONNXTensorElementDataType type) -> OrtValue& {
+      size_t count = 1;
+      for (int64_t d : shape) count *= static_cast<size_t>(d);
+      views.push_back(OrtValue::CreateTensor(*memory_info_, ptr, count * Ort::SizeOf(type), shape, type));
+      return *views.back();
+    };
+    for (const auto& name : f.dense_inputs) {
+      if (name == "input_ids")
+        binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * pos, {1, int64_t(m)}, i64));
+      else if (name == "attention_mask")
+        binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(pos + m)}, i64));
+      else if (name == "position_ids")
+        binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * pos, {1, int64_t(m)}, i64));
+      else if (name == "logits_indices")
+        binding->BindInput(name.c_str(), view(f.idx.data(), {1}, i64));
+      else if (name == ple_name)
+        binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
+      else {
+        auto it = f.states.find(name);
+        OrtValue* value = it != f.states.end() ? it->second.get() : f.initial.at(name).get();
+        binding->BindInput(name.c_str(), *value);
+      }
+    }
+    for (const auto& name : f.dense_outputs) {
+      if (name == "hidden_states")
+        binding->BindOutput(name.c_str(), view(d_prompt_hidden_.data() + pos * row_bytes, {1, int64_t(m), hidden_width_}, bf16));
+      else
+        binding->BindOutput(name.c_str(), *memory_info_);
+    }
+    f.dense->Run(f.run_options.get(), *binding);
+    SyncStream();
+
+    const auto names = binding->GetOutputNames();
+    auto values = binding->GetOutputValues();
+    std::map<std::string, std::unique_ptr<OrtValue>> next;
+    for (size_t i = 0; i < names.size(); ++i) {
+      if (names[i] == "present_position_ids")
+        next["past_position_ids"] = std::move(values[i]);
+      else if (names[i].rfind("present.", 0) == 0)
+        next["past_key_values." + names[i].substr(8)] = std::move(values[i]);
+      else if (names[i] == "logits")
+        f.logits = std::move(values[i]);
+    }
+    f.states = std::move(next);
+    f.dense_length += m;
+  }
+  ledger_.AdvancePrompt(n);
+
+  // Last prompt row: logits (host argmax, smallest index on ties like the device argmax), last hidden row.
+  const auto shape_info = f.logits->GetTensorTypeAndShapeInfo();
+  const auto shape = shape_info->GetShape();
+  size_t rows = 1;
+  for (size_t d = 0; d + 1 < shape.size(); ++d) rows *= static_cast<size_t>(shape[d]);
+  if (shape.back() != vocab_) throw std::runtime_error("qwen38_graph: unexpected dense logits shape");
+  std::vector<uint16_t> raw(static_cast<size_t>(vocab_));
+  plane_.Check(plane_.memcpy_d2h(raw.data(), static_cast<uint8_t*>(f.logits->GetTensorMutableRawData()) + (rows - 1) * static_cast<size_t>(vocab_) * 2,
+                                 raw.size() * 2, stream_),
+               "read logits");
+  plane_.Check(plane_.memcpy_d2d(d_last_hidden_.data(), d_prompt_hidden_.data() + (ledger_.Length() - 1) * row_bytes, row_bytes, stream_),
+               "last hidden");
+  SyncStream();
+  int best = 0;
+  float best_value = -INFINITY;
+  for (size_t i = 0; i < raw.size(); ++i) {
+    const float v = Bf16ToFloat(raw[i]);
+    if (v > best_value) {
+      best_value = v;
+      best = static_cast<int>(i);
+    }
+  }
+  pending_ = best;
+}
+
+// Dense state (KV, positions, GDN / conv / PLE state, raw index keys) -> packed decode state: KV rows into the fixed store,
+// GDN state transposed into ring bank 0, PLE / conv state copied, raw index keys pooled into the shared compressed keys
+// (+ pending rows and lengths). Mirrors handoff.py (HandoffWriter.write).
+void Qwen38GraphEngine::FastHandoff() {
+  FastPrefillState& f = *fast_;
+  const size_t P = ledger_.Length();
+  if (ledger_.Bank() != 0) throw std::logic_error("qwen38_graph: the dense hand-off writes bank 0");
+  if (f.dense_length != P) throw std::runtime_error("qwen38_graph: dense state length differs from the prompt length");
+  auto dense_ptr = [&](const std::string& name) -> uint8_t* {
+    auto it = f.states.find(name);
+    if (it == f.states.end()) throw std::runtime_error("qwen38_graph: dense state lacks " + name);
+    return static_cast<uint8_t*>(it->second->GetTensorMutableRawData());
+  };
+  for (auto& [name, t] : store_) {
+    const uint8_t* src = dense_ptr(name);
+    if (name == "past_position_ids") {
+      plane_.Check(plane_.memcpy_d2d(t->ptr, src, P * 8, stream_), "handoff positions");
+    } else {
+      // [1, 2, cap, 256] <- [1, 2, P, 256]
+      const size_t head_dst = static_cast<size_t>(capacity_) * 256 * 2, head_src = P * 256 * 2;
+      for (int h = 0; h < 2; ++h)
+        plane_.Check(plane_.memcpy_d2d(t->ptr + h * head_dst, src + h * head_src, head_src, stream_), "handoff kv");
+    }
+  }
+  const size_t blocks = P / kRatio, pending = P % kRatio;
+  for (auto& [name, t] : banks_[0].tensors) {
+    const std::string tail = TailOf(name);
+    if (tail == "index_buffer" || tail == "index_lengths") continue;
+    const uint8_t* src = dense_ptr(name);
+    if (tail == "recurrent_state") {
+      // dense [V, K] -> packed [K, V]; shape [1, heads, 128, 128] fp32
+      plane_.transpose_f32(stream_, src, t->ptr, static_cast<int>(t->shape.back()),
+                           static_cast<int>(t->Bytes() / (4 * t->shape.back() * t->shape.back())));
+    } else {
+      plane_.Check(plane_.memcpy_d2d(t->ptr, src, t->Bytes(), stream_), "handoff state");
+    }
+  }
+  const auto& qc = *f.consts;
+  for (auto& [name, shared] : shared_) {
+    const int layer = LayerOf(name);
+    const uint8_t* raw = dense_ptr(name);  // raw per-token keys bf16 [1, P, 128]
+    const std::string base = "past_key_values." + std::to_string(layer) + ".";
+    auto knorm = qc.target.knorm.find(layer);
+    if (knorm == qc.target.knorm.end()) throw std::runtime_error("qwen38_graph: no QSA key norm for layer " + std::to_string(layer));
+    plane_.pool_keys(stream_, raw, static_cast<int>(blocks), knorm->second, qc.target.cos, qc.target.sin, qc.target.width,
+                     qc.epsilon, 0, shared->ptr);
+    if (pending)
+      plane_.Check(plane_.memcpy_d2d(banks_[0].tensors.at(base + "index_buffer")->ptr, raw + blocks * kRatio * 128 * 2,
+                                     pending * 128 * 2, stream_),
+                   "handoff index buffer");
+    const int32_t lengths[2] = {static_cast<int32_t>(blocks), static_cast<int32_t>(pending)};
+    plane_.Check(plane_.memcpy_h2d(banks_[0].tensors.at(base + "index_lengths")->ptr, lengths, 8, stream_), "handoff index lengths");
+    SyncStream();  // `lengths` lives on the stack
+  }
+}
+
+// Batched head prompt prefill: KV-only head model over rows p = 1..P-1 = (token p, target hidden p-1) in chunks, written to
+// head slot p-1, then the pooled index keys / pending rows / lengths. Mirrors head_kv.py.
+void Qwen38GraphEngine::FastHeadKvPrefill() {
+  FastPrefillState& f = *fast_;
+  const size_t P = ledger_.Length();
+  if (P < 2) {
+    head_length_ = 0;
+    return;
+  }
+  const size_t rows = P - 1;
+  const size_t row_bytes = static_cast<size_t>(hidden_width_) * 2;
+  const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+  const auto bf16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+  uint8_t* key = head_store_.at("past_key_values.0.key")->ptr;
+  uint8_t* value = head_store_.at("past_key_values.0.value")->ptr;
+  const size_t head_stride = static_cast<size_t>(capacity_) * 256 * 2;
+  for (size_t lo = 0; lo < rows; lo += static_cast<size_t>(f.chunk)) {
+    const size_t m = std::min(static_cast<size_t>(f.chunk), rows - lo);
+    auto binding = OrtIoBinding::Create(*f.head_kv);
+    std::vector<std::unique_ptr<OrtValue>> views;
+    auto view = [&](void* ptr, std::vector<int64_t> shape, ONNXTensorElementDataType type) -> OrtValue& {
+      size_t count = 1;
+      for (int64_t d : shape) count *= static_cast<size_t>(d);
+      views.push_back(OrtValue::CreateTensor(*memory_info_, ptr, count * Ort::SizeOf(type), shape, type));
+      return *views.back();
+    };
+    for (const auto& name : f.head_kv->GetInputNames()) {
+      if (name == "input_ids")
+        binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
+      else if (name == "attention_mask")
+        binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(m)}, i64));
+      else if (name == "position_ids")
+        binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
+      else if (name == "past_position_ids")
+        binding->BindInput(name.c_str(), view(f.scratch.data(), {1, 0}, i64));
+      else if (name == "past_key_values.0.index_key")
+        binding->BindInput(name.c_str(), view(f.scratch.data(), {1, 0, 128}, bf16));
+      else if (name == "hidden_states")
+        binding->BindInput(name.c_str(), view(d_prompt_hidden_.data() + lo * row_bytes, {1, int64_t(m), hidden_width_}, bf16));
+      else
+        throw std::runtime_error("qwen38_graph: unsupported head_kv input " + name);
+    }
+    for (const char* name : {"key", "value", "index_key"}) binding->BindOutput(name, *memory_info_);
+    f.head_kv->Run(f.run_options.get(), *binding);
+    const auto names = binding->GetOutputNames();
+    auto values = binding->GetOutputValues();
+    for (size_t i = 0; i < names.size(); ++i) {
+      uint8_t* src = static_cast<uint8_t*>(values[i]->GetTensorMutableRawData());
+      const auto shape = values[i]->GetTensorTypeAndShapeInfo()->GetShape();
+      if (names[i] == "key") {
+        if (shape.size() == 4 && shape[1] == 2 && shape[2] == int64_t(m) && shape[3] == 256) {
+          // [1, 2, m, 256]
+          for (int h = 0; h < 2; ++h)
+            plane_.Check(plane_.memcpy_d2d(key + h * head_stride + lo * 512, src + h * m * 512, m * 512, stream_), "head key");
+        } else if (shape.size() == 3 && shape[1] == int64_t(m) && shape[2] == 512) {
+          // [1, m, 512] -> per head h columns [256 h, 256 (h+1))
+          for (int h = 0; h < 2; ++h)
+            plane_.Check(plane_.memcpy2d_d2d(key + h * head_stride + lo * 512, 512, src + h * 512, 1024, 512, m, stream_), "head key");
+        } else {
+          std::ostringstream message;
+          message << "qwen38_graph: unexpected head_kv key shape [";
+          for (int64_t d : shape) message << d << ' ';
+          throw std::runtime_error(message.str() + "]");
+        }
+      } else if (names[i] == "value") {
+        // [1, m, 512] -> per head h columns [256 h, 256 (h+1))
+        if (shape.size() != 3 || shape[1] != int64_t(m) || shape[2] != 512)
+          throw std::runtime_error("qwen38_graph: unexpected head_kv value shape");
+        for (int h = 0; h < 2; ++h)
+          plane_.Check(plane_.memcpy2d_d2d(value + h * head_stride + lo * 512, 512, src + h * 512, 1024, 512, m, stream_), "head value");
+      } else if (names[i] == "index_key") {
+        if (shape.size() != 3 || shape[1] != int64_t(m) || shape[2] != 128)
+          throw std::runtime_error("qwen38_graph: unexpected head_kv index_key shape");
+        plane_.Check(plane_.memcpy_d2d(f.raw_keys.data() + lo * 256, src, m * 256, stream_), "head raw keys");
+      }
+    }
+    SyncStream();  // the output values die here
+  }
+  const size_t blocks = rows / kRatio, pending = rows % kRatio;
+  const auto& qc = f.consts->head;
+  plane_.pool_keys(stream_, f.raw_keys.data(), static_cast<int>(blocks), qc.knorm.at(0), qc.cos, qc.sin, qc.width,
+                   f.consts->epsilon, 0, head_store_.at("past_key_values.0.index_key")->ptr);
+  HeadBank& bank = head_banks_[head_cur_];
+  if (pending)
+    plane_.Check(plane_.memcpy_d2d(bank.tensors.at("past_key_values.0.index_buffer")->ptr, f.raw_keys.data() + blocks * kRatio * 256,
+                                   pending * 256, stream_),
+                 "head index buffer");
+  const int32_t lengths[2] = {static_cast<int32_t>(blocks), static_cast<int32_t>(pending)};
+  plane_.Check(plane_.memcpy_h2d(bank.tensors.at("past_key_values.0.index_lengths")->ptr, lengths, 8, stream_), "head lengths");
+  SyncStream();
+  head_length_ = static_cast<int>(rows);
+}
+
+}  // namespace Generators
