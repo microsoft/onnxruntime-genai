@@ -205,6 +205,83 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
   return description;
 }
 
+// ------------------------------------------------------------------------------------------------
+// Weight pool manifest / QSA constants index
+// ------------------------------------------------------------------------------------------------
+namespace {
+
+void RequireInsideModelFolder(const std::string& path, const char* what) {
+  if (path.empty() || std::filesystem::path{path}.is_absolute() || path.find("..") != std::string::npos)
+    throw std::runtime_error(std::string("qwen38_graph: ") + what + " must be relative to the model folder and must not contain '..': " +
+                             path);
+}
+
+}  // namespace
+
+Qwen38WeightPoolManifest ParseQwen38WeightPoolManifest(const std::filesystem::path& manifest_path) {
+  std::ifstream in(manifest_path);
+  if (!in) throw std::runtime_error("qwen38_graph: cannot open the weight pool manifest " + manifest_path.string());
+  std::string line;
+  std::getline(in, line);
+  if (line != "qwen38_weights_pool 1")
+    throw std::runtime_error("qwen38_graph: unsupported weight pool manifest header: " + line);
+  Qwen38WeightPoolManifest manifest;
+  while (std::getline(in, line)) {
+    std::istringstream fields(line);
+    std::string key;
+    fields >> key;
+    if (key == "pool") {
+      size_t id, rank;
+      Qwen38WeightPoolManifest::Entry entry;
+      fields >> id >> entry.dtype >> entry.offset >> entry.length >> rank;
+      if (fields.fail() || rank > 8) throw std::runtime_error("qwen38_graph: malformed weight pool line: " + line);
+      entry.shape.resize(rank);
+      for (auto& d : entry.shape) fields >> d;
+      fields >> entry.file;
+      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed weight pool line: " + line);
+      if (id != manifest.entries.size()) throw std::runtime_error("qwen38_graph: weight pool ids must be consecutive");
+      RequireInsideModelFolder(entry.file, "a weight pool file");
+      manifest.entries.push_back(std::move(entry));
+    } else if (key == "session") {
+      std::string label, name;
+      int id = -1;
+      fields >> label >> name >> id;
+      if (fields.fail() || id < 0 || static_cast<size_t>(id) >= manifest.entries.size())
+        throw std::runtime_error("qwen38_graph: weight pool session entry references an unknown pool id: " + line);
+      manifest.sessions[label].emplace_back(name, id);
+    }
+  }
+  return manifest;
+}
+
+Qwen38QsaConstantsDescription ParseQwen38QsaConstantsIndex(const std::filesystem::path& index_path) {
+  std::ifstream in(index_path);
+  if (!in) throw std::runtime_error("qwen38_graph: cannot open the QSA constants index " + index_path.string());
+  std::string line;
+  std::getline(in, line);
+  if (line != "qwen38_qsa_consts 1") throw std::runtime_error("qwen38_graph: unsupported QSA constants header: " + line);
+  Qwen38QsaConstantsDescription description;
+  while (std::getline(in, line)) {
+    std::istringstream fields(line);
+    std::string key;
+    fields >> key;
+    if (key == "file") {
+      fields >> description.file;
+    } else if (key == "epsilon") {
+      fields >> description.epsilon;
+    } else if (key == "width") {
+      fields >> description.width;
+    } else if (key == "tensor") {
+      Qwen38QsaConstantsDescription::Item item;
+      fields >> item.set >> item.name >> item.offset >> item.bytes;
+      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed QSA constants line: " + line);
+      description.items.push_back(std::move(item));
+    }
+  }
+  RequireInsideModelFolder(description.file, "the QSA constants file");
+  return description;
+}
+
 #if defined(QWEN38_GRAPH_NO_POSIX)
 
 Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path&, const std::filesystem::path&, int)

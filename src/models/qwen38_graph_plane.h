@@ -10,7 +10,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "qwen38_plane/qwen38_plane_abi.h"
@@ -87,6 +89,41 @@ struct Qwen38PleDescription {
 // Reads a "qwen38_ple_table 1" description. Throws std::runtime_error on a wrong header, a malformed table, or a shard
 // path that is absolute or contains "..": shards must live inside the model folder.
 Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& table_path);
+
+// Parsed "qwen38_weights_pool 1" manifest: the initializers that several sessions of the stack share, as tensors stored in
+// files of the model folder, plus the (session label -> initializer name, pool id) lists. Kept apart from the weight pool
+// that uploads them so that it can be validated without a GPU.
+struct Qwen38WeightPoolManifest {
+  struct Entry {
+    int dtype{};  // ONNX tensor element type
+    uint64_t offset{};
+    uint64_t length{};
+    std::vector<int64_t> shape;
+    std::string file;  // relative to the model folder
+  };
+  std::vector<Entry> entries;
+  std::map<std::string, std::vector<std::pair<std::string, int>>> sessions;
+};
+
+// Throws std::runtime_error on a wrong header, non-consecutive pool ids, an unknown pool id in a session line, or a file
+// path that is absolute or contains "..": the files must live inside the model folder.
+Qwen38WeightPoolManifest ParseQwen38WeightPoolManifest(const std::filesystem::path& manifest_path);
+
+// Parsed "qwen38_qsa_consts 1" index of the dense -> packed hand-off constants (key-norm weights and RoPE tables).
+struct Qwen38QsaConstantsDescription {
+  struct Item {
+    std::string set;   // "target" or "head"
+    std::string name;  // "cos", "sin" or "knorm.<layer>"
+    size_t offset{};
+    size_t bytes{};
+  };
+  std::string file;  // relative to the model folder
+  float epsilon{};
+  int width{};
+  std::vector<Item> items;
+};
+
+Qwen38QsaConstantsDescription ParseQwen38QsaConstantsIndex(const std::filesystem::path& index_path);
 
 // Host-registered FP8 PLE shards. The table file (written by tools/qwen38_graph/build_package.py) lists the shard files;
 // each is mapped read-only and registered with the CUDA driver so that the gather kernel reads it zero-copy over PCIe.
