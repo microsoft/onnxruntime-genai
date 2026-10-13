@@ -10,7 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define QWEN38_PLANE_ABI_VERSION 1
+#define QWEN38_PLANE_ABI_VERSION 2
 
 // Host-registered FP8 PLE (per-layer embedding) table description, copied to the device once.
 typedef struct Qwen38PleParams {
@@ -44,6 +44,10 @@ typedef struct Qwen38PleParams {
   X(int, memcpy_d2h, (void* dst, const void* src, size_t bytes, void* stream))                                     \
   X(int, memcpy_d2d, (void* dst, const void* src, size_t bytes, void* stream))                                     \
   X(int, stream_sync, (void* stream))                                                                              \
+  X(int, memcpy2d_d2d,                                                                                             \
+    (void* dst, size_t dst_pitch, const void* src, size_t src_pitch, size_t width, size_t height, void* stream))   \
+  X(int, stream_create, (void** stream))                                                                           \
+  X(int, stream_destroy, (void* stream))                                                                           \
   X(void, prep,                                                                                                    \
     (void* stream, const void* params, const void* tok_ptr, const void* pos_ptr, int pos_add, const void* ctx_in,  \
      void* ctx_out, void* input_ids, void* position_ids, void* committed, void* past_pos, void* ple_out,           \
@@ -59,4 +63,11 @@ typedef struct Qwen38PleParams {
     (void* stream, const void* state, int rows, int head_length, int hidden_width, const void* hidden_src,         \
      void* hidden_dst, void* tokens, void* positions, void* committed))                                            \
   X(void, head_post, (void* stream, const void* next_token, void* state))                                          \
-  X(void, or_status, (void* stream, const void* status, int status_count, void* state))
+  X(void, or_status, (void* stream, const void* status, int status_count, void* state))                            \
+  X(void, ple_rows,                                                                                                \
+    (void* stream, const void* params, const void* tokens, int n, const void* ctx_in, void* ctx_out,               \
+     void* ple_out))                                                                                               \
+  X(void, pool_keys,                                                                                               \
+    (void* stream, const void* raw, int blocks, const void* key_norm, const void* cos, const void* sin, int width, \
+     float epsilon, int first_block, void* out))                                                                   \
+  X(void, transpose_f32, (void* stream, const void* src, void* dst, int n, int batch))

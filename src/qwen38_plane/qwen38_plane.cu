@@ -240,6 +240,122 @@ __global__ void k_or_status(const int* st, int nst, i64* state) {
   if (status) state[5] |= 2;
 }
 
+/* ---- fast prefill support (v12): batched PLE rows for the dense prompt chunks, dense -> packed state hand-off ---- */
+
+/* PLE embedding rows of n consecutive tokens (one block per row; same arithmetic as k_prep). history before the first
+ * token = ctx_in = (older, last); ctx_out = history[-2:] after the last token. */
+__global__ void k_ple_rows(const PleParams* P, const i64* tokens, int n, const i64* ctx_in, i64* ctx_out,
+                           __nv_bfloat16* ple_out) {
+  __shared__ i64 s_row[32];
+  __shared__ const unsigned char* s_src[32];
+  const int tid = threadIdx.x;
+  const int i = blockIdx.x;
+  const i64 tok = tokens[i];
+  const i64 c1 = i >= 1 ? tokens[i - 1] : ctx_in[1];
+  const i64 c0raw = i >= 2 ? tokens[i - 2] : (i == 1 ? ctx_in[1] : ctx_in[0]);
+  const i64 c0 = (c1 == P->eos) ? P->eos : c0raw;
+  if (tid < P->n_heads) {
+    const int h = tid;
+    unsigned long long mixed = (unsigned long long)tok * (unsigned long long)P->mult[0];
+    mixed ^= (unsigned long long)c1 * (unsigned long long)P->mult[1];
+    if (h >= P->heads_per_ngram) mixed ^= (unsigned long long)c0 * (unsigned long long)P->mult[2];
+    const i64 v = P->vocab[h];
+    i64 r = (i64)mixed % v;
+    if (r < 0) r += v;
+    const i64 id = r + P->offset[h];
+    int lo = 0, hi = P->n_shards - 1;
+    while (lo < hi) {
+      const int mid = (lo + hi) >> 1;
+      if (P->shard_end[mid] > id)
+        hi = mid;
+      else
+        lo = mid + 1;
+    }
+    const i64 first = lo == 0 ? 0 : P->shard_end[lo - 1];
+    s_row[h] = id - first;
+    s_src[h] = P->shard_ptr[lo];
+  }
+  __syncthreads();
+  const int hd = P->head_dim;
+  const int total = P->n_heads * hd;
+  __nv_bfloat16* out = ple_out + (size_t)i * total;
+  unsigned char b[3];
+#pragma unroll
+  for (int u = 0; u < 3; ++u) {
+    const int j = tid + u * blockDim.x;
+    b[u] = 0;
+    if (j < total) {
+      const int h = j / hd, c = j - h * hd;
+      b[u] = s_src[h][s_row[h] * hd + c];
+    }
+  }
+#pragma unroll
+  for (int u = 0; u < 3; ++u) {
+    const int j = tid + u * blockDim.x;
+    if (j < total) {
+      const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+      const float f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      out[j] = __float2bfloat16_rn(f * P->scale);
+    }
+  }
+  if (i == n - 1 && tid == 0) {
+    ctx_out[0] = c1;
+    ctx_out[1] = tok;
+  }
+}
+
+/* Mean-pooled, RMS-normalised, leading-half-RoPE compressed index keys of complete blocks of 4 raw keys
+ * (arithmetic order of handoff_lib.pooled_block_keys; no FMA contraction, the python reference rounds every elementwise op).
+ * raw bf16 [nb*4, 128] -> out fp32 [nb, 128]; block b has position 4 * (b + first_block). */
+__global__ void k_pool_keys(const __nv_bfloat16* raw, const __nv_bfloat16* knorm, const __nv_bfloat16* cosv,
+                            const __nv_bfloat16* sinv, int width, float eps, int first_block, float* out) {
+  __shared__ float s_red[4];
+  __shared__ float s_norm[128];
+  const int b = blockIdx.x, c = threadIdx.x;
+  const __nv_bfloat16* r = raw + (size_t)b * 4 * 128 + c;
+  const float k0 = __bfloat162float(r[0]), k1 = __bfloat162float(r[128]), k2 = __bfloat162float(r[256]),
+              k3 = __bfloat162float(r[384]);
+  float pooled = __fadd_rn(__fadd_rn(__fadd_rn(k0, k1), k2), k3);
+  pooled = __fmul_rn(pooled, 0.25f);
+  float sq = __fmul_rn(pooled, pooled);
+  for (int o = 16; o > 0; o >>= 1) sq = __fadd_rn(sq, __shfl_xor_sync(0xffffffffu, sq, o));
+  if ((c & 31) == 0) s_red[c >> 5] = sq;
+  __syncthreads();
+  const float total = __fadd_rn(__fadd_rn(s_red[0], s_red[1]), __fadd_rn(s_red[2], s_red[3]));
+  const float inv_rms = rsqrtf(__fadd_rn(__fmul_rn(total, 0.0078125f), eps));
+  const float normed = __fmul_rn(__fmul_rn(pooled, inv_rms), __bfloat162float(knorm[c]));
+  s_norm[c] = normed;
+  __syncthreads();
+  const int half = width / 2;
+  const size_t position = (size_t)(b + first_block) * 4;
+  float result = normed;
+  if (c < half) {
+    const float cs = __bfloat162float(cosv[position * width + c]), sn = __bfloat162float(sinv[position * width + c]);
+    result = __fadd_rn(__fmul_rn(normed, cs), __fmul_rn(-s_norm[c + half], sn));
+  } else if (c < width) {
+    const float cs = __bfloat162float(cosv[position * width + c]), sn = __bfloat162float(sinv[position * width + c]);
+    result = __fadd_rn(__fmul_rn(normed, cs), __fmul_rn(s_norm[c - half], sn));
+  }
+  out[(size_t)b * 128 + c] = result;
+}
+
+/* dst[b][k][v] = src[b][v][k] for batches of n x n fp32 matrices (GDN recurrent state: dense [V, K] -> packed [K, V]) */
+__global__ void k_transpose_f32(const float* src, float* dst, int n) {
+  __shared__ float tile[32][33];
+  const size_t base = (size_t)blockIdx.z * n * n;
+  const int x = blockIdx.x * 32 + threadIdx.x;
+  for (int j = 0; j < 32; j += 8) {
+    const int y = blockIdx.y * 32 + threadIdx.y + j;
+    tile[threadIdx.y + j][threadIdx.x] = src[base + (size_t)y * n + x];
+  }
+  __syncthreads();
+  const int tx = blockIdx.y * 32 + threadIdx.x;
+  for (int j = 0; j < 32; j += 8) {
+    const int ty = blockIdx.x * 32 + threadIdx.y + j;
+    dst[base + (size_t)ty * n + tx] = tile[threadIdx.x][threadIdx.y + j];
+  }
+}
+
 extern "C" {
 int qwen38_plane_abi_version(void) { return QWEN38_PLANE_ABI_VERSION; }
 int qwen38_plane_sizeof_ple_params(void) { return (int)sizeof(PleParams); }
@@ -282,6 +398,26 @@ void qwen38_plane_or_status(void* s, const void* st, int nst, void* state) {
   k_or_status<<<1, 32, 0, (cudaStream_t)s>>>((const int*)st, nst, (i64*)state);
 }
 
+/* ---- fast prefill kernels: batched PLE rows, dense -> packed state hand-off ---- */
+void qwen38_plane_ple_rows(void* s, const void* P, const void* tokens, int n, const void* ctx_in, void* ctx_out,
+                           void* ple_out) {
+  k_ple_rows<<<n, 1024, 0, (cudaStream_t)s>>>((const PleParams*)P, (const i64*)tokens, n, (const i64*)ctx_in, (i64*)ctx_out,
+                                              (__nv_bfloat16*)ple_out);
+}
+
+void qwen38_plane_pool_keys(void* s, const void* raw, int nb, const void* knorm, const void* cosv, const void* sinv,
+                            int width, float eps, int first_block, void* out) {
+  if (nb <= 0) return;
+  k_pool_keys<<<nb, 128, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)raw, (const __nv_bfloat16*)knorm,
+                                               (const __nv_bfloat16*)cosv, (const __nv_bfloat16*)sinv, width, eps,
+                                               first_block, (float*)out);
+}
+
+void qwen38_plane_transpose_f32(void* s, const void* src, void* dst, int n, int batch) {
+  dim3 grid(n / 32, n / 32, batch), block(32, 8);
+  k_transpose_f32<<<grid, block, 0, (cudaStream_t)s>>>((const float*)src, (float*)dst, n);
+}
+
 /* ---- CUDA runtime helpers (all return cudaError_t as int, 0 = success) ---- */
 int qwen38_plane_set_device(int device) { return (int)cudaSetDevice(device); }
 const char* qwen38_plane_error_string(int err) { return cudaGetErrorString((cudaError_t)err); }
@@ -303,5 +439,11 @@ int qwen38_plane_memcpy_d2h(void* dst, const void* src, size_t bytes, void* s) {
 int qwen38_plane_memcpy_d2d(void* dst, const void* src, size_t bytes, void* s) {
   return (int)cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, (cudaStream_t)s);
 }
+int qwen38_plane_memcpy2d_d2d(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, size_t height,
+                              void* s) {
+  return (int)cudaMemcpy2DAsync(dst, dpitch, src, spitch, width, height, cudaMemcpyDeviceToDevice, (cudaStream_t)s);
+}
+int qwen38_plane_stream_create(void** s) { return (int)cudaStreamCreateWithFlags((cudaStream_t*)s, cudaStreamNonBlocking); }
+int qwen38_plane_stream_destroy(void* s) { return (int)cudaStreamDestroy((cudaStream_t)s); }
 int qwen38_plane_stream_sync(void* s) { return (int)cudaStreamSynchronize((cudaStream_t)s); }
 }
