@@ -161,7 +161,7 @@ def _secret_value_start(value: str, key_start: int, cli_option: bool, key_end: i
 
 
 def _find_secret_value_anchor(value: str) -> int | None:
-    boundaries = _ASCII_WHITESPACE + "?&#;,\"'([{/-"
+    boundaries = _ASCII_WHITESPACE + "?&#;,\"'([{/-=:"
     index = 0
     while index < len(value):
         char = value[index]

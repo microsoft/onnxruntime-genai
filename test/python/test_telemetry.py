@@ -234,13 +234,29 @@ class TestOptOut(_HermeticTelemetryTestCase):
                 "APPVEYOR",
                 "BITBUCKET_BUILD_NUMBER",
                 "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
+                "ORT_RUNNING_UNIT_TESTS",
             },
         )
         for signal in sorted(_CI_ENV_VARS):
             with self.subTest(signal=signal), patch.dict(os.environ, {signal: " true "}, clear=True):
                 self.assertTrue(_is_ci_environment())
-        with patch.dict(os.environ, {"ORT_RUNNING_UNIT_TESTS": "true"}, clear=True):
-            self.assertFalse(_is_ci_environment())
+
+    def test_native_test_harness_suppresses_all_python_telemetry_resources(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        with (
+            patch.dict(os.environ, {"ORT_RUNNING_UNIT_TESTS": "true"}),
+            patch("telemetry.telemetry.OfflineEventStore") as store,
+            patch("telemetry.telemetry.EventUploader") as uploader,
+            patch("telemetry.telemetry.get_hashed_device_id_and_status") as device_id,
+        ):
+            telemetry = GenAITelemetry()
+        self.assertFalse(telemetry._enabled)
+        self.assertIsNone(telemetry._heartbeat_thread)
+        store.assert_not_called()
+        uploader.assert_not_called()
+        device_id.assert_not_called()
+        self.mock_send.assert_not_called()
 
     def test_false_ci_values_do_not_disable_telemetry(self):
         from telemetry.telemetry import _is_ci_environment
@@ -1175,6 +1191,33 @@ class TestPathRedaction(unittest.TestCase):
             with self.subTest(benign=benign):
                 self.assertEqual(scrub_string_for_telemetry(benign), benign)
 
+    def test_embedded_assignment_credentials_are_scrubbed_from_serialized_events(self):
+        import json
+
+        from telemetry.path_utils import scrub_string_for_telemetry
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._app_name = "onnxruntime-genai"
+        telemetry._app_version = "test"
+        telemetry._app_session_guid = "session"
+        telemetry._envelope_ikey = "o:test"
+        for prefix in ("outer=", "outer:", "outer:= ", "outer=inner:"):
+            for key in ("token", "password", "api_key", "refreshToken"):
+                with self.subTest(prefix=prefix, key=key):
+                    value = f"{prefix}{key}=placeholder-credential"
+                    expected = f"{prefix}{key}=[path]"
+                    self.assertEqual(scrub_string_for_telemetry(value), expected)
+                    payload = telemetry._serialize_event(
+                        "GenAIError", {"exceptionMessage": value, "innerExceptionMessage": value, "stackTrace": value}
+                    )
+                    data = json.loads(payload)["data"]
+                    for field in ("exceptionMessage", "innerExceptionMessage", "stackTrace"):
+                        self.assertEqual(data[field], expected)
+                    self.assertNotIn(b"placeholder-credential", payload)
+        for value in ("prefix=tokenizer=enabled", "prefix:oauth=enabled"):
+            self.assertEqual(scrub_string_for_telemetry(value), value)
+
     def test_secret_scanner_advances_past_rejected_key_tokens(self):
         import telemetry.path_utils as path_utils
 
@@ -1576,6 +1619,29 @@ class TestPathRedaction(unittest.TestCase):
         with patch("telemetry.telemetry_extensions._get_telemetry", side_effect=RuntimeError("telemetry failed")):
             log_action("test", "work", 1.0, True, metadata=["not", "a", "dict"])
             log_error("RuntimeError", "boom", metadata=["not", "a", "dict"])
+
+
+class TestTelemetryReinitialization(_HermeticTelemetryTestCase):
+    def test_shutdown_and_reuse_emits_a_heartbeat_for_each_new_session(self):
+        import json
+
+        from telemetry.telemetry import GenAITelemetry
+
+        first = None
+        for _ in range(2):
+            telemetry = GenAITelemetry()
+            if first is None:
+                first = telemetry
+            self.assertIs(telemetry, first)
+            self.assertIsNotNone(telemetry._heartbeat_thread)
+            telemetry._heartbeat_thread.join(5)
+            self.assertFalse(telemetry._heartbeat_thread.is_alive())
+            telemetry.shutdown(5)
+            self.assertFalse(telemetry._heartbeat_started)
+        events = [json.loads(line) for payload in self.sent_payloads for line in payload.splitlines()]
+        heartbeats = [event for event in events if event["name"] == "GenAIHeartbeat"]
+        self.assertEqual(len(heartbeats), 2)
+        self.assertNotEqual(heartbeats[0]["data"]["AppSessionGuid"], heartbeats[1]["data"]["AppSessionGuid"])
 
 
 class TestLiveTelemetryIsolation(_HermeticTelemetryTestCase):
@@ -3129,10 +3195,12 @@ class TestShutdownSafety(unittest.TestCase):
         telemetry._uploader = MagicMock()
         telemetry._uploader.stop_loop.return_value = False
         telemetry._store = MagicMock()
+        telemetry._heartbeat_started = True
 
         telemetry.shutdown(0)
 
         telemetry._store.close.assert_not_called()
+        self.assertTrue(telemetry._heartbeat_started)
 
     def test_shutdown_uses_one_overall_budget(self):
         from telemetry.telemetry import GenAITelemetry
@@ -3156,6 +3224,7 @@ class TestShutdownSafety(unittest.TestCase):
         self.assertIsNone(telemetry._uploader)
         self.assertIsNone(telemetry._store)
         self.assertFalse(telemetry._initialized)
+        self.assertFalse(telemetry._heartbeat_started)
 
     def test_runtime_disable_keeps_live_uploader_until_it_stops(self):
         from telemetry.telemetry import GenAITelemetry
@@ -3206,11 +3275,13 @@ class TestShutdownSafety(unittest.TestCase):
         telemetry._heartbeat_thread.is_alive.return_value = True
         telemetry._uploader = None
         telemetry._store = None
+        telemetry._heartbeat_started = True
         heartbeat = telemetry._heartbeat_thread
 
         telemetry.shutdown(5.0)
 
         heartbeat.join.assert_called_once()
+        self.assertTrue(telemetry._heartbeat_started)
 
 
 if __name__ == "__main__":

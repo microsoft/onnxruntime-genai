@@ -64,6 +64,7 @@ _CI_ENV_VARS = {
     "APPVEYOR",
     "BITBUCKET_BUILD_NUMBER",
     "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
+    "ORT_RUNNING_UNIT_TESTS",
 }
 _DISTRIBUTION_NAMES = (
     "onnxruntime-genai",
@@ -669,6 +670,7 @@ class GenAITelemetry:
             self._store.close()
             self._store = None
         if self._heartbeat_thread is None and self._uploader is None and self._store is None:
+            self._heartbeat_started = False
             self._initialized = False
 
 
