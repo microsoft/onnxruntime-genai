@@ -569,6 +569,31 @@ class TestTelemetryPackaging(unittest.TestCase):
 
 
 class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
+    def test_multimodal_model_load_duration_uses_monotonic_clock(self):
+        import ast
+        from types import SimpleNamespace
+
+        benchmark_path = Path(__file__).parents[2] / "benchmark" / "python" / "benchmark_multimodal.py"
+        tree = ast.parse(benchmark_path.read_text(encoding="utf-8"))
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        timing = [
+            node
+            for node in main.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id in {"model_load_start", "model_load_time_ms"}
+                for target in node.targets
+            )
+        ]
+        self.assertEqual(len(timing), 2)
+        clock = SimpleNamespace(
+            perf_counter=MagicMock(side_effect=[100.0, 100.125]),
+            time=MagicMock(side_effect=AssertionError("Wall-clock duration is not monotonic")),
+        )
+        namespace = {"time": clock}
+        exec(compile(ast.Module(body=timing, type_ignores=[]), str(benchmark_path), "exec"), namespace)
+        self.assertEqual(namespace["model_load_time_ms"], 125.0)
+
     def test_model_identifiers_are_scrubbed_without_filesystem_probes(self):
         from telemetry.path_utils import sanitize_model_identifier
 
@@ -2925,6 +2950,146 @@ class TestUploaderDrainLogic(unittest.TestCase):
         self.addCleanup(store.close)
         self.addCleanup(uploader.close)
         return store, uploader
+
+    def test_drain_lock_outlives_timed_out_http_worker(self):
+        import subprocess
+        import threading
+        import time
+
+        from telemetry.library.transport import HttpJsonPostTransport
+        from telemetry.process_lock import ProcessDrainLock
+
+        probe = (
+            "import os, sys\n"
+            "with open(sys.argv[1], 'r+b') as handle:\n"
+            "    try:\n"
+            "        if os.name == 'nt':\n"
+            "            import msvcrt\n"
+            "            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)\n"
+            "        else:\n"
+            "            import fcntl\n"
+            "            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "    except OSError:\n"
+            "        print('held')\n"
+            "    else:\n"
+            "        print('available')\n"
+        )
+        for release_path in ("flush", "loop", "close"):
+            with self.subTest(release_path=release_path):
+                store, uploader = self._setup()
+                store.store(b'{"ok":1}')
+                uploader._send_timeout = 0.05
+                entered = threading.Event()
+                finish_request = threading.Event()
+                lock_released = threading.Event()
+                release_lock = uploader._drain_lock.release
+                contender = ProcessDrainLock(store.db_path + ".lock")
+
+                def blocked_request(_request, _timeout, entered=entered, finish_request=finish_request):
+                    entered.set()
+                    self.assertTrue(finish_request.wait(5))
+                    return True, 204
+
+                def release_and_notify(release_lock=release_lock, lock_released=lock_released):
+                    release_lock()
+                    lock_released.set()
+
+                with (
+                    patch.object(HttpJsonPostTransport, "_do_request_blocking", side_effect=blocked_request) as request,
+                    patch.object(uploader._drain_lock, "release", side_effect=release_and_notify),
+                ):
+                    try:
+                        started = time.monotonic()
+                        if release_path == "flush":
+                            uploader.flush(0.05)
+                        elif release_path == "loop":
+                            uploader.start()
+                            self.assertTrue(entered.wait(2))
+                            self.assertTrue(uploader.stop_loop(0.5))
+                        else:
+                            self.assertTrue(uploader._acquire_drain_lock())
+                            uploader.drain_once()
+                            uploader.close()
+                        self.assertLess(time.monotonic() - started, 1)
+                        self.assertTrue(entered.is_set())
+                        self.assertTrue(uploader._drain_lock.held)
+                        self.assertFalse(contender.acquire())
+                        uploader.close()
+                        uploader.flush(0.05)
+                        self.assertEqual(request.call_count, 1)
+                        self.assertFalse(contender.acquire())
+                        self.assertEqual(store.count(), 1)
+                        child = subprocess.run(
+                            [sys.executable, "-c", probe, store.db_path + ".lock"],
+                            capture_output=True,
+                            text=True,
+                            timeout=2,
+                            check=True,
+                        )
+                        self.assertEqual(child.stdout.strip(), "held")
+                        finish_request.set()
+                        self.assertTrue(lock_released.wait(2))
+                        self.assertTrue(contender.acquire())
+                        contender.release()
+                        self.assertEqual(store.count(), 1)
+                        child = subprocess.run(
+                            [sys.executable, "-c", probe, store.db_path + ".lock"],
+                            capture_output=True,
+                            text=True,
+                            timeout=2,
+                            check=True,
+                        )
+                        self.assertEqual(child.stdout.strip(), "available")
+                        uploader.flush(1)
+                        self.assertEqual(request.call_count, 1)
+                        self.assertEqual(store.count(), 0)
+                        self.assertTrue(uploader._acquire_drain_lock())
+                        self.assertFalse(contender.acquire())
+                    finally:
+                        finish_request.set()
+                        worker = uploader._transport._inflight_worker
+                        if worker is not None:
+                            worker.join(5)
+                        uploader.stop_loop(1)
+                        uploader.close()
+                        contender.release()
+
+    def test_close_does_not_release_active_flush_lock(self):
+        import threading
+
+        from telemetry.library.transport import HttpJsonPostTransport
+        from telemetry.process_lock import ProcessDrainLock
+
+        store, uploader = self._setup()
+        store.store(b'{"ok":1}')
+        entered = threading.Event()
+        finish_request = threading.Event()
+        contender = ProcessDrainLock(store.db_path + ".lock")
+
+        def blocked_request(_request, _timeout):
+            entered.set()
+            self.assertTrue(finish_request.wait(5))
+            return True, 204
+
+        with patch.object(HttpJsonPostTransport, "_do_request_blocking", side_effect=blocked_request):
+            flushing = threading.Thread(target=lambda: uploader.flush(2))
+            flushing.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                uploader.close()
+                self.assertFalse(contender.acquire())
+                self.assertTrue(uploader._flushing)
+                uploader.flush(0.05)
+                self.assertFalse(contender.acquire())
+            finally:
+                finish_request.set()
+                flushing.join(5)
+                uploader.close()
+                contender.release()
+            self.assertFalse(flushing.is_alive())
+            self.assertEqual(store.count(), 0)
+            self.assertTrue(contender.acquire())
+            contender.release()
 
     def test_success_deletes(self):
         from telemetry.uploader import DrainOutcome

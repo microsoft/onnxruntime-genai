@@ -338,9 +338,9 @@ def main(args):
     model_path = args.input_folder
     if args.verbose:
         print("Loading model... ")
-    model_load_start = time.time()
+    model_load_start = time.perf_counter()
     model = og.Model(f"{model_path}")
-    model_load_time_ms = (time.time() - model_load_start) * 1000
+    model_load_time_ms = (time.perf_counter() - model_load_start) * 1000
     if args.verbose:
         print(f"Model loaded in {model_load_time_ms:.1f} ms, loading processor...")
 
