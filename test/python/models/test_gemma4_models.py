@@ -1683,7 +1683,6 @@ def test_gemma4_split_vision_configured_run_options(
     if option_scope == "vision":
         config["model"]["vision"]["run_options"] = {option_name: configured_value}
     else:
-        stage_index = 0 if option_scope == "encoder" else 1
         config["model"]["vision"]["pipeline"][0][option_scope]["run_options"] = {
             option_name: configured_value
         }
