@@ -49,9 +49,10 @@ int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs,
   return 0;
 }
 
-int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
+int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs,
+                                 const std::string& pixel_values_name) {
   for (const auto& input : extra_inputs) {
-    if (input.name == Config::Defaults::PixelValuesName) {
+    if (input.name == pixel_values_name) {
       assert(input.tensor->ort_tensor_);
       const auto shape = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
       if (shape.size() >= 3) {
@@ -601,7 +602,7 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
 void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   num_image_tokens_ = GetNumImageTokens(extra_inputs);
   num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
-  num_images_ = GetImageFeatureBatchSize(extra_inputs);
+  num_images_ = GetImageFeatureBatchSize(extra_inputs, model_.config_->model.vision.inputs.pixel_values);
 
   if (model_.vision_session_) {
     vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);

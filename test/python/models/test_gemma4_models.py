@@ -174,18 +174,18 @@ def _set_vision_position_dtype(onnx, model_path, dtype):
 
 
 def _create_static_batch_vision_pipeline(
-    onnx, encoder_path, projector_path, num_patches="num_patches", position_type=None
+    onnx, encoder_path, projector_path, num_patches="num_patches", position_type=None, pixel_name="pixel_values"
 ):
     """Split the static-B=1 vision fixture at a vision_features boundary."""
     helper = onnx.helper
     tensor_proto = onnx.TensorProto
     position_type = position_type or tensor_proto.INT64
 
-    pixel_values = helper.make_tensor_value_info("pixel_values", tensor_proto.FLOAT, [1, num_patches, 768])
+    pixel_values = helper.make_tensor_value_info(pixel_name, tensor_proto.FLOAT, [1, num_patches, 768])
     position_ids = helper.make_tensor_value_info("pixel_position_ids", position_type, [1, num_patches, 2])
     vision_features = helper.make_tensor_value_info("vision_features", tensor_proto.FLOAT, [1, num_patches, 768])
     encoder_graph = helper.make_graph(
-        [helper.make_node("Identity", ["pixel_values"], ["vision_features"])],
+        [helper.make_node("Identity", [pixel_name], ["vision_features"])],
         "gemma4_vision_encoder",
         [pixel_values],
         [vision_features],
@@ -228,14 +228,14 @@ def _create_static_batch_vision_pipeline(
     onnx.save(projector, projector_path)
 
 
-def _configure_split_vision(config):
+def _configure_split_vision(config, pixel_name="pixel_values"):
     vision = config["model"]["vision"]
     vision.pop("filename", None)
     vision["pipeline"] = [
         {
             "encoder": {
                 "filename": "dummy_vision_encoder.onnx",
-                "inputs": ["pixel_values"],
+                "inputs": [pixel_name],
                 "outputs": ["vision_features"],
                 "session_options": {"provider_options": []},
             },
@@ -908,8 +908,9 @@ def test_gemma4_split_vision_requires_two_stages(test_data_path, tmp_path):
     ]
     + [(True, ("australia.jpg",), np.int32, "cuda")],
 )
+@pytest.mark.parametrize("pixel_name", ["pixel_values", "pixels"])
 def test_gemma4_flat_decoder_runs_split_vision(
-    test_data_path, tmp_path, fixed_patches, image_names, position_dtype, encoder_provider
+    test_data_path, tmp_path, fixed_patches, image_names, position_dtype, encoder_provider, pixel_name
 ):
     """Split vision with a flat decoder must bind projector-only positions for each image."""
     onnx = pytest.importorskip("onnx")
@@ -927,6 +928,7 @@ def test_gemma4_flat_decoder_runs_split_vision(
         model_path / "dummy_vision_projector.onnx",
         2520 if fixed_patches else "num_patches",
         onnx.TensorProto.INT32 if position_dtype == np.int32 else onnx.TensorProto.INT64,
+        pixel_name,
     )
     config_path = model_path / "genai_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -935,7 +937,8 @@ def test_gemma4_flat_decoder_runs_split_vision(
     config["model"]["eos_token_id"] = [1]
     config["model"]["image_token_id"] = GEMMA4_IMAGE_TOKEN_ID
     config["search"]["past_present_share_buffer"] = False
-    _configure_split_vision(config)
+    config["model"]["vision"]["inputs"]["pixel_values"] = pixel_name
+    _configure_split_vision(config, pixel_name)
     if encoder_provider:
         config["model"]["decoder"]["session_options"]["provider_options"] = [
             {encoder_provider: {}}
