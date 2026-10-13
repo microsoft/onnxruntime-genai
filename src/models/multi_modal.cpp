@@ -8,6 +8,7 @@
 #include "models/io/qwen_vl_position_inputs.h"
 #include "pixtral_vision_state.h"
 #include "qwen_vl_state.h"
+#include "vision_stage_io.h"
 #include <algorithm>
 #include <numeric>
 
@@ -76,7 +77,7 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
       }
       const auto create_stage = [&](const Config::Model::Vision::PipelineModel& stage,
                                     std::unique_ptr<OrtSessionOptions>& options,
-                                    DeviceInterface** output_device = nullptr) {
+                                    DeviceInterface*& stage_device) {
         options = OrtSessionOptions::Create();
         static const Config::SessionOptions kDefaultSessionOptions;
         auto settings = stage.session_options.value_or(vision_config.session_options.value_or(kDefaultSessionOptions));
@@ -84,14 +85,14 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
           settings.providers.clear();
           settings.provider_options.clear();
         }
-        auto* device = CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/false,
+        stage_device = CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/true,
                                                       /*disable_graph_capture=*/true);
-        if (output_device) *output_device = device;
         return CreateSession(ort_env, stage.filename, options.get());
       };
-      vision_session_ = create_stage(vision_config.pipeline[0], vision_session_options_);
+      vision_session_ = create_stage(vision_config.pipeline[0], vision_session_options_, vision_encoder_device_);
       vision_projector_session_ = create_stage(vision_config.pipeline[1], vision_projector_session_options_,
-                                               &vision_device_);
+                                               vision_projector_device_);
+      vision_device_ = GetDeviceInterface(DeviceType::CPU);
     } else {
       vision_session_options_ = OrtSessionOptions::Create();
       vision_device_ = CreateSessionOptionsFromConfig(vision_config.session_options.has_value() ? vision_config.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, /*disable_graph_capture=*/true);

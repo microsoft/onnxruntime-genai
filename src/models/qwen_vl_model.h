@@ -53,6 +53,8 @@ struct Qwen2_5_VL_PipelineModel : public DecoderOnlyPipelineModel {
   std::unique_ptr<OrtSession> vision_session_;
   std::unique_ptr<OrtSessionOptions> vision_projector_session_options_;
   std::unique_ptr<OrtSession> vision_projector_session_;
+  DeviceInterface* vision_encoder_device_{};
+  DeviceInterface* vision_projector_device_{};
 };
 
 struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {

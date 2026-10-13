@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "gemma4_vision_state.h"
+#include "vision_stage_io.h"
 
 #include <array>
 #include <numeric>
@@ -250,7 +251,9 @@ DeviceSpan<float> Gemma4VisionState::RunSplitVision() {
     auto encoded = model_.vision_session_->Run(encoder_options.get(), input_names_.data(),
                                                encoder_inputs.data(), encoder_inputs.size(),
                                                &encoder_output_name, 1);
-    projector_inputs[encoder_output_index_] = encoded[0].get();
+    auto staged = StageVisionEncoderOutput(*encoded[0], *model_.vision_encoder_device_,
+                                           *model_.vision_projector_device_);
+    projector_inputs[encoder_output_index_] = staged ? staged.get() : encoded[0].get();
     OrtValue* output = outputs_[0];
     std::unique_ptr<OrtValue> output_slice;
     if (num_images_ > 1) {

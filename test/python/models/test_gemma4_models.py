@@ -11,6 +11,7 @@ This file can be used in two ways:
 """
 
 import argparse
+import itertools
 import json
 import logging
 import os
@@ -895,12 +896,27 @@ def test_gemma4_split_vision_requires_two_stages(test_data_path, tmp_path):
         og.Model(os.fspath(model_path))
 
 
-@pytest.mark.parametrize("fixed_patches", [False, True])
-@pytest.mark.parametrize("image_names", [("australia.jpg",), ("australia.jpg", "sheet.png")])
-@pytest.mark.parametrize("position_dtype", [np.int32, np.int64])
-def test_gemma4_flat_decoder_runs_split_vision(test_data_path, tmp_path, fixed_patches, image_names, position_dtype):
+@pytest.mark.parametrize(
+    "fixed_patches,image_names,position_dtype,encoder_provider",
+    [
+        (*case, None)
+        for case in itertools.product(
+            [False, True],
+            [("australia.jpg",), ("australia.jpg", "sheet.png")],
+            [np.int32, np.int64],
+        )
+    ]
+    + [(True, ("australia.jpg",), np.int32, "cuda")],
+)
+def test_gemma4_flat_decoder_runs_split_vision(
+    test_data_path, tmp_path, fixed_patches, image_names, position_dtype, encoder_provider
+):
     """Split vision with a flat decoder must bind projector-only positions for each image."""
     onnx = pytest.importorskip("onnx")
+    if encoder_provider == "cuda":
+        ort = pytest.importorskip("onnxruntime")
+        if "CUDAExecutionProvider" not in ort.get_available_providers():
+            pytest.skip("CUDA execution provider is not available")
     source_model_path = Path(_get_gemma4_model_path(test_data_path))
     model_path = tmp_path / "gemma4-flat-split-vision"
     shutil.copytree(source_model_path, model_path)
@@ -920,6 +936,13 @@ def test_gemma4_flat_decoder_runs_split_vision(test_data_path, tmp_path, fixed_p
     config["model"]["image_token_id"] = GEMMA4_IMAGE_TOKEN_ID
     config["search"]["past_present_share_buffer"] = False
     _configure_split_vision(config)
+    if encoder_provider:
+        config["model"]["decoder"]["session_options"]["provider_options"] = [
+            {encoder_provider: {}}
+        ]
+        config["model"]["vision"]["pipeline"][0]["encoder"]["session_options"] = {
+            "provider_options": [{encoder_provider: {}}]
+        }
     config_path.write_text(json.dumps(config), encoding="utf-8")
     _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx", GEMMA4_IMAGE_TOKEN_ID)
     _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")

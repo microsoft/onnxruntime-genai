@@ -38,6 +38,8 @@ struct MultiModalLanguageModel : Model {
 
   std::unique_ptr<OrtSessionOptions> vision_session_options_;
   std::unique_ptr<OrtSessionOptions> vision_projector_session_options_;
+  DeviceInterface* vision_encoder_device_{};
+  DeviceInterface* vision_projector_device_{};
   std::unique_ptr<OrtSessionOptions> speech_session_options_;
   std::unique_ptr<OrtSessionOptions> embedding_session_options_;
 

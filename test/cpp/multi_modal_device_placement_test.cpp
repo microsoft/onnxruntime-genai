@@ -4,12 +4,18 @@
 // Each state allocates against the device of the session it drives, never the decoder's
 // (see SessionCanAccess).
 
+#include <array>
+#include <cstring>
 #include <memory>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "models/model.h"
 #include "models/io/embeddings.h"
+#include "models/io/kv_cache.h"
+#include "models/vision_stage_io.h"
+#include "search.h"
 
 namespace {
 
@@ -33,6 +39,56 @@ struct PlacementTestState : Generators::State {
   }
 };
 
+struct TestAcceleratorBuffer : Generators::DeviceBuffer {
+  TestAcceleratorBuffer(void* data, size_t size) : host_copy_(size) {
+    p_device_ = static_cast<uint8_t*>(data);
+    size_in_bytes_ = size;
+  }
+
+  const char* GetType() const override { return "test_accelerator"; }
+  void AllocateCpu() override { p_cpu_ = host_copy_.data(); }
+  void CopyDeviceToCpu() override {
+    AllocateCpu();
+    std::memcpy(p_cpu_, p_device_, size_in_bytes_);
+  }
+  void CopyCpuToDevice() override { std::memcpy(p_device_, p_cpu_, size_in_bytes_); }
+  void CopyFrom(size_t dest, Generators::DeviceBuffer& source, size_t begin, size_t bytes) override {
+    Generators::CopyThroughCpu(*this, dest, source, begin, bytes);
+  }
+  void Zero() override { std::memset(p_device_, 0, size_in_bytes_); }
+
+ private:
+  std::vector<uint8_t> host_copy_;
+};
+
+struct TestAccelerator : Generators::DeviceInterface {
+  Generators::DeviceType GetType() const override { return Generators::DeviceType::DML; }
+  void InitOrt(const OrtApi&, Ort::Allocator&) override {}
+  Ort::Allocator& GetAllocator() override { return Generators::GetDeviceInterface(Generators::DeviceType::CPU)->GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::Create("DML", OrtDeviceAllocator, 0, OrtMemTypeDefault);
+  }
+  std::string GetExecutionProviderName() const override { return "DML"; }
+  std::shared_ptr<Generators::DeviceBuffer> AllocateBase(size_t) override { return {}; }
+  std::shared_ptr<Generators::DeviceBuffer> WrapMemoryBase(void* data, size_t size) override {
+    return std::make_shared<TestAcceleratorBuffer>(data, size);
+  }
+  std::unique_ptr<Generators::Search> CreateGreedy(const Generators::GeneratorParams&) override { return {}; }
+  std::unique_ptr<Generators::Search> CreateBeam(const Generators::GeneratorParams&) override { return {}; }
+  std::unique_ptr<Generators::KeyValueCache> CreateKeyValueCache(Generators::State&) override { return {}; }
+  void Synchronize() override {}
+};
+
+TEST(MultiModalDevicePlacementTests, VisionPipelineProvidersFollowStageOptions) {
+  Generators::Config config{
+      fs::path{std::string{MODEL_PATH "gemma4"}},
+      R"({"model":{"vision":{"pipeline":[{"encoder":{"filename":"encoder.onnx","session_options":{"provider_options":[{"cuda":{}}]}}},{"projector":{"filename":"projector.onnx","session_options":{"provider_options":[{"DML":{}}]},"run_on_cpu":true}}]}}})"};
+  ASSERT_EQ(config.model.vision.pipeline.size(), 2u);
+  EXPECT_EQ(config.model.vision.pipeline[0].session_options->providers, (std::vector<std::string>{"cuda"}));
+  EXPECT_EQ(config.model.vision.pipeline[1].session_options->providers, (std::vector<std::string>{"DML"}));
+  EXPECT_TRUE(config.model.vision.pipeline[1].run_on_cpu);
+}
+
 TEST(MultiModalDevicePlacementTests, SessionCanAccessOnlyHostOrItsOwnMemory) {
   auto& cpu = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   auto& gpu = *Generators::GetDeviceInterface(Generators::DeviceType::WEBGPU);
@@ -44,6 +100,37 @@ TEST(MultiModalDevicePlacementTests, SessionCanAccessOnlyHostOrItsOwnMemory) {
   // A CPU-EP session has no data transfer for device memory, which is the case that corrupts
   // the heap when the buffer is bound anyway.
   EXPECT_FALSE(Generators::SessionCanAccess(cpu, gpu));
+}
+
+TEST(MultiModalDevicePlacementTests, StagesAcceleratorEncoderOutputForCpuProjector) {
+  TestAccelerator encoder;
+  auto& projector = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
+  auto memory_info = encoder.GetMemoryInfo();
+  std::array<float, 4> pixels{1.0f, 2.0f, 3.0f, 4.0f};
+  const std::array<int64_t, 2> shape{2, 2};
+  auto encoded = OrtValue::CreateTensor<float>(*memory_info, pixels, shape);
+
+  auto staged = Generators::StageVisionEncoderOutput(*encoded, encoder, projector);
+  ASSERT_NE(staged, nullptr);
+  EXPECT_EQ(staged->GetTensorMemoryInfo().GetDeviceType(), OrtMemoryInfoDeviceType_CPU);
+  EXPECT_EQ(std::vector<float>(staged->GetTensorData<float>(), staged->GetTensorData<float>() + pixels.size()),
+            (std::vector<float>{pixels.begin(), pixels.end()}));
+}
+
+TEST(MultiModalDevicePlacementTests, ReusesCpuPlacedEncoderOutput) {
+  TestAccelerator encoder;
+  auto& cpu = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
+  auto encoded = OrtValue::CreateTensor<float>(cpu.GetAllocator(), std::array<int64_t, 1>{2});
+  EXPECT_EQ(Generators::StageVisionEncoderOutput(*encoded, encoder, cpu), nullptr);
+}
+
+TEST(MultiModalDevicePlacementTests, RejectsDeviceOutputWithoutCopyInterface) {
+  TestAccelerator encoder;
+  auto& cpu = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
+  auto memory_info = encoder.GetMemoryInfo();
+  std::array<float, 1> value{1.0f};
+  auto encoded = OrtValue::CreateTensor<float>(*memory_info, value, std::array<int64_t, 1>{1});
+  EXPECT_THROW(Generators::StageVisionEncoderOutput(*encoded, cpu, cpu), std::runtime_error);
 }
 
 TEST(MultiModalDevicePlacementTests, StateDefaultsToTheModelDevices) {

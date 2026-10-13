@@ -1,6 +1,7 @@
 #include "qwen_vl_model.h"
 #include "model.h"
 #include "onnxruntime_api.h"
+#include "vision_stage_io.h"
 #include "../logging.h"
 #include <iostream>
 #include <cstring>
@@ -113,7 +114,8 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
       throw std::runtime_error("Gemma 4 vision.pipeline must contain exactly two ordered stages: encoder and projector");
     }
     const auto create_stage = [&](const Config::Model::Vision::PipelineModel& stage,
-                                  std::unique_ptr<OrtSessionOptions>& options) {
+                                  std::unique_ptr<OrtSessionOptions>& options,
+                                  DeviceInterface*& stage_device) {
       options = OrtSessionOptions::Create();
       static const Config::SessionOptions kDefaultSessionOptions;
       auto settings = stage.session_options.value_or(
@@ -122,12 +124,13 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
         settings.providers.clear();
         settings.provider_options.clear();
       }
-      CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/false,
-                                     /*disable_graph_capture=*/true);
+      stage_device = CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/true,
+                                                    /*disable_graph_capture=*/true);
       return CreateSession(ort_env, stage.filename, options.get());
     };
-    vision_session_ = create_stage(stages[0], vision_session_options_);
-    vision_projector_session_ = create_stage(stages[1], vision_projector_session_options_);
+    vision_session_ = create_stage(stages[0], vision_session_options_, vision_encoder_device_);
+    vision_projector_session_ = create_stage(stages[1], vision_projector_session_options_,
+                                             vision_projector_device_);
     session_info_.Add(*vision_session_);
     session_info_.Add(*vision_projector_session_);
     return;
@@ -562,7 +565,9 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
                                    input_name_ptrs.size(), encoder_output_name, &raw_output, 1);
     std::unique_ptr<OrtValue> owned(raw_output);
     if (split_vision) {
-      projector_values[encoder_output_index] = owned.get();
+      auto staged = StageVisionEncoderOutput(*owned, *vl_model_.vision_encoder_device_,
+                                             *vl_model_.vision_projector_device_);
+      projector_values[encoder_output_index] = staged ? staged.get() : owned.get();
       raw_output = nullptr;
       vl_model_.vision_projector_session_->Run(projector_run_options_.get(), projector_names.data(),
                                                projector_values.data(), projector_names.size(),
