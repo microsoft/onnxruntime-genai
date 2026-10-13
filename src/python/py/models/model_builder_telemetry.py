@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 
@@ -57,7 +58,13 @@ class ModelBuilderTelemetry:
         """Exclude authentication/internal Hugging Face state and scrub user-facing options."""
         path_utils = self.load_telemetry_module("path_utils")
         return {
-            key: path_utils.scrub_value_for_telemetry(value)
+            key: path_utils.scrub_value_for_telemetry(
+                Path(value)
+                if isinstance(value, str)
+                and value
+                and (key == "filename" or key.endswith(("_path", "_file", "_dir", "_folder")))
+                else value
+            )
             for key, value in extra_options.items()
             if key not in {"hf_token", "hf_details"}
         }

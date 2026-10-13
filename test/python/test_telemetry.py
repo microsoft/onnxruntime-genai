@@ -651,6 +651,8 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
         return module
 
     def test_sanitizes_paths_without_changing_model_ids(self):
+        import ast
+
         module = self._load_helper()
 
         self.assertEqual(
@@ -669,6 +671,29 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
         with patch.object(path_utils_module.os.path, "exists") as mock_exists:
             self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
         mock_exists.assert_not_called()
+
+        benchmark_path = Path(__file__).parents[2] / "benchmark" / "python" / "benchmark_multimodal.py"
+        tree = ast.parse(benchmark_path.read_text(encoding="utf-8"))
+        identifiers = [
+            keyword.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"log_model_load", "log_benchmark"}
+            for keyword in node.keywords
+            if keyword.arg == "model_name"
+        ]
+        self.assertEqual(len(identifiers), 2)
+        namespace = {
+            "Path": Path,
+            "args": SimpleNamespace(input_folder="private_model"),
+            "model_path": "private_model",
+            "sanitize_model_identifier": module.sanitize_model_identifier,
+        }
+        for identifier in identifiers:
+            self.assertEqual(
+                eval(compile(ast.Expression(identifier), str(benchmark_path), "eval"), namespace), "[path]"
+            )
 
     def test_benchmark_shutdown_only_closes_existing_telemetry(self):
         module = self._load_helper()

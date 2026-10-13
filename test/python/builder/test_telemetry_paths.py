@@ -86,8 +86,15 @@ def test_telemetry_execution_provider_normalizes_trt_rtx(builder_telemetry):
 def test_extra_options_redact_relative_pathlike_values(builder_telemetry):
     sanitized = builder_telemetry.sanitize_extra_options(
         {
-            "adapter_path": Path("private/adapter"),
+            "adapter_path": "private_adapter",
+            "dflash2_path": "private_draft",
+            "dspark_path": "private_draft",
+            "kv_cache_scale_file": "private_scales",
+            "filename": "private_decoder",
+            "cache_dir": "private_cache",
+            "output_folder": "private_output",
             "nested": {"scale_path": Path("private/scales.json")},
+            "model_name": "microsoft/model",
             "batch_size": 4,
             "hf_token": "hf-secret",
             "hf_details": {
@@ -100,8 +107,18 @@ def test_extra_options_redact_relative_pathlike_values(builder_telemetry):
 
     assert "hf_token" not in sanitized
     assert "hf_details" not in sanitized
-    assert sanitized["adapter_path"] == "[path]"
+    for key in (
+        "adapter_path",
+        "dflash2_path",
+        "dspark_path",
+        "kv_cache_scale_file",
+        "filename",
+        "cache_dir",
+        "output_folder",
+    ):
+        assert sanitized[key] == "[path]"
     assert sanitized["nested"]["scale_path"] == "[path]"
+    assert sanitized["model_name"] == "microsoft/model"
     assert sanitized["batch_size"] == 4
 
 

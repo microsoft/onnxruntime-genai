@@ -8,7 +8,7 @@ The software may collect information about you and your use of the software and 
 
 ### Official Builds
 
-ONNX Runtime GenAI collects a small number of trace events with the goal of improving product quality. Official packages on supported platforms include the cross-platform 1DS telemetry SDK. Collection is subject to user consent and handled following Microsoft's privacy practices.
+ONNX Runtime GenAI collects telemetry to help improve product quality. Collection is subject to user consent and handled following Microsoft's privacy practices.
 
 Telemetry is turned **ON** by default in official packages.
 
@@ -16,31 +16,17 @@ Telemetry is turned **ON** by default in official packages.
 
 The standard `build.sh` and `build.bat` wrappers enable telemetry. For information on how to disable telemetry, see [Disabling Telemetry](#disabling-telemetry) below.
 
-#### Technical Details
+### Collected Information
 
-ONNX Runtime GenAI uses the cross-platform 1DS SDK (cpp_client_telemetry) to send ONNX Runtime GenAI trace events to Microsoft's telemetry backend over HTTPS. Based on user consent, this data is handled following GDPR and privacy regulations for anonymity and data access controls.
-
-Routine model, generation, adapter, and process information events use deterministic 1% client-side sampling; runtime error events are not sampled. Process information includes coarse container, virtual-machine, WSL, or emulator classification when detected. Python error events may include bounded, path-redacted stack metadata and immediate inner-exception details. Raw source lines, container identifiers, host names, and workload identifiers are not transmitted.
-
-Python model-builder events are emitted only after a successful build. Operator counts and types come from the in-memory graph and may differ from the saved graph after quantization.
-
-Python telemetry replaces structured secret values, including separate command-line secret arguments, with `[redacted]`. Free-text redaction uses the shared `[path]` marker for paths and other sensitive content.
-
-Model identifiers are scrubbed without probing the filesystem: explicit paths, bare dotted names (including filenames), and dot-prefixed names are replaced with `[path]`, while namespaced model IDs such as `microsoft/phi-3.5-mini` are preserved. A bare name without path syntax is treated as a model ID regardless of whether a same-named local file or directory exists; callers should pass a `Path` object or an explicit relative path for local inputs.
-
-Python file storage rejects symlinked or reparse-point directories and files, and foreign-owned storage, before persisting device IDs or queued events. POSIX uses directory-relative no-follow opens and private permissions; Windows pins validated paths with handles that prohibit deletion while in use. Unsafe SQLite paths disable the local queue and uploader, and storage initialization failures are available through the telemetry module's debug logging.
-
-On macOS, the root-owned system aliases `/etc`, `/tmp`, and `/var` are accepted only when they point to their expected `/private` directories and their parent is protected from non-root writes. All remaining path components retain the no-follow checks; arbitrary user-created symlinks are still rejected.
-
-For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
+Telemetry may include model and build metadata, device and platform information, performance measurements, diagnostics, and a pseudonymous device identifier. Local paths and credentials are redacted.
 
 ### Disabling Telemetry
 
-Telemetry can be disabled in any of these ways:
+- Set `ORT_DISABLE_TELEMETRY=1` before first use to disable native and Python telemetry.
+- For Python tools, use the model builder's `--disable_telemetry` flag or call `onnxruntime_genai.telemetry.disable_telemetry()`.
+- For private builds, pass `--no_telemetry` to the build script or configure CMake with `-DENABLE_TELEMETRY=OFF`.
+- Native language bindings provide `disable_telemetry_events`-style controls for non-essential events. These do not disable native process information; use the environment variable for full suppression.
 
-- **Run in CI or a native test harness.** Python and native telemetry honor the shared CI signals and `ORT_RUNNING_UNIT_TESTS`; truthy values suppress telemetry before storage or uploader initialization.
-- **Don't build it in.** Telemetry is compiled by default when using `build.py`, `build.bat`, or `build.sh` on supported platforms. Pass `--no_telemetry` to produce a binary that collects no telemetry, or configure CMake directly with `-DENABLE_TELEMETRY=OFF`. The model builder and benchmarks respect telemetry-disabled wheels even when run from a source checkout; source telemetry is used only when the GenAI package itself is absent.
-- **Disable native telemetry at runtime.** Set `ORT_DISABLE_TELEMETRY=1` before the native ONNX Runtime GenAI runtime initializes to prevent native events, the native uploader, and native device-ID persistence.
-- **Disable Python telemetry at runtime.** For the Python model builder and benchmarks, set `ORT_DISABLE_TELEMETRY=1`, pass the builder's `--disable_telemetry` flag, or call `onnxruntime_genai.telemetry.disable_telemetry()` before first use. These are full process-lifetime opt-outs: no Heartbeat or detailed event is emitted, and telemetry does not create its store, uploader, or device identifier.
-- **Stop Python telemetry after initialization.** Calling `onnxruntime_genai.telemetry.disable_telemetry()` after initialization stops new events and current-process uploading without flushing, deleting, or modifying queued rows. An upload already in flight may finish; otherwise a later telemetry-enabled process may drain the retained rows.
-- **Disable native non-essential events via language-binding APIs.** The C API and its C++, C#, Python, Java, and Objective-C wrappers expose `disable_telemetry_events`-style controls for native non-essential events. Native process information may still be emitted; use `ORT_DISABLE_TELEMETRY` for full native suppression.
+Telemetry is also disabled in CI and native test harnesses.
+
+Python runtime opt-out stops new events and uploads. An upload already admitted may finish, and retained queued events may be sent by a later telemetry-enabled process. Opt out before first use to prevent all uploads.

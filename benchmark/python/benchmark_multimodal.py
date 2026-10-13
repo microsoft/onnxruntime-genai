@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 from contextlib import suppress
+from pathlib import Path
 
 import onnxruntime_genai as og
 import pandas as pd
@@ -310,7 +311,7 @@ def run_benchmark(
     with suppress(Exception):
         telemetry = _get_telemetry()
         telemetry.log_benchmark(
-            model_name=sanitize_model_identifier(args.input_folder),
+            model_name=sanitize_model_identifier(Path(args.input_folder)),
             backend="onnxruntime-genai",
             device="default",
             prompt_length=prompt_length,
@@ -350,7 +351,7 @@ def main(args):
         telemetry = _get_telemetry()
         model_session_id = telemetry.allocate_model_session_id()
         telemetry.log_model_load(
-            model_name=sanitize_model_identifier(model_path),
+            model_name=sanitize_model_identifier(Path(model_path)),
             execution_provider="default",
             total_load_time_ms=model_load_time_ms,
             session_id=model_session_id,
