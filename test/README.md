@@ -29,11 +29,14 @@ ctest -C Release -R '^TelemetryShutdown-' --output-on-failure --repeat until-fai
 
 The cases exercise the actual singleton, initialization on an application thread, explicit
 shutdown, shutdown/reinitialization, constructor-only priming, full runtime suppression, and CI
-suppression. Test-only SDK objects observe real mutex initialization and native worker joins;
+suppression, and injected mutex/allocation failures during priming. Failed priming permanently
+suppresses telemetry, including after ordinary shutdown/reinitialization. Test-only SDK objects
+observe real mutex initialization and native worker joins, including in the no-worker modes;
 the lifetime observer also makes the destruction-order defect deterministic on GCC/MSVC.
 Collector events are intercepted before queuing, and each case uses a private cache directory.
 Missing SDK initialization fails enabled cases rather than silently passing.
 
 The constructor primes only an empty diagnostic source before singleton destruction is registered.
 SDK initialization remains lazy; priming creates no uploader or collector event. No process-exit
-callback or shutdown-state machinery is added.
+callback or shutdown-state machinery is added. A priming exception latches the existing full
+suppression state rather than retrying mutex initialization after singleton construction.

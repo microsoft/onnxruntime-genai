@@ -33,7 +33,7 @@ foreach(source callbacks/DebugSource.cpp pal/WorkerThread.cpp api/Logger.cpp)
       "TelemetryTestBeforeDebugLock();\n        (void)stateLock();\n        TelemetryTestDebugLockInitialized();\n        DE_LOCKGUARD(stateLock());"
       instrumented "${instrumented}")
     string(PREPEND instrumented
-      "extern \"C\" void TelemetryTestBeforeDebugLock();\nextern \"C\" void TelemetryTestDebugLockInitialized();\n")
+      "void TelemetryTestBeforeDebugLock();\nextern \"C\" void TelemetryTestDebugLockInitialized();\n")
   elseif(source STREQUAL "pal/WorkerThread.cpp")
     string(REGEX MATCHALL "threadToJoin\\.join\\(\\)" sites "${instrumented}")
     list(LENGTH sites count)
@@ -89,15 +89,10 @@ target_include_directories(telemetry_shutdown_tests PRIVATE
   "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib" "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/include"
   "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/include/mat")
 add_dependencies(telemetry_shutdown_tests onnxruntime-genai)
-if(WIN32)
-  add_custom_command(TARGET telemetry_shutdown_tests POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORT_LIB_DIR}/onnxruntime.dll"
-      "$<TARGET_FILE_DIR:telemetry_shutdown_tests>/onnxruntime.dll")
-endif()
 set_target_properties(telemetry_shutdown_tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>" FOLDER "Tests")
 
-foreach(mode retained threaded recreated explicit prime-only disabled ci-disabled)
+foreach(mode retained threaded recreated explicit prime-only disabled ci-disabled prime-failed prime-allocation-failed)
   set(home "${CMAKE_CURRENT_BINARY_DIR}/telemetry-shutdown-${mode}")
   file(MAKE_DIRECTORY "${home}")
   set(disabled 0)

@@ -183,8 +183,21 @@ GenAiTelemetry::GenAiTelemetry() {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   // Initialize the SDK diagnostic mutex before this singleton's destructor is registered.
   // An empty source starts no uploader and sends no telemetry, including when fully suppressed.
-  MAT::DebugEventSource source;
-  source.DispatchEvent({});
+  try {
+    MAT::DebugEventSource source;
+    source.DispatchEvent({});
+  } catch (const std::exception& error) {
+    // Retrying after construction could register the SDK mutex after its owner.
+    telemetry_disabled_.store(true);
+    enabled_.store(false);
+    if (g_log.enabled && g_log.warning) {
+      try {
+        Log("warning", "Telemetry disabled because SDK lifetime initialization failed: %s", error.what());
+      } catch (const std::exception&) {
+        std::fputs("WARNING: telemetry SDK lifetime initialization and diagnostic logging failed\n", stderr);
+      }
+    }
+  }
 #endif
 }
 

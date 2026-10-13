@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <string_view>
+#include <system_error>
 #include <thread>
 
 namespace {
@@ -42,13 +43,22 @@ struct State {
   bool worker_joined = false;
   int workers_started = 0;
   int collector_events = 0;
+  int priming_failure = 0;
+  int priming_attempts = 0;
 
   ~State() {
+    if (priming_failure != 0) {
+      if (priming_attempts != 1 || mutex_before_owner || mutex_retired) {
+        Fail(32, "failed priming was retried or unexpectedly initialized the SDK mutex");
+      }
+    } else if (!mutex_before_owner || !mutex_retired) {
+      Fail(32, "SDK mutex initialization and retirement were not exercised");
+    }
     if (no_worker_expected) {
       if (workers_started != 0 || collector_events != 0) {
         Fail(32, "priming or suppression started a worker or emitted a collector event");
       }
-    } else if (!mutex_before_owner || !mutex_retired || !callback_started ||
+    } else if (!callback_started ||
                !callback_completed || !worker_joined || !worker.expired()) {
       Fail(32, "owner, native SDK worker, and mutex teardown were not fully exercised");
     }
@@ -137,9 +147,16 @@ void InitializeOwner(bool initialize_sdk) {
 }
 }  // namespace
 
-extern "C" void TelemetryTestBeforeDebugLock() {
+void TelemetryTestBeforeDebugLock() {
   auto& state = GetState();
   std::unique_lock lock(state.mutex);
+  if (state.priming_failure != 0) {
+    ++state.priming_attempts;
+    if (state.priming_failure == 1) {
+      throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    }
+    throw std::bad_alloc();
+  }
   if (std::this_thread::get_id() != state.construction_thread &&
       !state.changed.wait_for(lock, 10s, [&] { return state.owner_ready; })) {
     Fail(32, "initialization depended on a background diagnostic");
@@ -176,16 +193,26 @@ int main(int argc, char* argv[]) {
   if (argc != 2) Fail(32, "expected a shutdown regression mode");
   const std::string_view mode{argv[1]};
   if (mode != "retained" && mode != "threaded" && mode != "recreated" &&
-      mode != "explicit" && mode != "prime-only" && mode != "disabled" && mode != "ci-disabled") {
+      mode != "explicit" && mode != "prime-only" && mode != "disabled" && mode != "ci-disabled" &&
+      mode != "prime-failed" && mode != "prime-allocation-failed") {
     Fail(32, "unknown shutdown regression mode");
   }
   auto& state = GetState();
-  state.no_worker_expected = mode == "prime-only" || mode == "disabled" || mode == "ci-disabled";
+  state.priming_failure = mode == "prime-failed" ? 1 : mode == "prime-allocation-failed" ? 2
+                                                                                         : 0;
+  state.no_worker_expected =
+      mode == "prime-only" || mode == "disabled" || mode == "ci-disabled" || state.priming_failure != 0;
   if (mode == "threaded") {
     std::thread initializer([] { InitializeOwner(true); });
     initializer.join();
   } else {
     InitializeOwner(mode != "prime-only");
+  }
+  if (state.priming_failure != 0) {
+    auto& telemetry = Generators::GenAiTelemetry::Instance();
+    telemetry.Shutdown();
+    telemetry.Initialize();
+    if (telemetry.IsEnabled()) Fail(32, "failed priming did not permanently suppress telemetry");
   }
   if (state.no_worker_expected) return 0;
 
