@@ -1701,19 +1701,20 @@ def test_gemma4_split_vision_configured_run_options(
     )
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=4096)
-    generator = og.Generator(model, params)
 
-    def run_prompt():
+    def run_prompt(generator):
         generator.set_inputs(inputs)
         generator.get_output("inputs_embeds")
         generator.generate_next_token()
 
     if option_name == "terminate_session":
+        generator = og.Generator(model, params)
         with pytest.raises(RuntimeError, match="[Tt]erminat"):
-            run_prompt()
+            run_prompt(generator)
     else:
         try:
-            run_prompt()
+            generator = og.Generator(model, params)
+            run_prompt(generator)
         except RuntimeError as exc:
             if str(exc) == "enable_profiling requires ONNX Runtime 1.25 or later":
                 pytest.skip(str(exc))
