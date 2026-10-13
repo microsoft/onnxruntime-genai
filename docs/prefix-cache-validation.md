@@ -158,7 +158,8 @@ sequentially.
 
 ### Focused numerical-parity reproductions
 
-Use `--scenarios` with exact names from `--plan-only` to isolate a failing
+Run `--plan-only` without `--scenarios` to list available names for the selected
+suites and profiles. Use `--scenarios` with those exact names to isolate a failing
 sequence without changing its actions, retained owners, or cache-disabled
 admission controls. Only prompts used by the selected scenarios are referenced;
 their token construction is unchanged. Unknown names fail for each profile

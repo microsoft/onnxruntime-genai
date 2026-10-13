@@ -463,6 +463,20 @@ def test_plan_only_named_selection_does_not_import_runtime_and_preserves_control
     assert {spec["name"] for spec in plan["prompts"]} == {"short-seed", "long"}
 
 
+def test_plan_only_invalid_selection_explains_how_to_list_available_cases(tmp_path, monkeypatch, capsys):
+    (tmp_path / "genai_config.json").write_text(
+        json.dumps({"model": {}, "engine": {"dynamic_batching": {"block_size": 4, "max_batch_size": 2}}})
+    )
+    monkeypatch.setattr(qa.importlib, "import_module", lambda name: pytest.fail(f"Unexpected runtime import: {name}"))
+    arguments = ["-m", str(tmp_path), "--plan-only", "--suites", "concurrency"]
+    with pytest.raises(ValueError, match="Use --plan-only without --scenarios"):
+        qa.main([*arguments, "--scenarios", "misspelled"])
+    qa.main(arguments)
+    plan = json.loads(capsys.readouterr().out)[0]
+    names = {scenario["name"] for scenario in plan["scenarios"]}
+    assert {"simultaneous-short-long", "simultaneous-long-short"} <= names
+
+
 def test_unknown_named_case_overwrites_stale_success_report(tmp_path):
     (tmp_path / "genai_config.json").write_text(
         json.dumps({"model": {}, "engine": {"dynamic_batching": {"block_size": 4}}})

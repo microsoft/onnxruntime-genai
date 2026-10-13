@@ -369,7 +369,10 @@ def select_scenarios(specs, scenarios, names):
         return specs, scenarios
     unknown = set(names) - {scenario.name for scenario in scenarios}
     if unknown:
-        raise ValueError(f"Unknown scenario(s) for this profile: {', '.join(sorted(unknown))}. Use --plan-only.")
+        raise ValueError(
+            f"Unknown scenario(s) for this profile: {', '.join(sorted(unknown))}. "
+            "Use --plan-only without --scenarios to list available names."
+        )
     selected = [scenario for scenario in scenarios if scenario.name in names]
     needed = {name for scenario in selected for action in scenario.actions for name in action.prompts}
     return {name: spec for name, spec in specs.items() if name in needed}, selected
