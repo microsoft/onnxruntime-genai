@@ -213,12 +213,18 @@ after its fixed-state checkpoint and the complete drafter proposal succeed.
 The ring is restored into newly allocated drafter blocks before a cached
 request joins at a nonzero position.
 
-### Tiered DFlash snapshot storage
+### Tiered snapshot cache
 
-Draft snapshots require a separate opt-in byte budget. Configure
-`engine.dynamic_batching.dflash2_snapshot_cache` with any combination of
+Snapshot storage uses one Engine-owned policy, not separate limits keyed by
+`decoder`, `dflash2`, `mtp`, or other component names. Configure
+`engine.dynamic_batching.snapshot_cache` with any combination of
 `vram_bytes`, `ram_bytes`, and `disk_bytes`; omitted limits default to zero and
-disable that tier. These limits cover **DFlash ring payloads only**, not retained
+disable that tier. `max_snapshots` is the shared count cap, not a per-component
+allowance. Separate Engine instances have independent policies; these are not
+process-wide limits.
+
+**Current integration: DFlash snapshots only.** DFlash ring payloads are the
+only component registered with this policy today. These limits do not cover retained
 target KV, hybrid fixed-state checkpoints, active drafter rings, or total process
 memory. Target KV and fixed state remain device-resident under their existing
 budgets. CPU execution supports RAM and disk; VRAM storage requires CUDA.
@@ -228,8 +234,8 @@ budgets. CPU execution supports RAM and disk; VRAM storage requires CUDA.
   "engine": {
     "dynamic_batching": {
       "prefix_caching": true,
-      "dflash2_max_snapshots": 8,
-      "dflash2_snapshot_cache": {
+      "max_snapshots": 8,
+      "snapshot_cache": {
         "vram_bytes": 104857600,
         "ram_bytes": 209715200,
         "disk_bytes": 419430400
@@ -239,7 +245,7 @@ budgets. CPU execution supports RAM and disk; VRAM storage requires CUDA.
 }
 ```
 
-`dflash2_max_snapshots` defaults to one and is an additional count cap across all
+`max_snapshots` defaults to one and is an additional count cap across all
 tiers, not an alternative to byte budgets. Zero disables snapshots. The count is
 also capped by the hybrid fixed-state checkpoint capacity (`max_batch_size`).
 Snapshot counts must be integers from zero through 2147483647; byte limits must
@@ -247,7 +253,8 @@ be non-negative exact integers no greater than 9007199254740991 and fit the
 platform's `size_t`. Prefix caching may be enabled without enabling any draft
 snapshot tier.
 
-`PrefixSnapshotCache` owns storage policy, while `PrefixCache` owns prefix identity.
+The Engine owns one `PrefixSnapshotCache` and supplies it to snapshot producers;
+the drafter does not create a private policy. `PrefixCache` owns prefix identity.
 New snapshots enter the fastest tier with available capacity. Under pressure,
 unleased least-recently-used payloads are demoted from VRAM to RAM to disk;
 when no lower tier can retain them they are evicted. Committed restoration
@@ -278,15 +285,20 @@ Disk I/O failures propagate explicitly; cleanup failures are logged as warnings.
 Spill directories request owner-only filesystem permissions. Windows inherits
 the parent directory's ACL, so a custom parent must restrict access appropriately.
 
-Runtime-profile overlays accept `prefix_caching`, `dflash2_max_snapshots`, and
-`dflash2_snapshot_cache`. A profile's snapshot-cache object replaces the base
+Runtime-profile overlays accept `prefix_caching`, `max_snapshots`, and
+`snapshot_cache`. A profile's snapshot-cache object replaces the base
 object completely, so omitted tier limits disable those tiers in that profile.
 
+The generic configuration and shared Engine ownership establish the policy for
+future snapshot-producing components without creating component-specific controls.
 The storage manager is deliberately independent of token identity and tensor
-semantics. Extending it to target KV and fixed state requires a coordinated
+semantics. Integrating retained target KV and fixed state requires shared
+accounting and coordinated eviction even if those payloads remain in VRAM.
+Offloading them additionally requires a coordinated
 checkpoint bundle, physical-block reallocation on restore, per-component lease
 protection, and transactional publication of the complete bundle. This PR does
-not offload those components or claim its draft budgets bound the entire prefix.
+not integrate or offload those components, and the configured budgets do not yet
+bound the entire retained prefix.
 
 If the matching draft checkpoint is absent, the request retains the full
 target hit and runs target-only until the windowed drafter has rebuilt its context.

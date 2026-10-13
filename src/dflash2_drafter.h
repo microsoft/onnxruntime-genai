@@ -143,6 +143,9 @@ struct Dflash2Drafter {
                  size_t max_requests);
   ~Dflash2Drafter();
 
+  // Binds the shared Engine policy once, before tracking requests.
+  void InitializeSnapshotCache(std::shared_ptr<PrefixSnapshotCache> snapshot_cache);
+
   // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
   static size_t BytesPerBlock(const Config& config, size_t paged_block_size,
                               ONNXTensorElementDataType cache_type);
@@ -215,7 +218,7 @@ struct Dflash2Drafter {
   // Whether the drafter can carry this feed's request, admitting it to the pool when it can.
   bool Admit(const Feed& feed);
   bool RestorePrefix(const Feed& feed);
-  std::unique_ptr<PrefixSnapshotCache> prefix_snapshot_cache_;
+  std::shared_ptr<PrefixSnapshotCache> prefix_snapshot_cache_;
   // Grows a request's block list so positions [0, positions) are addressable. A windowed drafter
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);

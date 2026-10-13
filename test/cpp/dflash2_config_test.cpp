@@ -30,7 +30,7 @@ Config MakeDflash2Config() {
   Config config;
   config.engine.dynamic_batching.emplace();
   config.engine.dynamic_batching->prefix_caching = true;
-  config.engine.dynamic_batching->dflash2_snapshot_cache.ram_bytes = 1024 * 1024;
+  config.engine.dynamic_batching->snapshot_cache.ram_bytes = 1024 * 1024;
   config.model.vocab_size = 128;
   auto& decoder = config.model.decoder;
   decoder.filename = "target.onnx";
@@ -50,6 +50,15 @@ Config MakeDflash2Config() {
   dflash2.mask_token_id = 31;
   dflash2.sliding_window = 17;
   return config;
+}
+
+std::shared_ptr<PrefixSnapshotCache> MakeSnapshotCache(const Config& config) {
+  const auto& batching = *config.engine.dynamic_batching;
+  const auto& limits = batching.snapshot_cache;
+  return std::make_shared<PrefixSnapshotCache>(
+      std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
+      std::min(batching.max_snapshots, batching.max_batch_size),
+      fs_std::path{fs::path{limits.directory}.c_str()});
 }
 
 struct TensorMetadata {
@@ -943,8 +952,8 @@ class Dflash2StorageRestoreTest : public ::testing::TestWithParam<bool> {};
 TEST_P(Dflash2StorageRestoreTest, ExecutesWindowedRestoreAcrossRingWrap) {
   auto config = MakeDflash2Config();
   if (GetParam()) {
-    config.engine.dynamic_batching->dflash2_snapshot_cache.ram_bytes = 0;
-    config.engine.dynamic_batching->dflash2_snapshot_cache.disk_bytes = 1024 * 1024;
+    config.engine.dynamic_batching->snapshot_cache.ram_bytes = 0;
+    config.engine.dynamic_batching->snapshot_cache.disk_bytes = 1024 * 1024;
   }
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
   auto& draft = config.model.dflash2;
@@ -961,6 +970,7 @@ TEST_P(Dflash2StorageRestoreTest, ExecutesWindowedRestoreAcrossRingWrap) {
   const size_t ring_blocks = Dflash2Drafter::PoolBlocks(config, 4, 1);
   Dflash2Drafter drafter{model, /*paged_block_size=*/4, ring_blocks * 2,
                          /*max_requests=*/2};
+  drafter.InitializeSnapshotCache(MakeSnapshotCache(config));
   int source_id = 0, restored_id = 0, peer_id = 0, extra_id = 0, remap_id = 0;
   auto* source = reinterpret_cast<Request*>(&source_id);
   auto* restored = reinterpret_cast<Request*>(&restored_id);
@@ -1133,6 +1143,7 @@ TEST(Dflash2ConfigTest, MissingWindowedPrefixRebuildsBeforeDraftingOrCheckpointi
   draft.sliding_window = 8;
   auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
   Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
+  drafter.InitializeSnapshotCache(MakeSnapshotCache(config));
   int request_id = 0;
   auto* request = reinterpret_cast<Request*>(&request_id);
   Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
@@ -1178,6 +1189,7 @@ TEST(Dflash2ConfigTest, CapturesAndRestoresExtendedWindowedPrefix) {
   auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
   const size_t ring_blocks = Dflash2Drafter::PoolBlocks(config, 4, 1);
   Dflash2Drafter drafter{model, /*paged_block_size=*/4, ring_blocks * 2, /*max_requests=*/2};
+  drafter.InitializeSnapshotCache(MakeSnapshotCache(config));
   int source_id = 0, replay_id = 0;
   auto* source = reinterpret_cast<Request*>(&source_id);
   auto* replay = reinterpret_cast<Request*>(&replay_id);
@@ -1607,6 +1619,7 @@ TEST(Dflash2ConfigTest, HostSnapshotProtectsLeasesAndOutlivesDrafter) {
   std::weak_ptr<void> memory;
   {
     Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
+    drafter.InitializeSnapshotCache(MakeSnapshotCache(config));
     int request_id{};
     auto* request = reinterpret_cast<Request*>(&request_id);
     Tensor aux{cpu, Ort::TypeToTensorType<float>};
@@ -1641,6 +1654,57 @@ TEST(Dflash2ConfigTest, HostSnapshotProtectsLeasesAndOutlivesDrafter) {
   EXPECT_NE(checkpoint->caches.front()->GetRawData(), nullptr);
   checkpoint.reset();
   EXPECT_TRUE(memory.expired());
+}
+
+TEST(Dflash2ConfigTest, SnapshotProducersShareCountBudgetAndLeaseProtection) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  config.engine.dynamic_batching->max_snapshots = 1;
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.sliding_window = 8;
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  const size_t pool_blocks = Dflash2Drafter::PoolBlocks(config, 4, 1);
+  Dflash2Drafter first{model, 4, pool_blocks, 1};
+  Dflash2Drafter second{model, 4, pool_blocks, 1};
+  auto cache = MakeSnapshotCache(config);
+  EXPECT_THROW(first.InitializeSnapshotCache(nullptr), std::invalid_argument);
+  first.InitializeSnapshotCache(cache);
+  second.InitializeSnapshotCache(cache);
+  EXPECT_THROW(first.InitializeSnapshotCache(cache), std::logic_error);
+  int first_id{}, second_id{};
+  auto* first_request = reinterpret_cast<Request*>(&first_id);
+  auto* second_request = reinterpret_cast<Request*>(&second_id);
+  Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  aux.CreateTensor(std::array<int64_t, 2>{8, 1});
+  aux.GetByteSpan().Zero();
+  const std::array first_feeds{Dflash2Drafter::Feed{
+      .request = first_request, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+  const std::array second_feeds{Dflash2Drafter::Feed{
+      .request = second_request, .aux_row_count = 8, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+  std::vector<std::vector<int32_t>> proposals;
+  ASSERT_TRUE(first.Propose(aux, first_feeds, proposals));
+  ASSERT_TRUE(second.Propose(aux, second_feeds, proposals));
+  auto checkpoint = first.CapturePrefix(first_request, 8);
+  ASSERT_NE(checkpoint, nullptr);
+  ASSERT_EQ(checkpoint->caches.size(), 2u);
+  auto lease = checkpoint;
+  EXPECT_EQ(second.CapturePrefix(second_request, 8), nullptr);
+  EXPECT_EQ(cache->Used(), (std::array<size_t, 3>{0, checkpoint->bytes, 0}));
+  const auto* address = checkpoint->caches.front()->GetRawData();
+  lease.reset();
+  auto replacement = second.CapturePrefix(second_request, 8);
+  ASSERT_NE(replacement, nullptr);
+  ASSERT_EQ(replacement->caches.size(), 2u);
+  EXPECT_EQ(checkpoint->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(replacement->caches.front()->GetRawData(), address);
+  EXPECT_EQ(cache->Used(), (std::array<size_t, 3>{0, replacement->bytes, 0}));
 }
 
 namespace {
@@ -1692,10 +1756,10 @@ TEST(PrefixSnapshotCacheTest, VramReservationPreservesTargetBlockAndConfiguredLi
   batching.prefix_caching = true;
   batching.num_blocks = 4;
   batching.max_batch_size = 8;
-  batching.dflash2_max_snapshots = 8;
+  batching.max_snapshots = 8;
   const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
   const size_t snapshot_bytes = 2 * block_bytes;
-  batching.dflash2_snapshot_cache.vram_bytes = 16 * block_bytes;
+  batching.snapshot_cache.vram_bytes = 16 * block_bytes;
   auto* cpu = model->p_device_kvcache_;
   CheckpointAllocationDevice device{*cpu, cpu->GetAllocator(), true};
   model->p_device_kvcache_ = &device;
@@ -1705,7 +1769,7 @@ TEST(PrefixSnapshotCacheTest, VramReservationPreservesTargetBlockAndConfiguredLi
     EXPECT_TRUE(enabled);
     EXPECT_EQ(manager->DraftCheckpointVramBytes(), snapshot_bytes);
     EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
-    EXPECT_EQ(batching.dflash2_snapshot_cache.vram_bytes, 16 * block_bytes);
+    EXPECT_EQ(batching.snapshot_cache.vram_bytes, 16 * block_bytes);
   }
   batching.num_blocks = 2;
   {

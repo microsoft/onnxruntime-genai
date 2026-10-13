@@ -398,8 +398,8 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   if (optional_draft_checkpoint_bytes != 0 && hybrid_prefix_caching &&
       auxiliary_bytes_per_block == 0) {
     const auto& batching = *model_->config_->engine.dynamic_batching;
-    const auto& limits = batching.dflash2_snapshot_cache;
-    const size_t count = std::min(batching.dflash2_max_snapshots, prefix_checkpoint_capacity);
+    const auto& limits = batching.snapshot_cache;
+    const size_t count = std::min(batching.max_snapshots, prefix_checkpoint_capacity);
     if (limits.vram_bytes != 0 && model_->p_device_kvcache_->GetType() != DeviceType::CUDA) {
       throw std::runtime_error("A VRAM prefix snapshot budget requires a CUDA device.");
     }

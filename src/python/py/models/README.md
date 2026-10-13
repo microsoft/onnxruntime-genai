@@ -159,10 +159,12 @@ speculative capabilities, invalid allocation and draft limits, provider changes,
 and changes to graph-required session options.
 
 Prefix caching is opt-in at runtime. Structured `runtime_config.engine.dynamic_batching`
-accepts `prefix_caching`, `dflash2_max_snapshots`, and `dflash2_snapshot_cache`.
-The latter specifies independent VRAM, RAM, and ephemeral disk budgets for draft
-ring snapshots, not target KV or fixed state. The count setting remains an
-additional cap. See [tiered snapshot configuration](../../../../docs/paged_attention_engine.md#tiered-dflash-snapshot-storage)
+accepts `prefix_caching`, `max_snapshots`, and `snapshot_cache`.
+The latter specifies VRAM, RAM, and ephemeral disk budgets shared by an Engine's
+registered snapshot components, rather than separate per-model allowances.
+Currently only DFlash ring snapshots participate; target KV and fixed state are
+not counted. The count setting remains an additional shared cap. See
+[tiered snapshot configuration](../../../../docs/paged_attention_engine.md#tiered-snapshot-cache)
 for limits, policy, and a complete runtime JSON example.
 
 For memory-dependent INT4/INT8 KV-cache graphs that share external weights, use

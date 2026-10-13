@@ -175,6 +175,7 @@ Engine::Engine(std::shared_ptr<Model> model)
 Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     : model_{std::move(model)},
       cache_manager_{std::move(dependencies.cache_manager)},
+      snapshot_cache_{std::move(dependencies.snapshot_cache)},
       scheduler_{std::move(dependencies.scheduler)},
       model_executor_{std::move(dependencies.model_executor)},
       mtp_model_{std::move(dependencies.mtp_model)},
@@ -194,6 +195,12 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   }
   if (!model_executor_) {
     throw std::runtime_error("Engine requires a non-null model executor.");
+  }
+  if (dflash2_prefix_checkpoints_enabled_ && (!dflash2_drafter_ || !snapshot_cache_)) {
+    throw std::runtime_error("DFlash prefix snapshots require a drafter and an Engine snapshot cache.");
+  }
+  if (dflash2_drafter_ && snapshot_cache_) {
+    dflash2_drafter_->InitializeSnapshotCache(snapshot_cache_);
   }
   fatal_contract_fallback_error_ =
       MakeFatalFallbackError(StepOutcomeKind::ExecutionContractFailure);
@@ -430,9 +437,16 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
                            dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes,
                            dflash2_prefix_checkpoint_bytes,
                            &dflash2_prefix_checkpoints_enabled);
-  if (dflash2_model) {
-    dflash2_model->config_->engine.dynamic_batching->dflash2_snapshot_cache.vram_bytes =
-        cache_manager->DraftCheckpointVramBytes();
+  std::shared_ptr<PrefixSnapshotCache> snapshot_cache;
+  const auto& batching = model->config_->engine.dynamic_batching;
+  if (batching && batching->prefix_caching && batching->max_snapshots != 0 &&
+      batching->snapshot_cache.Enabled()) {
+    const auto& limits = batching->snapshot_cache;
+    snapshot_cache = std::make_shared<PrefixSnapshotCache>(
+        std::array<size_t, 3>{cache_manager->DraftCheckpointVramBytes(),
+                              limits.ram_bytes, limits.disk_bytes},
+        std::min(batching->max_snapshots, batching->max_batch_size),
+        std::filesystem::path{fs::path{limits.directory}.c_str()});
   }
   if (dflash2_model && !dflash2_drafter) {
     const size_t paged_block_size =
@@ -468,7 +482,8 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   return EngineDependencies{
       std::move(cache_manager), std::move(scheduler), std::move(model_executor),
       std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor),
-      std::move(dflash2_drafter), dflash2_prefix_checkpoints_enabled};
+      std::move(dflash2_drafter), dflash2_prefix_checkpoints_enabled,
+      nullptr, std::move(snapshot_cache)};
 }
 
 void Engine::PrepareDflash2Feeds(const StepPlan& plan,

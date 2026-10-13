@@ -945,7 +945,7 @@ TEST(PagedKeyValueCacheManifestTest, OptionalDraftCheckpointDoesNotExhaustHybrid
   EXPECT_EQ(manager->Snapshot().total_blocks, 4u);
   manager.reset();
 
-  batching.dflash2_snapshot_cache.ram_bytes = 2 * block_bytes;
+  batching.snapshot_cache.ram_bytes = 2 * block_bytes;
   manager = CacheManager::Create(model, 0, 0, 2 * block_bytes, &enabled);
   EXPECT_TRUE(enabled);
   EXPECT_EQ(manager->Snapshot().total_blocks, 4u);

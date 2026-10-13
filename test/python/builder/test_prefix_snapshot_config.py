@@ -15,8 +15,8 @@ def test_runtime_snapshot_tiers_and_count_cap_are_preserved():
     generated = {"engine": {"dynamic_batching": {"num_blocks": 128}}}
     policy = {
         "prefix_caching": True,
-        "dflash2_max_snapshots": 8,
-        "dflash2_snapshot_cache": {
+        "max_snapshots": 8,
+        "snapshot_cache": {
             "vram_bytes": 4_294_967_296,
             "ram_bytes": 8_589_934_592,
             "disk_bytes": 17_179_869_184,
@@ -39,7 +39,7 @@ def test_runtime_snapshot_tiers_and_count_cap_are_preserved():
 @pytest.mark.parametrize("invalid", [-1, 1.5, True, "16", 9_007_199_254_740_992])
 def test_runtime_rejects_invalid_snapshot_byte_limits(tier, invalid):
     generated = {"engine": {"dynamic_batching": {"num_blocks": 128}}}
-    runtime = {"engine": {"dynamic_batching": {"dflash2_snapshot_cache": {tier: invalid}}}}
+    runtime = {"engine": {"dynamic_batching": {"snapshot_cache": {tier: invalid}}}}
     with pytest.raises(ValueError, match="non-negative integer byte count"):
         apply_runtime_config(generated, runtime)
 
@@ -47,5 +47,5 @@ def test_runtime_rejects_invalid_snapshot_byte_limits(tier, invalid):
 @pytest.mark.parametrize("invalid", [-1, 1.5, True, 2_147_483_648])
 def test_runtime_rejects_invalid_snapshot_count_cap(invalid):
     generated = {"engine": {"dynamic_batching": {"num_blocks": 128}}}
-    with pytest.raises(ValueError, match="dflash2_max_snapshots"):
-        apply_runtime_config(generated, {"engine": {"dynamic_batching": {"dflash2_max_snapshots": invalid}}})
+    with pytest.raises(ValueError, match="max_snapshots"):
+        apply_runtime_config(generated, {"engine": {"dynamic_batching": {"max_snapshots": invalid}}})

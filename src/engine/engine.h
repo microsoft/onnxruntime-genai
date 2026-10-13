@@ -101,6 +101,7 @@ struct EngineDependencies {
   bool dflash2_prefix_checkpoints_enabled{};
   // Test-only fault injection for allocation-sensitive durable error construction.
   EngineStepErrorFactory make_step_error{};
+  std::shared_ptr<PrefixSnapshotCache> snapshot_cache;
 };
 
 void ValidateMtpModelCompatibility(const Config& config,
@@ -285,8 +286,9 @@ struct Engine : std::enable_shared_from_this<Engine>,
                                           std::string_view message,
                                           std::exception_ptr error);
 
-  std::shared_ptr<Model> model_;                   // The model used by the Engine.
-  std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
+  std::shared_ptr<Model> model_;                 // The model used by the Engine.
+  std::shared_ptr<CacheManager> cache_manager_;  // The cache manager for handling cached data.
+  std::shared_ptr<PrefixSnapshotCache> snapshot_cache_;
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
   // Lazily created on the first stop-enabled BeginTurn (the no-stop fast path never touches this).

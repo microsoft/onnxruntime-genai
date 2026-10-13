@@ -687,6 +687,16 @@ Dflash2Drafter::~Dflash2Drafter() {
   ReleaseCapturedGraphs();
 }
 
+void Dflash2Drafter::InitializeSnapshotCache(std::shared_ptr<PrefixSnapshotCache> snapshot_cache) {
+  if (!snapshot_cache) {
+    throw std::invalid_argument("DFlash prefix snapshots require a non-null snapshot cache.");
+  }
+  if (prefix_snapshot_cache_ || !requests_.empty()) {
+    throw std::logic_error("The DFlash snapshot cache must be initialized once before tracking requests.");
+  }
+  prefix_snapshot_cache_ = std::move(snapshot_cache);
+}
+
 Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
                           ONNXTensorElementDataType type, const std::vector<int64_t>& shape,
                           bool* reallocated, std::unique_ptr<Tensor>* displaced) {
@@ -841,7 +851,7 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
     const Request* request, size_t token_count) {
   const auto& batching = model_->config_->engine.dynamic_batching;
   if (!CanCapturePrefix(request, token_count) || !batching ||
-      !batching->prefix_caching || !batching->dflash2_snapshot_cache.Enabled()) {
+      !batching->prefix_caching || !prefix_snapshot_cache_) {
     return nullptr;
   }
   const auto it = requests_.find(request);
@@ -849,13 +859,6 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
   checkpoint->token_count = token_count;
   checkpoint->ring_blocks = ring_blocks_;
   checkpoint->type = cache_type_;
-  if (!prefix_snapshot_cache_) {
-    const auto& limits = batching->dflash2_snapshot_cache;
-    prefix_snapshot_cache_ = std::make_unique<PrefixSnapshotCache>(
-        std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
-        std::min(batching->dflash2_max_snapshots, batching->max_batch_size),
-        std::filesystem::path{fs::path{limits.directory}.c_str()});
-  }
   for (const auto& cache : caches_) {
     auto shape = cache->GetShape();
     shape.front() = static_cast<int64_t>(ring_blocks_);

@@ -797,14 +797,14 @@ struct Config {
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       bool prefix_caching{false};
       bool prefix_caching_explicitly_set{};
-      size_t dflash2_max_snapshots{1};
+      size_t max_snapshots{1};
       struct SnapshotCache {
         size_t vram_bytes{};
         size_t ram_bytes{};
         size_t disk_bytes{};
         std::string directory;
         bool Enabled() const noexcept { return vram_bytes != 0 || ram_bytes != 0 || disk_bytes != 0; }
-      } dflash2_snapshot_cache;
+      } snapshot_cache;
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -843,8 +843,8 @@ struct Config {
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
         std::optional<bool> prefix_caching;
-        std::optional<size_t> dflash2_max_snapshots;
-        std::optional<Engine::DynamicBatching::SnapshotCache> dflash2_snapshot_cache;
+        std::optional<size_t> max_snapshots;
+        std::optional<Engine::DynamicBatching::SnapshotCache> snapshot_cache;
       } dynamic_batching;
 
       struct Search {

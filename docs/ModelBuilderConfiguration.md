@@ -908,9 +908,11 @@ target/drafter/runtime envelope.
 | Any other `extra_options` key | No canonical destination yet; see rule 8 |
 
 Structured `runtime_config.engine.dynamic_batching` also accepts `prefix_caching`,
-`dflash2_max_snapshots`, and `dflash2_snapshot_cache`. These opt-in snapshot tiers
-and their additional count cap are described in
-[Paged Attention Engine](paged_attention_engine.md#tiered-dflash-snapshot-storage).
+`max_snapshots`, and `snapshot_cache`. These opt-in snapshot tiers
+and their additional count cap define one Engine-owned policy, not per-component
+budgets. Currently only DFlash ring snapshots participate; retained target KV
+and fixed state remain outside these limits. See
+[Paged Attention Engine](paged_attention_engine.md#tiered-snapshot-cache).
 
 Normalization rules:
 
