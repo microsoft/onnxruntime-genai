@@ -164,6 +164,50 @@ verbose logs (`ORTGENAI_ORT_VERBOSE_LOGGING=1`).
 
 ## 3. Run two independent five-request invocations
 
+### Reproduce the 8K-128K source-code-review table
+
+Use `asonawane/qwen-38-flash-100-e2e` in **both** repositories. The measured
+runtime commits are ORT `16289abceb0eb1d2330bca6e8aa1de708d227f86` and
+GenAI `37e2b4773655427afa493098c7f44cb593cff0fa`. Later GenAI commits add
+the selected-logits preparation option and the portable sweep scripts;
+they do not change the native runtime used for this table.
+Build/install both matching wheels as described above into a dedicated
+environment. Use an otherwise idle H200 and the original NVFP4 model.
+
+```bash
+python "$GENAI_SRC/benchmark/python/qwen38/run_context_sweep.py" \
+  --model /absolute/path/to/qwen_38_flash_nvfp4_engine \
+  --output-dir /absolute/path/to/new-qwen-context-results \
+  --gpu 0
+```
+
+The output directory must not exist. `--gpu` is the physical `nvidia-smi`
+index, not an index relative to an inherited `CUDA_VISIBLE_DEVICES`.
+The runner uses the active Python interpreter, preserves `LD_LIBRARY_PATH`
+and `PYTHONPATH` when supplied, and explicitly sets all seven optimization
+flags listed in [README_MEMORY.md](README_MEMORY.md#complete-runtime-environment).
+Rejected activation quantization is disabled and inherited diagnostic ORT
+overrides are not forwarded. Verify the loaded library paths/hashes in
+`manifest.json`; package version numbers alone do not identify our kernels.
+
+It runs contexts 8192/16384/32768/65536/131072 and MTP widths 1/3/5/7,
+with one excluded warmup and three measured 512-token requests in each
+fresh process. Each request has a fresh Engine, with no reused prompt cache.
+CUDA graphs and GEMM tuning are enabled, scheduler chunks remain 8192,
+and KV-cache budgets are 5% for 8K-64K and 12% for 128K.
+The source-code-review chat prompt is identical to the measured sweep.
+`TABLE.md`, per-row JSON/logs, memory samples, and a manifest are saved.
+Failures remain explicit and cause a nonzero exit after the sweep.
+VRAM is device-wide sampled during timing, load, and warmup, not a hard peak.
+Timings vary by hardware/runtime; this reproduces the workload, not a TPS guarantee.
+
+For the **unverified selected-logits experiment**, prepare a new model with
+`prepare_memory_candidate.py --preserve-context` as described in
+[README_MEMORY.md](README_MEMORY.md#complete-runtime-environment), then run
+the same sweep against that directory with a different output directory.
+Do not use that transformed model to reproduce the original-graph table.
+The approximately 9K-limited bounded memory candidate is also a different workload.
+
 Set `MODEL` to the original model directory and `OUTPUT` to a writable
 directory outside the source tree. Each invocation loads its own model,
 excludes one warmup and retains all five measured requests. A fresh Engine
