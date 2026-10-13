@@ -766,6 +766,69 @@ struct Config {
       bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
     } mtp;
 
+    // Qwen3.8-Flash CUDA-graph decode stack with a built-in MTP(1) self-speculative loop
+    // (model.type "qwen38_flash_graph", served by the Engine). The target session is model.decoder; the head sessions,
+    // the CUDA data-plane library and the PLE table are described here. All paths are relative to the model folder.
+    struct Qwen38Graph {
+      struct Head {
+        std::string filename_s1;  // S=1 draft graph
+        std::string filename_s2;  // S=2 refeed graph
+        std::optional<SessionOptions> session_options;
+      } head;
+
+      std::string plane_library;  // libqwen38_plane.so (CUDA data plane, dlopen-ed)
+      std::string ple_table;      // description of the host-registered FP8 PLE shards
+
+      int kv_capacity{33028};
+      // First CUDA-graph annotation id of each session/row-count family; consecutive ids are used for the ring phases.
+      int target_s1_graph_id{41};  // 3 ids
+      int target_s2_graph_id{51};  // 3 ids
+      int head_s1_graph_id{61};    // 2 ids
+      int head_s2_graph_id{63};    // 2 ids
+
+      bool warmup{true};  // Run the graph warm-up (captures every graph id) when the model is created
+
+      // Prompt tokens ingested per Engine step (even, so S=2 pairs stay aligned); one step runs one chunk or one cycle.
+      int prefill_chunk_tokens{2048};
+
+      struct Mtp {
+        bool enabled{true};       // false: plain S=1 graph decode (no draft/verify)
+        bool prefill_head{true};  // feed the prompt hidden rows to the head (vLLM does the same)
+        bool skip_refeed{false};  // experiment: on accept feed only the last row to the head (lower acceptance)
+      } mtp;
+
+      // Folded decode cycle (v12 stack): the MTP head lives inside the verify graph, one graph launch per cycle.
+      // model.decoder is then the fold model (verify S=2 body + head + glue) run with graph ids target_graph_id + phase;
+      // head_r2 is the standalone R=2 head session used for the prompt context (pair calls) and the first draft.
+      struct Fold {
+        bool enabled{false};
+        int target_graph_id{71};   // 3 ids (ring phases)
+        bool force_reject{false};  // test hook: every draft is replaced by a different token before the verify (each cycle commits the greedy token only)
+        struct HeadR2 {
+          std::string filename;
+          int graph_id{81};  // 3 ids
+          std::optional<SessionOptions> session_options;
+        } head_r2;
+      } fold;
+
+      // Fast prompt prefill: dense chunked prefill session + hand-off of its state to the packed decode state
+      // + batched KV-only head prefill. The dense/head_kv/decode sessions share one device copy of every identical
+      // initializer (weights_pool, built by tools/qwen38_graph/build_package_v12.py).
+      struct Prefill {
+        bool enabled{false};
+        int chunk{8192};
+        std::string weights_pool;  // text manifest of the shared initializers (qwen38_weights_pool 1)
+        std::string constants;     // text index + binary of the QSA hand-off constants (qwen38_qsa_consts 1)
+        struct Model {
+          std::string filename;
+          std::optional<SessionOptions> session_options;
+        } dense, head_kv;
+        std::vector<int> warmup_lengths{8192, 2048, 512, 128, 37};
+      } prefill;
+
+      bool IsConfigured() const noexcept { return !head.filename_s1.empty() || !fold.head_r2.filename.empty(); }
+    } qwen38_graph;
+
     // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
     // reads the main model's auxiliary hidden states, predicts a whole block of tokens at once,
     // and returns a candidate lattice that the Engine walks greedily. model.dspark is a config
