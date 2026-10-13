@@ -26,6 +26,21 @@ S=2 target graphs and `arena_extend_strategy=kSameAsRequested`, plus the custom-
 `--stop-token-ids 248319` for a fixed-length benchmark package (config overlays append to `eos_token_id`, so "ignore EOS" needs
 its own package). `mtp.enabled=false` (config overlay) gives the plain S=1 graph decode.
 
+## v12b stack: folded cycle + fast prefill + shared weights
+
+With `model.qwen38_graph.fold.enabled` the decoder session is the **fold** model (verify S=2 body + MTP head + glue): one CUDA-graph
+launch per cycle, the cycle record is published mid-graph into a pinned ring that `WaitCycle` spins on. A standalone R=2 head
+session (`fold.head_r2`) serves the prompt context and the first draft. With `prefill.enabled` the prompt goes through the dense
+chunked prefill session (`prefill.chunk` tokens, default 8192; the Engine delivers the prompt in chunks of that size and the dense
+state continues across the chunks), is handed over to the packed decode state in `BeginDecode` (KV rows, GDN state, conv / PLE
+state, pooled compressed index keys; the `qwen38_plane` kernels `ple_rows`, `pool_keys`, `transpose_f32`) and the head KV is
+prefilled in batches by the KV-only `prefill.head_kv` model. The initializers that several sessions share (`prefill.weights_pool`,
+a text manifest) are loaded once to the device and handed to every session with `AddInitializer` (one copy of the weights).
+`prefill.enabled=false` keeps the bit-exact muted-fold S=2-step prompt path (the token gate reference); the fast prefill is
+tolerance level and not run-to-run reproducible. `fold.force_reject` (default off) is a test hook: every draft is replaced, so the
+stream is the no-MTP greedy stream. A v12b package is built from an existing v12b package with `build_package_engine_v12b.py`
+(hard links, the plane library of this build, optional unreachable stop id).
+
 ## Engine usage
 
 ```python
@@ -48,8 +63,11 @@ while engine.has_pending_requests():
 | script | purpose |
 | --- | --- |
 | `smoke.py` | minimal example, prints the stream, speed and speculative statistics |
-| `engine_gate.py` | token identity against the research no-MTP greedy hashes (EOS mode and `--ignore-eos` fixed length, `--no-mtp`) |
-| `engine_behaviours.py` | stop tokens, limits, stop strings, cancel during prefill/decode, second request queued, continuation, rewind, capability errors, statistics |
+| `engine_gate.py` | token identity against the research no-MTP greedy hashes (EOS mode and `--ignore-eos` fixed length, `--no-mtp`); v12b: `--python-ref` (python runner streams) `--prefill steps\|fast` `--no-research-hash` |
+| `engine_behaviours.py` | (`--prefill steps\|fast`) stop tokens, limits, stop strings, cancel during prefill/decode, second request queued, continuation, rewind, capability errors, statistics |
+| `bench_ttft_engine.py` | time to first token at several prompt lengths (+ MMLU-Pro prompt ids): begin_turn to the Run that delivers the token |
+| `mmlu_engine_eval.py` | MMLU-Pro 800 through the Engine (shards, resumable) and the MTP == no-MTP stream check (`--check-items`, `--force-reject`) |
+| `test_plane_kernels.py` | kernel tests of the plane's fast prefill kernels against the research implementations |
 | `bench_engine_mtp.py` | vLLM-protocol decode benchmark (exact prompt length, 256 new tokens, 1 warm-up + 3 runs, TPS = 255 tokens / time between first and last token) |
 
 The logic that does not need a GPU is covered by `test/cpp/engine/qwen38_graph_*_tests.cpp` (scripted device, real Engine).
@@ -62,7 +80,8 @@ an instantly answering device.
   `min_generated_tokens`, seeds and guidance are rejected by `BeginTurn`.
 * One resident Request; further Requests queue behind it (static batching semantics). One Engine per model at a time.
 * No prefix cache, no continuous batching, no caller-supplied draft tokens.
-* A continued turn and the replay after `RewindToStartOfTurn` re-ingest the whole history (S=2 prefill speed).
+* A continued turn and the replay after `RewindToStartOfTurn` re-ingest the whole history (a fast prefill with `prefill.enabled`,
+  S=2 step speed otherwise).
 * Sessions up to `kv_capacity - 4` tokens (33,024 with the default capacity).
 * Linux + CUDA only (`dlopen`, `mmap`, `cudaHostRegister`); other platforms compile the sources but creating the model fails with
   a clear message.

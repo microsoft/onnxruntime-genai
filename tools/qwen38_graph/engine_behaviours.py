@@ -5,7 +5,10 @@
 test/cpp/engine/qwen38_graph_executor_tests.cpp): stop tokens, limits, stop strings, cancel (during prefill and decode),
 queueing of a second request, turn continuation, rewind, speculative statistics and the capability errors.
 
-usage: engine_behaviours.py <package> --out <json> [--provider PATH]
+--prefill steps|fast overlays prefill.enabled (the v12b fast prefill is tolerance level and not run-to-run reproducible, so the
+"identical to the reference" checks are exact only with --prefill steps, the bit-exact muted-fold prompt path).
+
+usage: engine_behaviours.py <package> --out <json> [--prefill steps|fast] [--provider PATH]
 """
 
 import argparse
@@ -39,13 +42,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--prefill", choices=("steps", "fast"), default=None)
     parser.add_argument("--provider")
     args = parser.parse_args()
     if args.out.exists():
         raise FileExistsError(args.out)
 
     prompts = research_prompts()
-    model = load_model(args.model, args.provider)
+    overlay = {"model": {"qwen38_graph": {"prefill": {"enabled": args.prefill == "fast"}}}} if args.prefill else None
+    model = load_model(args.model, args.provider, overlay)
     tokenizer = og.Tokenizer(model)
     engine = og.Engine(model)
     buffer = engine.create_event_buffer(16)
@@ -151,8 +156,8 @@ def main():
     request.close()
     check("a request after a cancel is identical to the reference", after_cancel.tokens == reference.tokens)
 
-    # cancel during prefill (the 8k prompt is ingested in 2048-token Engine steps)
-    long_prompt = prompts.make("text", 8192, 5)
+    # cancel during prefill (the 20k prompt is ingested in several Engine steps: 8192-token dense chunks, 2048-token S=2 steps)
+    long_prompt = prompts.make("text", 20000, 5)
     request = engine.create_request()
     partial = TurnResult()
     turn = og.TurnOptions(request)
