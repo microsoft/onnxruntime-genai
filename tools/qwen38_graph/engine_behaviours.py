@@ -5,9 +5,11 @@
 test/cpp/engine/qwen38_graph_executor_tests.cpp): stop tokens, limits, stop strings, cancel (during prefill and decode),
 queueing of a second request, turn continuation, rewind, speculative statistics and the capability errors.
 
-usage: engine_behaviours.py <package> --text-file TEXT --out <json> [--provider PATH]
+usage: engine_behaviours.py <package> --text-file TEXT --out <json> [--prefill steps|fast] [--provider PATH]
 
-The text file must hold at least 8192 tokens of natural text (prompts are cut from it). The package must use MTP.
+The text file must hold at least 20000 tokens of natural text (prompts are cut from it). The package must use MTP.
+--prefill steps|fast overlays prefill.enabled of a v12b package (the fast prefill is tolerance level and not run-to-run
+reproducible, so the "identical to the reference" checks are exact only with --prefill steps).
 """
 
 import argparse
@@ -53,12 +55,14 @@ def main():
     add_common_arguments(parser)
     parser.add_argument("--text-file", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--prefill", choices=("steps", "fast"), default=None)
     args = parser.parse_args()
     if args.out.exists():
         raise FileExistsError(args.out)
 
     kv_capacity = package_info(args.model)["kv_capacity"]
-    model = load_model(args.model, args.provider)
+    overlay = {"model": {"qwen38_graph": {"prefill": {"enabled": args.prefill == "fast"}}}} if args.prefill else None
+    model = load_model(args.model, args.provider, overlay)
     tokenizer = og.Tokenizer(model)
     text_tokens = load_text_tokens(tokenizer, args.text_file)
     engine = og.Engine(model)
@@ -165,8 +169,8 @@ def main():
     request.close()
     check("a request after a cancel is identical to the reference", after_cancel.tokens == reference.tokens)
 
-    # cancel during prefill (the 8k prompt is ingested in 2048-token Engine steps)
-    long_prompt = text_prompt(text_tokens, 8192, 5)
+    # cancel during prefill (the 20k prompt is ingested in several Engine steps: 8192-token dense chunks, 2048-token S=2 steps)
+    long_prompt = text_prompt(text_tokens, 20000, 5)
     request = engine.create_request()
     partial = TurnResult()
     turn = og.TurnOptions(request)

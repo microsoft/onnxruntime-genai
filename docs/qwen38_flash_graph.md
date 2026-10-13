@@ -19,8 +19,9 @@ describes the model type itself.
 * One resident request. Further requests queue behind it (static-batching semantics). One Engine per model at a time.
 * No prefix cache, no continuous batching, no caller-supplied draft tokens (`MaxDraftTokensPerStep()` is 0).
 * A continued turn and the replay after `RewindToStartOfTurn` re-ingest the whole retained history: the look-ahead cycle and
-  the recurrent-state bank ring cannot be cropped to an arbitrary token. Prompt ingestion uses the S=2 target graph (two
-  tokens per step), so a long history is slow to re-ingest.
+  the recurrent-state bank ring cannot be cropped to an arbitrary token. The history goes through the same prompt path as a new
+  prompt: the fast prefill when `prefill.enabled` (see below), otherwise the S=2 target graph (two tokens per step), which is slow
+  for a long history.
 * A session holds at most `kv_capacity - 4` tokens (a verify step writes two rows past the committed length).
 * The Engine never delivers the stop token itself (finish reason `EOS`), as for every other model.
 
@@ -35,7 +36,10 @@ GenAI does not export this model. The package is produced by an exporter and con
   target/model.onnx (+ external data)        # the S=1 / S=2 target graphs (see "Graph contract")
   mtp_head/model_s1.onnx, model_s2.onnx       # the MTP head for one and two rows (only if MTP is enabled)
   libs/<custom op libraries>.so              # every custom-op library the graphs use (see below)
-  libs/libqwen38_plane.so                    # built from src/qwen38_plane (-DENABLE_QWEN38_PLANE=ON)
+  libs/libqwen38_plane.so                    # built from src/qwen38_plane (-DENABLE_QWEN38_PLANE=ON), ABI version 2
+  head_r2/model.onnx                         # folded stack: standalone R=2 head (prompt context, first draft)
+  dense/model.onnx, head_kv/model.onnx       # fast prefill: dense prefill session, KV-only head prefill session
+  weights_pool.txt, qsa_consts.txt/.bin      # fast prefill: shared initializers of the sessions, hand-off constants
   ple_table.txt                              # description of the host-side PLE table (see "PLE table")
   ple/<shards>                               # the FP8 PLE shard files named by ple_table.txt
 ```
@@ -107,6 +111,16 @@ Runtime requirements (none of them is needed to build GenAI or to run its unit t
 | `target_s1_graph_id`, `target_s2_graph_id` | 41, 51 | First `gpu_graph_id` run option of the S=1 / S=2 target graphs; three consecutive ids are used (one per bank phase). |
 | `head_s1_graph_id`, `head_s2_graph_id` | 61, 63 | First `gpu_graph_id` of the head graphs; two consecutive ids are used (double-buffered head state). |
 | `prefill_chunk_tokens` | 2048 | Prompt tokens ingested per Engine step (rounded down to an even number, at least 2). A step that only advances the prompt delivers no event, so `CancelRequest` stays responsive. |
+| `fold.enabled` | false | Folded decode cycle: `model.decoder` is the fold model (verify S=2 body + MTP head + glue), one CUDA-graph launch per cycle; requires `mtp.enabled`. The cycle record is published mid-graph into the pinned ring the host spins on. |
+| `fold.target_graph_id` | 71 | First `gpu_graph_id` of the fold graph (three consecutive ids). |
+| `fold.head_r2.filename`, `fold.head_r2.graph_id`, `fold.head_r2.session_options` | -, 81, inherits | The standalone R=2 head session (three ids): prompt context by pairs without the fast prefill, and the first draft. Its filename selects the section like `head.filename_s1`. |
+| `fold.force_reject` | false | Test hook: every draft is replaced by a different token before its verify, so each cycle commits the greedy token only (the no-MTP stream). |
+| `prefill.enabled` | false | Fast prompt prefill: dense chunked prefill session, hand-off of its state to the packed decode state and batched KV-only head prefill. Requires `fold.enabled`, `prefill.dense.filename`, `prefill.head_kv.filename`, `prefill.constants`. Tolerance level, not run-to-run reproducible; `false` is the bit-exact S=2-step prompt path. |
+| `prefill.chunk` | 8192 | Dense chunk (tokens). The Engine delivers the prompt in chunks of this size (replacing `prefill_chunk_tokens`); the dense state continues across chunks and is handed over when the last one is ingested. |
+| `prefill.weights_pool` | - | Text manifest (`qwen38_weights_pool 1`) of the initializers shared by several sessions; loaded once to the device and handed to every session (one copy of the weights). |
+| `prefill.constants` | - | Index (`qwen38_qsa_consts 1`) of the hand-off constants (key-norm weights, RoPE tables). |
+| `prefill.dense`, `prefill.head_kv` | - | `filename` and optional `session_options` of the two prefill sessions (not graph captured, they do not inherit the decoder's provider options). |
+| `prefill.warmup_lengths` | 8192, 2048, 512, 128, 37 | Dummy prompt lengths run through dense + hand-off + head KV at model creation. |
 | `warmup` | true | Run every graph often enough to capture it when the model is created. |
 | `mtp.enabled` | true | `false` runs the plain S=1 graph decode (no draft/verify); the head sessions are not created. |
 | `mtp.prefill_head` | true | Feed the target's hidden rows of the prompt to the head. `false` starts the head without prompt context (lower acceptance). |

@@ -10,7 +10,7 @@ the GPU-free tests are `test/cpp/engine/qwen38_graph_*_tests.cpp`.
   (`make onnxruntime-genai python qwen38_plane`; the resulting `libqwen38_plane.so` goes to `<package>/libs/`).
 * A package with the layout of the documentation (the exporter is not part of this repository), the custom-op libraries it
   lists, and the plugin CUDA execution provider library. Pass the latter with `--provider PATH` or `QWEN38_CUDA_EP_LIBRARY`.
-* A UTF-8 text file of natural prose with enough tokens for the longest prompt (for example 8,192 for
+* A UTF-8 text file of natural prose with enough tokens for the longest prompt (for example 20,000 for
   `engine_behaviours.py` and 33,000 for a 32k benchmark). Prompts are cut from it at seed-dependent offsets. Draft acceptance
   depends on the text, so benchmark numbers are only comparable for the same file.
 
@@ -18,7 +18,9 @@ the GPU-free tests are `test/cpp/engine/qwen38_graph_*_tests.cpp`.
 | --- | --- |
 | `smoke.py` | minimal example: one chat prompt, prints the stream, speed and speculative statistics |
 | `engine_gate.py` | token identity: `collect` the Engine's tokens for a fixed prompt set with MTP and with `--no-mtp`, then `compare` the two files (greedy MTP must equal plain greedy decoding). A token file of another greedy stack in the same JSON format can be compared too |
-| `engine_behaviours.py` | stop tokens, limits, stop strings, cancel during prefill and decode, a second queued request, continuation, rewind, capability errors, statistics (the GPU counterpart of the C++ executor tests) |
+| `build_package_engine_v12b.py` | derives an Engine package of the v12b stack (folded cycle, fast prefill, shared weights) from a v12b package: hard links, the plane library of this build, optional unreachable stop id, SHA256 manifest |
+| `test_plane_kernels.py` | kernel tests of the plane's fast prefill kernels against the research implementations |
+| `engine_behaviours.py` | (`--prefill steps\|fast`) stop tokens, limits, stop strings, cancel during prefill and decode, a second queued request, continuation, rewind, capability errors, statistics (the GPU counterpart of the C++ executor tests) |
 | `bench_engine_mtp.py` | decode throughput at exact prompt lengths: 1 warm-up + `--reps` measured runs on distinct prompts, TPS = (n-1) tokens / time between the first and the last delivered token |
 
 ```bash
