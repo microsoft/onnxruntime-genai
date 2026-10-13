@@ -1963,9 +1963,11 @@ paged, batched or cropped to an arbitrary token (package layout, config schema a
 
 - `Qwen38GraphCacheManager` holds one row. `StaticBatchScheduler` queues further Requests and recycles the slot when the
   resident turn is complete. `RewindToStartOfTurn` releases the slot; a continued turn (`BeginTurn` on the resident Request)
-  and the replay after a rewind re-ingest the whole retained history, because the look-ahead cycle and the bank ring cannot be
-  rolled back. There is no prefix cache.
-- `Qwen38GraphExecutor::SelectsOwnTokens()` is true. One Engine step is one prompt chunk (`model.qwen38_graph.prefill_chunk_tokens`,
+  and the replay after a rewind re-ingest the whole retained history (through the same chunked prefill as a new prompt), because
+  the look-ahead cycle and the bank ring cannot be rolled back. There is no prefix cache.
+- `Qwen38GraphExecutor::SelectsOwnTokens()` is true. One Engine step is one prompt chunk (the size the device asks for,
+  `Qwen38DecodeDevice::PrefillChunkTokens()` = `model.qwen38_graph.prefill.chunk` with the fast prefill, otherwise
+  `model.qwen38_graph.prefill_chunk_tokens`,
   even; a step that only advances the prompt delivers no event, so `CancelRequest` stays responsive) or one whole cycle. The
   cycle's one or two committed tokens are handed to `ScheduledRequests::StageExecutorTokens`; `GenerateNextTokens` then calls
   `Request::CommitExternalTokens`, which commits them one by one through `Search::CommitToken` (EOS and the session limit as
