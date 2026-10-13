@@ -14,6 +14,8 @@ Logs real events and verifies they reach OneCollector (HTTP 2xx):
 
 Every outgoing HTTP send is recorded by wrapping the transport, so uploader
 batches are observed. This makes actual HTTP requests; it is NOT a unit test.
+Each run uses temporary queue and device-ID storage rather than draining the
+user's existing queue, and restores the caller's CI/opt-out environment.
 
 Usage:
     ORT_GENAI_RUN_LIVE_TELEMETRY_TEST=1 python test/python/test_telemetry_live.py
@@ -23,6 +25,9 @@ import os
 import sys
 import threading
 from contextlib import suppress
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 transmission_results = []
 results_lock = threading.Lock()
@@ -41,10 +46,24 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    os.environ.pop("ORT_DISABLE_TELEMETRY", None)
-    os.environ.pop("CI", None)
-    os.environ.pop("GITHUB_ACTIONS", None)
-    os.environ.pop("TF_BUILD", None)
+    import telemetry.deviceid as deviceid
+    import telemetry.telemetry as telemetry_mod
+
+    signals = {"ORT_DISABLE_TELEMETRY": "0", **dict.fromkeys(telemetry_mod._CI_ENV_VARS, "0")}
+    with (
+        TemporaryDirectory(prefix="genai-live-telemetry-") as directory,
+        patch.dict(os.environ, signals),
+        patch.object(telemetry_mod, "get_telemetry_base_dir", return_value=Path(directory)),
+        patch.object(deviceid, "get_telemetry_base_dir", return_value=Path(directory)),
+        patch.dict(deviceid._device_id_state, {"device_id": None, "status": deviceid.DeviceIdStatus.NEW}),
+        patch.object(telemetry_mod.GenAITelemetry, "_instance", None),
+    ):
+        with results_lock:
+            transmission_results.clear()
+        return _run_live_test()
+
+
+def _run_live_test():
 
     # Record every HTTP send (heartbeat + uploader batches) by wrapping the
     # transport before any telemetry object is created.
@@ -83,6 +102,7 @@ def main():
     print("=" * 60)
     print()
 
+    telemetry = None
     try:
         print("[1/8] Initializing telemetry singleton...")
         telemetry = GenAITelemetry()
@@ -175,7 +195,7 @@ def main():
         print("[8/8] Flushing uploader (drain store) ...")
         telemetry.shutdown(flush_seconds=20.0)
 
-        # Re-open the store read-only to confirm it drained (uploader deletes on 2xx).
+        # Re-open the isolated store to confirm it drained (uploader deletes on 2xx).
         from telemetry.deviceid import get_telemetry_base_dir
         from telemetry.offline_store import OfflineEventStore
 
@@ -186,7 +206,11 @@ def main():
         finally:
             store.close()
     finally:
-        transport_mod.HttpJsonPostTransport.send = original_send
+        try:
+            if telemetry is not None:
+                telemetry.shutdown(flush_seconds=20.0)
+        finally:
+            transport_mod.HttpJsonPostTransport.send = original_send
 
     print()
     print("=" * 60)
@@ -209,7 +233,7 @@ def main():
     print()
 
     # 1 direct heartbeat + 5 detailed events from the durable uploader.
-    if remaining == 0 and failures == 0 and sent_items >= 6 and heartbeat_sent:
+    if remaining == 0 and failures == 0 and sent_items == 6 and heartbeat_sent:
         print("=" * 60)
         print(f"ALL EVENTS DELIVERED ({sent_items} items: heartbeat + 5 detailed, store drained, HTTP 2xx)")
         print("=" * 60)

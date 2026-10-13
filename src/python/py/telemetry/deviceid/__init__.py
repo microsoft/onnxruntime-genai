@@ -259,7 +259,7 @@ def get_device_id() -> str:
     r"""Get or create a persistent device ID.
 
     Storage locations:
-        Linux: $XDG_CACHE_HOME/Microsoft/DeveloperTools/.onnxruntime/deviceid
+        POSIX: $XDG_CACHE_HOME/Microsoft/DeveloperTools/.onnxruntime/deviceid
         macOS: ~/Library/Application Support/Microsoft/DeveloperTools/.onnxruntime/deviceid
         Windows: HKEY_CURRENT_USER\SOFTWARE\Microsoft\DeveloperTools\.onnxruntime\deviceid
     """
@@ -273,7 +273,7 @@ def get_device_id() -> str:
         system = platform.system()
         if system == "Windows":
             store = _WindowsStore()
-        elif system in ("Linux", "Darwin"):
+        elif system in ("Linux", "Darwin") or os.name == "posix":
             store = _FileStore()
         else:
             return failed_fallback()

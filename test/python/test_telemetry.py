@@ -24,6 +24,7 @@ import tempfile
 import unittest
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 _TELEMETRY_SOURCE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
@@ -1577,6 +1578,59 @@ class TestPathRedaction(unittest.TestCase):
             log_error("RuntimeError", "boom", metadata=["not", "a", "dict"])
 
 
+class TestLiveTelemetryIsolation(_HermeticTelemetryTestCase):
+    def test_live_runner_leaves_unrelated_queue_untouched_and_restores_ci(self):
+        import importlib.util
+        import io
+        import json
+        from contextlib import redirect_stdout
+
+        import telemetry.library.transport as transport_mod
+        from telemetry.offline_store import OfflineEventStore
+
+        spec = importlib.util.spec_from_file_location(
+            "live_telemetry_runner", Path(__file__).with_name("test_telemetry_live.py")
+        )
+        live = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live)
+        live.transmission_results.append({"succeeded": True, "item_count": 100, "has_heartbeat": True})
+
+        unrelated = OfflineEventStore(os.path.join(self._tmpdir, "genai_telemetry.db"))
+        unrelated.store(b'{"name":"UnrelatedEvent"}')
+        sent_names = []
+
+        def send(_transport, payload, _timeout_sec, item_count=1, on_send_admitted=None):
+            if on_send_admitted is not None:
+                on_send_admitted()
+            sent_names.extend(json.loads(line)["name"] for line in bytes(payload).splitlines())
+            return True, 204
+
+        try:
+            with (
+                patch.dict(os.environ, {"ORT_GENAI_RUN_LIVE_TELEMETRY_TEST": "1", "JENKINS_URL": "true"}),
+                patch.object(transport_mod.HttpJsonPostTransport, "send", send),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(live.main(), 0)
+                self.assertEqual(os.environ["JENKINS_URL"], "true")
+            self.assertEqual(unrelated.count(), 1)
+            self.assertEqual(len(sent_names), 6)
+            self.assertEqual(
+                set(sent_names),
+                {
+                    "GenAIHeartbeat",
+                    "GenAIModelBuild",
+                    "GenAIModelLoad",
+                    "GenAIBenchmark",
+                    "GenAIInference",
+                    "GenAIError",
+                },
+            )
+            self.assertEqual(sum(result["item_count"] for result in live.transmission_results), 6)
+        finally:
+            unrelated.close()
+
+
 class TestDeviceId(unittest.TestCase):
     """Test device ID generation."""
 
@@ -1611,6 +1665,23 @@ class TestDeviceId(unittest.TestCase):
         self.assertEqual(device_id, f"c:{expected}")
         self.assertIn(status, list(deviceid.DeviceIdStatus))
         self.assertIn(status.value, {"New", "Existing", "Corrupted", "Failed"})
+
+    def test_device_id_uses_file_store_on_other_posix_platforms(self):
+        import telemetry.deviceid as deviceid
+
+        stored_id = "123e4567-e89b-42d3-a456-426614174000"
+        store = MagicMock(retrieve_id=stored_id)
+        for system in ("FreeBSD", "OpenBSD", "AIX", "SunOS"):
+            deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
+            with (
+                self.subTest(system=system),
+                patch.object(deviceid.platform, "system", return_value=system),
+                patch.object(deviceid, "os", SimpleNamespace(name="posix")),
+                patch.object(deviceid, "_FileStore", return_value=store) as store_type,
+            ):
+                self.assertEqual(deviceid.get_device_id(), stored_id)
+                store_type.assert_called_once_with()
+                self.assertEqual(deviceid._device_id_state["status"], deviceid.DeviceIdStatus.EXISTING)
 
     def test_device_id_hash_matches_native_known_vector(self):
         import telemetry.deviceid as deviceid
