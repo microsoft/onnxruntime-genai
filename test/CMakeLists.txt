@@ -186,6 +186,8 @@ endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/telemetry-shutdown-tests.cmake")
+
 add_executable(kv_cache_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 target_include_directories(kv_cache_unit_tests PRIVATE
   ${ORT_HEADER_DIR}

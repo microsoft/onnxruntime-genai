@@ -10,6 +10,7 @@
 #include "../logging.h"
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
+#include "DebugEvents.hpp"
 #include "Enums.hpp"
 #include "ILogConfiguration.hpp"
 #include "LogManager.hpp"
@@ -177,6 +178,15 @@ struct GenAiTelemetry::Impl {};
 
 // Guard against access after static destruction
 static std::atomic<bool> s_instance_destroyed{false};
+
+GenAiTelemetry::GenAiTelemetry() {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  // Initialize the SDK diagnostic mutex before this singleton's destructor is registered.
+  // An empty source starts no uploader and sends no telemetry, including when fully suppressed.
+  MAT::DebugEventSource source;
+  source.DispatchEvent({});
+#endif
+}
 
 GenAiTelemetry& GenAiTelemetry::Instance() {
   static GenAiTelemetry instance;

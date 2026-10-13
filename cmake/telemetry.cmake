@@ -119,7 +119,18 @@ FetchContent_Declare(
   URL_HASH SHA1=${DEP_SHA1_cpp_client_telemetry}
   EXCLUDE_FROM_ALL
 )
+# Release archives lack the Git metadata used to derive the SDK's fourth version component.
+if(DEFINED BUILD_VERSION)
+  set(_ortgenai_saved_mat_build_version "${BUILD_VERSION}")
+endif()
+set(BUILD_VERSION "3.10.281.1")
 FetchContent_MakeAvailable(cpp_client_telemetry)
+if(DEFINED _ortgenai_saved_mat_build_version)
+  set(BUILD_VERSION "${_ortgenai_saved_mat_build_version}")
+  unset(_ortgenai_saved_mat_build_version)
+else()
+  unset(BUILD_VERSION)
+endif()
 if(ANDROID)
   target_compile_definitions(mat PRIVATE ANDROID_SUPPRESS_LOGCAT)
 endif()

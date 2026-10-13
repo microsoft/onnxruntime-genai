@@ -13,3 +13,27 @@ This directory contains assets, scripts, and definitions used by the test suite.
     - `test/python/integration/*` contains Python scripts used to run integrating testing on Foundry Local models.
     - `test/python/models/*` contains Python scripts used to test ONNX models. Scripts follow the `test_*.py` naming format.
 - `test/tool-definitions/*` contains all tool definitions used for testing.
+
+## Telemetry shutdown regression
+
+Native desktop builds with `ENABLE_TESTS=ON` and `ENABLE_TELEMETRY=ON` include
+`telemetry_shutdown_tests` when building 1DS from source. When using an installed static
+`MSTelemetry` package, also set `TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR` to the exact source tree used
+to build that package. Private SDK instrumentation must match the linked archive.
+
+Run the isolated processes from the configured build directory:
+
+```sh
+ctest -C Release -R '^TelemetryShutdown-' --output-on-failure --repeat until-fail:50
+```
+
+The cases exercise the actual singleton, initialization on an application thread, explicit
+shutdown, shutdown/reinitialization, constructor-only priming, full runtime suppression, and CI
+suppression. Test-only SDK objects observe real mutex initialization and native worker joins;
+the lifetime observer also makes the destruction-order defect deterministic on GCC/MSVC.
+Collector events are intercepted before queuing, and each case uses a private cache directory.
+Missing SDK initialization fails enabled cases rather than silently passing.
+
+The constructor primes only an empty diagnostic source before singleton destruction is registered.
+SDK initialization remains lazy; priming creates no uploader or collector event. No process-exit
+callback or shutdown-state machinery is added.
