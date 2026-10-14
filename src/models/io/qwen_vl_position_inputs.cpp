@@ -420,11 +420,14 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
 
   DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_});
 
-  if (state_.params_->use_graph_capture) {
+  const bool use_static_position_ids =
+      state_.params_->use_graph_capture && position_ids_shape_[2] >= 1 &&
+      position_ids_shape_[2] <= state_.params_->max_graph_capture_length;
+  if (use_static_position_ids) {
     const auto current_shape = position_ids_->GetShape();
     if (!position_ids_static_ || current_shape != std::vector<int64_t>{position_ids_shape_.begin(), position_ids_shape_.end()}) {
       const size_t capacity_bytes = static_cast<size_t>(position_ids_shape_[0]) * position_ids_shape_[1] *
-                                    std::max(1, state_.params_->max_graph_capture_length) * Ort::SizeOf(type_);
+                                    state_.params_->max_graph_capture_length * Ort::SizeOf(type_);
       position_ids_->CreateTensor(position_ids_shape_, true, capacity_bytes);
       position_ids_static_ = true;
       state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
@@ -434,6 +437,7 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
   }
 
   position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);  // No beam expansion needed, already expanded
+  position_ids_static_ = false;
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
