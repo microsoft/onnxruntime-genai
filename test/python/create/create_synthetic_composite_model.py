@@ -43,7 +43,6 @@ import os
 
 import numpy as np
 import onnx
-import create_synthetic_paged_model as synthetic_paged
 from create_synthetic_paged_model import (
     BLOCK_SIZE,
     CONTEXT_LENGTH,
@@ -136,8 +135,8 @@ def _fixed_group(prefix, layer_ids, row_dims, logits_per_token=False):
     return inputs, outputs, nodes
 
 
-def _decoder_graph(logits_per_token=False):
-    graph = _paged_decoder_graph(logits_per_token=logits_per_token)
+def _decoder_graph(logits_per_token=False, num_blocks=NUM_BLOCKS):
+    graph = _paged_decoder_graph(logits_per_token=logits_per_token, num_blocks=num_blocks)
     if logits_per_token:
         for value in [*graph.input, *graph.output]:
             if value.name.startswith(("past_key_values.", "present.")):
@@ -196,9 +195,9 @@ def _decoder_graph(logits_per_token=False):
     return graph
 
 
-def create_decoder(output_dir, logits_per_token=False):
+def create_decoder(output_dir, logits_per_token=False, num_blocks=NUM_BLOCKS):
     model = helper.make_model(
-        _decoder_graph(logits_per_token),
+        _decoder_graph(logits_per_token, num_blocks),
         opset_imports=[helper.make_operatorsetid("", 17)],
         ir_version=9,
         producer_name="onnxruntime-genai",
@@ -209,7 +208,7 @@ def create_decoder(output_dir, logits_per_token=False):
     onnx.save_model(model, os.path.join(output_dir, filename))
 
 
-def create_config(output_dir):
+def create_config(output_dir, num_blocks=NUM_BLOCKS, max_batch_size=MAX_BATCH_SIZE):
     state_groups = [
         {
             "kind": "fixed_conv",
@@ -278,8 +277,8 @@ def create_config(output_dir):
         "engine": {
             "dynamic_batching": {
                 "block_size": BLOCK_SIZE,
-                "num_blocks": NUM_BLOCKS,
-                "max_batch_size": MAX_BATCH_SIZE,
+                "num_blocks": num_blocks,
+                "max_batch_size": max_batch_size,
             }
         },
     }
@@ -288,8 +287,6 @@ def create_config(output_dir):
 
 
 def main():
-    global NUM_BLOCKS, MAX_BATCH_SIZE
-
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output_dir",
@@ -300,14 +297,11 @@ def main():
     args = parser.parse_args()
     if args.num_blocks <= 0 or args.max_batch_size <= 0:
         parser.error("--num_blocks and --max_batch_size must be positive")
-    NUM_BLOCKS = args.num_blocks
-    MAX_BATCH_SIZE = args.max_batch_size
-    synthetic_paged.NUM_BLOCKS = args.num_blocks
     output_dir = os.path.normpath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    create_decoder(output_dir)
-    create_decoder(output_dir, logits_per_token=True)
-    create_config(output_dir)
+    create_decoder(output_dir, num_blocks=args.num_blocks)
+    create_decoder(output_dir, logits_per_token=True, num_blocks=args.num_blocks)
+    create_config(output_dir, args.num_blocks, args.max_batch_size)
 
 
 if __name__ == "__main__":
