@@ -18,39 +18,65 @@ namespace test {
 namespace {
 
 TEST(VarlenDecoderIOTest, PackedHybridPositionIdsAcceptTokenVectorOrMropeMatrix) {
-  EXPECT_NO_THROW(ValidatePackedPositionIdsInput(
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
-      std::array<int64_t, 1>{-1},
-      std::array<const char*, 1>{"num_tokens"}));
-  EXPECT_NO_THROW(ValidatePackedPositionIdsInput(
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
-      std::array<int64_t, 2>{3, -1},
-      std::array<const char*, 2>{nullptr, "num_tokens"}));
-  EXPECT_THROW(ValidatePackedPositionIdsInput(
+  EXPECT_EQ(
+      GetPackedPositionIdsPlaneCount(
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+          std::array<int64_t, 1>{-1},
+          std::array<const char*, 1>{"num_tokens"}),
+      1u);
+  EXPECT_EQ(
+      GetPackedPositionIdsPlaneCount(
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+          std::array<int64_t, 2>{3, -1},
+          std::array<const char*, 2>{nullptr, "num_tokens"}),
+      3u);
+  EXPECT_THROW(GetPackedPositionIdsPlaneCount(
                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
                    std::array<int64_t, 1>{-1},
                    std::array<const char*, 1>{"batch_size"}),
                std::runtime_error);
-  EXPECT_THROW(ValidatePackedPositionIdsInput(
+  EXPECT_THROW(GetPackedPositionIdsPlaneCount(
                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
                    std::array<int64_t, 2>{2, -1}),
                std::runtime_error);
-  EXPECT_THROW(ValidatePackedPositionIdsInput(
+  EXPECT_THROW(GetPackedPositionIdsPlaneCount(
                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
                    std::array<int64_t, 2>{3, 1}),
                std::runtime_error);
-  EXPECT_THROW(ValidatePackedPositionIdsInput(
+  EXPECT_THROW(GetPackedPositionIdsPlaneCount(
                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
                    std::array<int64_t, 1>{-1}),
                std::runtime_error);
-  EXPECT_THROW(ValidatePackedPositionIdsInput(
+  EXPECT_THROW(GetPackedPositionIdsPlaneCount(
                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
                    std::array<int64_t, 1>{1}),
                std::runtime_error);
-  EXPECT_THROW(ValidatePackedPositionIdsInput(
+  EXPECT_THROW(GetPackedPositionIdsPlaneCount(
                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
                    std::array<int64_t, 1>{0}),
                std::runtime_error);
+}
+
+TEST(VarlenDecoderIOTest, FillsOnePlanePackedPositionIds) {
+  std::array<int64_t, 5> positions{};
+  FillPackedPositionIdsRange(
+      positions, 1, positions.size(), 0, 4, 2);
+  FillPackedPositionIdsRange(
+      positions, 1, positions.size(), 2, 10, 3);
+
+  EXPECT_EQ(positions, (std::array<int64_t, 5>{4, 5, 10, 11, 12}));
+}
+
+TEST(VarlenDecoderIOTest, FillsThreePlanePackedPositionIds) {
+  std::array<int64_t, 15> positions{};
+  FillPackedPositionIdsRange(positions, 3, 5, 0, 4, 2);
+  FillPackedPositionIdsRange(positions, 3, 5, 2, 10, 3);
+
+  const std::array<int64_t, 15> expected{
+      4, 5, 10, 11, 12,
+      4, 5, 10, 11, 12,
+      4, 5, 10, 11, 12};
+  EXPECT_EQ(positions, expected);
 }
 
 TEST(VarlenDecoderIOTest, EagerMetadataUsesExactStepBounds) {
