@@ -83,9 +83,9 @@ ServingResult RunServingWorkload(bool enabled, size_t quantum) {
       if (!arrived[index] && step >= arrival_steps[index]) {
         const bool long_request = index < 2;
         const std::vector<int32_t> prompt(long_request ? 12 : 4, 2 + static_cast<int32_t>(index));
+        arrival_ms[index] = elapsed();
         requests[index]->BeginTurn(prompt, long_request ? 44 : 8);
         arrived[index] = true;
-        arrival_ms[index] = elapsed();
       }
     }
     const size_t count = test.engine->Run(events);

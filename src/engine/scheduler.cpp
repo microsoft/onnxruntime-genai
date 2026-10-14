@@ -139,8 +139,7 @@ bool StaticBatchScheduler::HasPendingRequests() const {
 }
 
 DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : Scheduler{model}, model_{model}, cache_manager_{cache_manager},
-      preemption_enabled_{model->config_->engine.dynamic_batching->enable_recompute_preemption} {
+    : Scheduler{model}, model_{model}, cache_manager_{cache_manager}, preemption_enabled_{model->config_->engine.dynamic_batching->enable_recompute_preemption} {
   if (preemption_enabled_ && !cache_manager_->SupportsRecomputePreemption()) {
     throw std::runtime_error(
         "Recompute preemption requires full-attention paged KV without fixed or auxiliary state.");

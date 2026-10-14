@@ -561,26 +561,54 @@ TEST(RecomputePreemptionTest, ValidationAllocationFailureDoesNotPublishAnySuspen
 std::vector<std::vector<int32_t>> SyntheticStreams(bool preemption) {
   auto model = LoadSyntheticPagedModel();
   auto& batching = *model->config_->engine.dynamic_batching;
-  batching.num_blocks = preemption ? 4 : 16;
   batching.enable_recompute_preemption = preemption;
   batching.min_decode_steps_before_preemption = 2;
-  batching.max_scheduled_tokens = 3;
+  batching.max_scheduled_tokens = 512;
   auto engine = std::make_shared<Engine>(model);
-  const std::array<int32_t, 5> first_prompt{2, 3, 4, 5, 6};
-  const std::array<int32_t, 4> second_prompt{7, 8, 9, 10};
-  std::array requests{Queue(engine, first_prompt, 8), Queue(engine, second_prompt, 8)};
-  std::vector<std::vector<int32_t>> streams(2);
-  for (int guard = 0; engine->HasPendingRequests() && guard < 1000; ++guard) {
-    const auto event = RunOne(*engine);
-    EXPECT_EQ(event.flags & EngineEventFlagFailed, 0u)
-        << "synthetic execution failed with code " << static_cast<uint32_t>(event.error_code);
-    if ((event.flags & EngineEventFlagToken) != 0) {
-      const size_t index = event.request == requests[0] ? 0 : 1;
-      streams[index].push_back(event.token);
+  // This checked-in graph fixes both cache dimensions (128 blocks of four slots). Fill that
+  // actual pool with long residents instead of changing its declared tensor geometry.
+  std::vector<std::shared_ptr<Request>> requests;
+  for (int32_t seed = 2; seed < 6; ++seed) {
+    requests.push_back(Queue(engine, std::vector<int32_t>(96, seed), 8));
+  }
+  std::vector<std::vector<int32_t>> streams(5);
+  std::array<EngineEvent, 8> events;
+  uint64_t preemptions = 0;
+  const auto consume = [&] {
+    const size_t count = engine->Run(events);
+    for (const auto& event : std::span{events}.first(count)) {
+      if ((event.flags & (EngineEventFlagFailed | EngineEventFlagCapacityBlocked)) != 0) {
+        throw std::runtime_error("Synthetic graph execution did not make valid progress.");
+      }
+      const auto request = std::find(requests.begin(), requests.end(), event.request);
+      if (request == requests.end()) {
+        throw std::runtime_error("Synthetic graph emitted an unknown Request.");
+      }
+      const size_t index = static_cast<size_t>(request - requests.begin());
+      if ((event.flags & EngineEventFlagToken) != 0) {
+        streams[index].push_back(event.token);
+      }
+      if ((event.flags & EngineEventFlagTurnFinished) != 0) {
+        preemptions += event.request->PreemptionCount();
+        event.request->Close();
+      }
     }
+  };
+  for (int guard = 0; streams[3].size() < 4 && guard < 100; ++guard) {
+    consume();
+  }
+  for (size_t index = 0; index < 4; ++index) {
+    EXPECT_EQ(streams[index].size(), 4u);
+  }
+  requests.push_back(Queue(engine, std::vector<int32_t>(121, 9), 4));
+  for (int guard = 0; engine->HasPendingRequests() && guard < 1000; ++guard) {
+    consume();
   }
   EXPECT_FALSE(engine->HasPendingRequests());
-  EXPECT_EQ(requests[0]->PreemptionCount() + requests[1]->PreemptionCount() > 0, preemption);
+  EXPECT_EQ(preemptions > 0, preemption);
+  for (size_t index = 0; index < streams.size(); ++index) {
+    EXPECT_EQ(streams[index].size(), index < 4 ? 8u : 4u);
+  }
   return streams;
 }
 

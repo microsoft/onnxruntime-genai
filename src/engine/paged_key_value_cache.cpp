@@ -1037,25 +1037,29 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(
     const auto index = block_table_index_->Find(request_id);
     return index ? &block_tables_[*index] : nullptr;
   };
-  RequestIndex released_ids{released_requests.size()};
-  std::unordered_map<size_t, size_t> released_references;
+  std::optional<RequestIndex> released_ids;
+  std::optional<std::unordered_map<size_t, size_t>> released_references;
+  if (!released_requests.empty()) {
+    released_ids.emplace(released_requests.size());
+    released_references.emplace();
+  }
   for (size_t index = 0; index < released_requests.size(); ++index) {
     const void* request_id = released_requests[index];
     const auto* table = find_table(request_id);
-    if (!table || !released_ids.Insert(request_id, index)) {
+    if (!table || !released_ids->Insert(request_id, index)) {
       throw StepPlanningConsistencyError("Preemption release set has an unknown or duplicate request.");
     }
     ValidateRemove(request_id);
     for (const auto& block : table->Blocks()) {
-      ++released_references[block->Id()];
+      ++(*released_references)[block->Id()];
     }
   }
   const auto remaining_references = [&released_references](const Block& block) {
-    if (released_references.empty()) {
+    if (!released_references) {
       return block.RefCount();
     }
-    const auto released = released_references.find(block.Id());
-    const size_t count = released == released_references.end() ? 0 : released->second;
+    const auto released = released_references->find(block.Id());
+    const size_t count = released == released_references->end() ? 0 : released->second;
     if (count > block.RefCount()) {
       throw StepPlanningConsistencyError("Preemption releases more references than a block owns.");
     }
@@ -1081,7 +1085,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(
   // block only when all request references disappear, leaving it free or retained-only.
   if (!released_requests.empty()) {
     for (const auto& block : block_pool_->OwnedBlocks()) {
-      if (released_references.count(block->Id()) == 0) {
+      if (released_references->count(block->Id()) == 0) {
         continue;
       }
       const size_t remaining = remaining_references(*block);
@@ -1170,7 +1174,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(
       throw StepPlanningConsistencyError(
           "Step plan contains a duplicate request.");
     }
-    if (released_ids.Find(candidate.request_id)) {
+    if (released_ids && released_ids->Find(candidate.request_id)) {
       throw StepPlanningConsistencyError("Preemption plan still selects a released resident.");
     }
 
