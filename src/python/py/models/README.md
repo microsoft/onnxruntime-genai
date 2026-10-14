@@ -160,8 +160,8 @@ and changes to graph-required session options.
 WebGPU paged attention requires a positive `num_blocks` in the effective
 allocation policy. This may come from legacy extra options or
 `runtime_config.engine.dynamic_batching.num_blocks`; the runtime overlay takes
-precedence. An overlay selecting `gpu_utilization_factor` replaces legacy fixed
-capacity and is therefore rejected for WebGPU.
+precedence. Combining `gpu_utilization_factor` with a fixed capacity is rejected;
+WebGPU always requires a positive fixed capacity.
 
 `runtime_config.engine.dynamic_batching.dflash2_max_snapshots` limits retained
 windowed DFlash 2 prefix snapshots for a hybrid target with fixed state and prefix
@@ -457,6 +457,7 @@ The legacy `dflash2_precision` option accepts `bf16` (default), `int4`, or `int8
 The body uses portable raw blockwise weights by default. On CUDA, set `runtime_config.model.dflash2.session_options["ep.cuda.fpa_intb_gemm"]` to `"1"` to let the runtime prepack eligible raw weights, or set `drafter_options.quant_config.format.matmulnbits_weights_prepacked` to `1` (SM80) or `2` (SM90) to prepack eligible INT4/INT8 weights during export. INT2 offline prepacking supports only mode `1` with block size 64 or 128 and output width divisible by 128. Unsupported projections stay raw. BF16 x INT2 requires a full fpA-intB kernel build.
 
 Normally the LM head is not quantized separately: the drafter adopts the target's saved head, bytes and layout alike, so the two always agree and are deduplicated into one copy on disk. Its precision and block size remain the target's. If a BF16 target uses offline-prepacked weights, the drafter instead keeps a private raw INT4 head because the prepacked kernel requires FP16 activations. When the target's head uses a format the drafter cannot address by name, such as asymmetric, `use_qdq`, or `rtn`/`k_quant` layouts, the drafter's head stays dense. A head the checkpoint supplies already quantized (FP8) overrides `--precision` for the target and for the drafter alike. The embedding table works the same way: `op_types_to_quantize=MatMul/Gather` turns the target's `Gather` into `GatherBlockQuantized`, and the drafter adopts that table rather than keeping a dense copy. It has to, because the two graphs are deduplicated by initializer name — a target that renames the table while the drafter keeps a dense `Gather` costs more than the target saved. Under `shared_embeddings` the target gathers from its LM-head weight instead of a table of its own, so the drafter's embedding stays dense.
+
 WebGPU DFlash 2 uses FP16 activations and KV caches. Residual addition and
 `SkipSimplifiedLayerNormalization` execute in FP32, with persistent residual sums kept in FP32.
 Attention/MLP convolution **finish** multiply, mask, and accumulation paths also stay FP32 through

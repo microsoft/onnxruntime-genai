@@ -2113,53 +2113,57 @@ TEST_F(FixedStatePoolTest, DirectBindingStorageOutlivesPool) {
   }
 }
 
-TEST_F(FixedStatePoolTest, PrepareFailureDoesNotPublish) {
-    OffsetTensorViewsUnsupportedDevice device{*model_->p_device_kvcache_};
-    device.allow_offset_views = true;
-    ScopedKeyValueCacheDevice guard{*model_, device};
-    FixedStatePool pool{model_, 2};
-    MakeResident(pool, kRequestA, 4.0f, 2);
-    const auto handle = pool.HandleFor(kRequestA);
-    const auto generation = pool.StateGeneration(handle);
-    std::vector<DeviceSpan<float>> authoritative_state;
-    {
-      auto reservation = pool.Reserve(One(kRequestA, 2));
-      ASSERT_TRUE(reservation.UsesDirectBindings());
-      for (const auto& binding : reservation.Bindings()) {
-        authoritative_state.push_back(WrapTensor<float>(device, *binding.input));
-      }
+TEST_F(FixedStatePoolTest, DeferredReplayFailurePoisonsPool) {
+  OffsetTensorViewsUnsupportedDevice device{*model_->p_device_kvcache_};
+  device.allow_offset_views = true;
+  ScopedKeyValueCacheDevice guard{*model_, device};
+  FixedStatePool pool{model_, 2};
+  MakeResident(pool, kRequestA, 4.0f, 2);
+  const auto handle = pool.HandleFor(kRequestA);
+  const auto generation = pool.StateGeneration(handle);
+  std::vector<DeviceSpan<float>> authoritative_state;
+  {
+    auto reservation = pool.Reserve(One(kRequestA, 2));
+    ASSERT_TRUE(reservation.UsesDirectBindings());
+    for (const auto& binding : reservation.Bindings()) {
+      authoritative_state.push_back(WrapTensor<float>(device, *binding.input));
     }
-    {
-      const std::array<Request, 2> requests{Request{kRequestA, 6, 3}, Request{kRequestB, 4, 3}};
-      auto reservation = pool.Reserve(requests);
-      FillStagedRows(reservation, 0, 99.0f);
-      FillStagedRows(reservation, 1, 77.0f);
-      const std::array<float, 6> updates{10, 11, 20, 21, 30, 31};
-      for (const auto& binding : reservation.Bindings()) {
-        if (binding.state_update_value) FillConvUpdates(binding, 0, updates);
-      }
-      reservation.CommitPrefix(0, 4, 2);
-      device.fail_replay = true;
-      EXPECT_THROW(reservation.PrepareCommit(), std::runtime_error);
-      EXPECT_EQ(reservation.State(), FixedStateReservationState::Failed);
-      // Retained direct views refer to the authoritative bank, not this reservation's staging.
-      for (auto& state : authoritative_state) {
-        for (float value : state.CopyDeviceToCpu()) EXPECT_FLOAT_EQ(value, 4.0f);
-      }
-      EXPECT_EQ(pool.StateGeneration(handle), generation);
-      EXPECT_EQ(pool.CommittedTokens(handle), 2u);
-      EXPECT_FALSE(pool.OwnsCommittedSlot(kRequestB));
-      EXPECT_EQ(pool.Snapshot().reserved_slots, 0u);
-      EXPECT_FALSE(pool.Snapshot().healthy);
-      // Prove that the injected failure happened after a real inactive-bank write.
-      const std::array<float, 6> replayed{4, 10, 20, 4, 11, 21};
-      ASSERT_FALSE(device.replayed_destination.empty());
-      const auto actual = device.replayed_destination.CopyDeviceToCpu();
-      ASSERT_EQ(actual.size_bytes(), sizeof(replayed));
-      EXPECT_EQ(std::memcmp(actual.data(), replayed.data(), sizeof(replayed)), 0);
-    }
-    EXPECT_THROW(pool.Reserve(One(kRequestA, 3)), std::logic_error);
   }
+  {
+    const std::array<Request, 2> requests{Request{kRequestA, 6, 3}, Request{kRequestB, 4, 3}};
+    auto reservation = pool.Reserve(requests);
+    FillStagedRows(reservation, 0, 99.0f);
+    FillStagedRows(reservation, 1, 77.0f);
+    const std::array<float, 6> updates{10, 11, 20, 21, 30, 31};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_value) FillConvUpdates(binding, 0, updates);
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    device.fail_replay = true;
+    reservation.PrepareCommit();
+    EXPECT_EQ(reservation.State(), FixedStateReservationState::Prepared);
+    for (auto& state : authoritative_state) {
+      for (float value : state.CopyDeviceToCpu()) EXPECT_FLOAT_EQ(value, 4.0f);
+    }
+    EXPECT_EQ(pool.StateGeneration(handle), generation);
+    EXPECT_EQ(pool.CommittedTokens(handle), 2u);
+    EXPECT_FALSE(pool.OwnsCommittedSlot(kRequestB));
+    reservation.PublishCommit();
+    EXPECT_EQ(pool.StateGeneration(handle), generation + 1);
+    EXPECT_EQ(pool.CommittedTokens(handle), 4u);
+    EXPECT_TRUE(pool.OwnsCommittedSlot(kRequestB));
+    EXPECT_EQ(pool.Snapshot().reserved_slots, 0u);
+  }
+  EXPECT_THROW(pool.Reserve(One(kRequestA, 5)), std::runtime_error);
+  EXPECT_FALSE(pool.Snapshot().healthy);
+  // The next reservation flushes deferred replay, which fails after a real bank write.
+  const std::array<float, 6> replayed{4, 10, 20, 4, 11, 21};
+  ASSERT_FALSE(device.replayed_destination.empty());
+  const auto actual = device.replayed_destination.CopyDeviceToCpu();
+  ASSERT_EQ(actual.size_bytes(), sizeof(replayed));
+  EXPECT_EQ(std::memcmp(actual.data(), replayed.data(), sizeof(replayed)), 0);
+  EXPECT_THROW(pool.Reserve(One(kRequestA, 5)), std::logic_error);
+}
 
 void RunDeviceCompactPartialAcceptanceReplay(
     const std::shared_ptr<Model>& model, bool expect_direct_bindings) {

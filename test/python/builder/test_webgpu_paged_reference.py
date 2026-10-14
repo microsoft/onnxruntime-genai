@@ -213,6 +213,7 @@ def _export_attention_graph(tmp_path, monkeypatch, *, drafter):
     builder.num_kv_heads = kv_heads
     if drafter:
         builder.num_heads = num_heads
+        builder.attn_attrs = {"fuse_qkv": False}
         builder.hidden_size = 1
         builder.paged_block_size = _BLOCK_SIZE
         builder.include_attention_metadata = True
