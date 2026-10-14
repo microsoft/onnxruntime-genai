@@ -238,45 +238,24 @@ struct InterfaceImpl : DeviceInterface {
   void Synchronize() override {}  // Nothing to do?
 
   void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
-    auto* cpu = GetDeviceInterface(DeviceType::CPU);
-    std::vector<StateUpdateReplayDesc> staged;
-    staged.reserve(count);
-    const auto stage_input = [cpu](DeviceSpan<const uint8_t> source) {
-      if (source.empty()) {
-        return DeviceSpan<const uint8_t>{};
+    for (size_t index = 0; index < count; ++index) {
+      const auto& descriptor = descriptors[index];
+      if (descriptor.kind == StateUpdateReplayKind::GatedDeltaNet) {
+        if (descriptor.element_size != sizeof(float)) {
+          throw std::invalid_argument("WebGPU GatedDeltaNet state replay requires FP32 state.");
+        }
+        // Separate capsule allocations are supported by the CPU reference, not the one-buffer operator.
+        if (descriptor.decay.SameBufferAs(descriptor.key) &&
+            descriptor.decay.SameBufferAs(descriptor.delta)) {
+          RunStateReplay(descriptor);
+          continue;
+        }
+      } else if (descriptor.kind != StateUpdateReplayKind::CausalConv) {
+        throw std::invalid_argument("Unsupported WebGPU state replay kind.");
       }
-      auto destination = cpu->Allocate<uint8_t>(source.size());
-      destination.CopyFrom(source);
-      DeviceSpan<const uint8_t> view = destination;
-      return view;
-    };
-
-    for (size_t index = 0; index < count; ++index) {
-      const auto& source = descriptors[index];
-      staged.push_back(StateUpdateReplayDesc{
-          stage_input(source.source_state),
-          cpu->Allocate<uint8_t>(source.destination_state.size()),
-          stage_input(source.value),
-          stage_input(source.decay),
-          stage_input(source.key),
-          stage_input(source.delta),
-          source.channel_count,
-          source.state_width,
-          source.key_width,
-          source.key_head_count,
-          source.capacity,
-          source.kept_count,
-          source.element_size,
-          source.kind,
-      });
+      // Complete each descriptor before staging the next one's potentially dependent inputs.
+      ReplayStateUpdateOnCpu(descriptor);
     }
-
-    ReplayStateUpdatesOnCpu(staged.data(), staged.size());
-    for (size_t index = 0; index < count; ++index) {
-      auto destination = descriptors[index].destination_state;
-      destination.CopyFrom(staged[index].destination_state);
-    }
-    Synchronize();
   }
 
   void GetAvailableMemory(size_t& /*free_bytes*/, size_t& /*total_bytes*/) override {
@@ -410,7 +389,37 @@ struct InterfaceImpl : DeviceInterface {
   }
 
  private:
-  friend void RunGatedDeltaNetStateReplay(const StateUpdateReplayDesc& descriptor);
+  void ReplayStateUpdateOnCpu(const StateUpdateReplayDesc& descriptor) {
+    auto* cpu = GetDeviceInterface(DeviceType::CPU);
+    const auto stage_input = [cpu](DeviceSpan<const uint8_t> source) {
+      if (source.empty()) {
+        return DeviceSpan<const uint8_t>{};
+      }
+      auto destination = cpu->Allocate<uint8_t>(source.size());
+      destination.CopyFrom(source);
+      return DeviceSpan<const uint8_t>{destination};
+    };
+    StateUpdateReplayDesc staged{
+        stage_input(descriptor.source_state),
+        cpu->Allocate<uint8_t>(descriptor.destination_state.size()),
+        stage_input(descriptor.value),
+        stage_input(descriptor.decay),
+        stage_input(descriptor.key),
+        stage_input(descriptor.delta),
+        descriptor.channel_count,
+        descriptor.state_width,
+        descriptor.key_width,
+        descriptor.key_head_count,
+        descriptor.capacity,
+        descriptor.kept_count,
+        descriptor.element_size,
+        descriptor.kind,
+    };
+    ReplayStateUpdatesOnCpu(&staged, 1);
+    auto destination = descriptor.destination_state;
+    destination.CopyFrom(staged.destination_state);
+    Synchronize();
+  }
 
   void EnsureReplaySession() {
     if (replay_session_) return;
@@ -556,11 +565,6 @@ struct InterfaceImpl : DeviceInterface {
     GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
   }
 };
-
-void RunGatedDeltaNetStateReplay(const StateUpdateReplayDesc& descriptor) {
-  auto& device = static_cast<InterfaceImpl&>(*GetDeviceInterface(DeviceType::WEBGPU));
-  device.RunStateReplay(descriptor);
-}
 
 }  // namespace WebGPU
 

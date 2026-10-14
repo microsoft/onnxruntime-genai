@@ -88,9 +88,8 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
 #endif
 
-// Single gate for OrtModelPackageApi support: API version 28+ and the experimental header
-// available. The OrtModelPackage* wrappers below and model_package.{h,cpp} key off this.
-#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+// New headers expose a stable table; older headers require the experimental API.
+#if ORT_API_VERSION >= 32 || (ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API)
 #define ORT_GENAI_HAS_MODEL_PACKAGE 1
 #else
 #define ORT_GENAI_HAS_MODEL_PACKAGE 0
@@ -1544,6 +1543,9 @@ struct OrtModelPackageComponentContext;
 
 namespace Ort {
 
+#if ORT_API_VERSION >= 32
+using ModelPackageApi = OrtModelPackageApi;
+#else
 /// Typed function-pointer cache for the OrtModelPackageApi experimental entries genai uses.
 /// Each pointer is resolved once by name; null means the loaded ORT build lacks that entry.
 struct ModelPackageApi {
@@ -1574,9 +1576,9 @@ struct ModelPackageApi {
   OrtExperimental_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn
       ModelPackageComponent_GetSelectedVariantFolderPath{nullptr};
 };
+#endif
 
-/// Returns the lazily-resolved model package API function pointers. Throws if the loaded
-/// ONNX Runtime build does not expose the experimental functions genai requires.
+/// Returns the model package API table. Throws if the loaded runtime lacks support.
 const ModelPackageApi& GetModelPackageApi();
 
 }  // namespace Ort

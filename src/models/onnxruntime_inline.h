@@ -1548,6 +1548,13 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
 namespace Ort {
 
 inline const ModelPackageApi& GetModelPackageApi() {
+#if ORT_API_VERSION >= 32
+  const auto* fns = api == nullptr ? nullptr : api->GetModelPackageApi();
+  if (fns == nullptr) {
+    throw std::runtime_error("Model package API is not available in this ONNX Runtime build.");
+  }
+  return *fns;
+#else
   static const ModelPackageApi fns = []() {
     ModelPackageApi f;
     if (api == nullptr) {
@@ -1587,6 +1594,7 @@ inline const ModelPackageApi& GetModelPackageApi() {
         "Model packages require ONNX Runtime with the OrtModelPackageApi experimental functions.");
   }
   return fns;
+#endif
 }
 
 }  // namespace Ort

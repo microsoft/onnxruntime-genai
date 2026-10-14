@@ -1511,12 +1511,18 @@ allocated with the model state-device allocator. Devices are admitted only when
 they qualify the allocation, fill, ranged-copy, tensor-binding, and synchronization
 semantics needed to publish state transactionally. CPU, CUDA, and WebGPU satisfy
 that contract. CPU and CUDA bind offset tensor views directly; WebGPU uses staging
-bindings. Compact partial-acceptance replay is device-native on CUDA and currently
-stages the required ranges through CPU on WebGPU for correctness.
+bindings. Compact partial-acceptance replay is device-native on CUDA. WebGPU's
+`ReplayStateUpdates`, called by `PrepareCommit`, processes descriptors in their supplied
+order: FP32 GatedDeltaNet descriptors with one shared backing owner for their
+decay/key/delta capsule sections invoke ORT's `com.microsoft::GatedDeltaNetStateReplay`
+(version 1). Convolution descriptors and FP32 recurrent descriptors with separate
+capsule backing owners retain CPU staging, `ReplayStateUpdatesOnCpu`, and upload.
+Each descriptor finishes before the next one reads its inputs. Non-FP32 recurrent
+state and unknown replay kinds are rejected; the CPU recurrent reference also
+requires FP32. Invalid GPU views, helper-session creation errors, and failed ORT runs
+propagate without retrying on CPU.
 
-An internal, opt-in WebGPU helper can invoke ORT's
-`com.microsoft::GatedDeltaNetStateReplay` (version 1) for one FP32 recurrent-state
-descriptor. It is not yet called by `ReplayStateUpdates` or `PrepareCommit`.
+The replay invocation remains private to the WebGPU device interface.
 The device owns its lazily created helper session, cloned from the fully configured
 allocator-initialization session options, with graph capture disabled. This first
 version supports context 0 only and requires an ORT build containing the operator.
@@ -1525,8 +1531,11 @@ from `DeviceSpan::ByteOffset()` are converted to FP32-element metadata offsets.
 The output is prebound to the same inactive destination allocation as its input.
 The operator's checked completion makes a successful helper return a GPU-completion
 boundary; ORT failures propagate to the caller. The helper serializes its own runs,
-but callers must order target-session work before invoking it and keep borrowed
-buffer owners alive through the call. It does not publish or flip a state bank.
+but callers must order target-session work before replay and keep borrowed
+buffer owners alive through the call. There is one helper `Session::Run` and one
+checked-completion boundary per recurrent descriptor, with no batching or GPU
+convolution replay. It does not publish or flip a state bank; `PrepareCommit` failures
+leave active banks unchanged, fail the reservation, and mark the pool unhealthy.
 The source must be the incoming state before capsule capture, and capsule geometry
 and original capture capacity must match the producer; `kept_count` selects only
 the leading transitions, not a different capsule layout.
