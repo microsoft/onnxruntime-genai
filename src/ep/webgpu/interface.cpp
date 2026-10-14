@@ -5,9 +5,14 @@
 #include "config_utils.h"
 #include "search.h"
 #include "interface.h"
+#include "models/graph_builder.h"
 #include "models/graph_executor.h"
 #include "models/io/kv_cache.h"
 #include "state_update_replay.h"
+
+#include <charconv>
+#include <limits>
+#include <mutex>
 
 namespace Generators {
 namespace WebGPU {
@@ -174,6 +179,8 @@ struct InterfaceImpl : DeviceInterface {
  private:
   Ort::Allocator* ort_allocator_{};
   const OrtMemoryInfo* ort_memory_info_{};
+  std::mutex replay_mutex_;
+  std::unique_ptr<OrtSession> replay_session_;
   // Reusable CPU staging buffers for UpdateAttentionMask, pre-filled with 1s.
   // Content is always all 1s so sharing across generators is safe; only upload_bytes
   // worth of data is copied each call, regardless of buffer capacity.
@@ -231,45 +238,24 @@ struct InterfaceImpl : DeviceInterface {
   void Synchronize() override {}  // Nothing to do?
 
   void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
-    auto* cpu = GetDeviceInterface(DeviceType::CPU);
-    std::vector<StateUpdateReplayDesc> staged;
-    staged.reserve(count);
-    const auto stage_input = [cpu](DeviceSpan<const uint8_t> source) {
-      if (source.empty()) {
-        return DeviceSpan<const uint8_t>{};
+    for (size_t index = 0; index < count; ++index) {
+      const auto& descriptor = descriptors[index];
+      if (descriptor.kind == StateUpdateReplayKind::GatedDeltaNet) {
+        if (descriptor.element_size != sizeof(float)) {
+          throw std::invalid_argument("WebGPU GatedDeltaNet state replay requires FP32 state.");
+        }
+        // Separate capsule allocations are supported by the CPU reference, not the one-buffer operator.
+        if (descriptor.decay.SameBufferAs(descriptor.key) &&
+            descriptor.decay.SameBufferAs(descriptor.delta)) {
+          RunStateReplay(descriptor);
+          continue;
+        }
+      } else if (descriptor.kind != StateUpdateReplayKind::CausalConv) {
+        throw std::invalid_argument("Unsupported WebGPU state replay kind.");
       }
-      auto destination = cpu->Allocate<uint8_t>(source.size());
-      destination.CopyFrom(source);
-      DeviceSpan<const uint8_t> view = destination;
-      return view;
-    };
-
-    for (size_t index = 0; index < count; ++index) {
-      const auto& source = descriptors[index];
-      staged.push_back(StateUpdateReplayDesc{
-          stage_input(source.source_state),
-          cpu->Allocate<uint8_t>(source.destination_state.size()),
-          stage_input(source.value),
-          stage_input(source.decay),
-          stage_input(source.key),
-          stage_input(source.delta),
-          source.channel_count,
-          source.state_width,
-          source.key_width,
-          source.key_head_count,
-          source.capacity,
-          source.kept_count,
-          source.element_size,
-          source.kind,
-      });
+      // Complete each descriptor before staging the next one's potentially dependent inputs.
+      ReplayStateUpdateOnCpu(descriptor);
     }
-
-    ReplayStateUpdatesOnCpu(staged.data(), staged.size());
-    for (size_t index = 0; index < count; ++index) {
-      auto destination = descriptors[index].destination_state;
-      destination.CopyFrom(staged[index].destination_state);
-    }
-    Synchronize();
   }
 
   void GetAvailableMemory(size_t& /*free_bytes*/, size_t& /*total_bytes*/) override {
@@ -403,6 +389,154 @@ struct InterfaceImpl : DeviceInterface {
   }
 
  private:
+  void ReplayStateUpdateOnCpu(const StateUpdateReplayDesc& descriptor) {
+    auto* cpu = GetDeviceInterface(DeviceType::CPU);
+    const auto stage_input = [cpu](DeviceSpan<const uint8_t> source) {
+      if (source.empty()) {
+        return DeviceSpan<const uint8_t>{};
+      }
+      auto destination = cpu->Allocate<uint8_t>(source.size());
+      destination.CopyFrom(source);
+      return DeviceSpan<const uint8_t>{destination};
+    };
+    StateUpdateReplayDesc staged{
+        stage_input(descriptor.source_state),
+        cpu->Allocate<uint8_t>(descriptor.destination_state.size()),
+        stage_input(descriptor.value),
+        stage_input(descriptor.decay),
+        stage_input(descriptor.key),
+        stage_input(descriptor.delta),
+        descriptor.channel_count,
+        descriptor.state_width,
+        descriptor.key_width,
+        descriptor.key_head_count,
+        descriptor.capacity,
+        descriptor.kept_count,
+        descriptor.element_size,
+        descriptor.kind,
+    };
+    ReplayStateUpdatesOnCpu(&staged, 1);
+    auto destination = descriptor.destination_state;
+    destination.CopyFrom(staged.destination_state);
+    Synchronize();
+  }
+
+  void EnsureReplaySession() {
+    if (replay_session_) return;
+    const auto& init_options =
+        GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::WEBGPU)].session_options_;
+    if (!init_options || !ort_memory_info_ || ort_memory_info_->GetDeviceId() != 0) {
+      throw std::runtime_error("WebGPU state replay requires an initialized context-0 allocator.");
+    }
+    constexpr const char* context_key = "ep.webgpuexecutionprovider.deviceId";
+    if (init_options->HasConfigEntry(context_key)) {
+      size_t length = 0;
+      Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(init_options.get(), context_key, nullptr, &length));
+      std::string value(length, '\0');
+      Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(init_options.get(), context_key, value.data(), &length));
+      value.resize(length - 1);
+      int context_id = -1;
+      const auto result = std::from_chars(value.data(), value.data() + value.size(), context_id);
+      if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || context_id != 0) {
+        throw std::runtime_error("WebGPU state replay supports only context 0.");
+      }
+    }
+
+    ModelConfig config("GatedDeltaNetStateReplay");
+    for (const char* name : {"source_state", "capsule", "destination_state"}) {
+      config.inputs.emplace_back(name, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, std::vector<int64_t>{-1});
+    }
+    config.inputs.emplace_back("metadata", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, std::vector<int64_t>{11});
+    config.outputs.emplace_back("replayed_state", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, std::vector<int64_t>{-1});
+    auto model = GraphBuilder::Build(config, "com.microsoft", 1);
+    auto options = init_options->Clone();
+    options->AddConfigEntry("ep.webgpuexecutionprovider.enableGraphCapture", "0");
+    OrtSession* session = nullptr;
+    Ort::ThrowOnError(Ort::GetModelEditorApi().CreateSessionFromModel(
+        &GetOrtEnv(), model.get(), options.get(), &session));
+    replay_session_.reset(session);
+  }
+
+  void RunStateReplay(const StateUpdateReplayDesc& descriptor) {
+    std::lock_guard<std::mutex> lock(replay_mutex_);
+    if (descriptor.kind != StateUpdateReplayKind::GatedDeltaNet ||
+        descriptor.element_size != sizeof(float)) {
+      throw std::invalid_argument("WebGPU state replay requires an FP32 GatedDeltaNet descriptor.");
+    }
+    const auto extent_bytes = [](std::initializer_list<uint64_t> dimensions) {
+      uint64_t elements = 1;
+      for (const auto dimension : dimensions) {
+        if (!dimension || dimension > std::numeric_limits<uint32_t>::max() / elements) {
+          throw std::invalid_argument("WebGPU state replay geometry exceeds the supported indexing range.");
+        }
+        elements *= dimension;
+      }
+      if (elements > std::numeric_limits<size_t>::max() / sizeof(float)) {
+        throw std::invalid_argument("WebGPU state replay extent exceeds the supported byte range.");
+      }
+      return static_cast<size_t>(elements) * sizeof(float);
+    };
+    const auto backing = [&](const auto& view, size_t required_bytes) {
+      auto buffer = std::dynamic_pointer_cast<WebGPUMemory>(view.BackingBuffer());
+      if (!buffer || !ort_allocator_ || buffer->ort_allocator_ != ort_allocator_ ||
+          !buffer->p_device_ || buffer->size_in_bytes_ % sizeof(float) ||
+          buffer->size_in_bytes_ / sizeof(float) > std::numeric_limits<uint32_t>::max() ||
+          view.ByteOffset() % sizeof(float) ||
+          view.ByteOffset() > buffer->size_in_bytes_ ||
+          view.size() > buffer->size_in_bytes_ - view.ByteOffset() ||
+          view.size() < required_bytes) {
+        throw std::invalid_argument("WebGPU state replay requires valid FP32 views of this device's full backings.");
+      }
+      return buffer;
+    };
+    const auto state_bytes = extent_bytes(
+        {descriptor.channel_count, descriptor.state_width, descriptor.key_width});
+    auto source = backing(descriptor.source_state, state_bytes);
+    auto destination = backing(descriptor.destination_state, state_bytes);
+    auto capsule = backing(descriptor.decay, extent_bytes({descriptor.capacity, descriptor.channel_count}));
+    auto key_backing = backing(descriptor.key, extent_bytes(
+                                                   {descriptor.capacity, descriptor.key_head_count, descriptor.key_width}));
+    auto delta_backing = backing(descriptor.delta, extent_bytes(
+                                                       {descriptor.capacity, descriptor.channel_count, descriptor.state_width}));
+    if (capsule != key_backing || capsule != delta_backing) {
+      throw std::invalid_argument("WebGPU state replay capsule sections must share one backing owner.");
+    }
+
+    EnsureReplaySession();
+    const auto tensor = [&](const WebGPUMemory& buffer) {
+      const std::array<int64_t, 1> shape{static_cast<int64_t>(buffer.size_in_bytes_ / sizeof(float))};
+      return OrtValue::CreateTensor(*ort_memory_info_, buffer.p_device_, buffer.size_in_bytes_,
+                                    shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    };
+    auto source_tensor = tensor(*source);
+    // Preserve Tensor-owner identity when logical source/capsule views share a backing.
+    auto capsule_tensor = source == capsule ? nullptr : tensor(*capsule);
+    auto destination_tensor = tensor(*destination);
+    std::array<int64_t, 11> metadata{
+        static_cast<int64_t>(descriptor.source_state.ByteOffset() / sizeof(float)),
+        static_cast<int64_t>(descriptor.destination_state.ByteOffset() / sizeof(float)),
+        static_cast<int64_t>(descriptor.decay.ByteOffset() / sizeof(float)),
+        static_cast<int64_t>(descriptor.key.ByteOffset() / sizeof(float)),
+        static_cast<int64_t>(descriptor.delta.ByteOffset() / sizeof(float)),
+        static_cast<int64_t>(descriptor.channel_count),
+        static_cast<int64_t>(descriptor.state_width),
+        static_cast<int64_t>(descriptor.key_width),
+        static_cast<int64_t>(descriptor.key_head_count),
+        descriptor.capacity, descriptor.kept_count};
+    const std::array<int64_t, 1> metadata_shape{11};
+    auto cpu_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto metadata_tensor = OrtValue::CreateTensor(*cpu_memory_info, metadata.data(), sizeof(metadata),
+                                                  metadata_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    auto binding = OrtIoBinding::Create(*replay_session_);
+    binding->BindInput("source_state", *source_tensor);
+    binding->BindInput("capsule", capsule_tensor ? *capsule_tensor : *source_tensor);
+    binding->BindInput("destination_state", *destination_tensor);
+    binding->BindInput("metadata", *metadata_tensor);
+    binding->BindOutput("replayed_state", *destination_tensor);
+    // The operator performs checked queue completion before Run returns.
+    replay_session_->Run(nullptr, *binding);
+  }
+
   template <typename T>
   void UploadPositionIds(void* position_ids, int start, int new_kv_length) {
     // For the common single-token decode, use a stack variable to avoid heap allocation

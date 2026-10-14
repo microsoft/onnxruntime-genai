@@ -8,6 +8,9 @@ that best matches the local hardware at load time. Files that are common across 
 such as tokenizer or processor configuration, can live in a sibling directory and be
 referenced from each variant's configuration with a path scheme.
 
+Builds using ONNX Runtime API 32 or newer use its stable model-package API table.
+Older supported headers continue to use the experimental model-package functions.
+
 ## Package layout
 
 A model package is a directory containing a top-level `manifest.json`. The package owns a

@@ -65,6 +65,9 @@ struct DeviceSpan {
   bool empty() const { return length_ == 0; }
   size_t size() const { return length_; }
 
+  std::shared_ptr<DeviceBuffer> BackingBuffer() const { return p_device_memory_; }
+  size_t ByteOffset() const { return begin_ * sizeof(T); }
+
   operator DeviceSpan<const T>() const { return DeviceSpan<const T>(*p_device_memory_, begin_, length_); }
 
   DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
