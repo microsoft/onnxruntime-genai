@@ -93,9 +93,9 @@ def _run_live_test():
 
     transport_mod.HttpJsonPostTransport.send = recording_send
 
-    from telemetry.telemetry import GenAITelemetry
+    import telemetry.telemetry as telemetry_mod
 
-    GenAITelemetry._instance = None
+    telemetry_mod.GenAITelemetry._instance = None
 
     print("=" * 60)
     print("GenAI Telemetry - Live Integration Test (SQLite uploader)")
@@ -105,7 +105,7 @@ def _run_live_test():
     telemetry = None
     try:
         print("[1/8] Initializing telemetry singleton...")
-        telemetry = GenAITelemetry()
+        telemetry = telemetry_mod.GenAITelemetry()
         if not telemetry._enabled or telemetry._store is None or telemetry._uploader is None:
             print("  FAIL: telemetry did not initialize")
             return 1
@@ -196,10 +196,10 @@ def _run_live_test():
         telemetry.shutdown(flush_seconds=20.0)
 
         # Re-open the isolated store to confirm it drained (uploader deletes on 2xx).
-        from telemetry.deviceid import get_telemetry_base_dir
+        import telemetry.deviceid as deviceid
         from telemetry.offline_store import OfflineEventStore
 
-        db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
+        db_path = os.path.join(deviceid.get_telemetry_base_dir(), "genai_telemetry.db")
         store = OfflineEventStore(db_path)
         try:
             remaining = store.count()

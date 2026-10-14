@@ -46,7 +46,7 @@ def _validate_file(info, allow_shared=False):
 
 def _validate_windows_owner(handle, kernel32):
     import ctypes  # noqa: PLC0415
-    from ctypes import wintypes  # noqa: PLC0415
+    import ctypes.wintypes as wintypes  # noqa: PLC0415
 
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     advapi32.GetSecurityInfo.argtypes = [
@@ -108,8 +108,8 @@ def _validate_windows_owner(handle, kernel32):
 
 def _open_windows_path(path, flags=None):
     import ctypes  # noqa: PLC0415
+    import ctypes.wintypes as wintypes  # noqa: PLC0415
     import msvcrt  # noqa: PLC0415
-    from ctypes import wintypes  # noqa: PLC0415
 
     class AttributeTagInfo(ctypes.Structure):
         _fields_: ClassVar = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]

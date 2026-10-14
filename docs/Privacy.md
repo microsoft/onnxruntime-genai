@@ -24,7 +24,7 @@ Telemetry may include model and build metadata, device and platform information,
 
 - Set `ORT_DISABLE_TELEMETRY=1` before first use to disable native and Python telemetry.
 - For Python tools, use the model builder's `--disable_telemetry` flag or call `onnxruntime_genai.telemetry.disable_telemetry()`.
-- For private builds, pass `--no_telemetry` to the build script or configure CMake with `-DENABLE_TELEMETRY=OFF`.
+- For private native binaries and Python wheels, pass `--no_telemetry` to the build script or configure CMake with `-DENABLE_TELEMETRY=OFF`.
 - Native language bindings provide `disable_telemetry_events`-style controls for non-essential events. These do not disable native process information; use the environment variable for full suppression.
 
 Telemetry is also disabled in CI and native test harnesses.

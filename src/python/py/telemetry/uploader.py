@@ -84,7 +84,7 @@ class EventUploader:
         if self._drain_lock.held:
             self._wake.set()
 
-    def stop_loop(self, join_timeout_seconds: float = 5.0) -> bool:
+    def stop_loop(self, join_timeout_seconds: float | None = 5.0) -> bool:
         self._stop.set()
         self._wake.set()
         thread = self._thread

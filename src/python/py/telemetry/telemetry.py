@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import logging
 import os
 import threading
 import time
@@ -205,6 +206,7 @@ class GenAITelemetry:
                     instance._initialized = False
                     instance._telemetry_disabled = cls._process_disabled
                     instance._heartbeat_started = False
+                    instance._cleanup_thread = None
                     instance._next_model_session_id = 1
                     cls._instance = instance
         return cls._instance
@@ -623,9 +625,45 @@ class GenAITelemetry:
             if self._uploader is not None and uploader_stopped:
                 self._uploader.close()
                 self._uploader = None
-            if self._uploader is None and self._store is not None:
+            heartbeat_stopped = self._heartbeat_thread is None or not self._heartbeat_thread.is_alive()
+            if self._uploader is None and self._store is not None and heartbeat_stopped:
                 self._store.close()
                 self._store = None
+            if not uploader_stopped or not heartbeat_stopped:
+                self._defer_disabled_cleanup()
+
+    def _defer_disabled_cleanup(self) -> None:
+        if self._cleanup_thread is not None:
+            return
+        uploader, store, heartbeat = self._uploader, self._store, self._heartbeat_thread
+
+        def cleanup():
+            try:
+                if uploader is not None:
+                    uploader.stop_loop(None)
+                    uploader.close()
+                if heartbeat is not None and heartbeat.ident is not None:
+                    heartbeat.join()
+                with self._lock:
+                    if store is not None:
+                        store.close()
+                    if self._uploader is uploader:
+                        self._uploader = None
+                    if self._store is store:
+                        self._store = None
+                    if self._heartbeat_thread is heartbeat:
+                        self._heartbeat_thread = None
+                    if self._uploader is None and self._store is None and self._heartbeat_thread is None:
+                        self._heartbeat_started = False
+                        self._initialized = False
+            except Exception:
+                logging.getLogger(__name__).debug("Deferred telemetry cleanup failed", exc_info=True)
+            finally:
+                with self._lock:
+                    self._cleanup_thread = None
+
+        self._cleanup_thread = threading.Thread(target=cleanup, name="genai-telemetry-cleanup", daemon=True)
+        self._cleanup_thread.start()
 
     def shutdown(self, flush_seconds: float = 5.0) -> None:
         """Best-effort shutdown within one overall time budget.
@@ -637,6 +675,12 @@ class GenAITelemetry:
 
         def remaining_seconds() -> float:
             return max(0.0, deadline - time.monotonic())
+
+        cleanup = getattr(self, "_cleanup_thread", None)
+        if cleanup is not None:
+            cleanup.join(remaining_seconds())
+            if cleanup.is_alive():
+                return
 
         uploader_stopped = True
         if self._uploader is not None:

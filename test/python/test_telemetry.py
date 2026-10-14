@@ -318,18 +318,43 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertIn("GenAIModelBuild", names)
 
     def test_runtime_disable_is_process_latched(self):
+        import threading
+        import time
+
         from telemetry.offline_store import OfflineEventStore
         from telemetry.telemetry import GenAITelemetry
 
-        with patch("telemetry.telemetry.EventUploader.start"):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_send(payload, timeout_sec, item_count=1, on_send_admitted=None):
+            if on_send_admitted is not None:
+                on_send_admitted()
+            self.sent_payloads.append(bytes(payload))
+            entered.set()
+            release.wait(5)
+            return True, 204
+
+        self.mock_send.side_effect = blocked_send
+        try:
             t = GenAITelemetry()
-        self.assertTrue(t._enabled)
-        self.assertIsNotNone(t._store)
-        self.assertEqual(t._store.count(), 1)
-        db_path = t._store.db_path
-        t.disable_telemetry()
-        t.log_model_build(action="create_model", duration_ms=1.0, success=True)
-        t.disable_telemetry()
+            self.assertTrue(entered.wait(5))
+            store = t._store
+            db_path = store.db_path
+            started = time.monotonic()
+            t.disable_telemetry()
+            self.assertLess(time.monotonic() - started, 1)
+            t.log_model_build(action="create_model", duration_ms=1.0, success=True)
+            t.disable_telemetry()
+            cleanup = t._cleanup_thread
+            self.assertIsNotNone(cleanup)
+            t.shutdown(0.01)
+            self.assertTrue(store.is_open)
+        finally:
+            release.set()
+        cleanup.join(5)
+        self.assertFalse(cleanup.is_alive())
+        self.assertFalse(store.is_open)
         self.assertFalse(t._enabled)
         self.assertTrue(t._telemetry_disabled)
         self.assertIsNone(t._store)
@@ -341,7 +366,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertIs(GenAITelemetry(), t)
         self.assertFalse(t._enabled)
         self.assertIsNone(t._store)
-        self.assertEqual(self._sent_event_names(), [])
+        self.assertEqual(self._sent_event_names(), ["GenAIHeartbeat"])
 
     def test_disable_during_heartbeat_collection_retains_reserved_row(self):
         import threading
@@ -363,12 +388,16 @@ class TestOptOut(_HermeticTelemetryTestCase):
             patch("telemetry.telemetry.EventUploader.start"),
         ):
             telemetry = GenAITelemetry()
-            db_path = telemetry._store.db_path
+            store = telemetry._store
+            db_path = store.db_path
             telemetry.disable_telemetry()
+            cleanup = telemetry._cleanup_thread
+            self.assertTrue(store.is_open)
             release_heartbeat.set()
-            telemetry._heartbeat_thread.join(5)
-            telemetry.disable_telemetry()
+            cleanup.join(5)
 
+        self.assertFalse(cleanup.is_alive())
+        self.assertFalse(store.is_open)
         self.assertIsNone(telemetry._store)
         retained = OfflineEventStore(db_path)
         self.addCleanup(retained.close)
@@ -2369,12 +2398,30 @@ class TestActionDecorator(_HermeticTelemetryTestCase):
     def test_action_decorator_exception(self):
         from telemetry.telemetry_extensions import action
 
-        @action
-        def my_failing_function():
-            raise ValueError("test error")
-
-        with self.assertRaises(ValueError):
-            my_failing_function()
+        for enabled in (False, True):
+            for exception_type in (ValueError, KeyboardInterrupt, SystemExit):
+                with (
+                    self.subTest(enabled=enabled, exception=exception_type.__name__),
+                    patch(
+                        "telemetry.telemetry_extensions._get_telemetry",
+                        return_value=MagicMock(accepts_detailed_events=enabled),
+                    ),
+                    patch("telemetry.telemetry_extensions._resolve_invoked_from", return_value="test"),
+                    patch("telemetry.telemetry_extensions.log_action") as log_action,
+                    patch("telemetry.telemetry_extensions.log_error") as log_error,
+                ):
+                    failure = exception_type("test error")
+                    wrapped = MagicMock(side_effect=failure)
+                    with self.assertRaises(exception_type) as caught:
+                        action(wrapped)()
+                    self.assertIs(caught.exception, failure)
+                    wrapped.assert_called_once()
+                    if enabled:
+                        self.assertFalse(log_action.call_args.kwargs["success"])
+                        log_error.assert_called_once()
+                    else:
+                        log_action.assert_not_called()
+                        log_error.assert_not_called()
 
     def test_action_context_manager(self):
         from telemetry.telemetry_extensions import ActionContext
@@ -3561,24 +3608,45 @@ class TestShutdownSafety(unittest.TestCase):
         self.assertFalse(telemetry._heartbeat_started)
 
     def test_runtime_disable_keeps_live_uploader_until_it_stops(self):
+        import threading
+
         from telemetry.telemetry import GenAITelemetry
 
         telemetry = object.__new__(GenAITelemetry)
         telemetry._telemetry_disabled = False
         telemetry._enabled = True
+        telemetry._heartbeat_thread = None
+        telemetry._cleanup_thread = None
         telemetry._store = MagicMock()
         telemetry._uploader = MagicMock()
-        telemetry._uploader.stop_loop.return_value = False
+        release = threading.Event()
+
+        def stop_loop(timeout):
+            if timeout == 0:
+                return False
+            return release.wait(5)
+
+        telemetry._uploader.stop_loop.side_effect = stop_loop
         old_uploader = telemetry._uploader
+        old_store = telemetry._store
 
-        telemetry.disable_telemetry()
-
-        self.assertIs(telemetry._uploader, old_uploader)
-        self.assertFalse(telemetry._enabled)
-        self.assertTrue(telemetry._telemetry_disabled)
-        old_uploader.retain_queued_rows.assert_called_once()
-        old_uploader.stop_loop.assert_called_once_with(0)
-        telemetry._store.clear.assert_not_called()
+        try:
+            telemetry.disable_telemetry()
+            cleanup = telemetry._cleanup_thread
+            self.assertIs(telemetry._uploader, old_uploader)
+            self.assertFalse(telemetry._enabled)
+            self.assertTrue(telemetry._telemetry_disabled)
+            old_uploader.retain_queued_rows.assert_called_once()
+            old_store.clear.assert_not_called()
+            old_store.close.assert_not_called()
+        finally:
+            release.set()
+        cleanup.join(5)
+        self.assertFalse(cleanup.is_alive())
+        self.assertEqual(old_uploader.stop_loop.call_args_list, [call(0), call(None)])
+        old_store.close.assert_called_once()
+        self.assertIsNone(telemetry._store)
+        self.assertIsNone(telemetry._uploader)
 
     def test_shutdown_does_not_flush_after_runtime_disable(self):
         from telemetry.telemetry import GenAITelemetry
