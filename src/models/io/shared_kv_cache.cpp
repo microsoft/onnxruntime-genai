@@ -5,12 +5,14 @@
 
 #include "windowed_kv_cache.h"
 
+#include <algorithm>
+
 namespace Generators {
 
 namespace KeyValueCacheDetail {
 
 std::unique_ptr<OrtValue> CreateLogicalKeyValueCacheOutputView(OrtValue& backing_tensor,
-                                                               int logical_sequence_length) {
+                                                               int64_t logical_sequence_length) {
   auto type_and_shape = backing_tensor.GetTensorTypeAndShapeInfo();
   auto logical_shape = type_and_shape->GetShape();
   if (logical_shape.size() != 4) {
@@ -28,6 +30,18 @@ std::unique_ptr<OrtValue> CreateLogicalKeyValueCacheOutputView(OrtValue& backing
       logical_shape, type);
 }
 
+int64_t GetLogicalKeyValueCacheOutputLength(OrtValue& backing_tensor,
+                                            int total_length,
+                                            bool use_graph_capture) {
+  const auto shape = backing_tensor.GetTensorTypeAndShapeInfo()->GetShape();
+  if (shape.size() != 4) {
+    throw std::runtime_error("Shared KV-cache tensors must have rank 4.");
+  }
+
+  const int64_t capacity = shape[2];
+  return use_graph_capture ? capacity : std::min<int64_t>(total_length, capacity);
+}
+
 }  // namespace KeyValueCacheDetail
 
 void SharedKeyValueCache::Update(DeviceSpan<int32_t> /*beam_indices*/, int total_length) {
@@ -36,23 +50,27 @@ void SharedKeyValueCache::Update(DeviceSpan<int32_t> /*beam_indices*/, int total
   if (!Device().UsesLogicalKeyValueCacheOutputViews())
     return;
 
-  const int output_length = state_.params_->use_graph_capture
-                                ? state_.params_->search.max_length
-                                : total_length;
-  if (output_length == output_view_length_)
+  std::vector<int64_t> output_lengths;
+  output_lengths.reserve(presents_.size());
+  for (const auto& present : presents_) {
+    output_lengths.push_back(KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
+        *present, total_length, state_.params_->use_graph_capture));
+  }
+
+  if (output_lengths == output_view_lengths_)
     return;
 
   std::vector<std::unique_ptr<OrtValue>> output_views;
   output_views.reserve(presents_.size());
-  for (const auto& present : presents_) {
+  for (size_t i = 0; i < presents_.size(); ++i) {
     output_views.push_back(
-        KeyValueCacheDetail::CreateLogicalKeyValueCacheOutputView(*present, output_length));
+        KeyValueCacheDetail::CreateLogicalKeyValueCacheOutputView(*presents_[i], output_lengths[i]));
   }
 
   for (size_t i = 0; i < output_views.size(); ++i)
     state_.outputs_[output_index_ + i] = output_views[i].get();
   output_views_ = std::move(output_views);
-  output_view_length_ = output_length;
+  output_view_lengths_ = std::move(output_lengths);
 }
 
 void SharedKeyValueCache::RewindTo(size_t index) {

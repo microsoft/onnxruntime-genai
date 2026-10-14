@@ -185,6 +185,22 @@ TEST_F(StandardPositionInputsTest, Qwen3DGraphCaptureUsesStableDecodeBuffers) {
   const auto mask = next_attention_mask->GetTensorData<int64_t>();
   EXPECT_EQ(std::vector<int64_t>(mask, mask + 16),
             (std::vector<int64_t>{1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
+
+  auto append_tokens = model_->p_device_inputs_->Allocate<int32_t>(2);
+  append_tokens.CpuSpan()[0] = 5;
+  append_tokens.CpuSpan()[1] = 6;
+  append_tokens.CopyCpuToDevice();
+  inputs->Update(append_tokens, 7, 2);
+
+  auto* uncaptured_position_ids = state_->GetInput(model_->config_->model.decoder.inputs.position_ids.c_str());
+  ASSERT_NE(uncaptured_position_ids, nullptr);
+  EXPECT_EQ(uncaptured_position_ids->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{3, 1, 2}));
+
+  inputs->Update(decode_token, 8, 1);
+  auto* resumed_position_ids = state_->GetInput(model_->config_->model.decoder.inputs.position_ids.c_str());
+  ASSERT_NE(resumed_position_ids, nullptr);
+  EXPECT_EQ(resumed_position_ids->GetTensorRawData(), position_ids_data);
 }
 
 TEST(Qwen2VLPositionInputsTest, RejectsNegativeGridDimensions) {

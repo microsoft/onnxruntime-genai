@@ -70,6 +70,29 @@ TEST(KvCacheTests, LogicalOutputViewRejectsLengthBeyondCapacity) {
                std::runtime_error);
 }
 
+TEST(KvCacheTests, LogicalOutputLengthsRespectPerTensorCapacity) {
+  CacheTestModel model{false};
+  constexpr std::array<int64_t, 4> full_shape{1, 2, 96, 4};
+  constexpr std::array<int64_t, 4> sliding_shape{1, 2, 64, 4};
+  auto full_cache = OrtValue::CreateTensor(
+      model.allocator_cpu_, full_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  auto sliding_cache = OrtValue::CreateTensor(
+      model.allocator_cpu_, sliding_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+
+  EXPECT_EQ(Generators::KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
+                *full_cache, 80, false),
+            80);
+  EXPECT_EQ(Generators::KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
+                *sliding_cache, 80, false),
+            64);
+  EXPECT_EQ(Generators::KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
+                *full_cache, 80, true),
+            96);
+  EXPECT_EQ(Generators::KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
+                *sliding_cache, 80, true),
+            64);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
