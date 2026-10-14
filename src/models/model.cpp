@@ -685,7 +685,8 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
   }
 
   // Register custom ops libraries only if explicitly configured. custom_ops_library comes first, then every entry of
-  // custom_ops_libraries in order. All entries pass the allow-list checks before any of them is registered.
+  // custom_ops_libraries in order. All paths pass the allow-list checks before registration starts; registration then
+  // runs in order, so a later library load failure can still leave earlier libraries registered on session_options.
   std::vector<std::string> custom_ops_libraries;
   if (config_session_options.custom_ops_library.has_value()) {
     custom_ops_libraries.push_back(config_session_options.custom_ops_library.value());
@@ -816,6 +817,7 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
       validated_custom_ops_libraries.push_back(std::move(custom_ops_lib_path));
     }
   }
+  // Path validation is complete; load and register each library in order.
   for (const fs::path& custom_ops_lib_path : validated_custom_ops_libraries) {
     session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
   }

@@ -27,12 +27,43 @@ std::string ExceptionMessage(const std::function<void()>& action) {
 
 // Runs session-option creation without appending providers, so it only exercises the custom-op
 // handling this test is about.
-void CreateSessionOptions(Model& model, const Config::SessionOptions& options) {
+std::unique_ptr<OrtSessionOptions> CreateSessionOptions(Model& model, const Config::SessionOptions& options) {
   auto session_options = OrtSessionOptions::Create();
   model.CreateSessionOptionsFromConfig(options, *session_options, /*is_primary_session_options=*/false,
                                        /*disable_graph_capture=*/false, /*cloned_from_parent=*/false,
                                        /*append_providers=*/false);
+  return session_options;
 }
+
+std::vector<std::string> GetLoadedCustomOpLibraryTags(const OrtSessionOptions& session_options) {
+  std::vector<std::string> loaded_tags;
+  for (size_t index = 0;; ++index) {
+    const std::string key = "genai.test.custom_ops_loaded." + std::to_string(index);
+    if (!session_options.HasConfigEntry(key.c_str())) {
+      break;
+    }
+    size_t size = 0;
+    Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(&session_options, key.c_str(), nullptr, &size));
+    std::string value(size, '\0');
+    Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(&session_options, key.c_str(), value.data(), &size));
+    if (!value.empty() && value.back() == '\0') {
+      value.pop_back();
+    }
+    loaded_tags.push_back(std::move(value));
+  }
+  return loaded_tags;
+}
+
+struct ScopedCurrentPath {
+  std::filesystem::path original_path{std::filesystem::current_path()};
+  explicit ScopedCurrentPath(const std::filesystem::path& path) {
+    std::filesystem::current_path(path);
+  }
+  ~ScopedCurrentPath() {
+    std::error_code ignored;
+    std::filesystem::current_path(original_path, ignored);
+  }
+};
 
 }  // namespace
 
@@ -50,10 +81,29 @@ TEST(CustomOpsLibrariesConfigTest, ParsesListInOrder) {
   EXPECT_EQ(options.custom_ops_libraries[1], "third.so");
 }
 
-TEST(CustomOpsLibrariesConfigTest, RejectsNonStringEntries) {
+TEST(CustomOpsLibrariesConfigTest, OverlayAppendsAndEmptyOverlayPreservesExistingList) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"custom_ops_libraries":["old.so"]}}}})");
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"custom_ops_libraries":["new.so"]}}}})");
+  EXPECT_EQ(config.model.decoder.session_options.custom_ops_libraries,
+            (std::vector<std::string>{"old.so", "new.so"}));
+
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"custom_ops_libraries":[]}}}})");
+  EXPECT_EQ(config.model.decoder.session_options.custom_ops_libraries,
+            (std::vector<std::string>{"old.so", "new.so"}));
+}
+
+TEST(CustomOpsLibrariesConfigTest, RejectsNonStringEntriesAndScalarValue) {
   Config config;
   EXPECT_THROW(OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"custom_ops_libraries":[1]}}}})"),
                std::exception);
+
+  EXPECT_NE(ExceptionMessage([&] {
+              OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"custom_ops_libraries":"ops.so"}}}})");
+            }).find("custom_ops_libraries must be an array of strings"),
+            std::string::npos);
+  EXPECT_TRUE(config.model.decoder.session_options.config_entries.empty());
+  EXPECT_TRUE(config.model.decoder.session_options.custom_ops_libraries.empty());
 }
 
 TEST(CustomOpsLibrariesConfigTest, InheritsOnlyWhenChildSetsNoCustomOps) {
@@ -65,6 +115,13 @@ TEST(CustomOpsLibrariesConfigTest, InheritsOnlyWhenChildSetsNoCustomOps) {
   InheritSessionOptionsFromParent(parent, inheriting);
   EXPECT_EQ(inheriting.custom_ops_library, "parent_single.so");
   EXPECT_EQ(inheriting.custom_ops_libraries, parent.custom_ops_libraries);
+
+  // An explicit empty list `"custom_ops_libraries": []` leaves the vector empty, so it still inherits from the parent.
+  Config parsed_empty_child;
+  OverlayConfig(parsed_empty_child, R"({"model":{"decoder":{"session_options":{"custom_ops_libraries":[]}}}})");
+  InheritSessionOptionsFromParent(parent, parsed_empty_child.model.decoder.session_options);
+  EXPECT_EQ(parsed_empty_child.model.decoder.session_options.custom_ops_library, "parent_single.so");
+  EXPECT_EQ(parsed_empty_child.model.decoder.session_options.custom_ops_libraries, parent.custom_ops_libraries);
 
   // A child list replaces the parent's custom ops entirely, including the parent's single library.
   Config::SessionOptions overriding_list;
@@ -79,6 +136,107 @@ TEST(CustomOpsLibrariesConfigTest, InheritsOnlyWhenChildSetsNoCustomOps) {
   InheritSessionOptionsFromParent(parent, overriding_single);
   EXPECT_EQ(overriding_single.custom_ops_library, "child_single.so");
   EXPECT_TRUE(overriding_single.custom_ops_libraries.empty());
+}
+
+TEST(CustomOpsLibrariesConfigTest, MtpConfigInheritsDecoderLibrariesAndPreservesChildOverride) {
+  auto make_base_mtp_config = [] {
+    Config config;
+    OverlayConfig(config, R"({
+      "model": {
+        "decoder": {
+          "hidden_size": 16,
+          "session_options": {
+            "custom_ops_library": "decoder_single.so",
+            "custom_ops_libraries": ["decoder_a.so", "decoder_b.so"]
+          }
+        },
+        "mtp": {
+          "filename": "mtp.onnx",
+          "num_hidden_layers": 1,
+          "num_key_value_heads": 1,
+          "head_size": 16
+        }
+      }
+    })");
+    return config;
+  };
+
+  // Without model.mtp.session_options, the projected MTP config gets the decoder's custom-op libraries.
+  {
+    const auto projected = CreateMtpDecoderConfig(make_base_mtp_config());
+    EXPECT_EQ(projected->model.decoder.session_options.custom_ops_library, "decoder_single.so");
+    EXPECT_EQ(projected->model.decoder.session_options.custom_ops_libraries,
+              (std::vector<std::string>{"decoder_a.so", "decoder_b.so"}));
+  }
+
+  // With model.mtp.session_options that leaves custom ops unset (or sets an empty list), MTP inherits the decoder's.
+  {
+    auto config = make_base_mtp_config();
+    OverlayConfig(config, R"({"model":{"mtp":{"session_options":{"log_id":"mtp","custom_ops_libraries":[]}}}})");
+    const auto projected = CreateMtpDecoderConfig(config);
+    EXPECT_EQ(projected->model.decoder.session_options.log_id, "mtp");
+    EXPECT_EQ(projected->model.decoder.session_options.custom_ops_library, "decoder_single.so");
+    EXPECT_EQ(projected->model.decoder.session_options.custom_ops_libraries,
+              (std::vector<std::string>{"decoder_a.so", "decoder_b.so"}));
+  }
+
+  // When model.mtp.session_options sets its own custom_ops_libraries, MTP keeps its own choice.
+  {
+    auto config = make_base_mtp_config();
+    OverlayConfig(config, R"({"model":{"mtp":{"session_options":{"custom_ops_libraries":["mtp_only.so"]}}}})");
+    const auto projected = CreateMtpDecoderConfig(config);
+    EXPECT_FALSE(projected->model.decoder.session_options.custom_ops_library.has_value());
+    EXPECT_EQ(projected->model.decoder.session_options.custom_ops_libraries,
+              std::vector<std::string>{"mtp_only.so"});
+  }
+
+  // When model.mtp.session_options sets its own custom_ops_library, MTP keeps its own choice.
+  {
+    auto config = make_base_mtp_config();
+    OverlayConfig(config, R"({"model":{"mtp":{"session_options":{"custom_ops_library":"mtp_single.so"}}}})");
+    const auto projected = CreateMtpDecoderConfig(config);
+    EXPECT_EQ(projected->model.decoder.session_options.custom_ops_library, "mtp_single.so");
+    EXPECT_TRUE(projected->model.decoder.session_options.custom_ops_libraries.empty());
+  }
+}
+
+TEST(CustomOpsLibrariesConfigTest, LoadsLibrariesInOrderAndDeduplicates) {
+  auto model = LoadDummyDecoderModel();
+  const std::filesystem::path lib_dir{ORTGENAI_TEST_CUSTOM_OPS_LIB_DIR};
+  const std::string first_name{ORTGENAI_TEST_CUSTOM_OPS_FIRST_FILENAME};
+  const std::string second_name{ORTGENAI_TEST_CUSTOM_OPS_SECOND_FILENAME};
+  const std::string first_abs = std::filesystem::canonical(lib_dir / first_name).string();
+
+  ScopedCurrentPath cwd_guard{lib_dir};
+
+  // Loading a single library works.
+  {
+    Config::SessionOptions single;
+    single.custom_ops_libraries = {first_name};
+    const auto session_options = CreateSessionOptions(*model, single);
+    EXPECT_EQ(GetLoadedCustomOpLibraryTags(*session_options), std::vector<std::string>{"first"});
+  }
+
+  // custom_ops_library loads before custom_ops_libraries, and entries in custom_ops_libraries load in order.
+  {
+    Config::SessionOptions ordered;
+    ordered.custom_ops_library = first_name;
+    ordered.custom_ops_libraries = {second_name};
+    const auto session_options = CreateSessionOptions(*model, ordered);
+    EXPECT_EQ(GetLoadedCustomOpLibraryTags(*session_options),
+              (std::vector<std::string>{"first", "second"}));
+  }
+
+  // The same library listed multiple times (across custom_ops_library and custom_ops_libraries, or via relative and
+  // absolute paths that canonicalize to the same file) loads only once.
+  {
+    Config::SessionOptions deduplicated;
+    deduplicated.custom_ops_library = first_name;
+    deduplicated.custom_ops_libraries = {first_name, first_abs, second_name, second_name};
+    const auto session_options = CreateSessionOptions(*model, deduplicated);
+    EXPECT_EQ(GetLoadedCustomOpLibraryTags(*session_options),
+              (std::vector<std::string>{"first", "second"}));
+  }
 }
 
 TEST(CustomOpsLibrariesConfigTest, EveryEntryPassesTheAllowListBeforeAnyIsRegistered) {

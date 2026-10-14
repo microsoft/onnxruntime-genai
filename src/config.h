@@ -137,9 +137,12 @@ struct Config {
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
+    // Custom-op library or libraries registered on the session options: custom_ops_library is registered first,
+    // followed by custom_ops_libraries in order, with duplicate resolved paths registered once. Every entry must
+    // resolve to an existing file in the model folder, a registered EP library directory, or the current working
+    // directory (entries are not searched via LD_LIBRARY_PATH / PATH). OverlayConfig appends to custom_ops_libraries
+    // (an empty [] overlay leaves existing entries unchanged).
     std::optional<std::string> custom_ops_library;
-    // Additional custom-op libraries, registered in order after custom_ops_library. Entries are resolved against the
-    // model folder, EP library directories and the working directory, and must exist there. Duplicates are registered once.
     std::vector<std::string> custom_ops_libraries;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
@@ -870,7 +873,8 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
 // Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
-// custom_ops_library and custom_ops_libraries are inherited together, and only when the child sets neither.
+// custom_ops_library and custom_ops_libraries are inherited together only when the child sets neither; because
+// custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.
 void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
