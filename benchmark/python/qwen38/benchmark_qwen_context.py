@@ -108,6 +108,24 @@ def request_stats_delta(before, after):
     return result
 
 
+def generation_limit(prompt_tokens, requested_output_tokens, model_context, engine_capacity):
+    if requested_output_tokens < 0:
+        raise ValueError("Output token count must be nonnegative")
+    remaining = min(model_context, engine_capacity) - prompt_tokens
+    if remaining <= 0 or requested_output_tokens > remaining:
+        raise ValueError("Prompt plus generation exceeds model or Engine capacity")
+    return requested_output_tokens or remaining
+
+
+def token_throughput(output_tokens, decode_seconds, end_to_end_seconds, requests=1):
+    if requests < 1 or output_tokens < requests or decode_seconds < 0 or end_to_end_seconds <= 0:
+        raise ValueError("Invalid output count or request timing")
+    return {
+        "decode_tps": (output_tokens - requests) / decode_seconds if decode_seconds > 0 else None,
+        "end_to_end_tps": output_tokens / end_to_end_seconds,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["baseline", "mtp"], required=True)
@@ -117,6 +135,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--prompt-length", type=int, required=True)
+    parser.add_argument("--output-tokens", type=int, default=512,
+                        help="Exact generated length (default: 512); 0 stops at EOS or remaining context capacity")
     parser.add_argument("--prefix-cache", action="store_true", help="Reuse one Engine across identical prompt requests")
     parser.add_argument("--capture-decode-tokens", type=int, default=0)
     parser.add_argument("--capture-prefill", action="store_true")
@@ -127,6 +147,8 @@ def main():
     args = parser.parse_args()
     if args.warmup < 1 or args.repetitions < 1:
         parser.error("--warmup and --repetitions must be positive")
+    if args.output_tokens < 0:
+        parser.error("--output-tokens must be nonnegative")
     if not args.model.is_dir():
         parser.error("--model must name an existing model directory")
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -153,8 +175,7 @@ def main():
     load_seconds = time.perf_counter() - start
     tokenizer = og.Tokenizer(model)
     tokens = make_review_prompt(tokenizer, args.prompt_length)
-    if len(tokens) + 512 > model_config["model"]["context_length"]:
-        raise ValueError("Prompt plus generation exceeds model context length")
+    model_context = overlay.get("model", {}).get("context_length", model_config["model"]["context_length"])
     print(f"Loaded in {load_seconds:.2f}s; input_tokens={len(tokens)}", flush=True)
     if args.memory_markers:
         print("MEMORY_PHASE loaded", flush=True)
@@ -182,7 +203,8 @@ def main():
         "prompt_format": "chat",
         "source_prompt_sha256": hashlib.sha256(SOURCE.encode()).hexdigest(),
         "prompt_sha256": hashlib.sha256(tokens.tobytes()).hexdigest(),
-        "output_tokens": 512,
+        "output_tokens": args.output_tokens,
+        "output_policy": "exact" if args.output_tokens else "eos_or_capacity",
         "batch_size": 1,
         "do_sample": False,
         "overlay": overlay,
@@ -207,15 +229,16 @@ def main():
         if prefix_before is not None and not prefix_before["enabled"]:
             raise RuntimeError("Prefix-cache benchmark requires an enabled cache")
         capacity = engine.get_capabilities().max_request_length
+        output_limit = generation_limit(len(tokens), args.output_tokens, model_context, capacity)
         print(f"Run {run}: max_request_length={capacity}", flush=True)
         buffer = engine.create_event_buffer(16)
         request_options = og.RequestOptions()
-        request_options.set_max_session_tokens(len(tokens) + 512)
+        request_options.set_max_session_tokens(len(tokens) + output_limit)
         request = engine.create_request(options=request_options)
         turn = og.TurnOptions(request)
         turn.set_do_sample(False)
-        turn.set_min_generated_tokens(512)
-        turn.set_max_generated_tokens(512)
+        turn.set_min_generated_tokens(args.output_tokens)
+        turn.set_max_generated_tokens(output_limit)
         output_tokens = []
         first_time = None
         last_time = None
@@ -277,11 +300,12 @@ def main():
                     if cudart.cudaProfilerStop() != 0:
                         raise RuntimeError("cudaProfilerStop failed")
                     capture_stopped = True
-            if steps > 20000 or now - start > 1800:
-                raise RuntimeError("Benchmark exceeded iteration or time limit")
+            if now - start > 1800:
+                raise RuntimeError("Benchmark exceeded 1800-second request time limit")
         end = time.perf_counter()
-        if not finished or len(output_tokens) != 512 or first_time is None or last_time is None:
-            raise RuntimeError(f"Expected completed 512-token turn; got {len(output_tokens)}, finished={finished}")
+        valid_length = len(output_tokens) == output_limit if args.output_tokens else 1 <= len(output_tokens) <= output_limit
+        if not finished or not valid_length or first_time is None or last_time is None:
+            raise RuntimeError(f"Invalid completed turn; got {len(output_tokens)}, limit={output_limit}, finished={finished}")
         stats = engine.get_speculative_stats()
         if args.prefix_cache:
             stats = request_stats_delta(stats_before, stats)
@@ -297,11 +321,12 @@ def main():
             "warmup": run < args.warmup,
             "engine_max_request_length": capacity,
             "output_tokens": len(output_tokens),
+            "output_token_limit": output_limit,
+            "reached_output_limit": len(output_tokens) == output_limit,
             "ttft_seconds": first_time - start,
             "decode_seconds": last_time - first_time,
-            "decode_tps": 511 / (last_time - first_time),
             "end_to_end_seconds": end - start,
-            "end_to_end_tps": 512 / (end - start),
+            **token_throughput(len(output_tokens), last_time - first_time, end - start),
             "engine_steps": steps,
             "speculative_stats": stats,
             "output_sha256": hashlib.sha256(np.asarray(output_tokens, dtype=np.int32).tobytes()).hexdigest(),
@@ -328,15 +353,16 @@ def main():
         if args.memory_markers:
             print("MEMORY_PHASE between_requests", flush=True)
     measured = results["runs"][args.warmup:]
+    decode_rates = [row["decode_tps"] for row in measured if row["decode_tps"] is not None]
     results["summary"] = {
-        "decode_tps": sum(row["output_tokens"] - 1 for row in measured)
-        / sum(row["decode_seconds"] for row in measured),
-        "end_to_end_tps": sum(row["output_tokens"] for row in measured)
-        / sum(row["end_to_end_seconds"] for row in measured),
+        **token_throughput(
+            sum(row["output_tokens"] for row in measured),
+            sum(row["decode_seconds"] for row in measured),
+            sum(row["end_to_end_seconds"] for row in measured), requests=len(measured)),
         "mean_ttft_seconds": float(np.mean([row["ttft_seconds"] for row in measured])),
         "mean_end_to_end_seconds": float(np.mean([row["end_to_end_seconds"] for row in measured])),
-        "decode_tps_min": min(row["decode_tps"] for row in measured),
-        "decode_tps_max": max(row["decode_tps"] for row in measured),
+        "decode_tps_min": min(decode_rates) if decode_rates else None,
+        "decode_tps_max": max(decode_rates) if decode_rates else None,
     }
     results["loaded_runtime_libraries"] = sorted(
         {

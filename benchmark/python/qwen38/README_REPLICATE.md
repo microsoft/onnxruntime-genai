@@ -9,6 +9,262 @@ candidate or treat workload-specific selected-logits validation as universal.
 Do not overwrite another user's environment, model, results, or GPU workload.
 Keep all samples; never filter for acceptance or throughput targets.
 
+## Original Tianlei v12b package qualification (2026-10-14)
+
+This is a separate experiment from the historical paged-runtime measurements
+below and from the rejected locally reconstructed folded graph. The supplied
+`/home/asonawane/flash/pkg_v12b_engine` package was tested without modifying it.
+A hardlinked clone changes only EOS to valid token 248319 so each request
+delivers exactly 512 tokens. This is a forced-length workload, not natural
+conversation termination.
+
+Runtime: clean ORT `453ac97a6873b91f8e9dc166ad8945829bbc4119`, locally built
+core and plugin CUDA provider (CUDA 13.3); the existing GenAI
+`9eef282be7017f2d8e4e1c5677bc00af59296680` binary; supplied custom-op
+libraries, including the plane. This is not an all-libraries-from-source
+CUDA-13.0 reproduction. Actual loaded library paths and binary hashes are
+persisted in the evidence directory. All runs used Engine on exclusive H200
+GPU 5, a static single slot, no prefix reuse or continuous batching.
+
+Each dense-prefill cell below aggregates three measured requests following
+one retained warmup. E2E includes prefill and generation, not model load.
+Decode TPS is 511 divided by first-to-last output-token time.
+
+| Prompt tokens | Continuation decode TPS | Continuation E2E TPS | Chat-review decode TPS | Chat-review E2E TPS |
+|---|---:|---:|---:|---:|
+| 512 | 234.81 | 219.78 | 232.76 | 216.49 |
+| 8192 | 253.02 | 184.97 | 218.06 | 165.74 |
+| 16384 | 250.69 | 143.64 | 214.32 | 131.07 |
+| 32000 | 248.89 | 99.92 | 214.98 | 94.01 |
+
+**Qualification is workload-dependent, not an unconditional accuracy pass.**
+The continuation workload repeats technical documentation; its long-context
+draft acceptance is 100%, so do not generalize its approximately 250 TPS to
+arbitrary chat. All 16 continuation streams repeat exactly. The supplied CUDA
+provider, tested with the same new ORT core, matches all 8K/16K/32K streams
+and essentially matches throughput, but its 512-prompt streams do not repeat.
+
+The chat workload preserves the chat-template prefix and final
+448-token instruction/assistant suffix around a documentation body. Its
+measured acceptance is about 70-77%. **None of its four dense-prefill context
+groups is exactly repeatable**, so those chat TPS numbers are diagnostic,
+not exact-output-qualified results.
+
+Step-prefill qualification passes all 12 paired 512-output comparisons:
+three short questions, an 8192-token continuation, and 512/8192-token
+chat-review prompts, each repeated twice in normal MTP and forced rejection.
+There are zero MTP failures across all 72 valid requests. The 8K continuation
+also matches dense prefill exactly. The chat step-prefill streams repeat and
+match forced rejection, but differ from dense prefill. This isolates an
+observed fast-prefill-path repeatability problem, not its underlying kernel
+cause. Stable 8K chat step prefill measured 218.54 decode TPS but only 14.09
+E2E TPS because prefill is sequential; it is not a fast-prefill replacement.
+No universal model-accuracy or original-FP16 equivalence claim is made.
+
+### Measured original-package memory (2026-10-14)
+
+An exclusive GPU5 run sampled device memory and process RSS through model
+loading, warmup, and 16 fixed-512-output chat-review requests at
+512/8192/16384/32000 prompt tokens. The original package was unchanged;
+the fixed-EOS clone and clean upstream runtime described above were used.
+
+- Sampled GPU peak: **115.69 GiB**, during loading/warmup.
+- Retained GPU allocation after generation, model still loaded: **112.52 GiB**.
+- Process peak and retained RSS: **49.53 GiB**.
+- Resident PLE mappings: **47.68 GiB** (51.20 decimal GB), verified with
+  `mincore`; all mapped PLE pages resident.
+- Remaining resident host overhead: approximately **1.85 GiB**.
+- GPU memory after process exit: **0 MiB**.
+
+Linux page cache is additional shared/reclaimable storage, not an independent
+copy to add to PLE RSS. Global `Cached` increased approximately 114.71 GiB
+during the run, but other users and pre-existing cache prevent attributing
+that delta exclusively to this process. These results do not mean the full
+425 GB package is retained as application RAM. Virtual address reservations
+also must not be confused with physical RAM.
+
+The GPU samples averaged 0.328 seconds apart; short allocation peaks may be
+missed. Process peak uses Linux `VmHWM`. Model load took approximately
+1087 seconds in this run; cache state affects loading substantially.
+The profiler is `upstream-qwen38-genai/profile_package_memory.py`.
+Run with the flash Python environment; `--summarize` validates and summarizes
+existing evidence without loading the model again.
+Raw samples, `smaps` category summaries, residency checks, and final summary
+are in `upstream-qwen38-genai/qualification/memory/`.
+
+### Original-package kernel profile (2026-10-14)
+
+Nsight Systems 2026.1.3 captured one warmed 8192-token chat-review request
+with exactly512 outputs and zero MTP failures. The new upstream provider,
+existing pinned GenAI binary and supplied custom ops were unchanged.
+Capture starts after loading and a request warmup; CPU NVTX ranges divide
+prefill-to-first-token from remaining decode. CUDA graph node tracing and
+CUDA allocation tracing are enabled. This is a diagnostic, not a fresh TPS
+benchmark: graph tracing perturbs timing, and overlapping kernel durations
+cannot be added as wall time.
+
+| Phase | Wall ms under profiler | Kernel calls | GPU kernel union busy fraction |
+|---|---:|---:|---:|
+| Prefill through first token | 754.98 | 5180 | 98.07% |
+| Remaining decode | 2344.24 | 266950 | 94.36% |
+
+Leading decode opportunities, as percentages of **summed kernel durations**:
+
+- Two target NVFP4 MoE GEMV variants: **22.24%**, plus routing
+  finalization **3.03%**. Evaluate tile/register tuning and our guarded
+  routing/finalize improvements against this exact package.
+- Skinny projection family: **26.60%**. Focus on the expensive two-row
+  shapes, direct split outputs and row-shared weight reads.
+- Leading merged HC kernel: **17.25%** (~16.16us/call).
+  Controlled ablations of existing PDL/early-weight/row-sharing settings
+  precede kernel changes. Preserve software-grid-barrier co-residency.
+- Sparse indexer compact/merge/score top-k kernels: **5.35%** combined;
+  grouped sparse attention and its merge: **5.93%**. Preserve index state
+  precision, selection and tie order.
+
+Prefill hotspots: chunked GDN **15.13%**, NVFP4 weight dequantization
+**14.32%** (96 calls,106.01ms), DSA prefill **13.32%**. Packed-weight
+dequant+GEMM fusion or tiled scratch is a concrete prefill/memory candidate,
+but the existing BF16 graph must be qualified separately from earlier FP16
+paged-kernel work.
+
+Several prefill CPU copy calls take ~57ms to read **four bytes**; their GPU
+copy takes ~2.4us. This is a wait for preceding device work, not a PCIe
+bandwidth problem. Defer or batch validation only after locating exact call
+sites and preserving explicit error reporting. Aggregate CPU copy API time
+(675ms) is not independently removable wall time.
+
+Decode has only two stream synchronizations (0.61ms aggregate), so further
+host synchronization work is not the first priority. PLE gather kernels
+account for ~0.22% of summed decode kernel time on this warm workload.
+Neither observation establishes hardware bandwidth/occupancy bottlenecks;
+Nsight Compute counters were not collected.
+
+Direct `cudaMemGetInfo` reads show ~112.54GiB used at model-ready,
+after request warmup, and after profiling. This capture excludes loading
+allocations, so it does not establish which part of the gap above the
+72.17GiB shared pool is recoverable. A separate load-time allocation trace
+or per-session instrumentation is required for that attribution.
+
+Profile MTP counters:289rounds,223accepted drafts,77.16% acceptance.
+The profiled and warmup streams differ, consistent with the documented
+fast-prefill repeatability limitation; zero MTP failures is not an exact
+accuracy pass.
+
+Scripts: `upstream-qwen38-genai/profile_original_kernels.py` and
+`summarize_kernel_profile.py`. Persistent local evidence (placed on the
+larger `/var/tmp` filesystem):
+`/var/tmp/asonawane-v12b-profile/{engine.nsys-rep,engine.sqlite,run.json,kernel-summary.json}`.
+The summarizer validates output length/failures and separates phase kernel,
+CUDA API and transfer costs. Candidate rankings are hypotheses for controlled
+experiments, not measured optimization speedups.
+
+### Ordered v12b optimization screening
+
+Follow-up experiments used the same original package/runtime, an exclusive
+GPU5, four dense-prefill requests (one warmup plus three measured), and
+four step-prefill8192 requests to compare decode on exactly identical
+512-token streams and speculative counters. Short step-prefill questions
+were also checked. Dense prefill remains non-repeatable: its acceptance
+changes between runs, so dense TPS differences are not isolated kernel gains.
+
+| Variant | Exact step8K decode TPS | Retained VRAM GiB | Dense8K TTFT ms |
+|---|---:|---:|---:|
+| Fresh control | 234.64 | 112.52 | 745.57 |
+| MoE FC1 PDL enabled | 236.05 | 112.52 | 745.40 |
+| Skinny early trigger | 234.58 | 112.52 | 744.47 |
+| HC early weights | 234.74 | 112.52 | 746.00 |
+| HC one row per CTA | 234.56 | 112.52 | 745.00 |
+| Control repeat | 234.59 | 112.52 | 745.35 |
+| Prefill4096 + matching warmup | 242.24 | 100.40 | 891.13 |
+| Prefill2048 + matching warmup | 234.50 | 98.85 | 1244.02 |
+| Prefill4096 repeat | 234.41 | 100.40 | 891.86 |
+
+All listed step8K output streams and counters match the fresh control exactly;
+short gates also pass, with zero MTP failures. MoE FC1 PDL's ~0.6% is a small
+screening result, not a broader qualified speedup. Skinny/HC switches do not
+justify changed defaults. Sparse top-k has no safe runtime knob; a kernel
+rewrite remains unimplemented rather than claimed tested.
+
+The4096 option consistently saves **12.11GiB** retained memory (~10.8%) for
+the measured8K workload at the cost of ~20% higher TTFT. Its apparent first
+decode gain did not repeat. The2048 option saves13.67GiB but raises TTFT ~67%.
+Neither option is exact-output-qualified for dense prefill or validated over
+all contexts; these are intentional opt-in memory/latency tradeoffs. An overlay
+is persisted at `upstream-qwen38-genai/qualification/prefill-4096-overlay.json`.
+Apply through `og.Config.overlay`, keeping original package unchanged.
+
+Loading Nsight allocation trace reconstructs **110.66GiB live device
+allocations**, with **113.84GiB tracked allocation peak**; direct model-ready
+CUDA use is112.54GiB. The first625 live device allocations match the shared
+pool manifest in order and byte size exactly (**72.17GiB**), leaving
+**38.49GiB** of other tracked live allocations. Largest non-pool blocks:
+8GiB x1,4GiB x2,2GiB x2,1GiB x3. No allocation stacks/session labels were
+collected, so arena versus packed-weight attribution is not established.
+Driver/context accounting explains some difference from direct CUDA readings;
+this trace does not prove38.49GiB is removable.
+
+No production defaults, custom-op binaries, provider binaries or original
+model files were changed. Actual sparse-kernel rewrites, fused BF16 prefill
+dequant/GEMM, and per-session allocation-stack attribution remain follow-up
+implementation work, not completed optimizations.
+
+Evidence: `/var/tmp/asonawane-v12b-experiments/evaluation.json`, individual
+runJSONs/logs, and `load.nsys-rep`/`load.sqlite`. Scripts in the isolated GenAI
+worktree: `run_v12b_experiment.py`, `profile_v12b_load.py`,
+`summarize_v12b_experiments.py`. Rerun the summarizer to check streams,
+counters and allocation accounting without another GPU run.
+
+Local persistent evidence:
+
+Safetensors cleanup (2026-10-14): after recursively auditing tensor external
+data in all four ONNX models (including nested messages), shared-pool ranges,
+PLE shard ranges and JSON metadata, two unreferenced files were removed from
+the supplied package:
+`head_r2/source_weights/model-bf16-00010.safetensors` and
+`target/head_data/source_weights/model-bf16-00010.safetensors`.
+They total647128402bytes; both have SHA256
+`0c2c3ef0030f5134edca0f3bbffc111cfa5da4b39b839cb8248ec762009be0aa`.
+Every referenced file and checked range still resolves after deletion.
+Package logical size decreases from425.387GB to424.740GB. No physical space
+is expected to be freed because the test clone retains hardlinks.
+Graph/config/library contents were not changed. This is dependency validation,
+not a new GPU inference run. Audit script:
+`upstream-qwen38-genai/audit_package_safetensors.py`; before/after evidence:
+`/var/tmp/asonawane-v12b-experiments/safetensors-cleanup.json`.
+
+- `upstream-qwen38-genai/qualification/evaluation.json`: final gates,
+  throughput, provenance, and limitations.
+- `upstream-qwen38-genai/qualification/{gate*,benchmark*}.json`: all token
+  streams, prompt hashes, timestamps, and speculative counters.
+- `upstream-qwen38-genai/qualification/*loaded-libraries.json`: actual loaded
+  core, CUDA provider, GenAI, and custom-op paths.
+- `upstream-qwen38-genai/qualify_original_package.py` and
+  `summarize_original_qualification.py`: executable measurement and assertion
+  scripts. Initial invalid NumPy-array token-multiplication results are
+  explicitly archived as `invalid-input-*` and excluded.
+
+To rerun in this workspace (one command at a time on an otherwise idle GPU):
+
+```bash
+cd /home/asonawane/flash/upstream-qwen38-genai
+PY=/home/asonawane/.conda/envs/flash/bin/python
+"$PY" qualify_original_package.py --prepare
+export CUDA_VISIBLE_DEVICES=5 PYTHONNOUSERSITE=1
+export PYTHONPATH="$PWD/qualification/runtime"
+export LD_LIBRARY_PATH="/home/asonawane/flash/upstream-qwen38-ort/build-upstream:/usr/local/cuda-13.3/lib64:/usr/lib/python3.12/site-packages/nvidia/cudnn/lib"
+"$PY" qualify_original_package.py --gate
+"$PY" qualify_original_package.py --gate --force-reject
+"$PY" qualify_original_package.py --gate-long
+"$PY" qualify_original_package.py --gate-long --force-reject
+"$PY" qualify_original_package.py
+"$PY" qualify_original_package.py --shipped-provider
+"$PY" qualify_original_package.py --chat-workload
+"$PY" qualify_original_package.py --gate --chat-workload
+"$PY" qualify_original_package.py --gate --chat-workload --force-reject
+"$PY" summarize_original_qualification.py
+```
+
 All published changes use **`asonawane/qwen-38-flash-100-e2e` in both repositories**.
 
 | Repository | Pinned source commit | Purpose |
@@ -291,7 +547,7 @@ With the rebuilt GenAI library/Python bindings and warp-heads provider:
 python "$GENAI_SRC/benchmark/python/qwen38/run_context_sweep.py" \
   --model /absolute/path/to/long-context-selected-logits-model \
   --output-dir /absolute/path/to/new-cached-results \
-  --gpu 0 --indexer-warp-heads --prefix-cache
+  --gpu 0 --indexer-warp-heads --prefix-cache --output-tokens 512
 ```
 
 Unlike the historical uncached benchmark, one Engine is shared across the
@@ -380,15 +636,282 @@ This supports parity and a prefill-specific gain on that workload, without
 proving that autotuning caused the earlier mismatch. Keep this diagnostic
 separate from the historical tuned table.
 
+### Variable output length on current source
+
+The current context benchmark and sweep default to `--output-tokens 512`
+for controlled optimization comparisons. Explicit `--output-tokens 0` generates
+until EOS or the smaller of model context and Engine request capacity,
+without a fixed 512-token cap or EOS suppression. A 1800-second
+per-request safety timeout still fails explicitly rather than truncating output.
+Use `--output-tokens 512` to reproduce the historical tables, or
+`--output-tokens 2048` for an exact longer decode comparison. The older pinned
+scripts in section 1 have a hard-coded 512 length and do not accept this option;
+use current branch source for variable-length benchmarking.
+
+```bash
+python "$GENAI_SRC/benchmark/python/qwen38/run_context_sweep.py" \
+  --model /absolute/path/to/long-context-selected-logits-model \
+  --output-dir /absolute/path/to/new-natural-output-results \
+  --gpu 0 --indexer-warp-heads --prefix-cache --output-tokens 0
+```
+
+Actual output counts and per-request capacity limits are saved in raw results;
+the manifest also records measured output counts. Decode TPS uses actual
+generated tokens minus the first token per request divided by decode time.
+E2E TPS uses all actual generated tokens divided by total request time.
+A request with no measurable decode interval reports decode TPS as null/N/A.
+Longer outputs change context during decode and amortize prefill in E2E TPS;
+they are not a kernel speedup. EOS-ended text and fixed-length chat/code
+workloads must not be compared as if they were identical. The quoted external
+2K/8K/32K text TPS is not reproduced or qualified by this change.
+
 ## 8. Copilot validation checklist
+
+### Engine-native sparse attention follow-up (local)
+
+The current sweep accepts `--sparse-mtp-grouped-heads` and
+`--sparse-prefill-async-kv`, both default off. Rebuild the matching ORT provider
+before enabling either. These retain the Engine API and do not require the
+Generator-only `qwen38_flash_graph` package or its external custom-op libraries.
+The first uses same-reduction grouped scalar attention for small MTP batches;
+the second stages prefill KV asynchronously. Exact output qualification used
+GEMM autotuning disabled in both decoder and MTP sessions. Autotuning-enabled
+controls themselves varied; the cause of that variability is not established.
+
+For a qualified 8190-token prompt, MTP one, exact512 output, CUDA graphs, and
+4096-token scheduler chunks with genuine prefix reuse (4096 adopted tokens),
+paired Engine measurements were:
+
+| Metric | Control | Both sparse options |
+|---|---:|---:|
+| Decode TPS | 112.68 | 120.97 |
+| E2E TPS | 98.46 | 105.50 |
+| TTFT (ms) | 665.35 | 628.90 |
+
+All twelve cold/measured streams matched exactly. With 8192 scheduler chunks,
+the 8K prompt has no reusable checkpoint; that separate pair measured E2E
+95.30 to 102.70 TPS. Do not compare these diagnostic autotuning-off protocols
+directly with the historical tuned table or assume long-context qualification.
+Original defaults remain unchanged; the output default remains 512.
+
+### Combined Engine-native kernel qualification (local)
+
+The sweep additionally accepts `--hyperconnection-vectorize`,
+`--nvfp4-fused-routing`, and `--nvfp4-single-pass-finalize`. Each defaults off,
+is explicitly written into the child environment and manifest, and requires
+a matching rebuilt ORT provider. No Generator-only graph runtime is used.
+The MoE port includes only fused routing and ordered single-pass finalization;
+experimental register-prefetch, PDL changes and the rejected prefill scale
+pipeline are excluded. Hyperconnection vectorization is FP16 prefill-only,
+with fallback guards; it does not fuse or alter projection arithmetic.
+
+A combined rebuilt provider was tested with all five new options off/on/off
+in separate processes. Engine, MTP one, actual8190 prompt, exact512 outputs,
+CUDA graphs, GEMM autotuning off, scheduler4096 and true prefix reuse were
+identical on both sides:
+
+| Invocation | Decode TPS | E2E TPS | TTFT (ms) |
+|---|---:|---:|---:|
+| Control | 111.32 | 97.43 | 664.54 |
+| All five options | 124.22 | 108.49 | 605.70 |
+| Control repeat | 111.77 | 97.81 | 662.77 |
+
+All twelve cold/measured output streams matched exactly, with zero MTP
+failures; each measured request adopted4096 prefix tokens. This is an 8K
+MTP-one qualification, not a new all-context table or a200TPS claim.
+Flags remain opt-in pending broader context/MTP qualification. The current
+sweep's historical8192 scheduler/tuning settings differ from this diagnostic
+protocol; add the options to investigate it, not to assume identical numbers.
+
+### Follow-up single-draft device path screening (not retained)
+
+A short CUDA-profiler capture of the optimized Engine MTP-one decode path
+showed176 stream synchronizations and47 graph launches. Synchronization
+accounted for74.5% of summed CUDA API duration, but includes waiting for GPU
+execution and must not be interpreted as removable CPU overhead. Device
+argmax and compact token transfers already exist for target verification.
+
+A candidate extended the existing CUDA device-draft-chain path from multiple
+drafts to a single draft, allowing the asynchronous decoder/device-argmax
+handoff and reusable draft-token storage in MTP-one as well. It built and
+passed63 native MTP/speculative tests. Cached Engine control/candidate/control
+with the combined kernels, autotuning off, scheduler4096, and exact512 outputs
+produced decode123.98/124.28/124.10TPS and E2E108.23/108.49/108.34TPS.
+All twelve streams matched, and each measured request reused4096 prefix tokens.
+The approximately0.2% observed difference is within run variability; the
+candidate was reverted rather than retained as an optimization. Profiler
+timings are excluded from throughput claims.
+
+### Remaining Engine experiments (screened, not integrated)
+
+All candidates below were tested with Engine and exact512 outputs. Isolated
+candidate sources/runtimes were not copied into the qualified runtime.
+Compare only paired runs within each experiment; the differing baseline TPS
+across experiments are not interchangeable.
+
+| Experiment | Measured result | Decision |
+|---|---|---|
+| Binding-name validation cache | Microbenchmark20.9 to3.0us; Engine ABBA decode131.37 to131.92TPS and E2E113.77 to113.96TPS | No demonstrated gain beyond variation; reverted |
+| Fused verified-token CUDA handoff | Decode131.72 to128.14TPS;128 fused launches confirmed | Slower; not integrated |
+| Explicit MTP-head CUDA graph option | Decode123.78TPS, E2E108.08TPS versus prior bracketed decode123.98/124.10TPS | No measured benefit; not integrated |
+| Terminal prefix checkpoint | Reused7936/8190 tokens; cached TTFT control/candidate/control613/140/611ms | Changes output tokens; rejected |
+| Scheduler2048 fallback | Reused6144 tokens; cached TTFT360ms | Changes output tokens; not an equivalent optimization |
+
+Host-cache qualification matched all20 output streams and passed913 native
+tests, including eight new tests. The fused handoff matched all36 streams
+with zero MTP failures;888 CPU Engine tests,17 CUDA Engine tests per toggle,
+and six handoff tests per toggle passed. Explicit MTP-head graph screening
+matched all four streams.
+
+Terminal checkpoint qualification passed all twelve512-token cached versus
+cold-shadow cases, including changed suffixes and cache pressure with31
+prefix-block evictions. However, changing the cold prefill segmentation
+changed the same-budget control output: first difference at generated token46
+with MTP and495 target-only. Candidate-off matched control exactly.
+The2048 fallback also diverged, at token53. Cache self-consistency is not
+enough to establish equivalence to the qualified baseline. Final targeted
+native tests passed183 cases with one skip; neither checkpoint alternative
+is retained, despite the lower TTFT.
+
+A full device-only MTP cycle remains a larger redesign: host acceptance
+currently determines prefix commits, MTP packing, shadow transactions and
+binding lifetimes. No synchronization or correctness guards were removed
+to manufacture a speedup. The five qualified opt-in kernels above remain
+the retained improvements; these follow-ups establish no additional
+throughput gain and do not establish200TPS.
+
+### GenAI v12b branch evaluation (isolated)
+
+Branch `tlwu/20261013/ga03-engine-v12b-main`, inspected/built at
+`9eef282be7017f2d8e4e1c5677bc00af59296680`, now hosts its specialized folded
+MTP-one backend through Engine, not Generator. It is not a replacement for
+the dynamic prefix-cached backend: it has no prefix caching, serves one
+resident request, rejects `min_generated_tokens`, and needs externally
+exported graphs/custom ops and a plugin CUDA provider. Its fast dense
+prefill is documented as tolerance-level, not run-to-run reproducible.
+
+The generic hybrid-prefix retention change
+`2472a3608fccf7e86794d31e63903e8e25bcedde` was applied to an isolated checkout
+of the qualified GenAI source and built against the same ORT stack. This
+retains complete physical histories for alternating hybrid conversations
+instead of repeatedly falling back to an intermediate common prefix.
+
+Target-only Engine control/candidate/control, two checkpoint slots, block256,
+chunk2048, fixed256-block budget, 8449-token histories, exact512 outputs:
+
+| Metric on six alternating switches | Control | Candidate | Control repeat |
+|---|---:|---:|---:|
+| Reused prefix tokens, every switch | 2048 | 8192 | 2048 |
+| Mean TTFT (ms) | 1198.52 | 137.83 | 1194.87 |
+| Pooled E2E TPS | 72.98 | 85.99 | 72.99 |
+
+Every completed stream matched its cache-disabled reference, and repeated
+reference streams matched across builds. Both controls failed the deep-reuse
+assertion, not parity; the candidate passed the alternating-history suite.
+This is a cache-retention improvement, not a decode-kernel TPS claim.
+Relative to the bracketed controls, switch TTFT fell88.48% and pooled E2E
+rose17.82%. Additional candidate GPU suites passed boundary replay,
+active-owner lease/replacement, cancellation during prefill with retry,
+and bounded-pool eviction/recovery, with512-token completed requests.
+The port passed897 CPU Engine tests (one skip) and66 model-free QA tests.
+Evidence and the standalone port patch remain in the isolated
+`engine-hybrid-retention/results/` directory, outside this repository.
+
+Batch-one MTP-one retains only one checkpoint slot in the qualified layout.
+Its separate exact512 control/candidate/control test measured decode
+123.82/123.97/123.82TPS and E2E108.04/108.22/108.09TPS; all twelve streams
+matched, and every measured request reused4096 tokens. This is no demonstrated
+MTP throughput improvement. No batch-one eligibility guard was relaxed.
+
+The isolated folded branch built with CUDA/SM90 and `ENABLE_QWEN38_PLANE=ON`.
+All59 targeted native tests passed (one disabled); these use scripted
+devices/configuration checks, not a real model. Fifteen additional synthetic
+CUDA checks passed: three bitwise recurrent-state transposes and twelve
+pooled-key cases within rtol1e-4/atol1e-5 (max absolute error2.87e-6).
+No local v12b graph package was available, so full-model parity, memory and
+TPS for the folded backend remain **blocked**, not passed. The package
+builder consumes an existing export; it does not convert the current model.
+The qualified generic hybrid-prefix retention port is now integrated locally;
+the original GenAI build passed897 CPU Engine tests (one skip) and91 combined
+Python QA/benchmark tests after integration. The folded model backend remains
+isolated. Neither change has been committed or pushed.
+An additional GPU replay using the rebuilt original GenAI library also passed
+the exact512 alternating-history suite; its record is
+`engine-hybrid-retention/results/integrated.json`.
+
+After the custom-op sources became available in `tianleiwu/qwen38-flash-ops`,
+all eight libraries built locally and loading/CUDA smoke checks passed.
+An isolated first-stage BF16 exporter was also implemented for the available
+paged graphs: it converts FP16 weights with round-to-nearest-even, shares
+unchanged external weights and retains the supported FP16 CPU Engram lookup
+with an explicit BF16 boundary cast. Four exporter unit tests pass, including
+all65536 FP16 bit patterns against torch rounding.
+
+This first-stage export **is not a folded graph package**. Its exact512
+precision gate diverges from the qualified FP16 stream at generated token41
+in both target-only and MTP modes; cached/cold BF16 streams agree and MTP
+failures remain zero. Diagnostic paged BF16 MTP decode121.50/E2E93.42TPS
+must not be reported as folded-backend TPS or an output-equivalent speedup.
+Static state layout, per-row rollback outputs and folded target/head graph
+construction were subsequently implemented and tested as described below.
+The FP16 production model remains unchanged.
+
+### Reconstructed folded export: rejected accuracy gate (2026-10-14)
+
+An isolated exporter now emits static target/head graphs, intermediate and
+final recurrent states, a PLE table description, and an Engine-loadable
+folded target/head graph using `qwen.fold::FoldMid` / `FoldTail`. It retains
+the existing paged attention operators; this is **not** the upstream v12b
+fused-attention/dense-prefill export. The earlier full-model "blocked"
+status above is superseded by this completed reconstruction experiment,
+not by qualification of the unavailable upstream package.
+
+The two-row target component passed248 bitwise state/logit comparisons
+against two single-row full-target calls on synthetic inputs. Twelve
+exporter/operator tests pass, including CUDA convolution mid/final-state
+equivalence and all finite FP8 PLE codes through the original FP16 lookup
+boundary. A separate, default-off `QWEN38_PLE_FP16_ROUND_TRIP` data-plane
+build preserves that boundary; the standard data-plane behavior is unchanged.
+Native snapshot configuration is retained. `ConstantSharing` is disabled
+for this export because sharing equal zero-valued CPU and GPU control
+initializers caused a host dereference of device memory.
+
+Generation qualification used one63-token chat prompt, capacity1024,
+exactly512 outputs/request, and the qualified kernel flags. Sixteen
+requests across normal folded, forced rejection, uncaptured folded,
+paged BF16 reference and single-row-prefill BF16 reference completed with
+zero MTP failures. Every mode repeated exactly; captured/uncaptured folded
+streams also matched exactly. **Normal folded and forced-rejection streams
+differ at generated token32**, and folded differs from the paged oracle
+at token32 (single-row-prefill oracle at token28). Correcting PLE boundary
+rounding did not resolve these differences.
+
+| Mode | Decode TPS | E2E TPS | Qualification |
+| --- | ---: | ---: | --- |
+| Folded, captured | 77.51 | 68.92 | Rejected: token parity |
+| Folded, forced rejection | 40.29 | 37.87 | Rejected: differs from normal folded |
+| Folded, uncaptured | 63.89 | 56.65 | Matches captured folded, not reference |
+
+These are **short-prompt diagnostic timings**, not an output-equivalent
+speedup, cached throughput, or an8K-128K benchmark. Warmups are excluded.
+No long-context performance promotion was attempted after the accuracy
+gate failed. This static backend has no prefix cache or continuous batching.
+No production backend/model was replaced, and no commit or push was made.
+
+Local evidence: `engine-folded-v12b/static-evaluation-summary.json`,
+`evaluation.json`, and the raw `static-final-*.json` results. The candidate
+package is `/var/tmp/asonawane-qwen38-static-fold-native-state`; its export
+manifest explicitly records the rejected qualification.
 
 1. Record source commits, toolchain, GPU, active interpreter and package paths.
 2. Confirm all loaded runtime libraries/hashes in the manifest correspond to
    the locally built optimized runtime. Stock libraries invalidate the run.
-3. Require 20 configurations and 60 measured completed requests, 512 output
-   tokens each, zero MTP failures, expected context/MTP/overlay and prompt hashes.
+3. Require 20 configurations and 60 measured completed requests, zero MTP failures,
+   expected context/MTP/overlay and prompt hashes. Historical reproduction
+   requires 512 output tokens each; variable-output runs require recorded
+   actual lengths consistent with EOS/capacity or the requested exact length.
 4. Keep warmups excluded but saved; never remove slow or low-acceptance samples.
-5. For 128K, require Engine `max_request_length >= actual_prompt + 512`.
+5. Require Engine `max_request_length >= actual_prompt + output_token_limit`.
    Earlier 5%/7% budgets failed admission, including after warmup; do not
    silently shorten prompts or count warmup results instead.
 6. Compare manifests and raw counters, not just rounded table cells.

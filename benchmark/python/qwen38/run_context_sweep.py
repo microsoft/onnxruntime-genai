@@ -30,12 +30,14 @@ def file_hash(path):
     return digest.hexdigest()
 
 
-def save_table(rows, destination, prefix_cache=False):
+def save_table(rows, destination, prefix_cache=False, output_tokens=512):
     lines = [
         "# Optimized asonawane/qwen-38-flash-100-e2e context sweep",
         "",
         "CUDA graphs: enabled. Prompt task: source_code_review; format: chat.",
-        "Three measured 512-token requests per configuration, one excluded warmup.",
+        (f"Three measured {output_tokens}-token requests per configuration, one excluded warmup."
+         if output_tokens else "Three measured requests per configuration until EOS or remaining capacity, one excluded warmup."),
+        "Actual measured output lengths are recorded in manifest rows and raw request results.",
         "Acceptance target: 80% +/- 5%; no samples filtered.",
         "VRAM: device-wide sampled peak including load and warmup (nominal 20 ms interval).",
         "Runtime: active Python environment; package versions and loaded library hashes recorded in manifest.",
@@ -53,9 +55,10 @@ def save_table(rows, destination, prefix_cache=False):
         if row["status"] != "completed":
             lines.append(f"| {row['requested_prompt']} | - | {row['mtp']} | - | - | - | - | - | - | - | {row['peak_mib']:.0f} | failed; see log |")
             continue
+        decode_tps = f"{row['decode_tps']:.2f}" if row["decode_tps"] is not None else "N/A"
         lines.append(
             f"| {row['requested_prompt']} | {row['prompt_length']} | {row['mtp']} "
-            f"| {row['ttft_ms']:.2f} | {row['decode_tps']:.2f} | {row['e2e_tps']:.2f} "
+            f"| {row['ttft_ms']:.2f} | {decode_tps} | {row['e2e_tps']:.2f} "
             f"| {row['mtp_acceptance']:.2f}% | {row['first_draft_acceptance']:.2f}% "
             f"| {row['proposal_yield']:.2f}% | {'yes' if row['within_target'] else 'no'} "
             f"| {row['peak_mib']:.0f} | completed |"
@@ -69,8 +72,22 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True, help="New results directory; must not exist")
     parser.add_argument("--gpu", type=int, required=True, help="Physical GPU index from nvidia-smi")
     parser.add_argument("--indexer-warp-heads", action="store_true", help="Enable experimental warp-local indexer scoring")
+    parser.add_argument("--sparse-mtp-grouped-heads", action="store_true",
+                        help="Enable qualified same-reduction twelve-head sparse MTP attention")
+    parser.add_argument("--sparse-prefill-async-kv", action="store_true",
+                        help="Enable qualified async sparse prefill K/V staging")
+    parser.add_argument("--hyperconnection-vectorize", action="store_true",
+                        help="Enable experimental vectorized FP16 hyperconnection prefill")
+    parser.add_argument("--nvfp4-fused-routing", action="store_true",
+                        help="Enable experimental NVFP4 small-batch fused routing")
+    parser.add_argument("--nvfp4-single-pass-finalize", action="store_true",
+                        help="Enable experimental small-batch single-pass MoE finalize")
     parser.add_argument("--prefix-cache", action="store_true", help="Enable experimental repeated-prefix MTP workload")
+    parser.add_argument("--output-tokens", type=int, default=512,
+                        help="Exact generated length (default: 512); 0 stops at EOS or remaining context capacity")
     args = parser.parse_args()
+    if args.output_tokens < 0:
+        parser.error("--output-tokens must be nonnegative")
     model = args.model.resolve()
     destination = args.output_dir.resolve()
     if not model.is_dir() or not (model / "genai_config.json").is_file():
@@ -93,6 +110,11 @@ def main():
         "ORT_QMOE_NVFP4_TILED_DOWN_OUTPUT": "1",
         "ORT_SPARSE_PREFILL_TENSOR_CORE_QK": "1",
         "ORT_SPARSE_PREFILL_TENSOR_CORE_PV": "1",
+        "ORT_SPARSE_MTP_GROUPED_HEADS": "1" if args.sparse_mtp_grouped_heads else "0",
+        "ORT_SPARSE_PREFILL_ASYNC_KV": "1" if args.sparse_prefill_async_kv else "0",
+        "ORT_HYPER_CONNECTION_VECTORIZE": "1" if args.hyperconnection_vectorize else "0",
+        "ORT_NVFP4_DECODE_FUSED_ROUTING": "1" if args.nvfp4_fused_routing else "0",
+        "ORT_NVFP4_DECODE_SINGLE_PASS_FINALIZE": "1" if args.nvfp4_single_pass_finalize else "0",
         "ORT_GENAI_CUDA_BOUNDED_INDEXER_REPLAY": "1",
         "ORT_QMOE_INT2_FAKE_INT4_ACTIVATIONS": "0",
         "ORT_PACKED_SPARSE_INDEXER_WARP_HEADS": "1" if args.indexer_warp_heads else "0",
@@ -111,7 +133,8 @@ def main():
         "model_config_sha256": file_hash(model / "genai_config.json"),
         "repetitions": 3,
         "warmup": 1,
-        "output_tokens": 512,
+        "output_tokens": args.output_tokens,
+        "output_policy": "exact" if args.output_tokens else "eos_or_capacity",
         "prompt_task": "source_code_review",
         "prompt_format": "chat",
         "acceptance_target_percent": [75, 85],
@@ -157,6 +180,7 @@ def main():
                     str(PYTHON), str(BENCHMARK), "--model", str(model), "--mode", "mtp",
                     "--overlay", str(overlay_path), "--prompt-length", str(context),
                     "--warmup", "1", "--repetitions", "3", "--output", str(result_path),
+                    "--output-tokens", str(args.output_tokens),
                 ]
                 if args.prefix_cache:
                     command.append("--prefix-cache")
@@ -189,6 +213,7 @@ def main():
                 else:
                     result = json.loads(result_path.read_text())
                     assert result["requested_prompt_tokens"] == context
+                    assert result["output_tokens"] == args.output_tokens
                     assert context - 16 <= result["prompt_tokens"] <= context
                     assert result["max_draft_tokens"] == width
                     assert result["overlay"] == overlay
@@ -211,8 +236,10 @@ def main():
                         row["prefix_cache_stats"] = prefix_stats
                         row["cold_ttft_ms"] = result["runs"][0]["ttft_seconds"] * 1000
                     for run in result["runs"]:
-                        assert run["output_tokens"] == 512
-                        assert run["engine_max_request_length"] >= result["prompt_tokens"] + 512
+                        assert 1 <= run["output_tokens"] <= run["output_token_limit"]
+                        if args.output_tokens:
+                            assert run["output_tokens"] == args.output_tokens
+                        assert run["engine_max_request_length"] >= result["prompt_tokens"] + run["output_token_limit"]
                         assert run["speculative_stats"]["mtp_failures"] == 0
                         assert run["speculative_stats"]["draft_tokens_proposed"] > 0
                     counters = {
@@ -228,6 +255,7 @@ def main():
                     row.update({
                         "status": "completed",
                         "prompt_length": result["prompt_tokens"],
+                        "measured_output_tokens": [run["output_tokens"] for run in measured],
                         "prompt_sha256": result["prompt_sha256"],
                         "source_prompt_sha256": result["source_prompt_sha256"],
                         "ttft_ms": result["summary"]["mean_ttft_seconds"] * 1000,
@@ -244,7 +272,7 @@ def main():
                     })
                 manifest["rows"].append(row)
                 (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-                save_table(manifest["rows"], destination, args.prefix_cache)
+                save_table(manifest["rows"], destination, args.prefix_cache, args.output_tokens)
                 print(json.dumps(row), flush=True)
     finally:
         if process is not None and process.poll() is None:

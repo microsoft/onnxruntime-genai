@@ -197,6 +197,13 @@ overrides are not forwarded. Verify the loaded library paths/hashes in
 It runs contexts 8192/16384/32768/65536/131072 and MTP widths 1/3/5/7,
 with one excluded warmup and three measured 512-token requests in each
 fresh process. Each request has a fresh Engine, with no reused prompt cache.
+Those pinned historical scripts force 512 outputs. Current branch scripts
+also default to 512 outputs, with optional `--output-tokens 0` for EOS or
+remaining model/Engine capacity without EOS suppression. On current source
+use `--output-tokens 512` to reproduce historical output lengths, or a longer exact length such
+as `--output-tokens 2048`. Actual generated counts are used for decode/E2E
+TPS and persisted per request; a 1800-second request safety timeout remains.
+The separate historical 8K/512 launcher and validator are unchanged.
 CUDA graphs and GEMM tuning are enabled, scheduler chunks remain 8192,
 and KV-cache budgets are 5% for 8K-64K and 12% for 128K.
 The source-code-review chat prompt is identical to the measured sweep.
