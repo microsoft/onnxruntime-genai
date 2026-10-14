@@ -239,64 +239,31 @@ struct InterfaceImpl : DeviceInterface {
   void Synchronize() override {}  // Nothing to do?
 
   void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
-    auto* cpu = GetDeviceInterface(DeviceType::CPU);
-    struct StagedBacking {
-      DeviceSpan<uint8_t> bytes;
-      bool modified{};
+    const auto use_gpu = [](const StateUpdateReplayDesc& descriptor) {
+      if (descriptor.kind == StateUpdateReplayKind::GatedDeltaNet) {
+        if (descriptor.element_size != sizeof(float)) {
+          throw std::invalid_argument("WebGPU GatedDeltaNet state replay requires FP32 state.");
+        }
+        // Separate capsule allocations are supported by the CPU reference, not the one-buffer operator.
+        return descriptor.decay.SameBufferAs(descriptor.key) &&
+               descriptor.decay.SameBufferAs(descriptor.delta);
+      }
+      if (descriptor.kind != StateUpdateReplayKind::CausalConv) {
+        throw std::invalid_argument("Unsupported WebGPU state replay kind.");
+      }
+      return false;
     };
-    std::unordered_map<DeviceBuffer*, StagedBacking> backings;
-    std::vector<DeviceBuffer*> uploads;
-    std::vector<StateUpdateReplayDesc> staged;
-    staged.reserve(count);
-    const auto stage_view = [&](DeviceSpan<const uint8_t> view, bool modified = false) {
-      if (view.empty()) {
-        return DeviceSpan<uint8_t>{};
+    size_t index = 0;
+    while (index < count) {
+      if (use_gpu(descriptors[index])) {
+        RunStateReplay(descriptors[index++]);
+      } else {
+        const size_t first = index++;
+        while (index < count && !use_gpu(descriptors[index])) ++index;
+        // Upload CPU mirrors before GPU replay; never reuse stale mirrors across a GPU write.
+        ReplayStateUpdatesOnCpuStaged(descriptors + first, index - first);
       }
-      auto& buffer = view.GetBuffer();
-      const size_t offset = view.ByteOffset();
-      if (offset > buffer.size_in_bytes_ ||
-          view.size() > buffer.size_in_bytes_ - offset) {
-        throw std::out_of_range("WebGPU replay view exceeds its backing buffer.");
-      }
-      auto entry = backings.find(&buffer);
-      if (entry == backings.end()) {
-        // CopyTensors cannot address subranges. Keep one full mirror per owner, including
-        // destination banks so bytes outside the replayed rows survive the final upload.
-        buffer.CopyDeviceToCpu();
-        auto bytes = cpu->WrapMemory<uint8_t>({buffer.p_cpu_, buffer.size_in_bytes_});
-        entry = backings.emplace(&buffer, StagedBacking{bytes}).first;
-      }
-      if (modified && !entry->second.modified) {
-        uploads.push_back(&buffer);
-        entry->second.modified = true;
-      }
-      return entry->second.bytes.subspan(offset, view.size());
-    };
-
-    for (size_t index = 0; index < count; ++index) {
-      const auto& source = descriptors[index];
-      staged.push_back(StateUpdateReplayDesc{
-          stage_view(source.source_state),
-          stage_view(source.destination_state, true),
-          stage_view(source.value),
-          stage_view(source.decay),
-          stage_view(source.key),
-          stage_view(source.delta),
-          source.channel_count,
-          source.state_width,
-          source.key_width,
-          source.key_head_count,
-          source.capacity,
-          source.kept_count,
-          source.element_size,
-          source.kind,
-      });
     }
-    ReplayStateUpdatesOnCpu(staged.data(), staged.size());
-    for (auto* buffer : uploads) {
-      buffer->CopyCpuToDevice();
-    }
-    Synchronize();
   }
 
   void GetAvailableMemory(size_t& /*free_bytes*/, size_t& /*total_bytes*/) override {
@@ -431,7 +398,66 @@ struct InterfaceImpl : DeviceInterface {
   }
 
  private:
-  friend void RunGatedDeltaNetStateReplay(const StateUpdateReplayDesc& descriptor);
+  void ReplayStateUpdatesOnCpuStaged(const StateUpdateReplayDesc* descriptors, size_t count) {
+    auto* cpu = GetDeviceInterface(DeviceType::CPU);
+    struct StagedBacking {
+      DeviceSpan<uint8_t> bytes;
+      bool modified{};
+    };
+    std::unordered_map<DeviceBuffer*, StagedBacking> backings;
+    std::vector<DeviceBuffer*> uploads;
+    std::vector<StateUpdateReplayDesc> staged;
+    staged.reserve(count);
+    const auto stage_view = [&](DeviceSpan<const uint8_t> view, bool modified = false) {
+      if (view.empty()) {
+        return DeviceSpan<uint8_t>{};
+      }
+      auto& buffer = view.GetBuffer();
+      const size_t offset = view.ByteOffset();
+      if (offset > buffer.size_in_bytes_ ||
+          view.size() > buffer.size_in_bytes_ - offset) {
+        throw std::out_of_range("WebGPU replay view exceeds its backing buffer.");
+      }
+      auto entry = backings.find(&buffer);
+      if (entry == backings.end()) {
+        // CopyTensors cannot address subranges. Keep one full mirror per owner, including
+        // destination banks so bytes outside the replayed rows survive the final upload.
+        buffer.CopyDeviceToCpu();
+        auto bytes = cpu->WrapMemory<uint8_t>({buffer.p_cpu_, buffer.size_in_bytes_});
+        entry = backings.emplace(&buffer, StagedBacking{bytes}).first;
+      }
+      if (modified && !entry->second.modified) {
+        uploads.push_back(&buffer);
+        entry->second.modified = true;
+      }
+      return entry->second.bytes.subspan(offset, view.size());
+    };
+
+    for (size_t index = 0; index < count; ++index) {
+      const auto& source = descriptors[index];
+      staged.push_back(StateUpdateReplayDesc{
+          stage_view(source.source_state),
+          stage_view(source.destination_state, true),
+          stage_view(source.value),
+          stage_view(source.decay),
+          stage_view(source.key),
+          stage_view(source.delta),
+          source.channel_count,
+          source.state_width,
+          source.key_width,
+          source.key_head_count,
+          source.capacity,
+          source.kept_count,
+          source.element_size,
+          source.kind,
+      });
+    }
+    ReplayStateUpdatesOnCpu(staged.data(), staged.size());
+    for (auto* buffer : uploads) {
+      buffer->CopyCpuToDevice();
+    }
+    Synchronize();
+  }
 
   void EnsureReplaySession() {
     if (replay_session_) return;
@@ -577,11 +603,6 @@ struct InterfaceImpl : DeviceInterface {
     GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
   }
 };
-
-void RunGatedDeltaNetStateReplay(const StateUpdateReplayDesc& descriptor) {
-  auto& device = static_cast<InterfaceImpl&>(*GetDeviceInterface(DeviceType::WEBGPU));
-  device.RunStateReplay(descriptor);
-}
 
 }  // namespace WebGPU
 
