@@ -365,6 +365,12 @@ inline const OrtHardwareDevice* OrtEpDevice::Device() const {
   return Ort::api->EpDevice_Device(this);
 }
 
+inline const OrtMemoryInfo* OrtEpDevice::GetMemoryInfo(OrtDeviceMemoryType memory_type) const {
+  // Returns nullptr when the EP advertises no allocator of this type — callers branch on that, so
+  // forward the pointer directly and do NOT ThrowOnError (the C API returns no status here).
+  return Ort::api->EpDevice_MemoryInfo(this, memory_type);
+}
+
 inline OrtHardwareDeviceType OrtHardwareDevice::Type() const {
   return Ort::api->HardwareDevice_Type(this);
 }
@@ -463,6 +469,10 @@ inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
     devices.emplace_back(device_ptrs[i]);
   }
   return devices;
+}
+
+inline void OrtEnv::ReleaseSharedAllocator(const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type) {
+  Ort::ThrowOnError(Ort::api->ReleaseSharedAllocator(this, ep_device, mem_type));
 }
 
 inline std::unique_ptr<OrtThreadingOptions> OrtThreadingOptions::Create() {

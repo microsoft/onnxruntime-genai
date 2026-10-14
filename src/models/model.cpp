@@ -41,6 +41,7 @@
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
+#include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
 #include "ep/openvino/interface.h"
 #include "ep/qnn/interface.h"
@@ -523,6 +524,11 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
+
+  // Acquire the shared AMDGPU singleton, released in ~Model. Done last, after everything that can
+  // throw: a failed construction never runs ~Model, so acquiring earlier would pin the device forever.
+  if (p_device_->GetType() == DeviceType::AMDGPU)
+    AcquireAMDGPUInterface();
 }
 
 void Model::AddSharedInitializers() {
@@ -582,8 +588,11 @@ void Model::AddSharedInitializers() {
 }
 
 Model::~Model() {
+  // Snapshot the type before teardown: CloseDmlInterface() frees the singleton p_device_ points to,
+  // so reading p_device_->GetType() afterwards would be a use-after-free.
+  const DeviceType device_type = p_device_ ? p_device_->GetType() : DeviceType::CPU;
 #if USE_DML
-  if (p_device_->GetType() == DeviceType::DML) {
+  if (device_type == DeviceType::DML) {
     auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::DML)];
     allocator.session_.reset();
     allocator.allocator_.reset();
@@ -595,6 +604,14 @@ Model::~Model() {
     CloseDmlInterface();
   }
 #endif
+  if (device_type == DeviceType::AMDGPU) {
+    // Drop EP factory references before unregistering the library, and release device-backed
+    // initializers while the AMDGPU allocator is still alive.
+    pipeline_session_options_.clear();
+    session_options_.reset();
+    shared_initializer_entries_.clear();
+    CloseAMDGPUInterface();
+  }
 }
 
 // Returns the device the session will run on: CPU when the options name no device-backed provider.
