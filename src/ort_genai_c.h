@@ -1644,6 +1644,19 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineMaxDraftTokensPerProposal(const OgaE
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetSpeculativeStats(
     const OgaEngine* engine, OgaSpeculativeStats** out);
 
+/** Cumulative prefix-cache counters. Disabled caches return enabled=false and zero counts. */
+typedef struct OgaPrefixCacheStats {
+  bool enabled;
+  uint64_t lookups;
+  uint64_t hits;
+  uint64_t matched_tokens;
+  uint64_t evictions;
+} OgaPrefixCacheStats;
+
+/** Writes a snapshot into caller-owned storage. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetPrefixCacheStats(
+    const OgaEngine* engine, OgaPrefixCacheStats* out);
+
 /**
  * \brief Destroys the given request.
  *

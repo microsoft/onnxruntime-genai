@@ -1233,6 +1233,12 @@ struct OgaEngine : OgaAbstract {
     return std::unique_ptr<OgaSpeculativeStats>(stats);
   }
 
+  OgaPrefixCacheStats GetPrefixCacheStats() const {
+    OgaPrefixCacheStats stats{};
+    OgaCheckResult(OgaEngineGetPrefixCacheStats(this, &stats));
+    return stats;
+  }
+
   std::unique_ptr<OgaRequest> CreateRequest(
       const OgaRequestOptions* options = nullptr) {
     OgaRequest* request{};

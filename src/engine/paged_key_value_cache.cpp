@@ -422,12 +422,19 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
   const auto paged_group =
       ResolvePagedKeyValueGroup(model->config_->model.decoder);
   const auto windowed = WindowedLayers(model, paged_group);
+  // MTP creates a fresh shadow from the first generated token, not from the target prompt.
+  // Explicit batch-one opt-in may therefore adopt target state while leaving MTP state cold.
+  const bool cold_mtp_prefix =
+      batching.prefix_caching_explicitly_set && batching.max_batch_size == 1 &&
+      model->config_->model.mtp.enabled &&
+      !model->config_->model.mtp.filename.empty() &&
+      model->config_->model.dflash2.filename.empty();
   const char* unsupported_layout = nullptr;
   if (!model->config_->model.dflash2.filename.empty() &&
       model->config_->model.dflash2.is_dspark) {
     unsupported_layout =
         "Prefix caching does not yet support an Engine-hosted DSpark drafter.";
-  } else if (auxiliary_bytes_per_block != 0) {
+  } else if (auxiliary_bytes_per_block != 0 && !cold_mtp_prefix) {
     unsupported_layout =
         "Prefix caching does not yet support an auxiliary cache that mirrors target blocks.";
   } else if (!windowed.empty()) {

@@ -841,6 +841,27 @@ TEST(PagedKeyValueCacheManifestTest, RemovalReusesCommittedSlidingWindowCapacity
   EXPECT_TRUE(cache->OwnsRequest(second.get()));
 }
 
+TEST(PagedKeyValueCacheManifestTest, MtpPrefixCachingRequiresExplicitBatchOneOptIn) {
+  auto model = LoadSyntheticPagedModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  model->config_->model.mtp.enabled = true;
+  model->config_->model.mtp.filename = "mtp.onnx";
+  batching.max_batch_size = 1;
+  batching.prefix_caching = true;
+  batching.prefix_caching_explicitly_set = false;
+  EXPECT_FALSE(ResolvePrefixCachingEnabled(model, 1));
+  batching.prefix_caching_explicitly_set = true;
+  EXPECT_TRUE(ResolvePrefixCachingEnabled(model, 1));
+  batching.max_batch_size = 2;
+  EXPECT_THROW(ResolvePrefixCachingEnabled(model, 1), std::runtime_error);
+  batching.max_batch_size = 1;
+  model->config_->model.dflash2.filename = "dflash.onnx";
+  EXPECT_THROW(ResolvePrefixCachingEnabled(model, 1), std::runtime_error);
+  model->config_->model.dflash2.filename.clear();
+  model->config_->model.mtp.filename.clear();
+  EXPECT_THROW(ResolvePrefixCachingEnabled(model, 1), std::runtime_error);
+}
+
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsSlidingWindowCache) {
   auto model = LoadSyntheticPagedModel();
   model->config_->engine.dynamic_batching->prefix_caching_explicitly_set = true;
