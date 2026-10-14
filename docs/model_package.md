@@ -8,6 +8,10 @@ that best matches the local hardware at load time. Files that are common across 
 such as tokenizer or processor configuration, can live in a sibling directory and be
 referenced from each variant's configuration with a path scheme.
 
+Model package support requires building against ONNX Runtime 1.31 or newer and
+loading a runtime that exposes the stable `OrtModelPackageApi`. Builds using older
+ONNX Runtime headers continue to support flat model directories.
+
 ## Package layout
 
 A model package is a directory containing a top-level `manifest.json`. The package owns a
