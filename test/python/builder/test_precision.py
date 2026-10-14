@@ -678,6 +678,25 @@ def test_state_update_capacity_is_normalized(monkeypatch):
     assert options["state_update_capacity"] == 3
 
 
+@pytest.mark.parametrize("capacity", ["1", "8", 3])
+def test_webgpu_rejects_compact_state_updates(monkeypatch, capacity):
+    with pytest.raises(ValueError, match="Engine compact state replay is not implemented"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": capacity},
+            precision="fp16",
+            execution_provider="webgpu",
+        )
+
+
+def test_webgpu_allows_disabled_compact_state_updates(monkeypatch):
+    options = {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": "0"}
+
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    assert options["state_update_capacity"] == 0
+
+
 def test_webgpu_paged_attention_rejects_gemma2_softcap(monkeypatch):
     with pytest.raises(ValueError, match="does not support non-zero attention softcap"):
         _run_check_extra_options(
@@ -1173,6 +1192,28 @@ def test_webgpu_paged_attention_rejects_invalid_runtime_num_blocks(monkeypatch, 
     }
     with pytest.raises(ValueError, match="num_blocks"):
         _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+
+@pytest.mark.parametrize("execution_provider", ["webgpu", "cuda"])
+@pytest.mark.parametrize(
+    ("legacy_options", "runtime_batching"),
+    [
+        ({}, {"num_blocks": 8, "gpu_utilization_factor": 0.6}),
+        ({"num_blocks": "8"}, {"gpu_utilization_factor": 0.6}),
+        ({"gpu_utilization_factor": "0.6"}, {"num_blocks": 8}),
+        ({"num_blocks": "8", "gpu_utilization_factor": "0.6"}, {}),
+    ],
+)
+def test_paged_attention_rejects_merged_cache_sizing_conflicts(
+    monkeypatch, execution_provider, legacy_options, runtime_batching
+):
+    options = {
+        "use_paged_attention": "true",
+        **legacy_options,
+        "_runtime_config": {"engine": {"dynamic_batching": runtime_batching}},
+    }
+    with pytest.raises(ValueError, match="num_blocks and gpu_utilization_factor are mutually exclusive"):
+        _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider=execution_provider)
 
 
 def test_paged_attention_normalizes_engine_options(monkeypatch):

@@ -70,19 +70,19 @@ def _cache_shape(node_arg, paged=True, head_size=None):
     if node_arg.name.endswith(".conv"):
         assert len(shape) == 3, f"Unexpected convolution state rank for {node_arg.name}: {shape}"
         assert all(isinstance(dim, int) for dim in shape[1:]), f"Unexpected fixed state shape: {shape}"
-        return (1, shape[1], shape[2])
+        return [1, shape[1], shape[2]]
     if node_arg.name.endswith(".recurrent"):
         assert len(shape) == 4, f"Unexpected recurrent state rank for {node_arg.name}: {shape}"
         assert all(isinstance(dim, int) for dim in shape[1:]), f"Unexpected fixed state shape: {shape}"
-        return (1, shape[1], shape[2], shape[3])
+        return [1, shape[1], shape[2], shape[3]]
     if not paged:
-        return (1, shape[1], 0, head_size)
+        return [1, shape[1], 0, head_size]
     assert len(shape) == 4, f"Unexpected paged KV-cache shape for {node_arg.name}: {shape}"
     assert shape[1] in ("block_size", 256), f"Unexpected PagedAttention block size for {node_arg.name}: {shape}"
     assert isinstance(shape[2], int) and isinstance(shape[3], int), (
         f"Expected concrete KV head dimensions for {node_arg.name}: {shape}"
     )
-    return (_NUM_BLOCKS, 256, shape[2], shape[3])
+    return [_NUM_BLOCKS, 256, shape[2], shape[3]]
 
 
 def _cache_dtype(node_arg):
@@ -221,6 +221,13 @@ def test_webgpu_genai_session_accumulation(accumulation_model, tmp_path, monkeyp
     exitcode = process.exitcode
     process.close()
     assert exitcode == 0
+    # Version-specific shader probe for the CI pins: ORT 1.32.0.dev20261009003 and
+    # onnxruntime-ep-webgpu 0.5.0.dev20261009200253 (test/python/webgpu/ort/requirements.txt).
+    # The f16 input alias identifies FP16 MatMul; a vec4<f32> accumulator means its
+    # packed kernel widens accumulation to FP32 without changing model input precision.
+    # These are internal WGSL/debug-dump markers, not a public ORT contract. On an ORT
+    # upgrade, check dump availability, delimiters, and accumulator naming before
+    # interpreting a failure as a GenAI provider-option propagation regression.
     shaders = re.findall(
         r"=== WebGPU Shader code \[MatMul,.*? Start ===\n(.*?)\n=== WebGPU Shader code \[MatMul,.*? End ===",
         shader_path.read_text(encoding="utf-8"),

@@ -15,6 +15,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          bool disable_graph_capture) {
   auto device = GetDeviceInterface(DeviceType::WEBGPU);
   auto session_provider_options = provider_options;
+  // Batching config must be final here; overrides after provider registration cannot update this option.
   const bool enable_fp32_accumulation =
       (config.engine.dynamic_batching &&
        config.engine.dynamic_batching->max_batch_size > 1) ||
@@ -23,9 +24,8 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   auto fp32_accumulation_option = std::find_if(
       session_provider_options.options.begin(), session_provider_options.options.end(),
       [](const auto& option) { return option.first == "enableMatmulFp32Accumulation"; });
-  if (fp32_accumulation_option == session_provider_options.options.end()) {
-    session_provider_options.options.emplace_back("enableMatmulFp32Accumulation",
-                                                  enable_fp32_accumulation ? "1" : "0");
+  if (enable_fp32_accumulation && fp32_accumulation_option == session_provider_options.options.end()) {
+    session_provider_options.options.emplace_back("enableMatmulFp32Accumulation", "1");
   }
 
   // Graph capture applies to the decoder only. Auxiliary embedding and vision sessions pass
