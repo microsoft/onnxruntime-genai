@@ -692,23 +692,13 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
   }
   custom_ops_libraries.insert(custom_ops_libraries.end(), config_session_options.custom_ops_libraries.begin(),
                               config_session_options.custom_ops_libraries.end());
-  std::vector<fs::path> validated_custom_ops_libraries;
-  for (const std::string& configured_library : custom_ops_libraries) {
+
+  // Build the set of allowed directories once. The resolved library path must fall
+  // within one of these to prevent loading arbitrary libraries from disk.
+  std::vector<std::filesystem::path> allowed_dirs;
+  if (!custom_ops_libraries.empty()) {
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
-
-    std::string custom_library_file_prefix = configured_library;
-
-    std::filesystem::path custom_library_path{custom_library_file_prefix};
-
-    // Reject path traversal components regardless of absolute/relative
-    if (custom_library_file_prefix.find("..") != std::string::npos) {
-      throw std::runtime_error("custom_ops_library must not contain path traversal (..): " + custom_library_file_prefix);
-    }
-
-    // Build the set of allowed directories. The resolved library path must fall
-    // within one of these to prevent loading arbitrary libraries from disk.
-    std::vector<std::filesystem::path> allowed_dirs;
 
     // 1. GenAI model folder
     std::error_code ec;
@@ -745,6 +735,21 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
         if (!ec) allowed_dirs.push_back(cwd_canonical);
       }
     }
+  }
+
+  std::vector<fs::path> validated_custom_ops_libraries;
+  std::vector<std::string> registered_library_names;
+  for (const std::string& configured_library : custom_ops_libraries) {
+    std::string custom_library_file_prefix = configured_library;
+
+    std::filesystem::path custom_library_path{custom_library_file_prefix};
+
+    // Reject path traversal components regardless of absolute/relative
+    if (custom_library_file_prefix.find("..") != std::string::npos) {
+      throw std::runtime_error("custom ops library must not contain path traversal (..): " + custom_library_file_prefix);
+    }
+
+    std::error_code ec;
 
     // Resolve the library path. For relative paths, search allowed directories in order.
     // For absolute paths, use as-is and validate against the allowlist.
@@ -767,12 +772,21 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
       }
     }
 
+    // Entries that cannot be resolved are rejected rather than handed to the platform loader, which would search
+    // locations (e.g. LD_LIBRARY_PATH, PATH) that are not part of the allow-list.
+    if (!resolved) {
+      throw std::runtime_error(
+          "custom ops library was not found in any allowed directory (model folder, EP library directories, "
+          "current working directory): " +
+          configured_library);
+    }
+
     // Validate that the resolved path is under one of the allowed directories
-    if (resolved) {
+    {
       std::filesystem::path resolved_canonical =
           std::filesystem::canonical(std::filesystem::path(custom_library_file_prefix), ec);
       if (ec) {
-        throw std::runtime_error("Failed to canonicalize custom_ops_library path: " + custom_library_file_prefix);
+        throw std::runtime_error("Failed to canonicalize custom ops library path: " + custom_library_file_prefix);
       }
       bool in_allowed_dir = false;
       auto resolved_str = resolved_canonical.string();
@@ -789,12 +803,18 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
       }
       if (!in_allowed_dir) {
         throw std::runtime_error(
-            "custom_ops_library path is not within an allowed directory: " + custom_library_file_prefix);
+            "custom ops library path is not within an allowed directory: " + custom_library_file_prefix);
       }
     }
 
-    // Convert to fs::path for proper wide string handling on Windows
-    validated_custom_ops_libraries.emplace_back(custom_library_file_prefix);
+    // Convert to fs::path for proper wide string handling on Windows. A library that was already listed (for
+    // example in both custom_ops_library and custom_ops_libraries) is only registered once.
+    fs::path custom_ops_lib_path(custom_library_file_prefix);
+    if (std::find(registered_library_names.begin(), registered_library_names.end(), custom_library_file_prefix) ==
+        registered_library_names.end()) {
+      registered_library_names.push_back(custom_library_file_prefix);
+      validated_custom_ops_libraries.push_back(std::move(custom_ops_lib_path));
+    }
   }
   for (const fs::path& custom_ops_lib_path : validated_custom_ops_libraries) {
     session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());

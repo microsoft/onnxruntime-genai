@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <random>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -55,7 +56,7 @@ TEST(CustomOpsLibrariesConfigTest, RejectsNonStringEntries) {
                std::exception);
 }
 
-TEST(CustomOpsLibrariesConfigTest, InheritsOnlyWhenChildLeavesTheListEmpty) {
+TEST(CustomOpsLibrariesConfigTest, InheritsOnlyWhenChildSetsNoCustomOps) {
   Config::SessionOptions parent;
   parent.custom_ops_library = "parent_single.so";
   parent.custom_ops_libraries = {"parent_a.so", "parent_b.so"};
@@ -65,10 +66,19 @@ TEST(CustomOpsLibrariesConfigTest, InheritsOnlyWhenChildLeavesTheListEmpty) {
   EXPECT_EQ(inheriting.custom_ops_library, "parent_single.so");
   EXPECT_EQ(inheriting.custom_ops_libraries, parent.custom_ops_libraries);
 
-  Config::SessionOptions overriding;
-  overriding.custom_ops_libraries = {"child.so"};
-  InheritSessionOptionsFromParent(parent, overriding);
-  EXPECT_EQ(overriding.custom_ops_libraries, std::vector<std::string>{"child.so"});
+  // A child list replaces the parent's custom ops entirely, including the parent's single library.
+  Config::SessionOptions overriding_list;
+  overriding_list.custom_ops_libraries = {"child.so"};
+  InheritSessionOptionsFromParent(parent, overriding_list);
+  EXPECT_FALSE(overriding_list.custom_ops_library.has_value());
+  EXPECT_EQ(overriding_list.custom_ops_libraries, std::vector<std::string>{"child.so"});
+
+  // A child single library likewise does not pick up the parent's list.
+  Config::SessionOptions overriding_single;
+  overriding_single.custom_ops_library = "child_single.so";
+  InheritSessionOptionsFromParent(parent, overriding_single);
+  EXPECT_EQ(overriding_single.custom_ops_library, "child_single.so");
+  EXPECT_TRUE(overriding_single.custom_ops_libraries.empty());
 }
 
 TEST(CustomOpsLibrariesConfigTest, EveryEntryPassesTheAllowListBeforeAnyIsRegistered) {
@@ -89,30 +99,74 @@ TEST(CustomOpsLibrariesConfigTest, EveryEntryPassesTheAllowListBeforeAnyIsRegist
   EXPECT_NE(ExceptionMessage([&] { CreateSessionOptions(*model, single_traversal); })
                 .find("must not contain path traversal"),
             std::string::npos);
+}
 
-  // An absolute file outside the model folder, the working directory and every EP directory.
-  const auto outside_dir = std::filesystem::temp_directory_path();
+TEST(CustomOpsLibrariesConfigTest, RejectsEntriesThatCannotBeResolved) {
+  auto model = LoadDummyDecoderModel();
+  const auto model_dir = std::filesystem::path{model->config_->config_path.string()};
+  const std::string allowed_entry = (model_dir / "genai_config.json").string();
+
+  // A bare name that exists in no allowed directory must not be left to the platform loader's search path.
+  Config::SessionOptions missing_in_list;
+  missing_in_list.custom_ops_libraries = {allowed_entry, "genai_missing_custom_ops_library.so"};
+  EXPECT_NE(ExceptionMessage([&] { CreateSessionOptions(*model, missing_in_list); })
+                .find("not found in any allowed directory"),
+            std::string::npos);
+
+  Config::SessionOptions missing_single;
+  missing_single.custom_ops_library = "genai_missing_custom_ops_library.so";
+  EXPECT_NE(ExceptionMessage([&] { CreateSessionOptions(*model, missing_single); })
+                .find("not found in any allowed directory"),
+            std::string::npos);
+
+  Config::SessionOptions missing_absolute;
+  missing_absolute.custom_ops_libraries = {(model_dir / "genai_missing_custom_ops_library.so").string()};
+  EXPECT_NE(ExceptionMessage([&] { CreateSessionOptions(*model, missing_absolute); })
+                .find("not found in any allowed directory"),
+            std::string::npos);
+}
+
+TEST(CustomOpsLibrariesConfigTest, RejectsExistingFilesOutsideAllowedDirectories) {
+  auto model = LoadDummyDecoderModel();
+  const auto model_dir = std::filesystem::path{model->config_->config_path.string()};
+  const std::string allowed_entry = (model_dir / "genai_config.json").string();
+
   std::error_code ec;
-  const auto cwd = std::filesystem::canonical(std::filesystem::current_path(), ec);
-  const auto canonical_outside = std::filesystem::canonical(outside_dir, ec);
-  if (!ec && canonical_outside != cwd && cwd.string().rfind(canonical_outside.string(), 0) != 0 &&
-      canonical_outside.string().rfind(cwd.string(), 0) != 0) {
-    const auto outside_file = canonical_outside / "genai_custom_ops_allow_list_test.so";
-    {
-      std::ofstream out{outside_file};
-      out << "not a library";
+  const auto outside_dir = std::filesystem::canonical(std::filesystem::temp_directory_path(), ec) /
+                           ("genai_custom_ops_allow_list_test_" + std::to_string(std::random_device{}()));
+  ASSERT_TRUE(std::filesystem::create_directories(outside_dir, ec)) << ec.message();
+  struct Cleanup {
+    std::filesystem::path path;
+    ~Cleanup() {
+      std::error_code ignored;
+      std::filesystem::remove_all(path, ignored);
     }
-    Config::SessionOptions outside;
-    outside.custom_ops_libraries = {allowed_entry, outside_file.string()};
-    const std::string message = ExceptionMessage([&] { CreateSessionOptions(*model, outside); });
-    // custom_ops_library keeps the same check.
-    Config::SessionOptions outside_single;
-    outside_single.custom_ops_library = outside_file.string();
-    const std::string single_message = ExceptionMessage([&] { CreateSessionOptions(*model, outside_single); });
-    std::filesystem::remove(outside_file, ec);
-    EXPECT_NE(message.find("not within an allowed directory"), std::string::npos) << message;
-    EXPECT_NE(single_message.find("not within an allowed directory"), std::string::npos) << single_message;
+  } cleanup{outside_dir};
+
+  const auto is_under = [](const std::filesystem::path& path, const std::filesystem::path& dir) {
+    std::error_code error;
+    const auto canonical_dir = std::filesystem::canonical(dir, error);
+    return error || path.string().rfind(canonical_dir.string(), 0) == 0;
+  };
+  if (is_under(outside_dir, std::filesystem::current_path()) || is_under(outside_dir, model_dir)) {
+    GTEST_SKIP() << "The temp directory is inside an allowed directory, so it cannot be used as an outside location.";
   }
+
+  const auto outside_file = outside_dir / "custom_ops.so";
+  {
+    std::ofstream out{outside_file};
+    out << "not a library";
+  }
+
+  Config::SessionOptions outside;
+  outside.custom_ops_libraries = {allowed_entry, outside_file.string()};
+  Config::SessionOptions outside_single;
+  outside_single.custom_ops_library = outside_file.string();
+  EXPECT_NE(ExceptionMessage([&] { CreateSessionOptions(*model, outside); }).find("not within an allowed directory"),
+            std::string::npos);
+  EXPECT_NE(ExceptionMessage([&] { CreateSessionOptions(*model, outside_single); })
+                .find("not within an allowed directory"),
+            std::string::npos);
 }
 
 }  // namespace Generators::test

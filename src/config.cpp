@@ -79,8 +79,11 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
   if (!child.log_severity_level) child.log_severity_level = parent.log_severity_level;
   if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
   if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
-  if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
-  if (child.custom_ops_libraries.empty()) child.custom_ops_libraries = parent.custom_ops_libraries;
+  // custom_ops_library and custom_ops_libraries form one setting: the child inherits both only when it sets neither.
+  if (!child.custom_ops_library && child.custom_ops_libraries.empty()) {
+    child.custom_ops_library = parent.custom_ops_library;
+    child.custom_ops_libraries = parent.custom_ops_libraries;
+  }
   if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
   InheritNamedStrings(parent.config_entries, child.config_entries);
   InheritProviderOptions(parent, child);
