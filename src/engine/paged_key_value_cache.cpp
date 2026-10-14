@@ -1076,13 +1076,19 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
     const size_t reserved_slots =
         std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
     std::vector<size_t> claimed_retained_blocks;
-    if (entry.prefix_match) {
+    if (entry.prefix_match &&
+        !entry.prefix_match->fixed_state_checkpoint) {
+      // A hybrid Match returns one complete physical history together with a shared fixed-state
+      // checkpoint. That shared checkpoint leases its endpoint, and prefix-cache reclamation
+      // protects the endpoint's complete physical ancestry. None of the adopted blocks can
+      // contribute to available_blocks, so avoid rebuilding the pool-sized leased-ancestry bitmap
+      // for every queued candidate. An optional draft checkpoint is attached only at the same
+      // endpoint; this fast path relies on the fixed checkpoint, not on draft coverage.
       for (const size_t block_id :
            prefix_cache_->ReclaimableBlockIds(entry.prefix_match->blocks)) {
-        // Charge only retained blocks that contribute to available_blocks. A fixed-state or draft
-        // checkpoint lease can protect cache-only ancestry from reclamation; charging that block
-        // again would count it neither as existing capacity nor as available capacity and can
-        // falsely defer an exact-fit adoption.
+        // Charge only paged-only retained blocks that contribute to available_blocks. Claiming a
+        // shared block once prevents later candidates from planning against capacity that the
+        // first selected adoption protects.
         if (charged_retained_blocks.count(block_id) == 0) {
           claimed_retained_blocks.push_back(block_id);
         }

@@ -572,8 +572,15 @@ TEST(PagedKeyValueCacheManifestTest, HybridExactFitPrefixAdmissionMakesBoundedEn
   EXPECT_EQ(retained.blocks.front().ref_count, 1u);
   EXPECT_TRUE(ValidateCacheInvariants(retained).empty());
 
-  std::array<std::shared_ptr<Request>, 3> warm{
-      begin(engine), begin(engine), begin(engine)};
+  // Keep substantially more fixed-checkpoint hits queued than the batch limit. Planning must not
+  // rebuild global leased ancestry for every deferred candidate, while the two-block pool still
+  // admits only the one request whose private suffix fits.
+  std::vector<std::shared_ptr<Request>> warm;
+  constexpr size_t kQueuedWarmRequests = 16;
+  warm.reserve(kQueuedWarmRequests);
+  for (size_t index = 0; index < kQueuedWarmRequests; ++index) {
+    warm.push_back(begin(engine));
+  }
   const size_t first_count = engine->Run(events);
   ASSERT_GT(first_count, 0u) << "An exact-fit prefix hit must not loop CapacityDeferred.";
   EXPECT_TRUE(warm[0]->IsTurnComplete());
