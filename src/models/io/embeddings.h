@@ -38,7 +38,7 @@ struct Embeddings {
   void UseChunkView(size_t offset, size_t length);
   void RestoreFullView();
 
-  OrtValue* Get() { return embeddings_.get(); }
+  OrtValue* Get() { return embeddings_ ? embeddings_->GetOrtTensor() : nullptr; }
 
   auto& GetShape() const { return shape_; }
 
@@ -49,7 +49,8 @@ struct Embeddings {
   ONNXTensorElementDataType type_;
   const Mode mode_{};
   const std::string name_;
-  std::unique_ptr<OrtValue> embeddings_;
+  // Tensor preserves the captured decode buffer across uncaptured prefills.
+  std::unique_ptr<Tensor> embeddings_;
   std::unique_ptr<OrtValue> chunk_view_;  // Non-owning view into embeddings_ used during prefill chunking
 
   // Output mode, cross-device pipelines only: the consumer's buffer and device, wrapped once per
