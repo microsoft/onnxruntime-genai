@@ -76,11 +76,13 @@ struct Greater {
  * Each thread in the warp manages `kItemsPerThread` items in its registers. This approach
  * is highly efficient for small sort sizes that fit within a single warp's processing capacity.
  * It is designed to be called by a full thread block, where only the first warp performs work.
- * The caller might need call __syncthreads() before and after this function.
+ * The caller might need to call __syncthreads() before and after this function.
  *
  * `temp_storage_ptr` may alias `smem_scores`/`smem_indices`: callers union the CUB temp storage
- * with the score/index buffers to save shared memory, so the write-back below is fenced against
- * CUB's final reads of that storage.
+ * with the score/index buffers to save shared memory. CUB's Sort() ends with shared-memory reads
+ * from `temp_storage` without a trailing warp barrier, so `__syncwarp()` is required before
+ * overwriting that storage during write-back (per the CUDA Independent Thread Scheduling model
+ * and `compute-sanitizer --tool racecheck`, even when `ptxas` reconverges the warp in SASS).
  */
 template <int BufferSize>
 __device__ void WarpMergeSort(float* smem_scores, int* smem_indices, void* temp_storage_ptr, int num_valid_items) {
