@@ -205,7 +205,7 @@ python -m onnxruntime_genai.models.builder -i target_checkpoint -o output -p fp1
 # From source, keep the base opt-in but disable it for this memory class:
 python src/python/py/models/builder.py -i target_checkpoint -o output -p fp16 -e cuda \
   --extra_options use_paged_attention=true \
-  --runtime_config '{"engine":{"dynamic_batching":{"enable_recompute_preemption":true}},"runtime_profiles":[{"id":"wait-only","eligibility":{"maximum_total_device_memory_bytes":8589934592},"overlay":{"engine":{"dynamic_batching":{"enable_recompute_preemption":false}}}}]}'
+  --runtime_config '{"engine":{"dynamic_batching":{"enable_recompute_preemption":true}},"runtime_profiles":[{"id":"wait-only","eligibility":{"minimum_total_device_memory_bytes":0,"maximum_total_device_memory_bytes":8589934592},"overlay":{"engine":{"dynamic_batching":{"enable_recompute_preemption":false}}}}]}'
 ```
 
 Python callers should pass structured dictionaries to `parse_extra_options`
