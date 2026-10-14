@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include "engine/decoders/varlen_decoder_io.h"
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
 
@@ -79,6 +80,20 @@ RequestStepPlan Admission(const std::shared_ptr<Request>& request) {
   entry.is_prefill = true;
   return entry;
 }
+
+struct ScopedCacheDeviceOverride {
+  ScopedCacheDeviceOverride(Model& model, DeviceInterface& device)
+      : model_{model}, original_{model.p_device_kvcache_} {
+    model_.p_device_kvcache_ = &device;
+  }
+
+  ~ScopedCacheDeviceOverride() {
+    model_.p_device_kvcache_ = original_;
+  }
+
+  Model& model_;
+  DeviceInterface* original_;
+};
 
 TEST(RecomputePreemptionConfigTest, DefaultsOffWithBoundedStepAndServiceQuantum) {
   Config config{fs::path{MODEL_PATH "engine/dummy-decoder"},
@@ -511,6 +526,107 @@ TEST(RecomputePreemptionTest, RejectsFixedRingAndAuxiliaryStateBeforeExecution) 
   auto drafter = PreemptionModel();
   drafter->config_->model.dflash2.filename = "not-loaded.onnx";
   EXPECT_THROW((void)Engine{drafter}, std::runtime_error);
+}
+
+TEST(RecomputePreemptionTest, AutomaticGraphCaptureReservationAllowsPreemption) {
+  auto model = LoadSyntheticPagedModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.num_blocks.reset();
+  batching.gpu_utilization_factor = 0.5f;
+  batching.enable_recompute_preemption = true;
+  SetProviderOption(*model->config_, "cuda", "enable_cuda_graph", "1");
+
+  const size_t graph_reserved_bytes = VarlenGraphBufferBytes(
+      *model, PackedPositionIdPlanes(*model), kMaxDraftTokensPerStep + 1);
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  ASSERT_GT(graph_reserved_bytes, 0u);
+  ASSERT_GT(block_bytes, 0u);
+
+  size_t available_bytes =
+      (graph_reserved_bytes + 8 * block_bytes) * 3;
+  size_t expected_blocks = 0;
+  size_t blocks_without_reservation = 0;
+  for (size_t offset = 0; offset <= 4 * block_bytes; ++offset) {
+    expected_blocks = ComputePagedBlockCapacityFromBytes(
+        available_bytes, *batching.gpu_utilization_factor,
+        graph_reserved_bytes, block_bytes, 0);
+    blocks_without_reservation = ComputePagedBlockCapacityFromBytes(
+        available_bytes, *batching.gpu_utilization_factor,
+        0, block_bytes, 0);
+    if (expected_blocks >= 4 && blocks_without_reservation > expected_blocks) {
+      break;
+    }
+    ++available_bytes;
+  }
+  ASSERT_GT(blocks_without_reservation, expected_blocks);
+
+  CountingCudaDevice device;
+  device.state->total_memory_bytes = available_bytes;
+  device.state->free_memory_bytes = available_bytes;
+  ScopedCacheDeviceOverride cache_device{*model, device};
+
+  EngineDependencies dependencies;
+  ASSERT_NO_THROW(dependencies = Engine::CreateDependencies(model));
+  ASSERT_NE(dependencies.cache_manager, nullptr);
+  EXPECT_TRUE(dependencies.cache_manager->SupportsRecomputePreemption());
+  EXPECT_EQ(dependencies.cache_manager->TargetBlockCount(), expected_blocks);
+  EXPECT_EQ(device.state->memory_queries, 1u);
+  EXPECT_NO_THROW({
+    auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+  });
+}
+
+TEST(RecomputePreemptionTest, GenuineReservedAuxiliaryStateStillRejectsPreemption) {
+  auto model = PreemptionModel(8);
+  auto cache = CacheManager::Create(
+      model, /*auxiliary_bytes_per_block=*/0,
+      /*auxiliary_reserved_memory_bytes=*/1);
+  ASSERT_NE(cache, nullptr);
+  EXPECT_FALSE(cache->SupportsRecomputePreemption());
+  auto shared_cache = std::shared_ptr<CacheManager>{std::move(cache)};
+  EXPECT_THROW(Scheduler::Create(model, shared_cache), std::runtime_error);
+}
+
+TEST(RecomputePreemptionTest, LargeWaitingQueueBuildsProbesFromBoundedResidents) {
+  constexpr size_t kWaitingCount = 4096;
+  std::vector<int> identities(kWaitingCount + 2);
+  std::vector<RequestStepPlan> candidates;
+  candidates.reserve(identities.size());
+
+  RequestStepPlan first_resident;
+  first_resident.request_id = &identities[kWaitingCount];
+  candidates.push_back(first_resident);
+
+  for (size_t index = 0; index < kWaitingCount; ++index) {
+    RequestStepPlan waiting;
+    waiting.request_id = &identities[index];
+    waiting.newly_admitted = true;
+    candidates.push_back(waiting);
+  }
+
+  RequestStepPlan second_resident;
+  second_resident.request_id = &identities[kWaitingCount + 1];
+  candidates.insert(candidates.begin() + 2048, second_resident);
+  PreemptionProbeBuilder builder{candidates, /*resident_capacity=*/2};
+
+  StepPlan source;
+  source.transaction_id = 7;
+  source.scheduled_request_limit = 4;
+  size_t probe_count = 0;
+  for (const auto& candidate : candidates) {
+    if (!candidate.newly_admitted) {
+      continue;
+    }
+    const auto probe = builder.Build(source, candidate);
+    ASSERT_EQ(probe.requests.size(), 3u);
+    EXPECT_EQ(probe.requests[0].request_id, candidate.request_id);
+    EXPECT_EQ(probe.requests[1].request_id, first_resident.request_id);
+    EXPECT_EQ(probe.requests[2].request_id, second_resident.request_id);
+    EXPECT_EQ(probe.transaction_id, source.transaction_id);
+    EXPECT_EQ(probe.scheduled_request_limit, source.scheduled_request_limit);
+    ++probe_count;
+  }
+  EXPECT_EQ(probe_count, kWaitingCount);
 }
 
 TEST(RecomputePreemptionTest, RejectsManualSpeculationWithoutDiscardingTheTurn) {

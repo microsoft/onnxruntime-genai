@@ -122,6 +122,20 @@ struct StaticBatchScheduler : Scheduler {
   std::vector<std::shared_ptr<Request>> requests_pool_;
 };
 
+// Builds repeated beneficiary-first preemption probes from one stable, bounded snapshot of the
+// resident candidates. Waiting admissions are filtered once rather than rescanned for every
+// omitted beneficiary.
+struct PreemptionProbeBuilder {
+  PreemptionProbeBuilder(std::span<const RequestStepPlan> candidates,
+                         size_t resident_capacity);
+
+  StepPlan Build(const StepPlan& source,
+                 const RequestStepPlan& beneficiary) const;
+
+ private:
+  std::vector<RequestStepPlan> resident_candidates_;
+};
+
 struct DynamicBatchScheduler : Scheduler {
   DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 

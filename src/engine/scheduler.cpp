@@ -192,6 +192,36 @@ void DynamicBatchScheduler::OnStepCommitted(const StepPlan& plan) noexcept {
   }
 }
 
+PreemptionProbeBuilder::PreemptionProbeBuilder(
+    std::span<const RequestStepPlan> candidates, size_t resident_capacity) {
+  resident_candidates_.reserve(
+      std::min(candidates.size(), resident_capacity));
+  for (const auto& entry : candidates) {
+    if (!entry.newly_admitted) {
+      if (resident_candidates_.size() >= resident_capacity) {
+        throw StepPlanningConsistencyError{
+            "Preemption candidates exceed committed cache residency."};
+      }
+      resident_candidates_.push_back(entry);
+    }
+  }
+}
+
+StepPlan PreemptionProbeBuilder::Build(
+    const StepPlan& source, const RequestStepPlan& beneficiary) const {
+  StepPlan probe;
+  probe.transaction_id = source.transaction_id;
+  probe.scheduled_request_limit = source.scheduled_request_limit;
+  probe.requests.reserve(1 + resident_candidates_.size());
+  probe.requests.push_back(beneficiary);
+  for (const auto& entry : resident_candidates_) {
+    if (entry.request_id != beneficiary.request_id) {
+      probe.requests.push_back(entry);
+    }
+  }
+  return probe;
+}
+
 std::vector<std::shared_ptr<Request>> DynamicBatchScheduler::PlanPreemption(
     StepPlan& plan, std::span<const RequestStepPlan> candidates, StepPlanningResult& result) {
   if (!result.capacity_deferred || result.unserviceable_request_id) {
@@ -222,25 +252,13 @@ std::vector<std::shared_ptr<Request>> DynamicBatchScheduler::PlanPreemption(
     return left > right;
   });
   const auto& config = *model_->config_->engine.dynamic_batching;
+  const PreemptionProbeBuilder probe_builder{candidates, residents.size()};
 
   for (const auto& beneficiary : candidates) {
     if (contains(plan, beneficiary.request_id)) {
       continue;
     }
-    const auto make_probe = [&] {
-      StepPlan probe;
-      probe.transaction_id = plan.transaction_id;
-      probe.scheduled_request_limit = plan.scheduled_request_limit;
-      probe.requests.push_back(beneficiary);
-      // Reclaimed capacity goes to this beneficiary, not to unrelated new admissions.
-      for (const auto& entry : candidates) {
-        if (entry.request_id != beneficiary.request_id && !entry.newly_admitted) {
-          probe.requests.push_back(entry);
-        }
-      }
-      return probe;
-    };
-    auto probe = make_probe();
+    auto probe = probe_builder.Build(plan, beneficiary);
     auto probe_result = cache_manager_->PlanStepResources(probe);
     if (contains(probe, beneficiary.request_id) && !probe_result.unserviceable_request_id) {
       // The existing committed-epoch ordering handles token-row pressure. If prioritizing this
@@ -268,7 +286,7 @@ std::vector<std::shared_ptr<Request>> DynamicBatchScheduler::PlanPreemption(
         }
       }
       victims.push_back(victim);
-      probe = make_probe();
+      probe = probe_builder.Build(plan, beneficiary);
       probe.requests.erase(
           std::remove_if(probe.requests.begin(), probe.requests.end(), [&](const RequestStepPlan& entry) {
             return std::any_of(victims.begin(), victims.end(), [&](const auto& request) {

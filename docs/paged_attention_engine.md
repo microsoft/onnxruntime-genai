@@ -2047,7 +2047,9 @@ This version supports full-attention paged KV and its shared prefix-cache refere
 construction rejects opt-in with fixed convolution/recurrent state, sliding-window or model-managed
 state, hosted MTP/DFlash/DSpark, or n-gram speculative configuration. Manual draft proposals are
 also rejected. Static or injected non-reclaiming cache managers reject opt-in rather than ignoring
-it. Those layouts retain their existing behavior when the feature is disabled.
+it. Target graph-capture buffers remain part of automatic memory sizing but are not auxiliary
+decoder state and do not disable preemption. Those unsupported layouts retain their existing
+behavior when the feature is disabled.
 
 ### Plan, validate, then publish
 

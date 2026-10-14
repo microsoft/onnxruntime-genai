@@ -54,11 +54,15 @@ struct KeyValueCacheState : State {
 struct CacheManager {
   CacheManager(std::shared_ptr<Model> model) : model_{model} {}
 
-  static std::unique_ptr<CacheManager> Create(std::shared_ptr<Model> model,
-                                              size_t auxiliary_bytes_per_block = 0,
-                                              size_t auxiliary_reserved_memory_bytes = 0,
-                                              size_t optional_draft_checkpoint_bytes = 0,
-                                              bool* draft_checkpoint_enabled = nullptr);
+  // Auxiliary bytes identify model state that participates in cache capability checks.
+  // Non-auxiliary reserved bytes affect automatic sizing only (for example graph buffers).
+  static std::unique_ptr<CacheManager> Create(
+      std::shared_ptr<Model> model,
+      size_t auxiliary_bytes_per_block = 0,
+      size_t auxiliary_reserved_memory_bytes = 0,
+      size_t optional_draft_checkpoint_bytes = 0,
+      bool* draft_checkpoint_enabled = nullptr,
+      size_t non_auxiliary_reserved_memory_bytes = 0);
 
   virtual bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const = 0;
 
@@ -211,7 +215,8 @@ struct PagedCacheManager : CacheManager {
   PagedCacheManager(std::shared_ptr<Model> model,
                     size_t auxiliary_bytes_per_block = 0,
                     size_t auxiliary_reserved_memory_bytes = 0,
-                    size_t optional_draft_checkpoint_bytes = 0);
+                    size_t optional_draft_checkpoint_bytes = 0,
+                    size_t non_auxiliary_reserved_memory_bytes = 0);
   bool DraftCheckpointEnabled() const noexcept { return draft_checkpoint_capacity_ != 0; }
   size_t DraftCheckpointCapacity() const noexcept override { return draft_checkpoint_capacity_; }
 

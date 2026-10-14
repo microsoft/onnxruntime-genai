@@ -453,9 +453,10 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   }
   std::shared_ptr<CacheManager> cache_manager =
       CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
-                           dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes,
+                           dflash2_reserved_memory_bytes,
                            dflash2_prefix_checkpoint_bytes,
-                           &dflash2_prefix_checkpoints_enabled);
+                           &dflash2_prefix_checkpoints_enabled,
+                           graph_buffer_reserved_bytes);
   if (dflash2_model && !dflash2_drafter) {
     const size_t paged_block_size =
         static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
