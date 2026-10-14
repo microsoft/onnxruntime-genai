@@ -79,13 +79,23 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
   if (!child.log_severity_level) child.log_severity_level = parent.log_severity_level;
   if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
   if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
-  if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
+  // custom_ops_library and custom_ops_libraries form one setting: the child inherits both only when it sets neither.
+  // Because custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and
+  // still inherits the parent's custom-op libraries unless custom_ops_library is set.
+  if (!child.custom_ops_library && child.custom_ops_libraries.empty()) {
+    child.custom_ops_library = parent.custom_ops_library;
+    child.custom_ops_libraries = parent.custom_ops_libraries;
+  }
   if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
   InheritNamedStrings(parent.config_entries, child.config_entries);
   InheritProviderOptions(parent, child);
 }
 
 }  // namespace
+
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child) {
+  InheritSessionOptions(parent, child);
+}
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
@@ -336,6 +346,18 @@ GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
   }
 }
 
+// Appends parsed string elements to `v`; an empty array leaves `v` unchanged.
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
@@ -360,6 +382,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     } else if (name == "custom_ops_library") {
       v_.custom_ops_library = JSON::Get<std::string_view>(value);
+    } else if (name == "custom_ops_libraries") {
+      throw std::runtime_error("custom_ops_libraries must be an array of strings");
     } else {
       // Session options that are set with AddConfigEntry
       v_.config_entries.emplace_back(name, JSON::Get<std::string_view>(value));
@@ -370,12 +394,18 @@ struct SessionOptions_Element : JSON::Element {
     if (name == "provider_options") {
       return provider_options_;
     }
+    if (name == "custom_ops_libraries") {
+      // Overlays append to custom_ops_libraries (and [] leaves existing entries unchanged), matching config_entries
+      // and provider_options.
+      return custom_ops_libraries_;
+    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
+  StringArray_Element custom_ops_libraries_{v_.custom_ops_libraries};
 };
 
 struct RunOptions_Element : JSON::Element {
@@ -582,17 +612,6 @@ struct DecoderOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
-};
-
-struct StringArray_Element : JSON::Element {
-  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
-  }
-
- private:
-  std::vector<std::string>& v_;
 };
 
 struct IntArray_Element : JSON::Element {
