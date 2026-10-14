@@ -29,6 +29,40 @@ std::unique_ptr<OgaModel> CreateCudaModel() {
   return OgaModel::Create(*config);
 }
 
+TEST(CudaArenaOptionsTests, ForwardsOnlyAllocatorOptionsToInitSession) {
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  Generators::Config::ProviderOptions user_options;
+  user_options.options = {
+      {"gpu_mem_limit", "1048576"},
+      {"max_mem", "2097152"},
+      {"arena_extend_strategy", "1"},
+      {"initial_chunk_size_bytes", "256"},
+      {"max_dead_bytes_per_chunk", "0"},
+      {"initial_growth_chunk_size_bytes", "512"},
+      {"enable_cuda_graph", "1"},
+      {"user_compute_stream", "1234"}};
+  Generators::Config::ProviderOptions init_options;
+  device->ShapeInitSessionProviderOptions(init_options, &user_options);
+  ASSERT_EQ(init_options.options.size(), 6u);
+  EXPECT_TRUE(std::equal(init_options.options.begin(), init_options.options.end(),
+                         user_options.options.begin()));
+
+  Generators::Config::ProviderOptions empty_options;
+  device->ShapeInitSessionProviderOptions(empty_options, nullptr);
+  EXPECT_TRUE(empty_options.options.empty());
+}
+
+TEST(CudaArenaOptionsTests, CreatesModelWithExplicitArenaConfiguration) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+  config->SetProviderOption("cuda", "max_mem", "1073741824");
+  config->SetProviderOption("cuda", "initial_chunk_size_bytes", "1048576");
+  config->SetProviderOption("cuda", "max_dead_bytes_per_chunk", "0");
+  auto model = OgaModel::Create(*config);
+  ASSERT_NE(model, nullptr);
+}
+
 TEST(ArgMaxTests, DeviceRowResultsAccumulateBeforeOneHostCopyCuda) {
   constexpr int num_rows = 4;
   constexpr int first_row = 1;

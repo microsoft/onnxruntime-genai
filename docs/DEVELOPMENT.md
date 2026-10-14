@@ -57,6 +57,15 @@ The Python wheel is built by default. The build tree is created under `build/<pl
 
 ---
 
+For CUDA provider-bridge builds, explicit arena settings (`max_mem`,
+`arena_extend_strategy`, `initial_chunk_size_bytes`, `max_dead_bytes_per_chunk`,
+and `initial_growth_chunk_size_bytes`) require an ONNX Runtime build supporting
+the `default_memory_arena_cfg` pointer option and copying its configuration when
+the provider is appended. GenAI checks that the pointer option is accepted and
+reports an error instead of silently ignoring those settings. CUDA allocator
+initialization forwards these settings and `gpu_mem_limit` to its initialization
+session; model-only options such as CUDA graph capture are not forwarded.
+
 ## 3. `build.py` phases and key flags
 
 `build.py` runs three phases. If no phase is specified, it requests all three (`--update --build --test`). For `--arm64` and `--arm64ec` cross-compilation, the test phase is disabled after CMake configuration because the target binaries cannot run on the host. If you pass any phase explicitly, only those phases run.
