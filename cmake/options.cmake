@@ -26,6 +26,7 @@ option(ENABLE_ENGINE_BENCHMARK "Build the GenAI engine benchmark program" OFF)
 
 # diagnostics
 option(ENABLE_TRACING "Enable recording of tracing data" OFF)
+option(ENABLE_NVTX "Enable NVTX host profiling ranges" OFF)
 
 # telemetry
 if(CMAKE_SYSTEM_NAME STREQUAL "AIX" OR MAC_CATALYST)
