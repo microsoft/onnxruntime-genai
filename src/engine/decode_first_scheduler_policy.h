@@ -16,10 +16,12 @@ struct DecodeFirstBudgetCandidate {
   size_t pending_token_count{};
   std::optional<size_t> prefill_token_cap;
   size_t decode_extra_token_count{};
+  size_t prefill_wait_steps{};
 };
 
 std::vector<size_t> DecodeFirstCandidateOrder(
-    std::span<const DecodeFirstBudgetCandidate> candidates);
+    std::span<const DecodeFirstBudgetCandidate> candidates,
+    size_t prefill_aging_steps = 0);
 
 size_t DecodeFirstProvisionalRequestLimit(
     size_t max_scheduled_tokens,

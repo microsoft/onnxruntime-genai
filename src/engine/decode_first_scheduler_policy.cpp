@@ -9,15 +9,29 @@
 namespace Generators {
 
 std::vector<size_t> DecodeFirstCandidateOrder(
-    std::span<const DecodeFirstBudgetCandidate> candidates) {
+    std::span<const DecodeFirstBudgetCandidate> candidates,
+    size_t prefill_aging_steps) {
   std::vector<size_t> order;
   order.reserve(candidates.size());
+  size_t promoted = candidates.size();
+  if (prefill_aging_steps != 0) {
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      if (candidates[i].is_prefill &&
+          candidates[i].prefill_wait_steps >= prefill_aging_steps &&
+          (promoted == candidates.size() ||
+           candidates[i].prefill_wait_steps > candidates[promoted].prefill_wait_steps)) {
+        promoted = i;
+      }
+    }
+    if (promoted != candidates.size())
+      order.push_back(promoted);
+  }
   for (size_t i = 0; i < candidates.size(); ++i) {
     if (!candidates[i].is_prefill)
       order.push_back(i);
   }
   for (size_t i = 0; i < candidates.size(); ++i) {
-    if (candidates[i].is_prefill)
+    if (candidates[i].is_prefill && i != promoted)
       order.push_back(i);
   }
   return order;

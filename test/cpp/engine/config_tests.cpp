@@ -112,6 +112,52 @@ TEST(ConfigTest, Dflash2SnapshotsDefaultToOneAndAllowZeroOrLargerPools) {
   }
 }
 
+TEST(ConfigTest, PrefillAgingDefaultsOffAndSupportsRuntimeProfiles) {
+  Config config;
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"max_batch_size":4}}})");
+  ASSERT_TRUE(config.engine.dynamic_batching);
+  EXPECT_EQ(config.engine.dynamic_batching->prefill_aging_steps, 0u);
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"prefill_aging_steps":3}}})");
+  EXPECT_EQ(config.engine.dynamic_batching->prefill_aging_steps, 3u);
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"disable-aging",
+    "eligibility":{"minimum_total_device_memory_bytes":100},
+    "overlay":{"engine":{"dynamic_batching":{"prefill_aging_steps":0}}}
+  }]})");
+  ApplyRuntimeProfile(config, 99);
+  EXPECT_EQ(config.engine.dynamic_batching->prefill_aging_steps, 3u);
+  ApplyRuntimeProfile(config, 100);
+  EXPECT_EQ(config.engine.dynamic_batching->prefill_aging_steps, 0u);
+}
+
+TEST(ConfigTest, PrefillAgingRejectsInvalidValuesTransactionally) {
+  for (const auto* value : {"-1", "1.5", "2147483648", "true", "\"3\"", "null"}) {
+    Config config;
+    OverlayConfig(config, R"({"engine":{"dynamic_batching":{"prefill_aging_steps":3}}})");
+    EXPECT_THROW(OverlayConfig(config, R"({"engine":{"dynamic_batching":{"prefill_aging_steps":)" +
+                                           std::string{value} + "}}}"),
+                 std::runtime_error);
+    EXPECT_EQ(config.engine.dynamic_batching->prefill_aging_steps, 3u);
+    EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+      "id":"invalid",
+      "eligibility":{"minimum_total_device_memory_bytes":0},
+      "overlay":{"engine":{"dynamic_batching":{"prefill_aging_steps":)" +
+                                           std::string{value} + "}}}}]}"),
+                 std::runtime_error);
+    EXPECT_TRUE(config.runtime_profiles.empty());
+  }
+}
+
+TEST(ConfigTest, PrefillAgingProfileRequiresDynamicBatchingEvenWhenDisabled) {
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"disabled",
+    "eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"prefill_aging_steps":0}}}
+  }]})");
+  EXPECT_THROW(ApplyRuntimeProfile(config, 0), std::runtime_error);
+}
+
 TEST(ConfigTest, Dflash2SnapshotLimitRejectsInvalidValuesTransactionally) {
   for (const auto* value : {"-1", "1.5", "2147483648", "true", "\"3\"", "null"}) {
     Config config;

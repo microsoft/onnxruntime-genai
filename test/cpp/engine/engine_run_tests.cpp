@@ -1759,6 +1759,76 @@ TEST_F(EngineRunTest, RetryableExecutionFailureRollsBackAndCanRetry) {
   EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
 }
 
+TEST_F(EngineRunTest, PrefillAgingIgnoresRolledBackSteps) {
+  model_->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 1;
+  model_->config_->engine.dynamic_batching->prefill_aging_steps = 2;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  auto decode = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  for (size_t i = 0; decode->IsPrefill() && i < 4; ++i)
+    RunOne(*engine.engine);
+  ASSERT_FALSE(decode->IsPrefill());
+  auto prefill = CreateRequestWithPrompt(engine.engine, Prompt(20));
+
+  for (const auto failure : {ScriptedExecutionFailure::RetryableBeforeExecution,
+                             ScriptedExecutionFailure::RetryableDuringExecution,
+                             ScriptedExecutionFailure::PostProcessing}) {
+    engine.executor->SetNextFailure(failure);
+    EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
+    EXPECT_EQ(prefill->ProcessedSequenceLength(), 0);
+  }
+  for (size_t i = 0; i < 2; ++i) {
+    EXPECT_EQ(RunOne(*engine.engine).request, decode);
+    EXPECT_EQ(prefill->ProcessedSequenceLength(), 0);
+  }
+  // A partial prefill commits progress without publishing a generated token.
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
+  EXPECT_EQ(prefill->ProcessedSequenceLength(), 1);
+}
+
+TEST(EnginePrefillAgingTest, SyntheticGreedyOutputsMatchIsolatedExecution) {
+  const std::array<std::vector<int32_t>, 3> prompts{
+      std::vector<int32_t>{5, 9, 13},
+      std::vector<int32_t>{7, 2, 20, 4},
+      std::vector<int32_t>{3, 8, 2, 15, 6, 11},
+  };
+  auto model = LoadSyntheticPagedModel();
+  auto& config = *model->config_->engine.dynamic_batching;
+  config.max_scheduled_tokens = 1;
+  config.prefill_aging_steps = 2;
+  config.prefix_caching = false;
+  const auto generate = [&](bool concurrent) {
+    std::array<std::vector<int32_t>, 3> outputs;
+    auto engine = std::make_shared<Engine>(model);
+    std::vector<std::shared_ptr<Request>> requests;
+    TurnOptions options;
+    options.max_generated_tokens = 6;
+    for (size_t i = 0; i < prompts.size(); ++i) {
+      requests.push_back(CreateRequestWithPrompt(engine, prompts[i], options));
+      if (concurrent && i + 1 != prompts.size())
+        continue;
+      size_t calls = 0;
+      while (engine->HasPendingRequests() && calls++ < 100) {
+        const auto event = RunOne(*engine);
+        EXPECT_EQ(event.flags & (EngineEventFlagFailed | EngineEventFlagRetryable | EngineEventFlagCapacityBlocked), 0u);
+        if ((event.flags & EngineEventFlagToken) != 0) {
+          const auto found = std::find(requests.begin(), requests.end(), event.request);
+          if (found != requests.end())
+            outputs[static_cast<size_t>(found - requests.begin())].push_back(event.token);
+        }
+      }
+      EXPECT_FALSE(engine->HasPendingRequests());
+    }
+    return outputs;
+  };
+  const auto isolated = generate(false);
+  const auto concurrent = generate(true);
+  for (size_t i = 0; i < prompts.size(); ++i) {
+    EXPECT_FALSE(isolated[i].empty());
+    EXPECT_EQ(concurrent[i], isolated[i]);
+  }
+}
+
 TEST_F(EngineRunTest, ContinuedResidentRollsBackToQueuedAndCanRetry) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);

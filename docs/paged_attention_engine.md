@@ -1994,7 +1994,51 @@ The current ordering policy is:
 2. Consider prefills afterward, preserving resident order and then scheduler-pool order.
 3. Give every feasible selected row one token before expanding selected prefills in stable order.
 
-Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Phase 1 does not rotate service or promote waiting prefills, so sustained decode demand can starve prefill work.
+Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. By default, the scheduler does not rotate service or promote waiting prefills, so sustained decode demand can starve prefill work.
+
+Set `engine.dynamic_batching.prefill_aging_steps` to a positive integer to enable
+experimental prefill promotion. It defaults to `0` (disabled), accepts values up
+to `2147483647`, and can also be set in a runtime-profile overlay. For example:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "max_batch_size": 16,
+      "max_scheduled_tokens": 2048,
+      "prefill_aging_steps": 8
+    }
+  }
+}
+```
+
+Each pending prefill counts committed target steps in which it receives no
+service. Once it reaches the threshold, one overdue prefill moves ahead of the
+decodes in candidate order. The largest wait count wins; equal counts preserve
+candidate order. Counters saturate at the threshold, so overdue requests rotate
+as served requests reset their counters. Remaining candidates retain the normal
+decode-first order. Token allocation still gives each feasible selected row one
+token before spending the remaining budget on speculative decode work and
+prefill expansion. Prefill chunks continue to respect their configured caps.
+
+Planning and recoverable rollback never advance or reset these counters. The
+Engine calls `Scheduler::OnStepCommitted()` after publishing request progress;
+that hook updates the counters without allocating. A completed or closed turn
+clears its wait history, and a continuation starts fresh. Request removal and
+Engine teardown discard tracking state.
+
+Promotion changes priority, not cache residency or admission feasibility. A full
+resident pool or insufficient blocks can still defer a promoted prefill; an
+infeasible promoted request does not prevent feasible decodes from running.
+Another overdue prefill is not promoted in its place during that step. When the
+token budget is exhausted, a promoted prefill can displace a decode, so a smaller
+threshold can increase inter-token latency. With `max_scheduled_tokens` at least
+`max_batch_size`, every feasible resident request can already receive its initial
+token, so cache admission can matter more than priority. Aging does not adapt the
+global token budget or the configured prefill chunk cap. This is a committed-step threshold,
+not a wall-clock bound, a K-FCFS guarantee, or a throughput-optimality claim.
+Model-backed latency, throughput, and scheduling-overhead measurements remain
+necessary before choosing a nonzero deployment value.
 
 If no request can run because of temporary capacity, `RunDynamic()` reports `CapacityDeferred` instead of returning `nullptr`. Returning `nullptr` would incorrectly tell the caller that no work remains.
 

@@ -35,6 +35,34 @@ TEST(DecodeFirstSchedulerPolicyTest, AccountsForEveryTokenExactly) {
   EXPECT_EQ(counts, (std::vector<size_t>{1, 1, 4, 1}));
 }
 
+TEST(DecodeFirstSchedulerPolicyTest, AgingPromotesOnlyOneOverduePrefill) {
+  const std::array candidates{
+      DecodeFirstBudgetCandidate{true, 8, std::nullopt, 0, 2},
+      DecodeFirstBudgetCandidate{false, 1, std::nullopt},
+      DecodeFirstBudgetCandidate{true, 4, std::nullopt, 0, 4},
+      DecodeFirstBudgetCandidate{false, 1, std::nullopt},
+  };
+
+  EXPECT_EQ(DecodeFirstCandidateOrder(candidates, 2),
+            (std::vector<size_t>{2, 1, 3, 0}));
+  EXPECT_EQ(DecodeFirstCandidateOrder(candidates, 5),
+            (std::vector<size_t>{1, 3, 0, 2}));
+  EXPECT_EQ(DecodeFirstCandidateOrder(candidates),
+            (std::vector<size_t>{1, 3, 0, 2}));
+}
+
+TEST(DecodeFirstSchedulerPolicyTest, AgingBreaksTiesInCandidateOrder) {
+  const std::array candidates{
+      DecodeFirstBudgetCandidate{true, 8, std::nullopt, 0, 2},
+      DecodeFirstBudgetCandidate{true, 4, std::nullopt, 0, 2},
+      DecodeFirstBudgetCandidate{false, 1, std::nullopt},
+  };
+
+  EXPECT_EQ(DecodeFirstCandidateOrder(candidates, 2),
+            (std::vector<size_t>{0, 2, 1}));
+  EXPECT_TRUE(DecodeFirstCandidateOrder({}, 2).empty());
+}
+
 TEST(DecodeFirstSchedulerPolicyTest, DecodeDemandExhaustsTheBudget) {
   const std::array selected{
       DecodeFirstBudgetCandidate{false, 1, std::nullopt},

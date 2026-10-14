@@ -2243,6 +2243,7 @@ void Engine::RunDynamic() {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
       }
+      scheduler_->OnStepCommitted(step_plan_);
       for (auto& entry : step_plan_.requests) {
         entry.prefix_match.reset();
       }

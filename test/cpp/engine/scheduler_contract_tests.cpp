@@ -109,6 +109,135 @@ TEST_F(SchedulerContractTest, DynamicPlansSingleAssignedRequestWithoutAdmissionM
   EXPECT_EQ(cache->AllocatedCount(), 0u);
 }
 
+TEST_F(SchedulerContractTest, PrefillAgingCountsCommittedStepsAndResetsAfterService) {
+  auto& config = *model_->config_->engine.dynamic_batching;
+  config.max_scheduled_tokens = 1;
+  config.prefill_aging_steps = 2;
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto decode = Assigned(10);
+  MakeDecodeResident(scheduler, *cache, decode);
+  auto prefill = Assigned(20);
+  scheduler.AddRequest(prefill);
+  StepPlan plan;
+
+  // Planning retries and abandoned plans cannot age work or reset a promoted request.
+  for (size_t i = 0; i < 4; ++i) {
+    ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+    ASSERT_EQ(plan.requests.size(), 1u);
+    EXPECT_EQ(plan.requests[0].request, decode);
+  }
+  scheduler.OnStepCommitted(plan);
+  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+  EXPECT_EQ(plan.requests[0].request, decode);
+  scheduler.OnStepCommitted(plan);
+  for (size_t i = 0; i < 4; ++i) {
+    ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+    ASSERT_EQ(plan.requests.size(), 1u);
+    EXPECT_EQ(plan.requests[0].request, prefill);
+    EXPECT_EQ(plan.token_count, 1u);
+  }
+  scheduler.OnStepCommitted(plan);
+  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+  EXPECT_EQ(plan.requests[0].request, decode);
+}
+
+TEST_F(SchedulerContractTest, PrefillAgingRotatesServiceAcrossWaitingPrefills) {
+  auto& config = *model_->config_->engine.dynamic_batching;
+  config.max_scheduled_tokens = 1;
+  config.prefill_aging_steps = 1;
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto decode = Assigned(10);
+  MakeDecodeResident(scheduler, *cache, decode);
+  auto first = Assigned(20);
+  auto second = Assigned(30);
+  scheduler.AddRequest(first);
+  scheduler.AddRequest(second);
+  StepPlan plan;
+
+  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+  EXPECT_EQ(plan.requests[0].request, decode);
+  scheduler.OnStepCommitted(plan);
+  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+  EXPECT_EQ(plan.requests[0].request, first);
+  scheduler.OnStepCommitted(plan);
+  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+  EXPECT_EQ(plan.requests[0].request, second);
+}
+
+TEST_F(SchedulerContractTest, PrefillAgingCannotBypassCacheCapacity) {
+  auto& config = *model_->config_->engine.dynamic_batching;
+  config.max_scheduled_tokens = 1;
+  config.prefill_aging_steps = 1;
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/1);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto decode = Assigned(10);
+  MakeDecodeResident(scheduler, *cache, decode);
+  auto prefill = Assigned(20);
+  scheduler.AddRequest(prefill);
+  StepPlan plan;
+
+  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+  scheduler.OnStepCommitted(plan);
+  const auto result = scheduler.PlanStep(plan);
+  ASSERT_TRUE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].request, decode);
+  EXPECT_FALSE(cache->IsResident(prefill));
+  EXPECT_EQ(prefill->status_, RequestStatus::Assigned);
+}
+
+TEST_F(SchedulerContractTest, PrefillAgingDefaultsToDecodeFirstAndForgetsRemovedRequests) {
+  auto& config = *model_->config_->engine.dynamic_batching;
+  config.max_scheduled_tokens = 1;
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto decode = Assigned(10);
+  MakeDecodeResident(scheduler, *cache, decode);
+  auto prefill = Assigned(20);
+  scheduler.AddRequest(prefill);
+  StepPlan plan;
+
+  for (size_t i = 0; i < 4; ++i) {
+    ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+    EXPECT_EQ(plan.requests[0].request, decode);
+    scheduler.OnStepCommitted(plan);
+  }
+  scheduler.RemoveRequest(prefill);
+  scheduler.OnStepCommitted(plan);
+  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+  EXPECT_EQ(plan.requests[0].request, decode);
+}
+
+TEST_F(SchedulerContractTest, PrefillAgingDropsHistoryOnRemovalAndWhileDormant) {
+  auto& config = *model_->config_->engine.dynamic_batching;
+  config.max_scheduled_tokens = 1;
+  config.prefill_aging_steps = 1;
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto decode = Assigned(10);
+  MakeDecodeResident(scheduler, *cache, decode);
+  auto prefill = Assigned(20);
+  scheduler.AddRequest(prefill);
+  StepPlan plan;
+
+  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+  scheduler.OnStepCommitted(plan);
+  scheduler.RemoveRequest(prefill);
+  scheduler.AddRequest(prefill);
+  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+  EXPECT_EQ(plan.requests[0].request, decode);
+  scheduler.OnStepCommitted(plan);
+
+  prefill->status_ = RequestStatus::TurnComplete;
+  scheduler.OnStepCommitted(plan);
+  prefill->status_ = RequestStatus::Assigned;
+  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
+  EXPECT_EQ(plan.requests[0].request, decode);
+}
+
 TEST_F(SchedulerContractTest, DynamicPreservesRequestOrder) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
   DynamicBatchScheduler scheduler(model_, cache);

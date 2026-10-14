@@ -142,6 +142,8 @@ DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::
 void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
   requests_pool_.reserve(requests_pool_.size() + 1);
   auto sampling_state = CreateSamplingState(*request);
+  if (model_->config_->engine.dynamic_batching->prefill_aging_steps != 0)
+    prefill_wait_.try_emplace(request.get());
   request->CommitSamplingState(std::move(sampling_state));
   requests_pool_.push_back(std::move(request));
 }
@@ -150,12 +152,15 @@ void DynamicBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
   std::vector<std::shared_ptr<Request>> requests_to_remove{request};
   cache_manager_->Deallocate(requests_to_remove);
 
+  prefill_wait_.erase(request.get());
+
   requests_pool_.erase(std::remove(requests_pool_.begin(), requests_pool_.end(), request), requests_pool_.end());
 }
 
 void DynamicBatchScheduler::DetachRequestForTeardown(
     const std::shared_ptr<Request>& request) noexcept {
   cache_manager_->DetachRequestForTeardown(request);
+  prefill_wait_.erase(request.get());
   requests_pool_.erase(
       std::remove(requests_pool_.begin(), requests_pool_.end(), request),
       requests_pool_.end());
@@ -240,6 +245,11 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         prefill_token_cap,
         candidate.entry.draft_token_count,
     };
+    if (model_->config_->engine.dynamic_batching->prefill_aging_steps != 0) {
+      const auto wait = prefill_wait_.find(request.get());
+      if (wait != prefill_wait_.end() && wait->second.turn_id == request->CurrentTurnId())
+        candidate.budget.prefill_wait_steps = wait->second.skipped_steps;
+    }
     candidate.processed_sequence_length =
         effective_processed_sequence_length;
     candidate.remaining_token_count = static_cast<size_t>(remaining_token_count);
@@ -263,7 +273,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   budget_candidates.reserve(candidates.size());
   for (const auto& candidate : candidates)
     budget_candidates.push_back(candidate.budget);
-  const auto order = DecodeFirstCandidateOrder(budget_candidates);
+  const auto order = DecodeFirstCandidateOrder(
+      budget_candidates, model_->config_->engine.dynamic_batching->prefill_aging_steps);
   plan.requests.reserve(candidates.size());
   for (size_t candidate_index : order) {
     auto entry = candidates[candidate_index].entry;
@@ -446,6 +457,29 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     throw;
   }
   return result;
+}
+
+void DynamicBatchScheduler::OnStepCommitted(const StepPlan& plan) noexcept {
+  const size_t threshold = model_->config_->engine.dynamic_batching->prefill_aging_steps;
+  if (threshold == 0)
+    return;
+
+  for (auto& [request, wait] : prefill_wait_) {
+    if (wait.turn_id != request->CurrentTurnId()) {
+      wait.turn_id = request->CurrentTurnId();
+      wait.skipped_steps = 0;
+    }
+    if (!IsExecutable(request->status_) || !request->IsPrefill()) {
+      wait.skipped_steps = 0;
+    } else if (wait.skipped_steps < threshold) {
+      ++wait.skipped_steps;
+    }
+  }
+  for (const auto& entry : plan.requests) {
+    const auto wait = prefill_wait_.find(entry.request.get());
+    if (wait != prefill_wait_.end())
+      wait->second.skipped_steps = 0;
+  }
 }
 
 bool DynamicBatchScheduler::HasPendingRequests() const {

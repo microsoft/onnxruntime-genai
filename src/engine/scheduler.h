@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <unordered_map>
+
 #include "request.h"
 #include "scheduled_requests.h"
 #include "cache_manager.h"
@@ -72,6 +74,9 @@ struct Scheduler {
     throw std::logic_error("Scheduler does not support transactional step planning.");
   }
 
+  // Update scheduling history only after request and cache progress commits.
+  virtual void OnStepCommitted(const StepPlan&) noexcept {}
+
   ScheduledRequests CreateScheduledRequests(const StepPlan& plan);
 
   bool SupportsTransactionalSamplerState() const {
@@ -135,12 +140,19 @@ struct DynamicBatchScheduler : Scheduler {
 
   StepPlanningResult PlanStep(StepPlan& plan) override;
 
+  void OnStepCommitted(const StepPlan& plan) noexcept override;
+
   bool HasPendingRequests() const override;
 
  private:
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
+  struct PrefillWait {
+    uint64_t turn_id{};
+    size_t skipped_steps{};
+  };
+  std::unordered_map<const Request*, PrefillWait> prefill_wait_;
 };
 
 std::unique_ptr<Scheduler> CreateScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
