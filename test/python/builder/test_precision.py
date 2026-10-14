@@ -679,14 +679,11 @@ def test_state_update_capacity_is_normalized(monkeypatch):
 
 
 @pytest.mark.parametrize("capacity", ["1", "8", 3])
-def test_webgpu_rejects_compact_state_updates(monkeypatch, capacity):
-    with pytest.raises(ValueError, match="Engine compact state replay is not implemented"):
-        _run_check_extra_options(
-            monkeypatch,
-            {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": capacity},
-            precision="fp16",
-            execution_provider="webgpu",
-        )
+def test_webgpu_accepts_compact_state_updates(monkeypatch, capacity):
+    options = {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": capacity}
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    assert options["state_update_capacity"] == int(capacity)
 
 
 def test_webgpu_allows_disabled_compact_state_updates(monkeypatch):

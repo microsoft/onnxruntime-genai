@@ -227,8 +227,6 @@ def check_extra_options(
             raise ValueError(message)
         if state_update_capacity and not extra_options.get("use_paged_attention", False):
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
-        if state_update_capacity and execution_provider == "webgpu":
-            raise ValueError("state_update_capacity > 0 is not supported on WebGPU: Engine compact state replay is not implemented.")
         extra_options["state_update_capacity"] = state_update_capacity
 
     if "max_draft_tokens" in extra_options:
@@ -1080,9 +1078,8 @@ def get_args():
                     ignore this option. gated_delta_net requires CUDA or WebGPU and state_window=0. CUDA supports
                     fp16 or bf16 I/O; non-paged WebGPU supports fp16 or fp32.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
-                    Must be an integer from 0 through 8 and requires use_paged_attention=true. Positive capacities
-                    are not supported on WebGPU because Engine compact state replay is not implemented. This experimental
-                    contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
+                    Must be an integer from 0 through 8 and requires use_paged_attention=true. Engine compact
+                    replay supports CPU, CUDA, and WebGPU; WebGPU stages partial-acceptance replay through CPU.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
                     Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require

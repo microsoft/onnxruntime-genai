@@ -1969,7 +1969,7 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
     monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
     model = _composite(ep="webgpu")
     model.make_dflash2_init(
-        io_dtype=None,
+        io_dtype=ir.DataType.FLOAT16,
         extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_gate_up": fuse_gate_up},
     )
 

@@ -138,6 +138,11 @@ def test_drafter_outputs_stay_finite_across_steps(drafter_session, prompt):
                 names["block_table"]: np.zeros((1, 1), dtype=np.int32),
             }
         )
+        if names["attention_metadata"]:
+            query_length = context_rows + block_rows
+            feeds[names["attention_metadata"]] = np.array(
+                [query_length, past_length + query_length, past_length + query_length], dtype=np.int32
+            )
         values = dict(zip((value.name for value in session.get_outputs()), session.run(None, feeds), strict=True))
         candidate_ids, scores = values[outputs["candidate_ids"]], values[outputs["scores"]]
         assert candidate_ids.shape == (1, width, top_k)
