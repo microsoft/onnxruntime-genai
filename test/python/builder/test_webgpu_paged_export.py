@@ -330,7 +330,15 @@ def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path, structured, webgp
     assert _run_engine(engine_model, prompts, max_new_tokens) == isolated
 
 
-def test_webgpu_paged_export_requires_final_num_blocks(tmp_path):
+@pytest.mark.parametrize(
+    ("cache_options", "error"),
+    [
+        ([], "WebGPU paged attention requires num_blocks to be a positive integer"),
+        ([f"num_blocks={_NUM_BLOCKS}"], "num_blocks and gpu_utilization_factor are mutually exclusive"),
+    ],
+    ids=["missing-fixed-capacity", "conflicting-cache-sizing"],
+)
+def test_webgpu_paged_export_requires_final_num_blocks(tmp_path, cache_options, error):
     result = subprocess.run(
         [
             sys.executable,
@@ -347,7 +355,7 @@ def test_webgpu_paged_export_requires_final_num_blocks(tmp_path):
             json.dumps({"engine": {"dynamic_batching": {"gpu_utilization_factor": 0.6}}}),
             "--extra_options",
             "use_paged_attention=true",
-            f"num_blocks={_NUM_BLOCKS}",
+            *cache_options,
             "config_only=true",
             "hf_token=false",
         ],
@@ -356,7 +364,7 @@ def test_webgpu_paged_export_requires_final_num_blocks(tmp_path):
         check=False,
     )
     assert result.returncode != 0
-    assert "WebGPU paged attention requires num_blocks to be a positive integer" in result.stderr
+    assert error in result.stderr
 
 
 def test_webgpu_qwen35_paged_export_runs_prefill_and_decode(tmp_path, webgpu_plugin):
