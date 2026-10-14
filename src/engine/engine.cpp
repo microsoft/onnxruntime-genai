@@ -7,6 +7,7 @@
 #include "../constrained_logits_processor.h"
 #include "../models/preprocessing/genai_tokenizer.h"
 #include "../stop_string_controller.h"
+#include "../models/model_state_manifest.h"
 #include "decoders/varlen_decoder_io.h"
 
 #include <limits>
@@ -21,6 +22,21 @@ namespace {
 constexpr size_t kFatalEventOverhead = 2;
 constexpr size_t kMtpFailureDisableThreshold = 3;
 constexpr size_t kDflash2FailureDisableThreshold = 3;
+
+void ValidateRecomputePreemptionModel(const Config& config) {
+  if (!config.engine.dynamic_batching ||
+      !config.engine.dynamic_batching->enable_recompute_preemption) {
+    return;
+  }
+  if (ModelStateManifest{config.model.decoder}.HasFixedStateGroups() ||
+      config.model.decoder.sliding_window ||
+      config.model.mtp.IsEnabled() || !config.model.dflash2.filename.empty() ||
+      config.speculative.ngram_size != 0) {
+    throw std::runtime_error(
+        "Recompute preemption currently supports only full-attention paged KV; "
+        "fixed, sliding-window, model-managed and speculative auxiliary state are unsupported.");
+  }
+}
 
 struct MtpRollbackError : std::runtime_error {
   using std::runtime_error::runtime_error;
@@ -195,6 +211,15 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   if (!model_executor_) {
     throw std::runtime_error("Engine requires a non-null model executor.");
   }
+  ValidateRecomputePreemptionModel(*model_->config_);
+  if (model_->config_->engine.dynamic_batching &&
+      model_->config_->engine.dynamic_batching->enable_recompute_preemption &&
+      (!cache_manager_->SupportsDynamicBatching() ||
+       !cache_manager_->SupportsRecomputePreemption() ||
+       mtp_model_ || mtp_cache_manager_ || mtp_model_executor_ || dflash2_drafter_)) {
+    throw std::runtime_error(
+        "Recompute preemption requires a compatible dynamic paged cache without auxiliary state.");
+  }
   fatal_contract_fallback_error_ =
       MakeFatalFallbackError(StepOutcomeKind::ExecutionContractFailure);
   fatal_execution_fallback_error_ =
@@ -297,6 +322,7 @@ void ValidateMtpModelCompatibility(const Config& config,
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
+  ValidateRecomputePreemptionModel(*model->config_);
   // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so
   // it cannot resume a half-written prompt. Reject a model that configures chunking here rather
   // than surfacing it once a Request is already being admitted.
@@ -1373,7 +1399,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
         request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
     const bool replay_rewound_request =
-        request->NeedsReplayAfterRewind() &&
+        request->NeedsCacheReplay() &&
         !cache_manager_->IsResident(request);
     const bool allow_nonresident =
         restartable_canceled_turn || replay_rewound_request;
@@ -1521,7 +1547,7 @@ void Engine::RewindRequestToStartOfTurn(
 
   const bool resident = cache_manager_->IsResident(request);
   if (!resident && !request->IsRestartableCanceledTurn() &&
-      !request->NeedsReplayAfterRewind()) {
+      !request->NeedsCacheReplay()) {
     throw std::runtime_error(
         "Cannot rewind a request whose model state is no longer resident.");
   }
@@ -2291,6 +2317,7 @@ void Engine::RunDynamic() {
     pending_events_.swap(staged_events_);
     pending_event_index_ = 0;
     ++transaction_metrics_.committed_steps;
+    scheduler_->OnStepCommitted(step_plan_);
   }
 }
 

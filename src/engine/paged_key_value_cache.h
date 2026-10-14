@@ -147,7 +147,8 @@ struct PagedKeyValueCache {
   const PrefixCacheMetrics& PrefixMetrics() const;
 
   // Selects the active and pending requests whose immediate cache growth fits this step.
-  StepPlanningResult PlanStepResources(StepPlan& plan) const;
+  StepPlanningResult PlanStepResources(
+      StepPlan& plan, std::span<const void* const> released_requests = {}) const;
 
   // Returns the K, V cache.
   std::vector<std::pair<OrtValue*, OrtValue*>> Cache();

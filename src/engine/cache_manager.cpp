@@ -377,6 +377,9 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
                                      size_t optional_draft_checkpoint_bytes)
     : CacheManager(model),
       params_(std::make_shared<GeneratorParams>(*model_)) {
+  has_auxiliary_state_ = auxiliary_bytes_per_block != 0 ||
+                         auxiliary_reserved_memory_bytes != 0 ||
+                         optional_draft_checkpoint_bytes != 0;
   // The paged cache resolves its own paged_kv group. The fixed pool is created only when the
   // decoder manifest declares fixed state groups, so a dense paged model owns no pool and
   // the composite path degrades to paged-only. Its capacity matches the paged batch limit so paged
@@ -634,6 +637,11 @@ void PagedCacheManager::ValidateRewind(
 void PagedCacheManager::ReleaseForRewind(
     const std::shared_ptr<Request>& request) {
   ValidateRewind(request);
+  ReleaseForRewindValidated(request);
+}
+
+void PagedCacheManager::ReleaseForRewindValidated(
+    const std::shared_ptr<Request>& request) noexcept {
   if (!IsResident(request)) {
     return;
   }
@@ -646,6 +654,15 @@ void PagedCacheManager::ReleaseForRewind(
   cache_allocated_requests_.erase(
       std::remove(cache_allocated_requests_.begin(), cache_allocated_requests_.end(), request),
       cache_allocated_requests_.end());
+}
+
+void PagedCacheManager::CommitPreemption(
+    const std::shared_ptr<Request>& request) noexcept {
+  assert(SupportsRecomputePreemption());
+  assert(IsResident(request));
+  assert(request->CanSuspendForRecompute());
+  ReleaseForRewindValidated(request);
+  request->SuspendForRecompute();
 }
 
 void PagedCacheManager::DetachRequestForTeardown(
@@ -675,6 +692,9 @@ size_t PagedCacheManager::MaxQueryTokensPerRequest() const {
 }
 
 size_t PagedCacheManager::MaxDraftTokensPerStep() const {
+  if (model_->config_->engine.dynamic_batching->enable_recompute_preemption) {
+    return 0;
+  }
   // Recurrent state can only be replayed through the compact transitions the operators captured.
   // Without fixed state the paged KV boundary alone decides, and any tail slot can be left
   // uncommitted.
@@ -785,6 +805,28 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
           plan.requests.size(), capture_state_updates),
   };
   return result;
+}
+
+StepPlanningResult PagedCacheManager::PlanStepAfterReleasing(
+    StepPlan& plan, std::span<const std::shared_ptr<Request>> requests) const {
+  if (!SupportsRecomputePreemption()) {
+    throw StepPlanningConsistencyError(
+        "Recompute preemption requires full-attention paged KV without fixed or auxiliary state.");
+  }
+  std::vector<const void*> request_ids;
+  request_ids.reserve(requests.size());
+  for (const auto& request : requests) {
+    if (!request || !IsResident(request) ||
+        key_value_cache_->CommittedSlots(request.get()) !=
+            static_cast<size_t>(request->ProcessedSequenceLength())) {
+      throw StepPlanningConsistencyError(
+          "Preemption request and committed cache ownership disagree.");
+    }
+    ValidateRewind(request);
+    request_ids.push_back(request.get());
+  }
+  plan.fixed_state = {};
+  return key_value_cache_->PlanStepResources(plan, request_ids);
 }
 
 void PagedCacheManager::OrderStepForExecution(StepPlan& plan) const {
