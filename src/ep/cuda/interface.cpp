@@ -660,6 +660,7 @@ struct CudaBatchedSampler final : BatchedSampler {
 
 struct CudaInterfaceImplBase : DeviceInterface {
   CudaInterfaceImplBase() {
+    CUDA_CHECK(cudaGetDevice(&stream_device_id_));
     g_stream.Create();
   }
 
@@ -678,8 +679,27 @@ struct CudaInterfaceImplBase : DeviceInterface {
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     return OrtMemoryInfo::Create("Cuda",
                                  OrtAllocatorType::OrtDeviceAllocator,
-                                 0,
+                                 device_id_,
                                  OrtMemType::OrtMemTypeDefault);
+  }
+
+  // The interface, its stream and the global device allocator are shared by every model in the process,
+  // so they can only be bound to one device. The stream was created on the device that was current at
+  // construction; recreate it on the selected device before it is handed to the EP. Makes the selected
+  // device current on the calling thread.
+  void SelectDevice(int device_id) override {
+    if (device_selected_ && device_id != device_id_)
+      throw std::runtime_error("CUDA device interface is already bound to device " + std::to_string(device_id_) +
+                               ", but this model requested device " + std::to_string(device_id) +
+                               ". Models in one process must target the same device.");
+    CUDA_CHECK(cudaSetDevice(device_id));
+    if (device_id != stream_device_id_) {
+      g_stream.Reset();
+      g_stream.Create();
+      stream_device_id_ = device_id;
+    }
+    device_id_ = device_id;
+    device_selected_ = true;
   }
 
   std::string GetExecutionProviderName() const override { return "cuda"; }
@@ -1010,6 +1030,9 @@ struct CudaInterfaceImplBase : DeviceInterface {
   cuda_unique_ptr<cuda::StateUpdateReplayDescGpu> state_update_replay_descriptors_;
   size_t state_update_replay_capacity_{0};
   std::vector<cuda::StateUpdateReplayDescGpu> ordered_replay_descriptors_;  // host scratch, fast kernel first
+  int device_id_{};                                                         // device the allocator binds to; 0 unless SelectDevice chose one
+  int stream_device_id_{};                                                  // device g_stream was created on
+  bool device_selected_{};
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
@@ -1062,6 +1085,7 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
 struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
   std::string GetExecutionProviderName() const override { return "NvTensorRtRtx"; }
+  int GetDeviceId(const ProviderOptions*) override { return device_id_; }
 
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& /*search*/,
