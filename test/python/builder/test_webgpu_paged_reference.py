@@ -86,7 +86,9 @@ def _make_cpu_references(model_path):
             continue
         assert node.domain == "com.microsoft"
         attributes = {attr.name: onnx.helper.get_attribute_value(attr) for attr in node.attribute}
-        attributes["causal"] = attributes.pop("is_causal", 1)
+        causal = attributes.pop("is_causal", 1)
+        if causal != 1:
+            attributes["causal"] = causal
         assert attributes.keys() <= {
             "num_heads",
             "kv_num_heads",
@@ -108,21 +110,24 @@ def _make_cpu_references(model_path):
                 nodes.append(onnx.helper.make_node("Unsqueeze", [name, axes], [batched]))
             qkv.append(batched)
         batched_output = f"{node.output[0]}/cpu_batched"
+        gqa_inputs = [
+            *qkv,
+            *inputs[3:5],
+            "seqlens_k",
+            "total_sequence_length",
+            *inputs[8:10],
+            "",
+            "",
+            inputs[11],
+            *inputs[14:16],
+            *inputs[12:14],
+        ]
+        while gqa_inputs and not gqa_inputs[-1]:
+            gqa_inputs.pop()
         nodes.append(
             onnx.helper.make_node(
                 "GroupQueryAttention",
-                [
-                    *qkv,
-                    *inputs[3:5],
-                    "seqlens_k",
-                    "total_sequence_length",
-                    *inputs[8:10],
-                    "",
-                    "",
-                    inputs[11],
-                    *inputs[14:16],
-                    *inputs[12:14],
-                ],
+                gqa_inputs,
                 [batched_output, *node.output[1:]],
                 name=f"{node.name}/cpu_reference",
                 domain="com.microsoft",
