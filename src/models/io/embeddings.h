@@ -23,9 +23,13 @@ struct Embeddings {
 
   void ReuseEmbeddingsBuffer(const Embeddings& other);
 
-  // Output mode only. Flushes the staging buffer ReuseEmbeddingsBuffer allocated when the
-  // consuming session runs on a device this session cannot write to. No-op otherwise.
+  // Output mode only. Uploads the host mirror ReuseEmbeddingsBuffer bound as this session's output
+  // when the consuming session runs on a device this session cannot write to. No-op otherwise.
   void CopyToConsumer();
+
+  // Output mode only. Waits for the last CopyToConsumer upload, which may still be reading the host
+  // mirror. Call it before this session runs, since the run rewrites the mirror.
+  void WaitForUpload();
 
   // Prefill chunking support (input mode only): temporarily replaces the input embeddings
   // tensor with a non-owning view of the [offset, offset + length) slice along the sequence
@@ -49,19 +53,19 @@ struct Embeddings {
   std::unique_ptr<Tensor> embeddings_;
   std::unique_ptr<OrtValue> chunk_view_;  // Non-owning view into embeddings_ used during prefill chunking
 
-  // Output mode, cross-device pipelines only: buffer this session writes instead of the
-  // consumer's, plus the consumer buffer and its device to copy into afterwards. staging_ and
-  // consumer_ are null when the consumer's buffer is bound directly (the same-device case).
-  // consumer_ is only compared, never dereferenced: it dangles after the consumer's next
-  // UpdateSequenceLength, which creates the new tensor before freeing the old, so a new buffer
-  // always has a new address.
-  std::unique_ptr<OrtValue> staging_;
-  std::vector<int64_t> staging_shape_;
+  // Output mode, cross-device pipelines only: the consumer's buffer and device, wrapped once per
+  // buffer so that its host mirror (pinned memory on CUDA) lasts across decode steps, or once per
+  // step when the device recycles mirrors (recycle_mirror_). This session writes the mirror through
+  // host_view_ and CopyToConsumer uploads it. All null when the consumer's buffer is bound directly
+  // (the same-device case). consumer_ is only compared, never dereferenced: it dangles after the
+  // consumer's next UpdateSequenceLength, which creates the new tensor before freeing the old, so a
+  // new buffer always has a new address.
   OrtValue* consumer_{};
   DeviceInterface* consumer_device_{};
-  // Wrapped once per consumer buffer, not per token: on CUDA the consumer's wrapper owns the pinned
-  // host mirror the copy stages through, so rewrapping every step would allocate and free it each time.
-  DeviceSpan<uint8_t> staging_bytes_, consumer_bytes_;
+  DeviceSpan<uint8_t> consumer_bytes_;
+  std::unique_ptr<OrtValue> host_view_;
+  bool recycle_mirror_{};             // The next step takes a fresh mirror instead of reusing this one
+  DeviceInterface* upload_device_{};  // Set while the last upload may still be reading the mirror
 
   size_t index_{};
 };

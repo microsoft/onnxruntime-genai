@@ -381,10 +381,13 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   if (model_.config_->model.embedding.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.embedding.run_options.value());
   }
+  // The run rewrites the host mirrors, which the last uploads may still be reading.
+  inputs_embeds_.WaitForUpload();
+  if (per_layer_inputs_) per_layer_inputs_->WaitForUpload();
   State::Run(*model_.embedding_session_);
 
   // No-ops unless the decoder's buffers are on a device this session cannot write; then the
-  // outputs went to staging buffers that must be copied across.
+  // outputs went to those buffers' host mirrors, which must be uploaded.
   inputs_embeds_.CopyToConsumer();
   if (per_layer_inputs_) per_layer_inputs_->CopyToConsumer();
 
