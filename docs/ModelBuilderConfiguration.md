@@ -203,6 +203,14 @@ both spellings are present, `fuse_qkv` takes precedence. Fusion remains
 automatically disabled for unsupported execution providers and incompatible
 projection or quantization configurations.
 
+`target_options.optimizations.merge_shared_input_projections` (Qwen3.8 Flash Next
+only, default `false`) maps to the `merge_shared_input_projections` exporter option.
+It merges projections that read the same activation into one `MatMul` plus `Split`
+per group (linear-attention QKV/Z/A/B, sparse-attention QKV/gate/indexer, and the
+MoE router with the shared expert's gate/up). It requires dense, bias-free
+projections in an fp32, fp16 or bf16 export, applies to the decoder only, and
+rejects configurations it cannot merge rather than silently skipping them.
+
 `drafter_options.optimizations.fuse_qkv` (DFlash2 only, default `false`) maps to
 `dflash2_fuse_qkv`. Each layer stacks its query-block rows over the shared context
 rows and projects both with one Q/K/V projection whose gathered output feeds
@@ -877,6 +885,7 @@ target/drafter/runtime envelope.
 | `fuse_mlp_gate_up` | `target_options.optimizations.fuse_mlp_gate_up` |
 | `fuse_qkv` | `target_options.optimizations.fuse_qkv` |
 | `disable_qkv_fusion` | Deprecated inverse alias for `target_options.optimizations.fuse_qkv` |
+| `merge_shared_input_projections` | `target_options.optimizations.merge_shared_input_projections` |
 | `dflash2_fuse_gate_up` | `drafter_options.optimizations.fuse_mlp_gate_up` |
 | `dflash2_fuse_qkv` | `drafter_options.optimizations.fuse_qkv` |
 | `dspark_top_k` | `drafter_options.dspark.top_k` |

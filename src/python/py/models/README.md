@@ -505,6 +505,26 @@ python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_ou
 python builder.py -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true fuse_qkv=false
 ```
 
+#### Qwen3.8 Merged Shared-Input Projections
+
+The Qwen3.8 Flash Next decoder already emits packed QKV and Z, packed A/B gates, a combined hyper-connection down/inject projection, `qk_l2_norm=1`, FP32 `A_log`/`dt_bias` initializers, and a recurrent state in the GatedDeltaNet op layout. Set `merge_shared_input_projections=true` (or structured `target_options.optimizations.merge_shared_input_projections`) to also merge the projections that still read the same activation into one `MatMul` followed by `Split`:
+
+| Layer | Merged projections |
+|---|---|
+| GatedDeltaNet | QKV, Z, A and B (replacing the separate QKV/Z and A/B pairs) |
+| Sparse attention | packed Q/K/V, output gate and indexer Q/K (requires `fuse_qkv`, the default) |
+| MoE | router and the shared expert's gate and up |
+
+Each `Split` output keeps the name the unmerged `MatMul` output had, so no consumer changes and the model's inputs and outputs are identical. The shared expert's one-wide output gate stays separate because a width that is not a multiple of 8 would misalign the merged GEMM. The option defaults to `false`, applies to the decoder only (the MTP head is unchanged), and requires an fp32, fp16 or bf16 export with dense, bias-free projections; otherwise the export fails instead of silently skipping a group.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true merge_shared_input_projections=true
+
+# From source:
+python builder.py -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true merge_shared_input_projections=true
+```
+
 #### Build a DSpark Block Drafter
 
 Set `dspark_path` to a DSpark checkpoint to export an auxiliary `dspark.onnx` block drafter beside a Qwen3.5 or Qwen3.8 target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DSpark checkpoint. DSpark has no precision option of its own: its body is always BF16, and its embedding and LM head follow whatever format the target saved them in, adopted under the target's initializer names on the terms described for [DFlash 2](#build-a-dflash-2-block-drafter). `dspark_path` and `dflash2_path` are mutually exclusive, and selecting DSpark replaces rather than accompanies the target's MTP head.
