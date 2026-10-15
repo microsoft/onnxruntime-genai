@@ -297,7 +297,7 @@ void Qwen38GraphEngine::BuildFastPrefill() {
   fast->head_kv = model_.session_head_kv_.get();
   fast->dense_info.Add(*fast->dense);
   fast->head_kv_info.Add(*fast->head_kv);
-  fast->chunk = q.prefill.chunk;
+  fast->chunk = (q.prefill.chunk >= 2048) ? std::min<int>(std::max(q.prefill.chunk, 4096), capacity_) : q.prefill.chunk;
   fast->consts = model_.qsa_constants_.get();
   if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
   fast->dense_inputs = fast->dense->GetInputNames();
@@ -349,6 +349,11 @@ void Qwen38GraphEngine::FastReset() {
   fast_->states.clear();
   fast_->logits.reset();
   fast_->dense_length = 0;
+#if !defined(_WIN32)
+  setenv("ORT_QMOE_PREFILL_HANDOFF_DONE", "1", 1);
+  setenv("ORT_QMOE_PREFILL_NEW_TURN", "1", 1);
+  setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0", 1);
+#endif
 }
 
 // One call = whole chunk loop over `tokens`, continuing the dense state of earlier calls (chunked AppendTokens).
@@ -359,6 +364,19 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   if (n == 0) throw std::logic_error("qwen38_graph: empty prefill chunk");
   ledger_.RequireRoom(n, "the prompt", 3);
   const size_t base = ledger_.Length();
+  size_t total_expected = base + n;
+#if !defined(_WIN32)
+  if (base == 0) {
+    setenv("ORT_QMOE_PREFILL_NEW_TURN", "1", 1);
+  }
+  setenv("ORT_QMOE_PREFILL_HANDOFF_DONE", "0", 1);
+  if (const char* env_tot = std::getenv("ORT_QMOE_PREFILL_TOTAL_TOKENS")) {
+    const size_t parsed = static_cast<size_t>(std::strtoull(env_tot, nullptr, 10));
+    if (parsed > total_expected) total_expected = parsed;
+  }
+  const std::string total_str = std::to_string(total_expected);
+  setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", total_str.c_str(), 1);
+#endif
   {
     std::vector<int64_t> chunk(n);
     for (size_t i = 0; i < n; ++i) chunk[i] = tokens[i];
@@ -374,18 +392,17 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   for (size_t lo = 0; lo < n;) {
     const size_t pos = base + lo;  // == f.dense_length
     size_t max_m = static_cast<size_t>(f.chunk);
-    if (pos >= 16384 && max_m > 512) {
-      max_m = std::min<size_t>(max_m, 512);
-    } else if (pos >= 4096 && max_m > 1024) {
-      max_m = std::min<size_t>(max_m, 1024);
+    if (pos >= 16384 && max_m > 2048) {
+      max_m = std::min<size_t>(max_m, 2048);
     }
     const size_t m = std::min(max_m, n - lo);
 #if !defined(_WIN32)
-    // Phase- and context-dependent dynamic memory lending (v3 Section 8.4):
-    // Lend unused KV budget headroom to QMoE prefill compaction at short/medium context (<= 8k),
-    // and return it as KV state grows toward 32k.
+    // With Step 3 prefill memory lending:
+    // - At m <= 1024 (pos + m <= 2048): 0 layers lent, 128-expert compaction (4 passes) fits in free HBM.
+    // - At m == 2048 (pos + m <= 2048): 0 layers lent, 64-expert compaction (8 passes) fits in free HBM.
+    // - At pos + m > 2048 (up to 32k): 4,400-7,200 MiB lent, 128-expert compaction (4 passes) with double-buffered DMA.
     const char* compact_cap =
-        (pos + m <= 4096 && m <= 1024) ? "128" : (pos + m <= 8192 ? "64" : "16");
+        (pos + m <= 2048) ? (m <= 1024 ? "128" : "64") : "128";
     setenv("ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS", compact_cap, 1);
 #endif
     plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
@@ -544,6 +561,10 @@ void Qwen38GraphEngine::FastHandoff() {
   }
   f.states.clear();
   f.logits.reset();
+#if !defined(_WIN32)
+  setenv("ORT_QMOE_PREFILL_HANDOFF_DONE", "1", 1);
+  setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0", 1);
+#endif
 }
 
 // Batched head prompt prefill: KV-only head model over rows p = 1..P-1 = (token p, target hidden p-1) in chunks, written to

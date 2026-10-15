@@ -974,6 +974,12 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
 void Qwen38GraphEngine::Warmup() {
   // ORT captures a graph id after min_num_runs eager runs: touch every (rows, phase) and head direction enough times.
   // When CUDA graph capture is disabled (eager offload mode), 3 steps (6 tokens) suffice to warm up all 3 bank phases.
+#if !defined(_WIN32)
+  struct WarmupEnvGuard {
+    WarmupEnvGuard() { setenv("ORT_QMOE_IN_WARMUP", "1", 1); }
+    ~WarmupEnvGuard() { setenv("ORT_QMOE_IN_WARMUP", "0", 1); }
+  } warmup_guard;
+#endif
   const bool target_captures_graph = IsGraphCaptureEnabled(model_.config_->model.decoder.session_options);
   const int warm_tokens = target_captures_graph ? 48 : 6;
   std::vector<int32_t> dummy(warm_tokens);
