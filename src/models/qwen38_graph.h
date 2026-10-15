@@ -69,8 +69,10 @@ struct Qwen38WeightPool {
 // Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
 struct Qwen38QsaConstants {
   struct Set {
-    std::map<int, const uint8_t*> knorm;  // per QSA layer (bf16 [128])
-    const uint8_t* cos{};                 // bf16 [max_pos, width]
+    std::map<int, const uint8_t*> knorm;   // per QSA layer (bf16 [128])
+    std::map<int, const uint8_t*> kscale;  // per QSA layer (fp32 [512], optional for INT8/FP8 KV)
+    std::map<int, const uint8_t*> vscale;  // per QSA layer (fp32 [512], optional for INT8/FP8 KV)
+    const uint8_t* cos{};                  // bf16 [max_pos, width]
     const uint8_t* sin{};
     int width{};
   };
