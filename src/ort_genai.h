@@ -492,17 +492,6 @@ struct OgaTokenizerStream : OgaAbstract {
     return out;
   }
 
-  const OgaTokenMetadataOutput& DecodeWithMetadata(const OgaTokenMetadataInput& token) {
-    const OgaTokenMetadataOutput* out;
-    OgaCheckResult(OgaTokenizerStreamDecodeWithMetadata(this, &token, &out));
-    return *out;
-  }
-  const OgaTokenMetadataOutput& FinalizeMetadata() {
-    const OgaTokenMetadataOutput* out;
-    OgaCheckResult(OgaTokenizerStreamFinalizeMetadata(this, &out));
-    return *out;
-  }
-
   void Reset() { OgaCheckResult(OgaTokenizerStreamReset(this)); }
 
   static void operator delete(void* p) { OgaDestroyTokenizerStream(reinterpret_cast<OgaTokenizerStream*>(p)); }
@@ -623,14 +612,6 @@ struct OgaGenerator : OgaAbstract {
   }
 #endif
 
-  std::vector<OgaTokenMetadataInput> GetNextTokensWithMetadata() {
-    const OgaTokenMetadataInput* out;
-    size_t out_count;
-    OgaCheckResult(OgaGenerator_GetNextTokensWithMetadata(this, &out, &out_count));
-    if (out_count == 0) return {};
-    return {out, out + out_count};
-  }
-
   void RewindTo(size_t new_length) {
     OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
   }
@@ -694,6 +675,50 @@ struct OgaGenerator : OgaAbstract {
   }
 
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
+};
+
+struct OgaTokenPostProcessorTimestampRecord : OgaAbstract {
+  const char* GetText() const { return OgaTokenPostProcessorTimestampRecordGetText(this); }
+  int64_t GetStartFrame() const { return OgaTokenPostProcessorTimestampRecordGetStartFrame(this); }
+  int64_t GetStopFrame() const { return OgaTokenPostProcessorTimestampRecordGetStopFrame(this); }
+  double GetStartTime() const { return OgaTokenPostProcessorTimestampRecordGetStartTime(this); }
+  double GetStopTime() const { return OgaTokenPostProcessorTimestampRecordGetStopTime(this); }
+};
+
+struct OgaTokenPostProcessorResult : OgaAbstract {
+  const char* GetText() const { return OgaTokenPostProcessorResultGetText(this); }
+  bool HasTimestamps() const { return OgaTokenPostProcessorResultHasTimestamps(this); }
+  size_t GetWordCount() const { return OgaTokenPostProcessorResultGetWordCount(this); }
+  size_t GetSegmentCount() const { return OgaTokenPostProcessorResultGetSegmentCount(this); }
+  const OgaTokenPostProcessorTimestampRecord& GetWord(size_t index) const {
+    const auto* record = OgaTokenPostProcessorResultGetWord(this, index);
+    if (!record) throw std::out_of_range("Word index out of range");
+    return *record;
+  }
+  const OgaTokenPostProcessorTimestampRecord& GetSegment(size_t index) const {
+    const auto* record = OgaTokenPostProcessorResultGetSegment(this, index);
+    if (!record) throw std::out_of_range("Segment index out of range");
+    return *record;
+  }
+};
+
+struct OgaTokenPostProcessor : OgaAbstract {
+  static std::unique_ptr<OgaTokenPostProcessor> Create(const OgaModel& model, const OgaGenerator& generator) {
+    OgaTokenPostProcessor* processor;
+    OgaCheckResult(OgaCreateTokenPostProcessor(&model, &generator, &processor));
+    return std::unique_ptr<OgaTokenPostProcessor>(processor);
+  }
+  void ProcessNextTokens() { OgaCheckResult(OgaTokenPostProcessorProcessNextTokens(this)); }
+  void Finalize() { OgaCheckResult(OgaTokenPostProcessorFinalize(this)); }
+  void Reset() { OgaCheckResult(OgaTokenPostProcessorReset(this)); }
+  std::vector<const OgaTokenPostProcessorResult*> GetNextTokenResults() const {
+    std::vector<const OgaTokenPostProcessorResult*> results;
+    const size_t count = OgaTokenPostProcessorGetResultCount(this);
+    results.reserve(count);
+    for (size_t index = 0; index < count; ++index) results.push_back(OgaTokenPostProcessorGetResult(this, index));
+    return results;
+  }
+  static void operator delete(void* processor) { OgaDestroyTokenPostProcessor(reinterpret_cast<OgaTokenPostProcessor*>(processor)); }
 };
 
 struct OgaMtpGenerator : OgaAbstract {

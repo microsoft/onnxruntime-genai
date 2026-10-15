@@ -2,22 +2,6 @@ using System.Collections.Generic;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    /// <summary>An emitted token with an optional acoustic interval copied from a native record.</summary>
-    public sealed class TokenMetadataInput
-    {
-        internal TokenMetadataInput(NativeTokenMetadataInput token)
-        {
-            TokenId = token.TokenId;
-            if (token.HasTokenAcousticFrameInterval != 0)
-            {
-                var interval = token.TokenAcousticFrameInterval;
-                TokenAcousticFrameInterval = (interval.Start, interval.Stop);
-            }
-        }
-        public int TokenId { get; }
-        public (long start, long stop)? TokenAcousticFrameInterval { get; }
-    }
-
     /// <summary>A completed word or segment with frame bounds and times in seconds.</summary>
     public sealed class TokenMetadataTimestampRecord
     {
@@ -58,6 +42,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
         public string Text { get; }
         public TokenMetadataTimestamp TimestampMetadata { get; }
+        public TokenMetadataTimestamp GetTimestamps() { return TimestampMetadata; }
     }
 
 }

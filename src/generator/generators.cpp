@@ -4,11 +4,13 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include "token_outputs.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include "config_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/token_post_processor.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
@@ -973,32 +975,17 @@ void Generator::GenerateNextToken() {
   generation_telemetry_.OnTokenGenerated(active_token_count);
 }
 
-std::span<const OgaTokenMetadataInput> Generator::GetNextTokensWithMetadata() const {
-  // Pair each emitted ID with its model-provided interval without advancing generation.
-  next_tokens_with_metadata_.clear();
+TokenOutputs Generator::GetTokenOutputs() const {
   if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
     const auto tokens = transducer->GetStepTokens();
-    const bool timestamps_enabled = transducer->TimestampsEnabled();
-    const auto intervals = timestamps_enabled ? transducer->GetStepTokenIntervals() : std::span<const OgaTokenMetadataAcousticFrameInterval>{};
-    if (timestamps_enabled && intervals.size() != tokens.size())
+    const auto intervals = transducer->TimestampsEnabled()
+                               ? transducer->GetStepTokenIntervals()
+                               : std::span<const OgaTokenMetadataAcousticFrameInterval>{};
+    if (!intervals.empty() && intervals.size() != tokens.size())
       throw std::runtime_error("Generator timing count does not match emitted tokens");
-    next_tokens_with_metadata_.reserve(tokens.size());
-    for (size_t index = 0; index < tokens.size(); ++index) {
-      if (!timestamps_enabled) {
-        next_tokens_with_metadata_.push_back({tokens[index], 0, {}});
-      } else {
-        // The interval at this index was emitted with this token, not looked up by vocabulary ID.
-        next_tokens_with_metadata_.push_back({tokens[index], 1, intervals[index]});
-      }
-    }
-  } else {
-    // Ordinary search provides IDs but no acoustic frame positions.
-    const auto tokens = search_->GetNextTokens().CopyDeviceToCpu();
-    next_tokens_with_metadata_.reserve(tokens.size());
-    for (const auto token_id : tokens)
-      next_tokens_with_metadata_.push_back({token_id, 0, {}});
+    return {tokens, intervals};
   }
-  return next_tokens_with_metadata_;
+  return {search_->GetNextTokens().CopyDeviceToCpu(), {}};
 }
 
 SpeculativeStats Generator::GetSpeculativeStats() const {
