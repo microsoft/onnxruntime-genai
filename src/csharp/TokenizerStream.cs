@@ -27,18 +27,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public TokenMetadataOutput DecodeWithMetadata(TokenMetadataInput token)
         {
-            var timing = token.TokenAcousticFrameInterval;
-            var interval = new NativeTokenMetadataAcousticFrameInterval
-            {
-                Start = timing?.start ?? 0,
-                Stop = timing?.stop ?? 0,
-            };
-            var nativeToken = new NativeTokenMetadataInput
-            {
-                TokenId = token.TokenId,
-                HasTokenAcousticFrameInterval = timing.HasValue ? 1 : 0,
-                TokenAcousticFrameInterval = interval,
-            };
+            if (token == null) throw new ArgumentNullException(nameof(token));
+            var nativeToken = token.NativeToken;
             Result.VerifySuccess(NativeMethods.OgaTokenizerStreamDecodeWithMetadata(
                 _tokenizerStreamHandle, in nativeToken, out IntPtr result));
             return CopyMetadata(result);
@@ -78,7 +68,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             {
                 var record = Marshal.PtrToStructure<NativeTokenMetadataTimestampRecord>(IntPtr.Add(source, checked(index * stride)));
                 records[index] = new TokenMetadataTimestampRecord(
-                    StringUtils.FromUtf8(record.Text), record.StartFrame, record.StopFrame, record.StartTime, record.StopTime);
+                    StringUtils.FromUtf8(record.Text),
+                    record.HasTimestamp != 0 ? (long?)record.StartFrame : null,
+                    record.HasTimestamp != 0 ? (long?)record.StopFrame : null,
+                    record.HasTimestamp != 0 ? (double?)record.StartTime : null,
+                    record.HasTimestamp != 0 ? (double?)record.StopTime : null,
+                    record.SpeakerLabel != IntPtr.Zero ? StringUtils.FromUtf8(record.SpeakerLabel) : null);
             }
             return records;
         }

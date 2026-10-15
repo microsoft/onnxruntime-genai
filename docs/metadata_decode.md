@@ -18,7 +18,7 @@ while (!generator->IsDone()) {
 }
 ```
 
-For timestamps (`word`, `segment`, or `all`), the stream initializes metadata state
+For timestamps (`word` or `segment`) or diarization, the stream initializes metadata state
 from the tokenizer configuration when created. The generator returns each ID with
 an acoustic frame interval; Extensions
 returns decoded text and completed word token spans. The stream joins the spans
@@ -30,7 +30,7 @@ while (!generator->IsDone()) {
   generator->GenerateNextToken();
   const auto tokens = generator->GetNextTokensWithMetadata();
   for (const auto& token : tokens) {
-    const OgaTokenMetadataOutput& metadata = stream->DecodeWithMetadata(token);
+    const auto& metadata = stream->DecodeWithMetadata(token);
     ProcessText(metadata.text);
     if (metadata.timestampMetadata) {
       const auto& timestamps = *metadata.timestampMetadata;
@@ -54,10 +54,10 @@ callers need not unpack or interpret the metadata fields. Each record contains a
 `token_id` and optional `token_acoustic_frame_interval`, a pair of 64-bit integers
 ordered `(start, stop)`. The absolute acoustic frame interval is half-open
 `[start, stop)`; it is not restricted to one frame. When the generator's model
-timestamp level is `off`, the getter does not read or validate acoustic timing and
+timestamp level is `off` and diarization is disabled, the getter does not read or validate acoustic timing and
 marks it absent. Models without acoustic timing also return records without it.
-Timestamp-enabled decoding rejects absent timing before consuming the token;
-timestamp-disabled decoding accepts the record and skips timing retention.
+Timestamp- or diarization-enabled decoding rejects absent timing before consuming the token;
+fully disabled decoding accepts the record and skips timing retention.
 Plain `GetNextTokens()` still returns IDs only and is unchanged.
 
 The C getter `OgaGenerator_GetNextTokensWithMetadata` returns a borrowed array of
@@ -78,7 +78,8 @@ fields does not advance decoding.
 data contains `words`/`word_count` and `segments`/`segment_count`, with text, frame,
 and second intervals in each record. No per-field native getter calls are required.
 The C entry points are `OgaTokenizerStreamDecodeWithMetadata` and
-`OgaTokenizerStreamFinalizeMetadata`. C# returns `TokenMetadataOutput` with `Text` and nullable
+`OgaTokenizerStreamFinalizeMetadata` for both timestamps and diarization.
+C# returns `TokenMetadataOutput` with `Text` and nullable
 `TokenMetadataTimestamp`. Python returns an owned `TokenMetadataOutput` with `.text` and
 `.timestamp_metadata` (None when disabled); the timestamp object contains `.words` and
 `.segments` lists of `TokenMetadataTimestampRecord` objects. Words and segments remain
@@ -99,7 +100,7 @@ factor. Configuration is copied into the state and stays fixed until reset.
 Metadata state creation configures the stream's Extensions cache through
 `OrtxSetDetokenizerCacheMetadataConfig`. This overrides shared tokenizer metadata
 options only for that cache. Streams sharing a tokenizer have independent
-accumulators and decoder caches. Disabled timestamps do not buffer
+accumulators and decoder caches. When timestamps and diarization are both disabled, streams do not buffer
 token intervals or accumulate words and segments, return a null
 `timestampMetadata`, and impose no timing requirement.
 
@@ -111,7 +112,7 @@ post-processing before returning. Generator-specific retrieval belongs to
 `GetNextTokensWithMetadata()`, not the tokenizer. Callers pass the records to decoding
 in order, keeping independent sequences in separate streams.
 Creating metadata state does not enable timing collection in an existing generator;
-configure the model's timestamp level before creating the generator.
+configure the model's timestamp/diarization options before creating the generator.
 
 The stream has one metadata decoder and one finalizer, both using its owned state.
 Decode validates the selected token and timing before advancing Extensions, then
@@ -150,7 +151,7 @@ return null data, while ordinary decoded text remains available. `Reset()` resto
 the tokenizer defaults. The first decode or
 metadata finalization chooses a mode; switching modes afterward requires another reset.
 
-Public native `OgaTokenMetadataOutput` and all nested pointers are stream-owned until the next
+Public native metadata outputs and all nested pointers are stream-owned until the next
 decode/finalize/reset or destruction. Python and C# copy them into owned snapshots.
 The C-compatible field layouts are the contract; use compatible headers and native
 packages. Never free borrowed result pointers.
@@ -164,7 +165,7 @@ through the stream's public API.
 
 ```csharp
 using var config = new Config(modelPath);
-config.Overlay(@"{""model"":{""timestamp_level"":""all"",
+config.Overlay(@"{""model"":{""timestamp_level"":""segment"",
   ""segment_separators"":[""."",""!"",""?""],
   ""segment_gap_threshold_seconds"":0.26}}");
 using var tokenizer = new Tokenizer(config);
@@ -172,8 +173,8 @@ using var stream = tokenizer.CreateStream();
 ```
 
 The tokenizer reads `sample_rate`, `hop_length`, and `subsampling_factor` from
-`model` in the package's `genai_config.json`. Levels are `off`, `word`, `segment`,
-and `all`; the default is `off`. The optional gap is specified in non-negative
+`model` in the package's `genai_config.json`. Levels are `off`, `word`, and `segment`;
+`all` is rejected. The default is `off`. The optional gap is specified in non-negative
 seconds (or `null` to disable it), then rounded to the nearest acoustic frame.
 Zero and positive gaps below half a frame split each word into its own segment.
 The model's default separators are `.`, `?`, and `!`. A model that requests timestamps
@@ -192,3 +193,39 @@ feature-specific stream decode method or runtime registry is required.
 This workflow requires Extensions with the per-cache configuration API. The local
 integration build uses the modified Extensions checkout; the packaged dependency
 revision must be updated once that API is committed and available.
+
+## Speaker attribution
+
+The token record includes a presence flag and inline speaker-evidence boundary
+snapshots: eight cumulative probability sums at the start and stop boundaries,
+plus their evaluated-frame counts. Tokens still decode once. Zero-token audio
+chunks contribute internally; they require no metadata-only input or drain call.
+`MetadataCoreState` retains evidence with token intervals until Extensions' pending
+token watermark releases it. Extensions' `TokenizerDiarization` class provides
+speaker aggregation and speaker-change detection. Its methods are stateless;
+buffer ownership remains in `MetadataCoreState`. Timestamp-only segment helpers
+remain separate, and there is no additional metadata-state lifecycle.
+
+Speaker evidence is validated before advancing the decoder. Validation checks
+finite, non-negative cumulative probability sums, valid evaluated-frame counts,
+and nondecreasing snapshots across the entire stream. The last accepted snapshot
+is retained independently of pending word buffers, so completing/finalizing a
+word does not lose ordering validation. Equal snapshots are valid for repeated
+tokens on one frame; zero-token chunks may advance later snapshots. `Reset`
+clears this reference for a new stream. Validation does not compute a discarded
+speaker assignment.
+
+Output records include `has_timestamp` and nullable `speaker_label`. Diarization
+with timestamps off returns speaker-turn segments under the same metadata member,
+with timing absent. Python timing fields become `None`, and C# timing fields become
+nullable; labels are `.speaker_label` and `.SpeakerLabel`. Do not interpret zero
+native timing values as presence: inspect `has_timestamp`.
+
+There is one metadata contract for all feature combinations. The original C
+records include the speaker-evidence, timestamp-presence, and speaker-label
+fields; their layouts differ from the timestamp-only draft. Rebuild native callers
+against matching headers and binaries, and upgrade managed bindings together
+with the native library. No runtime layout negotiation or legacy conversion is provided.
+
+See [Nemotron streaming diarization](nemotron_speech_timestamps.md#streaming-diarization)
+for graph requirements, shared VAD, right-context, and finalization.

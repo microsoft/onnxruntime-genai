@@ -732,6 +732,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator
 
 OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithMetadata(const OgaGenerator* generator, const OgaTokenMetadataInput** out, size_t* out_count) {
   OGA_TRY
+  if (!generator || !out || !out_count) throw std::runtime_error("Generator and metadata outputs must not be null");
   const auto tokens = generator->GetNextTokensWithMetadata();
   *out = tokens.data();
   *out_count = tokens.size();
@@ -1206,6 +1207,7 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t 
 OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadata(
     OgaTokenizerStream* stream, const OgaTokenMetadataInput* token, const OgaTokenMetadataOutput** out) {
   OGA_TRY
+  if (!stream || !token || !out) throw std::runtime_error("Metadata arguments must not be null");
   *out = &stream->DecodeWithMetadata(*token);
   return nullptr;
   OGA_CATCH
@@ -1213,6 +1215,7 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadata(
 
 OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadata(OgaTokenizerStream* stream, const OgaTokenMetadataOutput** out) {
   OGA_TRY
+  if (!stream || !out) throw std::runtime_error("Metadata arguments must not be null");
   *out = &stream->FinalizeMetadata();
   return nullptr;
   OGA_CATCH

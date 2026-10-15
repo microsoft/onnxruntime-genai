@@ -48,7 +48,7 @@ TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
 }
 
 void TokenizerStream::InitializeDefaultMetadataState() {
-  if (tokenizer_->metadata_config_.timestamps.level != Config::TimestampLevel::Off) {
+  if (tokenizer_->metadata_config_.timestamps.level != Config::TimestampLevel::Off || tokenizer_->metadata_config_.diarization) {
     EnsureMetadataState();
   }
 }
@@ -56,7 +56,7 @@ void TokenizerStream::InitializeDefaultMetadataState() {
 void TokenizerStream::EnsureMetadataState() {
   if (metadata_state_) return;
   auto state = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(tokenizer_->metadata_config_));
-  const OrtxMetadataConfig producer_config{state->TimestampsEnabled()};
+  const OrtxMetadataConfig producer_config{state->AlignmentEnabled()};
   CheckResult(OrtxSetDetokenizerCacheMetadataConfig(cache_, &producer_config));
   metadata_state_ = std::move(state);
 }
@@ -127,8 +127,9 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
                                              eor_token_id_{config.model.eor_token_id} {
   // Default tokenizer options
   const bool timestamps_enabled = config.model.timestamp_level != Config::TimestampLevel::Off;
+  const bool alignment_enabled = timestamps_enabled || config.model.diarization.Enabled();
   const char* keys[] = {"add_special_tokens", "skip_special_tokens", "track_timestamp_metadata"};
-  const char* values[] = {"false", "true", timestamps_enabled ? "true" : "false"};
+  const char* values[] = {"false", "true", alignment_enabled ? "true" : "false"};
 
   // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
@@ -140,6 +141,7 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
                                                          config.model.sample_rate,
                                                          config.model.hop_length,
                                                          config.model.subsampling_factor};
+  metadata_config_.diarization = config.model.diarization.Enabled();
 
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback.

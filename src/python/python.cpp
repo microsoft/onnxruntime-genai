@@ -320,10 +320,11 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
 
 struct PyTokenMetadataTimestampRecord {
   std::string text;
-  int64_t start_frame;
-  int64_t stop_frame;
-  double start_time;
-  double stop_time;
+  std::optional<int64_t> start_frame;
+  std::optional<int64_t> stop_frame;
+  std::optional<double> start_time;
+  std::optional<double> stop_time;
+  std::optional<std::string> speaker_label;
 };
 
 struct PyTokenMetadataTimestamp {
@@ -345,7 +346,12 @@ PyTokenMetadataOutput ToMetadata(const OgaTokenMetadataOutput& result) {
     records.reserve(count);
     for (size_t index = 0; index < count; ++index) {
       const auto& value = source[index];
-      records.push_back({value.text, value.start_frame, value.stop_frame, value.start_time, value.stop_time});
+      records.push_back({value.text,
+          value.has_timestamp ? std::optional<int64_t>{value.start_frame} : std::nullopt,
+          value.has_timestamp ? std::optional<int64_t>{value.stop_frame} : std::nullopt,
+          value.has_timestamp ? std::optional<double>{value.start_time} : std::nullopt,
+          value.has_timestamp ? std::optional<double>{value.stop_time} : std::nullopt,
+          value.speaker_label ? std::optional<std::string>{value.speaker_label} : std::nullopt});
     }
     return records;
   };
@@ -538,7 +544,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            pybind11::arg("enable_ff_tokens") = false)
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
-  pybind11::class_<OgaTokenMetadataInput>(m, "TokenMetadataInput", "Emitted token with an optional acoustic interval stored by value.")
+  pybind11::class_<OgaTokenMetadataInput>(m, "TokenMetadataInput", "Emitted token with acoustic alignment and optional speaker evidence stored by value.")
       .def_readonly("token_id", &OgaTokenMetadataInput::token_id)
       .def_property_readonly("token_acoustic_frame_interval", [](const OgaTokenMetadataInput& token) -> std::optional<std::pair<int64_t, int64_t>> {
         if (!token.has_token_acoustic_frame_interval) return std::nullopt;
@@ -550,7 +556,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readonly("start_frame", &PyTokenMetadataTimestampRecord::start_frame)
       .def_readonly("stop_frame", &PyTokenMetadataTimestampRecord::stop_frame)
       .def_readonly("start_time", &PyTokenMetadataTimestampRecord::start_time)
-      .def_readonly("stop_time", &PyTokenMetadataTimestampRecord::stop_time);
+      .def_readonly("stop_time", &PyTokenMetadataTimestampRecord::stop_time)
+      .def_readonly("speaker_label", &PyTokenMetadataTimestampRecord::speaker_label);
 
   pybind11::class_<PyTokenMetadataTimestamp>(m, "TokenMetadataTimestamp")
       .def_readonly("words", &PyTokenMetadataTimestamp::words)

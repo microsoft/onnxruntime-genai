@@ -7,6 +7,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         internal TokenMetadataInput(NativeTokenMetadataInput token)
         {
+            NativeToken = token;
             TokenId = token.TokenId;
             if (token.HasTokenAcousticFrameInterval != 0)
             {
@@ -16,24 +17,27 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
         public int TokenId { get; }
         public (long start, long stop)? TokenAcousticFrameInterval { get; }
+        internal NativeTokenMetadataInput NativeToken { get; }
     }
 
     /// <summary>A completed word or segment with frame bounds and times in seconds.</summary>
     public sealed class TokenMetadataTimestampRecord
     {
-        internal TokenMetadataTimestampRecord(string text, long startFrame, long stopFrame, double startTime, double stopTime)
+        internal TokenMetadataTimestampRecord(string text, long? startFrame, long? stopFrame, double? startTime, double? stopTime, string speakerLabel)
         {
             Text = text;
             StartFrame = startFrame;
             StopFrame = stopFrame;
             StartTime = startTime;
             StopTime = stopTime;
+            SpeakerLabel = speakerLabel;
         }
         public string Text { get; }
-        public long StartFrame { get; }
-        public long StopFrame { get; }
-        public double StartTime { get; }
-        public double StopTime { get; }
+        public long? StartFrame { get; }
+        public long? StopFrame { get; }
+        public double? StartTime { get; }
+        public double? StopTime { get; }
+        public string SpeakerLabel { get; }
     }
 
     /// <summary>Word and segment events completed by a single decode or finalize call.</summary>

@@ -28,6 +28,7 @@ struct TimestampTokenizerConfig {
 // Model-derived metadata options copied into each stream.
 struct MetadataCoreConfig {
   TimestampTokenizerConfig timestamps;
+  bool diarization{};
 };
 
 // Owned exclusively by TokenizerStream; never exposed to API callers.
@@ -39,15 +40,16 @@ class MetadataCoreState {
   MetadataCoreState(const MetadataCoreState&) = delete;
   MetadataCoreState& operator=(const MetadataCoreState&) = delete;
   bool TimestampsEnabled() const { return config_.timestamps.level != Config::TimestampLevel::Off; }
+  bool AlignmentEnabled() const { return TimestampsEnabled() || config_.diarization; }
   void ValidateInput(const OgaTokenMetadataInput& token) const;
   const OgaTokenMetadataOutput& ProcessDecoded(const OgaTokenMetadataInput& token, const char* text, const OrtxMetadata& metadata);
   const OgaTokenMetadataOutput& ProcessFinalized(const OrtxMetadata& metadata);
   void BeginResult(const char* text);
   void ConsumeCompletedWords(const OrtxTimestampMetadata& metadata);
-  void PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval);
+  void PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval, int speaker);
   void CompleteSegment();
   void AddRecord(std::vector<OgaTokenMetadataTimestampRecord>& records, std::string_view text,
-                 OgaTokenMetadataAcousticFrameInterval interval);
+                 OgaTokenMetadataAcousticFrameInterval interval, int speaker);
   const OgaTokenMetadataOutput& PublishResult();
 
   const MetadataCoreConfig config_;
@@ -55,10 +57,12 @@ class MetadataCoreState {
   std::optional<int> segment_gap_threshold_frames_;
   double seconds_per_frame_{};
   // Extensions supplies completed-word token indices; keep intervals until its watermark releases them.
-  std::deque<OgaTokenMetadataAcousticFrameInterval> pending_token_intervals_;
+  std::deque<OgaTokenMetadataInput> pending_tokens_;
+  std::optional<OgaTokenMetadataSpeakerEvidence> last_speaker_evidence_;
   size_t first_pending_token_index_{};
   std::optional<std::string> pending_segment_text_;
   OgaTokenMetadataAcousticFrameInterval pending_segment_interval_{};
+  int pending_segment_speaker_{-1};
   // C records borrow text from this per-call storage until the next stream operation.
   std::deque<std::string> record_texts_;
   std::vector<OgaTokenMetadataTimestampRecord> word_records_;

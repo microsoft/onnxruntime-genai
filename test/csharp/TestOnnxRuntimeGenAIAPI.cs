@@ -622,7 +622,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             Assert.NotNull(_tinyRandomGpt2ModelPath);
             using var config = new Config(_tinyRandomGpt2ModelPath);
-            config.Overlay("{\"model\":{\"type\":\"nemotron_speech\",\"timestamp_level\":\"all\",\"sample_rate\":100,\"hop_length\":10,\"subsampling_factor\":1}}");
+            config.Overlay("{\"model\":{\"type\":\"nemotron_speech\",\"timestamp_level\":\"word\",\"sample_rate\":100,\"hop_length\":10,\"subsampling_factor\":1}}");
             using var tokenizer = new Tokenizer(config);
             using var stream = tokenizer.CreateStream();
             var result = stream.FinalizeMetadata();
