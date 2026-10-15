@@ -158,6 +158,7 @@ struct NemotronSpeechModel : Model {
   std::unique_ptr<OrtSession> session_diarization_;
   std::unique_ptr<OrtSessionOptions> diarization_session_options_;
   DeviceInterface* diarization_device_{};
+  SessionInfo diarization_session_info_;
 
   std::unique_ptr<OrtSessionOptions> encoder_session_options_;
   std::unique_ptr<OrtSessionOptions> decoder_session_options_;

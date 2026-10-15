@@ -206,6 +206,15 @@ speaker aggregation and speaker-change detection. Its methods are stateless;
 buffer ownership remains in `MetadataCoreState`. Timestamp-only segment helpers
 remain separate, and there is no additional metadata-state lifecycle.
 
+Speaker evidence is validated before advancing the decoder. Validation checks
+finite, non-negative cumulative probability sums, valid evaluated-frame counts,
+and nondecreasing snapshots across the entire stream. The last accepted snapshot
+is retained independently of pending word buffers, so completing/finalizing a
+word does not lose ordering validation. Equal snapshots are valid for repeated
+tokens on one frame; zero-token chunks may advance later snapshots. `Reset`
+clears this reference for a new stream. Validation does not compute a discarded
+speaker assignment.
+
 Output records include `has_timestamp` and nullable `speaker_label`. Diarization
 with timestamps off returns speaker-turn segments under the same metadata member,
 with timing absent. Python timing fields become `None`, and C# timing fields become

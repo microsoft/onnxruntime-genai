@@ -194,22 +194,66 @@ Add a `diarization` block to the ASR package configuration:
 
 Keep external ONNX weights beside their graph. Relative filenames are resolved from
 the ASR configuration directory. A nonempty filename enables diarization; omitting
-the block disables it. `right_context` defaults to 4 and accepts integer values
-from 0 through 264, measured in 80 ms encoder frames. The graph must support the
-chosen window. Session/run options use the existing GenAI options schema.
+the block disables it. `right_context` is a non-negative count of additional
+diarization encoder frames, not milliseconds or input mel frames. Its default of
+4 means **320 ms total**, because each default encoder frame represents 80 ms.
+Session/run options use the existing GenAI options schema.
+
+The block declares the export's preprocessing and temporal geometry:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `sample_rate` | 16000 | Audio samples per second; must match ASR |
+| `num_mels` | 128 | Mel bins; must match the graph's feature dimension |
+| `fft_size` | 512 | STFT FFT size in samples |
+| `win_length` | 400 | STFT window size in samples; positive and no larger than FFT |
+| `hop_length` | 160 | Samples per feature frame and output probability frame |
+| `subsampling_factor` | 8 | Feature frames per diarization encoder frame |
+| `preemph` | 0.97 | Finite pre-emphasis coefficient |
+| `log_eps` | 5.96046448e-8 | Positive finite log-mel guard |
+| `right_context` | 4 | Additional encoder frames |
+
+Defaults describe the supplied Nemotron-3 checkpoint. Other values require an
+export/checkpoint trained for the declared preprocessing; changing configuration
+does not alter learned weights or graph-internal feature stacking. These temporal
+and preprocessing values cannot be inferred from ONNX input dimensions alone.
+Declare them from the export's preprocessing/model configuration. ASR and
+diarization may use different feature extractors while evaluating the same samples.
+
+Conversions are derived rather than hardcoded:
+
+```text
+diarization encoder stride = hop_length * subsampling_factor samples
+right-context duration = right_context * encoder stride / sample_rate seconds
+probability frames per ASR frame = ASR acoustic stride / diarization hop_length
+```
+
+The last ratio must be a positive integer, and central `chunk_samples` must be a
+positive multiple of both encoder strides. Sample rates must match. Right-context
+is not limited by FIFO capacity; it must fit supported feature tensor dimensions
+and the chosen export's operating limits.
 
 This integration supports the stateful Nemotron-3 export with `input_features`,
 `num_lookahead_frames`, six `past_*` state inputs, `speaker_probs`, and six
-`present_*` state outputs. Cache/FIFO capacities are 264, embedding size is 512,
-and there are eight speakers. Cache updates and compression remain inside ONNX.
+`present_*` state outputs. The runtime derives fixed cache/FIFO capacities and
+embedding size from the graph, checks input/output compatibility and types, and
+requires eight speaker channels. The supplied graph has capacities of 264 and
+embedding size 512; these are not universal runtime constants. Cache updates and compression remain inside ONNX.
 The offline single-input export is not supported.
 
-The ASR package must use 16 kHz mono audio, 128 mel bins, FFT 512, window 400,
-hop 160, and subsampling 8. Chunk size must be a positive multiple of 1280 samples.
 ASR drives central chunking; the same processor provides additional future audio
-only to diarization. With 560 ms chunks and four right-context frames, initial
+only to diarization. With default geometry, 560 ms chunks and four right-context frames, initial
 buffering is 880 ms plus 16 ms STFT context, excluding compute time. Future audio
-is not committed twice and does not advance the ASR feature cache.
+is not committed twice and does not advance the ASR feature cache. At EOF only
+available complete encoder frames are used for look-ahead; missing future audio
+does not increase the declared right-context.
+
+The diarization sub-state follows the existing encoder pattern: `SetFeaturesInput`
+binds the feature tensor and look-ahead, and `Run` executes inference, adopts
+returned cache tensors, and builds probability boundary sums.
+`GetTokenSpeakerEvidence(local_asr_frame)` returns cumulative boundary sums/counts
+for one chunk-local ASR encoder frame. It does not run inference or select a
+speaker, and includes one ASR frame of left context.
 
 VAD gates both central inference branches. Dropped audio advances absolute time,
 but does not advance probability sums or cache state. Future audio may influence
@@ -218,7 +262,7 @@ no tokens still update speaker state and probability sums.
 
 Use the same `GetNextTokensWithMetadata` and `DecodeWithMetadata` loop as timestamps.
 Tokens carry cumulative sum/count snapshots by value. Extensions averages the
-word's evaluated 10 ms frames, includes a one-ASR-frame left shift, clamps scores
+word's evaluated probability frames (10 ms with default geometry), includes a one-ASR-frame left shift, clamps scores
 to at least 0.01, normalizes, and assigns the first maximum as `speaker_0` through
 `speaker_7`. Labels are recording-local, not persistent person identities.
 

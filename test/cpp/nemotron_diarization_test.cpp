@@ -29,7 +29,38 @@ TEST(NemotronDiarization, ConfigurationRequiresAlignedGeometry) {
   m.chunk_samples = 8961;
   EXPECT_THROW(Generators::ValidateTimestampConfiguration(m), std::runtime_error);
   m.chunk_samples = 8960;
+  m.hop_length = 161;
+  EXPECT_THROW(Generators::ValidateTimestampConfiguration(m), std::runtime_error);
+}
+
+TEST(NemotronDiarization, ConfigurationUsesDeclaredGeometry) {
+  Generators::Config config;
+  auto& m = config.model;
+  m.type = "nemotron_speech";
+  m.sample_rate = 8000;
   m.hop_length = 80;
+  m.subsampling_factor = 4;
+  m.chunk_samples = 4480;
+  m.diarization.filename = "compatible-export.onnx";
+  auto& diar = m.diarization;
+  diar.sample_rate = 8000;
+  diar.hop_length = 40;
+  diar.subsampling_factor = 4;
+  diar.num_mels = 64;
+  diar.fft_size = 256;
+  diar.win_length = 200;
+  diar.preemph = 0.95f;
+  diar.log_eps = 1e-7f;
+  diar.right_context = 300;  // Look-ahead is not bounded by FIFO capacity.
+  EXPECT_NO_THROW(Generators::ValidateTimestampConfiguration(m));
+  EXPECT_EQ(diar.SamplesPerEncoderFrame(), 160);
+  diar.sample_rate = 16000;
+  EXPECT_THROW(Generators::ValidateTimestampConfiguration(m), std::runtime_error);
+  diar.sample_rate = 8000;
+  diar.hop_length = 30;
+  EXPECT_THROW(Generators::ValidateTimestampConfiguration(m), std::runtime_error);
+  diar.hop_length = 40;
+  diar.log_eps = 0;
   EXPECT_THROW(Generators::ValidateTimestampConfiguration(m), std::runtime_error);
 }
 
@@ -168,14 +199,25 @@ TEST(NemotronDiarization, StreamingGraphStateAndLookahead) {
       model->config_->model.decoder.session_options, *speech.diarization_session_options_, true, true);
   speech.session_diarization_ = OrtSession::Create(Generators::GetOrtEnv(),
                                                    (fs::path{diarization} / "model.onnx").c_str(), speech.diarization_session_options_.get());
+  speech.diarization_session_info_.Add(*speech.session_diarization_);
+  auto mismatched = model->config_->model;
+  mismatched.diarization.num_mels = 64;
+  EXPECT_THROW(Generators::ValidateNemotronDiarizationGraph(mismatched, speech.diarization_session_info_),
+               std::runtime_error);
   auto params = Generators::CreateGeneratorParams(*model);
   Generators::NemotronDiarizationState state{speech, *params};
+  Generators::DeviceSpan<int32_t> no_tokens;
+  EXPECT_THROW(state.Run(0, no_tokens), std::runtime_error);
+  EXPECT_THROW(state.GetTokenSpeakerEvidence(0), std::runtime_error);
   auto features = OrtValue::CreateTensor<float>(model->allocator_cpu_, std::array<int64_t, 3>{1, 128, 88});
   std::fill_n(features->GetTensorMutableData<float>(), 128 * 88, -10.0f);
+  EXPECT_THROW(state.SetFeaturesInput(*features, -1), std::runtime_error);
+  EXPECT_THROW(state.SetFeaturesInput(*features, 5), std::runtime_error);
   for (int step = 0; step < 80; ++step) {
-    state.Process(*features, 4);
-    auto first = state.Evidence(0);
-    auto last = state.Evidence(6);
+    state.SetFeaturesInput(*features, 4);
+    state.Run(0, no_tokens);
+    auto first = state.GetTokenSpeakerEvidence(0);
+    auto last = state.GetTokenSpeakerEvidence(6);
     EXPECT_EQ(last.stop_frame_count, (step + 1) * 56);
     EXPECT_EQ(first.start_frame_count, step == 0 ? 0 : step * 56 - 8);
     EXPECT_NO_THROW(ort_extensions::TokenizerDiarization::AggregateWordSpeaker(first.start_probability_sums, last.stop_probability_sums,
@@ -184,8 +226,28 @@ TEST(NemotronDiarization, StreamingGraphStateAndLookahead) {
   EXPECT_TRUE(*state.GetInput("past_is_compressed")->GetTensorData<bool>());
   EXPECT_EQ(*state.GetInput("past_num_cache_frames")->GetTensorData<int64_t>(), 264);
   state.Reset();
-  state.Process(*features, 4);
-  EXPECT_EQ(state.Evidence(0).start_frame_count, 0);
+  state.SetFeaturesInput(*features, 4);
+  state.Run(0, no_tokens);
+  EXPECT_EQ(state.GetTokenSpeakerEvidence(0).start_frame_count, 0);
+  EXPECT_THROW(state.Run(0, no_tokens), std::runtime_error);
+  EXPECT_THROW(state.GetTokenSpeakerEvidence(7), std::runtime_error);
+
+  // A different aligned ASR stride changes boundary selection, not ONNX output resolution.
+  const auto original_hop = model->config_->model.hop_length;
+  const auto original_subsampling = model->config_->model.subsampling_factor;
+  model->config_->model.hop_length = 80;
+  model->config_->model.subsampling_factor = 4;
+  Generators::NemotronDiarizationState finer_asr{speech, *params};
+  finer_asr.SetFeaturesInput(*features, 4);
+  finer_asr.Run(0, no_tokens);
+  EXPECT_EQ(finer_asr.GetTokenSpeakerEvidence(6).start_frame_count, 10);
+  EXPECT_EQ(finer_asr.GetTokenSpeakerEvidence(6).stop_frame_count, 14);
+  finer_asr.SetFeaturesInput(*features, 4);
+  finer_asr.Run(0, no_tokens);
+  EXPECT_EQ(finer_asr.GetTokenSpeakerEvidence(0).start_frame_count, 54);
+  model->config_->model.hop_length = original_hop;
+  model->config_->model.subsampling_factor = original_subsampling;
+
   Generators::NemotronStreamingProcessor processor{*model};
   processor.SetOption("use_vad", "false");
   const size_t chunk = static_cast<size_t>(speech.nemotron_config_.chunk_samples);
@@ -212,4 +274,51 @@ TEST(NemotronDiarization, StreamingGraphStateAndLookahead) {
     ASSERT_NE(resumed, nullptr);
     EXPECT_EQ(*resumed->at("chunk_start_sample")->GetData<int64_t>(), static_cast<int64_t>(chunk));
   }
+}
+
+TEST(NemotronDiarization, EvidenceOrderingSurvivesReleasedWordsAndReset) {
+  Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
+  config.model.type = "nemotron_speech";
+  config.model.timestamp_level = Generators::Config::TimestampLevel::Word;
+  config.model.diarization.filename = "unused.onnx";
+  config.model.sample_rate = 100;
+  config.model.hop_length = 10;
+  config.model.subsampling_factor = 1;
+  auto stream = std::make_shared<Generators::Tokenizer>(config)->CreateStream();
+  OgaTokenMetadataInput token{42, 1, {4, 5}, 1, {}};
+  token.speaker_evidence.start_frame_count = 4;
+  token.speaker_evidence.stop_frame_count = 5;
+  token.speaker_evidence.start_probability_sums[0] = 2;
+  token.speaker_evidence.stop_probability_sums[0] = 3;
+  stream->DecodeWithMetadata(token);
+  EXPECT_EQ(stream->FinalizeMetadata().timestampMetadata->word_count, 1U);
+
+  // A fully released word must not erase the stream's previous snapshot.
+  auto backwards_count = token;
+  backwards_count.speaker_evidence.start_frame_count = 3;
+  backwards_count.speaker_evidence.stop_frame_count = 4;
+  EXPECT_THROW(stream->DecodeWithMetadata(backwards_count), std::runtime_error);
+  auto backwards_sum = token;
+  backwards_sum.speaker_evidence.start_probability_sums[0] = 1;
+  backwards_sum.speaker_evidence.stop_probability_sums[0] = 2;
+  EXPECT_THROW(stream->DecodeWithMetadata(backwards_sum), std::runtime_error);
+  auto changed_same_frame = token;
+  changed_same_frame.speaker_evidence.start_probability_sums[0] = 2.5;
+  changed_same_frame.speaker_evidence.stop_probability_sums[0] = 3.5;
+  EXPECT_THROW(stream->DecodeWithMetadata(changed_same_frame), std::runtime_error);
+
+  // Multiple tokens from one acoustic frame can share identical snapshots.
+  EXPECT_NO_THROW(stream->DecodeWithMetadata(token));
+  EXPECT_EQ(stream->FinalizeMetadata().timestampMetadata->word_count, 1U);
+
+  // Frames with no tokens can advance counts and sums before the next token.
+  token.speaker_evidence.start_frame_count = 9;
+  token.speaker_evidence.stop_frame_count = 10;
+  token.speaker_evidence.start_probability_sums[0] = 4;
+  token.speaker_evidence.stop_probability_sums[0] = 5;
+  EXPECT_NO_THROW(stream->DecodeWithMetadata(token));
+  EXPECT_EQ(stream->FinalizeMetadata().timestampMetadata->word_count, 1U);
+
+  stream->Reset();
+  EXPECT_NO_THROW(stream->DecodeWithMetadata(backwards_count));
 }

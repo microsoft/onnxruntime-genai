@@ -58,6 +58,7 @@ class MetadataCoreState {
   double seconds_per_frame_{};
   // Extensions supplies completed-word token indices; keep intervals until its watermark releases them.
   std::deque<OgaTokenMetadataInput> pending_tokens_;
+  std::optional<OgaTokenMetadataSpeakerEvidence> last_speaker_evidence_;
   size_t first_pending_token_index_{};
   std::optional<std::string> pending_segment_text_;
   OgaTokenMetadataAcousticFrameInterval pending_segment_interval_{};

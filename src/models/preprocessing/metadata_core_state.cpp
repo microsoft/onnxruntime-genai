@@ -52,17 +52,23 @@ void MetadataCoreState::ValidateInput(const OgaTokenMetadataInput& token) const 
     if (!token.has_speaker_evidence)
       throw std::runtime_error("Enabled diarization requires generation speaker evidence");
     const auto& evidence = token.speaker_evidence;
-    (void)ort_extensions::TokenizerDiarization::AggregateWordSpeaker(evidence.start_probability_sums, evidence.stop_probability_sums,
-                                                                     evidence.start_frame_count, evidence.stop_frame_count);
-    if (!pending_tokens_.empty()) {
-      const auto& previous = pending_tokens_.back().speaker_evidence;
+    ort_extensions::TokenizerDiarization::ValidateSpeakerEvidence(evidence.start_probability_sums, evidence.stop_probability_sums,
+                                                                  evidence.start_frame_count, evidence.stop_frame_count);
+    if (last_speaker_evidence_) {
+      const auto& previous = *last_speaker_evidence_;
       if (evidence.start_frame_count < previous.start_frame_count ||
           evidence.stop_frame_count < previous.stop_frame_count)
         throw std::runtime_error("Speaker evidence must follow token emission order");
-      for (size_t speaker = 0; speaker < 8; ++speaker)
+      for (size_t speaker = 0; speaker < 8; ++speaker) {
         if (evidence.start_probability_sums[speaker] < previous.start_probability_sums[speaker] ||
             evidence.stop_probability_sums[speaker] < previous.stop_probability_sums[speaker])
           throw std::runtime_error("Speaker probability sums must follow token emission order");
+        if (evidence.start_probability_sums[speaker] - previous.start_probability_sums[speaker] >
+                static_cast<double>(evidence.start_frame_count - previous.start_frame_count) + 1e-9 ||
+            evidence.stop_probability_sums[speaker] - previous.stop_probability_sums[speaker] >
+                static_cast<double>(evidence.stop_frame_count - previous.stop_frame_count) + 1e-9)
+          throw std::runtime_error("Speaker probability sums exceed the newly evaluated frame count");
+      }
     }
   }
 }
@@ -175,6 +181,7 @@ const OgaTokenMetadataOutput& MetadataCoreState::ProcessDecoded(
     // One interval enters for each decoded token, even when this call completes no words.
     pending_tokens_.push_back(token);
     ConsumeCompletedWords(*metadata.timestampMetadata);
+    if (config_.diarization) last_speaker_evidence_ = token.speaker_evidence;
   }
   return PublishResult();
 }
