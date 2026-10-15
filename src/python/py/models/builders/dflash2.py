@@ -114,6 +114,8 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.is_causal = bool(cfg.get("is_causal", False))
 
         self.taps = int(dfl["conv_kernel_size"])
+        if self.taps != 2:
+            raise ValueError(f"DFlash 2 requires conv_kernel_size=2 for block-boundary masking; got {self.taps}.")
         self.group_size = int(dfl["conv_group_size"])
         self.num_groups = self.hidden_size // self.group_size
         self.selector_rank = int(dfl["selector_rank"])

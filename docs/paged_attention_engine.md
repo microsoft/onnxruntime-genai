@@ -988,11 +988,17 @@ Requests that appended a token or became complete produce staged events. Events 
 
 The commit order in `Engine::RunDynamic()` is deliberate:
 
-1. Prepare the reservation: validate every ownership and capacity precondition of both sub-reservations. A fallback reservation copies each fixed staged output into its slot's inactive persistent bank. A direct reservation has already written full-step outputs there; if speculative verification keeps only a prefix, compact replay reconstructs the accepted state from the untouched active bank into that same inactive bank. Preparation synchronizes without publishing anything. This is the last step that performs fallible device work, and a failure here is fatal even though committed state is intact, because a partially written inactive bank cannot be proven consistent for a retry. The publish steps below do only host-side work; they can still throw on a state-machine misuse (for example a double publish), and the Engine treats any such throw as fatal too.
+1. Prepare the reservation: validate every ownership and capacity precondition of both sub-reservations, stage full-step fixed outputs in inactive banks as needed, and synchronize the preparation work without publishing anything. If speculative verification keeps only a prefix, compact replay reconstructs the accepted state from the untouched input snapshot into the inactive bank; this work may be queued for a later pool operation instead of executing during preparation. A preparation failure is fatal even though committed state is intact, because a partially written inactive bank cannot be proven consistent for a retry. The publication operations below do only host-side work; they can still throw on a state-machine misuse (for example a double publish), and the Engine treats any such throw as fatal too.
 2. Commit the request search checkpoints and sampler checkpoint.
 3. Publish the reservation: paged occupancy first, then the fixed bank flip.
 4. Commit each request's lightweight bookkeeping.
 5. Publish the staged events.
+
+Publication can precede physical execution of deferred replay. Before a later reader can consume
+the published bank, a pool operation executes replay or enqueues it ahead of that reader on the
+same device stream. If deferred replay fails, the triggering operation throws and the pool becomes
+unhealthy and unusable; already published metadata is not rolled back, and subsequent state
+readers are rejected rather than allowed to consume unreplayed state.
 
 Everything after step 1 crosses the commit boundary and is never retried. This is a fail-stop
 publication interval: a throw is fatal and the Engine is not used again; already published
@@ -1000,7 +1006,7 @@ components are not rolled back.
 
 Committing the cache reservation:
 
-- Flips each selected fixed slot to its freshly prepared bank, advances its state generation and committed token boundary, and publishes provisional fixed-slot ownership (`FixedStateReservation::PublishCommit()` is `noexcept`).
+- Flips each selected fixed slot to its prepared or replay-pending bank, advances its state generation and committed token boundary, and publishes provisional fixed-slot ownership (`FixedStateReservation::PublishCommit()` is `noexcept`).
 - Adds reserved blocks to existing block tables.
 - Adds provisional block tables for newly admitted requests.
 - Advances committed cache-slot counts.
@@ -1654,8 +1660,8 @@ storage already counted by `PersistentBytes`.
 Every tensor is backed by two persistent `[capacity, row...]` banks, and each slot
 records which bank is currently active (holds its visible committed state). This
 double buffering lets the commit be split into three phases so that a composite
-Engine transaction can validate and stage all of its resources, synchronize once,
-and then publish them at a single infallible boundary:
+Engine transaction can validate and stage its resources, synchronize the preparation
+work, and then publish metadata at a single infallible boundary:
 
 - **`ValidateCommit()`** is `const`, mutates nothing, and performs every host-side
   precondition check before device work begins. It proves every checkpointed slot
@@ -1663,23 +1669,25 @@ and then publish them at a single infallible boundary:
   left it (ownership, identity, generation, and reservation id), that publishing it
   cannot overflow a generation, and that no row regresses below its slot's
   `committed_tokens`.
-- **`PrepareCommit()`** is the fallible device-completion phase: it re-validates,
-  copies fallback outputs into the **inactive** bank, and synchronizes. A partially
-  accepted compact update over a direct output is replayed into the inactive bank by
-  the pool's next operation (`Reserve()`, `CapturePrefixCheckpoint()`, or the next
-  `PrepareCommit()`), which enqueues it ahead of every later reader of the banks on
-  the same stream, so the device runs the replay while the host prepares the next
-  step; discarding the prepared reservation drops it. A fully accepted direct
-  output needs no state copy. The active (visible) bank is never touched, so a
-  failure leaves committed state exactly as it was; it drains the device and marks
-  the pool unhealthy because the inactive banks may be left partially written. A
-  deferred replay that fails to launch also marks the pool unhealthy. The
-  reservation becomes `Prepared`.
+- **`PrepareCommit()`** is the fallible preparation phase: it re-validates,
+  copies full-step fallback outputs into the **inactive** bank, and synchronizes the
+  work it performs. A partially accepted compact update may instead queue replay
+  from the untouched input snapshot into the inactive bank. The pool's next operation
+  (`Reserve()`, `CapturePrefixCheckpoint()`, or the next `PrepareCommit()`) executes
+  that replay before allowing a later reader to proceed, or enqueues it ahead of the
+  reader on the same device stream. Discarding the prepared reservation drops its
+  deferred replay. A fully accepted direct output needs no state copy. Preparation
+  does not write the active (visible) bank, so a failure during preparation leaves
+  committed state exactly as it was; the pool drains the device and marks itself
+  unhealthy because the inactive banks may be left partially written. A
+  deferred replay that later fails also throws and marks the pool unhealthy, even
+  if publication has already occurred; subsequent state readers are rejected. The
+  reservation becomes `Prepared` without necessarily executing deferred replay.
 - **`PublishCommit()`** is `noexcept` and performs no fallible or device work: it
-  flips each slot to its freshly written bank, advances `state_generation`, sets
+  flips each slot to its prepared or replay-pending bank, advances `state_generation`, sets
   `committed_tokens` to the row's `target_tokens`, and publishes provisional
-  ownership. Because a prepared commit only wrote invisible banks, its output is
-  invisible until this flip.
+  ownership. Ownership and committed-token metadata become visible at this flip;
+  physical replay may still be pending.
 
 `Commit()` is a convenience wrapper that runs the three phases in order. `Discard()`
 is valid from either `Reserved` or `Prepared`: it preserves every resident slot's

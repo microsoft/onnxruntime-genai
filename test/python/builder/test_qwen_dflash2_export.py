@@ -1923,6 +1923,18 @@ def test_fp8_lm_head_normalizes_supported_scale_layouts(tmp_path, scale_shape):
     assert tuple(scale.shape) == (builder.vocab_size, 1)
 
 
+@pytest.mark.parametrize("conv_kernel_size", [0, 1, 3, 4])
+def test_unsupported_conv_kernel_size_is_rejected(tmp_path, conv_kernel_size):
+    draft_dir = _draft_checkpoint(tmp_path)
+    config_path = tmp_path / "dflash2_draft" / "config.json"
+    config = json.loads(config_path.read_text())
+    config["dflash_config"]["conv_kernel_size"] = conv_kernel_size
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match=rf"conv_kernel_size=2.*got {conv_kernel_size}"):
+        DFlash2Builder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
+
+
 def test_unsupported_rope_type_is_rejected(tmp_path):
     draft_dir = _draft_checkpoint(tmp_path)
     config_path = tmp_path / "dflash2_draft" / "config.json"
