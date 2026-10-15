@@ -13,7 +13,8 @@ struct Embeddings {
     Output
   };
 
-  Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size = 0);
+  Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size = 0,
+             int64_t feature_count = 0);
   Embeddings(const Embeddings&) = delete;
   Embeddings& operator=(const Embeddings&) = delete;
 
@@ -41,7 +42,7 @@ struct Embeddings {
  private:
   State& state_;
   const Model& model_{state_.model_};
-  std::array<int64_t, 3> shape_{};  // [batch_size, sequence_length, hidden_size]
+  std::vector<int64_t> shape_;  // [batch_size, sequence_length, optional feature dimensions..., hidden_size]
   ONNXTensorElementDataType type_;
   const Mode mode_{};
   const std::string name_;
