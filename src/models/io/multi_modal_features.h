@@ -18,6 +18,7 @@ struct MultiModalFeatures {
   void Add();
   void Update(bool is_prompt);
   void ReuseFeaturesBuffer(MultiModalFeatures& other);
+  void UsePreparedFeatures(OrtValue& features);
 
   // Pre-allocate an empty features tensor for Input mode when no source session provides one.
   // Used when the embedding model requires an input (e.g., audio_features) but no corresponding

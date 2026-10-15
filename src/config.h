@@ -302,6 +302,7 @@ struct Config {
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
+        std::string is_video{"is_video"};
         std::string pixel_position_ids{Defaults::PixelPositionIdsName};
         std::string image_sizes{Defaults::ImageSizesName};
         std::string image_grid_thw{Defaults::ImageSizesName};          // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
@@ -310,6 +311,8 @@ struct Config {
 
       struct Outputs {
         std::string image_features{Defaults::ImageFeaturesName};
+        std::string retention_mask{"retention_mask"};
+        std::string kept_indices{"kept_indices"};
       } outputs;
     } vision;
 

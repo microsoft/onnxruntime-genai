@@ -829,6 +829,15 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
   cpu_span<int32_t> input_ids;
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
+      if (model_type == "nemotron_h_omni") {
+        const auto info = tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+        const auto shape = info->GetShape();
+        if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+            shape.size() != 2 || shape[0] != 1 ||
+            tensor->ort_tensor_->GetTensorMemoryInfo().GetDeviceType() != OrtMemoryInfoDeviceType_CPU) {
+          throw std::runtime_error("Nemotron-H Omni requires CPU int32 input_ids with shape [1, sequence_length].");
+        }
+      }
       input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
                                     tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
     } else {

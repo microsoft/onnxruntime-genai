@@ -107,6 +107,25 @@ void MultiModalFeatures::AllocateEmptyFeatures() {
   state_.inputs_[index_] = features_.get();
 }
 
+void MultiModalFeatures::UsePreparedFeatures(OrtValue& features) {
+  if (mode_ != Mode::Input) {
+    throw std::runtime_error("Prepared features can only bind a feature input.");
+  }
+  const auto info = features.GetTensorTypeAndShapeInfo();
+  if (info->GetShape() != shape_ || info->GetElementType() != type_) {
+    throw std::runtime_error("Prepared " + name_ + " must match the embedding input's shape and element type.");
+  }
+
+  // Own a copy on the embedding session's input device, independently of the
+  // host processor's tensor lifetime or the device used for vision inference.
+  auto& consumer_device = *state_.p_session_device_inputs_;
+  features_ = OrtValue::CreateTensor(consumer_device.GetAllocator(), shape_, type_);
+  if (info->GetElementCount() != 0) {
+    ByteWrapTensor(consumer_device, *features_).CopyFrom(ByteWrapTensor(DeviceForTensor(features, consumer_device), features));
+  }
+  state_.inputs_[index_] = features_.get();
+}
+
 void MultiModalFeatures::ReshapeFeatures(std::vector<int64_t> new_shape) {
   if (!features_) return;
   auto old_info = features_->GetTensorTypeAndShapeInfo();

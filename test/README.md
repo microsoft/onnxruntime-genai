@@ -26,11 +26,19 @@ Nonempty layer metadata alone must not select the legacy convolution-only cache.
 The tests check complete cache tensors, logits and selected tokens after prefill
 and cached decode, then recurrent reset or fresh-generator initialization.
 They validate runtime cache plumbing, not neural-network or checkpoint parity.
-No checkpoint download or accelerator is required.
+CPU tests require no checkpoint download or accelerator. CUDA builds also run
+the controls on CUDA and exercise BF16 KV/convolution with FP32 recurrent state.
+The `multimodal` fixture adds a prepared-image/text-only three-model pipeline;
+`multimodal-retention` exercises scalar-BOOL vision dispatch, dynamic retained
+rows, host prompt compaction and the prepared-feature entry without rerunning
+vision. Invalid shapes, masks, counts, mixed raw inputs and beams are rejected.
+See [its runtime contract](../docs/nemotron_h_omni.md) for supported inputs and
+the remaining processor/video-pruning limitations.
 
 ```bash
 # Regenerate checked-in fixtures (requires numpy, onnx and onnx-ir).
 python test/python/create/create_cache_dispatch_models.py
+python test/python/create/create_multimodal_cache_model.py
 
 # Use an existing configured build with ENABLE_TESTS=ON.
 cmake --build <build-dir> --target kv_cache_unit_tests
