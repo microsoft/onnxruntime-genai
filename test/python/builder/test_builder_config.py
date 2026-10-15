@@ -270,6 +270,32 @@ def test_target_qkv_fusion_maps_to_legacy_option(fuse_qkv):
     assert effective.extra_options["fuse_qkv"] is fuse_qkv
 
 
+@pytest.mark.parametrize("value", [False, True])
+def test_target_shared_input_projection_merge_maps_to_legacy_option(value):
+    effective = normalize_builder_config(
+        "bf16",
+        "cuda",
+        target_options={"optimizations": {"merge_shared_input_projections": value}},
+    )
+
+    assert effective.extra_options["merge_shared_input_projections"] is value
+
+
+def test_structured_shared_input_projection_merge_overrides_legacy_option():
+    with pytest.warns(
+        UserWarning,
+        match="merge_shared_input_projections overrides legacy extra_options.merge_shared_input_projections",
+    ):
+        effective = normalize_builder_config(
+            "bf16",
+            "cuda",
+            {"merge_shared_input_projections": True},
+            target_options={"optimizations": {"merge_shared_input_projections": False}},
+        )
+
+    assert effective.extra_options["merge_shared_input_projections"] is False
+
+
 @pytest.mark.parametrize("legacy_option", ["fuse_qkv", "disable_qkv_fusion"])
 def test_structured_target_qkv_fusion_overrides_legacy_option(legacy_option):
     with pytest.warns(UserWarning, match=f"fuse_qkv overrides legacy extra_options.{legacy_option}"):
