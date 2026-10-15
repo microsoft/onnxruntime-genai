@@ -11,8 +11,8 @@
 # Provides:
 #   - imported target: onnxruntime-genai::onnxruntime-genai (and ::onnxruntime-genai-cuda when built with CUDA)
 #   - version:         onnxruntime-genai_VERSION
-#   - EP flavor flags:  onnxruntime-genai_USE_CUDA / _USE_TRT_RTX / _USE_DML / _USE_WINML /
-#                       _USE_GUIDANCE (0/1) so consumers can pick package names.
+#   - build flags:      onnxruntime-genai_USE_CUDA / _USE_TRT_RTX / _USE_DML / _USE_WINML /
+#                       _USE_GUIDANCE / _ENABLE_TELEMETRY (0/1).
 
 set(onnxruntime-genai_VERSION "@VERSION_INFO@")
 
@@ -22,6 +22,7 @@ set(onnxruntime-genai_USE_TRT_RTX @_genai_export_use_trt_rtx@)
 set(onnxruntime-genai_USE_DML @_genai_export_use_dml@)
 set(onnxruntime-genai_USE_WINML @_genai_export_use_winml@)
 set(onnxruntime-genai_USE_GUIDANCE @_genai_export_use_guidance@)
+set(onnxruntime-genai_ENABLE_TELEMETRY @_genai_export_enable_telemetry@)
 
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
