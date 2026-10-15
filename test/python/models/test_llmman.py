@@ -10,7 +10,6 @@ import socketserver
 import sys
 import threading
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -128,31 +127,6 @@ def test_tolerates_a_non_json_diagnostic_line(daemon):
     llmman.pull(daemon.url, "ref")
 
 
-def test_recognizes_the_oci_scheme():
-    assert llmman.is_oci_ref("oci://ghcr.io/org/model:tag")
-    assert llmman.is_oci_ref("OCI://ghcr.io/org/model:tag")
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "microsoft/Phi-3-mini-4k-instruct",
-        "ghcr.io/org/model:tag",
-        "/local/path/to/model",
-        "",
-        None,
-    ],
-)
-def test_leaves_every_other_shape_alone(value):
-    # A bare HF repo id must never be claimed.
-    assert not llmman.is_oci_ref(value)
-
-
-def test_strips_the_scheme_only_when_present():
-    assert llmman.strip_scheme("oci://ghcr.io/org/model:tag") == "ghcr.io/org/model:tag"
-    assert llmman.strip_scheme("microsoft/Phi-3") == "microsoft/Phi-3"
-
-
 @pytest.mark.parametrize("ref", ["oci://", "oci://   "])
 def test_rejects_an_empty_reference(ref):
     with pytest.raises(ValueError):
@@ -176,75 +150,3 @@ def test_rejects_an_empty_reference(ref):
 def test_endpoint_parsing(monkeypatch, host, want):
     monkeypatch.setenv(llmman.HOST_ENV, host)
     assert llmman.endpoint() == want
-
-
-@pytest.fixture
-def fake_pull(monkeypatch):
-    llmman.resolve_model.cache_clear()
-    calls = []
-
-    def pull_and_resolve(reference, progress=None):
-        calls.append(reference)
-        return "/models/" + reference
-
-    monkeypatch.setattr(llmman, "pull_and_resolve", pull_and_resolve)
-    yield calls
-    llmman.resolve_model.cache_clear()
-
-
-def test_resolve_input_pulls_an_oci_ref_once(fake_pull):
-    assert llmman.resolve_input("oci://ghcr.io/org/model:tag") == "/models/ghcr.io/org/model:tag"
-    assert llmman.resolve_input("oci://ghcr.io/org/model:tag") == "/models/ghcr.io/org/model:tag"
-    assert fake_pull == ["ghcr.io/org/model:tag"]
-
-
-@pytest.mark.parametrize("value", ["microsoft/Phi-3", "/local/dir", "model.gguf", "", None])
-def test_resolve_input_passes_everything_else_through(fake_pull, value):
-    assert llmman.resolve_input(value) == value
-    assert fake_pull == []
-
-
-def test_get_hf_details_reads_config_from_the_pulled_directory(fake_pull, monkeypatch, tmp_path):
-    builder = pytest.importorskip("builder")
-    seen = []
-
-    def from_pretrained(name, **kwargs):
-        seen.append(name)
-        return object()
-
-    monkeypatch.setattr(builder.AutoConfig, "from_pretrained", from_pretrained)
-    monkeypatch.setattr(builder.AutoTokenizer, "from_pretrained", from_pretrained)
-    monkeypatch.setattr(builder, "add_special_token_ids", lambda config, tokenizer: None)
-    monkeypatch.setattr(builder.os.path, "isdir", lambda path: path.startswith("/models/"))
-
-    # oci:// is accepted on either flag.
-    for model_name, input_path in [(None, "oci://ghcr.io/org/model:tag"), ("oci://ghcr.io/org/model:tag", "")]:
-        seen.clear()
-        details = builder.get_hf_details(model_name, input_path, str(tmp_path), {})
-        assert details["hf_name"] == "/models/ghcr.io/org/model:tag"
-        assert seen == [details["hf_name"]] * 2
-    assert fake_pull == ["ghcr.io/org/model:tag"]
-
-
-def test_load_weights_uses_the_pulled_directory(fake_pull, monkeypatch):
-    base = pytest.importorskip("builders.base")
-    quant_model = pytest.importorskip("loaders.quant_model")
-    seen = []
-
-    def from_pretrained(quant_type, input_path, **kwargs):
-        seen.append(input_path)
-        return object()
-
-    monkeypatch.setattr(quant_model.QuantModel, "from_pretrained", from_pretrained)
-    model = SimpleNamespace(
-        quant_type="awq",
-        quant_attrs={},
-        num_attn_heads=1,
-        num_kv_heads=1,
-        head_size=1,
-        intermediate_size=1,
-        num_layers=1,
-        extra_options={},
-    )
-    base.Model.load_weights(model, "oci://ghcr.io/org/model:tag")
-    assert seen == ["/models/ghcr.io/org/model:tag"]

@@ -18,7 +18,6 @@ Contract (from llmman's src/cmd/serve.rs and src/daemon.rs):
   - ``llmman resolve --no-pull <ref>`` -> one line of JSON carrying ``path``.
 """
 
-import functools
 import ipaddress
 import json
 import logging
@@ -217,38 +216,11 @@ def pull_and_resolve(reference: str, progress=None) -> str:
     return resolve(reference)
 
 
-SCHEME = "oci://"
-
-
-def is_oci_ref(value) -> bool:
-    """Whether ``value`` carries the ``oci://`` scheme.
-
-    An explicit scheme is required rather than sniffing a bare
-    ``registry/name:tag``: that shape is indistinguishable from a Hugging Face
-    repo id, so guessing would silently hijack existing -m/--model_name values.
-    """
-    if not value:
-        return False
-    return str(value).lower().startswith(SCHEME)
-
-
-def strip_scheme(value) -> str:
-    """Drop the ``oci://`` prefix, leaving the bare registry reference."""
-    text = str(value)
-    if is_oci_ref(text):
-        return text[len(SCHEME) :]
-    return text
-
-
-@functools.cache
-def resolve_model(value) -> str:
-    """Pull an ``oci://`` reference through llmman and return the local path.
-
-    Cached, so resolving the same reference again does not pull twice.
-    """
-    reference = strip_scheme(value).strip()
+def resolve_model(uri) -> str:
+    """Pull an ``oci://`` URI through llmman and return the local path."""
+    reference = str(uri).partition("://")[2].strip()
     if not reference:
-        raise ValueError(f"empty OCI model reference: {value!r}")
+        raise ValueError(f"empty OCI model reference: {uri!r}")
 
     def report_progress(status, completed, total):
         if total:
@@ -257,8 +229,3 @@ def resolve_model(value) -> str:
             print(f"llmman: {status}")
 
     return pull_and_resolve(reference, progress=report_progress)
-
-
-def resolve_input(value):
-    """Resolve an ``oci://`` reference to a local directory; pass anything else through."""
-    return resolve_model(value) if is_oci_ref(value) else value

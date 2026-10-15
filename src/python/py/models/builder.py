@@ -63,7 +63,7 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35Model, Qwen35MoEModel
-from loaders import llmman
+from loaders.resolver import resolve_input
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
@@ -106,8 +106,8 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     """
     Get Hugging Face details based on the provided inputs
     """
-    # Pull oci:// sources to a local directory (cached, so load_weights reuses it)
-    model_name, input_path = llmman.resolve_input(model_name), llmman.resolve_input(input_path)
+    # Resolve URI sources (e.g. oci://) to local paths, once
+    model_name, input_path = resolve_input(model_name), resolve_input(input_path)
 
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
@@ -140,6 +140,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
         "extra_kwargs": extra_kwargs,
         "hf_name": hf_name,
         "hf_config": config,
+        "input_path": input_path,
     }
     return hf_details
 
@@ -658,6 +659,8 @@ def create_model(
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
+    # Local path from `get_hf_details`, after any URI resolution
+    input_path = hf_details.pop("input_path", input_path)
     if effective_config is not None:
         validate_model_dependent_config(effective_config, config)
 
