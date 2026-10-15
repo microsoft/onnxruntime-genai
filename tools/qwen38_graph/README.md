@@ -55,6 +55,24 @@ tolerance level and not run-to-run reproducible. `fold.force_reject` (default of
 stream is the no-MTP greedy stream. A v12b package is built from an existing v12b package with `build_package_engine_v12b.py`
 (hard links, the plane library of this build, optional unreachable stop id).
 
+### v12c memory-reduced quantized package (`pkg_v12b_engine_int8kv_fp8w_fp4moe`)
+
+`build_package_engine_v12b.py` also builds the **v12c** quantized package from a v12b package, reducing peak GPU memory by
+**12.47 GiB** (`113.40 -> 100.93 GiB` on H200) and improving decode speed (`261.2 -> 265.3` MMLU decode tok/s) while achieving
+`667/800` (`83.375%`) on MMLU-Pro 800:
+
+1. **Per-channel INT8 (or FP8) KV cache** (`--kv-quant {int8,fp8} --kv-scale-file <json>`): quantizes the 12 target sparse-attention
+   KV caches and 1 MTP-head sparse-attention KV cache in `GuardedDSA` (`qwen.static::GuardedDSA` with `k_scale` / `v_scale`
+   attributes) and during the dense-to-packed hand-off (`qwen38_plane_quantize_kv`). Scales are calibrated with
+   `calibrate_qwen38_kv.py` (partial-rotary `rotary_dim=64` pair envelope, 99.99th percentile on the calibration corpus).
+2. **16-bit weight quantization + dense-prefill weight sharing** (`--weight-quant fp8 --mtp-moe-quant nvfp4 --share-dense-weights`):
+   quantizes the 48-layer + head attention and shared-expert projections (`merged_proj`, `out_proj`, `o_proj`,
+   `shared_expert.down_proj`) from BF16 to per-column FP8 E4M3FN (or block-16 NVFP4) in `qwen.fused_gemm::{SkinnyGemm,SharedExpertDown}`,
+   quantizes the 512 MTP-head routed experts (`4.69 GiB` BF16 -> `1.32 GiB` NVFP4 or `2.36 GiB` FP8) in `qwen.mtp::MtpMoe`, and
+   rewrites `dense/model.onnx` with `qwen.fused_gemm::{DequantWeightBf16,UntileHcBf16}` so the dense prefill graph shares all
+   `merged_proj`, `out_proj`/`o_proj`/`shared_expert.down_proj`, and `hc_tiled.data` weights with `target/model.onnx` in
+   `weights_pool.txt` (`100.90 GiB` -> `86.26 GiB` pool).
+
 ## Engine usage
 
 ```python
@@ -79,7 +97,8 @@ All need a package; the ones that build prompts need a text pool (`--text-pool`,
 | script | purpose |
 | --- | --- |
 | `build_package.py` | v11 package (S=1 / S=2 chain verify) from its parts, with the PLE table |
-| `build_package_engine_v12b.py` | v12b package (folded cycle + fast prefill) from an existing v12b package: hard links, the plane library of this build, optional unreachable stop id, `package_manifest.json` with the SHA256 of every library |
+| `build_package_engine_v12b.py` | v12b / v12c package (folded cycle + fast prefill, optional `--kv-quant`, `--weight-quant`, `--mtp-moe-quant`, `--share-dense-weights`) from an existing v12b package |
+| `calibrate_qwen38_kv.py` | calibrate per-channel INT8 and FP8 KV-cache scales for the 12 target sparse-attention layers and 1 MTP-head sparse-attention layer |
 | `smoke.py` | minimal example, prints the stream, speed and speculative statistics |
 | `engine_gate.py` | token-identity gate: greedy streams of the gate prompts against a `--reference` (a recording of `--no-mtp` or `--force-reject`, i.e. MTP == no-MTP, or another runner's streams); `--prefill steps` must be identical, `--prefill fast` is reported as agreement statistics; EOS mode and `--ignore-eos` fixed length |
 | `engine_behaviours.py` | (`--prefill steps\|fast`) stop tokens, limits, stop strings, cancel during prefill/decode, second request queued, continuation, rewind, capability errors, statistics |
