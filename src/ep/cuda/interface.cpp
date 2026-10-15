@@ -675,7 +675,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
       for (const auto& option : user_options->options) {
         if (option.first == "gpu_mem_limit" || option.first == "max_mem" ||
             option.first == "arena_extend_strategy" || option.first == "initial_chunk_size_bytes" ||
-            option.first == "max_dead_bytes_per_chunk" || option.first == "initial_growth_chunk_size_bytes") {
+            option.first == "max_dead_bytes_per_chunk" || option.first == "initial_growth_chunk_size_bytes" ||
+            option.first.starts_with("arena.")) {
           init_options.options.emplace_back(option);
         }
       }

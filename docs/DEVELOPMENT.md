@@ -57,14 +57,14 @@ The Python wheel is built by default. The build tree is created under `build/<pl
 
 ---
 
-For CUDA provider-bridge builds, explicit arena settings (`max_mem`,
-`arena_extend_strategy`, `initial_chunk_size_bytes`, `max_dead_bytes_per_chunk`,
-and `initial_growth_chunk_size_bytes`) require an ONNX Runtime build supporting
-the `default_memory_arena_cfg` pointer option and copying its configuration when
-the provider is appended. GenAI checks that the pointer option is accepted and
-reports an error instead of silently ignoring those settings. CUDA allocator
-initialization forwards these settings and `gpu_mem_limit` to its initialization
-session; model-only options such as CUDA graph capture are not forwarded.
+CUDA allocator initialization forwards allocator settings, but not model-only
+options such as CUDA graph capture, to its initialization session. On the
+provider-bridge path, `max_mem` is accepted as an alias for `gpu_mem_limit`, and
+`arena_extend_strategy` is forwarded directly. Fine-grained options
+(`initial_chunk_size_bytes`, `max_dead_bytes_per_chunk`, and
+`initial_growth_chunk_size_bytes`) require a registered CUDA V2 plugin execution
+provider. The plugin path also accepts and forwards `arena.*` options such as
+`arena.max_mem` and `arena.extend_strategy`.
 
 ## 3. `build.py` phases and key flags
 
