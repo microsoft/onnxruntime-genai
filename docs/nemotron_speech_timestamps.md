@@ -45,9 +45,9 @@ thresholds are rejected while loading the configuration.
 ## Decoding flows
 
 Both paths start with audio processed into features, followed by generated token IDs. Model
-configuration determines whether acoustic timing is produced; the first decode chooses each
-stream's mode. A tokenizer stream cannot switch decode modes without `Reset()`.
-
+configuration determines whether acoustic timing is produced. `TokenPostProcessor` owns
+decoding and timestamp processing; ordinary tokenizer stream decoding is unchanged.
+`timestamp_level` controls timestamp generation:
 ```mermaid
 flowchart TB
   audio[Audio chunks] --> processor[StreamingProcessor]
@@ -60,12 +60,13 @@ flowchart TB
   end
 
   subgraph timed[With timestamps: word, segment, or all]
-    setup[Stream starts with tokenizer metadata defaults] --> stream
-    timed_tokens[GetNextTokensWithMetadata: IDs + absolute frame intervals] --> stream[TokenizerStream.DecodeWithMetadata]
-    stream --> ortx[Extensions: decoded text + completed word token spans]
-    ortx --> align[Stream metadata state: align word spans with buffered frames]
+    setup[Processor copies model configuration] --> stream
+    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNextTokens]
+    stream --> ortx[Extensions: vocabulary facts + ordinary cached decode]
+    ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
     align --> events[Per-call word / segment events with frame and second bounds]
-    stream --> final[FinalizeMetadata: flush trailing word / segment]
+    events --> read[GetNextTokenResults: read only]
+    stream --> final[Finalize: flush trailing word / segment]
     final --> trailing[Trailing word / segment events]
   end
 
@@ -85,14 +86,14 @@ For a locally installed Nemotron model outside the test fixtures, set
 `AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
 That test uses CPU session options, even when the model package specifies CUDA.
 
-For the timed path, create a tokenizer stream; its metadata state is initialized from
-the tokenizer configuration. The generator supplies
-*when* each token occurred; Extensions supplies *which tokens* form each word. `DecodeWithMetadata`
-also returns the ordinary incremental text fragment. Use that fragment for live text, or collect
+For the timed path, create `TokenPostProcessor(model, generator)` after configuring
+the model. The generator supplies *when* each token occurred; Extensions supplies
+vocabulary-derived lexical facts and ordinary decoded text. GenAI groups the words.
+Each processor result also contains the ordinary incremental text fragment. Use it for live text, or collect
 completed word/segment events for stable timestamped output; do not append both to one transcript.
 The plain path needs no metadata state or finalization call.
 
-Internally, the stream buffers the frame intervals in token order until Extensions reports
+Internally, GenAI buffers the frame intervals in token order until its word grouper reports
 completed word spans and a pending-token watermark. It uses the first and last token
 intervals of each word, accumulates unfinished segments across calls, and owns the
 completed event text for the lifetime of the returned per-call result. The generator
@@ -100,25 +101,15 @@ pairs tokens and intervals by emission position, not by token ID.
 
 ## Decoding
 
-For the timestamp path, create the tokenizer stream and use metadata decoding
-directly. The stream initializes enabled model-derived metadata when created
-and restores it after `Reset()`. Configure timestamp level and grouping rules on
-the model before creating the tokenizer; the stream does not expose its internal
-metadata state. Plain-text `Decode()` still works on a timestamp-configured
-tokenizer when selected first. Disabled
-timestamps produce null timestamp data.
-
-For each generation step, use `GetNextTokensWithMetadata()` (C++/C#) or
-`get_next_tokens_with_metadata()` (Python). Pass each whole record directly to
-`DecodeWithMetadata(token)` or `decode_with_metadata(token)`; no field extraction
-is needed. The optional acoustic interval is a pair of 64-bit integers ordered
-`(start, stop)`, half-open and not restricted to one frame. With generator timestamps
-disabled, timing is not read or supplied. C and C++ records indicate absence with
-`has_token_acoustic_frame_interval == 0`; C# uses a null `TokenAcousticFrameInterval`
-and Python uses `None`. The interval is stored inline, so copying a record retains
-its timing independently of the generator's storage.
-An enabled timestamp consumer requires present, valid timing.
-Use a separate stream for each independent sequence.
+Configure timestamp level and segment rules before creating the generator and
+`TokenPostProcessor`. After each generation step, call `ProcessNextTokens()`
+(C++/C#) or `process_next_tokens()` (Python), then read `GetNextTokenResults()` or
+`get_next_token_results()`. All sequential emissions are processed in order,
+including steps that emit zero or multiple tokens. Reading results repeatedly
+does not change them. The private generator getter is not exposed to applications.
+Enabled timestamps require present, valid acoustic timing. Intervals are half-open
+`[start, stop)` and may span multiple frames. A processor requires the same model
+as its generator, `batch_size=1`, and `num_beams=1`.
 
 The returned `text` is the ordinary incremental decoded fragment and remains available for partial
 display. Applications that need only stable output can instead append completed word or segment
@@ -127,20 +118,24 @@ event text as it arrives.
 Completed words retain their original leading whitespace and attached punctuation. Segment text is
 the exact concatenation of its words; no whitespace is trimmed or synthesized. After finalization,
 concatenating all emitted words or all emitted segments reproduces the decoded transcript exactly.
-Copy native records before the next stream call. C# and Python bindings perform this copy
+Copy native records before the next processor mutation. C# and Python bindings perform this copy
 automatically.
 
-Word and segment collections are nested under `timestampMetadata` in C/C++,
-`TokenMetadataTimestamp` in C#, and `TokenMetadataOutput.timestamp_metadata` in Python.
+C/C++ expose opaque result and timestamp-record handles with typed accessors.
+C# and Python copy word and segment collections into `TokenMetadataTimestamp`,
+available through `GetTimestamps()` and `get_timestamps()` respectively.
 Python exposes typed `TokenMetadataTimestampRecord` entries rather than dictionaries.
 They are per-call event lists,
 not cumulative history. Each list is
 empty when that call completes no records, and it may contain multiple records when one decoded
 token spans multiple word or segment boundaries. Callers retain any history they need.
 
-After the final audio chunk, call `FinalizeMetadata()` or `finalize_metadata()` once and retain
-its completed records. Finalization returns pending words and segments but no additional transcript
-text.
+After the final audio chunk, call `Finalize()` (C++), `FinalizeProcessing()` (C#),
+or `finalize()` (Python), then read the results through the usual getter. It
+completes pending words and segments without adding transcript text. Repeated
+finalization emits no duplicate events. `Reset()` / `reset()` clears all processor
+state together; it does not reset the generator. The generator must outlive its
+processor. See [Token post-processing](metadata_decode.md) for the full lifecycle.
 
 The Nemotron examples demonstrate the complete flow:
 
