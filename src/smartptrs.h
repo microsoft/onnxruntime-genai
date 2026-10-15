@@ -234,7 +234,7 @@ struct StateUpdateReplayDesc {
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 14;
+inline constexpr uint32_t kDeviceInterfaceVersion = 15;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -397,6 +397,10 @@ struct DeviceInterface {
   // device. AMDGPU's pinned inputs fail the second test, since ORT tags them with the GPU.
   // Keep last for vtable ABI stability.
   virtual bool IsHostAccessible() const { return false; }
+  // Binds the interface to the device ordinal of the EP device the session was appended to, before
+  // the device's stream is handed to the EP or its allocator is requested. The default does nothing,
+  // for devices with no per-ordinal state. Keep last for vtable ABI stability.
+  virtual void SelectDevice(int /*device_id*/) {}
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
