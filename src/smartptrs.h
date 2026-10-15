@@ -234,7 +234,7 @@ struct StateUpdateReplayDesc {
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 15;
+inline constexpr uint32_t kDeviceInterfaceVersion = 16;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -396,7 +396,6 @@ struct DeviceInterface {
   // device. AMDGPU's pinned inputs fail the second test, since ORT tags them with the GPU.
   virtual bool IsHostAccessible() const { return false; }
   // Host storage must remain alive until all enqueued ranged transfers have completed.
-  // Keep these methods last for vtable ABI stability.
   virtual std::shared_ptr<void> AllocatePinnedHost(size_t /*bytes*/) {
     throw std::logic_error("Device does not support pinned host allocation.");
   }
@@ -406,6 +405,10 @@ struct DeviceInterface {
   virtual void CopyHostToDevice(void* /*device*/, const void* /*host*/, size_t /*bytes*/) {
     throw std::logic_error("Device does not support ranged host-to-device copies.");
   }
+  // Binds the interface to the device ordinal of the EP device the session was appended to, before
+  // the device's stream is handed to the EP or its allocator is requested. The default does nothing,
+  // for devices with no per-ordinal state. Keep last for vtable ABI stability.
+  virtual void SelectDevice(int /*device_id*/) {}
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

@@ -3,6 +3,8 @@
 
 #include "session_options.h"
 
+#include <charconv>
+
 #include "models/session_options.h"
 #include "ep/cuda/session_options.h"
 #include "models/io/kv_cache.h"
@@ -135,6 +137,32 @@ void ConfigureProfile(const Config& config, OrtSessionOptions& session_options, 
   }
 }
 
+constexpr const char* kPluginEpName = "NvTensorRTRTXExecutionProvider";
+
+// CUDA ordinal of the EP device. For the plugin EP this is the device of the allocator
+// advertised by the selected OrtEpDevice (the same one AppendExecutionProviderV2 passes to the EP), which
+// is not necessarily 0.
+std::optional<int> GetSelectedCudaDeviceId(const Config::ProviderOptions& provider_options) {
+  const auto ep_devices = FindRegisteredEpDevices(kPluginEpName);
+  if (!ep_devices.empty()) {
+    const auto filtered_ep_devices = ApplyDeviceFiltering(provider_options, ep_devices);
+    if (const OrtMemoryInfo* memory_info = filtered_ep_devices.front()->GetMemoryInfo(OrtDeviceMemoryType_DEFAULT))
+      return memory_info->GetDeviceId();
+    return std::nullopt;
+  }
+
+  for (const auto& [name, value] : provider_options.options) {
+    if (name != "device_id")
+      continue;
+    int device_id{};
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), device_id);
+    if (error != std::errc{} || end != value.data() + value.size() || device_id < 0)
+      throw std::runtime_error("Invalid NvTensorRtRtx device_id provider option: " + value);
+    return device_id;
+  }
+  return std::nullopt;
+}
+
 }  // namespace
 
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
@@ -142,6 +170,9 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config& config,
                                          bool /*disable_graph_capture*/) {
   auto device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
+  // Bind the device interface to the EP's device before its stream is handed to the EP below.
+  if (const auto device_id = GetSelectedCudaDeviceId(provider_options))
+    device->SelectDevice(*device_id);
   Generators::CUDAExecutionProvider::AddCudaStreamConfig(session_options, device);
   Generators::CUDAExecutionProvider::AddCudaStreamConfig(
       session_options, device, "ep.nvtensorrtrtxexecutionprovider.user_compute_stream");

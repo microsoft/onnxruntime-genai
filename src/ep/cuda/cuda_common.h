@@ -80,6 +80,12 @@ struct cuda_stream_holder {
     CUDA_CHECK(cudaStreamCreate(&v_));
   }
 
+  void Reset() {
+    if (v_)
+      (void)cudaStreamDestroy(v_);
+    v_ = {};
+  }
+
   ~cuda_stream_holder() {
     if (v_)
       (void)cudaStreamDestroy(v_);
