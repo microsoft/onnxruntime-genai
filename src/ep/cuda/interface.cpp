@@ -1033,6 +1033,7 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
 struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
   std::string GetExecutionProviderName() const override { return "NvTensorRtRtx"; }
+  bool UsesLogicalKeyValueCacheOutputViews() const override { return true; }
 
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& /*search*/,
