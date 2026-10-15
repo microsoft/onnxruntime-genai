@@ -2399,9 +2399,7 @@ void RunDeviceAdversarialReplay(const std::shared_ptr<Model>& model) {
     auto update_buffer = upload(updates);
     auto destination_buffer = upload(destination);
     StateUpdateReplayDesc half_replay{
-        source_buffer.subspan(2, 12), destination_buffer.subspan(6, 12),
-        update_buffer.subspan(4, 12), {}, {}, {},
-        2, 3, 0, 0, 3, 2, sizeof(Ort::Float16_t), StateUpdateReplayKind::CausalConv};
+        source_buffer.subspan(2, 12), destination_buffer.subspan(6, 12), update_buffer.subspan(4, 12), {}, {}, {}, 2, 3, 0, 0, 3, 2, sizeof(Ort::Float16_t), StateUpdateReplayKind::CausalConv};
     device.ReplayStateUpdates(&half_replay, 1);
     device.Synchronize();
     const std::array<float, 6> half_expected{3, 10, 20, 6, 11, 21};

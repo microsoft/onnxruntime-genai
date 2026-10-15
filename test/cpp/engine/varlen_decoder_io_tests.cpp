@@ -97,7 +97,7 @@ TEST(VarlenDecoderIOTest, PacksThreePlanePositionsInScheduledRequestOrder) {
     auto& tensor = *io.inputs_[position - io.input_names_.begin()];
     EXPECT_EQ(tensor.GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{3, 5}));
     const std::array<int64_t, 5> expected = reversed ? std::array<int64_t, 5>{1, 2, 3, 5, 6}
-                                                  : std::array<int64_t, 5>{5, 6, 1, 2, 3};
+                                                     : std::array<int64_t, 5>{5, 6, 1, 2, 3};
     const auto* data = tensor.GetTensorData<int64_t>();
     for (size_t plane = 0; plane < 3; ++plane) {
       EXPECT_TRUE(std::equal(expected.begin(), expected.end(), data + plane * expected.size()));
