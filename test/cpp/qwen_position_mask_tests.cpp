@@ -78,6 +78,9 @@ void CheckMaskAndPositions(bool capture, const char* model_type = "qwen3_5_moe_t
     inputs->Update(cpu.WrapMemory(std::span{next}), 5, 1);
     EXPECT_EQ(position_address, state.GetInput("position_ids")->GetTensorRawData());
     check({0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0}, 8);
+    std::vector<int32_t> empty;
+    EXPECT_THROW(inputs->Update(cpu.WrapMemory(std::span{empty}), 5, 0), std::runtime_error);
+    check({0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0}, 8);
     EXPECT_THROW(inputs->RewindTo(9), std::runtime_error);
     EXPECT_THROW(inputs->Update(cpu.WrapMemory(std::span{next}), 9, 1), std::runtime_error);
   }

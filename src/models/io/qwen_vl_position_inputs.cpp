@@ -347,18 +347,16 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
     rope_deltas_.push_back(max_pos_for_batch + 1 - seq_len);
   }
 
-  // Move tensor to GPU and expand by num_beams
-  auto expanded_position_ids = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
   position_ids_shape_[1] *= state_.params_->search.num_beams;
   // Short prompts can be captured on the first run. Use the same static buffer
   // as decode from the start, with capacity for every captured sequence length.
   const int max_capture_length = state_.params_->max_graph_capture_length;
-  if (state_.params_->use_graph_capture && seq_len <= max_capture_length) {
+  if (state_.params_->use_graph_capture && seq_len <= max_capture_length && state_.params_->search.num_beams == 1) {
     const size_t capacity_bytes = 3 * position_ids_shape_[1] * max_capture_length * Ort::SizeOf(type_);
     position_ids_->CreateTensor(position_ids_shape_, true, capacity_bytes);
-    position_ids_->GetByteSpan().CopyFrom(ByteWrapTensor(*model_.p_device_inputs_, *expanded_position_ids));
+    position_ids_->GetByteSpan().CopyFrom(ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *position_ids));
   } else {
-    position_ids_->ort_tensor_ = std::move(expanded_position_ids);
+    position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
   }
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 
@@ -435,7 +433,7 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
 
 void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_length) {
   if (ShouldUseStaticMaskHandling()) {
-    if (new_length < 0 || total_length < new_length || total_length > attention_mask_shape_[1])
+    if (new_length <= 0 || total_length < new_length || total_length > attention_mask_shape_[1])
       throw std::runtime_error("Qwen attention mask update exceeds allocated capacity");
     // Preserve prompt padding and activate only the newly appended tokens.
     if (!model_.p_device_inputs_->UpdateAttentionMask(nullptr, attention_mask_->GetMutableRawData(),
