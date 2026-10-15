@@ -26,6 +26,10 @@ for source formats whose packed weights require a format-specific operator.
 ## Loaders
 
 - `gguf.py` maps GGUF tensors and metadata to the common model structure.
+- `resolver.py` resolves URI model sources (e.g. `oci://`) to local paths by
+	scheme. Other inputs pass through unchanged.
+- `llmman.py` pulls `oci://` (CNCF ModelPack) sources through a running
+	`llmman serve` daemon, for `resolver.py`.
 - `base.py` defines the shared quantized-model IR and base loading,
 	unpacking, and repacking behavior.
 - `awq.py`, `gptq.py`, `quark.py`, `olive.py`, `modelopt.py`, and `quant_auto.py`

@@ -63,6 +63,7 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35Model, Qwen35MoEModel
+from loaders.resolver import resolve_input
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
@@ -105,6 +106,9 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     """
     Get Hugging Face details based on the provided inputs
     """
+    # Resolve URI sources (e.g. oci://) to local paths, once
+    model_name, input_path = resolve_input(model_name), resolve_input(input_path)
+
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
@@ -136,6 +140,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
         "extra_kwargs": extra_kwargs,
         "hf_name": hf_name,
         "hf_config": config,
+        "input_path": input_path,
     }
     return hf_details
 
@@ -680,6 +685,8 @@ def create_model(
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
+    # Local path from `get_hf_details`, after any URI resolution
+    input_path = hf_details.pop("input_path", input_path)
     if effective_config is not None:
         validate_model_dependent_config(effective_config, config)
 
@@ -867,7 +874,7 @@ def get_args():
         "--model_name",
         required=False,
         default=None,
-        help="Model name in Hugging Face. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
+        help="Model name in Hugging Face, or an oci://<registry>/<repo>:<tag> reference. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
     )
 
     parser.add_argument(
@@ -879,6 +886,7 @@ def get_args():
             Input model source. Currently supported options are:
                 hf_path: Path to folder on disk containing the Hugging Face config, model, tokenizer, etc.
                 gguf_path: Path to float16/float32 GGUF file on disk containing the GGUF model
+                oci://<registry>/<repo>:<tag>: CNCF ModelPack artifact, pulled via an llmman daemon
             """),
     )
 
