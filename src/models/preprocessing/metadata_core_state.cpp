@@ -43,7 +43,7 @@ MetadataCoreState::MetadataCoreState(const MetadataCoreConfig& config) : config_
   }
 }
 
-void MetadataCoreState::ValidateInput(const OgaTokenMetadataInput& token) const {
+void MetadataCoreState::ValidateInput(const TokenMetadataInput& token) const {
   if (TimestampsEnabled()) {
     if (!token.has_token_acoustic_frame_interval)
       throw std::runtime_error("Enabled timestamps require generation timing metadata");
@@ -62,7 +62,7 @@ void MetadataCoreState::BeginResult(const char* text) {
   result_ = {text_.c_str(), nullptr};
 }
 
-void MetadataCoreState::AddRecord(std::vector<OgaTokenMetadataTimestampRecord>& records, std::string_view text,
+void MetadataCoreState::AddRecord(std::vector<TimestampRecordView>& records, std::string_view text,
                                   OgaTokenMetadataAcousticFrameInterval interval) {
   // A deque keeps earlier c_str() pointers valid as later words/segments complete in this call.
   record_texts_.emplace_back(text);
@@ -107,34 +107,31 @@ void MetadataCoreState::PublishWord(std::string_view text, OgaTokenMetadataAcous
   }
 }
 
-void MetadataCoreState::ConsumeCompletedWords(const OrtxTimestampMetadata& metadata) {
-  if (metadata.word_count != 0 && metadata.words == nullptr) {
-    throw std::runtime_error("Tokenizer returned a null completed-word array");
-  }
-  for (size_t index = 0; index < metadata.word_count; ++index) {
-    const auto& word = metadata.words[index];
-    if (word.text == nullptr || word.start_token_index < first_pending_token_index_ ||
+void MetadataCoreState::ConsumeCompletedWords() {
+  for (const auto& word : word_grouping_.CompletedWords()) {
+    if (word.start_token_index < first_pending_token_index_ ||
         word.stop_token_index <= word.start_token_index ||
         word.stop_token_index > first_pending_token_index_ + pending_token_intervals_.size()) {
       throw std::runtime_error("Tokenizer returned an invalid completed-word token span");
     }
-    // Extensions groups token indices into words; the first and last token supply acoustic bounds.
+    // The first and last contributing tokens supply each word's acoustic bounds.
     const auto& first = pending_token_intervals_[word.start_token_index - first_pending_token_index_];
     const auto& last = pending_token_intervals_[word.stop_token_index - first_pending_token_index_ - 1];
     PublishWord(word.text, {first.start, last.stop});
   }
 
-  if (metadata.first_pending_token_index < first_pending_token_index_ ||
-      metadata.first_pending_token_index > first_pending_token_index_ + pending_token_intervals_.size()) {
+  const auto first_pending = word_grouping_.FirstPendingTokenIndex();
+  if (first_pending < first_pending_token_index_ ||
+      first_pending > first_pending_token_index_ + pending_token_intervals_.size()) {
     throw std::runtime_error("Tokenizer returned an invalid pending-token watermark");
   }
-  while (first_pending_token_index_ < metadata.first_pending_token_index) {
+  while (first_pending_token_index_ < first_pending) {
     pending_token_intervals_.pop_front();
     ++first_pending_token_index_;
   }
 }
 
-const OgaTokenMetadataOutput& MetadataCoreState::PublishResult() {
+const MetadataOutput& MetadataCoreState::PublishResult() {
   if (TimestampsEnabled()) {
     timestamp_result_ = {word_records_.data(), word_records_.size(), segment_records_.data(), segment_records_.size()};
     result_.timestampMetadata = &timestamp_result_;
@@ -142,24 +139,22 @@ const OgaTokenMetadataOutput& MetadataCoreState::PublishResult() {
   return result_;
 }
 
-const OgaTokenMetadataOutput& MetadataCoreState::ProcessDecoded(
-    const OgaTokenMetadataInput& token, const char* text, const OrtxMetadata& metadata) {
+const MetadataOutput& MetadataCoreState::ProcessDecoded(
+    const TokenMetadataInput& token, const char* text, const OrtxWordPieceInfo& piece) {
   BeginResult(text);
   if (TimestampsEnabled()) {
-    if (!metadata.timestampMetadata) throw std::runtime_error("Tokenizer metadata is missing timestamp data");
-    // One interval enters for each decoded token, even when this call completes no words.
     pending_token_intervals_.push_back(token.token_acoustic_frame_interval);
-    ConsumeCompletedWords(*metadata.timestampMetadata);
+    word_grouping_.Consume(piece, text);
+    ConsumeCompletedWords();
   }
   return PublishResult();
 }
 
-const OgaTokenMetadataOutput& MetadataCoreState::ProcessFinalized(const OrtxMetadata& metadata) {
+const MetadataOutput& MetadataCoreState::ProcessFinalized() {
   BeginResult("");
   if (TimestampsEnabled()) {
-    // Finalization contributes no interval, but Extensions may now release trailing words.
-    const OrtxTimestampMetadata empty{};
-    ConsumeCompletedWords(metadata.timestampMetadata ? *metadata.timestampMetadata : empty);
+    word_grouping_.Finalize();
+    ConsumeCompletedWords();
     CompleteSegment();
   }
   return PublishResult();
