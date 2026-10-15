@@ -1,0 +1,158 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+"""Shared helpers of the qwen38_flash_graph Engine qualification scripts (smoke, gate, behaviours, benchmarks).
+
+The scripts drive a package (see README.md) through the public Engine API (og.Engine / og.Request). Prompts are built from
+two natural-text pools that the caller supplies (`--text-pool`, `--prose-pool`, or $QWEN38_TEXT_POOL / $QWEN38_PROSE_POOL):
+either a text file (tokenized with the package's own tokenizer) or a `.npy` file of token ids. Random-token and chat prompts
+need no pool. Nothing is read from any other location.
+"""
+
+import hashlib
+import json
+import os
+import random
+import time
+from pathlib import Path
+
+import numpy as np
+import onnxruntime_genai as og
+
+EOS_IDS = (248046, 248044)
+
+# Chat template switches that turn the default "thinking" generation prompt into the non-thinking one used by the gates.
+_THINKING_ON = "enable_thinking is undefined or enable_thinking is true"
+_THINKING_OFF = "enable_thinking is defined and enable_thinking is false"
+
+
+def add_prompt_arguments(parser):
+    parser.add_argument(
+        "--text-pool",
+        default=os.environ.get("QWEN38_TEXT_POOL"),
+        help="natural text (a text file, or a .npy of token ids; at least ~40k tokens) for the 'text' prompts",
+    )
+    parser.add_argument(
+        "--prose-pool",
+        default=os.environ.get("QWEN38_PROSE_POOL"),
+        help="second natural-text pool for the 'prose' prompts (same formats)",
+    )
+
+
+class Prompts:
+    """Prompt builders of the vLLM benchmark protocol: a window of a natural-text pool, random tokens, or a chat prompt.
+
+    A window starts at (seed * 7919) % (len(pool) - n), so a seed names the same prompt for the same pool.
+    """
+
+    def __init__(self, model, package, text_pool=None, prose_pool=None):
+        self._package = Path(package)
+        self._tokenizer = og.Tokenizer(model)
+        self._paths = {"text": text_pool, "prose": prose_pool}
+        self._pools = {}
+
+    @classmethod
+    def from_args(cls, model, args):
+        return cls(model, args.model, args.text_pool, args.prose_pool)
+
+    def _pool(self, kind):
+        if kind not in self._pools:
+            path = self._paths[kind]
+            if not path:
+                raise SystemExit(
+                    f"the '{kind}' prompts need a natural-text pool: pass --{kind}-pool <file> "
+                    f"(or set QWEN38_{kind.upper()}_POOL); a text file or a .npy of token ids"
+                )
+            if str(path).endswith(".npy"):
+                tokens = np.load(path).tolist()
+            else:
+                tokens = [int(t) for t in self._tokenizer.encode(Path(path).read_text(errors="ignore"))]
+            self._pools[kind] = tokens
+        return self._pools[kind]
+
+    def make(self, kind, n, seed):
+        if kind == "random":
+            rng = random.Random(seed)
+            return [rng.randrange(1000, 200000) for _ in range(n)]
+        if kind not in ("text", "prose"):
+            raise ValueError(kind)
+        pool = self._pool(kind)
+        if len(pool) <= n:
+            raise SystemExit(f"the {kind} pool has {len(pool)} tokens; {n + 1} are needed")
+        start = (seed * 7919) % (len(pool) - n)
+        return pool[start : start + n]
+
+    def chat_prompt(self, question):
+        """Non-thinking chat prompt of the package's own chat template (GenAI tokenizer)."""
+        template = (self._package / "chat_template.jinja").read_text()
+        template = template.replace(_THINKING_ON, "false").replace(_THINKING_OFF, "true")
+        messages = json.dumps([{"role": "user", "content": question}])
+        text = self._tokenizer.apply_chat_template(messages, template_str=template, add_generation_prompt=True)
+        return [int(x) for x in self._tokenizer.encode(text)]
+
+
+def token_hash(tokens):
+    return hashlib.sha256(np.asarray(tokens, dtype="<i4").tobytes()).hexdigest()
+
+
+def load_model(package, provider=None, overlay=None):
+    """Registers the plugin CUDA EP (`provider` path, default $QWEN_PROVIDER) and loads the package."""
+    provider = provider or os.environ.get("QWEN_PROVIDER")
+    if provider:
+        og.register_execution_provider_library("CUDAExecutionProvider", provider)
+    config = og.Config(str(package))
+    if overlay:
+        config.overlay(json.dumps(overlay))
+    return og.Model(config)
+
+
+class TurnResult:
+    def __init__(self):
+        self.tokens = []
+        self.times = []  # perf_counter() after the Engine.run call that delivered each token
+        self.finish_reason = None
+        self.usage = None
+        self.matched_stop_string_index = None
+        self.runs = 0
+        self.events = 0
+        self.start = None
+
+
+def run_turn(engine, buffer, request, prompt, max_new, *, stop_strings=None, turn_setup=None, until=None):
+    """Begins a greedy turn and runs the Engine until the Engine has no work (or `until(result)` returns True).
+
+    Returns the TurnResult and the turn id. Raises on a failed or capacity-blocked event.
+    """
+    turn = og.TurnOptions(request)
+    turn.set_do_sample(False)
+    if max_new is not None:
+        turn.set_max_generated_tokens(max_new)
+    if stop_strings:
+        turn.set_stop_strings(stop_strings)
+    if turn_setup:
+        turn_setup(turn)
+    result = TurnResult()
+    result.start = time.perf_counter()
+    turn_id = request.begin_turn(np.asarray(prompt, dtype=np.int32), turn)
+    pump(engine, buffer, result, until)
+    return result, turn_id
+
+
+def pump(engine, buffer, result, until=None):
+    while engine.has_pending_requests():
+        events = engine.run(buffer)
+        now = time.perf_counter()
+        result.runs += 1
+        for event in events:
+            result.events += 1
+            if event.flags & (og.EngineEventFlags.FAILED | og.EngineEventFlags.CAPACITY_BLOCKED):
+                raise RuntimeError(f"Engine failure: flags={event.flags} error={event.error_code}")
+            if event.flags & og.EngineEventFlags.TOKEN:
+                result.tokens.append(int(event.token))
+                result.times.append(now)
+            if event.flags & og.EngineEventFlags.TURN_FINISHED:
+                result.finish_reason = event.finish_reason
+                result.usage = event.usage
+                result.matched_stop_string_index = event.matched_stop_string_index
+        if until is not None and until(result):
+            break
+    return result
