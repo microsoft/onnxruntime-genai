@@ -22,11 +22,16 @@ from builder_config import (  # noqa: E402
 )
 
 
-@pytest.mark.parametrize("values", [
-    [], [1, 2, 3], [[1, 2], []],
-    [{"kind": "paged_kv", "layer_ids": [3, 7]}, {"enabled": True}],
-    ["brackets [ ]", "quote\"", "line\nbreak", None, False, 0.25],
-])
+@pytest.mark.parametrize(
+    "values",
+    [
+        [],
+        [1, 2, 3],
+        [[1, 2], []],
+        [{"kind": "paged_kv", "layer_ids": [3, 7]}, {"enabled": True}],
+        ["brackets [ ]", 'quote"', "line\nbreak", None, False, 0.25],
+    ],
+)
 def test_genai_config_serialization_keeps_arrays_inline(values):
     config = {"model": {"values": values, "inputs": {"input_ids": "input_ids"}}, "search": {}}
 

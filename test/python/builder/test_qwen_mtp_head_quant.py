@@ -15,6 +15,7 @@ from loaders.modelopt import ModeloptModel
 from loaders.qwen import Qwen4ExpMTPModel, QwenMTPModel
 from safetensors.torch import save_file
 
+from models import builder as builder_module
 from models.builders.qwen import Qwen4ExpModel, Qwen35DenseMTPModel, Qwen35Model, Qwen35MoEModel
 
 
@@ -184,8 +185,6 @@ def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):
 
 
 def test_qwen4_exp_text_only_dispatches_composite_builder(monkeypatch, tmp_path):
-    from models import builder as builder_module
-
     captured = {}
 
     class FakeQwen4ExpModel:
@@ -911,6 +910,4 @@ def test_qwen4_exp_mtp_state_uses_residual_linear_shared_schema(monkeypatch):
     assert mtp.fc_embedding.weight is mtp_state["mtp.fc_embedding.weight"]
     assert mtp.fc_hidden.weight is mtp_state["mtp.fc_hidden.weight"]
     assert mtp.layers[0].state == {"marker": mtp_state["mtp.layers.0.marker"]}
-    assert mtp.hyper_connection_mixer.state == {
-        "marker": mtp_state["mtp.hyper_connection_mixer.marker"]
-    }
+    assert mtp.hyper_connection_mixer.state == {"marker": mtp_state["mtp.hyper_connection_mixer.marker"]}

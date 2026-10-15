@@ -3528,9 +3528,9 @@ TEST_F(EngineRunTest, MtpChainCarriesFixedStateWithoutOverwritingCommitState) {
   auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
   const std::array<int64_t, 2> shape{1, 1};
   auto input = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
-                                     shape, Ort::TypeToTensorType<float>);
-  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
                                       shape, Ort::TypeToTensorType<float>);
+  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                       shape, Ort::TypeToTensorType<float>);
   input->GetTensorMutableData<float>()[0] = 0.0f;
   output->GetTensorMutableData<float>()[0] = -1.0f;
   FixedStateBinding binding{};
@@ -3580,9 +3580,9 @@ TEST_F(EngineRunTest, MtpChainSelectsFixedStateRowsForDifferentDraftWidths) {
   auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
   const std::array<int64_t, 2> shape{2, 1};
   auto input = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
-                                     shape, Ort::TypeToTensorType<float>);
-  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
                                       shape, Ort::TypeToTensorType<float>);
+  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                       shape, Ort::TypeToTensorType<float>);
   input->GetTensorMutableData<float>()[0] = 10.0f;
   input->GetTensorMutableData<float>()[1] = 20.0f;
   FixedStateBinding binding{};
