@@ -164,6 +164,10 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem
       set.sin = ptr;
     else if (item.name.rfind("knorm.", 0) == 0)
       set.knorm[std::stoi(item.name.substr(6))] = ptr;
+    else if (item.name.rfind("kscale.", 0) == 0)
+      set.kscale[std::stoi(item.name.substr(7))] = ptr;
+    else if (item.name.rfind("vscale.", 0) == 0)
+      set.vscale[std::stoi(item.name.substr(7))] = ptr;
   }
   if (!target.cos || !head.cos || target.knorm.empty() || head.knorm.empty())
     throw std::runtime_error("qwen38_graph: incomplete QSA constants " + index_path.string());
@@ -369,15 +373,33 @@ void Qwen38GraphEngine::FastHandoff() {
     if (it == f.states.end()) throw std::runtime_error("qwen38_graph: dense state lacks " + name);
     return static_cast<uint8_t*>(it->second->GetTensorMutableRawData());
   };
+  const auto& qc = *f.consts;
   for (auto& [name, t] : store_) {
     const uint8_t* src = dense_ptr(name);
     if (name == "past_position_ids") {
       plane_.Check(plane_.memcpy_d2d(t->ptr, src, P * 8, stream_), "handoff positions");
-    } else {
+    } else if (t->type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
       // [1, 2, cap, 256] <- [1, 2, P, 256]
       const size_t head_dst = static_cast<size_t>(capacity_) * 256 * 2, head_src = P * 256 * 2;
       for (int h = 0; h < 2; ++h)
         plane_.Check(plane_.memcpy_d2d(t->ptr + h * head_dst, src + h * head_src, head_src, stream_), "handoff kv");
+    } else if (t->type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8 || t->type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+      if (!plane_.quantize_kv)
+        throw std::runtime_error("qwen38_graph: plane library lacks qwen38_plane_quantize_kv for quantized KV cache");
+      const int layer = LayerOf(name);
+      const std::string tail = TailOf(name);
+      const auto& smap = (tail == "key") ? qc.target.kscale : qc.target.vscale;
+      auto sit = smap.find(layer);
+      if (sit == smap.end())
+        throw std::runtime_error("qwen38_graph: missing KV scale in qsa_consts for " + name);
+      const int mode = (t->type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8) ? 1 : 2;
+      const size_t head_dst = static_cast<size_t>(capacity_) * 256, head_src = P * 256 * 2;
+      for (int h = 0; h < 2; ++h) {
+        plane_.quantize_kv(stream_, src + h * head_src, t->ptr + h * head_dst, sit->second + h * 256 * sizeof(float),
+                           static_cast<int>(P), 256, 256, mode);
+      }
+    } else {
+      throw std::runtime_error("qwen38_graph: unsupported store tensor dtype for " + name);
     }
   }
   const size_t blocks = P / kRatio, pending = P % kRatio;
@@ -393,7 +415,6 @@ void Qwen38GraphEngine::FastHandoff() {
       plane_.Check(plane_.memcpy_d2d(t->ptr, src, t->Bytes(), stream_), "handoff state");
     }
   }
-  const auto& qc = *f.consts;
   for (auto& [name, shared] : shared_) {
     const int layer = LayerOf(name);
     const uint8_t* raw = dense_ptr(name);  // raw per-token keys bf16 [1, P, 128]
@@ -410,6 +431,8 @@ void Qwen38GraphEngine::FastHandoff() {
     plane_.Check(plane_.memcpy_h2d(banks_[0].tensors.at(base + "index_lengths")->ptr, lengths, 8, stream_), "handoff index lengths");
     SyncStream();  // `lengths` lives on the stack
   }
+  f.states.clear();
+  f.logits.reset();
 }
 
 // Batched head prompt prefill: KV-only head model over rows p = 1..P-1 = (token p, target hidden p-1) in chunks, written to
@@ -425,9 +448,28 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
   const size_t row_bytes = static_cast<size_t>(hidden_width_) * 2;
   const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
   const auto bf16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
-  uint8_t* key = head_store_.at("past_key_values.0.key")->ptr;
-  uint8_t* value = head_store_.at("past_key_values.0.value")->ptr;
-  const size_t head_stride = static_cast<size_t>(capacity_) * 256 * 2;
+  const DevTensor& key_tensor = *head_store_.at("past_key_values.0.key");
+  const DevTensor& value_tensor = *head_store_.at("past_key_values.0.value");
+  uint8_t* key = key_tensor.ptr;
+  uint8_t* value = value_tensor.ptr;
+  const bool kv_quant =
+      (key_tensor.type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8 || key_tensor.type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN);
+  const int kv_mode = (key_tensor.type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8) ? 1 : 2;
+  const size_t elem_bytes = kv_quant ? 1 : 2;
+  const size_t head_stride = static_cast<size_t>(capacity_) * 256 * elem_bytes;
+  const auto& qc = f.consts->head;
+  const uint8_t* head_kscale = nullptr;
+  const uint8_t* head_vscale = nullptr;
+  if (kv_quant) {
+    if (!plane_.quantize_kv)
+      throw std::runtime_error("qwen38_graph: plane library lacks qwen38_plane_quantize_kv for quantized head KV cache");
+    auto ksit = qc.kscale.find(0);
+    auto vsit = qc.vscale.find(0);
+    if (ksit == qc.kscale.end() || vsit == qc.vscale.end())
+      throw std::runtime_error("qwen38_graph: missing head KV scale in qsa_consts");
+    head_kscale = ksit->second;
+    head_vscale = vsit->second;
+  }
   for (size_t lo = 0; lo < rows; lo += static_cast<size_t>(f.chunk)) {
     const size_t m = std::min(static_cast<size_t>(f.chunk), rows - lo);
     auto binding = OrtIoBinding::Create(*f.head_kv);
@@ -464,12 +506,24 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
       if (names[i] == "key") {
         if (shape.size() == 4 && shape[1] == 2 && shape[2] == int64_t(m) && shape[3] == 256) {
           // [1, 2, m, 256]
-          for (int h = 0; h < 2; ++h)
-            plane_.Check(plane_.memcpy_d2d(key + h * head_stride + lo * 512, src + h * m * 512, m * 512, stream_), "head key");
+          for (int h = 0; h < 2; ++h) {
+            if (!kv_quant) {
+              plane_.Check(plane_.memcpy_d2d(key + h * head_stride + lo * 512, src + h * m * 512, m * 512, stream_), "head key");
+            } else {
+              plane_.quantize_kv(stream_, src + h * m * 512, key + h * head_stride + lo * 256,
+                                 head_kscale + h * 256 * sizeof(float), static_cast<int>(m), 256, 256, kv_mode);
+            }
+          }
         } else if (shape.size() == 3 && shape[1] == int64_t(m) && shape[2] == 512) {
           // [1, m, 512] -> per head h columns [256 h, 256 (h+1))
-          for (int h = 0; h < 2; ++h)
-            plane_.Check(plane_.memcpy2d_d2d(key + h * head_stride + lo * 512, 512, src + h * 512, 1024, 512, m, stream_), "head key");
+          for (int h = 0; h < 2; ++h) {
+            if (!kv_quant) {
+              plane_.Check(plane_.memcpy2d_d2d(key + h * head_stride + lo * 512, 512, src + h * 512, 1024, 512, m, stream_), "head key");
+            } else {
+              plane_.quantize_kv(stream_, src + h * 512, key + h * head_stride + lo * 256,
+                                 head_kscale + h * 256 * sizeof(float), static_cast<int>(m), 512, 256, kv_mode);
+            }
+          }
         } else {
           std::ostringstream message;
           message << "qwen38_graph: unexpected head_kv key shape [";
@@ -480,8 +534,14 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
         // [1, m, 512] -> per head h columns [256 h, 256 (h+1))
         if (shape.size() != 3 || shape[1] != int64_t(m) || shape[2] != 512)
           throw std::runtime_error("qwen38_graph: unexpected head_kv value shape");
-        for (int h = 0; h < 2; ++h)
-          plane_.Check(plane_.memcpy2d_d2d(value + h * head_stride + lo * 512, 512, src + h * 512, 1024, 512, m, stream_), "head value");
+        for (int h = 0; h < 2; ++h) {
+          if (!kv_quant) {
+            plane_.Check(plane_.memcpy2d_d2d(value + h * head_stride + lo * 512, 512, src + h * 512, 1024, 512, m, stream_), "head value");
+          } else {
+            plane_.quantize_kv(stream_, src + h * 512, value + h * head_stride + lo * 256,
+                               head_vscale + h * 256 * sizeof(float), static_cast<int>(m), 512, 256, kv_mode);
+          }
+        }
       } else if (names[i] == "index_key") {
         if (shape.size() != 3 || shape[1] != int64_t(m) || shape[2] != 128)
           throw std::runtime_error("qwen38_graph: unexpected head_kv index_key shape");
@@ -491,7 +551,6 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
     SyncStream();  // the output values die here
   }
   const size_t blocks = rows / kRatio, pending = rows % kRatio;
-  const auto& qc = f.consts->head;
   plane_.pool_keys(stream_, f.raw_keys.data(), static_cast<int>(blocks), qc.knorm.at(0), qc.cos, qc.sin, qc.width,
                    f.consts->epsilon, 0, head_store_.at("past_key_values.0.index_key")->ptr);
   HeadBank& bank = head_banks_[head_cur_];
