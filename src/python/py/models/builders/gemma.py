@@ -156,7 +156,7 @@ class Gemma3Model(Gemma2Model):
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
 
 
-class Gemma4Model(Gemma3Model):
+class Gemma4UnifiedModel(Gemma3Model):
     """Builder for the text decoder of Gemma4Unified (gemma4-12b-it).
 
     Differs from Gemma3 in several structural ways (see below). Only the text
@@ -437,7 +437,7 @@ class Gemma4Model(Gemma3Model):
             self.layernorm_attrs[attr] = f"{mul_name}/output_0"
 
 
-class Gemma4MoEModel(Gemma4Model):
+class Gemma4MoEModel(Gemma4UnifiedModel):
     """Builder for the text decoder of Gemma4 MoE (gemma-4-26B-A4B-it).
 
     Inherits the entire attention / RoPE / per-layer-KV / layer_scalar stack from
@@ -468,8 +468,25 @@ class Gemma4MoEModel(Gemma4Model):
         # op's "geglu" activation with swiglu_fusion=1 (interleaved gate|up), which applies the
         # gelu-tanh gate on the gate half. HF renormalizes the selected top-k weights to sum to 1.
         self.moe_attrs["activation_type"] = "geglu"
-        self.moe_attrs["swiglu_fusion"] = 1
+        # Float re-quant path interleaves gate|up (swiglu_fusion=1). The pre-quantized Quark
+        # path re-fuses experts as gate|up CONCAT (matching the factored checkpoint's layout),
+        # which the CUDA op consumes with swiglu_fusion=2 (fused, non-interleaved). The CPU QMoE
+        # kernel only supports the interleaved layout (swiglu_fusion=1), so for the CPU quark path
+        # we interleave the fc1 expert rows at build time (see make_moe_quark_preprocessing) and
+        # use fusion=1.
+        if self.quant_type == "quark":
+            self.moe_attrs["swiglu_fusion"] = 1 if self.ep == "cpu" else 2
+        else:
+            self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["normalize_routing_weights"] = True
+
+        # The pre-quantized Quark experts are group-wise (asymmetric, per-group scales/zero
+        # points). Emit block_size so the QMoE op interprets the 3D block-wise scales/zero
+        # points ([E, out, in/group_size]) instead of treating them as per-row.
+        if self.quant_type == "quark":
+            quant_config = self.quant_attrs["config"]
+            group_size = quant_config["global_quant_config"]["weight"]["group_size"]
+            self.moe_attrs["block_size"] = group_size
 
         # MoE layers emit MoE/QMoE ops instead of dense /mlp/ MatMuls for the experts, but
         # the parallel DENSE mlp is still a normal MatMul path — keep its mixed-precision
@@ -597,6 +614,7 @@ class Gemma4MoEModel(Gemma4Model):
         #   h2 = post_feedforward_layernorm_2( experts(pre_ffn_ln_2(residual)) )   # MoE branch
         #   skip_input = h1 + h2
         residual = self.layernorm_attrs["root_input"]
+        moe = self.get_gemma4_moe(layer)
 
         # --- Dense branch ---
         super().make_mlp(layer_id, dense_mlp, root_input)
@@ -606,12 +624,12 @@ class Gemma4MoEModel(Gemma4Model):
         )
 
         # --- MoE branch: preprocessing (expert initializers) + router + fused op ---
-        self.make_moe_preprocessing(layer_id, layer)
+        self.make_moe_preprocessing(layer_id, moe)
         expert_input = self.make_gemma4_rmsnorm(
             f"layers.{layer_id}.pre_feedforward_layernorm_2", residual, layer.pre_feedforward_layernorm_2.weight
         )
-        router_probs = self.make_moe_router(layer_id, layer, residual)
-        moe_out = self.make_moe_subgraph(layer_id, layer, expert_input, router_probs)
+        router_probs = self.make_moe_router(layer_id, moe, residual)
+        moe_out = self.make_moe_subgraph(layer_id, moe, expert_input, router_probs)
         h2 = self.make_gemma4_rmsnorm(
             f"layers.{layer_id}.post_feedforward_layernorm_2", moe_out, layer.post_feedforward_layernorm_2.weight
         )
@@ -623,12 +641,24 @@ class Gemma4MoEModel(Gemma4Model):
         )
         self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
 
+    def get_gemma4_moe(self, layer):
+        # Resolve the routed-experts/router group. The quantized loader groups them under
+        # `layer.moe` (QuantizedMoE); the float HF layer exposes `experts`/`router` directly.
+        return getattr(layer, "moe", layer)
+
     def make_moe_preprocessing(self, layer_id, moe, root_input=None):
-        # Emit the fused-gate/up expert initializers. HF stores experts.gate_up_proj [E, 2*inter,
-        # hidden] as [gate | up] concat; the fused SwiGLU op (swiglu_fusion=1) wants the rows
-        # interleaved [g0, u0, g1, u1, ...]. per_expert_scale is a pure per-expert output constant,
-        # folded into down_proj here (equivalent to scaling each expert's output). The MoE/QMoE op
-        # takes the (empty) expert biases as separate inputs.
+        # Emit the fused-gate/up expert initializers. Pre-quantized Quark experts take a dedicated
+        # path (weights are already quantized; no float re-quantization); see
+        # make_moe_quark_preprocessing. The float path re-quantizes HF float experts here.
+        if self.quant_type == "quark":
+            self.make_moe_quark_preprocessing(layer_id, moe)
+            return
+
+        # HF stores experts.gate_up_proj [E, 2*inter, hidden] as [gate | up] concat; the fused
+        # SwiGLU op (swiglu_fusion=1) wants the rows interleaved [g0, u0, g1, u1, ...].
+        # per_expert_scale is a pure per-expert output constant, folded into down_proj here
+        # (equivalent to scaling each expert's output). The MoE/QMoE op takes the (empty) expert
+        # biases as separate inputs.
         experts = moe.experts
         raw_gate_up = experts.gate_up_proj
         half = raw_gate_up.shape[1] // 2
@@ -684,6 +714,18 @@ class Gemma4MoEModel(Gemma4Model):
         # in make_moe).
         op_type = self.moe_attrs["op_type"]
         names = self.make_moe_expert_names(layer_id)
+        gate_up_zero = f"model.layers.{layer_id}.moe.experts.gate_up_proj.zero_points"
+        down_zero = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
+
+        if self.quant_type == "quark":
+            # Pre-quantized Quark experts may be stored in a prescaled+rotated domain and carry
+            # explicit zero-points. Apply the shared input transform (once) and thread the
+            # zero-point initializers emitted by make_moe_quark_preprocessing.
+            root_input = self.make_moe_quark_input_transform(layer_id, moe, root_input)
+            use_zero_points = getattr(self, "quark_use_zero_points", False)
+        else:
+            use_zero_points = False
+
         moe_name = f"/model/layers.{layer_id}/moe/{op_type}"
         self.make_moe_op(
             moe_name,
@@ -695,5 +737,7 @@ class Gemma4MoEModel(Gemma4Model):
             weight2=names["down_weight"],
             scales2=names["down_scales"] if op_type == "QMoE" else "",
             bias2=names["down_bias"],
+            zero_points1=gate_up_zero if use_zero_points else "",
+            zero_points2=down_zero if use_zero_points else "",
         )
         return f"{moe_name}/output_0"
