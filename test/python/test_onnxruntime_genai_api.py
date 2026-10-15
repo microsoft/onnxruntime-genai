@@ -117,6 +117,23 @@ def test_asr_example_formats_metadata_results(test_data_path, asr_example, times
     assert asr_example.format_timestamp_records(stream.finalize_metadata(), use_segments) == ""
 
 
+def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, capsys):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10)
+    generator = og.Generator(model, params)
+    prompt = np.array([[0, 0, 0, 52]], dtype=np.int32)
+    generator.append_tokens(prompt)
+    postprocessor = og.TokenPostProcessor(model, generator)
+    transcript = asr_example.decode_tokens(generator, postprocessor, "off", [])
+    tokenizer = og.Tokenizer(model)
+    plain = tokenizer.create_stream()
+    expected = "".join(plain.decode(int(token_id)) for token_id in generator.get_sequence(0)[prompt.size:])
+    assert transcript == expected
+    assert capsys.readouterr().out == expected
+
+
 @pytest.mark.parametrize(
     "timestamp_level,use_vad",
     [("off", False), ("word", False), ("segment", False), ("all", False), ("all", True)],

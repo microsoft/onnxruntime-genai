@@ -172,12 +172,13 @@ transcript followed by the per-word timestamp transcript.
 ### Building the examples
 
 These examples require headers, language bindings, and a native GenAI library from a build containing
-the timestamp APIs, together with the corresponding ONNX Runtime Extensions metadata support.
+the processor APIs, together with the corresponding ONNX Runtime Extensions lexical lookup API.
 Existing packages such as GenAI `0.17.0` do not provide those APIs. Until a feature-containing release
 is published:
 
-- For Python, use the wheel built from the implementation branch. Decode and finalization return
-  typed objects: read `result.timestamp_metadata`, then `.words` or `.segments`, and each record's
+- For Python, use the wheel built from the implementation branch. Call `process_next_tokens()`
+  after generation and `finalize()` at the end, then read typed objects from
+  `get_next_token_results()`: use `result.get_timestamps()`, then `.words` or `.segments`, and each record's
   `.text`, `.start_time`, and `.stop_time` attributes rather than dictionary keys.
 - For C++, build the `model_asr` target with `MODEL_ASR=ON` and set `OGA_INCLUDE_DIR` and `OGA_LIB_DIR`
   to the matching headers and native library.
@@ -193,7 +194,7 @@ remove the timestamp API references from the C++ or C# example source.
 With a feature-enabled Python package installed, run the example regressions from the repository root:
 
 ```bash
-python -m pytest test/python/test_onnxruntime_genai_api.py --test_models test/models -k asr_example_formats
+python -m pytest test/python/test_onnxruntime_genai_api.py --test_models test/models -k asr_example
 ```
 
 The real-speech cases use `test/models/nemotron-speech-streaming` and `test/audios/jfk.flac`. Set
@@ -210,6 +211,7 @@ by VAD. Time values are seconds rounded to two decimal places.
 Punctuation remains attached to its word. Segments complete on configured suffixes, configured
 frame gaps, or finalization.
 
-When `timestamp_level` is `off`, use ordinary `GetNextTokens()` and tokenizer stream `Decode()`.
+When `timestamp_level` is `off`, the examples use the processor's ordinary text results.
+Applications needing only text may also use `GetNextTokens()` and tokenizer stream `Decode()`.
 The streaming processor does not create timestamp origin metadata, the transducer does not append
 token intervals, and the tokenizer stream does not buffer intervals or build timestamp events.

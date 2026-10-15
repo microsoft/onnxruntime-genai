@@ -4,13 +4,14 @@ This sample streams audio through Nemotron Speech and builds its output only fro
 events. It enables `timestamp_level: "segment"` with a configuration overlay and prints each segment
 as `[StartTime - StopTime] SegmentText` when the segment completes.
 
-The tokenizer stream automatically initializes metadata from the model configuration.
-`Reset()` restores those settings; no explicit metadata-state initialization is needed.
+`TokenPostProcessor(model, generator)` owns decoding and timestamp state, using the model
+configuration. `Reset()` clears all processor state together; no explicit metadata-state
+initialization is needed. The generator must outlive its processor.
 
 ## Build and run
 
 This sample requires managed bindings and a native GenAI library containing the timestamp APIs,
-including the corresponding ONNX Runtime Extensions metadata support. The current `0.17.0` package
+including the corresponding ONNX Runtime Extensions lexical lookup API. The current `0.17.0` package
 references are aligned with the other C# examples but do not contain these APIs. Until a
 feature-containing package is published, use the local project reference and matching native build.
 
@@ -25,9 +26,11 @@ dotnet run --project examples/csharp/NemotronSpeechTimestamps -c Release -p:UseL
 On Windows, make the corresponding native libraries available on `PATH`. Update both the CPU and
 CUDA package references to a feature-containing release before using the package-based build.
 
-`TokenMetadataOutput.TimestampMetadata.Segments` is a per-call event list, not cumulative history. It is usually
-empty, but one decoded token can complete multiple segments, so the sample iterates every returned
-record. Pass each record from `GetNextTokensWithMetadata()` directly to
-`DecodeWithMetadata(token)`. Acoustic timing is optional and is not supplied when
-generator timestamps are disabled; an enabled timestamp consumer requires it.
-`FinalizeMetadata()` emits the final trailing segment through the same metadata wrapper.
+After each `GenerateNextToken()`, the sample calls `ProcessNextTokens()` and iterates
+`GetNextTokenResults()`. `result.GetTimestamps().Segments` is a per-call event list,
+not cumulative history. A step can emit zero or multiple tokens and complete zero or
+multiple segments, so every result and record is visited. Repeated getter calls do
+not change state. Enabled timestamps require valid model-provided acoustic timing.
+`FinalizeProcessing()` completes the trailing segment; read it through the same
+getter. Results are owned managed copies. The processor supports one sequence and
+one beam and must use its generator's model.
