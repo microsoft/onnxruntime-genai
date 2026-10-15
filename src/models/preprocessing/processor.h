@@ -69,6 +69,7 @@ struct Processor {
     return std::make_shared<ProcessorType>(config, session_info);
   }
 
+  virtual void ConfigureTokenizer(Tokenizer&) const {}
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
 };
 

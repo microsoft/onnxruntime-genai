@@ -42,12 +42,12 @@ void ModelMM(
 )
 {
     // Creating running list of messages
-    var system_message = new Dictionary<string, string>
+    var system_message = new Dictionary<string, object>
     {
         { "role", "system" },
         { "content", systemPrompt }
     };
-    var input_list = new List<Dictionary<string, string>>() { system_message };
+    var input_list = new List<Dictionary<string, object>>() { system_message };
 
     // Get and set guidance info if requested
     string guidance_type = "";
@@ -91,7 +91,7 @@ void ModelMM(
         var user_content = Common.GetUserContent(model.GetModelType(), num_images, num_audios, text);
 
         // Add user message to list of messages
-        var user_message = new Dictionary<string, string>
+        var user_message = new Dictionary<string, object>
         {
             { "role", "user" },
             { "content", user_content }
@@ -270,8 +270,7 @@ RootCommand GetArgs()
     )
     {
         Arity = ArgumentArity.ExactlyOne,
-        DefaultValueFactory = (_) => "What color is the sky?",
-        Description = "User prompt to use for the model."
+        Description = "User prompt. Defaults to the package prompt when omitted."
     };
 
     var rewind = new Option<bool>(
@@ -354,7 +353,7 @@ void main(string[] args) {
     string executionProvider = parseResult.GetValue<string>("execution_provider")!;
     string epPath = parseResult.GetValue<string>("ep_path")!;
     string systemPrompt = parseResult.GetValue<string>("system_prompt")!;
-    string userPrompt = parseResult.GetValue<string>("user_prompt")!;
+    string userPrompt = parseResult.GetValue<string>("user_prompt") ?? Common.GetDefaultUserPrompt(modelPath, "What color is the sky?");
     bool verbose = parseResult.GetValue<bool>("verbose");
     bool debug = parseResult.GetValue<bool>("debug");
     bool interactive = !parseResult.GetValue<bool>("non_interactive");

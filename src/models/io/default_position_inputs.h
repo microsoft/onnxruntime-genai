@@ -1,11 +1,12 @@
 #pragma once
 
-#include "position_inputs.h"
+#include "attention_mask.h"
 
 namespace Generators {
 
 struct DefaultPositionInputs : PositionInputs {
-  DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name);
+  DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name,
+                        std::optional<int> static_mask_capacity = std::nullopt);
 
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
@@ -15,7 +16,6 @@ struct DefaultPositionInputs : PositionInputs {
   void AddAttentionMask();
   void AddPositionIDs();
   void CreateNextPositionIDsTensor();
-  void CreateNextAttentionMaskTensor(int total_length);
   void UpdatePositionIDs(int total_length, int new_length);
   void UpdateAttentionMask(int total_length, int new_length);
 
@@ -25,11 +25,6 @@ struct DefaultPositionInputs : PositionInputs {
   void CreateAndInitializePositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
   template <typename T>
   void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
-  template <typename T>
-  void InitializeStaticMask(OrtValue& cpu_attention_mask);
-
-  void RewindMask(size_t index);
-  bool ShouldUseStaticMaskHandling() const;
 
   const Model& model_;
   State& state_;
@@ -42,9 +37,7 @@ struct DefaultPositionInputs : PositionInputs {
   std::array<int64_t, 2> position_ids_shape_{};
   std::unique_ptr<Tensor> position_ids_;
   std::unique_ptr<Tensor> position_ids_next_;
-  std::array<int64_t, 2> attention_mask_shape_{};
-  std::unique_ptr<Tensor> attention_mask_;
-  std::unique_ptr<Tensor> attention_mask_next_;
+  std::unique_ptr<AttentionMask> attention_mask_;
   bool is_first_update_{true};
 };
 
