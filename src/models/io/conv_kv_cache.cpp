@@ -12,7 +12,14 @@
 namespace Generators {
 
 bool HasConvKeyValueCache(const Model& model) {
-  return ModelType::IsLFM2(model.config_->model.type) || !model.config_->model.decoder.layer_types.empty();
+  const auto& layer_types = model.config_->model.decoder.layer_types;
+  // Other hybrids also describe their layers, but pair convolution and recurrent
+  // states through RecurrentState rather than this conv-only cache manager.
+  return ModelType::IsLFM2(model.config_->model.type) ||
+         (!layer_types.empty() &&
+          std::all_of(layer_types.begin(), layer_types.end(), [](const auto& type) {
+            return type == "conv" || type == "full_attention";
+          }));
 }
 
 ConvKeyValueCache::ConvKeyValueCache(State& state)

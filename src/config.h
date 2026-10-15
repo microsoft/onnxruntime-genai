@@ -494,9 +494,11 @@ struct Config {
       // without rerunning the model. 0 means the model does not export the state-update bindings.
       int state_update_capacity{};
 
+      // Per-layer metadata. Only the legacy "conv"/"full_attention" vocabulary selects
+      // the convolution-only cache manager; other hybrids discover paired states from the graph.
+      std::vector<std::string> layer_types;
       // Hybrid SSM+Attention (LFM2) parameters
-      std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
-      int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
+      int conv_cache_size{};  // Convolution cache width (conv_L_cache from HF config)
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
