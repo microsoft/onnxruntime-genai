@@ -236,12 +236,12 @@ DeviceSpan<float> Gemma4VisionState::RunSplitVision() {
       }
     }
 
-    auto encoded = model_.vision_session_->Run(encoder_options.get(), input_names_.data(),
-                                               encoder_inputs.data(), encoder_inputs.size(),
-                                               &encoder_output_name, 1);
-    auto staged = StageVisionEncoderOutput(*encoded[0], *model_.vision_encoder_device_,
+    auto encoded = RunVisionEncoderWithPreallocatedOutput(
+        *model_.vision_session_, encoder_options.get(), input_names_.data(),
+        encoder_inputs.data(), encoder_inputs.size(), encoder_output_name, *model_.vision_encoder_device_);
+    auto staged = StageVisionEncoderOutput(*encoded, *model_.vision_encoder_device_,
                                            *model_.vision_projector_device_);
-    projector_inputs[encoder_output_index_] = staged ? staged.get() : encoded[0].get();
+    projector_inputs[encoder_output_index_] = staged ? staged.get() : encoded.get();
     OrtValue* output = outputs_[0];
     std::unique_ptr<OrtValue> output_slice;
     if (num_images_ > 1) {

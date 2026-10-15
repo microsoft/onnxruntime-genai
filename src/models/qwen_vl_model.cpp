@@ -526,19 +526,23 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
     State::SetRunOptions(vision.run_options.value());
   }
   auto run_encoder = [&]() {
+    std::unique_ptr<OrtValue> owned;
     OrtValue* raw_output = nullptr;
-    vl_model_.vision_session_->Run(split_vision ? encoder_run_options_.get() : run_options_.get(),
-                                   input_name_ptrs.data(), input_values.data(),
-                                   input_name_ptrs.size(), encoder_output_name, &raw_output, 1);
-    std::unique_ptr<OrtValue> owned(raw_output);
     if (split_vision) {
+      owned = RunVisionEncoderWithPreallocatedOutput(
+          *vl_model_.vision_session_, encoder_run_options_.get(), input_name_ptrs.data(),
+          input_values.data(), input_name_ptrs.size(), encoder_output_name[0],
+          *vl_model_.vision_encoder_device_);
       auto staged = StageVisionEncoderOutput(*owned, *vl_model_.vision_encoder_device_,
                                              *vl_model_.vision_projector_device_);
       projector_values[encoder_output_index] = staged ? staged.get() : owned.get();
-      raw_output = nullptr;
       vl_model_.vision_projector_session_->Run(projector_run_options_.get(), projector_names.data(),
                                                projector_values.data(), projector_names.size(),
                                                output_name_ptrs, &raw_output, 1);
+      owned.reset(raw_output);
+    } else {
+      vl_model_.vision_session_->Run(run_options_.get(), input_name_ptrs.data(), input_values.data(),
+                                     input_name_ptrs.size(), encoder_output_name, &raw_output, 1);
       owned.reset(raw_output);
     }
     if (owned->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {

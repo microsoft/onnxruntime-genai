@@ -159,7 +159,13 @@ TEST(MultiModalDevicePlacementTests, SessionCanAccessOnlyHostOrItsOwnMemory) {
 
 TEST(MultiModalDevicePlacementTests, StagesAcceleratorEncoderOutputForCpuProjector) {
   TestAccelerator encoder;
-  auto& projector = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
+  Generators::Config config{
+      fs::path{std::string{MODEL_PATH "gemma4"}},
+      R"({"model":{"vision":{"pipeline":[{"encoder":{"filename":"encoder.onnx"}},{"projector":{"filename":"projector.onnx","run_on_cpu":true}}]}}})"};
+  ASSERT_TRUE(config.model.vision.pipeline[1].run_on_cpu);
+  auto& projector = config.model.vision.pipeline[1].run_on_cpu
+                        ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU)
+                        : static_cast<Generators::DeviceInterface&>(encoder);
   auto memory_info = encoder.GetMemoryInfo();
   std::array<float, 4> pixels{1.0f, 2.0f, 3.0f, 4.0f};
   const std::array<int64_t, 2> shape{2, 2};
@@ -170,6 +176,33 @@ TEST(MultiModalDevicePlacementTests, StagesAcceleratorEncoderOutputForCpuProject
   EXPECT_EQ(staged->GetTensorMemoryInfo().GetDeviceType(), OrtMemoryInfoDeviceType_CPU);
   EXPECT_EQ(std::vector<float>(staged->GetTensorData<float>(), staged->GetTensorData<float>() + pixels.size()),
             (std::vector<float>{pixels.begin(), pixels.end()}));
+}
+
+TEST(MultiModalDevicePlacementTests, PreallocatesConcreteVisionEncoderOutput) {
+  auto& cpu = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
+  const auto model_path = fs::path{std::string{MODEL_PATH "marian-batch/encoder.onnx"}};
+  auto session = OrtSession::Create(Generators::GetOrtEnv(), model_path.c_str(), nullptr);
+  const std::array<int64_t, 2> input_shape{2, 2};
+  auto input_ids = OrtValue::CreateTensor<int64_t>(cpu.GetAllocator(), input_shape);
+  auto attention_mask = OrtValue::CreateTensor<int32_t>(cpu.GetAllocator(), input_shape);
+  const char* input_names[] = {"input_ids", "attention_mask"};
+  const OrtValue* inputs[] = {input_ids.get(), attention_mask.get()};
+
+  auto output = Generators::RunVisionEncoderWithPreallocatedOutput(
+      *session, nullptr, input_names, inputs, 2, "encoder_outputs", cpu);
+  ASSERT_NE(output, nullptr);
+  EXPECT_EQ(output->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{2, 2, 512}));
+  EXPECT_EQ(output->GetTensorMemoryInfo().GetDeviceType(), OrtMemoryInfoDeviceType_CPU);
+  EXPECT_EQ(Generators::StageVisionEncoderOutput(*output, cpu, cpu), nullptr);
+}
+
+TEST(MultiModalDevicePlacementTests, RejectsDynamicVisionEncoderOutputBeforeRunning) {
+  auto& cpu = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
+  const auto model_path = fs::path{std::string{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32/past.onnx"}};
+  auto session = OrtSession::Create(Generators::GetOrtEnv(), model_path.c_str(), nullptr);
+  EXPECT_THROW(
+      Generators::RunVisionEncoderWithPreallocatedOutput(*session, nullptr, nullptr, nullptr, 0, "logits", cpu),
+      std::runtime_error);
 }
 
 TEST(MultiModalDevicePlacementTests, ReusesCpuPlacedEncoderOutput) {
