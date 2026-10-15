@@ -356,6 +356,30 @@ __global__ void k_transpose_f32(const float* src, float* dst, int n) {
   }
 }
 
+/* Quantize BF16 KV rows into 1-byte per-channel INT8 (mode=1) or FP8 E4M3FN (mode=2).
+ * Each row has 256 elements (1 KV head of dim 256); `scale` points to the 256 float scales of that head.
+ * `src` has stride `src_pitch_elems` BF16 elements between rows; `dst` has stride `dst_pitch_elems` bytes between rows. */
+__global__ void k_quantize_kv(const __nv_bfloat16* src, uint8_t* dst, const float* scale, int rows, int src_pitch_elems,
+                              int dst_pitch_elems, int mode) {
+  const int r = blockIdx.x;
+  const int c = threadIdx.x;
+  if (r >= rows || c >= 256) return;
+  const float x = __bfloat162float(src[(size_t)r * src_pitch_elems + c]);
+  const float s = scale[c];
+  const float q = s > 0.0f ? (x / s) : 0.0f;
+  uint8_t out_byte = 0;
+  if (mode == 1) {
+    int qi = __float2int_rn(q);
+    if (qi < -127) qi = -127;
+    if (qi > 127) qi = 127;
+    out_byte = static_cast<uint8_t>(static_cast<int8_t>(qi));
+  } else {
+    float qc = fminf(fmaxf(q, -448.0f), 448.0f);
+    out_byte = static_cast<uint8_t>(__nv_cvt_float_to_fp8(qc, __NV_SATFINITE, __NV_E4M3));
+  }
+  dst[(size_t)r * dst_pitch_elems + c] = out_byte;
+}
+
 extern "C" {
 int qwen38_plane_abi_version(void) { return QWEN38_PLANE_ABI_VERSION; }
 int qwen38_plane_sizeof_ple_params(void) { return (int)sizeof(PleParams); }
@@ -416,6 +440,13 @@ void qwen38_plane_pool_keys(void* s, const void* raw, int nb, const void* knorm,
 void qwen38_plane_transpose_f32(void* s, const void* src, void* dst, int n, int batch) {
   dim3 grid(n / 32, n / 32, batch), block(32, 8);
   k_transpose_f32<<<grid, block, 0, (cudaStream_t)s>>>((const float*)src, (float*)dst, n);
+}
+
+void qwen38_plane_quantize_kv(void* s, const void* src, void* dst, const void* scale, int rows, int src_pitch_elems,
+                              int dst_pitch_elems, int mode) {
+  if (rows <= 0) return;
+  k_quantize_kv<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)src, (uint8_t*)dst, (const float*)scale, rows,
+                                                   src_pitch_elems, dst_pitch_elems, mode);
 }
 
 /* ---- CUDA runtime helpers (all return cudaError_t as int, 0 = success) ---- */
