@@ -25,13 +25,18 @@ from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwe
         (Model, PagedAttention, "make_varlen_gated_delta_net"),
         (Qwen35TextModel, Qwen35, "make_attention_input_proj"),
         (Qwen35TextModel, Qwen35, "make_qwen_gated_delta_net"),
+        (Qwen35TextModel, Qwen35, "make_linear_attention_projections"),
         (Qwen35TextModel, Qwen35, "make_linear_attention_output_proj"),
         (Qwen35MoETextModel, Qwen35MoE, "make_moe_router"),
         (Qwen35MoETextModel, Qwen35MoE, "make_shared_expert"),
         (Qwen35MTPModel, Qwen35MTP, "make_mtp_input_projection"),
         (Qwen4ExpTextModel, Qwen38, "make_attention_input_proj"),
+        (Qwen4ExpTextModel, Qwen38, "make_linear_attention_projections"),
         (Qwen4ExpTextModel, Qwen38, "make_linear_attention_qkv_z_proj"),
         (Qwen4ExpTextModel, Qwen38, "make_linear_attention_a_b_proj"),
+        (Qwen4ExpTextModel, Qwen38, "make_moe_router"),
+        (Qwen4ExpTextModel, Qwen38, "make_shared_expert"),
+        (Qwen4ExpTextModel, Qwen38, "make_merged_projections"),
         (Qwen4ExpTextModel, Qwen38, "make_qwen_sparse_attention"),
         (Qwen4ExpTextModel, Qwen38, "make_ple"),
         (Qwen4ExpTextModel, Qwen38, "make_hyper_connection_mix"),
@@ -51,5 +56,10 @@ def test_qwen38_super_dispatch_preserves_qwen35_projection_fallback():
     model = object.__new__(Qwen4ExpTextModel)
 
     assert super(Qwen38, model).make_attention_input_proj.__func__ is Qwen35.make_attention_input_proj
+    assert (
+        super(Qwen38, model).make_linear_attention_projections.__func__ is Qwen35.make_linear_attention_projections
+    )
     assert super(Qwen38, model).make_moe_preprocessing.__func__ is Qwen35MoE.make_moe_preprocessing
+    assert super(Qwen38, model).make_moe_router.__func__ is Qwen35MoE.make_moe_router
+    assert super(Qwen38, model).make_shared_expert.__func__ is Qwen35MoE.make_shared_expert
     assert super(Qwen35, model).make_attention_input_proj.__func__ is Model.make_attention_input_proj

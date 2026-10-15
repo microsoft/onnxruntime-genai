@@ -27,18 +27,20 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
         self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
 
 
-    def make_moe_router(self, layer_id, moe, root_input):
-        return super().make_moe_router(layer_id, moe, root_input)
-
-    def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
-        return super().make_shared_expert(layer_id, shared_expert, shared_expert_gate, root_input)
-
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         extra_options = copy.deepcopy(extra_options)
         text_only = extra_options.get("text_only", False)
         extra_options["exclude_embeds"] = not text_only
         extra_options.setdefault("filename", "model.onnx" if text_only else "text.onnx")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.merge_shared_input_projections = bool(extra_options.get("merge_shared_input_projections", False))
+        self.merged_shared_expert_layers = set()
+        if self.merge_shared_input_projections and onnx_dtype not in {
+            ir.DataType.FLOAT,
+            ir.DataType.FLOAT16,
+            ir.DataType.BFLOAT16,
+        }:
+            raise ValueError("merge_shared_input_projections requires an fp32, fp16 or bf16 export.")
         if not hasattr(self, "context_length_attrs"):
             self.context_length_attrs = {"state_window": 0, "state_window_dims": []}
         self.use_cpu_embedding_gather = False
@@ -786,6 +788,7 @@ class Qwen4ExpModel(MTPModel):
         mtp_options.pop("include_hidden_states", None)
         mtp_options.pop("exclude_lm_head", None)
         mtp_options.pop("external_engram", None)
+        mtp_options.pop("merge_shared_input_projections", None)
         self.mtp = Qwen4ExpMTPTextModel(
             copy.deepcopy(config),
             self.mtp_attrs["io_dtype"],
