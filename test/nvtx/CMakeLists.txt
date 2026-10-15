@@ -1,0 +1,35 @@
+cmake_minimum_required(VERSION 3.26)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project(GenAINvtxTests LANGUAGES CXX)
+  option(ENABLE_NVTX "Enable NVTX host profiling ranges" OFF)
+  enable_testing()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/nvtx.cmake")
+
+add_executable(nvtx_disabled_test nvtx_range_test.cpp)
+set(nvtx_test_targets nvtx_disabled_test)
+add_test(NAME NvtxDisabled COMMAND nvtx_disabled_test)
+
+if(ENABLE_NVTX)
+  add_executable(nvtx_enabled_test nvtx_range_test.cpp)
+  target_link_libraries(nvtx_enabled_test PRIVATE onnxruntime-genai-nvtx)
+  add_test(NAME NvtxEnabled COMMAND nvtx_enabled_test)
+
+  add_executable(nvtx_balance_test nvtx_range_test.cpp)
+  target_link_libraries(nvtx_balance_test PRIVATE onnxruntime-genai-nvtx)
+  target_compile_definitions(nvtx_balance_test PRIVATE ORTGENAI_NVTX_TEST_MOCK)
+  add_test(NAME NvtxBalance COMMAND nvtx_balance_test)
+  list(APPEND nvtx_test_targets nvtx_enabled_test nvtx_balance_test)
+endif()
+
+foreach(nvtx_test_target IN LISTS nvtx_test_targets)
+  target_compile_features(${nvtx_test_target} PRIVATE cxx_std_17)
+  if(MSVC)
+    target_compile_options(${nvtx_test_target} PRIVATE /W4 /WX /EHsc)
+  else()
+    target_compile_options(${nvtx_test_target} PRIVATE -Wall -Wextra -Werror)
+  endif()
+  set_target_properties(${nvtx_test_target} PROPERTIES FOLDER "Tests")
+endforeach()
