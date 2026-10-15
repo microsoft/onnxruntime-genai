@@ -284,8 +284,9 @@ void ValidateStateUpdateSession(std::string_view group_label,
         metadata.GetOutputShape(state_name),
         state_name};
     const size_t state_rank = update_kind == StateUpdateKind::GatedDeltaNet
-                    ? 4
-                    : update_kind == StateUpdateKind::Ple ? 2 : 3;
+                                  ? 4
+                              : update_kind == StateUpdateKind::Ple ? 2
+                                                                    : 3;
     ValidateRank(group_label, "state output", state, state_rank);
     if (!DimensionsCompatible(state.shape[0], capture_count.shape[0])) {
       throw std::runtime_error(
@@ -303,7 +304,7 @@ void ValidateStateUpdateSession(std::string_view group_label,
                                                   metadata.GetOutputShape(ExpandBinding(state_bindings[1].output, layer_id)),
                                                   ExpandBinding(state_bindings[1].output, layer_id)}
                                             : state;
-                                ValidateRank(group_label, "convolution state output", conv_state, 3);
+      ValidateRank(group_label, "convolution state output", conv_state, 3);
       const auto value = get_output("value", value_template, layer_id);
       ValidateRank(group_label, "state_update value output", value, 3);
       if (value.data_type != conv_state.data_type) {

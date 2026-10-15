@@ -155,7 +155,6 @@ void PleState::Snapshot(size_t position) {
           OrtValue::CreateTensor(allocator, token_shape_, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64));
       snapshot_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
     }
-
   }
   CopyStates(presents_, snapshot_);
   snapshot_position_ = position;
@@ -188,8 +187,7 @@ void PleState::CopyStates(
     std::vector<std::unique_ptr<OrtValue>>& destination) {
   auto& device = *model_.p_device_kvcache_;
   for (size_t index = 0; index < source.size(); ++index) {
-    ByteWrapTensor(device, *destination[index]).CopyFrom(
-        ByteWrapTensor(device, *source[index]));
+    ByteWrapTensor(device, *destination[index]).CopyFrom(ByteWrapTensor(device, *source[index]));
   }
 }
 

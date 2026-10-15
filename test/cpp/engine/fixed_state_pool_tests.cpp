@@ -17,6 +17,7 @@
 #include "engine_test_helpers.h"
 #include "models/model_state_manifest.h"
 #include "models/utils.h"
+#include "scoped-environment-variable.h"
 
 namespace Generators {
 namespace test {
@@ -1799,6 +1800,144 @@ TEST(CudaFixedStatePoolTest, ReplaysHalfSnapshotAtAcceptedPrefix) {
   for (size_t index = 0; index < actual.size(); ++index) {
     EXPECT_EQ(actual[index], values[4 + index]);
   }
+}
+
+TEST(CudaFixedStatePoolTest, BoundedIndexerReplayTouchesOnlyActiveRows) {
+  auto bounded_replay = ScopedEnvironmentVariable{
+      "ORT_GENAI_CUDA_BOUNDED_INDEXER_REPLAY", std::string{"1"}};
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto& device = *model->p_device_kvcache_;
+
+  constexpr size_t key_capacity = 8;
+  constexpr size_t aux_capacity = 4;
+  constexpr size_t row_width = 2;
+  const std::array<uint16_t, key_capacity * row_width> source{
+      10, 11, 12, 13, 14, 15, 16, 17,
+      18, 19, 20, 21, 22, 23, 24, 25};
+  const std::array<uint16_t, aux_capacity * row_width> source_aux{
+      30, 31, 32, 33, 34, 35, 36, 37};
+  const std::array<uint16_t, 3 * row_width> updates{
+      40, 41, 42, 43, 44, 45};
+  constexpr uint16_t kKeySentinel = 0xeeee;
+  constexpr uint16_t kAuxSentinel = 0xdddd;
+  const std::array<int32_t, 2> source_lengths{4, 2};
+
+  auto source_device = device.Allocate<uint16_t>(source.size());
+  auto destination_device = device.Allocate<uint16_t>(source.size());
+  auto source_aux_device = device.Allocate<uint16_t>(source_aux.size());
+  auto destination_aux_device = device.Allocate<uint16_t>(source_aux.size());
+  auto updates_device = device.Allocate<uint16_t>(updates.size());
+  auto source_lengths_device = device.Allocate<int32_t>(source_lengths.size());
+  auto destination_lengths_device = device.Allocate<int32_t>(source_lengths.size());
+  source_device.CopyFromCpu(source);
+  destination_device.CopyFromCpu(std::array<uint16_t, key_capacity * row_width>{
+      kKeySentinel, kKeySentinel, kKeySentinel, kKeySentinel,
+      kKeySentinel, kKeySentinel, kKeySentinel, kKeySentinel,
+      kKeySentinel, kKeySentinel, kKeySentinel, kKeySentinel,
+      kKeySentinel, kKeySentinel, kKeySentinel, kKeySentinel});
+  source_aux_device.CopyFromCpu(source_aux);
+  destination_aux_device.CopyFromCpu(std::array<uint16_t, aux_capacity * row_width>{
+      kAuxSentinel, kAuxSentinel, kAuxSentinel, kAuxSentinel,
+      kAuxSentinel, kAuxSentinel, kAuxSentinel, kAuxSentinel});
+  updates_device.CopyFromCpu(updates);
+  source_lengths_device.CopyFromCpu(source_lengths);
+  destination_lengths_device.CopyFromCpu(std::array<int32_t, 2>{-1, -1});
+
+  const StateUpdateReplayDesc descriptor{
+      .source_state = source_device.Span().data(),
+      .destination_state = destination_device.Span().data(),
+      .value = updates_device.Span().data(),
+      .source_aux_state = source_aux_device.Span().data(),
+      .destination_aux_state = destination_aux_device.Span().data(),
+      .source_lengths = source_lengths_device.Span().data(),
+      .destination_lengths = destination_lengths_device.Span().data(),
+      .state_width = row_width,
+      .state_capacity = key_capacity,
+      .aux_capacity = aux_capacity,
+      .kept_count = 3,
+      .element_size = sizeof(uint16_t),
+      .compress_ratio = 4,
+      .kind = StateUpdateReplayKind::Indexer,
+  };
+  device.ReplayStateUpdates(&descriptor, 1);
+  device.Synchronize();
+
+  const auto key_result = destination_device.CopyDeviceToCpu();
+  const auto aux_result = destination_aux_device.CopyDeviceToCpu();
+  const auto length_result = destination_lengths_device.CopyDeviceToCpu();
+  for (size_t index = 0; index < 4 * row_width; ++index) {
+    EXPECT_EQ(key_result[index], source[index]);
+  }
+  EXPECT_EQ(key_result[4 * row_width], updates[2]);
+  EXPECT_EQ(key_result[4 * row_width + 1], updates[3]);
+  for (size_t index = 5 * row_width; index < key_result.size(); ++index) {
+    EXPECT_EQ(key_result[index], kKeySentinel);
+  }
+  EXPECT_EQ(aux_result[0], updates[4]);
+  EXPECT_EQ(aux_result[1], updates[5]);
+  for (size_t index = 2; index < aux_result.size(); ++index) {
+    EXPECT_EQ(aux_result[index], kAuxSentinel);
+  }
+  EXPECT_EQ(length_result[0], 5);
+  EXPECT_EQ(length_result[1], 1);
+
+  const std::array<uint16_t, 2> one_update{50, 51};
+  const std::array<int32_t, 2> buffered_lengths{0, 2};
+  auto empty_source_device = device.Allocate<uint16_t>(source.size());
+  auto empty_destination_device = device.Allocate<uint16_t>(source.size());
+  auto buffered_source_lengths_device = device.Allocate<int32_t>(buffered_lengths.size());
+  auto buffered_destination_lengths_device = device.Allocate<int32_t>(buffered_lengths.size());
+  auto one_update_device = device.Allocate<uint16_t>(one_update.size());
+  empty_source_device.CopyFromCpu(source);
+  empty_destination_device.CopyFromCpu(std::array<uint16_t, key_capacity * row_width>{
+      kKeySentinel, kKeySentinel, kKeySentinel, kKeySentinel,
+      kKeySentinel, kKeySentinel, kKeySentinel, kKeySentinel,
+      kKeySentinel, kKeySentinel, kKeySentinel, kKeySentinel,
+      kKeySentinel, kKeySentinel, kKeySentinel, kKeySentinel});
+  destination_aux_device.CopyFromCpu(std::array<uint16_t, aux_capacity * row_width>{
+      kAuxSentinel, kAuxSentinel, kAuxSentinel, kAuxSentinel,
+      kAuxSentinel, kAuxSentinel, kAuxSentinel, kAuxSentinel});
+  buffered_source_lengths_device.CopyFromCpu(buffered_lengths);
+  buffered_destination_lengths_device.CopyFromCpu(std::array<int32_t, 2>{-1, -1});
+  one_update_device.CopyFromCpu(one_update);
+  const StateUpdateReplayDesc buffered_descriptor{
+      .source_state = empty_source_device.Span().data(),
+      .destination_state = empty_destination_device.Span().data(),
+      .value = one_update_device.Span().data(),
+      .source_aux_state = source_aux_device.Span().data(),
+      .destination_aux_state = destination_aux_device.Span().data(),
+      .source_lengths = buffered_source_lengths_device.Span().data(),
+      .destination_lengths = buffered_destination_lengths_device.Span().data(),
+      .state_width = row_width,
+      .state_capacity = key_capacity,
+      .aux_capacity = aux_capacity,
+      .kept_count = 1,
+      .element_size = sizeof(uint16_t),
+      .compress_ratio = 4,
+      .kind = StateUpdateReplayKind::Indexer,
+  };
+  device.ReplayStateUpdates(&buffered_descriptor, 1);
+  device.Synchronize();
+  const auto empty_key_result = empty_destination_device.CopyDeviceToCpu();
+  const auto buffered_aux_result = destination_aux_device.CopyDeviceToCpu();
+  const auto buffered_length_result = buffered_destination_lengths_device.CopyDeviceToCpu();
+  for (uint16_t value : empty_key_result) {
+    EXPECT_EQ(value, kKeySentinel);
+  }
+  EXPECT_EQ(buffered_aux_result[0], source_aux[0]);
+  EXPECT_EQ(buffered_aux_result[1], source_aux[1]);
+  EXPECT_EQ(buffered_aux_result[2], source_aux[2]);
+  EXPECT_EQ(buffered_aux_result[3], source_aux[3]);
+  EXPECT_EQ(buffered_aux_result[4], one_update[0]);
+  EXPECT_EQ(buffered_aux_result[5], one_update[1]);
+  for (size_t index = 6; index < buffered_aux_result.size(); ++index) {
+    EXPECT_EQ(buffered_aux_result[index], kAuxSentinel);
+  }
+  EXPECT_EQ(buffered_length_result[0], 0);
+  EXPECT_EQ(buffered_length_result[1], 3);
 }
 
 TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {

@@ -3528,9 +3528,9 @@ TEST_F(EngineRunTest, MtpChainCarriesFixedStateWithoutOverwritingCommitState) {
   auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
   const std::array<int64_t, 2> shape{1, 1};
   auto input = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
-                                     shape, Ort::TypeToTensorType<float>);
-  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
                                       shape, Ort::TypeToTensorType<float>);
+  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                       shape, Ort::TypeToTensorType<float>);
   input->GetTensorMutableData<float>()[0] = 0.0f;
   output->GetTensorMutableData<float>()[0] = -1.0f;
   FixedStateBinding binding{};
@@ -3580,9 +3580,9 @@ TEST_F(EngineRunTest, MtpChainSelectsFixedStateRowsForDifferentDraftWidths) {
   auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
   const std::array<int64_t, 2> shape{2, 1};
   auto input = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
-                                     shape, Ort::TypeToTensorType<float>);
-  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
                                       shape, Ort::TypeToTensorType<float>);
+  auto output = OrtValue::CreateTensor(model_->p_device_inputs_->GetAllocator(),
+                                       shape, Ort::TypeToTensorType<float>);
   input->GetTensorMutableData<float>()[0] = 10.0f;
   input->GetTensorMutableData<float>()[1] = 20.0f;
   FixedStateBinding binding{};
@@ -4384,6 +4384,122 @@ TEST_F(EngineRunTest, HybridPrefixCacheRestoresPagedAndFixedStateAtOneBoundary) 
   fixed = engine.cache->FixedStateSnapshot();
   ASSERT_TRUE(fixed.has_value());
   EXPECT_EQ(FixedSlotFor(*fixed, warm.get()).committed_tokens, 9u);
+}
+
+TEST_F(EngineRunTest, MtpPrefixCacheRestoresTargetStateAndStartsAFreshShadow) {
+  model_ = LoadSyntheticCompositeMtpModel();
+  model_->config_->search.chunk_size = 4;
+  model_->config_->speculative.max_draft_tokens = 3;
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 1;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  batching.prefix_caching_explicitly_set = true;
+
+  auto cache = std::make_shared<PagedCacheManager>(
+      model_, /*auxiliary_bytes_per_block=*/1);
+  auto* cache_observer = cache.get();
+  auto scheduler = Scheduler::Create(model_, cache);
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto executor =
+      std::make_unique<RecordingModelExecutor>(model_, cache, filler);
+  executor->EnableHiddenStatesOutput(
+      model_->config_->model.decoder.hidden_size);
+  auto* executor_observer = executor.get();
+
+  auto mtp_source = LoadSyntheticPagedMtpModel();
+  auto mtp_model = std::make_shared<DecoderOnly_Model>(
+      CreateMtpDecoderConfig(*mtp_source->config_), GetOrtEnv());
+  auto mtp_cache =
+      std::make_shared<RecordingCacheManager>(mtp_model, /*capacity=*/1);
+  mtp_cache->SetMaxDraftTokensPerStep(3);
+  auto* mtp_cache_observer = mtp_cache.get();
+  auto mtp_executor =
+      std::make_unique<RecordingModelExecutor>(mtp_model, mtp_cache, filler);
+  mtp_executor->EnableHiddenStatesOutput(
+      model_->config_->model.decoder.hidden_size);
+  auto* mtp_executor_observer = mtp_executor.get();
+
+  EngineDependencies dependencies{
+      std::move(cache), std::move(scheduler), std::move(executor),
+      std::move(mtp_model), std::move(mtp_cache), std::move(mtp_executor)};
+  auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
+  const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+  TurnOptions options;
+  options.max_generated_tokens = 4;
+  const auto finish = [&](const std::shared_ptr<Request>& request) {
+    std::vector<int32_t> tokens;
+    std::array<EngineEvent, 8> events;
+    for (size_t step = 0; step < 16 && !request->IsTurnComplete(); ++step) {
+      const size_t count = engine->Run(events);
+      for (size_t index = 0; index < count; ++index) {
+        if (events[index].flags & EngineEventFlagToken) {
+          tokens.push_back(events[index].token);
+        }
+      }
+    }
+    EXPECT_TRUE(request->IsTurnComplete());
+    return tokens;
+  };
+
+  size_t cold_step = 0;
+  executor_observer->SetExecutionCallback([&](ExecutionContext& context) {
+    ++cold_step;
+    for (const auto& binding : context.fixed_state_bindings) {
+      FillFixedOutputRow(binding, 0, static_cast<float>(cold_step));
+    }
+  });
+  auto cold = CreateRequestWithPrompt(engine, prompt, options);
+  const auto cold_tokens = finish(cold);
+  ASSERT_EQ(cold_tokens.size(), 4u);
+  EXPECT_GT(mtp_executor_observer->decode_calls, 0);
+  EXPECT_EQ(engine->GetSpeculativeStats().mtp_failures, 0u);
+  cold->Close();
+  EXPECT_EQ(mtp_cache_observer->AllocatedCount(), 0u);
+
+  bool observed_warm_adoption = false;
+  bool observed_fresh_mtp_shadow = false;
+  mtp_executor_observer->SetExecutionCallback([&](ExecutionContext& context) {
+    if (observed_fresh_mtp_shadow) {
+      return;
+    }
+    observed_fresh_mtp_shadow = true;
+    ASSERT_NE(context.plan, nullptr);
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    EXPECT_TRUE(context.plan->requests.front().newly_admitted);
+  });
+  executor_observer->SetExecutionCallback([&](ExecutionContext& context) {
+    if (observed_warm_adoption) {
+      return;
+    }
+    observed_warm_adoption = true;
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    const auto& entry = context.plan->requests.front();
+    ASSERT_NE(entry.prefix_match, nullptr);
+    ASSERT_NE(entry.prefix_match->fixed_state_checkpoint, nullptr);
+    EXPECT_EQ(entry.prefix_match->token_count, 8u);
+    EXPECT_EQ(entry.prefix_match->blocks.size(), 2u);
+    EXPECT_EQ(entry.unprocessed_token_count, 1u);
+    EXPECT_EQ(mtp_cache_observer->AllocatedCount(), 0u);
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, 2.0f);
+      FillFixedOutputRow(binding, 0, 3.0f);
+    }
+  });
+  auto warm = CreateRequestWithPrompt(engine, prompt, options);
+  const auto warm_tokens = finish(warm);
+
+  EXPECT_TRUE(observed_warm_adoption);
+  EXPECT_TRUE(observed_fresh_mtp_shadow);
+  EXPECT_EQ(warm_tokens, cold_tokens);
+  EXPECT_EQ(warm->AdoptedPrefixLength(), 8u);
+  const auto metrics = engine->PrefixCacheStats();
+  ASSERT_TRUE(metrics.has_value());
+  EXPECT_EQ(metrics->hits, 1u);
+  EXPECT_EQ(metrics->matched_tokens, 8u);
+  EXPECT_TRUE(ValidateCacheInvariants(cache_observer->Snapshot()).empty());
 }
 
 TEST_F(EngineRunTest, HybridBlockAlignedPromptRetainsLastAdoptableCheckpoint) {

@@ -158,17 +158,20 @@ def fp8_checkpoint(checkpoint):
             del tensors[name]
         elif name.endswith(".weight"):
             tensors[name] = torch.arange(256).reshape(16, 16).to(torch.float8_e4m3fn)
-            tensors[f"{name.removesuffix('.weight')}.weight_scale_inv"] = torch.tensor(
-                [[0.3125]], dtype=torch.bfloat16
-            )
+            tensors[f"{name.removesuffix('.weight')}.weight_scale_inv"] = torch.tensor([[0.3125]], dtype=torch.bfloat16)
     save_file(tensors, path)
     return checkpoint
 
 
 def load_fp8(checkpoint):
     return QuantModel.from_pretrained(
-        "fp8", input_path=str(checkpoint), quant_attrs={"config": {}},
-        q_size=16, kv_size=16, intermediate_size=16, num_layers=2,
+        "fp8",
+        input_path=str(checkpoint),
+        quant_attrs={"config": {}},
+        q_size=16,
+        kv_size=16,
+        intermediate_size=16,
+        num_layers=2,
     )
 
 
@@ -190,8 +193,12 @@ def test_official_fp8_loader_preserves_native_tensors(fp8_checkpoint, monkeypatc
     monkeypatch.setattr(ModeloptModel, "dequantize_tensor", reject_dequantization)
     model = load_fp8(fp8_checkpoint)
     mtp = Qwen4ExpMTPModel.from_pretrained(
-        "fp8", str(fp8_checkpoint), str(fp8_checkpoint), None,
-        preserve_quantization=False, load_quantized_model=lambda _: model,
+        "fp8",
+        str(fp8_checkpoint),
+        str(fp8_checkpoint),
+        None,
+        preserve_quantization=False,
+        load_quantized_model=lambda _: model,
     )
     with safe_open(fp8_checkpoint / "model.safetensors", framework="pt", device="cpu") as source:
         for prefix, layers in (("model.language_model", model.layers), ("mtp", mtp.layers)):
@@ -232,10 +239,9 @@ def test_official_fp8_serialized_experts_preserve_bits(fp8_checkpoint, builder_c
         ("down_proj", names["down_weight"], names["down_scales"]),
     ):
         for attribute, initializer_name in (("weight", weight_name), ("weight_scale_inv", scale_name)):
-            expected = torch.stack([
-                getattr(getattr(getattr(layer.mlp.experts, str(index)), name), attribute)
-                for index in range(2)
-            ])
+            expected = torch.stack(
+                [getattr(getattr(getattr(layer.mlp.experts, str(index)), name), attribute) for index in range(2)]
+            )
             actual = initializers[initializer_name]
             if attribute == "weight_scale_inv" and ep == "webgpu":
                 expected = expected.float()
@@ -261,8 +267,10 @@ def test_official_fp8_repository_uses_shared_cache(fp8_checkpoint, monkeypatch):
     monkeypatch.setattr("models.builders.qwen3_8.snapshot_download", download)
     wrapper = object.__new__(Qwen4ExpModel)
     wrapper.decoder = SimpleNamespace(
-        quant_type="fp8", model_name_or_path="Qwen/Qwen3.8-Flash-Next-FP8",
-        cache_dir="/home/kvaishnavi/cache_dir", hf_token=False,
+        quant_type="fp8",
+        model_name_or_path="Qwen/Qwen3.8-Flash-Next-FP8",
+        cache_dir="/home/kvaishnavi/cache_dir",
+        hf_token=False,
         make_model=lambda path: calls.append(("decoder", path)),
     )
     wrapper.mtp = SimpleNamespace(make_model=lambda path: calls.append(("mtp", path)))
@@ -285,7 +293,10 @@ def test_native_engram_preserves_or_widens_bf16_scale(request, checkpoint_fixtur
     embedding.ngram_heads_vocab_sizes = torch.tensor([8], dtype=torch.int64)
     embedding.ngram_heads_offsets = torch.tensor([0], dtype=torch.int64)
     config = SimpleNamespace(
-        ngram_size=2, heads_per_ngram=1, ple_embed_dim=8, ple_layer_ids=[2],
+        ngram_size=2,
+        heads_per_ngram=1,
+        ple_embed_dim=8,
+        ple_layer_ids=[2],
     )
     builder = Qwen4ExpEngramModel(SimpleNamespace(ple_embedding=embedding), config, io_dtype, scale_dtype=scale_dtype)
     proto = ir.to_proto(builder.model)
@@ -314,8 +325,9 @@ def test_native_engram_preserves_or_widens_bf16_scale(request, checkpoint_fixtur
     builder.save_model(tmp_path)
     onnx.checker.check_model(str(tmp_path / "engram.onnx"), check_custom_domain=False)
     saved = onnx.load(tmp_path / "engram.onnx")
-    saved_scale = next(value for value in saved.graph.initializer
-                       if value.name == "model.ple.ngram_embedding.weight_scale")
+    saved_scale = next(
+        value for value in saved.graph.initializer if value.name == "model.ple.ngram_embedding.weight_scale"
+    )
     assert saved_scale.data_type == int(expected_dtype)
     assert saved_scale.raw_data == expected_scale
 
@@ -330,13 +342,17 @@ def test_engram_cuda_session_runs_annotated_lookup_on_cpu(request, checkpoint_fi
     embedding.ngram_heads_vocab_sizes = torch.tensor([8], dtype=torch.int64)
     embedding.ngram_heads_offsets = torch.tensor([0], dtype=torch.int64)
     config = SimpleNamespace(ngram_size=2, heads_per_ngram=1, ple_embed_dim=8, ple_layer_ids=[2])
-    model = Qwen4ExpEngramModel(SimpleNamespace(ple_embedding=embedding), config, ir.DataType.FLOAT16, scale_dtype=ir.DataType.FLOAT)
+    model = Qwen4ExpEngramModel(
+        SimpleNamespace(ple_embedding=embedding), config, ir.DataType.FLOAT16, scale_dtype=ir.DataType.FLOAT
+    )
     model.save_model(tmp_path)
     options = ort.SessionOptions()
     options.enable_profiling = True
     options.profile_file_prefix = str(tmp_path / "engram_cpu_lookup")
     options.add_session_config_entry("session.layer_assignment_settings", "cpu(=cpu_embedding)")
-    mixed = ort.InferenceSession(str(tmp_path / "engram.onnx"), sess_options=options, providers=["CUDAExecutionProvider"])
+    mixed = ort.InferenceSession(
+        str(tmp_path / "engram.onnx"), sess_options=options, providers=["CUDAExecutionProvider"]
+    )
     cpu = ort.InferenceSession(str(tmp_path / "engram.onnx"), providers=["CPUExecutionProvider"])
     feeds = {
         "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.int64).numpy(),
@@ -351,8 +367,11 @@ def test_engram_cuda_session_runs_annotated_lookup_on_cpu(request, checkpoint_fi
     lookup_events = [event for event in profile if event.get("args", {}).get("op_name") == "GatherBlockQuantized"]
     assert lookup_events
     assert all(event["args"]["provider"] == "CPUExecutionProvider" for event in lookup_events)
-    assert any(event.get("args", {}).get("op_name") == "NGramHashMapping" and
-               event["args"].get("provider") == "CUDAExecutionProvider" for event in profile)
+    assert any(
+        event.get("args", {}).get("op_name") == "NGramHashMapping"
+        and event["args"].get("provider") == "CUDAExecutionProvider"
+        for event in profile
+    )
 
 
 def test_nvfp4_dispatch_and_qwen38_surface(checkpoint):
@@ -412,9 +431,14 @@ def test_nvfp4_loader_uses_builder_hardware_packing_policy(
 
     monkeypatch.setattr(torch.cuda, "get_device_capability", get_capability)
     config = LlamaConfig(
-        hidden_size=16, intermediate_size=16, num_hidden_layers=1,
-        num_attention_heads=2, num_key_value_heads=1, vocab_size=32,
-        max_position_embeddings=128, architectures=["LlamaForCausalLM"],
+        hidden_size=16,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+        max_position_embeddings=128,
+        architectures=["LlamaForCausalLM"],
     )
     builder = Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, provider, "", {})
     assert builder.quant_attrs["qmoe_weights_prepacked"] == expected_mode
@@ -436,8 +460,11 @@ def test_nvfp4_experts_preserve_checkpoint_codes_and_scales(weights_prepacked):
         for projection_id, name in enumerate(("gate_proj", "up_proj", "down_proj")):
             rows, packed_columns = (32, 8) if name == "down_proj" else (16, 16)
             projections[name] = SimpleNamespace(
-                weight=(torch.arange(rows * packed_columns).reshape(rows, packed_columns)
-                        + expert_id * 53 + projection_id * 37).to(torch.uint8),
+                weight=(
+                    torch.arange(rows * packed_columns).reshape(rows, packed_columns)
+                    + expert_id * 53
+                    + projection_id * 37
+                ).to(torch.uint8),
                 weight_scale=torch.arange(1, 33).reshape(rows, packed_columns // 8).to(torch.float8_e4m3fn),
                 weight_scale_2=torch.tensor(0.5 + expert_id),
             )
@@ -472,11 +499,19 @@ def test_nvfp4_experts_preserve_checkpoint_codes_and_scales(weights_prepacked):
     builder.ep = "cuda"
     builder.io_dtype = ir.DataType.FLOAT16
     builder.moe_attrs = {
-        "op_type": "QMoE", "quant_type": "nvfp4", "num_experts": 2,
+        "op_type": "QMoE",
+        "quant_type": "nvfp4",
+        "num_experts": 2,
         "weights_prepacked": 1,
-        "expert_weight_bits": 4, "top_k": 1, "normalize_routing_weights": True,
-        "activation_type": "swiglu", "activation_alpha": 1.702, "activation_beta": 1.0,
-        "swiglu_fusion": 1, "swiglu_limit": 7.0, "use_sparse_mixer": False,
+        "expert_weight_bits": 4,
+        "top_k": 1,
+        "normalize_routing_weights": True,
+        "activation_type": "swiglu",
+        "activation_alpha": 1.702,
+        "activation_beta": 1.0,
+        "swiglu_fusion": 1,
+        "swiglu_limit": 7.0,
+        "use_sparse_mixer": False,
     }
     initializers = {}
     builder.make_initializer = lambda tensor, name, **kwargs: initializers.setdefault(name, tensor)
@@ -490,9 +525,13 @@ def test_nvfp4_experts_preserve_checkpoint_codes_and_scales(weights_prepacked):
     builder.make_value = lambda *args, **kwargs: None
     builder.make_hidden_state_shape = lambda: ["batch", "sequence", 16]
     builder.make_moe_op(
-        "/model/layers.0/moe/QMoE", root_input="hidden", router_probs="router",
-        weight1=names["gate_up_weight"], scales1=names["gate_up_scales"],
-        weight2=names["down_weight"], scales2=names["down_scales"],
+        "/model/layers.0/moe/QMoE",
+        root_input="hidden",
+        router_probs="router",
+        weight1=names["gate_up_weight"],
+        scales1=names["gate_up_scales"],
+        weight2=names["down_weight"],
+        scales2=names["down_scales"],
     )
     if weights_prepacked in (None, -1):
         assert "weights_prepacked" not in recorded
@@ -615,9 +654,14 @@ def test_nvfp4_mtp_unquantized_module_config_and_explicit_override(monkeypatch, 
     wrapper.decoder = SimpleNamespace(quant_type="modelopt", quant_config=config)
     wrapper.mtp_attrs = {}
     runtime_options = {
-        "use_paged_attention": True, "paged_block_size": 256, "enable_webgpu_graph": True,
-        "gpu_utilization_factor": 0.25, "max_batch_size": 1,
-        "state_update_capacity": 7, "max_draft_tokens": 7, "indexshare_mtp": True,
+        "use_paged_attention": True,
+        "paged_block_size": 256,
+        "enable_webgpu_graph": True,
+        "gpu_utilization_factor": 0.25,
+        "max_batch_size": 1,
+        "state_update_capacity": 7,
+        "max_draft_tokens": 7,
+        "indexshare_mtp": True,
     }
     options = {"_quant_config": config, **runtime_options}
     if explicit:
