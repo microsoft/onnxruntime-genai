@@ -14,6 +14,10 @@
 
 namespace Generators {
 
+void TransposeVideoChatFlashHwcToChw(ThreadPool* thread_pool, const float* source,
+                                     float* destination, int64_t num_images,
+                                     int64_t channels, int64_t height, int64_t width);
+
 struct VideoChatFlashProcessor : Processor {
   VideoChatFlashProcessor(Config& config, const SessionInfo& session_info);
 

@@ -274,11 +274,11 @@ std::unique_ptr<NamedTensors> Mistral3ImageProcessor::Process(
   {
     std::unique_ptr<OrtValue> pv_ortvalue;
     if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-      pv_ortvalue = ProcessTensor<float>(pixel_values, allocator);
+      pv_ortvalue = ProcessTensor<float>(thread_pool_, pixel_values, allocator);
     } else if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
-      pv_ortvalue = ProcessTensor<Ort::BFloat16_t>(pixel_values, allocator);
+      pv_ortvalue = ProcessTensor<Ort::BFloat16_t>(thread_pool_, pixel_values, allocator);
     } else {
-      pv_ortvalue = ProcessTensor<Ort::Float16_t>(pixel_values, allocator);
+      pv_ortvalue = ProcessTensor<Ort::Float16_t>(thread_pool_, pixel_values, allocator);
     }
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(std::move(pv_ortvalue)));
@@ -287,7 +287,7 @@ std::unique_ptr<NamedTensors> Mistral3ImageProcessor::Process(
   // Add image_sizes[N, 2] for PixtralVisionState to slice per-image dimensions
   if (image_sizes) {
     named_tensors->emplace(std::string(Config::Defaults::ImageSizesName),
-                           std::make_shared<Tensor>(ProcessTensor<int64_t>(image_sizes, allocator)));
+                           std::make_shared<Tensor>(ProcessTensor<int64_t>(thread_pool_, image_sizes, allocator)));
   }
 
   // Add num_image_tokens (total across all images) for the embedding model
