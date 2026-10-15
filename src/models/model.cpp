@@ -492,6 +492,29 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
+  const auto& memory = config_->model.memory;
+  if (memory.device_limit_bytes != 0) {
+    if (memory.safety_margin_bytes >= memory.device_limit_bytes ||
+        memory.scratch_reserve_bytes >= memory.device_limit_bytes - memory.safety_margin_bytes)
+      throw std::runtime_error("model.memory reserves exhaust the device budget");
+    const auto& providers = config_->model.decoder.session_options.provider_options;
+    if (std::none_of(providers.begin(), providers.end(), [](const auto& provider) {
+          return NormalizeProviderName(provider.name) == "cuda";
+        }))
+      throw std::runtime_error("model.memory.device_limit_bytes requires the CUDA execution provider");
+    SetProviderOption(*config_, "cuda", "gpu_device_mem_limit",
+                      std::to_string(memory.device_limit_bytes - memory.safety_margin_bytes));
+  }
+  if (memory.offload_mode != "disabled") {
+    const auto& out = config_->model.decoder.outputs;
+    const bool any_diag = !out.offload_route_rows.empty() || !out.offload_route_calls.empty() ||
+                          !out.offload_call_counts.empty();
+    const bool all_diag = !out.offload_route_rows.empty() && !out.offload_route_calls.empty() &&
+                          !out.offload_call_counts.empty();
+    if (any_diag && !all_diag) {
+      throw std::runtime_error("Expert offload requires all three statistics output prefixes when any is specified.");
+    }
+  }
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
   AddSharedInitializers();
@@ -538,7 +561,8 @@ void Model::AddSharedInitializers() {
     const uint64_t offset = initializer.offset.empty() ? 0 : std::stoull(initializer.offset);
     const size_t length = static_cast<size_t>(std::stoull(initializer.length));
     const auto data_type = static_cast<ONNXTensorElementDataType>(initializer.data_type);
-    auto memory_info = p_device_->GetMemoryInfo();
+    auto* storage_device = initializer.placement == "cpu" ? GetDeviceInterface(DeviceType::CPU) : p_device_;
+    auto memory_info = storage_device->GetMemoryInfo();
 
     std::ostringstream key;
     key << SharedInitializerFileIdentity(data_path) << ':' << offset << ':' << length << ':'
@@ -561,16 +585,23 @@ void Model::AddSharedInitializers() {
           throw std::runtime_error("Failed to open shared initializer data file: " + data_path_string);
         }
         input.seekg(static_cast<std::streamoff>(offset));
-        std::vector<uint8_t> bytes(length);
-        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(length));
-        if (input.gcount() != static_cast<std::streamsize>(length)) {
-          throw std::runtime_error("Failed to read shared initializer '" + initializer.name + "' from " +
-                                   data_path_string);
-        }
-
         entry = std::make_shared<SharedInitializerEntry>();
-        entry->device_data = p_device_->Allocate<uint8_t>(length);
-        entry->device_data.CopyFromCpu(bytes);
+        entry->device_data = storage_device->Allocate<uint8_t>(length);
+        if (initializer.placement == "cpu") {
+          input.read(reinterpret_cast<char*>(entry->device_data.Span().data()), static_cast<std::streamsize>(length));
+          if (input.gcount() != static_cast<std::streamsize>(length)) {
+            throw std::runtime_error("Failed to read shared initializer '" + initializer.name + "' from " +
+                                     data_path_string);
+          }
+        } else {
+          std::vector<uint8_t> bytes(length);
+          input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(length));
+          if (input.gcount() != static_cast<std::streamsize>(length)) {
+            throw std::runtime_error("Failed to read shared initializer '" + initializer.name + "' from " +
+                                     data_path_string);
+          }
+          entry->device_data.CopyFromCpu(bytes);
+        }
         entry->shared_view = OrtValue::CreateTensor(
             *memory_info, entry->device_data.Span().data(), length, initializer.shape, data_type);
         g_shared_initializers[key.str()] = entry;

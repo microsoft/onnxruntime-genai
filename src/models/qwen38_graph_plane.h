@@ -99,10 +99,28 @@ struct Qwen38WeightPoolManifest {
     uint64_t offset{};
     uint64_t length{};
     std::vector<int64_t> shape;
-    std::string file;  // relative to the model folder
+    std::string file;                  // relative to the model folder
+    std::string placement{"device"};  // "device", "cpu", or "host_mapped"
   };
   std::vector<Entry> entries;
   std::map<std::string, std::vector<std::pair<std::string, int>>> sessions;
+};
+
+// Read-only memory-mapped weight file (optionally registered with CUDA UVA mapped memory).
+struct Qwen38FileMapping {
+  Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::path& full_path, bool register_cuda_mapped);
+  ~Qwen38FileMapping();
+  Qwen38FileMapping(const Qwen38FileMapping&) = delete;
+  Qwen38FileMapping& operator=(const Qwen38FileMapping&) = delete;
+
+  uint8_t* data() const { return static_cast<uint8_t*>(base_); }
+  size_t size() const { return length_; }
+
+ private:
+  Qwen38Plane& plane_;
+  void* base_{};
+  size_t length_{};
+  void* registered_{};
 };
 
 // Throws std::runtime_error on a wrong header, non-consecutive pool ids, an unknown pool id in a session line, or a file

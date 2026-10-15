@@ -527,6 +527,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.embeddings = JSON::Get<std::string_view>(value);
     } else if (name == "engram_embeddings") {
       v_.engram_embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "token_phase") {
+      v_.token_phase = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {
@@ -618,6 +620,12 @@ struct DecoderOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "logits") {
       v_.logits = JSON::Get<std::string_view>(value);
+    } else if (name == "offload_route_rows") {
+      v_.offload_route_rows = JSON::Get<std::string_view>(value);
+    } else if (name == "offload_route_calls") {
+      v_.offload_route_calls = JSON::Get<std::string_view>(value);
+    } else if (name == "offload_call_counts") {
+      v_.offload_call_counts = JSON::Get<std::string_view>(value);
     } else if (name == "present_key_names") {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
@@ -717,6 +725,12 @@ struct SharedInitializer_Element : JSON::Element {
       v_.length = JSON::Get<std::string_view>(value);
     } else if (name == "data_type") {
       v_.data_type = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "placement") {
+      v_.placement = JSON::Get<std::string_view>(value);
+      if (v_.placement != "cpu" && v_.placement != "device")
+        throw std::runtime_error("shared initializer placement must be cpu or device");
+    } else if (name == "packing_layout") {
+      v_.packing_layout = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2593,6 +2607,46 @@ struct Qwen38Graph_Element : JSON::Element {
   Qwen38GraphPrefill_Element prefill_{v_.prefill};
 };
 
+struct ModelMemory_Element : JSON::Element {
+  explicit ModelMemory_Element(Config::Model::Memory& memory) : memory_{memory} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "offload_mode") {
+      memory_.offload_mode = JSON::Get<std::string_view>(value);
+      if (memory_.offload_mode != "disabled" && memory_.offload_mode != "gpu_stream" &&
+          memory_.offload_mode != "hybrid_frequency")
+        throw std::runtime_error("offload_mode must be disabled, gpu_stream or hybrid_frequency");
+      return;
+    }
+    const auto bytes = SafeDoubleToInt64(JSON::Get<double>(value), name);
+    if (bytes < 0 || static_cast<uint64_t>(bytes) > std::numeric_limits<size_t>::max())
+      throw std::runtime_error("memory byte counts must be nonnegative and fit size_t");
+    auto* target = name == "device_limit_bytes"       ? &memory_.device_limit_bytes
+                   : name == "host_weight_limit_bytes" ? &memory_.host_weight_limit_bytes
+                   : name == "expert_cache_bytes"      ? &memory_.expert_cache_bytes
+                   : name == "pinned_staging_bytes"     ? &memory_.pinned_staging_bytes
+                   : name == "scratch_reserve_bytes"    ? &memory_.scratch_reserve_bytes
+                   : name == "safety_margin_bytes"      ? &memory_.safety_margin_bytes
+                                                        : nullptr;
+    if (!target) throw JSON::unknown_value_error{};
+    *target = static_cast<size_t>(bytes);
+  }
+
+  void OnComplete(bool) override {
+    if (memory_.offload_mode != "disabled" &&
+        (memory_.device_limit_bytes == 0 || memory_.host_weight_limit_bytes == 0 ||
+         memory_.pinned_staging_bytes == 0))
+      throw std::runtime_error("offload requires device/host/pinned limits");
+    if (memory_.device_limit_bytes != 0 &&
+        (memory_.safety_margin_bytes >= memory_.device_limit_bytes ||
+         memory_.scratch_reserve_bytes >= memory_.device_limit_bytes - memory_.safety_margin_bytes))
+      throw std::runtime_error("model.memory reserves exhaust the device budget");
+  }
+
+ private:
+  Config::Model::Memory& memory_;
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v)
       : v_{v}, block_drafter_alias_{v_.dflash2.configured_alias_is_dspark} {}
@@ -2684,6 +2738,9 @@ struct Model_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "memory") {
+      return memory_;
+    }
     if (name == "encoder") {
       return encoder_;
     }
@@ -2743,6 +2800,7 @@ struct Model_Element : JSON::Element {
 
  private:
   Config::Model& v_;
+  ModelMemory_Element memory_{v_.memory};
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
   std::unique_ptr<Decoder_Element> draft_;

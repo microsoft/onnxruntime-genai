@@ -49,6 +49,8 @@ struct Qwen38WeightPool {
   // Adds the shared initializers of one session label ("target", "head_r2", "dense", "head_kv", ...) to its options.
   size_t AddTo(OrtSessionOptions& options, const std::string& label) const;
   size_t bytes{};
+  size_t cpu_bytes{};
+  size_t host_mapped_bytes{};
   double seconds{};
 
  private:
@@ -58,10 +60,16 @@ struct Qwen38WeightPool {
     uint64_t length{};
     std::vector<int64_t> shape;
     std::filesystem::path file;
+    std::string placement{"device"};
+    bool owns_device_ptr{false};
     uint8_t* ptr{};
     std::unique_ptr<OrtValue> value;
+    std::unique_ptr<OrtValue> gpu_mapped_value;
   };
   Qwen38Plane& plane_;
+  std::unique_ptr<OrtMemoryInfo> cpu_memory_info_;
+  std::map<std::pair<std::filesystem::path, bool>, std::unique_ptr<Qwen38FileMapping>> file_mappings_;
+  std::vector<void*> registered_ranges_;
   std::vector<Entry> entries_;
   std::map<std::string, std::vector<std::pair<std::string, int>>> sessions_;
 };

@@ -239,6 +239,13 @@ Qwen38WeightPoolManifest ParseQwen38WeightPoolManifest(const std::filesystem::pa
       for (auto& d : entry.shape) fields >> d;
       fields >> entry.file;
       if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed weight pool line: " + line);
+      std::string placement;
+      if (fields >> placement) {
+        if (placement != "device" && placement != "cpu" && placement != "host_mapped") {
+          throw std::runtime_error("qwen38_graph: invalid weight pool placement '" + placement + "' in line: " + line);
+        }
+        entry.placement = std::move(placement);
+      }
       if (id != manifest.entries.size()) throw std::runtime_error("qwen38_graph: weight pool ids must be consecutive");
       RequireInsideModelFolder(entry.file, "a weight pool file");
       manifest.entries.push_back(std::move(entry));
@@ -284,6 +291,11 @@ Qwen38QsaConstantsDescription ParseQwen38QsaConstantsIndex(const std::filesystem
 
 #if defined(QWEN38_GRAPH_NO_POSIX)
 
+Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::path&, bool) : plane_{plane} {
+  ThrowUnsupportedPlatform();
+}
+Qwen38FileMapping::~Qwen38FileMapping() = default;
+
 Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path&, const std::filesystem::path&, int)
     : plane_{plane} {
   ThrowUnsupportedPlatform();
@@ -291,6 +303,44 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path&,
 Qwen38PleTable::~Qwen38PleTable() = default;
 
 #else
+
+Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::path& full_path,
+                                     bool register_cuda_mapped)
+    : plane_{plane} {
+  const int fd = open(full_path.c_str(), O_RDONLY);
+  if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open weight pool file " + full_path.string());
+  const off_t end = lseek(fd, 0, SEEK_END);
+  if (end <= 0) {
+    close(fd);
+    throw std::runtime_error("qwen38_graph: empty or invalid weight pool file " + full_path.string());
+  }
+  length_ = static_cast<size_t>(end);
+  void* base = mmap(nullptr, length_, PROT_READ, MAP_SHARED, fd, 0);
+  close(fd);
+  if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full_path.string());
+  base_ = base;
+  if (register_cuda_mapped) {
+    try {
+      plane_.Check(plane_.host_register(base_, length_, 2 | 8), "cudaHostRegister(weight pool file)");
+      registered_ = base_;
+    } catch (...) {
+      munmap(base_, length_);
+      base_ = nullptr;
+      length_ = 0;
+      throw;
+    }
+  } else if (const char* pin_env = std::getenv("ORTGENAI_PIN_CPU_POOL");
+             pin_env != nullptr && std::string(pin_env) == "1") {
+    if (plane_.host_register(base_, length_, 1 | 8) == 0) {
+      registered_ = base_;
+    }
+  }
+}
+
+Qwen38FileMapping::~Qwen38FileMapping() {
+  if (registered_) plane_.host_unregister(registered_);
+  if (base_) munmap(base_, length_);
+}
 
 Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& table_path,
                                const std::filesystem::path& root, int capacity)

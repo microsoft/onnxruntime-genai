@@ -155,6 +155,16 @@ struct Config {
   struct Model {
     std::string type;
 
+    struct Memory {
+      size_t device_limit_bytes{};
+      size_t host_weight_limit_bytes{};
+      size_t expert_cache_bytes{};
+      size_t pinned_staging_bytes{};
+      size_t scratch_reserve_bytes{};
+      size_t safety_margin_bytes{};
+      std::string offload_mode{"disabled"};
+    } memory;
+
     std::string tokenizer_dir;  // Directory containing tokenizer files. Empty means alongside genai_config.json. Resolved via Config::ResolvePath.
 
     int pad_token_id{};             // The id of the padding token.
@@ -496,6 +506,8 @@ struct Config {
       std::string length;
       int data_type{};
       std::vector<int64_t> shape;
+      std::string placement{"device"};
+      std::string packing_layout;
     };
 
     struct Decoder {
@@ -573,6 +585,7 @@ struct Config {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};
         std::string engram_embeddings;
+        std::string token_phase;
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
@@ -627,6 +640,9 @@ struct Config {
 
       struct Outputs {
         std::string logits{Defaults::LogitsName};
+        std::string offload_route_rows;
+        std::string offload_route_calls;
+        std::string offload_call_counts;
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
         std::string present_key_scale_names;

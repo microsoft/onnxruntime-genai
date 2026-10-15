@@ -973,15 +973,21 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
 
 void Qwen38GraphEngine::Warmup() {
   // ORT captures a graph id after min_num_runs eager runs: touch every (rows, phase) and head direction enough times.
-  const int warm_tokens = 48;
+  // When CUDA graph capture is disabled (eager offload mode), 3 steps (6 tokens) suffice to warm up all 3 bank phases.
+  const bool target_captures_graph = IsGraphCaptureEnabled(model_.config_->model.decoder.session_options);
+  const int warm_tokens = target_captures_graph ? 48 : 6;
   std::vector<int32_t> dummy(warm_tokens);
   for (int i = 0; i < warm_tokens; ++i) dummy[i] = 1000 + i;
   StepPrefill(dummy);  // S=2 target ids (24 steps -> 8 runs per phase); fold: the muted cycle graphs
   if (fold_) {
     // standalone R=2 head graphs: one call commits one row, so 18 calls touch every phase 6 times
+    const auto& q = model_.config_->model.qwen38_graph;
+    const bool head_captures_graph =
+        q.fold.head_r2.session_options ? IsGraphCaptureEnabled(*q.fold.head_r2.session_options) : target_captures_graph;
+    const int head_warm_calls = head_captures_graph ? 18 : 3;
     ClearHead();
     SyncStream();
-    for (int i = 0; i < 18; ++i) {
+    for (int i = 0; i < head_warm_calls; ++i) {
       const int64_t tokens[2] = {1000 + i, 1000 + i}, positions[2] = {i + 1, i + 2};
       CallHeadR2(tokens, positions, d_last_hidden_.data(), d_last_hidden_.data(), 1);
     }

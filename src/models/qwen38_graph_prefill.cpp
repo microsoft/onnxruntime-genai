@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <mutex>
@@ -41,7 +42,8 @@ float Bf16ToFloat(uint16_t bits) {
 // ------------------------------------------------------------------------------------------------
 Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::path& manifest_path,
                                    const std::filesystem::path& root, const OrtMemoryInfo& memory_info, int threads)
-    : plane_{plane} {
+    : plane_{plane},
+      cpu_memory_info_{OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault)} {
   Qwen38WeightPoolManifest manifest = ParseQwen38WeightPoolManifest(manifest_path);
   sessions_ = std::move(manifest.sessions);
   for (auto& source : manifest.entries) {
@@ -51,21 +53,93 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
     entry.length = source.length;
     entry.shape = std::move(source.shape);
     entry.file = root / source.file;
+    entry.placement = std::move(source.placement);
     entries_.push_back(std::move(entry));
   }
 
   const auto start = Clock::now();
-  for (auto& entry : entries_) {
-    void* p = nullptr;
-    plane_.Check(plane_.device_alloc(&p, std::max<uint64_t>(entry.length, 16)), "cudaMalloc(weight pool)");
-    entry.ptr = static_cast<uint8_t*>(p);
-    bytes += entry.length;
-    entry.value = OrtValue::CreateTensor(memory_info, entry.ptr, static_cast<size_t>(entry.length), entry.shape,
-                                         static_cast<ONNXTensorElementDataType>(entry.dtype));
+  std::vector<size_t> device_indices;
+  std::map<std::filesystem::path, std::vector<std::pair<size_t, size_t>>> raw_ranges;
+  constexpr size_t kPage = 4096;
+
+  for (size_t idx = 0; idx < entries_.size(); ++idx) {
+    auto& entry = entries_[idx];
+    if (entry.placement == "cpu" || entry.placement == "host_mapped") {
+      auto key = std::make_pair(entry.file, false);
+      auto it = file_mappings_.find(key);
+      if (it == file_mappings_.end()) {
+        it = file_mappings_.emplace(key, std::make_unique<Qwen38FileMapping>(plane_, entry.file, false)).first;
+      }
+      Qwen38FileMapping& mapping = *it->second;
+      if (entry.offset > mapping.size() || entry.length > mapping.size() - entry.offset) {
+        throw std::runtime_error("qwen38_graph: weight pool entry exceeds mapped file size: " + entry.file.string());
+      }
+      entry.ptr = mapping.data() + entry.offset;
+      entry.owns_device_ptr = false;
+      const size_t aligned_start = (static_cast<size_t>(entry.offset) / kPage) * kPage;
+      const size_t aligned_end =
+          std::min(mapping.size(), ((static_cast<size_t>(entry.offset + entry.length) + kPage - 1) / kPage) * kPage);
+      if (aligned_end > aligned_start) {
+        raw_ranges[entry.file].emplace_back(aligned_start, aligned_end);
+      }
+      if (entry.placement == "host_mapped") {
+        host_mapped_bytes += entry.length;
+        entry.value = OrtValue::CreateTensor(memory_info, entry.ptr, static_cast<size_t>(entry.length), entry.shape,
+                                             static_cast<ONNXTensorElementDataType>(entry.dtype));
+      } else {
+        cpu_bytes += entry.length;
+        entry.value = OrtValue::CreateTensor(*cpu_memory_info_, entry.ptr, static_cast<size_t>(entry.length), entry.shape,
+                                             static_cast<ONNXTensorElementDataType>(entry.dtype));
+        entry.gpu_mapped_value = OrtValue::CreateTensor(memory_info, entry.ptr, static_cast<size_t>(entry.length),
+                                                        entry.shape, static_cast<ONNXTensorElementDataType>(entry.dtype));
+      }
+    } else {
+      void* p = nullptr;
+      plane_.Check(plane_.device_alloc(&p, std::max<uint64_t>(entry.length, 16)), "cudaMalloc(weight pool)");
+      entry.ptr = static_cast<uint8_t*>(p);
+      entry.owns_device_ptr = true;
+      bytes += entry.length;
+      entry.value = OrtValue::CreateTensor(memory_info, entry.ptr, static_cast<size_t>(entry.length), entry.shape,
+                                           static_cast<ONNXTensorElementDataType>(entry.dtype));
+      device_indices.push_back(idx);
+    }
   }
 
-  // Copy the files in parallel: pinned staging buffer per worker, unbuffered reads from the page cache, async H2D on a
-  // private stream.
+  // Register only the merged page-aligned active subranges of cpu/host_mapped files for UVA access (skips unreferenced dead bytes).
+  try {
+    for (auto& [file, intervals] : raw_ranges) {
+      if (intervals.empty()) continue;
+      std::sort(intervals.begin(), intervals.end());
+      std::vector<std::pair<size_t, size_t>> merged;
+      for (const auto& iv : intervals) {
+        if (merged.empty() || iv.first > merged.back().second) {
+          merged.push_back(iv);
+        } else {
+          merged.back().second = std::max(merged.back().second, iv.second);
+        }
+      }
+      uint8_t* base = file_mappings_.at({file, false})->data();
+      for (const auto& [lo, hi] : merged) {
+        void* p = base + lo;
+        plane_.Check(plane_.host_register(p, hi - lo, 2 | 8), "cudaHostRegister(weight pool range)");
+        registered_ranges_.push_back(p);
+      }
+    }
+  } catch (...) {
+    for (void* p : registered_ranges_) plane_.host_unregister(p);
+    registered_ranges_.clear();
+    for (auto& entry : entries_) {
+      entry.value.reset();
+      entry.gpu_mapped_value.reset();
+      if (entry.owns_device_ptr && entry.ptr) plane_.device_free(entry.ptr);
+    }
+    entries_.clear();
+    file_mappings_.clear();
+    throw;
+  }
+
+  // Copy the device-placed files in parallel: pinned staging buffer per worker, unbuffered reads from the page cache,
+  // async H2D on a private stream.
   constexpr size_t kStage = size_t{64} << 20;
   std::atomic<size_t> next{0};
   std::mutex error_mutex;
@@ -77,8 +151,8 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
     try {
       plane_.Check(plane_.host_alloc(&stage, kStage), "cudaHostAlloc(pool stage)");
       plane_.Check(plane_.stream_create(&stream), "cudaStreamCreate");
-      for (size_t i = next.fetch_add(1); i < entries_.size(); i = next.fetch_add(1)) {
-        Entry& entry = entries_[i];
+      for (size_t k = next.fetch_add(1); k < device_indices.size(); k = next.fetch_add(1)) {
+        Entry& entry = entries_[device_indices[k]];
         auto [found, inserted] = files.try_emplace(entry.file);
         std::ifstream& file = found->second;
         if (inserted) {
@@ -101,39 +175,58 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
     } catch (const std::exception& e) {
       std::lock_guard<std::mutex> lock(error_mutex);
       if (error.empty()) error = e.what();
-      next.store(entries_.size());
+      next.store(device_indices.size());
     }
     if (stream) plane_.stream_destroy(stream);
     if (stage) plane_.host_free(stage);
   };
-  std::vector<std::thread> workers;
-  for (int t = 0; t < threads; ++t) workers.emplace_back(worker);
-  for (auto& t : workers) t.join();
+  if (!device_indices.empty()) {
+    std::vector<std::thread> workers;
+    const int active_threads = std::min<int>(threads, static_cast<int>(device_indices.size()));
+    for (int t = 0; t < active_threads; ++t) workers.emplace_back(worker);
+    for (auto& t : workers) t.join();
+  }
   if (!error.empty()) {
+    for (void* p : registered_ranges_) plane_.host_unregister(p);
+    registered_ranges_.clear();
     for (auto& entry : entries_) {
       entry.value.reset();
-      if (entry.ptr) plane_.device_free(entry.ptr);
+      entry.gpu_mapped_value.reset();
+      if (entry.owns_device_ptr && entry.ptr) plane_.device_free(entry.ptr);
     }
     entries_.clear();
+    file_mappings_.clear();
     throw std::runtime_error(error);
   }
   seconds = SecondsSince(start);
   if (g_log.enabled)
-    Log("qwen38_graph") << "weight pool: " << entries_.size() << " initializers, " << bytes / double(1 << 30) << " GiB in "
+    Log("qwen38_graph") << "weight pool: " << entries_.size() << " initializers, device=" << bytes / double(1 << 30)
+                        << " GiB, cpu=" << cpu_bytes / double(1 << 30)
+                        << " GiB, host_mapped=" << host_mapped_bytes / double(1 << 30) << " GiB in "
                         << seconds << " s" << std::endl;
 }
 
 Qwen38WeightPool::~Qwen38WeightPool() {
   for (auto& entry : entries_) {
     entry.value.reset();
-    if (entry.ptr) plane_.device_free(entry.ptr);
+    entry.gpu_mapped_value.reset();
+    if (entry.owns_device_ptr && entry.ptr) plane_.device_free(entry.ptr);
   }
+  for (void* p : registered_ranges_) plane_.host_unregister(p);
+  registered_ranges_.clear();
+  entries_.clear();
+  file_mappings_.clear();
 }
 
 size_t Qwen38WeightPool::AddTo(OrtSessionOptions& options, const std::string& label) const {
   auto it = sessions_.find(label);
   if (it == sessions_.end()) return 0;
-  for (const auto& [name, id] : it->second) options.AddInitializer(name.c_str(), *entries_[id].value);
+  const bool use_gpu_mapped = (label == "dense");
+  for (const auto& [name, id] : it->second) {
+    const Entry& entry = entries_[id];
+    const OrtValue& val = (use_gpu_mapped && entry.gpu_mapped_value) ? *entry.gpu_mapped_value : *entry.value;
+    options.AddInitializer(name.c_str(), val);
+  }
   return it->second.size();
 }
 
@@ -242,6 +335,8 @@ void Qwen38GraphEngine::BuildFastPrefill() {
   }
   SyncStream();
   fast->run_options = OrtRunOptions::Create();
+  const std::string shrink_cfg = "gpu:" + std::to_string(model_.p_device_->GetDeviceId(nullptr));
+  fast->run_options->AddConfigEntry("memory.enable_memory_arena_shrinkage", shrink_cfg.c_str());
   fast_ = std::move(fast);
 }
 
@@ -272,9 +367,22 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   const auto bf16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
   const std::string ple_name = "ple_embeddings." + std::to_string(ple_layer_);
 
-  for (size_t lo = 0; lo < n; lo += static_cast<size_t>(f.chunk)) {
-    const size_t m = std::min(static_cast<size_t>(f.chunk), n - lo);
+  for (size_t lo = 0; lo < n;) {
     const size_t pos = base + lo;  // == f.dense_length
+    size_t max_m = static_cast<size_t>(f.chunk);
+    if (pos >= 24576 && max_m > 512) {
+      max_m = std::min<size_t>(max_m, 512);
+    } else if (pos >= 16384 && max_m > 1024) {
+      max_m = std::min<size_t>(max_m, 1024);
+    }
+    const size_t m = std::min(max_m, n - lo);
+#if !defined(_WIN32)
+    // Phase- and context-dependent dynamic memory lending (v3 Section 8.4):
+    // Lend unused KV budget headroom to QMoE prefill compaction at short/medium context (<= 16k),
+    // and return it as KV state grows toward 32k.
+    const char* compact_cap = (pos + m <= 8192) ? "128" : (pos + m <= 16384 ? "64" : "16");
+    setenv("ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS", compact_cap, 1);
+#endif
     plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
                     ctx_b_.data(), f.ples.data());
     plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_b_.data(), 16, stream_), "ctx commit");
@@ -328,6 +436,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
     }
     f.states = std::move(next);
     f.dense_length += m;
+    lo += m;
   }
   ledger_.AdvancePrompt(n);
 
@@ -353,6 +462,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       best = static_cast<int>(i);
     }
   }
+  f.logits.reset();
   pending_ = best;
 }
 
@@ -410,6 +520,7 @@ void Qwen38GraphEngine::FastHandoff() {
     plane_.Check(plane_.memcpy_h2d(banks_[0].tensors.at(base + "index_lengths")->ptr, lengths, 8, stream_), "handoff index lengths");
     SyncStream();  // `lengths` lives on the stack
   }
+  f.states.clear();
 }
 
 // Batched head prompt prefill: KV-only head model over rows p = 1..P-1 = (token p, target hidden p-1) in chunks, written to
@@ -428,8 +539,9 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
   uint8_t* key = head_store_.at("past_key_values.0.key")->ptr;
   uint8_t* value = head_store_.at("past_key_values.0.value")->ptr;
   const size_t head_stride = static_cast<size_t>(capacity_) * 256 * 2;
-  for (size_t lo = 0; lo < rows; lo += static_cast<size_t>(f.chunk)) {
-    const size_t m = std::min(static_cast<size_t>(f.chunk), rows - lo);
+  const size_t head_chunk = std::min<size_t>(static_cast<size_t>(f.chunk), 512);
+  for (size_t lo = 0; lo < rows; lo += head_chunk) {
+    const size_t m = std::min(head_chunk, rows - lo);
     auto binding = OrtIoBinding::Create(*f.head_kv);
     std::vector<std::unique_ptr<OrtValue>> views;
     auto view = [&](void* ptr, std::vector<int64_t> shape, ONNXTensorElementDataType type) -> OrtValue& {
