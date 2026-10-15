@@ -9,6 +9,7 @@
 #include "search_cuda.h"
 #include "kernels.h"
 #include "cuda_topk.h"
+#include "models/env_utils.h"
 #include "models/io/kv_cache.h"
 #include <algorithm>
 #include <cassert>
@@ -862,11 +863,11 @@ struct CudaInterfaceImplBase : DeviceInterface {
       cuda::LaunchStoreBytes(reinterpret_cast<uint8_t*>(state_update_replay_descriptors_.get()) + offset,
                              bytes + offset, std::min(cuda::kMaxStoreBytes, total - offset), stream);
     }
-    const char* bounded_indexer_replay = std::getenv("ORT_GENAI_CUDA_BOUNDED_INDEXER_REPLAY");
+    bool bounded_indexer_replay = false;
+    GetEnv("ORT_GENAI_CUDA_BOUNDED_INDEXER_REPLAY", bounded_indexer_replay);
     cuda::LaunchReplayStateUpdates(state_update_replay_descriptors_.get(), fast_count,
                                    static_cast<int>(count) - fast_count, fast_blocks,
-                                   bounded_indexer_replay != nullptr &&
-                                       std::strcmp(bounded_indexer_replay, "1") == 0,
+                                   bounded_indexer_replay,
                                    stream);
   }
 
