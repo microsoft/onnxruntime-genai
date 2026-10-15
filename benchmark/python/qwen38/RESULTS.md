@@ -170,7 +170,15 @@ the 2k and 8k rows were re-measured for this table on the stacked branch
 the development run (7.71 / 7.88). Tokens per second follows draft acceptance;
 ms per cycle is the steadier metric. Peak GPU memory of the static-graph
 backend is 113.4 GiB (`nvidia-smi`, 0.5 s samples, 2k-32k decode), compared
-with the 100.09 GiB sampled above; the two samplers differ.
+with the 100.09 GiB sampled above; the two samplers differ. With the v12c
+quantized package (`pkg_v12b_engine_int8kv_fp8w_fp4moe`: calibrated per-channel
+INT8 KV cache, FP8 attention/shared-expert projections, NVFP4 MTP-head routed
+experts, and dense-prefill weight sharing via `build_package_engine_v12b.py`),
+peak GPU memory drops by **12.47 GiB** to **100.93 GiB** (`103,353 MiB` across
+2k-32k decode), cycle time improves to **7.66 / 7.84 / 8.04 ms/cycle**
+(`250.3 / 241.0 / 233.6` decode tokens/s on 2k / 8k / 32k natural text), and
+MMLU-Pro (800 items, 8,192 new tokens) scores **667/800** (`83.375%`, `265.3`
+decode tokens/s).
 
 Read the comparison with these caveats:
 
