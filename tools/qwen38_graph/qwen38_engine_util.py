@@ -1,32 +1,93 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
-"""Shared helpers of the qwen38_flash_graph Engine qualification scripts (smoke, gate, behaviours, benchmark).
+"""Shared helpers of the qwen38_flash_graph Engine qualification scripts (smoke, gate, behaviours, benchmarks).
 
-The scripts drive a package built by build_package.py through the public Engine API (og.Engine / og.Request). The
-reference prompts and hashes come from the research runner (CG/mtp_runner); point QWEN38_RUNNER_DIR at it.
+The scripts drive a package (see README.md) through the public Engine API (og.Engine / og.Request). Prompts are built from
+two natural-text pools that the caller supplies (`--text-pool`, `--prose-pool`, or $QWEN38_TEXT_POOL / $QWEN38_PROSE_POOL):
+either a text file (tokenized with the package's own tokenizer) or a `.npy` file of token ids. Random-token and chat prompts
+need no pool. Nothing is read from any other location.
 """
 
 import hashlib
-import importlib
 import json
 import os
-import sys
+import random
 import time
 from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
 
-RUNNER_DIR = Path(
-    os.environ.get("QWEN38_RUNNER_DIR", "/home/tianlei/git/eval_runs/qwen38_cuda_graph_20261010_01/mtp_runner")
-)
 EOS_IDS = (248046, 248044)
 
+# Chat template switches that turn the default "thinking" generation prompt into the non-thinking one used by the gates.
+_THINKING_ON = "enable_thinking is undefined or enable_thinking is true"
+_THINKING_OFF = "enable_thinking is defined and enable_thinking is false"
 
-def research_prompts():
-    """The research prompt builders (text pools frozen under runs/)."""
-    sys.path.insert(0, str(RUNNER_DIR))
-    return importlib.import_module("prompts")
+
+def add_prompt_arguments(parser):
+    parser.add_argument(
+        "--text-pool",
+        default=os.environ.get("QWEN38_TEXT_POOL"),
+        help="natural text (a text file, or a .npy of token ids; at least ~40k tokens) for the 'text' prompts",
+    )
+    parser.add_argument(
+        "--prose-pool",
+        default=os.environ.get("QWEN38_PROSE_POOL"),
+        help="second natural-text pool for the 'prose' prompts (same formats)",
+    )
+
+
+class Prompts:
+    """Prompt builders of the vLLM benchmark protocol: a window of a natural-text pool, random tokens, or a chat prompt.
+
+    A window starts at (seed * 7919) % (len(pool) - n), so a seed names the same prompt for the same pool.
+    """
+
+    def __init__(self, model, package, text_pool=None, prose_pool=None):
+        self._package = Path(package)
+        self._tokenizer = og.Tokenizer(model)
+        self._paths = {"text": text_pool, "prose": prose_pool}
+        self._pools = {}
+
+    @classmethod
+    def from_args(cls, model, args):
+        return cls(model, args.model, args.text_pool, args.prose_pool)
+
+    def _pool(self, kind):
+        if kind not in self._pools:
+            path = self._paths[kind]
+            if not path:
+                raise SystemExit(
+                    f"the '{kind}' prompts need a natural-text pool: pass --{kind}-pool <file> "
+                    f"(or set QWEN38_{kind.upper()}_POOL); a text file or a .npy of token ids"
+                )
+            if str(path).endswith(".npy"):
+                tokens = np.load(path).tolist()
+            else:
+                tokens = [int(t) for t in self._tokenizer.encode(Path(path).read_text(errors="ignore"))]
+            self._pools[kind] = tokens
+        return self._pools[kind]
+
+    def make(self, kind, n, seed):
+        if kind == "random":
+            rng = random.Random(seed)
+            return [rng.randrange(1000, 200000) for _ in range(n)]
+        if kind not in ("text", "prose"):
+            raise ValueError(kind)
+        pool = self._pool(kind)
+        if len(pool) <= n:
+            raise SystemExit(f"the {kind} pool has {len(pool)} tokens; {n + 1} are needed")
+        start = (seed * 7919) % (len(pool) - n)
+        return pool[start : start + n]
+
+    def chat_prompt(self, question):
+        """Non-thinking chat prompt of the package's own chat template (GenAI tokenizer)."""
+        template = (self._package / "chat_template.jinja").read_text()
+        template = template.replace(_THINKING_ON, "false").replace(_THINKING_OFF, "true")
+        messages = json.dumps([{"role": "user", "content": question}])
+        text = self._tokenizer.apply_chat_template(messages, template_str=template, add_generation_prompt=True)
+        return [int(x) for x in self._tokenizer.encode(text)]
 
 
 def token_hash(tokens):

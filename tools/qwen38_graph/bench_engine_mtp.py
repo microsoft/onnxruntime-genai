@@ -4,13 +4,14 @@
 """vLLM-protocol decode benchmark of the Engine-hosted qwen38_flash_graph backend.
 
 Exact prompt lengths, 256 new tokens, EOS ignored (package built with build_package.py --stop-token-ids 248319), natural
-text from the vLLM source pool (frozen under the research runner's runs/), 1 warm-up + 3 measured runs on distinct prompts
+text windows of --text-pool (any natural text of at least ~40k tokens), 1 warm-up + 3 measured runs on distinct prompts
 (seed 1000+n for the warm-up, i*7+n for run i). TPS = (n-1) generated tokens / (time the last token was delivered - time
 the first token was delivered), measured around Engine.run:
 
     request.begin_turn(prompt, turn); while engine.has_pending_requests(): events = engine.run(buffer)
 
 usage: bench_engine_mtp.py <package> --out <json> [--contexts 2048,8192,32768] [--kind text] [--no-mtp] [--reps 3] [--new 256]
+                           [--text-pool FILE] [--prose-pool FILE]
 """
 
 import argparse
@@ -20,7 +21,7 @@ import sys
 from pathlib import Path
 
 import onnxruntime_genai as og
-from qwen38_engine_util import load_model, research_prompts, run_turn, token_hash
+from qwen38_engine_util import Prompts, add_prompt_arguments, load_model, run_turn, token_hash
 
 
 def main():
@@ -34,15 +35,16 @@ def main():
     parser.add_argument("--no-mtp", action="store_true")
     parser.add_argument("--no-head-prefill", action="store_true")
     parser.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
+    add_prompt_arguments(parser)
     args = parser.parse_args()
     if args.out.exists():
         raise FileExistsError(args.out)
 
-    prompts = research_prompts()
     overlay = {
         "model": {"qwen38_graph": {"mtp": {"enabled": not args.no_mtp, "prefill_head": not args.no_head_prefill}}}
     }
     model = load_model(args.model, args.provider, overlay)
+    prompts = Prompts.from_args(model, args)
     engine = og.Engine(model)
     buffer = engine.create_event_buffer(16)
 

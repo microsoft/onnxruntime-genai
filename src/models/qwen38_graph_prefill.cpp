@@ -374,17 +374,18 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   for (size_t lo = 0; lo < n;) {
     const size_t pos = base + lo;  // == f.dense_length
     size_t max_m = static_cast<size_t>(f.chunk);
-    if (pos >= 24576 && max_m > 512) {
+    if (pos >= 16384 && max_m > 512) {
       max_m = std::min<size_t>(max_m, 512);
-    } else if (pos >= 16384 && max_m > 1024) {
+    } else if (pos >= 4096 && max_m > 1024) {
       max_m = std::min<size_t>(max_m, 1024);
     }
     const size_t m = std::min(max_m, n - lo);
 #if !defined(_WIN32)
     // Phase- and context-dependent dynamic memory lending (v3 Section 8.4):
-    // Lend unused KV budget headroom to QMoE prefill compaction at short/medium context (<= 16k),
+    // Lend unused KV budget headroom to QMoE prefill compaction at short/medium context (<= 8k),
     // and return it as KV state grows toward 32k.
-    const char* compact_cap = (pos + m <= 8192) ? "128" : (pos + m <= 16384 ? "64" : "16");
+    const char* compact_cap =
+        (pos + m <= 4096 && m <= 1024) ? "128" : (pos + m <= 8192 ? "64" : "16");
     setenv("ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS", compact_cap, 1);
 #endif
     plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
@@ -558,14 +559,6 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
   const size_t row_bytes = static_cast<size_t>(hidden_width_) * 2;
   const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
   const auto bf16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
-<<<<<<< HEAD
-  uint8_t* key = head_store_.at("past_key_values.0.key")->ptr;
-  uint8_t* value = head_store_.at("past_key_values.0.value")->ptr;
-  const size_t head_stride = static_cast<size_t>(capacity_) * 256 * 2;
-  const size_t head_chunk = std::min<size_t>(static_cast<size_t>(f.chunk), 512);
-  for (size_t lo = 0; lo < rows; lo += head_chunk) {
-    const size_t m = std::min(head_chunk, rows - lo);
-=======
   const DevTensor& key_tensor = *head_store_.at("past_key_values.0.key");
   const DevTensor& value_tensor = *head_store_.at("past_key_values.0.value");
   uint8_t* key = key_tensor.ptr;
@@ -588,9 +581,9 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
     head_kscale = ksit->second;
     head_vscale = vsit->second;
   }
-  for (size_t lo = 0; lo < rows; lo += static_cast<size_t>(f.chunk)) {
-    const size_t m = std::min(static_cast<size_t>(f.chunk), rows - lo);
->>>>>>> 38393601a (Support INT8/FP8 quantized KV cache hand-off and release dense state after FastHandoff)
+  const size_t head_chunk = std::min<size_t>(static_cast<size_t>(f.chunk), 512);
+  for (size_t lo = 0; lo < rows; lo += head_chunk) {
+    const size_t m = std::min(head_chunk, rows - lo);
     auto binding = OrtIoBinding::Create(*f.head_kv);
     std::vector<std::unique_ptr<OrtValue>> views;
     auto view = [&](void* ptr, std::vector<int64_t> shape, ONNXTensorElementDataType type) -> OrtValue& {

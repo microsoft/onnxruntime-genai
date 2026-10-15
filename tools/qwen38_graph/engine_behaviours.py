@@ -8,7 +8,7 @@ queueing of a second request, turn continuation, rewind, speculative statistics 
 --prefill steps|fast overlays prefill.enabled (the v12b fast prefill is tolerance level and not run-to-run reproducible, so the
 "identical to the reference" checks are exact only with --prefill steps, the bit-exact muted-fold prompt path).
 
-usage: engine_behaviours.py <package> --out <json> [--prefill steps|fast] [--provider PATH]
+usage: engine_behaviours.py <package> --out <json> [--prefill steps|fast] [--provider PATH] --text-pool FILE
 """
 
 import argparse
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
-from qwen38_engine_util import TurnResult, load_model, pump, research_prompts, run_turn
+from qwen38_engine_util import Prompts, TurnResult, add_prompt_arguments, load_model, pump, run_turn
 
 CHECKS = []
 
@@ -44,14 +44,15 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--prefill", choices=("steps", "fast"), default=None)
     parser.add_argument("--provider")
+    add_prompt_arguments(parser)
     args = parser.parse_args()
     if args.out.exists():
         raise FileExistsError(args.out)
 
-    prompts = research_prompts()
     overlay = {"model": {"qwen38_graph": {"prefill": {"enabled": args.prefill == "fast"}}}} if args.prefill else None
     model = load_model(args.model, args.provider, overlay)
     tokenizer = og.Tokenizer(model)
+    prompts = Prompts.from_args(model, args)
     engine = og.Engine(model)
     buffer = engine.create_event_buffer(16)
     finish = og.FinishReason
@@ -206,7 +207,7 @@ def main():
 
     # continuation and rewind: the history is re-ingested; the result must equal a fresh run over the same history
     request = engine.create_request()
-    turn1, turn1_id = run_turn(engine, buffer, request, text[:256], 12)
+    turn1, _ = run_turn(engine, buffer, request, text[:256], 12)
     follow = [int(x) for x in tokenizer.encode(" Continue.")]
     turn2, turn2_id = run_turn(engine, buffer, request, follow, 12)
     request.rewind_to_start_of_turn(turn2_id)

@@ -7,7 +7,7 @@ TTFT = time from before request.begin_turn(prompt) to the return of the Engine.r
 chunks, the dense -> packed hand-off, the batched head KV prefill, the first draft and the enqueue of the first verify cycle all
 happen before that step returns). The turn then runs to its 2-token limit so that the next prompt starts on a clean slot. Also
 reported: the time of the steps before the one that delivers the token (prefill chunks) and of that last step (last chunk + hand-off).
-Natural text of the research prompt pool (as bench_engine_mtp.py), median of --reps distinct prompts per length, plus MMLU-Pro prompt
+Natural text windows of --text-pool (as bench_engine_mtp.py), median of --reps distinct prompts per length, plus MMLU-Pro prompt
 ids (--mmlu N evenly spaced rows of --mmlu-prompts, a jsonl with "prompt_ids" and "index").
 
 usage: bench_ttft_engine.py <package> --out <json> [--lengths 128,...,32768] [--reps 5] [--mmlu 80 --mmlu-prompts FILE]
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
-from qwen38_engine_util import load_model, research_prompts
+from qwen38_engine_util import Prompts, add_prompt_arguments, load_model
 
 
 def ttft(engine, buffer, prompt):
@@ -70,13 +70,14 @@ def main():
     parser.add_argument("--mmlu-prompts", type=Path, default=os.environ.get("QWEN38_MMLU_PROMPTS"))
     parser.add_argument("--prefill", default=None, choices=("fast", "steps"))
     parser.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
+    add_prompt_arguments(parser)
     args = parser.parse_args()
     if args.out.exists():
         raise FileExistsError(args.out)
-    prompts = research_prompts()
     overlay = {"model": {"qwen38_graph": {"prefill": {"enabled": args.prefill == "fast"}}}} if args.prefill else None
     t = time.perf_counter()
     model = load_model(args.model, args.provider, overlay)
+    prompts = Prompts.from_args(model, args)
     result = {"load_s": time.perf_counter() - t, "lengths": {}, "args": {k: str(v) for k, v in vars(args).items()}}
     print(f"model load {result['load_s']:.1f} s", flush=True)
     engine = og.Engine(model)

@@ -63,6 +63,10 @@ def link_tree(src: Path, dst: Path, copy: bool = False) -> int:
     for root, _dirs, files in os.walk(src, followlinks=False):
         rel = Path(root).relative_to(src)
         (dst / rel).mkdir(parents=True, exist_ok=True)
+        if rel.name == "_source_weights":
+            alias = (dst / rel).parent / "source_weights"
+            if not alias.exists() and not alias.is_symlink():
+                alias.symlink_to("_source_weights")
         for name in files:
             relative = rel / name
             if relative in REPLACED:
@@ -235,6 +239,7 @@ def build_offload_weights_pool(
     pool_lines = []
     session_lines = []
     qmoe_pool_ids = set()
+    mtp_moe_pool_ids = set()
     dense_bound_names = set()
 
     for line in src_pool[1:]:
@@ -246,12 +251,21 @@ def build_offload_weights_pool(
             sess, name, pid = parts[1], parts[2], int(parts[3])
             if ".mlp.fc1_" in name or ".mlp.fc2_" in name:
                 qmoe_pool_ids.add(pid)
+            if "mtp.layers.0.mlp.experts." in name:
+                mtp_moe_pool_ids.add(pid)
             if sess == "dense":
                 dense_bound_names.add(name)
             session_lines.append((sess, name, pid))
 
     aligned_mtp_rel = "target/head_data/source_weights/mtp_moe_aligned.bin"
-    if mtp_moe_placement != "device":
+    need_aligned_mtp_copy = False
+    for line in src_pool[1:]:
+        parts = line.strip().split()
+        if parts and parts[0] == "pool" and int(parts[1]) in mtp_moe_pool_ids:
+            if int(parts[3]) % 16 != 0:
+                need_aligned_mtp_copy = True
+
+    if mtp_moe_placement != "device" and need_aligned_mtp_copy:
         shared_aligned = source_pkg.parent / f"{source_pkg.name}_mtp_moe_aligned.bin"
         src_st = source_pkg / "target/head_data/source_weights/model-bf16-00011.safetensors"
         expected_size = 3355443200 + 1677721600
@@ -289,14 +303,17 @@ def build_offload_weights_pool(
                 pool_lines.append(f"{s} cpu")
             elif pid == 0 and embed_placement != "device":
                 pool_lines.append(f"{s} {embed_placement}")
-            elif pid == 607 and mtp_moe_placement != "device":
-                pool_lines.append(
-                    f"pool 607 16 0 3355443200 3 512 1280 2560 {aligned_mtp_rel} {mtp_moe_placement}"
-                )
-            elif pid == 608 and mtp_moe_placement != "device":
-                pool_lines.append(
-                    f"pool 608 16 3355443200 1677721600 3 512 2560 640 {aligned_mtp_rel} {mtp_moe_placement}"
-                )
+            elif pid in mtp_moe_pool_ids and mtp_moe_placement != "device":
+                if not need_aligned_mtp_copy:
+                    pool_lines.append(f"{s} {mtp_moe_placement}")
+                elif pid == 607:
+                    pool_lines.append(
+                        f"pool 607 16 0 3355443200 3 512 1280 2560 {aligned_mtp_rel} {mtp_moe_placement}"
+                    )
+                elif pid == 608:
+                    pool_lines.append(
+                        f"pool 608 16 3355443200 1677721600 3 512 2560 640 {aligned_mtp_rel} {mtp_moe_placement}"
+                    )
             else:
                 pool_lines.append(s)
 
