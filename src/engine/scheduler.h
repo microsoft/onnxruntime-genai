@@ -71,6 +71,7 @@ struct Scheduler {
   virtual StepPlanningResult PlanStep(StepPlan&) {
     throw std::logic_error("Scheduler does not support transactional step planning.");
   }
+  virtual void OnStepCommitted(const StepPlan&) noexcept {}
 
   ScheduledRequests CreateScheduledRequests(const StepPlan& plan);
 
@@ -121,6 +122,20 @@ struct StaticBatchScheduler : Scheduler {
   std::vector<std::shared_ptr<Request>> requests_pool_;
 };
 
+// Builds repeated beneficiary-first preemption probes from one stable, bounded snapshot of the
+// resident candidates. Waiting admissions are filtered once rather than rescanned for every
+// omitted beneficiary.
+struct PreemptionProbeBuilder {
+  PreemptionProbeBuilder(std::span<const RequestStepPlan> candidates,
+                         size_t resident_capacity);
+
+  StepPlan Build(const StepPlan& source,
+                 const RequestStepPlan& beneficiary) const;
+
+ private:
+  std::vector<RequestStepPlan> resident_candidates_;
+};
+
 struct DynamicBatchScheduler : Scheduler {
   DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 
@@ -134,13 +149,22 @@ struct DynamicBatchScheduler : Scheduler {
   ScheduledRequests Schedule() override;
 
   StepPlanningResult PlanStep(StepPlan& plan) override;
+  void OnStepCommitted(const StepPlan& plan) noexcept override;
 
   bool HasPendingRequests() const override;
 
  private:
+  std::vector<std::shared_ptr<Request>> PlanPreemption(
+      StepPlan& plan, std::span<const RequestStepPlan> candidates,
+      StepPlanningResult& result);
+
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
+  bool preemption_enabled_{};
+  uint64_t committed_step_index_{};
+  std::weak_ptr<Request> preemption_beneficiary_;
+  uint64_t preemption_beneficiary_turn_id_{};
 };
 
 std::unique_ptr<Scheduler> CreateScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);

@@ -30,6 +30,7 @@ struct RequestGuidanceTestAccess;
 
 struct Request;
 struct ScheduledRequests;
+struct DynamicBatchScheduler;
 struct Tokenizer;
 class StopStringController;
 
@@ -194,6 +195,14 @@ struct Request : std::enable_shared_from_this<Request>,
   bool NeedsReplayAfterRewind() const noexcept {
     return needs_replay_after_rewind_;
   }
+  bool NeedsCacheReplay() const noexcept {
+    return needs_replay_after_rewind_ || needs_replay_after_preemption_;
+  }
+  bool CanSuspendForRecompute() const;
+  // Called only after validated cache release at a serialized Engine boundary.
+  void SuspendForRecompute() noexcept;
+  uint64_t PreemptionCount() const noexcept { return preemption_count_; }
+  uint64_t RecomputedTokenCount() const noexcept { return recomputed_token_count_; }
   void ValidateTurnAdmission(
       std::span<const int32_t> tokens,
       const TurnOptions& options) const;
@@ -601,6 +610,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::vector<int32_t> tokens_host_;
   friend struct Engine;
   friend struct ScheduledRequests;
+  friend struct DynamicBatchScheduler;
   friend struct test::EngineRunTestAccess;
   friend struct test::RequestGuidanceTestAccess;
 
@@ -633,11 +643,22 @@ struct Request : std::enable_shared_from_this<Request>,
   int64_t processed_sequence_length_{};
   size_t adopted_prefix_length_{};
   size_t turn_cached_prompt_tokens_{};
+  size_t prefix_adoption_previous_length_{};
+  size_t prefix_adoption_previous_cached_tokens_{};
   bool prefix_adoption_staged_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
   // request is still prefilling while processed_sequence_length_ has not caught up with it.
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
+  size_t recompute_sequence_length_{};
+  size_t recompute_processed_length_{};
+  uint64_t preemption_turn_id_{};
+  uint64_t preemption_count_{};
+  uint64_t recomputed_token_count_{};
+  uint64_t last_serviced_step_{};
+  size_t decode_steps_since_admission_{};
+  bool generated_since_admission_{};
+  bool needs_replay_after_preemption_{};
   // The committed turn's resolved policy. The constructor resolves it from the model's own search
   // defaults so an unadmitted Request already has a complete one.
   EffectiveTurnPolicy turn_policy_;

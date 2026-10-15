@@ -22,6 +22,7 @@ enum class RequestStatus {
   Active,        // The current generation turn is executable and owned by the Engine.
   TurnComplete,  // The current turn stopped; output and resident model state remain available.
   Closed,        // Permanently terminal; never scheduled again. Static batch storage may linger.
+  Suspended,     // An unfinished Turn retains its logical state but must rebuild released KV.
 };
 
 enum class GenerationFinishReason : uint32_t {
@@ -35,7 +36,7 @@ enum class GenerationFinishReason : uint32_t {
 };
 
 constexpr bool IsQueued(RequestStatus status) noexcept {
-  return status == RequestStatus::Assigned;
+  return status == RequestStatus::Assigned || status == RequestStatus::Suspended;
 }
 
 constexpr bool IsExecuting(RequestStatus status) noexcept {

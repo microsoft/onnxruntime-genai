@@ -71,6 +71,29 @@ planning steady-state decode steps at batch sizes 1, 8, and 32. That planning ti
 of inter-token latency; use the model-backed `decode_baseline` scenario for end-to-end inter-token
 latency, which also includes model execution, sampling, synchronization, and event delivery.
 
+### Recompute-preemption serving microbenchmark
+
+The same test executable includes a disabled production-policy serving benchmark:
+
+```powershell
+.\build\Windows\Release\Release\engine_unit_tests.exe --gtest_also_run_disabled_tests --gtest_filter=RecomputePreemptionBenchmark.*
+```
+
+Use the equivalent executable path on Linux. The workload submits two long Requests followed by six
+short ones under an identical two-block, 64-slots-per-block budget. Completed Requests are closed,
+as in a serving application. It compares wait-only behavior with quantum-one and quantum-eight
+opt-in policies, including the new committed-step aging.
+
+TTFT covers the six short arrivals; ITL covers every generated sequence. Output includes both
+deterministic model-invocation-step latencies and measured CPU host milliseconds, host tokens/s,
+completions, query tokens, nonresident scheduler wait, published preemptions, committed recomputed
+tokens and long-request slowdown. Event-drain-only API calls do not advance model-step time.
+Five measured repetitions follow warm-up.
+
+Only model execution is replaced by scripted logits. These wall-clock results measure host policy,
+cache, Search and event-processing overhead, not attention kernels or deployed LLM throughput.
+Real-model/provider qualification and model-backed serving measurements remain separate.
+
 ## Run
 
 ```bash
