@@ -276,6 +276,18 @@ def test_int4_onnx_dtype_is_still_int4(is_symmetric, expected):
 
 
 @pytest.mark.parametrize(
+    "is_symmetric, expected",
+    [
+        # The Quark 2-bit export is asymmetric uint2, so int2 defaults to UINT2.
+        (False, ir.DataType.UINT2),
+        (True, ir.DataType.INT2),
+    ],
+)
+def test_int2_onnx_dtype_is_int2(is_symmetric, expected):
+    assert builder_module.set_onnx_dtype("int2", {"is_symmetric": is_symmetric}) == expected
+
+
+@pytest.mark.parametrize(
     "execution_provider, expected",
     [
         ("cpu", ir.DataType.FLOAT),
