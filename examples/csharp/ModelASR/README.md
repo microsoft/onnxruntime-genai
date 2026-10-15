@@ -27,6 +27,17 @@ dotnet build ModelASR -c Release
 
 ## Run
 
+For diarization, use bindings and native binaries built from the corresponding
+implementation branch until a package containing the metadata APIs is released.
+The pinned `0.17.0` packages are not sufficient. Build the local bindings with:
+
+```bash
+dotnet build ModelASR -c Release -p:UseLocalGenAI=true
+```
+
+Make the matching GenAI native libraries available to the application through
+`LD_LIBRARY_PATH` on Linux or `PATH` on Windows.
+
 ```bash
 cd ./ModelASR/bin/Release/net8.0/
 ./ModelASR <model_path> <audio_file.wav> [execution_provider]
@@ -65,3 +76,21 @@ and real-time factor (RTFx).
 ============================================================
   Audio: 10.50s | Wall: 2.13s | RTFx: 4.93x
 ```
+
+## Speaker-attributed output
+
+Configure the model's `diarization.filename` and optional `right_context` in
+`genai_config.json`, as described in the [streaming diarization guide](../../../docs/nemotron_speech_timestamps.md#streaming-diarization).
+The example selects metadata decoding automatically:
+
+| `timestamp_level` | With diarization enabled |
+|---|---|
+| `off` | Speaker-turn segments without timestamps |
+| `word` | Timestamped words with speaker labels |
+| `segment` | Timestamped speaker-turn segments |
+
+Without diarization, timestamp-only modes still work and `off` retains ordinary
+incremental text. `all` is not supported. Metadata output prints completed records
+once; the final summary is the plain transcript. The example flushes every pending
+audio chunk before finalizing metadata. VAD statistics count actually skipped
+central chunks, not calls waiting for diarization look-ahead.

@@ -29,6 +29,7 @@
 struct AudioConfig {
   int sample_rate;
   int chunk_samples;
+  bool metadata;
 };
 
 AudioConfig LoadConfig(const std::string& model_path) {
@@ -41,6 +42,8 @@ AudioConfig LoadConfig(const std::string& model_path) {
   return {
       config["model"]["sample_rate"].get<int>(),
       config["model"]["chunk_samples"].get<int>(),
+      config["model"].value("timestamp_level", "off") != "off" ||
+          !config["model"].value("diarization", nlohmann::json::object()).value("filename", "").empty(),
   };
 }
 
@@ -149,10 +152,33 @@ std::vector<float> LoadWav(const std::string& path, int target_sample_rate) {
   throw std::runtime_error("No data chunk found in WAV file");
 }
 
-std::string DecodeTokens(OgaGenerator& generator, OgaTokenizerStream& tokenizer_stream) {
+void PrintMetadata(const OgaTokenMetadataOutput& result) {
+  if (!result.timestampMetadata) return;
+  const auto& metadata = *result.timestampMetadata;
+  const auto print = [](const OgaTokenMetadataTimestampRecord* records, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+      const auto& record = records[i];
+      if (record.has_timestamp) std::cout << '[' << record.start_time << " - " << record.stop_time << "] ";
+      if (record.speaker_label) std::cout << '[' << record.speaker_label << "] ";
+      std::cout << record.text << std::flush;
+    }
+  };
+  print(metadata.words, metadata.word_count);
+  print(metadata.segments, metadata.segment_count);
+}
+
+std::string DecodeTokens(OgaGenerator& generator, OgaTokenizerStream& tokenizer_stream, bool metadata) {
   std::string text;
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
+    if (metadata) {
+      for (const auto& token : generator.GetNextTokensWithMetadata()) {
+        const auto& result = tokenizer_stream.DecodeWithMetadata(token);
+        text += result.text;
+        PrintMetadata(result);
+      }
+      continue;
+    }
     auto next_tokens = generator.GetNextTokens();
     if (!next_tokens.empty()) {
       const char* token_text = tokenizer_stream.Decode(next_tokens[0]);
@@ -166,7 +192,7 @@ std::string DecodeTokens(OgaGenerator& generator, OgaTokenizerStream& tokenizer_
 }
 
 void StreamingTranscribe(const std::string& model_path, const std::string& audio_path, const std::string& use_vad_override = "") {
-  auto [sample_rate, chunk_samples] = LoadConfig(model_path);
+  auto [sample_rate, chunk_samples, metadata] = LoadConfig(model_path);
 
   std::cout << "Loading audio: " << audio_path << std::endl;
   auto audio = LoadWav(audio_path, sample_rate);
@@ -206,7 +232,6 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
   std::string full_transcript;
   int chunks_total = 0;
   int chunks_processed = 0;
-  int chunks_skipped = 0;
 
   // Stream audio in chunks
   for (size_t i = 0; i < audio.size(); i += chunk_samples) {
@@ -216,20 +241,18 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
     if (inputs) {
       chunks_processed++;
       generator->SetInputs(*inputs);
-      full_transcript += DecodeTokens(*generator, *tokenizer_stream);
-    } else {
-      chunks_skipped++;
+      full_transcript += DecodeTokens(*generator, *tokenizer_stream, metadata);
     }
   }
 
   // Flush remaining audio
-  {
-    auto inputs = processor->Flush();
-    if (inputs && inputs.get()) {
-      generator->SetInputs(*inputs);
-      full_transcript += DecodeTokens(*generator, *tokenizer_stream);
-    }
+  while (auto inputs = processor->Flush()) {
+    chunks_processed++;
+    generator->SetInputs(*inputs);
+    full_transcript += DecodeTokens(*generator, *tokenizer_stream, metadata);
   }
+  if (metadata) PrintMetadata(tokenizer_stream->FinalizeMetadata());
+  const int chunks_skipped = chunks_total - chunks_processed;
 
   auto end = std::chrono::high_resolution_clock::now();
   double wall_time = std::chrono::duration<double>(end - start).count();

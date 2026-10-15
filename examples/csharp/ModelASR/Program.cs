@@ -38,10 +38,16 @@ for (int i = 2; i < args.Length; i++) {
 }
 
 // Read sample_rate and chunk_samples from genai_config.json
-var configJson = JsonDocument.Parse(File.ReadAllText(Path.Combine(modelPath, "genai_config.json")));
+using var configJson = JsonDocument.Parse(File.ReadAllText(Path.Combine(modelPath, "genai_config.json")));
 var modelConfig = configJson.RootElement.GetProperty("model");
 int sampleRate = modelConfig.GetProperty("sample_rate").GetInt32();
 int chunkSize = modelConfig.GetProperty("chunk_samples").GetInt32();
+bool timestampsEnabled = modelConfig.TryGetProperty("timestamp_level", out var timestampLevel) &&
+                         timestampLevel.GetString() != "off";
+bool diarizationEnabled = modelConfig.TryGetProperty("diarization", out var diarization) &&
+                          diarization.TryGetProperty("filename", out var diarizationFilename) &&
+                          !string.IsNullOrEmpty(diarizationFilename.GetString());
+bool metadataEnabled = timestampsEnabled || diarizationEnabled;
 
 // Load audio, convert to mono, and resample to match the model's expected sample rate
 float[] audio = LoadAudio(audioFile, sampleRate);
@@ -74,7 +80,6 @@ Console.WriteLine(new string('-', 60));
 string fullTranscript = "";
 int chunksTotal = 0;
 int chunksProcessed = 0;
-int chunksSkipped = 0;
 
 for (int i = 0; i < audio.Length; i += chunkSize) {
   int remaining = Math.Min(chunkSize, audio.Length - i);
@@ -86,18 +91,20 @@ for (int i = 0; i < audio.Length; i += chunkSize) {
   if (inputs != null) {
     chunksProcessed++;
     generator.SetInputs(inputs);
-    fullTranscript += DecodeTokens(generator, tokenizerStream);
-  } else {
-    chunksSkipped++;
+    fullTranscript += DecodeTokens(generator, tokenizerStream, metadataEnabled);
   }
 }
 
 // Flush remaining buffered audio
-using var flushInputs = processor.Flush();
-if (flushInputs != null) {
+while (true) {
+  using var flushInputs = processor.Flush();
+  if (flushInputs == null) break;
+  chunksProcessed++;
   generator.SetInputs(flushInputs);
-  fullTranscript += DecodeTokens(generator, tokenizerStream);
+  fullTranscript += DecodeTokens(generator, tokenizerStream, metadataEnabled);
 }
+if (metadataEnabled) PrintMetadata(tokenizerStream.FinalizeMetadata());
+int chunksSkipped = chunksTotal - chunksProcessed;
 
 Console.WriteLine($"\n{new string('=', 60)}");
 Console.WriteLine($"  {fullTranscript.Trim()}");
@@ -108,10 +115,27 @@ if (useVad == "true") {
                     $"{chunksSkipped} skipped ({pctSaved:F1}% compute saved)");
 }
 
-static string DecodeTokens(Generator generator, TokenizerStream tokenizerStream) {
+static void PrintMetadata(TokenMetadataOutput result) {
+  if (result.TimestampMetadata == null) return;
+  foreach (var record in result.TimestampMetadata.Words.Concat(result.TimestampMetadata.Segments)) {
+    if (record.StartTime.HasValue) Console.Write($"[{record.StartTime:F2} - {record.StopTime:F2}] ");
+    if (record.SpeakerLabel != null) Console.Write($"[{record.SpeakerLabel}] ");
+    Console.Write(record.Text);
+  }
+}
+
+static string DecodeTokens(Generator generator, TokenizerStream tokenizerStream, bool metadataEnabled) {
   string text = "";
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
+    if (metadataEnabled) {
+      foreach (var token in generator.GetNextTokensWithMetadata()) {
+        var result = tokenizerStream.DecodeWithMetadata(token);
+        text += result.Text;
+        PrintMetadata(result);
+      }
+      continue;
+    }
     var tokens = generator.GetNextTokens();
     if (tokens.Length > 0) {
       string tokenText = tokenizerStream.Decode(tokens[0]);
