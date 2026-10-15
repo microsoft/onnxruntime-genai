@@ -41,10 +41,9 @@ if (useVadOverride == "true") {
   processor.SetOption("use_vad", "true");
 }
 
-using var tokenizer = new Tokenizer(model);
-using var tokenizerStream = tokenizer.CreateStream();
 using var generatorParams = new GeneratorParams(model);
 using var generator = new Generator(model, generatorParams);
+using var postprocessor = new TokenPostProcessor(model, generator);
 var timestampedTranscript = new StringBuilder();
 
 for (int offset = 0; offset < audio.Length; offset += chunkSize) {
@@ -55,37 +54,40 @@ for (int offset = 0; offset < audio.Length; offset += chunkSize) {
   using var inputs = processor.Process(chunk);
   if (inputs != null) {
     generator.SetInputs(inputs);
-    DecodeSegments(generator, tokenizerStream, timestampedTranscript);
+    DecodeSegments(generator, postprocessor, timestampedTranscript);
   }
 }
 
 using var flushInputs = processor.Flush();
 if (flushInputs != null) {
   generator.SetInputs(flushInputs);
-  DecodeSegments(generator, tokenizerStream, timestampedTranscript);
+  DecodeSegments(generator, postprocessor, timestampedTranscript);
 }
 
-AppendSegments(tokenizerStream.FinalizeMetadata(), timestampedTranscript);
+postprocessor.FinalizeProcessing();
+foreach (var result in postprocessor.GetNextTokenResults())
+  AppendSegments(result, timestampedTranscript);
 
 Console.WriteLine();
 Console.WriteLine(new string('=', 60));
 Console.WriteLine(timestampedTranscript.ToString());
 Console.WriteLine(new string('=', 60));
 
-static void DecodeSegments(Generator generator, TokenizerStream tokenizerStream,
+static void DecodeSegments(Generator generator, TokenPostProcessor postprocessor,
                            StringBuilder timestampedTranscript) {
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
-    var tokens = generator.GetNextTokensWithMetadata();
-    foreach (var token in tokens) {
-        AppendSegments(tokenizerStream.DecodeWithMetadata(token), timestampedTranscript);
+    postprocessor.ProcessNextTokens();
+    foreach (var result in postprocessor.GetNextTokenResults()) {
+      AppendSegments(result, timestampedTranscript);
     }
   }
 }
 
 static void AppendSegments(TokenMetadataOutput result, StringBuilder timestampedTranscript) {
-  if (result.TimestampMetadata == null) return;
-  foreach (var segment in result.TimestampMetadata.Segments) {
+  var timestamps = result.GetTimestamps();
+  if (timestamps == null) return;
+  foreach (var segment in timestamps.Segments) {
     string separator = segment.Text.Length > 0 && char.IsWhiteSpace(segment.Text[0]) ? "" : " ";
     string timestampedSegment = $"[{segment.StartTime:F2} - {segment.StopTime:F2}]{separator}{segment.Text}";
     timestampedTranscript.Append(timestampedSegment);
