@@ -17,6 +17,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cpu_cast_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen_position_mask_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp")
@@ -205,6 +206,26 @@ if (NOT MSVC)
   target_compile_options(kv_cache_unit_tests PRIVATE "-fvisibility=hidden")
 endif()
 add_test(NAME KvCacheUnitTests COMMAND kv_cache_unit_tests)
+
+add_executable(qwen_position_mask_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen_position_mask_tests.cpp")
+target_include_directories(qwen_position_mask_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_definitions(qwen_position_mask_tests PRIVATE
+  QWEN_POSITION_TEST_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/models/qwen-position-inputs"
+)
+target_link_libraries(qwen_position_mask_tests PRIVATE onnxruntime-genai-obj GTest::gtest)
+add_dependencies(qwen_position_mask_tests onnxruntime-genai)
+set_target_properties(qwen_position_mask_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  FOLDER "Tests"
+)
+if (NOT MSVC)
+  target_compile_options(qwen_position_mask_tests PRIVATE "-fvisibility=hidden")
+endif()
+add_test(NAME QwenPositionMaskTests COMMAND qwen_position_mask_tests)
 # Cast tests call CreateCpuInterface, which is not part of the public shared-library API.
 add_executable(cpu_cast_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cpu_cast_test.cpp")
 target_include_directories(cpu_cast_tests PRIVATE
