@@ -40,6 +40,10 @@ void Gpt_State::RewindTo(size_t index) {
   kv_cache_.RewindTo(index);
 }
 
+bool Gpt_State::CanRewindTo(size_t index) const {
+  return position_inputs_.CanRewindTo(index) && kv_cache_.CanRewindTo(index);
+}
+
 void Gpt_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);

@@ -16,8 +16,9 @@ namespace Generators {
 // the GQA kernel itself evicts old entries by compaction (sliding_window_cache=1).
 // ---------------------------------------------------------------------------
 
-// Throws if rewinding to `index` is not safe because the windowed KV cache has
-// already evicted the positions needed at that point.
+// False if the windowed KV cache has already evicted a position RewindTo(index) needs.
+bool CanRewindWindowedKvCache(int windowed_cache_size, int current_length, size_t index);
+
 void CheckWindowedKvCacheRewind(int windowed_cache_size, int current_length, size_t index);
 
 struct WindowedKeyValueCache : KeyValueCache {
@@ -35,6 +36,7 @@ struct WindowedKeyValueCache : KeyValueCache {
   void RewindTo(size_t index) override {
     throw std::runtime_error("WindowedKeyValueCache does not support RewindTo.");
   }
+  bool CanRewindTo(size_t index) const override { (void)index; return false; }
 
  private:
   using CacheTensorShape = std::array<int64_t, 4>;

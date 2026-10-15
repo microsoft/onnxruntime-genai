@@ -14,6 +14,7 @@ struct CombinedKeyValueCache : KeyValueCache {
   void Add() override;  // Add to state inputs/outputs
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
+  bool CanRewindTo(size_t index) const override;
 
  private:
   template <typename ScoreType>

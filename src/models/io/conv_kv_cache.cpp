@@ -210,10 +210,29 @@ void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_lengt
 }
 
 void ConvKeyValueCache::RewindTo(size_t index) {
-  // ConvKeyValueCache uses conv layers with fixed-size rolling state buffers that depend on all prior tokens.
-  // Rewinding the KV cache without replaying tokens through the conv layers would produce
-  // incorrect results, so rewind is not supported for this cache type.
-  throw std::runtime_error("ConvKeyValueCache does not support RewindTo.");
+  if (!CanRewindTo(index)) {
+    // Conv layers keep fixed-size rolling state built from all prior tokens, so a partial rewind
+    // would need those tokens replayed.
+    throw std::runtime_error("ConvKeyValueCache only supports RewindTo(0).");
+  }
+
+  // Shared-buffer KV is rewound logically: the next prompt overwrites it from position 0.
+  if (!kv_share_buffer_) {
+    for (int i = 0; i < kv_layer_count_ * 2; ++i) {
+      kv_pasts_[i] = nullptr;
+      state_.inputs_[kv_input_index_ + i] = kv_empty_past_.get();
+    }
+    kv_is_first_update_ = true;
+  }
+
+  for (int i = 0; i < conv_layer_count_; ++i) {
+    if (!conv_pasts_[i]) {
+      conv_pasts_[i] = OrtValue::CreateTensor(Allocator(), conv_shapes_[i], conv_type_);
+    }
+    ByteWrapTensor(Device(), *conv_pasts_[i]).Zero();
+    state_.inputs_[conv_input_index_ + i] = conv_pasts_[i].get();
+  }
+  conv_is_first_update_ = true;
 }
 
 template <typename ScoreType>

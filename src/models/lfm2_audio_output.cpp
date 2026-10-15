@@ -93,6 +93,16 @@ Lfm2AudioOutput::Lfm2AudioOutput(const MultiModalLanguageModel& model, const Gen
   placeholder_logits_.CopyCpuToDevice();
 }
 
+void Lfm2AudioOutput::Reset() {
+  modality_ = Modality::Text;
+  previous_was_text_ = false;
+  text_done_ = false;
+  modality_left_ = 0;
+  pending_embedding_.clear();
+  audio_codes_.clear();
+  audio_codes_tensor_.reset();
+}
+
 void Lfm2AudioOutput::BeginStep(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
   if (is_prompt || next_tokens.size() != 1) {
     // A new turn starts in text, whatever the last one ended in.

@@ -36,6 +36,11 @@ struct RecurrentState {
   void SetForwardLength(int sequence_length);  // Record this step's seq_len (maps position -> slot).
   void CropToPosition(size_t position);        // Copy window slot for `position` -> slot W-1.
 
+  // False if RewindTo(index) would throw (nonzero index needs a snapshot at that length).
+  bool CanRewindTo(size_t index) const {
+    return layer_indices_.empty() || index == 0 || (snapshot_valid_ && index == snapshot_position_);
+  }
+
   bool IsEmpty() const { return layer_indices_.empty(); }
   int GraphCaptureVariant() const { return graph_buffer_variant_; }
 

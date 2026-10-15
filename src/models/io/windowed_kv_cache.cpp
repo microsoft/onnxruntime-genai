@@ -13,7 +13,7 @@
 
 namespace Generators {
 
-void CheckWindowedKvCacheRewind(int windowed_cache_size, int current_length, size_t index) {
+bool CanRewindWindowedKvCache(int windowed_cache_size, int current_length, size_t index) {
   // Sliding-window layers hold only the most recent windowed_cache_size positions, anchored
   // at cache index 0.  Once anything has been evicted, position i no longer lives at cache
   // offset i, so a rewind would silently read misaligned keys.  Refuse instead of returning
@@ -25,8 +25,12 @@ void CheckWindowedKvCacheRewind(int windowed_cache_size, int current_length, siz
   // [i - min(i, C), i) while the buffer still physically holds [T - min(T, C), T).  Those
   // ranges only coincide when nothing has been evicted; supporting the resident case would
   // require left-shifting every sliding layer's cache, which is not implemented.
-  if (windowed_cache_size > 0 && current_length > windowed_cache_size &&
-      index < static_cast<size_t>(current_length)) {
+  return !(windowed_cache_size > 0 && current_length > windowed_cache_size &&
+           index < static_cast<size_t>(current_length));
+}
+
+void CheckWindowedKvCacheRewind(int windowed_cache_size, int current_length, size_t index) {
+  if (!CanRewindWindowedKvCache(windowed_cache_size, current_length, index)) {
     throw std::runtime_error(
         "Cannot rewind to " + std::to_string(index) +
         ": the sliding-window KV cache holds only the last " +

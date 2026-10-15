@@ -463,13 +463,24 @@ def test_lfm2_vl_decoder_on_another_provider_matches_cpu(test_data_path, tmp_pat
     np.testing.assert_array_equal(features, expected_features)
 
 
-def test_lfm2_vl_rejects_rewind(test_data_path):
-    generator, _ = _generate(
-        _model_path(test_data_path), "<image>Hi", og.Images.open(_image_path(test_data_path, "cars.jpg")), num_tokens=1
+def test_lfm2_vl_rewind_to_zero_replays_prompt(test_data_path):
+    num_tokens = 4
+    generator, inputs = _generate(
+        _model_path(test_data_path),
+        "<image>Hi",
+        og.Images.open(_image_path(test_data_path, "cars.jpg")),
+        num_tokens=num_tokens,
     )
-    sequence = generator.get_sequence(0).copy()
+    expected = generator.get_sequence(0).copy()
+    prompt = inputs["input_ids"].as_numpy()[0]
 
-    # The conv state cannot be rewound; the generator must refuse before touching the sequence.
-    with pytest.raises(RuntimeError, match="RewindTo is currently not supported for lfm2_vl"):
-        generator.rewind_to(0)
-    np.testing.assert_array_equal(generator.get_sequence(0), sequence)
+    # The conv state cannot be cropped; a partial rewind must be refused before touching the sequence.
+    with pytest.raises(RuntimeError, match="RewindTo is only supported with new_length=0 for lfm2_vl"):
+        generator.rewind_to(len(prompt) + 1)
+    np.testing.assert_array_equal(generator.get_sequence(0), expected)
+
+    generator.rewind_to(0)
+    generator.append_tokens(prompt)
+    for _ in range(num_tokens):
+        generator.generate_next_token()
+    np.testing.assert_array_equal(generator.get_sequence(0), expected)

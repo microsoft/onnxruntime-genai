@@ -16,6 +16,7 @@ struct ModelManagedKeyValueCache : KeyValueCache {
   virtual void Add() override;
   virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   virtual void RewindTo(size_t index) override;
+  bool CanRewindTo(size_t index) const override { (void)index; return true; }
   virtual bool IsModelManaged() const override { return true; }
 
  private:

@@ -19,6 +19,12 @@ struct MultiModalFeatures {
   void Update(bool is_prompt);
   void ReuseFeaturesBuffer(MultiModalFeatures& other);
 
+  // Resizes to native_shape_, so the encoder can produce real output again.
+  void ResizeToNative();
+
+  // Resizes the token-count dimension to zero, freeing the tensor's data.
+  void ResizeToZeroTokens();
+
   // Pre-allocate an empty features tensor for Input mode when no source session provides one.
   // Used when the embedding model requires an input (e.g., audio_features) but no corresponding
   // encoder session exists.
@@ -31,10 +37,14 @@ struct MultiModalFeatures {
   OrtValue* Get() { return features_.get(); }
 
  private:
+  // Reallocates at new_shape; no-op if already there.
+  void ResizeTo(std::vector<int64_t> new_shape);
+
   State& state_;
   const Model& model_{state_.model_};
 
   std::vector<int64_t> shape_;  // [num_feature_tokens, hidden_size]
+  std::vector<int64_t> native_shape_;  // Encoder's own output shape, unaffected by ReshapeFeatures
   ONNXTensorElementDataType type_;
 
   const Mode mode_{};

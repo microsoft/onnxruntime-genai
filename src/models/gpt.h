@@ -24,6 +24,7 @@ struct Gpt_State : State {
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
   void RewindTo(size_t index) override;
+  bool CanRewindTo(size_t index) const override;
 
  private:
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int current_length);
