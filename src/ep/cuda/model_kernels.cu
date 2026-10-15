@@ -5,10 +5,14 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include <algorithm>
+#include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <assert.h>
 #include <stdio.h>
 #include "cuda_common.h"
+#include "kernels.h"
 
 namespace Generators {
 namespace cuda {
@@ -586,6 +590,75 @@ __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restr
 
 }  // namespace
 
+// Fast compact replay for gated-delta-net states. One block owns kReplayRows value rows of one head:
+// it stages that head's decays, the kept keys, and the rows' deltas in shared memory, and each warp
+// then streams whole rows as float4 through registers. It computes exactly what
+// ReplayStateUpdatesKernel does for these descriptors, without the per-element index arithmetic and
+// global reloads of the transition factors that keep that kernel below the bandwidth roofline.
+constexpr int kReplayThreads = 256;
+constexpr int kReplayRows = 32;
+
+__global__ void __launch_bounds__(kReplayThreads) ReplayGatedDeltaNetKernel(
+    const StateUpdateReplayDescGpu* __restrict__ descs) {
+  __shared__ float key_tile[kMaxFastReplayTransitions * kMaxFastReplayKeyWidth];
+  __shared__ float delta_tile[kMaxFastReplayTransitions * kReplayRows];
+  __shared__ float decay_tile[kMaxFastReplayTransitions];
+
+  const StateUpdateReplayDescGpu d = descs[blockIdx.y];
+  const int value_width = static_cast<int>(d.state_width);
+  const int key_width = static_cast<int>(d.key_width);
+  const int heads = static_cast<int>(d.channel_count);
+  const int key_heads = static_cast<int>(d.key_head_count);
+  const int kept = static_cast<int>(d.kept_count);
+  const int chunks = (value_width + kReplayRows - 1) / kReplayRows;
+  const int head = blockIdx.x / chunks;
+  if (head >= heads) return;
+  const int first_row = (blockIdx.x - head * chunks) * kReplayRows;
+  const int key_head = head * key_heads / heads;
+
+  for (int i = threadIdx.x; i < kept * key_width; i += blockDim.x) {
+    const int t = i / key_width;
+    const int k = i - t * key_width;
+    key_tile[t * key_width + k] =
+        d.key[(static_cast<size_t>(t) * key_heads + key_head) * key_width + k];
+  }
+  for (int i = threadIdx.x; i < kept * kReplayRows; i += blockDim.x) {
+    const int t = i / kReplayRows;
+    const int r = i - t * kReplayRows;
+    const int v = first_row + r;
+    delta_tile[i] = v < value_width
+                        ? d.delta[(static_cast<size_t>(t) * heads + head) * value_width + v]
+                        : 0.0f;
+  }
+  if (threadIdx.x < kept) {
+    decay_tile[threadIdx.x] = d.decay[static_cast<size_t>(threadIdx.x) * heads + head];
+  }
+  __syncthreads();
+
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const auto* source = static_cast<const float*>(d.source_state);
+  auto* destination = static_cast<float*>(d.destination_state);
+  for (int r = warp; r < kReplayRows; r += kReplayThreads / 32) {
+    const int v = first_row + r;
+    if (v >= value_width) break;
+    const size_t row = (static_cast<size_t>(head) * value_width + v) * key_width;
+    for (int k = lane * 4; k < key_width; k += 128) {
+      float4 s = *reinterpret_cast<const float4*>(source + row + k);
+      for (int t = 0; t < kept; ++t) {
+        const float decay = decay_tile[t];
+        const float delta = delta_tile[t * kReplayRows + r];
+        const float* key = key_tile + t * key_width + k;
+        s.x = __fmaf_rn(key[0], delta, __fmul_rn(s.x, decay));
+        s.y = __fmaf_rn(key[1], delta, __fmul_rn(s.y, decay));
+        s.z = __fmaf_rn(key[2], delta, __fmul_rn(s.z, decay));
+        s.w = __fmaf_rn(key[3], delta, __fmul_rn(s.w, decay));
+      }
+      *reinterpret_cast<float4*>(destination + row + k) = s;
+    }
+  }
+}
+
 void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_slot, cudaStream_t stream) {
   if (count <= 0 || src_slot == dst_slot) return;
   const dim3 grid(kSlotCopyBlocksPerTensor, static_cast<unsigned>(count));
@@ -593,11 +666,121 @@ void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_sl
       reinterpret_cast<const StateSlotDescGpu*>(descs), src_slot, dst_slot);
 }
 
-void LaunchReplayStateUpdates(const void* descs, int count, cudaStream_t stream) {
+void LaunchReplayStateUpdates(const void* descs, int fast_count, int generic_count,
+                              int fast_blocks_per_descriptor, cudaStream_t stream) {
+  const auto* typed = reinterpret_cast<const StateUpdateReplayDescGpu*>(descs);
+  if (fast_count > 0) {
+    const dim3 grid(static_cast<unsigned>(fast_blocks_per_descriptor), static_cast<unsigned>(fast_count));
+    ReplayGatedDeltaNetKernel<<<grid, kReplayThreads, 0, stream>>>(typed);
+    CUDA_CHECK_LAUNCH();
+  }
+  if (generic_count > 0) {
+    const dim3 grid(kSlotCopyBlocksPerTensor, static_cast<unsigned>(generic_count));
+    ReplayStateUpdatesKernel<<<grid, kSlotCopyThreads, 0, stream>>>(typed + fast_count);
+    CUDA_CHECK_LAUNCH();
+  }
+}
+
+int ReplayGatedDeltaNetBlocks(int heads, int value_width) {
+  return heads * ((value_width + kReplayRows - 1) / kReplayRows);
+}
+
+namespace small_copy {
+
+template <int kBytes>
+struct BytePayload {
+  alignas(16) unsigned char bytes[kBytes];
+};
+
+template <int kBytes>
+__global__ void StoreBytesKernel(BytePayload<kBytes> payload, unsigned char* __restrict__ destination,
+                                 int count) {
+  for (int i = threadIdx.x; i < count; i += blockDim.x) destination[i] = payload.bytes[i];
+}
+
+template <int kBytes>
+void LaunchStoreBytesImpl(void* destination, const void* source, size_t count, cudaStream_t stream) {
+  BytePayload<kBytes> payload;
+  memcpy(payload.bytes, source, count);
+  const auto kernel = StoreBytesKernel<kBytes>;
+  const int threads = count < 256 ? 64 : 256;
+  kernel<<<1, threads, 0, stream>>>(payload, static_cast<unsigned char*>(destination), static_cast<int>(count));
+  CUDA_CHECK_LAUNCH();
+}
+
+__global__ void CopyBytesKernel(const unsigned char* __restrict__ source,
+                                unsigned char* __restrict__ destination, size_t count) {
+  const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+  const size_t start = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (((reinterpret_cast<uintptr_t>(source) | reinterpret_cast<uintptr_t>(destination)) & 0xF) == 0) {
+    const size_t vectors = count >> 4;
+    const auto* source_vectors = reinterpret_cast<const uint4*>(source);
+    auto* destination_vectors = reinterpret_cast<uint4*>(destination);
+    for (size_t i = start; i < vectors; i += stride) destination_vectors[i] = source_vectors[i];
+    for (size_t i = (vectors << 4) + start; i < count; i += stride) destination[i] = source[i];
+    return;
+  }
+  for (size_t i = start; i < count; i += stride) destination[i] = source[i];
+}
+
+__global__ void ZeroBytesKernel(unsigned char* __restrict__ destination, size_t count) {
+  const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+  const size_t start = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if ((reinterpret_cast<uintptr_t>(destination) & 0xF) == 0) {
+    const size_t vectors = count >> 4;
+    auto* destination_vectors = reinterpret_cast<uint4*>(destination);
+    for (size_t i = start; i < vectors; i += stride) destination_vectors[i] = make_uint4(0, 0, 0, 0);
+    for (size_t i = (vectors << 4) + start; i < count; i += stride) destination[i] = 0;
+    return;
+  }
+  for (size_t i = start; i < count; i += stride) destination[i] = 0;
+}
+
+__global__ void GatherStridedInt32Kernel(const int32_t* __restrict__ source, int stride,
+                                         int32_t* __restrict__ destination, int count) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < count) destination[i] = source[static_cast<size_t>(i) * stride];
+}
+
+unsigned CopyBlocks(size_t count) {
+  constexpr size_t kBytesPerBlock = 256 * 16 * 4;
+  return static_cast<unsigned>(std::min<size_t>(1024, (count + kBytesPerBlock - 1) / kBytesPerBlock));
+}
+
+}  // namespace small_copy
+
+void LaunchStoreBytes(void* destination, const void* source, size_t count, cudaStream_t stream) {
+  if (count == 0) return;
+  if (count <= 64) {
+    small_copy::LaunchStoreBytesImpl<64>(destination, source, count, stream);
+  } else if (count <= 512) {
+    small_copy::LaunchStoreBytesImpl<512>(destination, source, count, stream);
+  } else if (count <= kMaxStoreBytes) {
+    small_copy::LaunchStoreBytesImpl<kMaxStoreBytes>(destination, source, count, stream);
+  } else {
+    throw std::invalid_argument("LaunchStoreBytes payload exceeds kMaxStoreBytes.");
+  }
+}
+
+void LaunchCopyBytes(void* destination, const void* source, size_t count, cudaStream_t stream) {
+  if (count == 0) return;
+  small_copy::CopyBytesKernel<<<small_copy::CopyBlocks(count), 256, 0, stream>>>(
+      static_cast<const unsigned char*>(source), static_cast<unsigned char*>(destination), count);
+  CUDA_CHECK_LAUNCH();
+}
+
+void LaunchZeroBytes(void* destination, size_t count, cudaStream_t stream) {
+  if (count == 0) return;
+  small_copy::ZeroBytesKernel<<<small_copy::CopyBlocks(count), 256, 0, stream>>>(
+      static_cast<unsigned char*>(destination), count);
+  CUDA_CHECK_LAUNCH();
+}
+
+void LaunchGatherStridedInt32(const int32_t* source, int stride, int32_t* destination, int count,
+                              cudaStream_t stream) {
   if (count <= 0) return;
-  const dim3 grid(kSlotCopyBlocksPerTensor, static_cast<unsigned>(count));
-  ReplayStateUpdatesKernel<<<grid, kSlotCopyThreads, 0, stream>>>(
-      reinterpret_cast<const StateUpdateReplayDescGpu*>(descs));
+  small_copy::GatherStridedInt32Kernel<<<(count + 255) / 256, 256, 0, stream>>>(
+      source, stride, destination, count);
   CUDA_CHECK_LAUNCH();
 }
 

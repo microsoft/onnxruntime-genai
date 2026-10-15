@@ -201,8 +201,8 @@ example.
 
 ### Runtime
 
-`MtpGenerator` ([src/mtp_generator.h](../src/mtp_generator.h),
-[src/mtp_generator.cpp](../src/mtp_generator.cpp)) composes two ordinary `Generator`s — the main
+`MtpGenerator` ([src/generator/mtp_generator.h](../src/generator/mtp_generator.h),
+[src/generator/mtp_generator.cpp](../src/generator/mtp_generator.cpp)) composes two ordinary `Generator`s — the main
 decoder and the head — on the **shared compute stream**, and keeps the hidden-state handoff
 device-to-device. Constraints enforced at construction: `batch_size == 1`, `num_beams == 1`,
 `num_return_sequences == 1`, no guidance, and matching device type / vocab size / hidden size /
@@ -311,7 +311,7 @@ absorbed every token of the forward. `RecurrentState`
 
 `Generator` exposes this as `SnapshotState()`, `CanCropRecurrentState()` and
 `CropToAccepted(new_length, recurrent_position)`
-([src/generators.h](../src/generators.h)). `MtpGenerator` snapshots before each wide greedy verify
+([src/generator/generators.h](../src/generator/generators.h)). `MtpGenerator` snapshots before each wide greedy verify
 so a partial rejection can always replay the committed prefix with decode-consistent numerics.
 
 `RecurrentState::GraphCaptureVariant()` feeds the graph-capture annotation id so a double-buffered

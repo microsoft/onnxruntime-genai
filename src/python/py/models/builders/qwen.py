@@ -13,7 +13,6 @@ import os
 import numpy as np
 import onnx_ir as ir
 import torch
-from transformers import Qwen2ForCausalLM
 
 from .base import Model
 from .mtp import MTPModel
@@ -105,8 +104,10 @@ class VideoChatFlashQwenModel(QwenModel):
     def load_weights(self, input_path):
         # Load the standard Qwen2 backbone without importing the checkpoint's
         # custom video modeling code and its optional dependencies.
+        model_class = self.resolve_transformers_class("Qwen2ForCausalLM")
+
         extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
-        return Qwen2ForCausalLM.from_pretrained(
+        return model_class.from_pretrained(
             self.model_name_or_path,
             token=self.hf_token,
             **extra_kwargs,
@@ -116,8 +117,8 @@ class VideoChatFlashQwenModel(QwenModel):
 class Qwen35TextModel(Model):
     def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep):
         uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
-        if uses_gated_delta_net and ep != "cuda":
-            raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
+        if uses_gated_delta_net and ep not in ("cuda", "webgpu"):
+            raise ValueError("GatedDeltaNet exports require the CUDA or WebGPU execution provider")
         if uses_gated_delta_net and state_window:
             raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
 
@@ -210,10 +211,6 @@ class Qwen35TextModel(Model):
         )
         super().make_inputs_and_outputs()
 
-    def is_packed_matmul_supported(self):
-        # Qwen-3.5 needs a separate Q projection to split its per-head Q and gate values.
-        return False
-
     def is_packed_attn_supported(self):
         return False
 
@@ -222,6 +219,16 @@ class Qwen35TextModel(Model):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
         super().make_attention_init(config)
+        if self.use_paged_attention:
+            # The base paged path keeps Q/K/V separate under Q/K norm; this model splits them itself.
+            self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
+
+    def is_qkv_projection_packable(self, layer_id, attention):
+        # Keep the V-only mixed_layers upgrade this model used before Q/K/V fusion was enabled.
+        v_name = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
+        return v_name not in self.int4_customized_weight_config and super().is_qkv_projection_packable(
+            layer_id, attention
+        )
 
     def is_fused_rope_supported(self):
         # Qwen-3.5 applies MRoPE manually before attention, not fused in the op
@@ -847,8 +854,9 @@ class Qwen35MoETextModel(Qwen35TextModel):
             root_input=f"{moe_name}/output_0",
             scaled_input=shared_output,
             gate=shared_gate,
-            shape=["batch_size", "sequence_length", self.hidden_size],
+            shape=self.make_hidden_state_shape(),
         )
+        self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
         return f"{combine_name}/output_0"
 
     def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
@@ -869,7 +877,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
         gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
         gate_sigmoid_name = f"{basename}_gate/Sigmoid"
         self.make_sigmoid(
-            gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", 1]
+            gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=self.make_hidden_state_shape(last_dim=1)
         )
 
         return shared_output, f"{gate_sigmoid_name}/output_0"
@@ -1243,6 +1251,9 @@ class Qwen35MoEModel(MTPModel):
         fuse_gate_up = str(extra_options.get("dflash2_fuse_gate_up", False)).lower()
         if fuse_gate_up not in ("true", "false"):
             raise ValueError("dflash2_fuse_gate_up must be true or false.")
+        fuse_qkv = str(extra_options.get("dflash2_fuse_qkv", False)).lower()
+        if fuse_qkv not in ("true", "false"):
+            raise ValueError("dflash2_fuse_qkv must be true or false.")
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
             "compute_dtype": drafter_io_dtype,
@@ -1250,6 +1261,7 @@ class Qwen35MoEModel(MTPModel):
             "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
             "quant_config": drafter_quant_config,
             "fuse_gate_up": fuse_gate_up == "true",
+            "fuse_qkv": fuse_qkv == "true",
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
@@ -1292,7 +1304,9 @@ class Qwen35MoEModel(MTPModel):
             lm_head_quant=self.block_drafter_lm_head_quant(),
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
+            include_attention_metadata=True,
             compute_dtype=self.dflash2_attrs["compute_dtype"],
+            fuse_qkv=self.dflash2_attrs["fuse_qkv"],
         )
         self.dflash2.make_model()
 
@@ -1491,6 +1505,7 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
+            include_attention_metadata=True,
             embed_quant=self.block_drafter_embed_quant(),
             lm_head_quant=self.block_drafter_lm_head_quant(),
         )

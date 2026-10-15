@@ -184,6 +184,12 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
   if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
       cache_manager_->SupportsDynamicBatching()) {
     context.run_options->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
+    // Every consumer of a captured step's outputs runs on the session's CUDA stream, and the first
+    // host read of them (the sampled token ids) synchronizes that stream. Skipping the end-of-run
+    // synchronization lets that work queue behind the graph instead of waiting for the device.
+    if (capture && model_->p_device_->GetType() == DeviceType::CUDA) {
+      context.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+    }
   }
 
   decoder_state->DumpInputs();

@@ -60,7 +60,9 @@ class DFlash2Builder(BlockDrafterBuilder):
         lm_head_quant=None,
         embed_quant=None,
         fuse_gate_up=False,
+        include_attention_metadata=True,
         compute_dtype=None,
+        fuse_qkv=False,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
@@ -74,7 +76,11 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.embed_quant = embed_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
+        self.include_attention_metadata = include_attention_metadata
         self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
+        self.attn_attrs = {"fuse_qkv": fuse_qkv}
+        # An unconsumed graph input is copied to the CPU by ORT, which breaks CUDA graph capture.
+        self.uses_q_row_map = not fuse_qkv
 
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)
@@ -280,7 +286,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         ctx = self.matmul("/dflash2/fc/MatMul", aux, w["fc.weight"], self.aux_hidden_size, self.hidden_size, "num_ctx")
         ctx_n = self.rms_norm("/dflash2/hidden_norm", ctx, w["hidden_norm.weight"], "num_ctx")
         ctx_kv = []
-        for i in range(self.num_layers):
+        for i in range(0 if self.attn_attrs["fuse_qkv"] else self.num_layers):
             k = self.matmul(
                 f"/dflash2/layers.{i}/ctx_k/MatMul",
                 ctx_n,
@@ -341,7 +347,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 rows_q,
             )
 
-            attn_out = self._make_attention(i, x, ctx_kv[i], rows_q)
+            attn_out = self._make_attention(i, x, ctx_n if self.attn_attrs["fuse_qkv"] else ctx_kv[i], rows_q)
             attn_out = self._grouped_conv(
                 f"{p}/attention_conv/finish",
                 attn_out,
@@ -376,7 +382,105 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.graph.sort()
         return self.model
 
-    def _make_attention(self, i, x, ctx_kv, rows_q):
+    def _make_attention(self, i, x, context, rows_q):
+        """``context`` is the normalized context hidden state when Q/K/V are fused, else its ``(k, v)``."""
+        p = f"/dflash2/layers.{i}"
+        w = self.weights
+        if self.attn_attrs["fuse_qkv"]:
+            query, key, value = self.make_packed_qkv(i, x, context), "", ""
+        else:
+            query, key, value = self.make_separate_qkv(i, x, context, rows_q)
+
+        q_norm = self.make_initializer(
+            w[f"layers.{i}.self_attn.q_norm.weight"], f"dflash2.layers.{i}.self_attn.q_norm.weight", to=self.io_dtype
+        )
+        k_norm = self.make_initializer(
+            w[f"layers.{i}.self_attn.k_norm.weight"], f"dflash2.layers.{i}.self_attn.k_norm.weight", to=self.io_dtype
+        )
+
+        attn_name = f"{p}/attn/PagedAttention"
+        attn_out = self.out(attn_name)
+        self.make_node(
+            "PagedAttention",
+            [
+                query,
+                key,
+                value,
+                f"past_key_values.{i}.key",
+                f"past_key_values.{i}.value",
+                "cumulative_sequence_lengths",
+                "past_sequence_lengths",
+                "block_table",
+                "dflash2.cos_cache",
+                "dflash2.sin_cache",
+                "",  # slot_mapping: derived from block_table + past_sequence_lengths
+                "",  # head_sink
+                q_norm,
+                k_norm,
+                "",
+                "",  # k_scale / v_scale
+                "attention_metadata" if self.include_attention_metadata else "",
+            ],
+            [attn_out, f"present.{i}.key", f"present.{i}.value"],
+            name=attn_name,
+            domain="com.microsoft",
+            num_heads=self.num_heads,
+            kv_num_heads=self.num_kv_heads,
+            local_window_size=self.sliding_window,
+            is_causal=1 if self.is_causal else 0,
+            do_rotary=1,
+            rotary_interleaved=0,
+            qk_norm_epsilon=self.rms_eps,
+        )
+        self.make_value(attn_out, self.io_dtype, ["num_tokens", self.num_heads * self.head_size])
+        for suffix in ("key", "value"):
+            self.make_value(
+                f"present.{i}.{suffix}",
+                self.io_dtype,
+                ["num_blocks", self.paged_block_size, self.num_kv_heads, self.head_size],
+            )
+
+        block_out = self.binary(
+            "Gather",
+            f"{p}/attn/out_gather",
+            attn_out,
+            "block_row_index",
+            self.io_dtype,
+            [rows_q, self.num_heads * self.head_size],
+        )
+        return self.matmul(
+            f"{p}/attn/o_proj/MatMul",
+            block_out,
+            w[f"layers.{i}.self_attn.o_proj.weight"],
+            self.num_heads * self.head_size,
+            self.hidden_size,
+            rows_q,
+        )
+
+    def make_packed_qkv(self, i, x, ctx_n):
+        """One projection over ``concat(block, context)`` rows, gathered into a packed QKV stream.
+
+        The stacked rows are exactly what ``qkv_row_map`` indexes, so a single Gather orders Q, K
+        and V at once. Context rows then carry their own query instead of borrowing row 0; their
+        attention output is still dropped.
+        """
+        p = f"/dflash2/layers.{i}"
+        w = self.weights
+        rows = self.out(f"{p}/attn/qkv_rows/Concat")
+        self.make_node("Concat", [x, ctx_n], [rows], name=f"{p}/attn/qkv_rows/Concat", axis=0)
+        self.make_value(rows, self.io_dtype, ["num_rows", self.hidden_size])
+        qkv_dim = (self.num_heads + 2 * self.num_kv_heads) * self.head_size
+        qkv = self.matmul(
+            f"{p}/attn/qkv_proj/MatMul",
+            rows,
+            torch.cat([w[f"layers.{i}.self_attn.{proj}.weight"] for proj in ("q_proj", "k_proj", "v_proj")], dim=0),
+            self.hidden_size,
+            qkv_dim,
+            "num_rows",
+        )
+        return self.binary("Gather", f"{p}/attn/qkv_gather", qkv, "qkv_row_map", self.io_dtype, ["num_tokens", qkv_dim])
+
+    def make_separate_qkv(self, i, x, ctx_kv, rows_q):
         p = f"/dflash2/layers.{i}"
         w = self.weights
         q = self.matmul(
@@ -427,72 +531,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         )
         k_all = self.binary("Gather", f"{p}/attn/k_gather", k_cat, "qkv_row_map", self.io_dtype, ["num_tokens", kv_dim])
         v_all = self.binary("Gather", f"{p}/attn/v_gather", v_cat, "qkv_row_map", self.io_dtype, ["num_tokens", kv_dim])
-
-        q_norm = self.make_initializer(
-            w[f"layers.{i}.self_attn.q_norm.weight"], f"dflash2.layers.{i}.self_attn.q_norm.weight", to=self.io_dtype
-        )
-        k_norm = self.make_initializer(
-            w[f"layers.{i}.self_attn.k_norm.weight"], f"dflash2.layers.{i}.self_attn.k_norm.weight", to=self.io_dtype
-        )
-
-        attn_name = f"{p}/attn/PagedAttention"
-        attn_out = self.out(attn_name)
-        self.make_node(
-            "PagedAttention",
-            [
-                q_all,
-                k_all,
-                v_all,
-                f"past_key_values.{i}.key",
-                f"past_key_values.{i}.value",
-                "cumulative_sequence_lengths",
-                "past_sequence_lengths",
-                "block_table",
-                "dflash2.cos_cache",
-                "dflash2.sin_cache",
-                "",  # slot_mapping: derived from block_table + past_sequence_lengths
-                "",  # head_sink
-                q_norm,
-                k_norm,
-                "",
-                "",  # k_scale / v_scale
-                "attention_metadata",
-            ],
-            [attn_out, f"present.{i}.key", f"present.{i}.value"],
-            name=attn_name,
-            domain="com.microsoft",
-            num_heads=self.num_heads,
-            kv_num_heads=self.num_kv_heads,
-            local_window_size=self.sliding_window,
-            is_causal=1 if self.is_causal else 0,
-            do_rotary=1,
-            rotary_interleaved=0,
-            qk_norm_epsilon=self.rms_eps,
-        )
-        self.make_value(attn_out, self.io_dtype, ["num_tokens", self.num_heads * self.head_size])
-        for suffix in ("key", "value"):
-            self.make_value(
-                f"present.{i}.{suffix}",
-                self.io_dtype,
-                ["num_blocks", self.paged_block_size, self.num_kv_heads, self.head_size],
-            )
-
-        block_out = self.binary(
-            "Gather",
-            f"{p}/attn/out_gather",
-            attn_out,
-            "block_row_index",
-            self.io_dtype,
-            [rows_q, self.num_heads * self.head_size],
-        )
-        return self.matmul(
-            f"{p}/attn/o_proj/MatMul",
-            block_out,
-            w[f"layers.{i}.self_attn.o_proj.weight"],
-            self.num_heads * self.head_size,
-            self.hidden_size,
-            rows_q,
-        )
+        return q_all, k_all, v_all
 
     def _make_mlp(self, i, x, w, rows_q):
         p = f"/dflash2/layers.{i}/mlp"

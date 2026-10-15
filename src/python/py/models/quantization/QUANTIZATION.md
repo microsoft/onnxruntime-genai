@@ -191,6 +191,7 @@ Combinable with any base method.
 Promotes the most quantization-sensitive MatMuls, following llama.cpp's mixed
 strategy: for the first and last eighth of layers, plus every third layer, the
 `attn/qkv_proj`, `attn/v_proj`, and `mlp/down_proj` MatMuls are upgraded.
+Qwen3.5/3.8 keeps Q/K/V separate in those layers so only `v_proj` is upgraded.
 
 ### `linear_attn` (legacy `k_quant_linear`)
 For hybrid attention models (e.g. Qwen3.5), promotes the linear-attention projections

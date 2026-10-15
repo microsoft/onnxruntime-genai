@@ -221,9 +221,10 @@ def _parse_extra_options(builder, extra_options, precision="int4", execution_pro
     )
 
 
-def test_moe_quant_type_mxfp4_is_accepted(monkeypatch):
+@pytest.mark.parametrize("precision", ["int4", "int8"])
+def test_moe_quant_type_mxfp4_is_accepted(monkeypatch, precision):
     builder = _load_builder_cli_module(monkeypatch)
-    options = _parse_extra_options(builder, ["moe_quant_type=mxfp4"], "int4", "cuda")
+    options = _parse_extra_options(builder, ["moe_quant_type=mxfp4"], precision, "cuda")
     assert options["moe_quant_type"] == "mxfp4"
 
 
@@ -241,7 +242,7 @@ def test_use_8bits_moe_maps_to_moe_quant_type(monkeypatch):
 
 def test_moe_quant_type_mxfp4_requires_qmoe_precision(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
-    with pytest.raises(ValueError, match="moe_quant_type=mxfp4 requires building with precision=int4"):
+    with pytest.raises(ValueError, match="moe_quant_type=mxfp4 requires building with symmetric int4 or int8"):
         _parse_extra_options(builder, ["moe_quant_type=mxfp4"], "fp16", "cuda")
 
 

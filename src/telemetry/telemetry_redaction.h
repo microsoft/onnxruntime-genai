@@ -7,11 +7,9 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include "telemetry_string.h"
 
 namespace Generators {
-
-// Maximum transmitted telemetry-string length, applied after scrubbing to bound telemetry payload size.
-inline constexpr size_t kMaxTelemetryStringLength = 40'960;
 
 namespace telemetry_detail {
 
@@ -90,18 +88,6 @@ inline size_t FindPathAnchor(std::string_view s) {
   return std::string_view::npos;
 }
 
-inline void TruncateUtf8AtBoundary(std::string& s, size_t max_length) {
-  if (s.size() <= max_length) {
-    return;
-  }
-
-  size_t end = max_length;
-  while (end > 0 && (static_cast<unsigned char>(s[end]) & 0xC0) == 0x80) {
-    --end;
-  }
-  s.resize(end);
-}
-
 }  // namespace telemetry_detail
 
 // Scrub filesystem paths out of a free-text telemetry string before transmission and cap its length.
@@ -111,17 +97,26 @@ inline void TruncateUtf8AtBoundary(std::string& s, size_t max_length) {
 // path anchor to the end of the message is replaced with a single "[path]" placeholder, so no portion
 // of the path -- including a space-separated user name -- can survive.
 inline std::string ScrubStringForTelemetry(std::string_view msg) {
-  const size_t anchor = telemetry_detail::FindPathAnchor(msg);
-  std::string out;
+  const bool input_truncated = msg.size() > kMaxTelemetryInputBytes;
+  msg = msg.substr(0, kMaxTelemetryInputBytes);
+  size_t anchor = telemetry_detail::FindPathAnchor(msg);
+  if (input_truncated) {
+    // An unseen suffix can complete a path anchor or a relative path's first segment.
+    // Conservatively redact any separator and the unfinished last token.
+    size_t uncertain = msg.find_first_of("/\\");
+    if (uncertain == std::string_view::npos) uncertain = msg.size();
+    while (uncertain > 0) {
+      const unsigned char previous = static_cast<unsigned char>(msg[uncertain - 1]);
+      if (std::isspace(previous) || previous == '"' || previous == '\'') break;
+      --uncertain;
+    }
+    anchor = (std::min)(anchor, uncertain);
+  }
   if (anchor == std::string_view::npos) {
-    out.assign(msg);
-  } else {
-    out.assign(msg.substr(0, anchor));
-    out += "[path]";
+    return BoundTelemetryString(msg);
   }
-  if (out.size() > kMaxTelemetryStringLength) {
-    telemetry_detail::TruncateUtf8AtBoundary(out, kMaxTelemetryStringLength);
-  }
+  std::string out = BoundTelemetryString(msg.substr(0, anchor));
+  AppendTelemetryString(out, "[path]");
   return out;
 }
 

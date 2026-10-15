@@ -14,10 +14,12 @@ import os
 import subprocess
 import types
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import onnx_ir as ir
 import torch
+import transformers
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -25,22 +27,9 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     QuantFormat,
     RTNWeightOnlyQuantConfig,
 )
-from tqdm import tqdm
-from transformers import (
-    AutoModelForCausalLM,
-    AutoModelForSpeechSeq2Seq,
-    AutoTokenizer,
-    Gemma3ForConditionalGeneration,
-    GenerationConfig,
-    Lfm2VlForConditionalGeneration,
-    Mistral3ForConditionalGeneration,
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen3_5ForConditionalGeneration,
-    Qwen3_5MoeForConditionalGeneration,
-    Qwen3VLForConditionalGeneration,
-)
-
 from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
+from tqdm import tqdm
+from transformers import AutoTokenizer, GenerationConfig
 
 
 class Model:
@@ -524,6 +513,17 @@ class Model:
             self.make_skip_simplified_layer_norm = TRT_RTX.make_skip_simplified_layer_norm.__get__(self, self.__class__)
             self.make_skip_layer_norm = TRT_RTX.make_skip_layer_norm.__get__(self, self.__class__)
             self.make_simplified_layer_norm = TRT_RTX.make_simplified_layer_norm.__get__(self, self.__class__)
+            # TRT-RTX does not support these fused Qwen operators. Keep their unfused graphs.
+            self.make_gated_add = TRT_RTX.make_gated_add.__get__(self, self.__class__)
+            self.make_linear_attention_gate = TRT_RTX.make_linear_attention_gate.__get__(self, self.__class__)
+            self.make_gated_rms_norm = TRT_RTX.make_gated_rms_norm.__get__(self, self.__class__)
+            self.make_mrotary_embedding = TRT_RTX.make_mrotary_embedding.__get__(self, self.__class__)
+            self.make_expansion_constant = TRT_RTX.make_expansion_constant.__get__(self, self.__class__)
+            self.get_mrope_owners = TRT_RTX.get_mrope_owners.__get__(self, self.__class__)
+            self.make_mrope_positions = TRT_RTX.make_mrope_positions.__get__(self, self.__class__)
+            self.make_mrope_cache = TRT_RTX.make_mrope_cache.__get__(self, self.__class__)
+            self.make_mrope_rotation = TRT_RTX.make_mrope_rotation.__get__(self, self.__class__)
+            self.make_mrope_output = TRT_RTX.make_mrope_output.__get__(self, self.__class__)
 
         elif self.ep == "dml":
             from .expansions import DML
@@ -725,7 +725,9 @@ class Model:
         return (
             self.ep not in ["dml"]
             and not self.matmul_attrs["use_lora"]
-            and not self.extra_options.get("disable_qkv_fusion", False)
+            and self.extra_options.get(
+                "fuse_qkv", not self.extra_options.get("disable_qkv_fusion", False)
+            )
         )
 
     def is_fused_rope_supported(self):
@@ -770,7 +772,9 @@ class Model:
                 not self.matmul_attrs["use_lora"]
                 and not self.attention_attrs["q_norm"]
                 and not self.attention_attrs["k_norm"]
-                and not self.extra_options.get("disable_qkv_fusion", False)
+                and self.extra_options.get(
+                    "fuse_qkv", not self.extra_options.get("disable_qkv_fusion", False)
+                )
             )
 
             # Some architectures require a separate RoPE op before PagedAttention.
@@ -1312,7 +1316,8 @@ class Model:
                 inputs["block_table_windowed"] = self.input_names["block_table_windowed"]
             inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
             inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
-            inputs["attention_metadata"] = self.input_names["attention_metadata"]
+            if "attention_metadata" in self.input_names:
+                inputs["attention_metadata"] = self.input_names["attention_metadata"]
             if "logits_indices" in self.input_names:
                 inputs["logits_indices"] = self.input_names["logits_indices"]
         if "past_key_values.key" in self.input_names:
@@ -1447,6 +1452,11 @@ class Model:
             # Prepacked nodes take the fpA_intB path unconditionally. This flag also selects that
             # kernel family for raw-layout nodes and prepack-pass skips.
             session_options["ep.cuda.fpa_intb_gemm"] = "1"
+        if self.ep == "cuda" and self.matmul_attrs["weights_prepacked"] > 0:
+            # MatMulNBitsFusion folds a following Add into optional bias input 5, but offline-
+            # prepacked weights force the fpA_intB path, which does not support bias. Keep the
+            # builder's separate Add nodes intact.
+            session_options["optimization.disable_specified_optimizers"] = "MatMulNBitsFusion"
         if self.extra_options.get("use_device_allocator_for_initializers", False):
             session_options["session.use_device_allocator_for_initializers"] = "1"
 
@@ -2976,8 +2986,9 @@ class Model:
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
 
         matmul = self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)
-        new_name = self.make_matmul_nbits(matmul, basename, root_input, **kwargs)
-        return new_name
+        if self.quant_attrs["use_qdq"]:
+            return self.make_matmul_nbits_qdq(matmul, basename, root_input, **kwargs)
+        return self.make_matmul_nbits(matmul, basename, root_input, **kwargs)
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
@@ -3004,7 +3015,7 @@ class Model:
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding_lookup(self, embedding, basename, lm_head):
-        # Tied quantized: lm_head weight -> Reshape -> GatherBlockQuantized
+        # Tied quantized: lm_head weight -> Reshape -> GatherBlockQuantized [-> Slice]
         # Tied float:     lm_head weight -> Transpose -> Gather
         # Separate:       embedding weight -------------> Gather
         can_reuse_lm_head = getattr(lm_head, "can_reuse_as_embedding", True)
@@ -3013,12 +3024,18 @@ class Model:
         # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
         if self.tied_quantized_embeddings and can_reuse_lm_head:
             bits, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = self.make_tied_quantized_embedding_input_names()
+            # A pre-quantized LM head keeps the group size of its checkpoint.
+            is_prequantized = getattr(lm_head, "qweight", None) is not None
+            block_size = int(lm_head.group_size if is_prequantized else self.quant_attrs["matmul_block_size"])
 
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
 
+            # The quantized LM head pads each row to whole blocks, so gather the padded rows and slice the padding off.
+            padded_hidden_size = (self.hidden_size + block_size - 1) // block_size * block_size
+
             weight_reshape_name = f"{basename}/Reshape"
-            flat_dim = self.hidden_size * bits // 8
+            flat_dim = padded_hidden_size * bits // 8
             weight_reshape_inputs = [
                 tied_weight_name,
                 f"/model/constants/INT64/[{self.vocab_size}, {flat_dim}]",
@@ -3041,10 +3058,22 @@ class Model:
                 name=gather_name,
                 domain="com.microsoft",
                 bits=bits,
-                block_size=int(self.quant_attrs["matmul_block_size"]),
+                block_size=block_size,
                 gather_axis=0,
                 quantize_axis=1,
             )
+
+            if padded_hidden_size != self.hidden_size:
+                self.make_value(gather_output, self.io_dtype, shape=self.make_hidden_state_shape(last_dim=padded_hidden_size))
+                slice_name = f"{basename}/Slice"
+                slice_inputs = [
+                    gather_output,
+                    "/model/constants/INT64/[0]",
+                    f"/model/constants/INT64/[{self.hidden_size}]",
+                    "/model/constants/INT64/[-1]",
+                ]
+                self.make_slice(slice_name, slice_inputs, dtype=self.io_dtype, shape=self.make_hidden_state_shape())
+                gather_output = f"{slice_name}/output_0"
 
         # Use Transpose + Gather for tied embeddings for float embedding layers
         elif self.tied_unquantized_embeddings and can_reuse_lm_head:
@@ -4126,7 +4155,7 @@ class Model:
                 cumulative_sequence_lengths=self.input_names["cumulative_sequence_lengths"],
                 past_sequence_lengths=self.input_names["past_sequence_lengths"],
                 block_table=block_table,
-                attention_metadata=self.input_names["attention_metadata"],
+                attention_metadata=self.input_names.get("attention_metadata", ""),
                 **kwargs,
             )
         else:
@@ -4629,6 +4658,11 @@ class Model:
             == getattr(k_dtype, "dtype", k_dtype)
             == getattr(v_dtype, "dtype", v_dtype)
         )
+        pack_qkv = (
+            self.attention_attrs["use_packed_matmul"]
+            and qkv_dtype_equal
+            and self.is_qkv_projection_packable(layer_id, attention)
+        )
 
         if self.attention_attrs["use_matmul_in_attn"]:
             # Make packed weights initializer
@@ -4640,7 +4674,7 @@ class Model:
 
         else:
             # Make MatMul nodes
-            if self.attention_attrs["use_packed_matmul"] and qkv_dtype_equal:
+            if pack_qkv:
                 # Combine 3 MatMuls into 1 packed MatMul
                 qkv_matmul_basename = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
                 qkv_matmul_name = self.make_packed_matmul(
@@ -4675,7 +4709,7 @@ class Model:
 
         else:
             # Make Add nodes (if bias exists)
-            if self.attention_attrs["use_packed_matmul"] and qkv_dtype_equal and any_bias_exists:
+            if pack_qkv and any_bias_exists:
                 # Combine 3 Adds into 1 packed Add
                 qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
                 self.make_packed_add(
@@ -4704,31 +4738,58 @@ class Model:
         # (norm runs per-head before attention). Split here so downstream sees Q/K/V separately.
         # Placed after the (optional) packed Add so packed bias fusion is preserved.
         if (
-            self.attention_attrs["use_packed_matmul"]
-            and qkv_dtype_equal
+            pack_qkv
             and self.attention_attrs["q_norm"]
             and self.attention_attrs["k_norm"]
         ):
             split_name = f"/model/layers.{layer_id}/attn/qkv_proj/Split"
             split_outputs = [f"{split_name}/output_{i}" for i in range(3)]
+            # Q can be wider than q_size (e.g. Qwen3.5 packs a per-head output gate into q_proj).
+            q_width = getattr(attention.q_proj, "out_features", 0) or attention.q_proj.weight.shape[0]
             self.make_split(
                 split_name,
                 inputs=[
                     self.attention_attrs["q_path"],
-                    f"/model/constants/INT64/[{self.q_size}, {self.kv_size}, {self.kv_size}]",
+                    f"/model/constants/INT64/[{q_width}, {self.kv_size}, {self.kv_size}]",
                 ],
                 outputs=split_outputs,
                 dtypes=[self.io_dtype] * 3,
                 shapes=[
-                    ["batch_size", "sequence_length", self.q_size],
-                    ["batch_size", "sequence_length", self.kv_size],
-                    ["batch_size", "sequence_length", self.kv_size],
+                    self.make_hidden_state_shape(last_dim=q_width),
+                    self.make_hidden_state_shape(last_dim=self.kv_size),
+                    self.make_hidden_state_shape(last_dim=self.kv_size),
                 ],
                 axis=-1,
             )
             self.attention_attrs["q_path"] = split_outputs[0]
             self.attention_attrs["k_path"] = split_outputs[1]
             self.attention_attrs["v_path"] = split_outputs[2]
+
+    def is_qkv_projection_packable(self, layer_id, attention):
+        # Packing concatenates raw weights, so all three projections must share one weight layout and quantization policy.
+        projections = (attention.q_proj, attention.k_proj, attention.v_proj)
+        if any(
+            getattr(proj, "quant_type", "none") != "none" or getattr(proj, "exclude_from_quantization", False)
+            for proj in projections
+        ):
+            return False
+
+        names = {f"/model/layers.{layer_id}/attn/{name}/MatMul" for name in ("q_proj", "k_proj", "v_proj")}
+        if not names.isdisjoint(self.quant_attrs["nodes_to_exclude"]) or not names.isdisjoint(
+            self.exact_quant_override_names
+        ):
+            return False
+
+        q_proj = attention.q_proj
+        if not hasattr(q_proj, "qweight"):
+            return True
+        # The packed weight keeps one g_idx, so GPTQ act-order projections must share their channel mapping.
+        return all(
+            proj.group_size == q_proj.group_size
+            and (proj.g_idx is None) == (q_proj.g_idx is None)
+            and (proj.g_idx is None or torch.equal(proj.g_idx, q_proj.g_idx))
+            for proj in (attention.k_proj, attention.v_proj)
+        )
 
     def make_attention_qk_norm(self, layer_id, attention):
         # Make Q/K SimplifiedLayerNorm nodes
@@ -6045,6 +6106,39 @@ class Model:
     def get_moe_module(self, layer_id, layer):
         return layer.moe
 
+    def resolve_transformers_class(self, class_name: str) -> type[Any]:
+        """Resolve only the selected Transformers class, without requiring newer architectures."""
+        try:
+            return getattr(transformers, class_name)
+        except AttributeError as error:
+            version = getattr(transformers, "__version__", "unknown")
+            raise ImportError(
+                f"The selected model requires transformers.{class_name}, but "
+                f"Transformers {version} does not provide that class. Upgrade "
+                "Transformers to use this model architecture."
+            ) from error
+
+    def resolve_model_loader(self) -> type[Any]:
+        """Resolve the Transformers weight loader for this model's architecture."""
+        # More specific markers must precede overlapping general markers (e.g. Qwen3.5 MoE before dense).
+        model_loader_rules = (
+            ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
+            ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
+            ("qwen3_vl_text", "Qwen3VLForConditionalGeneration"),
+            ("Qwen3VL", "Qwen3VLForConditionalGeneration"),
+            ("qwen2_5_vl_text", "Qwen2_5_VLForConditionalGeneration"),
+            ("Qwen2_5_VL", "Qwen2_5_VLForConditionalGeneration"),
+            ("gemma3_vl_text", "Gemma3ForConditionalGeneration"),
+            ("lfm2_vl", "Lfm2VlForConditionalGeneration"),
+            ("mistral3_text", "Mistral3ForConditionalGeneration"),
+            ("Mistral3", "Mistral3ForConditionalGeneration"),
+            ("Whisper", "AutoModelForSpeechSeq2Seq"),
+        )
+        for model_type_marker, class_name in model_loader_rules:
+            if model_type_marker in self.model_type:
+                return self.resolve_transformers_class(class_name)
+        return self.resolve_transformers_class("AutoModelForCausalLM")
+
     def load_weights(self, input_path):
         # Load weights of original model
         if input_path.endswith(".gguf"):
@@ -6086,29 +6180,7 @@ class Model:
 
         else:
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
-
-            # Get auto class to load PyTorch model based on model type
-            auto_class_map = {
-                "ForCausalLM": AutoModelForCausalLM,
-                "gemma3_vl_text": Gemma3ForConditionalGeneration,
-                "lfm2_vl": Lfm2VlForConditionalGeneration,
-                "mistral3_text": Mistral3ForConditionalGeneration,
-                "Mistral3": Mistral3ForConditionalGeneration,
-                "qwen2_5_vl_text": Qwen2_5_VLForConditionalGeneration,
-                "Qwen2_5_VL": Qwen2_5_VLForConditionalGeneration,
-                "qwen3_vl_text": Qwen3VLForConditionalGeneration,
-                "Qwen3VL": Qwen3VLForConditionalGeneration,
-                "qwen3_5_moe_text": Qwen3_5MoeForConditionalGeneration,
-                "qwen3_5_moe": Qwen3_5MoeForConditionalGeneration,
-                "qwen3_5_text": Qwen3_5ForConditionalGeneration,
-                "qwen3_5": Qwen3_5ForConditionalGeneration,
-                "Whisper": AutoModelForSpeechSeq2Seq,
-            }
-            auto_class = AutoModelForCausalLM
-            for k, v in auto_class_map.items():
-                if k in self.model_type:
-                    auto_class = v
-                    break
+            auto_class = self.resolve_model_loader()
 
             # Load PyTorch model
             model = auto_class.from_pretrained(
