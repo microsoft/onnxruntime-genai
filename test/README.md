@@ -44,3 +44,38 @@ python test/python/create/create_multimodal_cache_model.py
 cmake --build <build-dir> --target kv_cache_unit_tests
 <build-dir>/kv_cache_unit_tests --gtest_filter='LegacyGenerator/*'
 ```
+
+### Opt-in native packed-operator interoperability
+
+`native_quantized_cache_probe.cpp` additionally exercises raw `MatMulGGMLQ8_0`
+and dedicated `MatMulNVFP4A16` through the prepared three-model entry. It requires
+the corresponding ORT CUDA operators (see
+[ORT prerequisite #33400](https://github.com/microsoft/onnxruntime/pull/33400));
+it is deliberately separate from the default tests that use released ORT.
+
+Both fixtures pass genuine C++ BF16 feature buffers and CPU INT32 tokens, then
+check BF16 native outputs, complete FP32 logits, all sparse KV/conv/SSM states,
+and greedy selection through prefill and three cached decode steps. Tokens are
+internally converted to the embedding graph's declared INT64 type. Scalar
+reference formulas discriminate FP32 Q8 weight reconstruction from native BF16
+weights, and globally scaled NVFP4 weights from the dedicated operator's FP32
+global epilogue. Q8 uses its optional native bias; A16 uses a separate native
+BF16 `Add` at opset 21. Capture and shared caches are disabled, batch/beam are
+one. No Python BF16 conversion is used.
+
+```bash
+# Requires numpy, ml_dtypes, onnx and onnx-ir; no checkpoint downloads.
+python test/python/create/create_native_quantized_cache_models.py
+c++ -std=c++20 -O2 -Isrc test/cpp/native_quantized_cache_probe.cpp \
+  -L<cuda-build-dir> -lonnxruntime-genai \
+  -Wl,-rpath,<absolute-cuda-build-dir> -o <probe-output>
+CUDA_VISIBLE_DEVICES=2 \
+  LD_PRELOAD=<absolute-qualified-ort-dir>/libonnxruntime.so.1.32.0 \
+  LD_LIBRARY_PATH=<qualified-ort-dir>:<cuda-lib-dir>:<cudnn-lib-dir>:<cuda-build-dir> \
+  <probe-output> test/models/cache-dispatch
+```
+
+Use a fresh profiling/config directory when collecting evidence against another
+ORT build. The probe prints loaded runtime paths on Linux. These are small
+arithmetic interoperability fixtures, not source-exact image/video processing,
+full-package generation, checkpoint parity, footprint or performance evidence.
