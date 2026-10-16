@@ -11,6 +11,7 @@ dependencies is missing so the pure-Python parts of the builder can still be exe
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import sys
 import types
@@ -101,3 +102,45 @@ def load_builder_module(module_name):
     sys.modules[qualified_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@functools.cache
+def ort_runs_causal_conv_with_state():
+    """Whether the installed onnxruntime can load the CausalConvWithState node the LFM2 builder writes.
+
+    Tests that run an LFM2 export in onnxruntime need this. Some CI jobs pin an older onnxruntime: the
+    DirectML job's onnxruntime-directml 1.25.0.dev does not have the op, and 1.25.1 to 1.28 do not know
+    its state_window attribute. This loads a one-node model once, so a load error in the model under test
+    still fails that test instead of skipping it.
+    """
+    import onnx  # noqa: PLC0415
+    import onnxruntime  # noqa: PLC0415
+
+    def float_value(name, shape):
+        return onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, shape)
+
+    node = onnx.helper.make_node(
+        "CausalConvWithState",
+        ["x", "weight", "", "past"],
+        ["y", "present"],
+        domain="com.microsoft",
+        ndim=1,
+        activation="none",
+        state_window=0,
+    )
+    graph = onnx.helper.make_graph(
+        [node],
+        "causal_conv_with_state_probe",
+        [float_value("x", [1, 4, 3]), float_value("weight", [4, 1, 3]), float_value("past", [1, 4, 2])],
+        [float_value("y", [1, 4, 3]), float_value("present", [1, 4, 2])],
+    )
+    opsets = [onnx.helper.make_opsetid("", 21), onnx.helper.make_opsetid("com.microsoft", 1)]
+    model = onnx.helper.make_model(graph, opset_imports=opsets, ir_version=10)
+    try:
+        onnxruntime.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    except Exception as error:
+        message = str(error)
+        if "is not a registered function/op" in message or "Unrecognized attribute: state_window" in message:
+            return False
+        raise
+    return True
