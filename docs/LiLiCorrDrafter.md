@@ -41,5 +41,8 @@ The target must expose the residual stream entering the layers in `aux_hidden_st
 * Avoid `ReduceLogSumExp` / `ReduceMax` over the `[rows, vocab]` logits: on the CUDA execution
   providers they run a cuDNN reduction that is ~100x slower than TopK + Exp + ReduceSum. The exporter
   derives the log-partition from the sorted top-k instead.
+* The graph keeps `in_vec` behind a single `Slice`. Two slices of it would be fused by ORT's
+  `GatherSliceToSplitFusion` into a `Split` whose CUDA kernel allocates per call, which breaks CUDA graph capture
+  (`enable_cuda_graph`). With capture the drafter step takes ~2.5 ms against ~3.3 ms eager (H200, 8 context rows).
 * `lilicorr_drafter_tests` (CUDA kernel tests) replays recorded drafter steps through the real
   `Dflash2Drafter`; it is skipped unless `LILICORR_TEST_DIR` is set.

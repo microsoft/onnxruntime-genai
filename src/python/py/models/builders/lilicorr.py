@@ -468,9 +468,12 @@ class LiLiCorrBuilder(DFlash2Builder):
         anchor_out = self._l2_normalize(f"{p}/anchor_out_norm", ao_raw, ["batch_size", fd])
         anchor_out = self.reshape(f"{p}/anchor_out4", anchor_out, [-1, 1, 1, fd], f32, ["batch_size", 1, 1, fd])
 
-        in_first = self._op("Slice", f"{p}/in_first", [in_vec, self.const([0]), self.const([1]), self.const([1])], f32, ["batch_size", 1, k, fd])
-        start = self._op("Mul", f"{p}/start/mul", [in_first, anchor_out], f32, ["batch_size", 1, k, fd])
-        start = self._op("ReduceSum", f"{p}/start/sum", [start, self.const([-1])], f32, ["batch_size", 1, k], keepdims=0)
+        # The start scores are row 0 of anchor . in_vec. Scoring every row and slicing the result keeps `in_vec` consumed by a
+        # single Slice: with two slices of it (rows 0 and 1..) ORT fuses them into a Split whose kernel allocates per call,
+        # which cannot be captured in a CUDA graph.
+        start = self._op("Mul", f"{p}/start/mul", [in_vec, anchor_out], f32, ["batch_size", n, k, fd])
+        start = self._op("ReduceSum", f"{p}/start/sum", [start, self.const([-1])], f32, ["batch_size", n, k], keepdims=0)
+        start = self._op("Slice", f"{p}/start/first", [start, self.const([0]), self.const([1]), self.const([1])], f32, ["batch_size", 1, k])
         start = self._op("Unsqueeze", f"{p}/start/unsq", [start, self.const([2])], f32, ["batch_size", 1, 1, k])
         start = self._op("Expand", f"{p}/start/expand", [start, self.const([1, 1, k, k])], f32, ["batch_size", 1, k, k])
         scale_c = self.const(np.full((1,), self.logit_scale, np.float32), f32)
