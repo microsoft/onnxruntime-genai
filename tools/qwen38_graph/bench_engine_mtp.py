@@ -63,6 +63,27 @@ def main():
             decode_s = turn.times[-1] - turn.times[0]
             rounds = after["rounds"] - before["rounds"]
             accepted = after["draft_tokens_accepted"] - before["draft_tokens_accepted"]
+            proposed = after["draft_tokens_proposed"] - before["draft_tokens_proposed"]
+            head_calls = after["draft_forward_passes"] - before["draft_forward_passes"]
+            before_hist = before.get("acceptance_length_histogram", [])
+            after_hist = after.get("acceptance_length_histogram", [])
+            hist_len = min(4, len(after_hist), len(before_hist))
+            accept_hist = [after_hist[i] - before_hist[i] for i in range(hist_len)]
+            while len(accept_hist) < 4:
+                accept_hist.append(0)
+            ge1 = sum(accept_hist[1:])
+            ge2 = sum(accept_hist[2:])
+            ge3 = accept_hist[3]
+            pos_accept_rates = [
+                ge1 / rounds if rounds else 0.0,
+                ge2 / rounds if rounds else 0.0,
+                ge3 / rounds if rounds else 0.0,
+            ]
+            cond_accept_rates = [
+                ge1 / rounds if rounds else 0.0,
+                ge2 / ge1 if ge1 else 0.0,
+                ge3 / ge2 if ge2 else 0.0,
+            ]
             record = {
                 "label": "warmup" if index == 0 else f"run{index}",
                 "seed": seed,
@@ -73,8 +94,15 @@ def main():
                 "decode_s": decode_s,
                 "tps": (count - 1) / decode_s,
                 "cycles": rounds,
+                "proposed": proposed,
                 "accepted": accepted,
                 "accept_rate": accepted / rounds if rounds else None,
+                "accepted_per_proposed": accepted / proposed if proposed else None,
+                "head_calls": head_calls,
+                "accept_hist": accept_hist,
+                "pos_accept_rates": pos_accept_rates,
+                "cond_accept_rates": cond_accept_rates,
+                "tokens_per_cycle": (count - 1) / rounds if rounds else None,
                 "ms_per_cycle": decode_s / rounds * 1e3 if rounds else None,
                 "engine_runs": turn.runs,
             }
