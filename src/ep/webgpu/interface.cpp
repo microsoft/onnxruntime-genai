@@ -350,6 +350,7 @@ struct InterfaceImpl : DeviceInterface {
         "uniformBufferCacheMode",
         "queryResolveBufferCacheMode",
         "defaultBufferCacheMode",
+        "weightLoadAcceleration",
     };
     for (const auto& opt : user_options->options) {
       if (std::find(kWebGpuGlobalOptions.begin(), kWebGpuGlobalOptions.end(), opt.first) != kWebGpuGlobalOptions.end()) {
