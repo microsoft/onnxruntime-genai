@@ -965,15 +965,16 @@ void Generator::GenerateNextToken() {
 
 TokenOutputs Generator::GetTokenOutputs() const {
   if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
-    const auto tokens = transducer->GetStepTokens();
-    const auto intervals = transducer->TimestampsEnabled()
-                               ? transducer->GetStepTokenIntervals()
-                               : std::span<const OgaTokenMetadataAcousticFrameInterval>{};
-    if (!intervals.empty() && intervals.size() != tokens.size())
-      throw std::runtime_error("Generator timing count does not match emitted tokens");
-    return {tokens, intervals};
+    TokenOutputs outputs{transducer->GetStepTokens()};
+    if (transducer->TimestampsEnabled()) {
+      const auto intervals = transducer->GetStepTokenIntervals();
+      if (intervals.size() != outputs.GetTokens().size())
+        throw std::runtime_error("Generator timing count does not match emitted tokens");
+      outputs.SetTimestamps(intervals);
+    }
+    return outputs;
   }
-  return {search_->GetNextTokens().CopyDeviceToCpu(), {}};
+  return TokenOutputs{search_->GetNextTokens().CopyDeviceToCpu()};
 }
 
 SpeculativeStats Generator::GetSpeculativeStats() const {

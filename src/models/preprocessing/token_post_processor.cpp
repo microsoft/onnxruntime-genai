@@ -6,67 +6,48 @@
 namespace Generators {
 
 TokenPostProcessor::TokenPostProcessor(const Model& model, const Generator& generator)
-    : generator_{generator}, generator_lifetime_{generator.postprocessor_lifetime_} {
+    : generator_{generator},
+      config_{{model.config_->model.timestamp_level, model.config_->model.segment_separators,
+               model.config_->model.segment_gap_threshold_seconds, model.config_->model.sample_rate,
+               model.config_->model.hop_length, model.config_->model.subsampling_factor}} {
   if (generator.model_.get() != &model)
     throw std::runtime_error("TokenPostProcessor model must match the generator model");
   const auto& search = generator.state_->params_->search;
   if (search.batch_size != 1 || search.num_beams != 1)
     throw std::runtime_error("TokenPostProcessor requires batch_size=1 and num_beams=1");
   ValidateTimestampConfiguration(model.config_->model);
-  const auto& source = model.config_->model;
-  config_.timestamps = {source.timestamp_level, source.segment_separators, source.segment_gap_threshold_seconds,
-                        source.sample_rate, source.hop_length, source.subsampling_factor};
   tokenizer_ = model.CreateTokenizer();
   stream_ = tokenizer_->CreateStream();
   metadata_state_ = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(config_));
 }
 
-void TokenPostProcessor::CheckGenerator() const {
-  if (generator_lifetime_.expired()) throw std::runtime_error("TokenPostProcessor generator has been destroyed");
-}
-
-void TokenPostProcessor::AppendResult(const MetadataOutput& source) {
-  PostProcessorResult result;
-  result.text = source.text;
-  result.has_timestamps = source.timestampMetadata != nullptr;
-  const auto copy = [](const TimestampRecordView* records, size_t count,
-                       std::vector<PostProcessorTimestamp>& output) {
-    for (size_t index = 0; index < count; ++index) {
-      const auto& record = records[index];
-      output.push_back({record.text, record.start_frame, record.stop_frame, record.start_time, record.stop_time});
-    }
-  };
-  if (source.timestampMetadata) {
-    const auto& timestamps = *source.timestampMetadata;
-    copy(timestamps.words, timestamps.word_count, result.words);
-    copy(timestamps.segments, timestamps.segment_count, result.segments);
-  }
-  results_.push_back(std::move(result));
-}
-
 void TokenPostProcessor::ProcessNextTokens() {
-  CheckGenerator();
   results_.clear();
   const auto outputs = generator_.GetTokenOutputs();
-  for (size_t index = 0; index < outputs.tokens_.size(); ++index) {
-    const bool has_interval = !outputs.intervals_.empty();
-    const TokenMetadataInput token{outputs.tokens_[index], has_interval ? 1 : 0,
-                                   has_interval ? outputs.intervals_[index] : OgaTokenMetadataAcousticFrameInterval{}};
+  const auto tokens = outputs.GetTokens();
+  const auto* timestamps = outputs.GetTimestamps();
+  for (size_t index = 0; index < tokens.size(); ++index) {
+    TokenMetadataInput token{tokens[index], 0, {}};
+    if (timestamps) {
+      token.has_token_acoustic_frame_interval = 1;
+      token.token_acoustic_frame_interval = (*timestamps)[index];
+    }
     metadata_state_->ValidateInput(token);
-    const auto piece = tokenizer_->GetWordPieceInfo(token.token_id);
+    OrtxWordPieceInfo piece{};
+    if (metadata_state_->TimestampsEnabled()) piece = tokenizer_->GetWordPieceInfo(token.token_id);
     const auto& text = stream_->Decode(token.token_id);
-    AppendResult(metadata_state_->ProcessDecoded(token, text.c_str(), piece));
+    auto& result = results_.emplace_back();
+    result.text = text;
+    metadata_state_->ProcessDecoded(token, piece, result);
   }
 }
 
 void TokenPostProcessor::Finalize() {
-  CheckGenerator();
   results_.clear();
-  AppendResult(metadata_state_->ProcessFinalized());
+  metadata_state_->ProcessFinalized(results_.emplace_back());
 }
 
 void TokenPostProcessor::Reset() {
-  CheckGenerator();
   results_.clear();
   stream_->Reset();
   metadata_state_ = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(config_));

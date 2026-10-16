@@ -226,7 +226,7 @@ TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
   const auto& final_results = postprocessor.GetNextTokenResults();
   results.insert(results.end(), final_results.begin(), final_results.end());
   for (const auto& result : results) {
-    for (const auto& word : result.words) {
+    for (const auto& word : result.timestamps->words) {
       EXPECT_GE(word.start_frame,
                 2 * static_cast<int64_t>(chunk_samples) /
                     (model->config_->model.hop_length * model->config_->model.subsampling_factor));
@@ -368,13 +368,13 @@ TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions)
   std::string words;
   for (const auto& result : results) {
     text += result.text;
-    for (const auto& word : result.words) words += word.text;
+    for (const auto& word : result.timestamps->words) words += word.text;
   }
   EXPECT_EQ(text, "Hello world.");
   EXPECT_EQ(&processor.GetNextTokenResults(), &results);
   processor.Finalize();
   for (const auto& result : processor.GetNextTokenResults()) {
-    for (const auto& word : result.words) {
+    for (const auto& word : result.timestamps->words) {
       words += word.text;
       EXPECT_EQ(word.start_frame, 4);
       EXPECT_EQ(word.stop_frame, 5);
@@ -382,7 +382,7 @@ TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions)
   }
   EXPECT_EQ(words, text);
   processor.Finalize();
-  EXPECT_TRUE(processor.GetNextTokenResults()[0].words.empty());
+  EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->words.empty());
   source->SetStep({}, 99);
   processor.ProcessNextTokens();
   EXPECT_TRUE(processor.GetNextTokenResults().empty());
@@ -415,12 +415,12 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
   source->SetStep(repeated, 20);
   for (auto& interval : source->last_token_intervals_) interval.stop = 23;
   processor.ProcessNextTokens();
-  std::vector<Generators::PostProcessorTimestamp> words;
+  std::vector<Generators::TimestampRecord> words;
   for (const auto& result : processor.GetNextTokenResults())
-    words.insert(words.end(), result.words.begin(), result.words.end());
+    words.insert(words.end(), result.timestamps->words.begin(), result.timestamps->words.end());
   processor.Finalize();
   for (const auto& result : processor.GetNextTokenResults())
-    words.insert(words.end(), result.words.begin(), result.words.end());
+    words.insert(words.end(), result.timestamps->words.begin(), result.timestamps->words.end());
   ASSERT_EQ(words.size(), 2U);
   EXPECT_EQ(words[0].text, " Hello");
   EXPECT_EQ(words[1].text, words[0].text);
@@ -436,10 +436,10 @@ TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
   for (double threshold : {0.0, 0.01, 1.0}) {
     model->config_->model.segment_gap_threshold_seconds = threshold;
     Generators::TokenPostProcessor processor{*model, *generator};
-    std::vector<Generators::PostProcessorTimestamp> segments;
+    std::vector<Generators::TimestampRecord> segments;
     const auto collect = [&] {
       for (const auto& result : processor.GetNextTokenResults())
-        segments.insert(segments.end(), result.segments.begin(), result.segments.end());
+        segments.insert(segments.end(), result.timestamps->segments.begin(), result.timestamps->segments.end());
     };
     source->SetStep(tokenizer->Encode(" first"), 2);
     processor.ProcessNextTokens();
@@ -453,7 +453,7 @@ TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
     EXPECT_EQ(segments[0].text, " first");
     EXPECT_EQ(segments[1].text, " second");
     processor.Finalize();
-    EXPECT_TRUE(processor.GetNextTokenResults()[0].segments.empty());
+    EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->segments.empty());
   }
 }
 
@@ -468,9 +468,9 @@ TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
     size_t segments = 0;
     const auto collect = [&] {
       for (const auto& result : processor.GetNextTokenResults()) {
-        EXPECT_EQ(result.has_timestamps, level != Level::Off);
-        words += result.words.size();
-        segments += result.segments.size();
+        EXPECT_EQ(result.timestamps.has_value(), level != Level::Off);
+        words += result.timestamps ? result.timestamps->words.size() : 0;
+        segments += result.timestamps ? result.timestamps->segments.size() : 0;
       }
     };
     collect();
@@ -491,16 +491,16 @@ TEST_F(MetadataCoreStateTests, ResetClearsPendingStateAndResultsAreReadOnly) {
   processor.Reset();
   EXPECT_TRUE(processor.GetNextTokenResults().empty());
   processor.Finalize();
-  EXPECT_TRUE(processor.GetNextTokenResults()[0].words.empty());
-  EXPECT_TRUE(processor.GetNextTokenResults()[0].segments.empty());
+  EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->words.empty());
+  EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->segments.empty());
   source->SetStep(tokens, 8);
   processor.ProcessNextTokens();
   std::string text;
   for (const auto& result : processor.GetNextTokenResults()) text += result.text;
   EXPECT_EQ(text, "Hello world.");
   processor.Finalize();
-  ASSERT_FALSE(processor.GetNextTokenResults()[0].words.empty());
-  EXPECT_EQ(processor.GetNextTokenResults()[0].words.back().start_frame, 8);
+  ASSERT_FALSE(processor.GetNextTokenResults()[0].timestamps->words.empty());
+  EXPECT_EQ(processor.GetNextTokenResults()[0].timestamps->words.back().start_frame, 8);
   EXPECT_EQ(owned.size(), tokens.size());
 }
 
@@ -512,14 +512,6 @@ TEST_F(MetadataCoreStateTests, RejectsMismatchedModelsAndMultipleSequences) {
   params->search.batch_size = 1;
   params->search.num_beams = 2;
   EXPECT_THROW((Generators::TokenPostProcessor{*model, *generator}), std::runtime_error);
-}
-
-TEST_F(MetadataCoreStateTests, GeneratorDisposalFailsBeforeDereferencingState) {
-  Generators::TokenPostProcessor processor{*model, *generator};
-  generator.reset();
-  EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
-  EXPECT_THROW(processor.Finalize(), std::runtime_error);
-  EXPECT_THROW(processor.Reset(), std::runtime_error);
 }
 
 TEST(AudioSpeechValidationTests, ParakeetEncoderChannelDimensionValidation) {
@@ -556,7 +548,7 @@ TEST(AudioSpeechValidationTests, DimensionMismatchesCaught) {
 
 TEST(TokenizerWordGroupingTest, OneTokenCanCompleteMultipleWords) {
   Generators::TokenWordGroupingState grouping;
-  grouping.Consume({OrtxWordBoundaryStyle_SentencePiece, false, false, false},
+  grouping.Process({OrtxWordBoundaryStyle_SentencePiece, false, false, false},
                    " first second third");
 
   const auto& completed = grouping.CompletedWords();
@@ -577,10 +569,10 @@ TEST(TokenizerWordGroupingTest, OneTokenCanCompleteMultipleWords) {
 
 TEST(TokenizerWordGroupingTest, EmptyDecoderOutputRetainsContributingTokenSpan) {
   Generators::TokenWordGroupingState grouping;
-  grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "");
+  grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "");
   EXPECT_EQ(grouping.FirstPendingTokenIndex(), 0u);
 
-  grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "é");
+  grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "é");
   grouping.Finalize();
   ASSERT_EQ(grouping.CompletedWords().size(), 1u);
   EXPECT_EQ(grouping.CompletedWords()[0].text, "é");
@@ -590,15 +582,15 @@ TEST(TokenizerWordGroupingTest, EmptyDecoderOutputRetainsContributingTokenSpan) 
 
 TEST(TokenizerWordGroupingTest, SkippedSpecialTokenDoesNotExtendBufferedWordSpan) {
   Generators::TokenWordGroupingState grouping;
-  grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, true, false, false}, "");
+  grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, true, false, false}, "");
   EXPECT_TRUE(grouping.CompletedWords().empty());
   EXPECT_EQ(grouping.FirstPendingTokenIndex(), 1u);
 
-  grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "");
+  grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "");
   EXPECT_TRUE(grouping.CompletedWords().empty());
   EXPECT_EQ(grouping.FirstPendingTokenIndex(), 1u);
 
-  grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "\xC3\xA9");
+  grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "\xC3\xA9");
   EXPECT_EQ(grouping.FirstPendingTokenIndex(), 1u);
   grouping.Finalize();
 
@@ -611,7 +603,7 @@ TEST(TokenizerWordGroupingTest, SkippedSpecialTokenDoesNotExtendBufferedWordSpan
 
 TEST(TokenizerWordGroupingTest, FinalizeDiscardsTrailingEmptyDecoderOutput) {
   Generators::TokenWordGroupingState grouping;
-  grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "");
+  grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "");
   EXPECT_EQ(grouping.FirstPendingTokenIndex(), 0u);
 
   grouping.Finalize();
@@ -621,12 +613,12 @@ TEST(TokenizerWordGroupingTest, FinalizeDiscardsTrailingEmptyDecoderOutput) {
 
 TEST(TokenizerWordGroupingTest, DelimiterBeforePunctuationStaysWithPreviousWord) {
   Generators::TokenWordGroupingState grouping;
-  grouping.Consume({OrtxWordBoundaryStyle_SentencePiece, false, false, false}, " hello");
-  grouping.Consume({OrtxWordBoundaryStyle_SentencePiece, false, false, false}, " ");
-  grouping.Consume({OrtxWordBoundaryStyle_SentencePiece, false, false, false}, ",");
+  grouping.Process({OrtxWordBoundaryStyle_SentencePiece, false, false, false}, " hello");
+  grouping.Process({OrtxWordBoundaryStyle_SentencePiece, false, false, false}, " ");
+  grouping.Process({OrtxWordBoundaryStyle_SentencePiece, false, false, false}, ",");
   EXPECT_TRUE(grouping.CompletedWords().empty());
 
-  grouping.Consume({OrtxWordBoundaryStyle_SentencePiece, false, false, false}, " world");
+  grouping.Process({OrtxWordBoundaryStyle_SentencePiece, false, false, false}, " world");
   ASSERT_EQ(grouping.CompletedWords().size(), 1u);
   EXPECT_EQ(grouping.CompletedWords()[0].text, " hello ,");
   EXPECT_EQ(grouping.CompletedWords()[0].start_token_index, 0u);
@@ -635,8 +627,8 @@ TEST(TokenizerWordGroupingTest, DelimiterBeforePunctuationStaysWithPreviousWord)
 
 TEST(TokenizerWordGroupingTest, NonAsciiContinuationDoesNotStartWord) {
   Generators::TokenWordGroupingState grouping;
-  grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "caf");
-  grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "\xC3\xA9");
+  grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "caf");
+  grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "\xC3\xA9");
   EXPECT_TRUE(grouping.CompletedWords().empty());
   grouping.Finalize();
   ASSERT_EQ(grouping.CompletedWords().size(), 1u);
@@ -645,9 +637,9 @@ TEST(TokenizerWordGroupingTest, NonAsciiContinuationDoesNotStartWord) {
   EXPECT_EQ(grouping.CompletedWords()[0].stop_token_index, 2u);
 
   Generators::TokenWordGroupingState buffered;
-  buffered.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "caf");
-  buffered.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "");
-  buffered.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "\xC3\xA9");
+  buffered.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "caf");
+  buffered.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "");
+  buffered.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "\xC3\xA9");
   EXPECT_TRUE(buffered.CompletedWords().empty());
   buffered.Finalize();
   ASSERT_EQ(buffered.CompletedWords().size(), 1u);
@@ -659,11 +651,11 @@ TEST(TokenizerWordGroupingTest, NonAsciiContinuationDoesNotStartWord) {
 TEST(TokenizerWordGroupingTest, UnicodePunctuationStaysWithPreviousWord) {
   for (const std::string punctuation : {"\xE3\x80\x82", "\xE2\x80\xA6"}) {
     Generators::TokenWordGroupingState grouping;
-    grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "hello");
-    grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, " ");
-    grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, punctuation);
+    grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "hello");
+    grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, " ");
+    grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, punctuation);
     EXPECT_TRUE(grouping.CompletedWords().empty());
-    grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, " world");
+    grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, " world");
     ASSERT_EQ(grouping.CompletedWords().size(), 1u);
     EXPECT_EQ(grouping.CompletedWords()[0].text, "hello " + punctuation);
     EXPECT_EQ(grouping.CompletedWords()[0].start_token_index, 0u);
@@ -675,7 +667,7 @@ TEST(TokenizerWordGroupingTest, UnicodeWhitespacePreservesTextAndSpans) {
   for (const std::string separator : {"\xC2\xA0", "\xE3\x80\x80", "\v", "\f"}) {
     const std::string text = "first" + separator + "second" + separator + "third";
     Generators::TokenWordGroupingState grouping;
-    grouping.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, text);
+    grouping.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, text);
     ASSERT_EQ(grouping.CompletedWords().size(), 2u);
     EXPECT_EQ(grouping.CompletedWords()[0].text, "first");
     EXPECT_EQ(grouping.CompletedWords()[1].text, separator + "second");
@@ -689,10 +681,10 @@ TEST(TokenizerWordGroupingTest, UnicodeWhitespacePreservesTextAndSpans) {
     EXPECT_EQ(grouping.FirstPendingTokenIndex(), 1u);
 
     Generators::TokenWordGroupingState fragmented;
-    fragmented.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "first");
-    fragmented.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, separator);
+    fragmented.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "first");
+    fragmented.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, separator);
     EXPECT_TRUE(fragmented.CompletedWords().empty());
-    fragmented.Consume({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "second");
+    fragmented.Process({OrtxWordBoundaryStyle_PrefixBpe, false, false, false}, "second");
     ASSERT_EQ(fragmented.CompletedWords().size(), 1u);
     EXPECT_EQ(fragmented.CompletedWords()[0].text, "first");
     EXPECT_EQ(fragmented.CompletedWords()[0].stop_token_index, 1u);
@@ -709,8 +701,8 @@ TEST(TokenizerWordGroupingTest, ExplicitPrefixAndSuffixBoundaries) {
   for (const auto style : {OrtxWordBoundaryStyle_PrefixBpe,
                            OrtxWordBoundaryStyle_SentencePiece}) {
     Generators::TokenWordGroupingState grouping;
-    grouping.Consume({style, false, false, false}, "first");
-    grouping.Consume({style, false, true, false}, "second");
+    grouping.Process({style, false, false, false}, "first");
+    grouping.Process({style, false, true, false}, "second");
     ASSERT_EQ(grouping.CompletedWords().size(), 1u);
     EXPECT_EQ(grouping.CompletedWords()[0].text, "first");
     EXPECT_EQ(grouping.CompletedWords()[0].stop_token_index, 1u);
@@ -720,8 +712,8 @@ TEST(TokenizerWordGroupingTest, ExplicitPrefixAndSuffixBoundaries) {
     EXPECT_EQ(grouping.CompletedWords()[0].start_token_index, 1u);
   }
   Generators::TokenWordGroupingState suffix;
-  suffix.Consume({OrtxWordBoundaryStyle_SuffixBpe, false, false, false}, "caf");
-  suffix.Consume({OrtxWordBoundaryStyle_SuffixBpe, false, false, true}, "\xC3\xA9 ");
+  suffix.Process({OrtxWordBoundaryStyle_SuffixBpe, false, false, false}, "caf");
+  suffix.Process({OrtxWordBoundaryStyle_SuffixBpe, false, false, true}, "\xC3\xA9 ");
   ASSERT_EQ(suffix.CompletedWords().size(), 1u);
   EXPECT_EQ(suffix.CompletedWords()[0].text, "caf\xC3\xA9 ");
   EXPECT_EQ(suffix.CompletedWords()[0].start_token_index, 0u);

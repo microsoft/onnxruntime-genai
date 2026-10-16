@@ -221,14 +221,13 @@ TEST(CAPITests, TokenPostProcessorOpaqueResults) {
   auto plain = OgaTokenizerStream::Create(*tokenizer);
   const std::string expected = plain->Decode(generator->GetNextTokens()[0]);
   EXPECT_EQ(result->GetText(), expected);
-  EXPECT_FALSE(result->HasTimestamps());
-  EXPECT_EQ(result->GetWordCount(), 0U);
-  EXPECT_EQ(result->GetSegmentCount(), 0U);
+  EXPECT_EQ(result->GetTimestamps(), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorResultGetTimestamps(nullptr), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampGetWordCount(nullptr), 0U);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampGetSegmentCount(nullptr), 0U);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampGetWord(nullptr, 0), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampGetSegment(nullptr, 0), nullptr);
   EXPECT_EQ(OgaTokenPostProcessorGetResult(processor.get(), 1), nullptr);
-  EXPECT_EQ(OgaTokenPostProcessorResultGetWord(result, 0), nullptr);
-  EXPECT_EQ(OgaTokenPostProcessorResultGetSegment(result, 0), nullptr);
-  EXPECT_THROW(result->GetWord(0), std::out_of_range);
-  EXPECT_THROW(result->GetSegment(0), std::out_of_range);
   generator->GenerateNextToken();
   EXPECT_EQ(result->GetText(), expected);
   processor->Finalize();
@@ -237,8 +236,8 @@ TEST(CAPITests, TokenPostProcessorOpaqueResults) {
   EXPECT_STREQ(processor->GetNextTokenResults()[0]->GetText(), "");
   processor->Reset();
   EXPECT_TRUE(processor->GetNextTokenResults().empty());
+  processor.reset();
   generator.reset();
-  EXPECT_THROW(processor->ProcessNextTokens(), std::runtime_error);
 }
 
 TEST(CAPITests, TokenPostProcessorRejectsInvalidCreation) {

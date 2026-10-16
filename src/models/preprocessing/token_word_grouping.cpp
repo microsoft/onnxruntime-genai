@@ -47,7 +47,7 @@ void TokenWordGroupingState::CompleteWord() {
   pending_word_ = {};
 }
 
-void TokenWordGroupingState::ConsumeTextPart(std::string_view text, size_t start_token_index,
+void TokenWordGroupingState::ProcessTextPart(std::string_view text, size_t start_token_index,
                                              size_t stop_token_index, bool starts_word) {
   if (IsWhitespace(text)) {
     Append(pending_delimiter_, text, start_token_index, stop_token_index);
@@ -62,7 +62,7 @@ void TokenWordGroupingState::ConsumeTextPart(std::string_view text, size_t start
   Append(pending_word_, text, start_token_index, stop_token_index);
 }
 
-void TokenWordGroupingState::Consume(const OrtxWordPieceInfo& piece, std::string_view decoded_text) {
+void TokenWordGroupingState::Process(const OrtxWordPieceInfo& piece, std::string_view decoded_text) {
   completed_words_.clear();
   const size_t token_index = next_token_index_++;
   if (decoded_text.empty()) {
@@ -83,7 +83,7 @@ void TokenWordGroupingState::Consume(const OrtxWordPieceInfo& piece, std::string
       stop += width;
       ++index;
     } while (index < codepoints.size() && IsWhitespace(codepoints[index]) == whitespace);
-    ConsumeTextPart(decoded_text.substr(offset, stop - offset), output_start_token_index, token_index + 1, first_part && piece.starts_word);
+    ProcessTextPart(decoded_text.substr(offset, stop - offset), output_start_token_index, token_index + 1, first_part && piece.starts_word);
     offset = stop;
   }
   if (piece.boundary_style == OrtxWordBoundaryStyle_SuffixBpe && piece.ends_word) {
