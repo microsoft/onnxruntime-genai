@@ -390,9 +390,9 @@ TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions)
 
 TEST_F(MetadataCoreStateTests, InvalidIntervalsDoNotAdvanceDecoding) {
   Generators::TokenPostProcessor processor{*model, *generator};
-  source->SetTimestampsEnabled(false);
+  source->last_token_intervals_.clear();
   EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
-  source->SetTimestampsEnabled(true);
+  source->SetStep(tokens, 4);
   source->last_token_intervals_[0] = {5, 5};
   EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
   source->last_token_intervals_[0] = {-1, 5};
@@ -403,6 +403,27 @@ TEST_F(MetadataCoreStateTests, InvalidIntervalsDoNotAdvanceDecoding) {
   processor.ProcessNextTokens();
   std::string text;
   for (const auto& result : processor.GetNextTokenResults()) text += result.text;
+  EXPECT_EQ(text, "Hello world.");
+}
+
+TEST_F(MetadataCoreStateTests, GeneratorOutputSelectionUsesModelConfig) {
+  source->SetTimestampsEnabled(false);
+  Generators::TokenPostProcessor timed_processor{*model, *generator};
+  EXPECT_NO_THROW(timed_processor.ProcessNextTokens());
+  ASSERT_EQ(timed_processor.GetNextTokenResults().size(), tokens.size());
+  for (const auto& result : timed_processor.GetNextTokenResults())
+    EXPECT_TRUE(result.timestamps.has_value());
+
+  model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Off;
+  source->SetTimestampsEnabled(true);
+  source->last_token_intervals_.clear();
+  Generators::TokenPostProcessor plain_processor{*model, *generator};
+  EXPECT_NO_THROW(plain_processor.ProcessNextTokens());
+  std::string text;
+  for (const auto& result : plain_processor.GetNextTokenResults()) {
+    EXPECT_FALSE(result.timestamps.has_value());
+    text += result.text;
+  }
   EXPECT_EQ(text, "Hello world.");
 }
 
