@@ -42,7 +42,8 @@ void SpeechState::ReuseFeaturesBuffer(MultiModalFeatures& embedding_features) {
 }
 
 std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
-  if (model.config_->model.type == "gemma4") {
+  if (model.config_->model.type == "gemma4" ||
+      model.config_->model.type == "gemma4_unified") {
     return std::make_unique<Gemma4SpeechState>(model, params);
   }
   if (model.config_->model.type == "phi4mm") {
