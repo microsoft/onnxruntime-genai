@@ -369,6 +369,33 @@ def test_answers_follow_the_logits(decisions, crafted):
     assert answers["urgency"]["confidence"] == pytest.approx(np.e / (1 + np.e))
 
 
+def test_a_tie_goes_to_the_first_option(monkeypatch, decisions, crafted):
+    # fp16 logits can make two options exactly equal. As in d1, the first option wins the tie.
+    for token, value in ((A, 5.0), (B, 5.0), (SPACE_C, -10.0)):
+        monkeypatch.setitem(CRAFTED, token, value)
+
+    answer = decisions.decide({"state": STATE, "questions": {"team": TEAM}})["answers"]["team"]
+
+    assert answer["choice"] == "billing"
+    assert answer["probabilities"]["billing"] == answer["probabilities"]["technical"]
+
+
+def test_a_code_that_is_not_one_token_takes_the_next_free_one(tokenizer):
+    # "A" encodes to two tokens here, so the first option takes the next free code, B, and the others move on.
+    codes = d1.choice_codes(SplitTokenizer(tokenizer, {"A"}), d1.check_question("team", TEAM))
+
+    assert [code for code, _ in codes] == ["B", "C", "D"]
+    assert [token for _, token in codes] == [B, C, int(tokenizer.encode("D")[0])]
+
+
+def test_more_than_26_options_use_two_digit_codes(tokenizer):
+    question = {"type": "choice", "instructions": "Pick one.", "criteria": {f"option {i}": "" for i in range(27)}}
+
+    codes = d1.choice_codes(tokenizer, d1.check_question("q", question))
+
+    assert [code for code, _ in codes] == [f"{i:02d}" for i in range(27)]
+
+
 def test_one_question_is_encoded_as_one_string(tokenizer, decisions, runs):
     # A leading newline in the instructions tokenizes differently after "QUESTION:\n" than on its
     # own. d1 encodes a single question together with the prefix, as one string.
@@ -735,8 +762,12 @@ def test_main_keeps_setup_messages_off_stdout(monkeypatch, capsys, tmp_path, mod
     [
         (json.dumps({"state": STATE, "questions": {"q": {"type": "bool", "instructions": "x"}}}), "unknown type"),
         ("{not json", "error: "),
+        (
+            '{"state": null, "questions": {"q": {"instructions": "a"}, "q": {"instructions": "b"}}}',
+            "repeats the field 'q'",
+        ),
     ],
-    ids=["bad_question", "bad_json"],
+    ids=["bad_question", "bad_json", "repeated_question"],
 )
 def test_main_refuses_with_one_line_and_exit_code_2(
     monkeypatch, capsys, tmp_path, model_path, chatty_common, text, message

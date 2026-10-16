@@ -64,9 +64,8 @@ curl -O https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examp
 curl -O https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/common.py
 ```
 
-The examples can use API from newer onnxruntime-genai versions than the one you have. Replace `main`
-with a release tag or a commit that matches your installed version, or upgrade the package. The script
-was tested with onnxruntime-genai 0.18.0.
+`d1-decisions.py` is new on `main` and is not in a release yet. It was tested with onnxruntime-genai
+0.18.0 and the `common.py` next to it, so take both files from the same commit.
 
 ## 2. Build the model
 

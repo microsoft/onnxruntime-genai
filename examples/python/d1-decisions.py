@@ -114,10 +114,13 @@ def check_question(name, question):
         raise ValueError(f"choice {name!r} needs criteria {{name: description}} with at least 2 options")
     if kind == "score" and (not isinstance(criteria, (list, tuple)) or not 2 <= len(criteria) <= 10):
         raise ValueError(f"score {name!r} needs criteria: a list of 2 to 10 levels, lowest first")
-    if kind == "noul" and criteria is not None:
-        # One side may be left out: d1 prints it as "None". Other keys would be dropped, so they are refused.
-        if not isinstance(criteria, Mapping) or any(key not in NOUL_CRITERIA_KEYS for key in criteria):
-            raise ValueError(f'noul {name!r} criteria must be {{"true": "...", "false": "..."}} if given')
+    # A noul may leave one side out: d1 prints it as "None". Other keys would be dropped, so they are refused.
+    if (
+        kind == "noul"
+        and criteria is not None
+        and (not isinstance(criteria, Mapping) or any(key not in NOUL_CRITERIA_KEYS for key in criteria))
+    ):
+        raise ValueError(f'noul {name!r} criteria must be {{"true": "...", "false": "..."}} if given')
     return {"type": kind, "instructions": question["instructions"], "criteria": criteria}
 
 
@@ -360,6 +363,15 @@ def model_context_length(model_path):
         return json.load(f)["model"]["context_length"]
 
 
+def refuse_repeated_fields(pairs):
+    """A json.load hook. A field given twice would silently keep only its last value, so it is refused."""
+    names = [name for name, _ in pairs]
+    repeated = next((name for name in names if names.count(name) > 1), None)
+    if repeated is not None:
+        raise ValueError(f"the request repeats the field {repeated!r}")
+    return dict(pairs)
+
+
 def main():
     # common.py sits next to this script. It is imported here, not at the top, so that the classes
     # above can be loaded from anywhere.
@@ -379,15 +391,16 @@ def main():
     try:
         # utf-8-sig also reads files that start with a byte order mark (Windows Notepad, PowerShell).
         with open(args.request, encoding="utf-8-sig") as f:
-            request = json.load(f)
+            request = json.load(f, object_pairs_hook=refuse_repeated_fields)
         decisions = D1Decisions(model, model_context_length(args.model_path))
-        response = json.dumps(decisions.decide(request, args.image), ensure_ascii=False, indent=2)
+        response = decisions.decide(request, args.image)
     except ValueError as error:
         # A bad request (including bad JSON): one line on stderr and exit code 2, no traceback.
         parser.exit(2, f"error: {error}\n")
-    # UTF-8 on every platform: on Windows a redirected stdout uses the ANSI code page otherwise.
-    sys.stdout.reconfigure(encoding="utf-8")
-    print(response)
+    else:
+        # UTF-8 on every platform: on Windows a redirected stdout uses the ANSI code page otherwise.
+        sys.stdout.reconfigure(encoding="utf-8")
+        print(json.dumps(response, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
