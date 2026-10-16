@@ -312,7 +312,8 @@ void CheckResult(extError_t error) {
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the OnnxRuntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
+void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config,
+                         const Config::SessionOptions& provider_session_options) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
   // OpenVINO delegates to the CPU device allocator
   auto type = device.GetType();
@@ -338,7 +339,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // then let the EP shape the trivial-model init session options. Most EPs use
   // the default no-op; WebGPU forwards global/singleton options and QNN injects
   // the QnnHtpShared allocator gating option.
-  const auto& user_provider_options_list = config.model.decoder.session_options.provider_options;
+  const auto& user_provider_options_list = provider_session_options.provider_options;
   const auto user_provider_options_it = std::find_if(
       user_provider_options_list.begin(), user_provider_options_list.end(),
       [&provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
@@ -492,7 +493,7 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-  EnsureDeviceOrtInit(*p_device_, *config_);
+  EnsureDeviceOrtInit(*p_device_, *config_, config_->model.decoder.session_options);
   AddSharedInitializers();
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small

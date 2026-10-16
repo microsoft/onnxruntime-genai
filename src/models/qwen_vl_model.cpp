@@ -105,7 +105,9 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
       }
       stage_device = CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/false,
                                                     /*disable_graph_capture=*/true);
-      return CreateSession(ort_env, stage.filename, options.get());
+      auto session = CreateSession(ort_env, stage.filename, options.get());
+      EnsureDeviceOrtInit(*stage_device, *config_, settings);
+      return session;
     };
     vision_session_ = create_stage(stages[0], vision_session_options_, vision_encoder_device_);
     vision_projector_session_ = create_stage(stages[1], vision_projector_session_options_,

@@ -988,6 +988,60 @@ def test_gemma4_flat_decoder_runs_split_vision(
     assert text_generator.get_next_tokens() == [0]
 
 
+@pytest.mark.parametrize("decoder_layout", ["flat", "pipeline"])
+def test_gemma4_cpu_decoder_cuda_vision_initializes_allocator_in_fresh_process(
+    test_data_path, tmp_path, decoder_layout
+):
+    """A CUDA vision encoder must initialize its allocator without a CUDA decoder or prior tests."""
+    onnx = pytest.importorskip("onnx")
+    ort = pytest.importorskip("onnxruntime")
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        pytest.skip("CUDA execution provider is not available")
+
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4-cpu-decoder-cuda-vision"
+    if decoder_layout == "pipeline":
+        _write_pipelined_gemma4(onnx, source_model_path, model_path)
+    else:
+        shutil.copytree(source_model_path, model_path)
+        _register_gemma4_image_token(model_path)
+    _create_static_batch_vision_pipeline(
+        onnx, model_path / "dummy_vision_encoder.onnx", model_path / "dummy_vision_projector.onnx", 2520
+    )
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if decoder_layout == "flat":
+        config["model"]["speech"] = {"filename": "", "config_filename": ""}
+        config["model"]["vocab_size"] = 8
+        config["model"]["eos_token_id"] = [1]
+        config["model"]["image_token_id"] = GEMMA4_IMAGE_TOKEN_ID
+        config["search"]["past_present_share_buffer"] = False
+        _create_dynamic_embedding_model(onnx, model_path / "dummy_embedding.onnx", GEMMA4_IMAGE_TOKEN_ID)
+        _create_dynamic_decoder_model(onnx, model_path / "dummy_text.onnx")
+    _configure_split_vision(config)
+    assert not config["model"]["decoder"]["session_options"]["provider_options"]
+    config["model"]["vision"]["pipeline"][0]["encoder"]["session_options"] = {"provider_options": [{"cuda": {}}]}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    image_path = os.fspath(_get_test_media_path(test_data_path, Path("images") / "australia.jpg"))
+    if not os.path.exists(image_path):
+        pytest.skip("Gemma4 test image not available")
+    script = (
+        "import onnxruntime_genai as og\n"
+        "import sys\n"
+        "model = og.Model(sys.argv[1])\n"
+        "inputs = model.create_multimodal_processor()("
+        "'<|image|>Describe this image', images=og.Images.open(sys.argv[2]))\n"
+        "params = og.GeneratorParams(model)\n"
+        "params.set_search_options(max_length=4096)\n"
+        "generator = og.Generator(model, params)\n"
+        "generator.set_inputs(inputs)\n"
+        "generator.generate_next_token()\n"
+        "assert generator.get_next_tokens() == [2]\n"
+    )
+    run_subprocess([sys.executable, "-c", script, os.fspath(model_path), image_path])
+
+
 @pytest.mark.parametrize(
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
