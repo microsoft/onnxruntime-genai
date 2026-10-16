@@ -48,13 +48,22 @@ def create_model(
         return result
 
     if multimodal:
-        embeds = value("inputs_embeds", ir.DataType.FLOAT, ["batch_size", "sequence_length", 2])
+        embeds = value(
+            "inputs_embeds",
+            ir.DataType.BFLOAT16 if bf16 else ir.DataType.FLOAT,
+            ["batch_size", "sequence_length", 2],
+        )
         position_ids = value("position_ids", ir.DataType.INT64, ["batch_size", "sequence_length"])
         mask = value("attention_mask", ir.DataType.INT64, ["batch_size", "total_sequence_length"])
         inputs.extend([embeds, position_ids, mask])
+        arithmetic_embeds = (
+            op("Cast", [embeds], shape=list(embeds.shape), attrs=[ir.AttrInt64("to", 1)])
+            if bf16
+            else embeds
+        )
         tokens = op(
             "Gather",
-            [embeds, constant("embedding_channel", 0, np.int64)],
+            [arithmetic_embeds, constant("embedding_channel", 0, np.int64)],
             shape=["batch_size", "sequence_length"],
             attrs=[ir.AttrInt64("axis", 2)],
         )

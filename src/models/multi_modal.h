@@ -231,6 +231,7 @@ struct MultiModalPipelineState : State {
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
   bool uses_prepared_image_features_{};
+  bool uses_token_only_text_{};
   std::shared_ptr<Tensor> prepared_attention_mask_;
 
   const std::string vision_adapter_name_{"vision"};

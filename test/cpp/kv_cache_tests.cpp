@@ -846,7 +846,8 @@ TEST_P(CachePhaseTest, UnsupportedOperationsAndDuplicateOwnershipReject) {
   auto mm_generator = Generators::CreateGenerator(*multimodal, *mm_params);
   EXPECT_THROW(mm_generator->RewindToLength(0), std::exception);
   ExpectCachePhaseError([&] { mm_generator->state_->RewindTo(0); }, "does not support rewind");
-  ExpectCachePhaseError([&] { AppendPhaseTokens(*mm_generator, {2}); }, "requires prepared image_features");
+  AppendPhaseTokens(*mm_generator, {2});
+  ExpectPhase(*mm_generator, false);
   auto bool_value = OrtValue::CreateTensor<bool>(multimodal->allocator_cpu_, std::array<int64_t, 0>{});
   Generators::NamedTensors duplicate_prepared{
       {"has_previous_state", std::make_shared<Generators::Tensor>(std::move(bool_value))}};
@@ -857,6 +858,43 @@ TEST_P(CachePhaseTest, UnsupportedOperationsAndDuplicateOwnershipReject) {
   duplicate_prepared["image_features"] = std::make_shared<Generators::Tensor>(std::move(features));
   auto mm_duplicate = Generators::CreateGenerator(*multimodal, *mm_params);
   ExpectCachePhaseError([&] { mm_duplicate->SetInputs(duplicate_prepared); }, "runtime-owned");
+}
+
+TEST_P(CachePhaseTest, TokenOnlyTextKeepsNativeMixedBuffersAndMatchesPreparedText) {
+  auto model = LoadPhaseModel("phase-multimodal-bf16", GetParam());
+  auto params = Generators::CreateGeneratorParams(*model);
+  auto text = Generators::CreateGenerator(*model, *params);
+  auto prepared = Generators::CreateGenerator(*model, *params);
+  AppendPhaseTokens(*text, {2, 3});
+  prepared->SetInputs(PhasePreparedText(*model, {2, 3}));
+  ExpectPhase(*text, false);
+  for (const auto* name : {"image_features", "inputs_embeds", "past_key_values.0.conv_state",
+                           "past_key_values.2.key", "past_key_values.2.value"}) {
+    EXPECT_EQ(text->state_->GetInput(name)->GetTensorTypeAndShapeInfo()->GetElementType(),
+              ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  }
+  EXPECT_EQ(text->state_->GetInput("image_features")->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{0, 2}));
+  EXPECT_EQ(text->state_->GetInput("input_ids")->GetTensorTypeAndShapeInfo()->GetElementType(),
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  EXPECT_EQ(text->state_->GetInput("past_key_values.0.ssm_state")->GetTensorTypeAndShapeInfo()->GetElementType(),
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  const auto compare = [&] {
+    for (const auto* name : {"logits", "present.0.conv_state", "present.0.ssm_state",
+                             "present.2.key", "present.2.value", "present.3.conv_state",
+                             "present.3.ssm_state"}) {
+      EXPECT_EQ(PhaseOutputBytes(*text, name), PhaseOutputBytes(*prepared, name)) << name;
+    }
+  };
+  compare();
+  AppendPhaseTokens(*text, {4});
+  AppendPhaseTokens(*prepared, {4});
+  ExpectPhase(*text, true);
+  compare();
+  const auto before = PhaseOutputBytes(*text, "present.0.conv_state");
+  ExpectCachePhaseError([&] { AppendPhaseTokens(*text, {18}); }, "media placeholders");
+  EXPECT_EQ(PhaseOutputBytes(*text, "present.0.conv_state"), before);
+  ExpectCachePhaseError([&] { AppendPhaseTokens(*text, {2}); }, "create a new Generator");
 }
 
 TEST_P(CachePhaseTest, ParserAndActualDecoderMetadataValidation) {

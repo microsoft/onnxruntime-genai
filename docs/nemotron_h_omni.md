@@ -142,6 +142,8 @@ exposes no DLPack constructor. A Python host using BF16 features therefore
 needs a separately validated binding bridge or a C++/C consumer; silently
 casting those features to FP16 changes the contract. The prepared-input tests
 here establish the C++/C runtime path, not Python BF16 interoperability.
+This restriction concerns caller-supplied feature tensors, not native
+embedding/cache buffers or the token-only text entry below.
 
 This does not make GenAI's raw-media processor implement EVS. Correct resizing,
 normalization, video sampling, placeholder expansion and retention application
@@ -163,12 +165,37 @@ pipeline prompt status do not determine validity. False-branch graphs must
 implement their own source-defined treatment of initial cache tensors.
 
 This opt-in currently supports fresh batch1/beam1 ordinary Generators:
-decoder-only models and the prepared-feature Nemotron-H Omni path (including
-native BF16 empty features). It rejects Engine scheduling, speculative decoding,
+decoder-only models and the prepared-feature or token-only Nemotron-H Omni paths
+(including native BF16 empty features). It rejects Engine scheduling, speculative decoding,
 snapshots/cropping, **all rewind calls**, CUDA graph capture, scheduler prompt
 chunking, and cached calls with more than one token. Scheduler chunking is
 unrelated to a Mamba operator's internal chunk-128 algorithm. Raw-media input is
 not supported for this opt-in.
+
+### Public token-only text
+
+With the explicit cache-phase mapping configured, Nemotron-H Omni accepts
+ordinary `Generator.append_tokens(tokenizer.encode(text))` or `set_inputs`
+containing only CPU INT32 `input_ids[1,sequence_length]`. An optional INT32/INT64
+all-ones attention mask must match the initial prompt. No other extra inputs
+are accepted by this token-only entry.
+After initial input setup, `set_inputs` accepts only `input_ids`; cached media,
+features, masks, and other extra updates are explicitly rejected rather than
+silently ignored. The initial prepared-feature entry remains available.
+
+The runtime allocates graph-typed empty `image_features[0,hidden_size]`, skips
+vision execution, and runs the embedding and decoder sessions normally.
+BF16 embeddings, convolution and KV caches, and independently typed SSM states
+stay in C++; Python only needs integer tokens. This does not add Python NumPy
+BF16 tensor conversion. The configured vision session is still constructed.
+
+Token-only prompts and cached tokens must be unpadded and contain no configured
+image/media placeholder ID. These checks run before embedding or decoder
+execution; missing extra inputs alone are not treated as proof of valid text.
+Rejections poison the opted-in Generator just like prepared-input failures.
+Supplying explicit features continues to select the existing prepared-feature
+path with its exact shape/type/count and media-mixing checks unchanged.
+Graphs without the cache-phase mapping retain their existing behavior.
 
 Any exception from `SetInputs`, either `AppendTokens` overload,
 `GenerateNextToken`, `GetLogits`, `SetLogits`, or `PrepareForSetLogits` makes an

@@ -619,8 +619,17 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
     }
   }
   uses_prepared_image_features_ = prepared_features != nullptr;
-  if (!model_.config_->model.decoder.inputs.has_previous_state.empty() && !prepared_features)
+  uses_token_only_text_ = model_.config_->model.type == "nemotron_h_omni" && !model_.config_->model.decoder.inputs.has_previous_state.empty() && !prepared_features;
+  if (!model_.config_->model.decoder.inputs.has_previous_state.empty() && !prepared_features && !uses_token_only_text_)
     throw std::runtime_error("has_previous_state Nemotron-H Omni requires prepared image_features (empty for text-only)");
+  if (uses_token_only_text_) {
+    for (const auto& input : extra_inputs) {
+      if (input.name != model_.config_->model.decoder.inputs.attention_mask)
+        throw std::runtime_error("Token-only Nemotron-H Omni does not accept media or extra inputs; use prepared image_features.");
+      prepared_attention_mask_ = input.tensor;
+    }
+    vision_state_.reset();
+  }
   if (prepared_features) {
     if (!is_prompt_ || params_->BatchBeamSize() != 1) {
       throw std::runtime_error("Prepared Nemotron-H Omni features require an initial batch-1, beam-1 prompt.");
@@ -677,6 +686,9 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
   if (prepared_features) {
     embedding_state_->image_features_->UsePreparedFeatures(*prepared_features->ort_tensor_);
+  } else if (uses_token_only_text_) {
+    // Text still traverses the embedding graph, with native graph-typed [0, hidden] features.
+    embedding_state_->image_features_->AllocateEmptyFeatures();
   }
   // Set the grid tensors for Qwen2-VL if present
   if (auto* qwen_pos_inputs = dynamic_cast<Qwen2VLPositionInputs*>(decoder_state_->position_inputs_.get())) {
@@ -709,15 +721,17 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   //   - input_ids, image_features, audio_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
 
-  if (is_prompt_ && uses_prepared_image_features_) {
+  if ((is_prompt_ && uses_prepared_image_features_) || uses_token_only_text_) {
     const auto tokens = next_tokens.CopyDeviceToCpu();
+    if (uses_token_only_text_ && std::find(tokens.begin(), tokens.end(), model_.config_->model.image_token_id) != tokens.end())
+      throw std::runtime_error("Token-only Nemotron-H Omni media placeholders require prepared image_features.");
     if (std::count(tokens.begin(), tokens.end(), model_.config_->model.image_token_id) != num_image_tokens_) {
       throw std::runtime_error("The compacted prompt must contain exactly one image placeholder per prepared feature row.");
     }
     if (std::find(tokens.begin(), tokens.end(), model_.config_->model.pad_token_id) != tokens.end()) {
       throw std::runtime_error("Prepared Nemotron-H Omni prompts must be unpadded.");
     }
-    if (prepared_attention_mask_) {
+    if (is_prompt_ && prepared_attention_mask_) {
       const auto info = prepared_attention_mask_->ort_tensor_->GetTensorTypeAndShapeInfo();
       if (info->GetShape() != std::vector<int64_t>{1, static_cast<int64_t>(tokens.size())}) {
         throw std::runtime_error("Prepared attention_mask must match the compacted input_ids length.");

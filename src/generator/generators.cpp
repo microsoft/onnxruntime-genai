@@ -845,6 +845,9 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
       input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
                                     tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
     } else {
+      if (model_type == "nemotron_h_omni" && !model_->config_->model.decoder.inputs.has_previous_state.empty() && !set_extra_inputs_) {
+        throw std::runtime_error("has_previous_state Nemotron-H Omni cached SetInputs accepts only input_ids; media and extra inputs are not supported.");
+      }
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
       [[maybe_unused]] const auto [graph_name, found] = model_->config_->GetGraphName(name);
