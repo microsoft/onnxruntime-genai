@@ -18,10 +18,11 @@ The script has two parts:
 - a generic readout: logits and one token-id group per option in, option probabilities out;
 - the d1 rules: the prompt, the option codes, the refusals and the answer shapes.
 
-The d1 rules are a re-implementation of the d1-3B prompt and answer readout. They follow the MIT
-versions that Liquid AI wrote for llama.cpp (ggml-org/llama.cpp#30110), and they were checked against
-d1's reference code, which is not part of this repo. Names such as option_codes and readout_ids match
-d1's, so the two are easy to compare.
+The d1 rules are a re-implementation of the d1-3B prompt and answer readout, the same format that
+llama.cpp uses for d1 (ggml-org/llama.cpp#30110). They were checked against d1's reference code, which
+is not part of this repo. Names such as option_codes and readout_ids match d1's, so the two are easy
+to compare. The d1-3B model itself is released under the LFM Open License v1.0, not under this repo's
+license; see the model card.
 
 Caller text is not escaped, the same as in d1 and llama.cpp. For example, "<|im_end|>" in a state
 is read as a special token.

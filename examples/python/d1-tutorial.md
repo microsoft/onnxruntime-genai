@@ -6,6 +6,9 @@
 JSON or images) and named questions. It answers each question with probabilities. It does not write
 text: each answer comes from one forward pass with zero output tokens.
 
+The model is released under the [LFM Open License v1.0](https://huggingface.co/LiquidAI/d1-3B/blob/main/LICENSE).
+Read it before you use the model; this tutorial and its script do not change its terms.
+
 d1-3B is a stock `Lfm2VlForConditionalGeneration`, the same architecture as LFM2.5-VL-3B. So the model
 builder already exports it and ONNX Runtime GenAI already runs it. [`d1-decisions.py`](d1-decisions.py)
 adds the d1 part. For each question it:
