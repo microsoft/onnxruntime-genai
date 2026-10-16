@@ -1005,9 +1005,11 @@ def get_args():
                     exclude_lm_head. A block drafter (dflash2_path/dspark_path) already supersedes the head
                     and does not need this option.
                 prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
-                    When enabled for standard models, inserts Gather+Unsqueeze so the MatMul input is [B,1,H] instead
-                    of [B,S,H]. For paged-attention models, gathers the final packed hidden state for each sequence so
-                    the MatMul input is [B,H] instead of [num_tokens,H].
+                    When enabled for standard models, gathers each row's last real token (found from attention_mask)
+                    so the MatMul input is [B,1,H] instead of [B,S,H]. This expects right padding, as
+                    onnxruntime-genai produces; left-padded inputs are not supported. For paged-attention models,
+                    gathers the final packed hidden state for each sequence so the MatMul input is [B,H] instead of
+                    [num_tokens,H].
                     Ignored when exclude_lm_head is true.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
