@@ -14,7 +14,7 @@ import types
 import numpy as np
 import onnxruntime as ort
 import pytest
-from _builder_test_utils import load_builder_module
+from _builder_test_utils import load_builder_module, ort_runs_causal_conv_with_state
 
 base_module = load_builder_module("base")
 ir = base_module.ir
@@ -131,6 +131,7 @@ def _tiny_lfm2():
         architectures=["Lfm2ForCausalLM"],
         vocab_size=128,
         hidden_size=4 * HEAD_SIZE,
+        # LFM2 rounds the FFN width up to a multiple of 256, so it does not collide with vocab_size.
         intermediate_size=128,
         num_hidden_layers=4,
         layer_types=["conv", "full_attention", "conv", "full_attention"],
@@ -147,7 +148,9 @@ def _tiny_llama():
         architectures=["LlamaForCausalLM"],
         vocab_size=128,
         hidden_size=4 * HEAD_SIZE,
-        intermediate_size=128,
+        # Not 128: the builder takes the first Linear with vocab_size outputs as the LM head, so an MLP of
+        # that width would become the head (see test_the_last_layer_reaches_the_logits).
+        intermediate_size=96,
         num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=2,
@@ -158,6 +161,17 @@ def _tiny_llama():
 
 
 TINY_MODELS = {"lfm2": (_tiny_lfm2, "Lfm2ForCausalLM"), "llama": (_tiny_llama, "LlamaForCausalLM")}
+# Llama runs on every onnxruntime. The LFM2 conv layers need com.microsoft:CausalConvWithState.
+TINY_MODEL_PARAMS = [
+    pytest.param(
+        "lfm2",
+        marks=pytest.mark.skipif(
+            not ort_runs_causal_conv_with_state(),
+            reason="the installed onnxruntime cannot run com.microsoft:CausalConvWithState",
+        ),
+    ),
+    "llama",
+]
 
 
 def _build_session(tmp_path, hf_model, builder_class, extra_options):
@@ -195,20 +209,38 @@ def _run(session, input_ids, attention_mask, state):
     return outputs["logits"], next_state
 
 
-@pytest.fixture(scope="module", params=sorted(TINY_MODELS))
+@pytest.fixture(scope="module", params=TINY_MODEL_PARAMS)
 def model_sessions(request, tmp_path_factory):
     make_model, class_name = TINY_MODELS[request.param]
     if not hasattr(transformers, class_name):
         # The transformers stub has no model classes.
         pytest.skip(f"transformers does not provide {class_name}")
 
-    torch.manual_seed(0)
-    hf_model, builder_class = make_model()
+    # Seed the weights without changing the global RNG for later tests.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        hf_model, builder_class = make_model()
     hf_model.eval()
     tmp_path = tmp_path_factory.mktemp(f"{request.param}_prune")
     full = _build_session(tmp_path, hf_model, builder_class, {})
     pruned = _build_session(tmp_path, hf_model, builder_class, {"prune_lm_head": True})
     return full, pruned
+
+
+def test_the_last_layer_reaches_the_logits(model_sessions):
+    # Guards the tiny configs: if an MLP had vocab_size outputs, the builder would take it as the LM head,
+    # the later layers would not reach the logits, and the tests below would check much less.
+    full, _ = model_sessions
+    rng = np.random.default_rng(2)
+    _, state = _run(full, rng.integers(1, 128, size=(1, 4)), np.ones((1, 4), dtype=np.int64), _empty_state(full, 1))
+    # past_key_values.3.key -> 3
+    last_layer_state = max(state, key=lambda name: int(name.split(".")[1]))
+    changed_state = {**state, last_layer_state: state[last_layer_state] + 1}
+
+    next_ids = rng.integers(1, 128, size=(1, 1))
+    logits, _ = _run(full, next_ids, np.ones((1, 5), dtype=np.int64), state)
+    changed_logits, _ = _run(full, next_ids, np.ones((1, 5), dtype=np.int64), changed_state)
+    assert np.abs(changed_logits - logits).max() > 1e-3
 
 
 # The row choice is exact (the head-only tests above use assert_array_equal). Here a MatMul over one row
