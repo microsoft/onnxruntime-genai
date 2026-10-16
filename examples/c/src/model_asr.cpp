@@ -156,10 +156,11 @@ std::vector<float> LoadWav(const std::string& path, int target_sample_rate) {
 
 void AppendTimestampRecords(const OgaTokenPostProcessorResult& result, bool use_segments,
                             std::string& transcript, bool print_output = true) {
-  if (!result.HasTimestamps()) return;
-  const size_t count = use_segments ? result.GetSegmentCount() : result.GetWordCount();
+  const auto* timestamps = result.GetTimestamps();
+  if (!timestamps) return;
+  const size_t count = use_segments ? timestamps->GetSegmentCount() : timestamps->GetWordCount();
   for (size_t index = 0; index < count; ++index) {
-    const auto& record = use_segments ? result.GetSegment(index) : result.GetWord(index);
+    const auto& record = use_segments ? timestamps->GetSegment(index) : timestamps->GetWord(index);
     const char* text = record.GetText();
     std::ostringstream output;
     output << '[' << std::fixed << std::setprecision(2) << record.GetStartTime() << " - " << record.GetStopTime() << ']';

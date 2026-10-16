@@ -178,8 +178,11 @@ is published:
 
 - For Python, use the wheel built from the implementation branch. Call `process_next_tokens()`
   after generation and `finalize()` at the end, then read typed objects from
-  `get_next_token_results()`: use `result.get_timestamps()`, then `.words` or `.segments`, and each record's
-  `.text`, `.start_time`, and `.stop_time` attributes rather than dictionary keys.
+  `get_next_token_results()`: use nullable `result.get_timestamps()`, then
+  `get_words()` or `get_segments()`, and each record's `get_text()`,
+  `get_start_time()`, and `get_stop_time()` accessors. Append the needed values to
+  application-owned transcript storage before the next processing call; the
+  returned objects are borrowed, not independent snapshots.
 - For C++, build the `model_asr` target with `MODEL_ASR=ON` and set `OGA_INCLUDE_DIR` and `OGA_LIB_DIR`
   to the matching headers and native library.
 - For C#, pass `-p:UseLocalGenAI=true` to build against the local managed project. Run with matching

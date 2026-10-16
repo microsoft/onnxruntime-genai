@@ -84,12 +84,13 @@ static void DecodeSegments(Generator generator, TokenPostProcessor postprocessor
   }
 }
 
-static void AppendSegments(TokenMetadataOutput result, StringBuilder timestampedTranscript) {
+static void AppendSegments(TokenPostProcessorResult result, StringBuilder timestampedTranscript) {
   var timestamps = result.GetTimestamps();
   if (timestamps == null) return;
-  foreach (var segment in timestamps.Segments) {
-    string separator = segment.Text.Length > 0 && char.IsWhiteSpace(segment.Text[0]) ? "" : " ";
-    string timestampedSegment = $"[{segment.StartTime:F2} - {segment.StopTime:F2}]{separator}{segment.Text}";
+  foreach (var segment in timestamps.GetSegments()) {
+    string text = segment.GetText();
+    string separator = text.Length > 0 && char.IsWhiteSpace(text[0]) ? "" : " ";
+    string timestampedSegment = $"[{segment.GetStartTime():F2} - {segment.GetStopTime():F2}]{separator}{text}";
     timestampedTranscript.Append(timestampedSegment);
     Console.Write(timestampedSegment);
   }

@@ -142,13 +142,13 @@ def format_timestamp_records(result, use_segments):
     timestamps = result.get_timestamps()
     if timestamps is None:
         return ""
-    records = timestamps.segments if use_segments else timestamps.words
+    records = timestamps.get_segments() if use_segments else timestamps.get_words()
     formatted = []
     for record in records:
-        text = record.text if use_segments else record.text.strip()
+        text = record.get_text() if use_segments else record.get_text().strip()
         separator = " " if use_segments and not text[:1].isspace() else ""
         suffix = "" if use_segments else " "
-        formatted.append(f"[{record.start_time:.2f} - {record.stop_time:.2f}]{separator}{text}{suffix}")
+        formatted.append(f"[{record.get_start_time():.2f} - {record.get_stop_time():.2f}]{separator}{text}{suffix}")
     return "".join(formatted)
 
 
@@ -161,8 +161,9 @@ def decode_tokens(generator, postprocessor, timestamp_level, all_word_transcript
         postprocessor.process_next_tokens()
         for result in postprocessor.get_next_token_results():
             if not timestamps_enabled:
-                print(result.text, end="", flush=True)
-                text += result.text
+                token_text = result.get_text()
+                print(token_text, end="", flush=True)
+                text += token_text
             else:
                 timestamped_text = format_timestamp_records(
                     result, timestamp_level in ("segment", "all")
