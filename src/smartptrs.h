@@ -29,6 +29,7 @@ struct State;
 struct KeyValueCache;
 struct PositionInputs;
 struct DeviceInterface;
+struct Tensor;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -118,6 +119,20 @@ struct PositionInputs {
   virtual void Add() = 0;
   virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
   virtual void RewindTo(size_t index) = 0;
+
+  // Prefill chunking (see search.chunk_size) slices the pre-computed embeddings and updates the
+  // position/attention-mask inputs one chunk at a time. Only implementations whose position ids
+  // are produced sequentially (i.e. safe to resume mid-prompt at a chunk boundary) can support
+  // this; the default is the conservative single-pass answer. Implementations whose position ids
+  // may depend on multimodal content (e.g. 3D mRoPE deltas) can report support conditionally.
+  virtual bool SupportsSequentialPrefillChunking(bool has_multimodal_content) const { return false; }
+
+  // Optional 2D/3D RoPE grid metadata (image_grid_thw, video_grid_thw, second_per_grid_ts) used by
+  // position-input implementations whose position ids depend on vision content layout. Most
+  // implementations don't use per-image grid metadata and ignore it.
+  virtual void SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
+                              const std::shared_ptr<Tensor>& video_grid_thw,
+                              const std::shared_ptr<Tensor>& second_per_grid_ts) {}
 };
 
 struct BatchedSamplerState {

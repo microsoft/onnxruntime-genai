@@ -48,9 +48,14 @@ struct Qwen2VLPositionInputs : PositionInputs {
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
   void RewindTo(size_t index) override;
 
+  // 3D mRoPE position ids diverge from sequential positions only when vision/audio content
+  // shifts the rope deltas. A text-only prompt reduces to sequential positions, so chunking is
+  // safe; with multimodal content the ids must be produced in a single full pass.
+  bool SupportsSequentialPrefillChunking(bool has_multimodal_content) const override { return !has_multimodal_content; }
+
   void SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
                       const std::shared_ptr<Tensor>& video_grid_thw,
-                      const std::shared_ptr<Tensor>& second_per_grid_ts);
+                      const std::shared_ptr<Tensor>& second_per_grid_ts) override;
 
   friend struct InitPositionIdsFunctor;
   friend struct InitAttentionMaskFunctor;

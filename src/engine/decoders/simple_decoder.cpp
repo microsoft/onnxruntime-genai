@@ -9,7 +9,7 @@
 
 namespace Generators {
 
-SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
+SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderModel> model,
                              std::shared_ptr<CacheManager> cache_manager)
     : model_{model}, cache_manager_{cache_manager} {
   const ModelStateManifest manifest{model_->config_->model.decoder};

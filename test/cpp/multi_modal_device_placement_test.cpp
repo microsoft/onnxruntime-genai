@@ -9,7 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "models/model.h"
-#include "models/io/embeddings.h"
+#include "models/embedding/embeddings.h"
 
 namespace {
 

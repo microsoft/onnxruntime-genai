@@ -253,7 +253,7 @@ re-anchoring. K=1 and applicable boundary cases use the explicit path.
 
 ## Base speculative decoding
 
-`SpeculativeDecodingModel` composes two `DecoderOnly_Model` instances under one public model. Prefill
+`SpeculativeDecodingModel` composes two `DecoderModel` instances under one public model. Prefill
 runs both children and stores the draft's next-token logits. Target and draft configurations are
 cloned independently so each child owns its own session and state.
 
@@ -427,11 +427,12 @@ speculative counters such as rounds, accepted tokens, adaptive moves, or cooldow
 
 ## Target logits and cache requirements
 
-Verification needs one target distribution per proposal position. `DecoderOnly_State::RunUnchunked`
-bypasses prefill chunking for the verification input because chunked prefill can expose only the
-final chunk's logits. This is a correctness requirement, not a general recommendation to disable
-prefill chunking. If the output still contains only the final row, base speculative decoding
-rewinds and reconstructs the rows with sequential target runs; n-gram decoding fails fast.
+Verification needs one target distribution per proposal position. `DecoderState::Run` only applies
+prefill chunking on the first run, so verification inputs bypass chunking because chunked prefill can
+expose only the final chunk's logits. This is a correctness requirement, not a general
+recommendation to disable prefill chunking. If the output still contains only the final row, base
+speculative decoding rewinds and reconstructs the rows with sequential target runs; n-gram decoding
+fails fast.
 
 The target output may be FP16 or FP32. `GetFloatVerifyLogits` wraps FP32 directly and casts other
 supported output types to FP32 before CPU-side row processing.

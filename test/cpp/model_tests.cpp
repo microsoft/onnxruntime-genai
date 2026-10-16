@@ -16,8 +16,8 @@
 
 #include "models/model.h"
 #include "models/model_type.h"
-#include "models/qwen_vl_model.h"
-#include "models/qwen_vl_vision.h"
+#include "models/qnn/qwen_vl_pipeline.h"
+#include "models/qnn/qwen_vl_vision.h"
 
 #include "test_utils.h"
 

@@ -29,18 +29,17 @@
 #include "model.h"
 #include "runtime_profiles.h"
 #include "model_package.h"
-#include "gpt.h"
-#include "decoder_only.h"
+#include "decoder/gpt.h"
+#include "decoder/multi_modal_decoder.h"
 #include "speculative_decoding.h"
-#include "whisper.h"
-#include "parakeet.h"
-#include "nemotron_speech.h"
-#include "moonshine_streaming.h"
+#include "speech/whisper.h"
+#include "speech/parakeet.h"
+#include "speech/nemotron_speech.h"
+#include "speech/moonshine_streaming.h"
 #include "multi_modal.h"
-#include "lfm2.h"
-#include "marian.h"
-#include "decoder_only_pipeline.h"
-#include "qwen_vl_model.h"
+#include "decoder/lfm2.h"
+#include "encoder_decoder/marian.h"
+#include "qnn/model_pipeline.h"
 #include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
 #include "ep/openvino/interface.h"
@@ -997,18 +996,14 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
-  if (!config->model.decoder.pipeline.empty() &&
-      (ModelType::IsVLM(config->model.type) || ModelType::IsMMM(config->model.type))) {
-    if (!ModelType::IsPipe(config->model.type))
-      throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
-    return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
-  }
+  if (auto pipeline_model = CreatePipelineModel(config, ort_env))
+    return pipeline_model;
   if (ModelType::IsLFM2(config->model.type))
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
-    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+    return std::make_shared<DecoderModel>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsStreamingEncDecASR(config->model.type))
@@ -1039,8 +1034,6 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     }
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
   }
-  if (ModelType::IsPipe(config->model.type))
-    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (config->model.type == "marian-ssru")
     return std::make_shared<MarianModel>(std::move(config), ort_env);
 

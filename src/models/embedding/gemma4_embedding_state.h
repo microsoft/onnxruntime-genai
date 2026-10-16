@@ -1,0 +1,21 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#pragma once
+
+#include "models/embedding/multi_modal_embedding.h"
+
+namespace Generators {
+
+struct Gemma4EmbeddingState : EmbeddingState {
+  Gemma4EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params);
+
+  void ReuseBuffersInDecoder(DecoderState& decoder) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices = {}) override;
+
+ private:
+  std::unique_ptr<Embeddings> per_layer_inputs_;
+};
+
+}  // namespace Generators
