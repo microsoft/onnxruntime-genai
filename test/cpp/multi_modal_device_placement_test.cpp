@@ -188,7 +188,7 @@ TEST(MultiModalDevicePlacementTests, PreallocatesConcreteVisionEncoderOutput) {
   const char* input_names[] = {"input_ids", "attention_mask"};
   const OrtValue* inputs[] = {input_ids.get(), attention_mask.get()};
 
-  auto output = Generators::RunVisionEncoderWithPreallocatedOutput(
+  auto output = Generators::RunVisionEncoder(
       *session, nullptr, input_names, inputs, 2, "encoder_outputs", cpu);
   ASSERT_NE(output, nullptr);
   EXPECT_EQ(output->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{2, 2, 512}));
@@ -196,13 +196,26 @@ TEST(MultiModalDevicePlacementTests, PreallocatesConcreteVisionEncoderOutput) {
   EXPECT_EQ(Generators::StageVisionEncoderOutput(*output, cpu, cpu), nullptr);
 }
 
-TEST(MultiModalDevicePlacementTests, RejectsDynamicVisionEncoderOutputBeforeRunning) {
+TEST(MultiModalDevicePlacementTests, RunsDynamicVisionEncoderOutput) {
   auto& cpu = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
-  const auto model_path = fs::path{std::string{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32/past.onnx"}};
+  const auto model_path = fs::path{std::string{MODEL_PATH "marian-cache/uncached/encoder.onnx"}};
   auto session = OrtSession::Create(Generators::GetOrtEnv(), model_path.c_str(), nullptr);
-  EXPECT_THROW(
-      Generators::RunVisionEncoderWithPreallocatedOutput(*session, nullptr, nullptr, nullptr, 0, "logits", cpu),
-      std::runtime_error);
+  const char* input_names[] = {"input_ids", "attention_mask"};
+  for (int64_t length : {3, 5}) {
+    const std::array<int64_t, 2> input_shape{2, length};
+    auto input_ids = OrtValue::CreateTensor<int32_t>(cpu.GetAllocator(), input_shape);
+    auto attention_mask = OrtValue::CreateTensor<int32_t>(cpu.GetAllocator(), input_shape);
+    const size_t count = static_cast<size_t>(2 * length);
+    std::fill_n(input_ids->GetTensorMutableData<int32_t>(), count, 1);
+    std::fill_n(attention_mask->GetTensorMutableData<int32_t>(), count, 1);
+    const OrtValue* inputs[] = {input_ids.get(), attention_mask.get()};
+
+    auto output = Generators::RunVisionEncoder(*session, nullptr, input_names, inputs, 2, "encoder_outputs", cpu);
+    ASSERT_NE(output, nullptr);
+    EXPECT_EQ(output->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{2, length, 4}));
+    EXPECT_EQ(output->GetTensorMemoryInfo().GetDeviceType(), OrtMemoryInfoDeviceType_CPU);
+    EXPECT_EQ(Generators::StageVisionEncoderOutput(*output, cpu, cpu), nullptr);
+  }
 }
 
 TEST(MultiModalDevicePlacementTests, ReusesCpuPlacedEncoderOutput) {

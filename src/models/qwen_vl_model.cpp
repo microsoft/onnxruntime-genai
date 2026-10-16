@@ -529,7 +529,7 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
     std::unique_ptr<OrtValue> owned;
     OrtValue* raw_output = nullptr;
     if (split_vision) {
-      owned = RunVisionEncoderWithPreallocatedOutput(
+      owned = RunVisionEncoder(
           *vl_model_.vision_session_, encoder_run_options_.get(), input_name_ptrs.data(),
           input_values.data(), input_name_ptrs.size(), encoder_output_name[0],
           *vl_model_.vision_encoder_device_);

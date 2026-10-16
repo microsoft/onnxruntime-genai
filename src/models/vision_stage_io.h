@@ -9,8 +9,8 @@ namespace Generators {
 void ApplyVisionRunOption(OrtRunOptions& options, const char* key, const char* value);
 std::unique_ptr<OrtRunOptions> CreateVisionStageRunOptions(const Config::Model::Vision& vision, size_t stage_index);
 
-// Bind an encoder-device output before Run; dynamic output dimensions must be resolved by the model first.
-std::unique_ptr<OrtValue> RunVisionEncoderWithPreallocatedOutput(
+// Preallocate concrete outputs on the encoder device; let ORT allocate dynamic outputs.
+std::unique_ptr<OrtValue> RunVisionEncoder(
     OrtSession& session, OrtRunOptions* run_options, const char* const* input_names,
     const OrtValue* const* inputs, size_t input_count, const char* output_name,
     DeviceInterface& encoder_device);

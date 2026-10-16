@@ -236,7 +236,7 @@ DeviceSpan<float> Gemma4VisionState::RunSplitVision() {
       }
     }
 
-    auto encoded = RunVisionEncoderWithPreallocatedOutput(
+    auto encoded = RunVisionEncoder(
         *model_.vision_session_, encoder_options.get(), input_names_.data(),
         encoder_inputs.data(), encoder_inputs.size(), encoder_output_name, *model_.vision_encoder_device_);
     auto staged = StageVisionEncoderOutput(*encoded, *model_.vision_encoder_device_,

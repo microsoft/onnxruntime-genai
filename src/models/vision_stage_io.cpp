@@ -47,7 +47,7 @@ std::unique_ptr<OrtRunOptions> CreateVisionStageRunOptions(const Config::Model::
   return options;
 }
 
-std::unique_ptr<OrtValue> RunVisionEncoderWithPreallocatedOutput(
+std::unique_ptr<OrtValue> RunVisionEncoder(
     OrtSession& session, OrtRunOptions* run_options, const char* const* input_names,
     const OrtValue* const* inputs, size_t input_count, const char* output_name,
     DeviceInterface& encoder_device) {
@@ -60,10 +60,9 @@ std::unique_ptr<OrtValue> RunVisionEncoderWithPreallocatedOutput(
   const auto type_info = session.GetOutputTypeInfo(static_cast<size_t>(output_it - output_names.begin()));
   const auto& tensor_info = type_info->GetTensorTypeAndShapeInfo();
   const auto shape = tensor_info.GetShape();
-  if (shape.empty() || std::any_of(shape.begin(), shape.end(), [](int64_t dim) { return dim <= 0; })) {
-    throw std::runtime_error(
-        std::string("Vision encoder output '") + output_name +
-        "' requires a concrete, positive shape for preallocation. Infer shapes before splitting the vision model.");
+  if (std::any_of(shape.begin(), shape.end(), [](int64_t dim) { return dim <= 0; })) {
+    auto outputs = session.Run(run_options, input_names, inputs, input_count, &output_name, 1);
+    return std::move(outputs.front());
   }
 
   auto output = OrtValue::CreateTensor(encoder_device.GetAllocator(), shape, tensor_info.GetElementType());
