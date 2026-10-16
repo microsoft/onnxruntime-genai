@@ -734,7 +734,7 @@ def main() -> None:
     )
     build_multidraft_target_onnx(out / "target/model_s2.onnx", out / "target/model_s3.onnx", verify_rows=3)
     build_multidraft_target_onnx(out / "target/model_s2.onnx", out / "target/model_s4.onnx", verify_rows=4)
-    shutil.copy2(out / "target/model_s2.onnx", out / "target/model.onnx")
+    shutil.copy2(out / "target/model_s4.onnx", out / "target/model.onnx")
     if args.dense_gpu_qmoe:
         link_file(source / "dense/model.onnx", out / "dense/model.onnx", args.copy)
         dense_rewritten = 0
