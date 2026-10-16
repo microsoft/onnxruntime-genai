@@ -418,7 +418,8 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
       model_{model},
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
       kv_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
-      recurrent_state_{CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)} {
+      recurrent_state_{CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)},
+      cache_phase_{*this, *model_.decoder_session_} {
   inputs_embeds_.Add();
 
   // Gemma4: decoder accepts per_layer_inputs from the embedding model
@@ -449,6 +450,12 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
     kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
+  cache_phase_.Add();
+}
+
+void DecoderState::RewindTo(size_t index) {
+  RejectCachePhaseOperation(*model_.config_, "rewind");
+  State::RewindTo(index);
 }
 
 DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -467,6 +474,7 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
     recurrent_state_->RestoreAfterGraphCapture(graph_id);
   }
   State::Run(*model_.decoder_session_, graph_capture_this_run, seq_len, graph_capture_variant);
+  cache_phase_.Commit();
   return logits_.Get();
 }
 
@@ -541,6 +549,7 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
+  cache_phase_.Begin(new_length);
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
   if (kv_cache_)
@@ -554,6 +563,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
 
 // Overload for pipeline to call
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices, size_t new_length) {
+  cache_phase_.Begin(new_length);
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
   if (kv_cache_)
     kv_cache_->Update(beam_indices, total_length);
@@ -591,7 +601,13 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   }
 }
 
+void MultiModalPipelineState::RewindTo(size_t index) {
+  RejectCachePhaseOperation(*model_.config_, "rewind");
+  State::RewindTo(index);
+}
+
 void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  decoder_state_->cache_phase_.ValidateExtraInputs(extra_inputs);
   prepared_attention_mask_.reset();
   std::shared_ptr<Tensor> prepared_features;
   if (model_.config_->model.type == "nemotron_h_omni") {
@@ -602,6 +618,8 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
     }
   }
   uses_prepared_image_features_ = prepared_features != nullptr;
+  if (!model_.config_->model.decoder.inputs.has_previous_state.empty() && !prepared_features)
+    throw std::runtime_error("has_previous_state Nemotron-H Omni requires prepared image_features (empty for text-only)");
   if (prepared_features) {
     if (!is_prompt_ || params_->BatchBeamSize() != 1) {
       throw std::runtime_error("Prepared Nemotron-H Omni features require an initial batch-1, beam-1 prompt.");

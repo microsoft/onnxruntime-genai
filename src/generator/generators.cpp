@@ -15,6 +15,7 @@
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
+#include "models/io/cache_phase.h"
 #include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "models/io/kv_cache.h"
@@ -987,6 +988,7 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 }
 
 void Generator::RewindToLength(size_t new_length) {
+  RejectCachePhaseOperation(*model_->config_, "rewind");
   const auto& model_type = model_->config_->model.type;
   // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
   // TransducerState path and never create search_, so rewind is unsupported.
@@ -1040,6 +1042,7 @@ DeviceSpan<float> Generator::GetLogits() {
 }
 
 void Generator::SnapshotState() {
+  RejectCachePhaseOperation(*model_->config_, "snapshot/speculative decoding");
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   state_->SnapshotState(search_->GetSequenceLength());
 }
@@ -1053,6 +1056,7 @@ int64_t Generator::RecurrentStateWindow() const {
 }
 
 void Generator::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  RejectCachePhaseOperation(*model_->config_, "crop/speculative decoding");
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (new_length > search_->GetSequenceLength())
     throw std::runtime_error("CropToAccepted: new_length exceeds current sequence length");

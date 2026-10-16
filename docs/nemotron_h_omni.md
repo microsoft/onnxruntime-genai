@@ -148,7 +148,39 @@ normalization, video sampling, placeholder expansion and retention application
 remain the host processor's responsibility. Full features plus an unapplied
 mask are not a valid prepared prompt.
 
+## Optional explicit decoder cache phase
+
+Graphs that distinguish source prefill from cached execution may opt in with
+`model.decoder.inputs.has_previous_state = "has_previous_state"`. The value is
+an input-name mapping, not a session option or a caller-supplied boolean. A custom
+graph name is allowed. The named **decoder-session** input must be a BOOL scalar
+`[]`; the default empty mapping leaves existing graphs unchanged.
+
+GenAI owns stable scalar storage. A fresh Generator supplies false, including a
+one-token prefill; only successful decoder execution makes the next call supply
+true. Sequence length, position/offset, mask values, embedding execution and
+pipeline prompt status do not determine validity. False-branch graphs must
+implement their own source-defined treatment of initial cache tensors.
+
+This opt-in currently supports fresh batch1/beam1 ordinary Generators:
+decoder-only models and the prepared-feature Nemotron-H Omni path (including
+native BF16 empty features). It rejects Engine scheduling, speculative decoding,
+snapshots/cropping, **all rewind calls**, CUDA graph capture, scheduler prompt
+chunking, and cached calls with more than one token. Scheduler chunking is
+unrelated to a Mamba operator's internal chunk-128 algorithm. Raw-media input is
+not supported for this opt-in.
+
+After a managed preparation/execution failure, create a new Generator. Cache
+buffers may have been partially modified; the phase bit provides no rollback
+guarantee. Duplicate caller bindings for the managed input are rejected.
+
 ## Regression tests
+
+`create_cache_phase_models.py` generates real conditional sparse-cache fixtures.
+The cache tests check one-token/long prefill, carried states/logits, independent
+offset controls, dirty initial caches, execution failures, and the explicit
+unsupported boundaries. These are runtime interface tests, not production
+Nemotron numerical qualification.
 
 `test/models/cache-dispatch/multimodal` contains executed arithmetic vision,
 embedding and sparse-state decoder graphs. The tests cover text-only and

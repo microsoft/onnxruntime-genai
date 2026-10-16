@@ -490,6 +490,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.input_ids = JSON::Get<std::string_view>(value);
     } else if (name == "inputs_embeds") {
       v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "has_previous_state") {
+      v_.has_previous_state = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {

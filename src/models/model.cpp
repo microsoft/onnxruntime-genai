@@ -995,6 +995,13 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  if (!config->model.decoder.inputs.has_previous_state.empty() &&
+      (config->model.draft || config->model.mtp.IsEnabled() ||
+       !config->model.decoder.pipeline.empty() ||
+       !(config->model.type == "nemotron_h_omni" ||
+         (ModelType::IsLLM(config->model.type) && !ModelType::IsLFM2(config->model.type) &&
+          config->model.type != "gpt2"))))
+    throw std::runtime_error("has_previous_state requires an ordinary decoder-only or prepared Nemotron-H Omni Generator");
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   if (!config->model.decoder.pipeline.empty() &&

@@ -554,6 +554,7 @@ struct Config {
         std::string embeddings{Defaults::InputsEmbedsName};
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string has_previous_state;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
         std::string past_key_scale_names;
