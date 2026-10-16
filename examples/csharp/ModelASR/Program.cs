@@ -133,8 +133,9 @@ static string DecodeTokens(Generator generator, TokenPostProcessor postprocessor
     postprocessor.ProcessNextTokens();
     foreach (var result in postprocessor.GetNextTokenResults()) {
       if (!timestampsEnabled) {
-        Console.Write(result.Text);
-        text += result.Text;
+        string tokenText = result.GetText();
+        Console.Write(tokenText);
+        text += tokenText;
       } else {
         string timestampedText = FormatTimestampRecords(result, timestampLevel is "segment" or "all");
         if (timestampLevel == "all")
@@ -147,15 +148,15 @@ static string DecodeTokens(Generator generator, TokenPostProcessor postprocessor
   return text;
 }
 
-static string FormatTimestampRecords(TokenMetadataOutput result, bool useSegments) {
+static string FormatTimestampRecords(TokenPostProcessorResult result, bool useSegments) {
   var timestamps = result.GetTimestamps();
   if (timestamps == null) return "";
-  var records = useSegments ? timestamps.Segments : timestamps.Words;
+  var records = useSegments ? timestamps.GetSegments() : timestamps.GetWords();
   return string.Concat(records.Select(record => {
-    string text = useSegments ? record.Text : record.Text.Trim();
+    string text = useSegments ? record.GetText() : record.GetText().Trim();
     string separator = useSegments && (text.Length == 0 || !char.IsWhiteSpace(text[0])) ? " " : "";
     string suffix = useSegments ? "" : " ";
-    return $"[{record.StartTime:F2} - {record.StopTime:F2}]{separator}{text}{suffix}";
+    return $"[{record.GetStartTime():F2} - {record.GetStopTime():F2}]{separator}{text}{suffix}";
   }));
 }
 

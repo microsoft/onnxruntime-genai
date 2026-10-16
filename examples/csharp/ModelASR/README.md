@@ -74,6 +74,10 @@ For Nemotron, configure `model.timestamp_level` in `genai_config.json` as `word`
 to print completed timestamp records instead of incremental token text. `TokenPostProcessor`
 owns decoding and grouping, consumes every sequential emission through `ProcessNextTokens()`,
 and exposes read-only per-call results through `GetNextTokenResults()`.
+Results expose `GetText()` and nullable `GetTimestamps()`; timestamps expose
+`GetWords()` and `GetSegments()`, with text and time accessors on each record.
+These objects borrow the processor's current output. The sample appends needed
+values to its own transcript before the next processing or finalization call.
 `FinalizeProcessing()` completes trailing records. `off` (the default) returns ordinary text
 without timestamps; Moonshine supports only this plain-text path. See
 [Nemotron streaming timestamps](../../../docs/nemotron_speech_timestamps.md) for configuration and
