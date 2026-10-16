@@ -170,15 +170,26 @@ chunking, and cached calls with more than one token. Scheduler chunking is
 unrelated to a Mamba operator's internal chunk-128 algorithm. Raw-media input is
 not supported for this opt-in.
 
-After a managed preparation/execution failure, create a new Generator. Cache
-buffers may have been partially modified; the phase bit provides no rollback
-guarantee. Duplicate caller bindings for the managed input are rejected.
+Any exception from `SetInputs`, either `AppendTokens` overload,
+`GenerateNextToken`, `GetLogits`, `SetLogits`, or `PrepareForSetLogits` makes an
+opted-in Generator terminal. Subsequent calls to these methods require a new
+Generator, including a corrected retry after rejected input validation.
+This boundary starts before input/search mutations and includes pipeline prompt
+validation, embedding preparation/execution, decoder preparation/execution and
+logits processing. Search history may already contain rejected tokens even when
+the decoder never ran. Cache buffers may also have been partially modified;
+neither the failure marker nor the phase bit provides rollback. Nested successful
+operations do not clear failure. Only successful decoder/logits execution advances
+the separate cache-valid phase. Unconfigured Generators retain their existing
+behavior. Duplicate caller bindings for the managed input are rejected.
 
 ## Regression tests
 
 `create_cache_phase_models.py` generates real conditional sparse-cache fixtures.
 The cache tests check one-token/long prefill, carried states/logits, independent
-offset controls, dirty initial caches, execution failures, and the explicit
+offset controls, dirty initial caches, rejected padded prepared prompts followed
+by corrected retries, actual embedding failures before/after cached success,
+decoder execution failures, and the explicit
 unsupported boundaries. These are runtime interface tests, not production
 Nemotron numerical qualification.
 

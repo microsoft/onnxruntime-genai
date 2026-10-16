@@ -18,7 +18,7 @@ def value(name, dtype, shape):
     return ir.Value(name=name, type=ir.TensorType(dtype), shape=ir.Shape(shape))
 
 
-def create(directory: Path, *, multimodal=False, alias="has_previous_state", rank=0):
+def create(directory: Path, *, multimodal=False, alias="has_previous_state", rank=0, embedding_failure=False):
     create_model(
         directory, recurrent=True, model_type="nemotron_h_omni" if multimodal else "decoder", multimodal=multimodal
     )
@@ -37,7 +37,45 @@ def create(directory: Path, *, multimodal=False, alias="has_previous_state", ran
         embedding.graph.insert_before(
             original_nodes[0], ir.Node("", "Cast", [features], [ir.AttrInt64("to", 1)], outputs=[converted])
         )
+        if embedding_failure:
+            graph = embedding.graph
+
+            def constant(name, data, dtype=np.int64):
+                tensor = ir.tensor(np.asarray(data, dtype=dtype), name=name)
+                result = ir.Value(name=name, type=ir.TensorType(tensor.dtype), shape=tensor.shape, const_value=tensor)
+                graph.initializers[name] = result
+                return result
+
+            ids = next(x for x in graph.inputs if x.name == "input_ids")
+            matches = value("failure_matches", ir.DataType.BOOL, ["batch_size", "sequence_length"])
+            flags = value("failure_flags", ir.DataType.INT64, ["batch_size", "sequence_length"])
+            found = value("failure_found", ir.DataType.INT64, [])
+            fail = value("embedding_fail", ir.DataType.BOOL, [])
+            shape = value("embedding_check_shape", ir.DataType.INT64, [1])
+            checked = value("embedding_check", ir.DataType.FLOAT, [1])
+            graph.append(ir.Node("", "Equal", [ids, constant("failure_token", 13, np.int32)], outputs=[matches]))
+            graph.append(ir.Node("", "Cast", [matches], [ir.AttrInt64("to", 7)], outputs=[flags]))
+            graph.append(ir.Node("", "ReduceMax", [flags], [ir.AttrInt64("keepdims", 0)], outputs=[found]))
+            graph.append(ir.Node("", "Equal", [found, constant("failure_one", 1)], outputs=[fail]))
+            graph.append(
+                ir.Node("", "Where", [fail, constant("bad_shape", [-2]), constant("good_shape", [1])], outputs=[shape])
+            )
+            graph.append(
+                ir.Node(
+                    "",
+                    "Reshape",
+                    [constant("embedding_zero", [0], np.float32), shape],
+                    outputs=[checked],
+                    name="embedding_failure_reshape",
+                )
+            )
+            original_output = graph.outputs[0]
+            result = value(original_output.name, original_output.dtype, list(original_output.shape))
+            original_output.name = "unchecked_inputs_embeds"
+            graph.append(ir.Node("", "Add", [original_output, checked], outputs=[result]))
+            graph.outputs[0] = result
         ir.save(embedding, directory / "embedding.onnx")
+        onnx.checker.check_model(directory / "embedding.onnx", full_check=True)
     model = ir.load(directory / "decoder.onnx")
     graph = model.graph
     phase = value(alias, ir.DataType.BOOL, [] if rank == 0 else [1])
@@ -113,3 +151,4 @@ if __name__ == "__main__":
     create(root / "phase-alias", alias="cache_is_valid")
     create(root / "phase-multimodal", multimodal=True)
     create(root / "phase-rank", rank=1)
+    create(root / "phase-multimodal-embedding-failure", multimodal=True, embedding_failure=True)

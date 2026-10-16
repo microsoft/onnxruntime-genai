@@ -2,10 +2,36 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <exception>
+
 #include "generator/generators.h"
 #include "models/model.h"
 
 namespace Generators {
+
+// Search/input preparation can fail before the decoder phase begins. Nested
+// operations share a terminal failure bit; successful scopes never clear it.
+class CachePhaseOperation {
+ public:
+  CachePhaseOperation(const Config& config, bool& failed) {
+    if (config.model.decoder.inputs.has_previous_state.empty()) return;
+    if (failed)
+      throw std::runtime_error("has_previous_state managed generation operation failed; create a new Generator");
+    failed_ = &failed;
+    exception_count_ = std::uncaught_exceptions();
+  }
+  CachePhaseOperation(const CachePhaseOperation&) = delete;
+  CachePhaseOperation& operator=(const CachePhaseOperation&) = delete;
+
+  ~CachePhaseOperation() noexcept {
+    if (failed_ && std::uncaught_exceptions() > exception_count_)
+      *failed_ = true;
+  }
+
+ private:
+  bool* failed_{};
+  int exception_count_{};
+};
 
 // A completed decoder forward, not token count or position, makes its caches valid.
 class CachePhaseInput {
@@ -49,7 +75,7 @@ class CachePhaseInput {
     if (!value_) return;
     if (in_flight_)
       throw std::runtime_error("has_previous_state decoder execution failed; create a new Generator");
-    // Remains set on an exception: cache writes and search preparation are not transactional.
+    // Remains set on an exception: decoder preparation and cache writes are not transactional.
     in_flight_ = true;
     if (valid_ && sequence_length != 1)
       throw std::runtime_error("has_previous_state cached decoding requires S==1");

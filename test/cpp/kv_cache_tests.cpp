@@ -527,6 +527,14 @@ void AppendPhaseTokens(Generators::Generator& generator, std::vector<int32_t> to
 
 class CachePhaseTest : public ::testing::TestWithParam<bool> {};
 
+Generators::NamedTensors PhasePreparedText(const Generators::Model& model, const std::vector<int32_t>& tokens) {
+  auto ids = OrtValue::CreateTensor<int32_t>(model.allocator_cpu_, std::array<int64_t, 2>{1, static_cast<int64_t>(tokens.size())});
+  std::copy(tokens.begin(), tokens.end(), ids->GetTensorMutableData<int32_t>());
+  auto features = OrtValue::CreateTensor(model.allocator_cpu_, std::array<int64_t, 2>{0, 2}, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  return {{"input_ids", std::make_shared<Generators::Tensor>(std::move(ids))},
+          {"image_features", std::make_shared<Generators::Tensor>(std::move(features))}};
+}
+
 template <typename Action>
 void ExpectCachePhaseError(Action action, std::string_view message) {
   try {
@@ -728,6 +736,83 @@ TEST_P(CachePhaseTest, PreparedBfloat16FeaturesUseDecoderSuccessPhase) {
   }
 }
 
+TEST_P(CachePhaseTest, PreparedPromptValidationFailurePoisonsBeforeDecoderPreparation) {
+  auto model = LoadPhaseModel("phase-multimodal", GetParam());
+  auto params = Generators::CreateGeneratorParams(*model);
+  for (const bool device_input : {false, true}) {
+    auto generator = Generators::CreateGenerator(*model, *params);
+    auto rejected = PhasePreparedText(*model, {model->config_->model.pad_token_id});
+    auto device_tokens = params->p_device->Allocate<int32_t>(1);
+    if (device_input) {
+      rejected.erase("input_ids");
+      generator->SetInputs(rejected);
+      device_tokens.CpuSpan()[0] = model->config_->model.pad_token_id;
+      device_tokens.CopyCpuToDevice();
+      ExpectCachePhaseError([&] { generator->AppendTokens(device_tokens); }, "must be unpadded");
+    } else {
+      ExpectCachePhaseError([&] { generator->SetInputs(rejected); }, "must be unpadded");
+    }
+    // Search history was already mutated, even though the decoder never started.
+    ASSERT_EQ(generator->TokenCount(), size_t{1});
+    EXPECT_FALSE(*generator->state_->GetInput("has_previous_state")->GetTensorData<bool>());
+    auto corrected = PhasePreparedText(*model, {2});
+    if (device_input) {
+      device_tokens.CpuSpan()[0] = 2;
+      device_tokens.CopyCpuToDevice();
+      ExpectCachePhaseError([&] { generator->AppendTokens(device_tokens); }, "create a new Generator");
+    } else {
+      ExpectCachePhaseError([&] { generator->SetInputs(corrected); }, "create a new Generator");
+    }
+    EXPECT_EQ(generator->TokenCount(), size_t{1});
+    ExpectCachePhaseError([&] { AppendPhaseTokens(*generator, {2}); }, "create a new Generator");
+    ExpectCachePhaseError([&] { generator->GenerateNextToken(); }, "create a new Generator");
+    ExpectCachePhaseError([&] { generator->GetLogits(); }, "create a new Generator");
+    EXPECT_EQ(generator->TokenCount(), size_t{1});
+    auto fresh = Generators::CreateGenerator(*model, *params);
+    fresh->SetInputs(corrected);
+    ExpectPhase(*fresh, false);
+    EXPECT_EQ(fresh->TokenCount(), size_t{1});
+    const auto logits = PhaseOutputBytes(*fresh, "logits");
+    ASSERT_EQ(logits.size(), 16 * sizeof(float));
+    for (size_t i = 0; i < 16; ++i) {
+      float actual;
+      std::memcpy(&actual, logits.data() + i * sizeof(float), sizeof(actual));
+      EXPECT_FLOAT_EQ(actual, i == 9 ? 1.0f : 0.0f);
+    }
+    AppendPhaseTokens(*fresh, {3});
+    ExpectPhase(*fresh, true);
+  }
+}
+
+TEST_P(CachePhaseTest, ActualEmbeddingFailurePoisonsInitialAndCachedManagedOperations) {
+  auto model = LoadPhaseModel("phase-multimodal-embedding-failure", GetParam());
+  auto params = Generators::CreateGeneratorParams(*model);
+  for (const bool previously_valid : {false, true}) {
+    auto generator = Generators::CreateGenerator(*model, *params);
+    if (previously_valid) {
+      generator->SetInputs(PhasePreparedText(*model, {2}));
+      ExpectPhase(*generator, false);
+      AppendPhaseTokens(*generator, {3});
+      ExpectPhase(*generator, true);
+      ExpectCachePhaseError([&] { AppendPhaseTokens(*generator, {13}); }, "embedding_failure_reshape");
+    } else {
+      ExpectCachePhaseError([&] { generator->SetInputs(PhasePreparedText(*model, {13})); }, "embedding_failure_reshape");
+    }
+    const size_t rejected_length = previously_valid ? 3 : 1;
+    ASSERT_EQ(generator->TokenCount(), rejected_length);
+    EXPECT_EQ(*generator->state_->GetInput("has_previous_state")->GetTensorData<bool>(), previously_valid);
+    ExpectCachePhaseError([&] { AppendPhaseTokens(*generator, {2}); }, "create a new Generator");
+    ExpectCachePhaseError([&] { generator->GenerateNextToken(); }, "create a new Generator");
+    ExpectCachePhaseError([&] { generator->GetLogits(); }, "create a new Generator");
+    EXPECT_EQ(generator->TokenCount(), rejected_length);
+    auto fresh = Generators::CreateGenerator(*model, *params);
+    fresh->SetInputs(PhasePreparedText(*model, {2}));
+    ExpectPhase(*fresh, false);
+    AppendPhaseTokens(*fresh, {3});
+    ExpectPhase(*fresh, true);
+  }
+}
+
 TEST_P(CachePhaseTest, UnsupportedOperationsAndDuplicateOwnershipReject) {
   auto model = LoadPhaseModel("phase", GetParam());
   ExpectCachePhaseError([&] { Generators::Engine::CreateDependencies(model); }, "does not support Engine");
@@ -770,7 +855,8 @@ TEST_P(CachePhaseTest, UnsupportedOperationsAndDuplicateOwnershipReject) {
   duplicate_prepared["input_ids"] = std::make_shared<Generators::Tensor>(std::move(ids));
   auto features = OrtValue::CreateTensor(multimodal->allocator_cpu_, std::array<int64_t, 2>{0, 2}, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
   duplicate_prepared["image_features"] = std::make_shared<Generators::Tensor>(std::move(features));
-  ExpectCachePhaseError([&] { mm_generator->SetInputs(duplicate_prepared); }, "runtime-owned");
+  auto mm_duplicate = Generators::CreateGenerator(*multimodal, *mm_params);
+  ExpectCachePhaseError([&] { mm_duplicate->SetInputs(duplicate_prepared); }, "runtime-owned");
 }
 
 TEST_P(CachePhaseTest, ParserAndActualDecoderMetadataValidation) {

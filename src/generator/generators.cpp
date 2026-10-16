@@ -743,6 +743,7 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 }
 
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   DurationTrace trace{"Generator::AppendTokens"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
@@ -799,6 +800,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
 }
 
 void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   DurationTrace trace{"Generator::AppendTokensDevice"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
@@ -821,6 +823,7 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   const auto& model_type = model_->config_->model.type;
   if (ModelType::IsLLM(model_type) ||
       (ModelType::IsPipe(model_type) && !ModelType::IsVLM(model_type) && !ModelType::IsMMM(model_type))) {
@@ -957,15 +960,18 @@ bool Generator::IsSessionTerminated() const {
 }
 
 void Generator::SetLogits(DeviceSpan<float> logits) {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   search_->SetLogits(logits);
   computed_logits_ = true;
 }
 
 void Generator::PrepareForSetLogits() {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   strategy_->PrepareForSetLogits(*this);
 }
 
 void Generator::GenerateNextToken() {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   DurationTrace trace{"Generator::GenerateNextToken"};
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
@@ -1023,6 +1029,7 @@ void Generator::RewindToLength(size_t new_length) {
 }
 
 DeviceSpan<float> Generator::GetLogits() {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   DeviceSpan<float> strategy_logits;
   if (strategy_->TryGetExternalLogits(*this, strategy_logits)) {
     return strategy_logits;

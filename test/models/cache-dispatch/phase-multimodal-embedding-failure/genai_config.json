@@ -1,0 +1,60 @@
+{
+  "model": {
+    "type": "nemotron_h_omni",
+    "vocab_size": 16,
+    "context_length": 32,
+    "eos_token_id": 15,
+    "pad_token_id": 0,
+    "decoder": {
+      "filename": "decoder.onnx",
+      "hidden_size": 2,
+      "num_attention_heads": 1,
+      "num_key_value_heads": 1,
+      "head_size": 1,
+      "num_hidden_layers": 4,
+      "layer_types": [
+        "mamba",
+        "moe",
+        "attention",
+        "mamba"
+      ],
+      "inputs": {
+        "inputs_embeds": "inputs_embeds",
+        "attention_mask": "attention_mask",
+        "position_ids": "position_ids",
+        "past_recurrent_names": "past_key_values.%d.ssm_state",
+        "has_previous_state": "has_previous_state"
+      },
+      "outputs": {
+        "logits": "logits",
+        "present_recurrent_names": "present.%d.ssm_state"
+      }
+    },
+    "image_token_id": 18,
+    "embedding": {
+      "filename": "embedding.onnx",
+      "inputs": {
+        "input_ids": "input_ids",
+        "image_features": "image_features"
+      },
+      "outputs": {
+        "inputs_embeds": "inputs_embeds"
+      }
+    },
+    "vision": {
+      "filename": "vision.onnx",
+      "inputs": {
+        "pixel_values": "pixel_values"
+      },
+      "outputs": {
+        "image_features": "image_features"
+      }
+    }
+  },
+  "search": {
+    "max_length": 16,
+    "num_beams": 1,
+    "do_sample": false,
+    "past_present_share_buffer": false
+  }
+}
