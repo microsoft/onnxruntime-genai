@@ -53,41 +53,30 @@ void MetadataCoreState::ValidateInput(const TokenMetadataInput& token) const {
   }
 }
 
-void MetadataCoreState::BeginResult(const char* text) {
-  // Only completed events are per-call; buffered intervals and the unfinished segment survive.
-  text_ = text;
-  record_texts_.clear();
-  word_records_.clear();
-  segment_records_.clear();
-  result_ = {text_.c_str(), nullptr};
-}
-
-void MetadataCoreState::AddRecord(std::vector<TimestampRecordView>& records, std::string_view text,
+void MetadataCoreState::AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
                                   OgaTokenMetadataAcousticFrameInterval interval) {
-  // A deque keeps earlier c_str() pointers valid as later words/segments complete in this call.
-  record_texts_.emplace_back(text);
-  records.push_back({record_texts_.back().c_str(), interval.start, interval.stop,
+  records.push_back({std::string(text), interval.start, interval.stop,
                      RoundTimestamp(interval.start * seconds_per_frame_),
                      RoundTimestamp(interval.stop * seconds_per_frame_)});
 }
 
-void MetadataCoreState::CompleteSegment() {
+void MetadataCoreState::CompleteSegment(TimestampResult& result) {
   if (!pending_segment_text_) return;
-  AddRecord(segment_records_, *pending_segment_text_, pending_segment_interval_);
+  AddRecord(result.segments, *pending_segment_text_, pending_segment_interval_);
   pending_segment_text_.reset();
 }
 
-void MetadataCoreState::PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval) {
+void MetadataCoreState::PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval, TimestampResult& result) {
   const auto level = config_.timestamps.level;
   if (level == Config::TimestampLevel::Word || level == Config::TimestampLevel::All) {
-    AddRecord(word_records_, text, interval);
+    AddRecord(result.words, text, interval);
   }
 
   if (level == Config::TimestampLevel::Segment || level == Config::TimestampLevel::All) {
     if (pending_segment_text_ && segment_gap_threshold_frames_ &&
         (*segment_gap_threshold_frames_ == 0 ||
          interval.start - pending_segment_interval_.stop >= *segment_gap_threshold_frames_)) {
-      CompleteSegment();
+      CompleteSegment(result);
     }
 
     if (!pending_segment_text_) {
@@ -103,11 +92,11 @@ void MetadataCoreState::PublishWord(std::string_view text, OgaTokenMetadataAcous
                                           [text](const std::string& separator) {
                                             return EndsWithSeparator(text, separator);
                                           });
-    if (ends_segment) CompleteSegment();
+    if (ends_segment) CompleteSegment(result);
   }
 }
 
-void MetadataCoreState::ConsumeCompletedWords() {
+void MetadataCoreState::ProcessCompletedWords(TimestampResult& result) {
   for (const auto& word : word_grouping_.CompletedWords()) {
     if (word.start_token_index < first_pending_token_index_ ||
         word.stop_token_index <= word.start_token_index ||
@@ -117,7 +106,7 @@ void MetadataCoreState::ConsumeCompletedWords() {
     // The first and last contributing tokens supply each word's acoustic bounds.
     const auto& first = pending_token_intervals_[word.start_token_index - first_pending_token_index_];
     const auto& last = pending_token_intervals_[word.stop_token_index - first_pending_token_index_ - 1];
-    PublishWord(word.text, {first.start, last.stop});
+    PublishWord(word.text, {first.start, last.stop}, result);
   }
 
   const auto first_pending = word_grouping_.FirstPendingTokenIndex();
@@ -131,33 +120,23 @@ void MetadataCoreState::ConsumeCompletedWords() {
   }
 }
 
-const MetadataOutput& MetadataCoreState::PublishResult() {
+void MetadataCoreState::ProcessDecoded(
+    const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, PostProcessorResult& result) {
   if (TimestampsEnabled()) {
-    timestamp_result_ = {word_records_.data(), word_records_.size(), segment_records_.data(), segment_records_.size()};
-    result_.timestampMetadata = &timestamp_result_;
-  }
-  return result_;
-}
-
-const MetadataOutput& MetadataCoreState::ProcessDecoded(
-    const TokenMetadataInput& token, const char* text, const OrtxWordPieceInfo& piece) {
-  BeginResult(text);
-  if (TimestampsEnabled()) {
+    auto& timestamps = result.timestamps.emplace();
     pending_token_intervals_.push_back(token.token_acoustic_frame_interval);
-    word_grouping_.Consume(piece, text);
-    ConsumeCompletedWords();
+    word_grouping_.Process(piece, result.text);
+    ProcessCompletedWords(timestamps);
   }
-  return PublishResult();
 }
 
-const MetadataOutput& MetadataCoreState::ProcessFinalized() {
-  BeginResult("");
+void MetadataCoreState::ProcessFinalized(PostProcessorResult& result) {
   if (TimestampsEnabled()) {
+    auto& timestamps = result.timestamps.emplace();
     word_grouping_.Finalize();
-    ConsumeCompletedWords();
-    CompleteSegment();
+    ProcessCompletedWords(timestamps);
+    CompleteSegment(timestamps);
   }
-  return PublishResult();
 }
 
 }  // namespace Generators

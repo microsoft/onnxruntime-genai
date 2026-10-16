@@ -6,6 +6,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         private IntPtr _handle;
         private readonly Generator _generator;
+        private object _resultLifetime = new object();
 
         public TokenPostProcessor(Model model, Generator generator)
         {
@@ -25,52 +26,50 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void ProcessNextTokens()
         {
+            PrepareMutation();
             Result.VerifySuccess(NativeMethods.OgaTokenPostProcessorProcessNextTokens(Handle));
             GC.KeepAlive(_generator);
         }
 
         public void FinalizeProcessing()
         {
+            PrepareMutation();
             Result.VerifySuccess(NativeMethods.OgaTokenPostProcessorFinalize(Handle));
             GC.KeepAlive(_generator);
         }
 
         public void Reset()
         {
+            PrepareMutation();
             Result.VerifySuccess(NativeMethods.OgaTokenPostProcessorReset(Handle));
             GC.KeepAlive(_generator);
         }
 
-        public TokenMetadataOutput[] GetNextTokenResults()
+        public TokenPostProcessorResult[] GetNextTokenResults()
         {
             int count = checked((int)NativeMethods.OgaTokenPostProcessorGetResultCount(Handle).ToUInt64());
-            var results = new TokenMetadataOutput[count];
+            var results = new TokenPostProcessorResult[count];
             for (int index = 0; index < count; ++index)
             {
                 var result = NativeMethods.OgaTokenPostProcessorGetResult(Handle, (UIntPtr)index);
-                TokenMetadataTimestamp timestamps = null;
-                if (NativeMethods.OgaTokenPostProcessorResultHasTimestamps(result))
-                    timestamps = new TokenMetadataTimestamp(CopyRecords(result, false), CopyRecords(result, true));
-                results[index] = new TokenMetadataOutput(StringUtils.FromUtf8(NativeMethods.OgaTokenPostProcessorResultGetText(result)), timestamps);
+                results[index] = new TokenPostProcessorResult(this, _resultLifetime, result);
             }
             return results;
         }
 
-        private static TokenMetadataTimestampRecord[] CopyRecords(IntPtr result, bool segments)
+        private void PrepareMutation()
         {
-            int count = checked((int)(segments ? NativeMethods.OgaTokenPostProcessorResultGetSegmentCount(result) : NativeMethods.OgaTokenPostProcessorResultGetWordCount(result)).ToUInt64());
-            var records = new TokenMetadataTimestampRecord[count];
-            for (int index = 0; index < count; ++index)
-            {
-                var record = segments ? NativeMethods.OgaTokenPostProcessorResultGetSegment(result, (UIntPtr)index) : NativeMethods.OgaTokenPostProcessorResultGetWord(result, (UIntPtr)index);
-                records[index] = new TokenMetadataTimestampRecord(
-                    StringUtils.FromUtf8(NativeMethods.OgaTokenPostProcessorTimestampRecordGetText(record)),
-                    NativeMethods.OgaTokenPostProcessorTimestampRecordGetStartFrame(record),
-                    NativeMethods.OgaTokenPostProcessorTimestampRecordGetStopFrame(record),
-                    NativeMethods.OgaTokenPostProcessorTimestampRecordGetStartTime(record),
-                    NativeMethods.OgaTokenPostProcessorTimestampRecordGetStopTime(record));
-            }
-            return records;
+            _ = Handle;
+            _ = _generator.Handle;
+            _resultLifetime = new object();
+        }
+
+        internal IntPtr GetResultHandle(IntPtr handle, object lifetime)
+        {
+            _ = Handle;
+            if (!ReferenceEquals(lifetime, _resultLifetime))
+                throw new InvalidOperationException("The postprocessor result expired after a processor mutation.");
+            return handle;
         }
 
         ~TokenPostProcessor() { Dispose(); }

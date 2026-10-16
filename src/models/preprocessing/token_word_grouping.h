@@ -18,7 +18,7 @@ struct CompletedTokenizerWord {
 
 class TokenWordGroupingState {
  public:
-  void Consume(const OrtxWordPieceInfo& piece, std::string_view decoded_text);
+  void Process(const OrtxWordPieceInfo& piece, std::string_view decoded_text);
   void Finalize();
   const std::vector<CompletedTokenizerWord>& CompletedWords() const { return completed_words_; }
   size_t FirstPendingTokenIndex() const;
@@ -33,7 +33,7 @@ class TokenWordGroupingState {
 
   void Append(PendingText& pending, std::string_view text, size_t start_token_index, size_t stop_token_index);
   void CompleteWord();
-  void ConsumeTextPart(std::string_view text, size_t start_token_index, size_t stop_token_index, bool starts_word);
+  void ProcessTextPart(std::string_view text, size_t start_token_index, size_t stop_token_index, bool starts_word);
 
   size_t next_token_index_{};
   PendingText pending_word_;

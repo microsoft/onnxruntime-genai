@@ -18,18 +18,22 @@ while (!generator->IsDone()) {
   postprocessor->ProcessNextTokens();
   for (const auto* result : postprocessor->GetNextTokenResults()) {
     ProcessText(result->GetText());
-    for (size_t index = 0; index < result->GetWordCount(); ++index)
-      ProcessWord(result->GetWord(index));
-    for (size_t index = 0; index < result->GetSegmentCount(); ++index)
-      ProcessSegment(result->GetSegment(index));
+    if (const auto* timestamps = result->GetTimestamps()) {
+      for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
+        ProcessWord(timestamps->GetWord(index));
+      for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index)
+        ProcessSegment(timestamps->GetSegment(index));
+    }
   }
 }
 postprocessor->Finalize();
 for (const auto* result : postprocessor->GetNextTokenResults()) {
-  for (size_t index = 0; index < result->GetWordCount(); ++index)
-    ProcessWord(result->GetWord(index));
-  for (size_t index = 0; index < result->GetSegmentCount(); ++index)
-    ProcessSegment(result->GetSegment(index));
+  if (const auto* timestamps = result->GetTimestamps()) {
+    for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
+      ProcessWord(timestamps->GetWord(index));
+    for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index)
+      ProcessSegment(timestamps->GetSegment(index));
+  }
 }
 ```
 
@@ -57,7 +61,9 @@ flowchart TD
   process[TokenPostProcessor.ProcessNextTokens] --> outputs[Private Generator.GetTokenOutputs]
   outputs --> each[For each emission in order]
   each --> validate[Validate required acoustic interval]
-  validate --> facts[Private Tokenizer.GetWordPieceInfo]
+  validate --> enabled{Timestamps enabled?}
+  enabled -->|Yes| facts[Private Tokenizer.GetWordPieceInfo]
+  enabled -->|No| decode
   facts --> lookup[Extensions OrtxGetTokenWordPieceInfo]
   lookup --> decode[Ordinary TokenizerStream.Decode]
   decode --> cache[Extensions OrtxDetokenizeCached]
@@ -69,10 +75,11 @@ flowchart TD
 The private generator getter views existing token and interval storage without
 advancing generation. It is accessible only to the native processor, not through
 the public C, C++, C#, or Python generator APIs. `GenerateNextToken()` is unchanged.
+`TokenOutputs` hides its storage behind accessors; disabled timestamp data is null.
 
 Extensions owns vocabulary-specific facts: `is_special`, `starts_word`,
 `ends_word`, and `boundary_style`. Its standalone lookup is independent of decoder
-history and runs before ordinary decoding. It neither groups words nor owns
+history and runs before ordinary decoding only when timestamps are enabled. It neither groups words nor owns
 timestamp state. The tokenizer and stream have no timestamp configuration or
 special metadata decode mode.
 
@@ -102,30 +109,46 @@ origins and interval semantics. Diarization is not implemented by this processor
 
 ## Bindings and Lifetime
 
-C exposes opaque `OgaTokenPostProcessor`, `OgaTokenPostProcessorResult`, and
+C exposes opaque `OgaTokenPostProcessor`, `OgaTokenPostProcessorResult`,
+`OgaTokenPostProcessorTimestamp`, and
 `OgaTokenPostProcessorTimestampRecord` handles, with typed getters for text,
 timestamp presence, word/segment counts, records, frame bounds, and second bounds.
 Result and record layouts are private. An out-of-range C result or record lookup
 returns null; the C++ record accessor throws `std::out_of_range`.
 
-Native results and their strings are borrowed until the next processor mutation
+Results, nested timestamp records, and native strings are borrowed until the next processor mutation
 or destruction, not the next getter or generator operation. Never free them;
 copy anything needed afterward. Operations and borrowed reads on one processor
 must be externally serialized. Independent processors have independent state.
 
+`MetadataCoreState` populates the processor's canonical results directly. There
+is no intermediate metadata output or conversion to a second result model. The
+processor owns one immutable configuration; metadata state reads that same object.
+
 Python uses `TokenPostProcessor(model, generator)`, `process_next_tokens()`,
-`get_next_token_results()`, `finalize()`, and `reset()`. Results are owned
-`TokenMetadataOutput` values with `.text` and nullable `.get_timestamps()` /
-`.timestamp_metadata`. Timestamp values contain `.words` and `.segments` lists
-of typed `TokenMetadataTimestampRecord` values.
+`get_next_token_results()`, `finalize()`, and `reset()`. Borrowed
+`TokenPostProcessorResult` objects expose `get_text()` and nullable
+`get_timestamps()`. Timestamp objects expose `get_words()` and `get_segments()`;
+records expose `get_text()`, `get_start_frame()`, `get_stop_frame()`,
+`get_start_time()`, and `get_stop_time()`.
 
 C# uses `TokenPostProcessor(model, generator)`, `ProcessNextTokens()`,
-`GetNextTokenResults()`, `FinalizeProcessing()`, and `Reset()`. Owned
-`TokenMetadataOutput` results expose `Text` and nullable `GetTimestamps()` /
-`TimestampMetadata`, whose `Words` and `Segments` contain typed records.
-Python and C# retain the generator and copy native results, so results survive
-subsequent processing, reset, and disposal. Explicit generator disposal makes
-subsequent processor mutations fail rather than accessing destroyed state.
+`GetNextTokenResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
+`TokenPostProcessorResult` objects expose `GetText()` and nullable `GetTimestamps()`.
+Timestamp objects expose `GetWords()` and `GetSegments()`; records expose
+`GetText()`, `GetStartFrame()`, `GetStopFrame()`, `GetStartTime()`, and `GetStopTime()`.
+
+Python and C# wrap the same native results without copying their payload. They
+reject access to results or nested records invalidated by processing, finalization,
+reset, or disposal. Repeated getters do not invalidate results. Read the result,
+append needed strings and scalar values to application-owned transcript storage,
+and discard the borrowed object before processing more tokens. Returned strings
+and scalar values are independent values; the result wrappers are not snapshots.
+
+Bindings retain the generator against garbage collection. C# rejects explicitly
+disposed generators before entering native processing. Native C/C++ callers must
+keep the generator alive until after processor destruction; no native lifetime
+sentinel or generation-step counter is used.
 
 Ordinary `TokenizerStream.Decode()` and `Reset()` remain available and unchanged
 for callers needing only text. No public generator-output getter, metadata input

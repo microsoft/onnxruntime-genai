@@ -685,21 +685,24 @@ struct OgaTokenPostProcessorTimestampRecord : OgaAbstract {
   double GetStopTime() const { return OgaTokenPostProcessorTimestampRecordGetStopTime(this); }
 };
 
-struct OgaTokenPostProcessorResult : OgaAbstract {
-  const char* GetText() const { return OgaTokenPostProcessorResultGetText(this); }
-  bool HasTimestamps() const { return OgaTokenPostProcessorResultHasTimestamps(this); }
-  size_t GetWordCount() const { return OgaTokenPostProcessorResultGetWordCount(this); }
-  size_t GetSegmentCount() const { return OgaTokenPostProcessorResultGetSegmentCount(this); }
+struct OgaTokenPostProcessorTimestamp : OgaAbstract {
+  size_t GetWordCount() const { return OgaTokenPostProcessorTimestampGetWordCount(this); }
+  size_t GetSegmentCount() const { return OgaTokenPostProcessorTimestampGetSegmentCount(this); }
   const OgaTokenPostProcessorTimestampRecord& GetWord(size_t index) const {
-    const auto* record = OgaTokenPostProcessorResultGetWord(this, index);
+    const auto* record = OgaTokenPostProcessorTimestampGetWord(this, index);
     if (!record) throw std::out_of_range("Word index out of range");
     return *record;
   }
   const OgaTokenPostProcessorTimestampRecord& GetSegment(size_t index) const {
-    const auto* record = OgaTokenPostProcessorResultGetSegment(this, index);
+    const auto* record = OgaTokenPostProcessorTimestampGetSegment(this, index);
     if (!record) throw std::out_of_range("Segment index out of range");
     return *record;
   }
+};
+
+struct OgaTokenPostProcessorResult : OgaAbstract {
+  const char* GetText() const { return OgaTokenPostProcessorResultGetText(this); }
+  const OgaTokenPostProcessorTimestamp* GetTimestamps() const { return OgaTokenPostProcessorResultGetTimestamps(this); }
 };
 
 struct OgaTokenPostProcessor : OgaAbstract {
