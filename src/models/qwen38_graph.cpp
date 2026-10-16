@@ -70,6 +70,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   keep_hidden_ = mtp_enabled_ && prefill_head_;
   fold_ = q.fold.enabled;
   force_reject_ = q.fold.force_reject;
+  if (const char* sl_env = std::getenv("ORT_QWEN38_SUFFIX_LOOKUP")) {
+    suffix_lookup_mode_ = std::atoi(sl_env);
+  }
   if (fold_ && !mtp_enabled_) throw std::runtime_error("qwen38_graph: the fold stack requires model.qwen38_graph.mtp.enabled");
   stream_ = model_.p_device_->GetCudaStream();
   plane_.Check(plane_.set_device(model_.p_device_->GetDeviceId(nullptr)), "cudaSetDevice");
@@ -551,6 +554,7 @@ void Qwen38GraphEngine::Reset() {
   decode_started_ = false;
   pending_ = -1;
   prompt_tokens_.clear();
+  suffix_drafter_.Reset();
   last_hidden_ptr_ = nullptr;
 }
 
@@ -611,6 +615,9 @@ void Qwen38GraphEngine::PrefillChunk(std::span<const int32_t> tokens) {
     FastAppend(tokens);
   else
     StepPrefill(tokens);
+  if (suffix_lookup_mode_ > 0) {
+    suffix_drafter_.AppendSpan(tokens);
+  }
 }
 
 void Qwen38GraphEngine::StepPrefill(std::span<const int32_t> tokens) {
@@ -949,8 +956,22 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
   ledger_.Advance(record.TokenCount());
   ledger_.CheckDeviceLength(record.new_length);
   if (fold_) head_length_ += static_cast<int>(record.TokenCount());
+  if (suffix_lookup_mode_ > 0) {
+    suffix_drafter_.AppendToken(static_cast<int32_t>(pending_));
+    if (record.accepted) {
+      suffix_drafter_.AppendToken(static_cast<int32_t>(record.pred0));
+    }
+    pending_ = static_cast<int32_t>(record.new_pending);
+  }
   if (!want_more) return;
   if (fold_) {
+    if (suffix_lookup_mode_ == 1 || (suffix_lookup_mode_ == 2 && !record.accepted)) {
+      int32_t lookup_draft = -1;
+      if (suffix_drafter_.ProposeDrafts(static_cast<int32_t>(record.new_pending), 1, &lookup_draft, 3) == 1) {
+        const int64_t draft64 = lookup_draft;
+        WriteCtl(2, {&draft64, 1});
+      }
+    }
     head_cur_ = ledger_.Bank();
     EnqueueFold();
     return;

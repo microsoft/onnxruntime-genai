@@ -20,6 +20,9 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #endif
 
 namespace Generators {
@@ -320,6 +323,52 @@ Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::
   close(fd);
   if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full_path.string());
   base_ = base;
+#if defined(__linux__) && defined(__NR_mbind)
+  if (const char* numa_env = std::getenv("ORT_QMOE_NUMA_INTERLEAVE");
+      numa_env == nullptr || std::string(numa_env) != "0") {
+    static const unsigned long kNumaMask = []() -> unsigned long {
+      std::ifstream in("/sys/devices/system/node/has_memory");
+      if (!in) in.open("/sys/devices/system/node/online");
+      std::string line;
+      if (!in || !std::getline(in, line)) return 0UL;
+      unsigned long mask = 0;
+      int count = 0;
+      size_t pos = 0;
+      while (pos < line.size()) {
+        size_t end_p = line.find(',', pos);
+        if (end_p == std::string::npos) end_p = line.size();
+        const std::string tok = line.substr(pos, end_p - pos);
+        const size_t dash = tok.find('-');
+        try {
+          if (dash == std::string::npos) {
+            const int n = std::stoi(tok);
+            if (n >= 0 && static_cast<size_t>(n) < sizeof(unsigned long) * 8) {
+              mask |= (1UL << n);
+              ++count;
+            }
+          } else {
+            const int lo = std::stoi(tok.substr(0, dash));
+            const int hi = std::stoi(tok.substr(dash + 1));
+            for (int n = lo; n <= hi; ++n) {
+              if (n >= 0 && static_cast<size_t>(n) < sizeof(unsigned long) * 8) {
+                mask |= (1UL << n);
+                ++count;
+              }
+            }
+          }
+        } catch (...) {
+        }
+        pos = end_p + 1;
+      }
+      return count >= 2 ? mask : 0UL;
+    }();
+    if (kNumaMask != 0UL) {
+      constexpr int kMpolInterleave = 3;
+      static_cast<void>(syscall(__NR_mbind, base_, static_cast<unsigned long>(length_), kMpolInterleave,
+                                &kNumaMask, static_cast<unsigned long>(sizeof(unsigned long) * 8), 0u));
+    }
+  }
+#endif
   if (register_cuda_mapped) {
     try {
       plane_.Check(plane_.host_register(base_, length_, 2 | 8), "cudaHostRegister(weight pool file)");

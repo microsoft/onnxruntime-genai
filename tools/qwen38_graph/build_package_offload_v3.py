@@ -449,9 +449,9 @@ def main() -> None:
     if args.stop_token_id is not None:
         config["model"]["eos_token_id"] = [args.stop_token_id]
 
-    # Target decoder runs eagerly with QMoEOffload; head_r2 can keep CUDA graphs enabled.
+    # Target decoder supports CUDA graph capture via Device-Doorbell Host Worker Protocol (ORT_QMOE_ALLOW_CUDA_GRAPH=1).
     cuda_opts = config["model"]["decoder"]["session_options"]["provider_options"][0]["cuda"]
-    cuda_opts["enable_cuda_graph"] = "0"
+    cuda_opts["enable_cuda_graph"] = "1"
     cuda_opts["arena_extend_strategy"] = "kSameAsRequested"
     cuda_opts["arena.extend_strategy"] = "1"
     if args.vram_limit_gib is not None and args.vram_limit_gib > 0:

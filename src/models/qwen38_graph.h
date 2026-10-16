@@ -9,6 +9,7 @@
 // (src/engine/qwen38_graph_executor.h). The model is served by the Engine API only; there is no Generator state.
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <deque>
@@ -91,6 +92,92 @@ struct Qwen38QsaConstants {
 
  private:
   PlaneBuffer buffer_;
+};
+
+// Prompt & output n-gram suffix lookup drafter for multi-draft / hybrid MTP+lookup speculation.
+struct Qwen38SuffixDrafter {
+  static constexpr size_t kTableSize = 8192;
+  static constexpr size_t kTableMask = kTableSize - 1;
+
+  Qwen38SuffixDrafter() { Reset(); }
+
+  void Reset() noexcept {
+    tokens_.clear();
+    ngram3_pos_.fill(-1);
+    ngram3_key_.fill(0);
+    ngram2_pos_.fill(-1);
+    ngram2_key_.fill(0);
+  }
+
+  void AppendToken(int32_t tok) {
+    const int32_t next_pos = static_cast<int32_t>(tokens_.size());
+    if (tokens_.size() >= 2) {
+      const uint64_t k2 = Pack2(tokens_[tokens_.size() - 2], tokens_[tokens_.size() - 1]);
+      const size_t slot2 = Hash64(k2) & kTableMask;
+      ngram2_key_[slot2] = k2;
+      ngram2_pos_[slot2] = next_pos;
+    }
+    if (tokens_.size() >= 3) {
+      const uint64_t k3 = Pack3(tokens_[tokens_.size() - 3], tokens_[tokens_.size() - 2], tokens_[tokens_.size() - 1]);
+      const size_t slot3 = Hash64(k3) & kTableMask;
+      ngram3_key_[slot3] = k3;
+      ngram3_pos_[slot3] = next_pos;
+    }
+    tokens_.push_back(tok);
+  }
+
+  void AppendSpan(std::span<const int32_t> span) {
+    tokens_.reserve(tokens_.size() + span.size());
+    for (int32_t t : span) AppendToken(t);
+  }
+
+  int ProposeDrafts(int32_t pending_token, int max_drafts, int32_t* out_drafts, int min_ngram = 3) const noexcept {
+    if (max_drafts <= 0 || out_drafts == nullptr || tokens_.empty()) return 0;
+    int32_t match_pos = -1;
+    if (tokens_.size() >= 2) {
+      const uint64_t k3 = Pack3(tokens_[tokens_.size() - 2], tokens_[tokens_.size() - 1], pending_token);
+      const size_t slot3 = Hash64(k3) & kTableMask;
+      if (ngram3_pos_[slot3] >= 0 && ngram3_key_[slot3] == k3) {
+        match_pos = ngram3_pos_[slot3];
+      }
+    }
+    if (match_pos < 0 && min_ngram <= 2 && !tokens_.empty()) {
+      const uint64_t k2 = Pack2(tokens_[tokens_.size() - 1], pending_token);
+      const size_t slot2 = Hash64(k2) & kTableMask;
+      if (ngram2_pos_[slot2] >= 0 && ngram2_key_[slot2] == k2) {
+        match_pos = ngram2_pos_[slot2];
+      }
+    }
+    if (match_pos < 0 || static_cast<size_t>(match_pos) >= tokens_.size()) return 0;
+    int count = 0;
+    while (count < max_drafts && static_cast<size_t>(match_pos + count) < tokens_.size()) {
+      out_drafts[count] = tokens_[match_pos + count];
+      ++count;
+    }
+    return count;
+  }
+
+ private:
+  static uint64_t Pack2(int32_t a, int32_t b) noexcept {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) | static_cast<uint32_t>(b);
+  }
+  static uint64_t Pack3(int32_t a, int32_t b, int32_t c) noexcept {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(a) & 0x1FFFFFu) << 42) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(b) & 0x1FFFFFu) << 21) |
+           static_cast<uint64_t>(static_cast<uint32_t>(c) & 0x1FFFFFu);
+  }
+  static size_t Hash64(uint64_t x) noexcept {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return static_cast<size_t>(x);
+  }
+
+  std::vector<int32_t> tokens_;
+  std::array<int32_t, kTableSize> ngram3_pos_{};
+  std::array<uint64_t, kTableSize> ngram3_key_{};
+  std::array<int32_t, kTableSize> ngram2_pos_{};
+  std::array<uint64_t, kTableSize> ngram2_key_{};
 };
 
 // Owns every device-side object of one model. Graphs stay captured across Engines (see Qwen38GraphModel::AcquireDevice).
@@ -283,6 +370,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
 
   // host state
   Qwen38DecodeLedger ledger_;
+  Qwen38SuffixDrafter suffix_drafter_;
+  int suffix_lookup_mode_{0};  // 0=off, 1=always prefer 3-gram suffix match, 2=fallback on prior draft reject
   uint64_t seq_{};
   bool inflight_{};
   bool decode_started_{};
