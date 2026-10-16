@@ -234,6 +234,7 @@ class RequestLifecycleTest : public ::testing::Test {
 TEST(ContinuousDecodingDeviceSupportTest, MatchesKvCacheCapabilityContract) {
   EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::CPU));
   EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::CUDA));
+  EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::AMDGPU));
   EXPECT_FALSE(SupportsContinuousDecoding(DeviceType::DML));
   EXPECT_FALSE(SupportsContinuousDecoding(DeviceType::QnnHtp));
 }
