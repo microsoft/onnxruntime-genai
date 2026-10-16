@@ -355,7 +355,7 @@ TEST_P(MultiModalCacheTest, PreparedFeaturesUseCompactedPromptWithoutRunningVisi
         ASSERT_EQ(tensor->Type(), OgaElementType_float32);
         ASSERT_EQ(tensor->Shape(), (ssm ? std::vector<int64_t>{1, 2, 2, 2} : std::vector<int64_t>{1, 2, 3}));
         for (size_t i = 0; i < (ssm ? 8u : 6u); ++i)
-          EXPECT_FLOAT_EQ(ReadCacheElement(*tensor, i), (scale + (ssm ? 1 : 0)) * state_total);
+          EXPECT_FLOAT_EQ(ReadCacheElement(*tensor, i), static_cast<float>((scale + (ssm ? 1 : 0)) * state_total));
       }
     }
     for (const auto* kind : {"key", "value"}) {
