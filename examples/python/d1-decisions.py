@@ -310,21 +310,29 @@ class D1Decisions:
             raise ValueError(f"the prompt has {max(lengths)} tokens; the model allows {self.context_length}")
 
         answers = {}
-        for (name, question), group, tail, length in zip(questions.items(), groups, tails, lengths, strict=True):
-            params = og.GeneratorParams(self.model)
-            # max_length is the exact prompt length: the prefill fills the cache and nothing is generated.
-            params.set_search_options(max_length=length)
-            generator = og.Generator(self.model, params)
-            if inputs is None:
-                generator.append_tokens(head_ids + tail)
-            else:
-                # set_inputs only reads the processor output, so every question can reuse it.
-                generator.set_inputs(inputs)
-                if tail:
-                    generator.append_tokens(tail)
-            answers[name] = answer(question, probabilities(generator.get_logits()[0, -1], group))
+        for (name, question), group, tail in zip(questions.items(), groups, tails, strict=True):
+            answers[name] = answer(question, self.prefill(head_ids, inputs, tail, group))
         input_tokens = len(head_ids) + sum(len(tail) for tail in tails)
         return {"answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 0}}
+
+    def prefill(self, head_ids, inputs, tail, group):
+        """The option probabilities of one question.
+
+        The generator and its cache are freed when this returns, so only one question holds memory
+        at a time.
+        """
+        params = og.GeneratorParams(self.model)
+        # max_length is the exact prompt length: the prefill fills the cache and nothing is generated.
+        params.set_search_options(max_length=len(head_ids) + len(tail))
+        generator = og.Generator(self.model, params)
+        if inputs is None:
+            generator.append_tokens(head_ids + tail)
+        else:
+            # set_inputs only reads the processor output, so every question can reuse it.
+            generator.set_inputs(inputs)
+            if tail:
+                generator.append_tokens(tail)
+        return probabilities(generator.get_logits()[0, -1], group)
 
 
 def model_context_length(model_path):

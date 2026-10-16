@@ -10,7 +10,7 @@ single tokens, but not YES.
 
 The dummy decoder only computes logits for ids below 1024 and only looks at the last three tokens. So
 every prompt gives the same logits, and yes/no sit in the padding (P(yes) is 0.5). The tests therefore
-also check the exact ids each generator receives.
+also check the exact ids and max_length each generator receives.
 
 Run with:
     python -m pytest test/python/models/test_d1_decisions.py --test_models test/models
@@ -23,6 +23,8 @@ import json
 import shutil
 import subprocess
 import sys
+import types
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +44,7 @@ NO, NO_TITLE, NO_UPPER = 2744, 5048, 20099
 A, B, C, SPACE_A, SPACE_B, SPACE_C = 542, 543, 544, 835, 879, 841
 DIGITS = list(range(525, 535))
 GENERATOR = og.Generator
+PARAMS = og.GeneratorParams
 
 # Logits for test_answers_follow_the_logits. Every other id gets -10.
 CRAFTED = {YES_TITLE: 3.0, NO: 1.0, A: 0.0, B: 2.0, SPACE_C: 4.0, DIGITS[0]: 0.0, DIGITS[1]: 1.0}
@@ -84,15 +87,30 @@ def decisions(model, model_path):
 
 
 @pytest.fixture
-def fed(monkeypatch):
-    """The token ids each generator receives, one list per generator."""
-    fed = []
+def runs(monkeypatch):
+    """What the generators receive.
+
+    runs.ids holds the token ids of each generator and runs.max_lengths its max_length.
+    runs.most_alive is the largest number of generators alive at the same time.
+    """
+    runs = types.SimpleNamespace(ids=[], max_lengths=[], most_alive=0)
+    alive = weakref.WeakSet()
+
+    class ParamsRecorder:
+        def __init__(self, model):
+            self.params = PARAMS(model)
+
+        def set_search_options(self, **options):
+            runs.max_lengths.append(options.get("max_length"))
+            self.params.set_search_options(**options)
 
     class Recorder:
         def __init__(self, model, params):
-            self.generator = GENERATOR(model, params)
+            alive.add(self)
+            runs.most_alive = max(runs.most_alive, len(alive))
+            self.generator = GENERATOR(model, params.params)
             self.ids = []
-            fed.append(self.ids)
+            runs.ids.append(self.ids)
 
         def set_inputs(self, inputs):
             self.ids += inputs["input_ids"].as_numpy()[0].tolist()
@@ -105,8 +123,9 @@ def fed(monkeypatch):
         def get_logits(self):
             return self.generator.get_logits()
 
+    monkeypatch.setattr(og, "GeneratorParams", ParamsRecorder)
     monkeypatch.setattr(og, "Generator", Recorder)
-    return fed
+    return runs
 
 
 @pytest.fixture
@@ -164,7 +183,7 @@ def reference_probabilities(model, groups, ids, inputs=None):
 
     With processor inputs, ids starts with their input_ids and the rest is appended.
     """
-    params = og.GeneratorParams(model)
+    params = PARAMS(model)
     params.set_search_options(max_length=len(ids))
     generator = GENERATOR(model, params)
     if inputs is None:
@@ -308,13 +327,15 @@ def test_probabilities_take_the_best_token_per_option():
     ],
     ids=["noul", "choice", "score"],
 )
-def test_one_question_matches_numpy(model, tokenizer, decisions, fed, question, groups):
+def test_one_question_matches_numpy(model, tokenizer, decisions, runs, question, groups):
     ids = tokenizer.encode(render(tokenizer, STATE, question)).tolist()
     expected = reference_probabilities(model, groups, ids)
 
     response = decisions.decide({"state": STATE, "questions": {"q": question}})
 
-    assert fed == [ids]
+    assert runs.ids == [ids]
+    # max_length is the exact prompt length, so no cache is allocated beyond the prompt.
+    assert runs.max_lengths == [len(ids)]
     assert response["usage"] == {"input_tokens": len(ids), "output_tokens": 0}
     result = response["answers"]["q"]
     assert result["type"] == question["type"]
@@ -348,7 +369,23 @@ def test_answers_follow_the_logits(decisions, crafted):
     assert answers["urgency"]["confidence"] == pytest.approx(np.e / (1 + np.e))
 
 
-def test_several_questions_encode_the_prefix_once(model, tokenizer, decisions, fed):
+def test_one_question_is_encoded_as_one_string(tokenizer, decisions, runs):
+    # A leading newline in the instructions tokenizes differently after "QUESTION:\n" than on its
+    # own. d1 encodes a single question together with the prefix, as one string.
+    split = {"type": "noul", "instructions": "\nIs this a refund request?"}
+    prefix = d1.prompt_prefix(STATE)
+    text = suffix(tokenizer, d1.check_question("split", split))
+    joint = tokenizer.encode(prefix + text).tolist()
+    assert joint != tokenizer.encode(prefix).tolist() + tokenizer.encode(text).tolist()
+
+    response = decisions.decide({"state": STATE, "questions": {"split": split}})
+
+    assert runs.ids == [joint]
+    assert runs.max_lengths == [len(joint)]
+    assert response["usage"]["input_tokens"] == len(joint)
+
+
+def test_several_questions_encode_the_prefix_once(model, tokenizer, decisions, runs):
     # A leading newline in the instructions tokenizes differently after "QUESTION:\n" than on its
     # own. d1 encodes the shared prefix and each question separately, so this example does too.
     split = {"type": "noul", "instructions": "\nIs this a refund request?"}
@@ -361,10 +398,19 @@ def test_several_questions_encode_the_prefix_once(model, tokenizer, decisions, f
 
     response = decisions.decide(request)
 
-    assert fed == [prefix + suffix for suffix in suffixes]
+    assert runs.ids == [prefix + suffix for suffix in suffixes]
+    assert runs.max_lengths == [len(prefix) + len(suffix) for suffix in suffixes]
     assert response["usage"] == {"input_tokens": len(prefix) + sum(map(len, suffixes)), "output_tokens": 0}
     choice = reference_probabilities(model, [[A, SPACE_A], [B, SPACE_B], [C, SPACE_C]], prefix + suffixes[1])
     np.testing.assert_allclose(list(response["answers"]["team"]["probabilities"].values()), choice, rtol=0, atol=1e-12)
+
+
+def test_each_question_frees_its_generator_before_the_next(decisions, runs):
+    # Each generator holds a KV cache for its whole prompt. Two alive at once would double that.
+    decisions.decide({"state": STATE, "questions": {"refund": REFUND, "team": TEAM, "urgency": URGENCY}})
+
+    assert len(runs.ids) == 3
+    assert runs.most_alive == 1
 
 
 def test_missing_type_means_choice(decisions):
@@ -376,7 +422,7 @@ def test_missing_type_means_choice(decisions):
 # Images
 
 
-def test_one_image_matches_numpy(model, model_path, tokenizer, decisions, fed):
+def test_one_image_matches_numpy(model, model_path, tokenizer, decisions, runs):
     path = image_path(model_path)
     prompt = render(tokenizer, None, URGENCY, num_images=1)
     inputs = model.create_multimodal_processor()(prompt, images=og.Images.open(path))
@@ -385,14 +431,15 @@ def test_one_image_matches_numpy(model, model_path, tokenizer, decisions, fed):
 
     response = decisions.decide({"state": None, "questions": {"urgency": URGENCY}}, [path])
 
-    assert fed == [ids]
+    assert runs.ids == [ids]
+    assert runs.max_lengths == [len(ids)]
     assert response["usage"]["input_tokens"] == len(ids)
     probs = list(response["answers"]["urgency"]["probabilities"].values())
     np.testing.assert_allclose(probs, expected, rtol=0, atol=1e-12)
     assert sum(probs) == pytest.approx(1.0)
 
 
-def test_one_image_with_several_questions(model, model_path, tokenizer, decisions, fed):
+def test_one_image_with_several_questions(model, model_path, tokenizer, decisions, runs):
     path = image_path(model_path)
     inputs = model.create_multimodal_processor()(d1.prompt_prefix(STATE, 1), images=og.Images.open(path))
     prefix = inputs["input_ids"].as_numpy()[0].tolist()
@@ -402,7 +449,9 @@ def test_one_image_with_several_questions(model, model_path, tokenizer, decision
 
     response = decisions.decide({"state": STATE, "questions": {"refund": REFUND, "urgency": URGENCY}}, [path])
 
-    assert fed == [prefix + suffix for suffix in suffixes]
+    assert runs.ids == [prefix + suffix for suffix in suffixes]
+    assert runs.max_lengths == [len(prefix) + len(suffix) for suffix in suffixes]
+    assert runs.most_alive == 1
     assert response["usage"]["input_tokens"] == len(prefix) + sum(map(len, suffixes))
     probs = list(response["answers"]["urgency"]["probabilities"].values())
     np.testing.assert_allclose(probs, expected, rtol=0, atol=1e-12)
