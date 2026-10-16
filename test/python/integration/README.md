@@ -67,6 +67,25 @@ The Foundry Local SDK is intentionally not installed in CI: it bundles a
 native ORT GenAI runtime that would shadow the source-built wheel under
 test.
 
+## Tool-calling model regression
+
+On main merges (or a manually selected `all` suite), the Linux CUDA job for
+`qwen2.5-coder-1.5b-instruct` also runs the existing
+`benchmark/python/toolcalling` two-turn, 29-case benchmark. It uses that job's
+downloaded model and source-built wheel, with greedy generation and canned
+tool results. The job publishes `toolcalling-linux-cuda-qwen2.5-coder-1.5b-instruct`
+as a pipeline artifact containing the full per-case JSON report; the console
+shows aggregate scores for tool choice, argument fidelity, stop conditions,
+and the answer after a tool result. A missing report or benchmark runtime error
+fails the job.
+
+Scores are initially **report-only**: there is no `--fail_under` quality gate
+until the model artifact and template have a reviewed baseline. Pin the model
+version/identity before comparing scores across runs, then set a threshold
+from measured results rather than assuming 100% on a small model. This is a
+GenAI runtime/model regression, not a Foundry HTTP conformance test; the
+source-built-wheel job must not install the Foundry SDK.
+
 ## Paged-attention Engine test
 
 `test_integration_engine.py` drives the continuous-batching `og.Engine`
