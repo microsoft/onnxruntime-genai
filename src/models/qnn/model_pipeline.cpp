@@ -18,7 +18,9 @@ std::shared_ptr<Model> CreatePipelineModel(std::unique_ptr<Config>& config, OrtE
     }
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   }
-  if (ModelType::IsPipe(model_type)) {
+  if (ModelType::IsPipe(model_type) &&
+      !ModelType::IsVLM(model_type) &&
+      !ModelType::IsMMM(model_type)) {
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   }
   return {};
