@@ -39,7 +39,7 @@ DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next
 
 int64_t VisionState::GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) const {
   for (const auto& input : extra_inputs) {
-    if (input.name == Config::Defaults::PixelValuesName) {
+    if (input.name == model_.config_->model.vision.inputs.pixel_values) {
       assert(input.tensor->ort_tensor_);
       const auto shape = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
       return shape.size() >= 3 ? shape.front() : 0;

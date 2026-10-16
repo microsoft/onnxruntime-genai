@@ -12,7 +12,10 @@ namespace Generators {
 std::shared_ptr<Model> CreatePipelineModel(std::unique_ptr<Config>& config, OrtEnv& ort_env) {
   const auto& model_type = config->model.type;
   if (!config->model.decoder.pipeline.empty() &&
-      (model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_vl")) {
+      (ModelType::IsVLM(model_type) || ModelType::IsMMM(model_type))) {
+    if (!ModelType::IsPipe(model_type)) {
+      throw std::runtime_error("Pipelined decoder is not supported for model type '" + model_type + "'");
+    }
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   }
   if (ModelType::IsPipe(model_type)) {
