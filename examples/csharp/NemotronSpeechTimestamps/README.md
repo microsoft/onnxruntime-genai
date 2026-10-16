@@ -27,10 +27,14 @@ On Windows, make the corresponding native libraries available on `PATH`. Update 
 CUDA package references to a feature-containing release before using the package-based build.
 
 After each `GenerateNextToken()`, the sample calls `ProcessNextTokens()` and iterates
-`GetNextTokenResults()`. `result.GetTimestamps().Segments` is a per-call event list,
+`GetNextTokenResults()`. After checking `result.GetTimestamps()` for null,
+`GetSegments()` returns the completed records for the current call,
 not cumulative history. A step can emit zero or multiple tokens and complete zero or
 multiple segments, so every result and record is visited. Repeated getter calls do
 not change state. Enabled timestamps require valid model-provided acoustic timing.
 `FinalizeProcessing()` completes the trailing segment; read it through the same
-getter. Results are owned managed copies. The processor supports one sequence and
+getter. Results and nested records borrow processor-owned data and expire on the
+next process, finalize, reset, or disposal. The sample reads each record's
+`GetText()`, `GetStartTime()`, and `GetStopTime()` and appends the formatted string
+to its own transcript before advancing. The processor supports one sequence and
 one beam and must use its generator's model.

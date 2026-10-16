@@ -90,31 +90,20 @@ def asr_example(monkeypatch):
     return example
 
 
-@pytest.mark.parametrize("timestamp_level", ["off", "word", "segment", "all"])
 @pytest.mark.parametrize("use_segments", [False, True])
-def test_asr_example_formats_metadata_results(test_data_path, asr_example, timestamp_level, use_segments):
+def test_asr_example_formats_empty_results(test_data_path, asr_example, use_segments):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
-    config = og.Config(model_path)
-    config.overlay(
-        json.dumps(
-            {
-                "model": {
-                    "type": "nemotron_speech",
-                    "timestamp_level": timestamp_level,
-                    "sample_rate": 100,
-                    "hop_length": 10,
-                    "subsampling_factor": 1,
-                }
-            }
-        )
-    )
-    tokenizer = og.Tokenizer(config)
-    stream = tokenizer.create_stream()
-    result = stream.finalize_metadata()
-    assert isinstance(result, og.TokenMetadataOutput)
+    model = og.Model(model_path)
+    generator = og.Generator(model, og.GeneratorParams(model))
+    postprocessor = og.TokenPostProcessor(model, generator)
+    postprocessor.finalize()
+    result = postprocessor.get_next_token_results()[0]
+    assert isinstance(result, og.TokenPostProcessorResult)
     assert asr_example.format_timestamp_records(result, use_segments) == ""
-    stream.reset()
-    assert asr_example.format_timestamp_records(stream.finalize_metadata(), use_segments) == ""
+    postprocessor.reset()
+    postprocessor.finalize()
+    for result in postprocessor.get_next_token_results():
+        assert asr_example.format_timestamp_records(result, use_segments) == ""
 
 
 def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, capsys):
@@ -164,28 +153,53 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
     processor = og.StreamingProcessor(model)
     processor.set_option("use_vad", "true" if use_vad else "false")
     tokenizer = og.Tokenizer(model)
-    stream = tokenizer.create_stream()
     plain_stream = tokenizer.create_stream()
     generator = og.Generator(model, og.GeneratorParams(model))
+    postprocessor = og.TokenPostProcessor(model, generator)
     sample_rate, chunk_samples, _ = asr_example.load_config(model_path)
     audio = asr_example.load_audio(audio_path, sample_rate)[: 2 * sample_rate]
     if use_vad:
         audio = np.concatenate((np.zeros(4 * sample_rate, dtype=np.float32), audio))
 
-    results = []
+    words = []
+    segments = []
+    word_start_times = []
     text_fragments = []
     skipped_chunks = 0
+
+    def process_result(result):
+        timestamps = result.get_timestamps()
+        if timestamp_level == "off":
+            assert timestamps is None
+            assert asr_example.format_timestamp_records(result, False) == ""
+            assert asr_example.format_timestamp_records(result, True) == ""
+            return
+        word_records = timestamps.get_words()
+        segment_records = timestamps.get_segments()
+        assert asr_example.format_timestamp_records(result, False) == "".join(
+            f"[{word.get_start_time():.2f} - {word.get_stop_time():.2f}]{word.get_text().strip()} "
+            for word in word_records
+        )
+        assert asr_example.format_timestamp_records(result, True) == "".join(
+            f"[{segment.get_start_time():.2f} - {segment.get_stop_time():.2f}]"
+            f"{'' if segment.get_text()[:1].isspace() else ' '}{segment.get_text()}"
+            for segment in segment_records
+        )
+        words.extend(word.get_text() for word in word_records)
+        segments.extend(segment.get_text() for segment in segment_records)
+        word_start_times.extend(word.get_start_time() for word in word_records)
 
     def decode_inputs(inputs):
         generator.set_inputs(inputs)
         while not generator.is_done():
             generator.generate_next_token()
-            for token in generator.get_next_tokens_with_metadata():
-                result = stream.decode_with_metadata(token)
-                text = plain_stream.decode(token.token_id)
-                assert result.text == text
-                text_fragments.append(text)
-                results.append(result)
+            text = "".join(plain_stream.decode(int(token_id)) for token_id in generator.get_next_tokens())
+            postprocessor.process_next_tokens()
+            step_results = postprocessor.get_next_token_results()
+            assert "".join(result.get_text() for result in step_results) == text
+            text_fragments.append(text)
+            for result in step_results:
+                process_result(result)
 
     for offset in range(0, len(audio), chunk_samples):
         inputs = processor.process(audio[offset : offset + chunk_samples])
@@ -198,40 +212,23 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
     if inputs is not None:
         decode_inputs(inputs)
 
-    final_result = stream.finalize_metadata()
-    assert final_result.text == ""
-    results.append(final_result)
+    postprocessor.finalize()
+    for result in postprocessor.get_next_token_results():
+        assert result.get_text() == ""
+        process_result(result)
     transcript = "".join(text_fragments)
     assert transcript.strip()
-    words = []
-    segments = []
-    for result in results:
-        if timestamp_level == "off":
-            assert result.timestamp_metadata is None
-            assert asr_example.format_timestamp_records(result, False) == ""
-            assert asr_example.format_timestamp_records(result, True) == ""
-            continue
-        timestamps = result.timestamp_metadata
-        words.extend(timestamps.words)
-        segments.extend(timestamps.segments)
-        assert asr_example.format_timestamp_records(result, False) == "".join(
-            f"[{word.start_time:.2f} - {word.stop_time:.2f}]{word.text.strip()} " for word in timestamps.words
-        )
-        assert asr_example.format_timestamp_records(result, True) == "".join(
-            f"[{segment.start_time:.2f} - {segment.stop_time:.2f}]"
-            f"{'' if segment.text[:1].isspace() else ' '}{segment.text}"
-            for segment in timestamps.segments
-        )
     if timestamp_level in ("word", "all"):
-        assert "".join(word.text for word in words) == transcript
+        assert "".join(words) == transcript
     if timestamp_level in ("segment", "all"):
-        assert "".join(segment.text for segment in segments) == transcript
+        assert "".join(segments) == transcript
     if use_vad:
         assert skipped_chunks > 0
-        assert words[0].start_time >= 3.0
-    repeated_final = stream.finalize_metadata()
-    assert asr_example.format_timestamp_records(repeated_final, False) == ""
-    assert asr_example.format_timestamp_records(repeated_final, True) == ""
+        assert word_start_times[0] >= 3.0
+    postprocessor.finalize()
+    for result in postprocessor.get_next_token_results():
+        assert asr_example.format_timestamp_records(result, False) == ""
+        assert asr_example.format_timestamp_records(result, True) == ""
 
 
 def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
