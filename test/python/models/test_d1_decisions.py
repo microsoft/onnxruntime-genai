@@ -508,6 +508,7 @@ def test_refuses_bad_questions(decisions, no_prefill, questions, message):
 
 IMAGE_PART = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}}
 AUDIO_PART = {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}
+VIDEO_PART = {"type": "video_url", "video_url": {"url": "https://example.com/cats.mp4"}}
 
 
 @pytest.mark.parametrize(
@@ -524,6 +525,7 @@ AUDIO_PART = {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "
         ({"questions": {"q": REFUND}}, 'needs a "state" field'),
         ({"state": [{"role": "user", "content": [IMAGE_PART]}], "questions": {"q": REFUND}}, "image, audio or video"),
         ({"state": [{"role": "user", "content": [AUDIO_PART]}], "questions": {"q": REFUND}}, "image, audio or video"),
+        ({"state": [{"role": "user", "content": [VIDEO_PART]}], "questions": {"q": REFUND}}, "image, audio or video"),
         ("Is it?", "must be an object"),
     ],
     ids=[
@@ -535,6 +537,7 @@ AUDIO_PART = {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "
         "no_state",
         "image_part",
         "audio_part",
+        "video_part",
         "request_text",
     ],
 )
@@ -595,6 +598,12 @@ def test_refuses_a_tokenizer_without_single_token_yes(monkeypatch, decisions, to
     monkeypatch.setattr(decisions, "tokenizer", SplitTokenizer(tokenizer, {"yes", "Yes", "YES"}))
     with pytest.raises(ValueError, match="no single-token yes or no"):
         decisions.decide({"state": STATE, "questions": {"refund": REFUND}})
+
+
+def test_refuses_a_tokenizer_without_single_token_digits(monkeypatch, decisions, tokenizer, no_prefill):
+    monkeypatch.setattr(decisions, "tokenizer", SplitTokenizer(tokenizer, {"1"}))
+    with pytest.raises(ValueError, match="no single-token digit for every score level"):
+        decisions.decide({"state": STATE, "questions": {"urgency": URGENCY}})
 
 
 def test_refuses_when_no_single_token_alias_is_left(monkeypatch, decisions, tokenizer, no_prefill):
