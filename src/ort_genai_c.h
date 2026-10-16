@@ -150,6 +150,21 @@ typedef uint32_t OgaErrorCode;
 OGA_EXPORT void OGA_API_CALL OgaShutdown();
 
 /**
+ * \brief Releases cached GenAI resources for a device.
+ *
+ * The device type is the value returned by OgaModelGetDeviceType. Currently CUDA and
+ * NvTensorRtRtx are supported. The next model load for the device recreates the resources lazily.
+ *
+ * \warning The caller must destroy every model, generator, session, tensor, and other GenAI object
+ *          using the device before calling this function. Concurrent use or model creation for the
+ *          same device is not supported.
+ *
+ * \param[in] device_type Device type returned by OgaModelGetDeviceType.
+ * \return OgaResult containing an error message on failure, else nullptr.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaReleaseDeviceResources(const char* device_type);
+
+/**
  * \brief Enable or disable non-essential telemetry event collection.
  *
  * Telemetry can be fully disabled at compile time (ENABLE_TELEMETRY=OFF) or by setting
