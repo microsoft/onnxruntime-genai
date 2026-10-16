@@ -12,6 +12,7 @@ its `embedding_norm` there, and label the export `lfm2_vl` (a vision pipeline st
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -47,9 +48,10 @@ builder_module = _load_builder_entrypoint_module()
 Model = base_module.Model
 
 
+@pytest.mark.parametrize("auto_map", [False, True], ids=["stock", "d1_auto_map"])
 @pytest.mark.parametrize("exclude_embeds,expected_type", [(True, "lfm2_vl"), (False, "lfm2_vl_text")])
 def test_lfm2_vl_architecture_uses_lfm2_builder_and_labels_the_export(
-    monkeypatch, tmp_path, exclude_embeds, expected_type
+    monkeypatch, tmp_path, exclude_embeds, expected_type, auto_map
 ):
     captured = {}
 
@@ -66,7 +68,24 @@ def test_lfm2_vl_architecture_uses_lfm2_builder_and_labels_the_export(
         def save_processing(self, *args):
             pass
 
-    config = types.SimpleNamespace(architectures=["Lfm2VlForConditionalGeneration"])
+    if auto_map:
+        # LiquidAI/d1-3B is a stock Lfm2VlForConditionalGeneration whose config also names its own
+        # AutoModel class. Without remote code, the real AutoConfig must still lead to the LFM2 builder.
+        checkpoint = tmp_path / "input"
+        checkpoint.mkdir()
+        (checkpoint / "config.json").write_text(
+            json.dumps(
+                {
+                    "architectures": ["Lfm2VlForConditionalGeneration"],
+                    "auto_map": {"AutoModel": "modeling_d1.D1Model"},
+                    "model_type": "lfm2_vl",
+                }
+            ),
+            encoding="utf-8",
+        )
+        config = base_module.transformers.AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=False)
+    else:
+        config = types.SimpleNamespace(architectures=["Lfm2VlForConditionalGeneration"])
     monkeypatch.setattr(builder_module, "LFM2Model", FakeLFM2Model)
 
     builder_module.create_model(
