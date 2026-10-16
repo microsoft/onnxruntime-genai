@@ -225,7 +225,7 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
         assert asr_example.format_timestamp_records(result, True) == ""
 
 
-def test_token_postprocessor_results_are_owned_and_reads_are_repeatable(test_data_path):
+def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
@@ -237,33 +237,51 @@ def test_token_postprocessor_results_are_owned_and_reads_are_repeatable(test_dat
     assert processor.get_next_token_results() == []
     processor.finalize()
     initial = processor.get_next_token_results()[0]
-    assert initial.text == ""
+    assert initial.get_text() == ""
     assert initial.get_timestamps() is None
     processor.reset()
+    with pytest.raises(RuntimeError, match="expired"):
+        initial.get_text()
     generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
     retained = []
     for _ in range(2):
         generator.generate_next_token()
+        for previous, expected_text in retained:
+            assert previous.get_text() == expected_text
         expected = plain.decode(int(generator.get_next_tokens()[0]))
         processor.process_next_tokens()
+        for previous, _ in retained:
+            with pytest.raises(RuntimeError, match="expired"):
+                previous.get_text()
+            with pytest.raises(RuntimeError, match="expired"):
+                previous.get_timestamps()
+        retained.clear()
         results = processor.get_next_token_results()
         assert len(results) == 1
         result = results[0]
-        assert isinstance(result, og.TokenMetadataOutput)
-        assert result.text == expected
+        assert isinstance(result, og.TokenPostProcessorResult)
+        assert result.get_text() == expected
         assert result.get_timestamps() is None
-        assert processor.get_next_token_results()[0].text == expected
+        assert processor.get_next_token_results()[0].get_text() == expected
         retained.append((result, expected))
     del generator
     processor.finalize()
+    with pytest.raises(RuntimeError, match="expired"):
+        result.get_text()
     processor.finalize()
-    assert processor.get_next_token_results()[0].text == ""
+    final_result = processor.get_next_token_results()[0]
+    assert final_result.get_text() == ""
     processor.reset()
     assert processor.get_next_token_results() == []
+    with pytest.raises(RuntimeError, match="expired"):
+        final_result.get_text()
+    processor.finalize()
+    before_destruction = processor.get_next_token_results()[0]
+    copied_text = before_destruction.get_text()
     del processor
-    for result, expected in retained:
-        assert result.text == expected
-        assert result.timestamp_metadata is None
+    with pytest.raises(RuntimeError, match="expired"):
+        before_destruction.get_text()
+    assert copied_text == ""
 
 
 @pytest.mark.parametrize("search", [{"batch_size": 2}, {"num_beams": 2}])

@@ -394,16 +394,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaTokenPostProcessorResultGetText(IntPtr result);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        [return: MarshalAs(UnmanagedType.I1)]
-        public static extern bool OgaTokenPostProcessorResultHasTimestamps(IntPtr result);
+        public static extern IntPtr OgaTokenPostProcessorResultGetTimestamps(IntPtr result);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaTokenPostProcessorResultGetWordCount(IntPtr result);
+        public static extern UIntPtr OgaTokenPostProcessorTimestampGetWordCount(IntPtr timestamps);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaTokenPostProcessorResultGetSegmentCount(IntPtr result);
+        public static extern UIntPtr OgaTokenPostProcessorTimestampGetSegmentCount(IntPtr timestamps);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorResultGetWord(IntPtr result, UIntPtr index);
+        public static extern IntPtr OgaTokenPostProcessorTimestampGetWord(IntPtr timestamps, UIntPtr index);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaTokenPostProcessorResultGetSegment(IntPtr result, UIntPtr index);
+        public static extern IntPtr OgaTokenPostProcessorTimestampGetSegment(IntPtr timestamps, UIntPtr index);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaTokenPostProcessorTimestampRecordGetText(IntPtr record);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

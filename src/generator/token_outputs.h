@@ -3,21 +3,25 @@
 #include "ort_genai_c.h"
 #include "span.h"
 
+#include <memory>
+
 namespace Generators {
 
 struct Generator;
-class TokenPostProcessor;
-
 class TokenOutputs {
   friend struct Generator;
-  friend class TokenPostProcessor;
+
+ public:
+  ~TokenOutputs();
+  TokenOutputs(TokenOutputs&&) noexcept;
+  std::span<const int32_t> GetTokens() const;
+  const std::span<const OgaTokenMetadataAcousticFrameInterval>* GetTimestamps() const;
 
  private:
-  TokenOutputs(std::span<const int32_t> tokens,
-               std::span<const OgaTokenMetadataAcousticFrameInterval> intervals)
-      : tokens_{tokens}, intervals_{intervals} {}
-  std::span<const int32_t> tokens_;
-  std::span<const OgaTokenMetadataAcousticFrameInterval> intervals_;
+  explicit TokenOutputs(std::span<const int32_t> tokens);
+  void SetTimestamps(std::span<const OgaTokenMetadataAcousticFrameInterval> intervals);
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace Generators

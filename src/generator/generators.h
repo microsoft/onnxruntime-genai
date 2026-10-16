@@ -182,7 +182,6 @@ struct Generator : LeakChecked<Generator> {
  private:
   friend class TokenPostProcessor;
   TokenOutputs GetTokenOutputs() const;
-  std::shared_ptr<int> postprocessor_lifetime_{std::make_shared<int>(0)};
 #if defined(_MSC_VER)
   [[msvc::no_unique_address]]
 #else

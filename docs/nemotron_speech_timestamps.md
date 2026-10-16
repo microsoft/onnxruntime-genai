@@ -111,20 +111,21 @@ Enabled timestamps require present, valid acoustic timing. Intervals are half-op
 `[start, stop)` and may span multiple frames. A processor requires the same model
 as its generator, `batch_size=1`, and `num_beams=1`.
 
-The returned `text` is the ordinary incremental decoded fragment and remains available for partial
+`GetText()` / `get_text()` returns the ordinary incremental decoded fragment for partial
 display. Applications that need only stable output can instead append completed word or segment
 event text as it arrives.
 
 Completed words retain their original leading whitespace and attached punctuation. Segment text is
 the exact concatenation of its words; no whitespace is trimmed or synthesized. After finalization,
 concatenating all emitted words or all emitted segments reproduces the decoded transcript exactly.
-Copy native records before the next processor mutation. C# and Python bindings perform this copy
-automatically.
+In every binding, read and copy needed text and scalar values into the application's
+transcript before the next processor mutation. Result wrappers do not retain old native output.
 
 C/C++ expose opaque result and timestamp-record handles with typed accessors.
-C# and Python copy word and segment collections into `TokenMetadataTimestamp`,
-available through `GetTimestamps()` and `get_timestamps()` respectively.
-Python exposes typed `TokenMetadataTimestampRecord` entries rather than dictionaries.
+C# and Python expose the same borrowed timestamp output through nullable
+`GetTimestamps()` and `get_timestamps()`. Read records using `GetWords()` / `GetSegments()`
+or `get_words()` / `get_segments()`, then the record's text/frame/time accessors.
+The returned objects are opaque wrappers, not dictionaries or copied metadata objects.
 They are per-call event lists,
 not cumulative history. Each list is
 empty when that call completes no records, and it may contain multiple records when one decoded

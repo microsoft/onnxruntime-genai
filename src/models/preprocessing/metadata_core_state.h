@@ -20,24 +20,22 @@ struct TokenMetadataInput {
   OgaTokenMetadataAcousticFrameInterval token_acoustic_frame_interval;
 };
 
-struct TimestampRecordView {
-  const char* text;
+struct TimestampRecord {
+  std::string text;
   int64_t start_frame;
   int64_t stop_frame;
   double start_time;
   double stop_time;
 };
 
-struct TimestampResultView {
-  const TimestampRecordView* words;
-  size_t word_count;
-  const TimestampRecordView* segments;
-  size_t segment_count;
+struct TimestampResult {
+  std::vector<TimestampRecord> words;
+  std::vector<TimestampRecord> segments;
 };
 
-struct MetadataOutput {
-  const char* text;
-  const TimestampResultView* timestampMetadata;
+struct PostProcessorResult {
+  std::string text;
+  std::optional<TimestampResult> timestamps;
 };
 
 // Processor-specific grouping settings and model timing.
@@ -64,19 +62,16 @@ class MetadataCoreState {
   MetadataCoreState& operator=(const MetadataCoreState&) = delete;
   bool TimestampsEnabled() const { return config_.timestamps.level != Config::TimestampLevel::Off; }
   void ValidateInput(const TokenMetadataInput& token) const;
-  const MetadataOutput& ProcessDecoded(const TokenMetadataInput& token, const char* text, const OrtxWordPieceInfo& piece);
-  const MetadataOutput& ProcessFinalized();
-  void BeginResult(const char* text);
-  void ConsumeCompletedWords();
-  void PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval);
-  void CompleteSegment();
-  void AddRecord(std::vector<TimestampRecordView>& records, std::string_view text,
+  void ProcessDecoded(const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, PostProcessorResult& result);
+  void ProcessFinalized(PostProcessorResult& result);
+  void ProcessCompletedWords(TimestampResult& result);
+  void PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval, TimestampResult& result);
+  void CompleteSegment(TimestampResult& result);
+  void AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
                  OgaTokenMetadataAcousticFrameInterval interval);
-  const MetadataOutput& PublishResult();
 
-  const MetadataCoreConfig config_;
+  const MetadataCoreConfig& config_;
   TokenWordGroupingState word_grouping_;
-  std::string text_;
   std::optional<int> segment_gap_threshold_frames_;
   double seconds_per_frame_{};
   // Keep intervals until the word grouper's pending-token watermark releases them.
@@ -84,12 +79,6 @@ class MetadataCoreState {
   size_t first_pending_token_index_{};
   std::optional<std::string> pending_segment_text_;
   OgaTokenMetadataAcousticFrameInterval pending_segment_interval_{};
-  // Internal records borrow text from this per-call storage until the next processing operation.
-  std::deque<std::string> record_texts_;
-  std::vector<TimestampRecordView> word_records_;
-  std::vector<TimestampRecordView> segment_records_;
-  TimestampResultView timestamp_result_{};
-  MetadataOutput result_{};
 };
 
 }  // namespace Generators
