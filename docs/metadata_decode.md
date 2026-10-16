@@ -56,26 +56,42 @@ configuration for a fresh sequence. It does not reset the generator.
 
 ## Internal Flow
 
+The following native method flow starts after `Generator::GenerateNextToken()`
+has produced a step's token IDs and acoustic intervals. It shows timestamps
+enabled; the processor handles every emission in order, including empty decoded
+fragments. The language bindings forward processing to this same native path.
+
 ```mermaid
 flowchart TD
-  process[TokenPostProcessor.ProcessNextTokens] --> outputs[Private Generator.GetTokenOutputs]
-  outputs --> each[For each emission in order]
-  each --> validate[Validate required acoustic interval]
-  validate --> enabled{Timestamps enabled?}
-  enabled -->|Yes| facts[Private Tokenizer.GetWordPieceInfo]
-  enabled -->|No| decode
-  facts --> lookup[Extensions OrtxGetTokenWordPieceInfo]
-  lookup --> decode[Ordinary TokenizerStream.Decode]
-  decode --> cache[Extensions OrtxDetokenizeCached]
-  cache --> group[GenAI MetadataCoreState: exact text + lexical facts + interval]
-  group --> results[Processor-owned completed results]
-  results --> read[GetNextTokenResults: read only]
+  process["TokenPostProcessor::ProcessNextTokens()"] --> clear["Clear previous results"]
+  clear --> outputs["Generator::GetTokenOutputs() - private"]
+  outputs --> tokens["TransducerState::GetStepTokens()"]
+  tokens --> config["Check generator model timestamp_level != Off"]
+  config --> intervals["TransducerState::GetStepTokenIntervals()<br/>Validate interval count equals token count"]
+  intervals --> set["TokenOutputs::SetTimestamps()"]
+  set --> access["TokenOutputs::GetTokens() / GetTimestamps()"]
+  access --> each{"Another emitted token?"}
+  each -->|Yes| validate["MetadataCoreState::ValidateInput()<br/>TimestampsEnabled(): require 0 <= start < stop"]
+  validate --> enabled["MetadataCoreState::TimestampsEnabled()"]
+  enabled --> facts["Tokenizer::GetWordPieceInfo(token_id)"]
+  facts --> lookup["Extensions: OrtxGetTokenWordPieceInfo()"]
+  lookup --> decode["TokenizerStream::Decode(token_id)"]
+  decode --> cache["Extensions: OrtxDetokenizeCached()"]
+  cache --> result["Create processor-owned result<br/>Store exact decoded text"]
+  result --> metadata["MetadataCoreState::ProcessDecoded(token, piece, result)<br/>Detailed flow below"]
+  metadata --> each
+  each -->|No| done["ProcessNextTokens() returns"]
+  done -.->|Caller reads| read["TokenPostProcessor::GetNextTokenResults()<br/>GetText() / nullable GetTimestamps()"]
 ```
 
 The private generator getter views existing token and interval storage without
 advancing generation. It is accessible only to the native processor, not through
 the public C, C++, C#, or Python generator APIs. `GenerateNextToken()` is unchanged.
 `TokenOutputs` hides its storage behind accessors; disabled timestamp data is null.
+The getter selects optional timestamp output from
+`model_->config_->model.timestamp_level` directly. The transducer's cached
+timestamp flag controls interval production only; it does not select the getter's
+output fields. A token/interval count mismatch fails before per-token decoding.
 
 Extensions owns vocabulary-specific facts: `is_special`, `starts_word`,
 `ends_word`, and `boundary_style`. Its standalone lookup is independent of decoder
@@ -89,6 +105,53 @@ punctuation. Half-open token spans map to the first and last contributing acoust
 intervals by position, never by token ID. Intervals remain buffered until no
 pending word or decoder output needs them. Unfinished segments persist across
 processing calls.
+
+### MetadataCoreState Calls
+
+`ProcessDecoded()` writes into the result created by the processor; it does not
+construct another output representation. `PublishWord()` evaluates word output
+first, then segment output. The conditional branches below show its possible
+helper calls, not concurrent processing.
+
+```mermaid
+flowchart TD
+  decoded["MetadataCoreState::ProcessDecoded()"] --> enabled["TimestampsEnabled()"]
+  enabled --> retain["Create result.timestamps<br/>Append this token's acoustic interval to pending buffer"]
+  retain --> group["TokenWordGroupingState::Process(piece, result.text)"]
+  group -.->|For nonempty text parts| parts["ProcessTextPart()<br/>IsWhitespace() / IsPunctuation()<br/>Append() / CompleteWord() as needed"]
+  group --> completed["MetadataCoreState::ProcessCompletedWords()"]
+  completed --> words["TokenWordGroupingState::CompletedWords()"]
+  words --> align["For each completed word:<br/>validate token span; take first.start and last.stop"]
+  align --> publish["MetadataCoreState::PublishWord(text, interval, timestamps)"]
+  publish -->|word or all| word["AddRecord(timestamps.words)<br/>RoundTimestamp(start and stop seconds)"]
+  publish -->|segment or all| gap["Check gap against pending segment"]
+  gap -->|Gap completes prior segment| prior["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
+  gap --> pending["Start or extend pending segment text and interval"]
+  prior --> pending
+  pending --> separator["EndsWithSeparator() for configured suffixes"]
+  separator -->|Suffix completes segment| finish["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
+  completed --> release["After all completed words:<br/>TokenWordGroupingState::FirstPendingTokenIndex()<br/>Release intervals before that watermark"]
+  release --> returned["Return to TokenPostProcessor with result populated"]
+```
+
+The grouper buffers incomplete words, whitespace, and UTF-8 output. It may
+complete zero or multiple words from one token. `AddRecord()` preserves text and
+frame bounds and converts each bound to seconds with `RoundTimestamp()`. No
+completed-word event means no word/segment publication, but pending intervals and
+grouping state still advance. A suffix-BPE end marker can also call
+`CompleteWord()` directly from `Process()`.
+
+After the last generation step, flush pending work without decoding a token:
+
+```mermaid
+flowchart TD
+  finalize["TokenPostProcessor::Finalize()<br/>Clear previous results; create final result"] --> state["MetadataCoreState::ProcessFinalized()"]
+  state --> enabled["TimestampsEnabled()"]
+  enabled --> group["TokenWordGroupingState::Finalize()<br/>Append() pending delimiter; CompleteWord()"]
+  group --> words["MetadataCoreState::ProcessCompletedWords()<br/>Same alignment/publication path as above"]
+  words --> segment["MetadataCoreState::CompleteSegment()<br/>Flush any remaining segment with AddRecord()"]
+  segment -.->|Caller reads| results["GetNextTokenResults()"]
+```
 
 ## Configuration
 
