@@ -731,6 +731,8 @@ struct Config {
         std::string q_row_map{"q_row_map"};
         std::string qkv_row_map{"qkv_row_map"};
         std::string block_row_index{"block_row_index"};
+        // Optional (LiLiCorr): packed aux_hidden_states row of each request's last context row.
+        std::string anchor_row_index;
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
