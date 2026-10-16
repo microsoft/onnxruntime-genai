@@ -532,7 +532,9 @@ of each other. The BoolQ accuracy counts P(yes) above 0.5 as yes, so an exact 0.
 **fp16 on CUDA.** The fp16 export returns fp16 logits, so two close options can get exactly the same
 probability (for a `noul`, P(yes) is then exactly 0.5). For a `choice` or a `score`, a tie goes to the
 first option, as in d1. All 5 changed answers in the CUDA fp16 rows above were such exact ties in GenAI.
-An export with `-p bf16` returns fp32 logits instead.
+`-p bf16` does not help: its logits are float32, but they come from a bf16 MatMul, so they are coarser
+than fp16. On the same BoolQ and MNLI items, bf16 gave 994 and 988 same top answers (fp16: 998 and 997)
+and more exact ties. Use fp16 on CUDA.
 
 Long states (one question, Linux):
 
