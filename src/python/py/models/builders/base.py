@@ -2349,6 +2349,11 @@ class Model:
         self.make_node("ReduceMax", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
 
+    def make_cumsum(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("CumSum", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
     def make_reduce_mean(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
         self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
@@ -5951,62 +5956,104 @@ class Model:
             self.layernorm_attrs[key] = selected[name]
         self.hidden_rows_dim = "num_logits"
 
-    def make_last_real_token_selection(self, basename, root_input):
-        """Pick each row's last real token from [B, S, H] hidden states and return the [B, 1, H] output name.
+    def make_last_real_token_position(self, root_input):
+        """Find where each row's real tokens end in this step and return the [B, 1] int32 output name.
 
-        This expects right padding, as onnxruntime-genai produces. Left-padded inputs are not supported:
-        they pick a pad column. A row with n real tokens ends at index n - 1, where n is
-        ReduceSum(attention_mask). The index is min(n, S) - 1. In decode S is 1, so the index is 0. In a
-        batch-1 continuation the mask also counts past tokens, so the index is S - 1, the last new token.
-        A static mask is zero after the real tokens, so n is the same.
+        The result is n = min(p, S). p is the position after the last 1 in the row's attention_mask (0 when
+        the row has no 1), and S is the sequence length of root_input, any [B, S, ...] tensor of this step.
+        The row's last real token in this step is at index n - 1. When n is 0, this step has none.
 
-        After the first prefill, every row must add the same number of new tokens, with no padding inside
-        the new chunk. og.Generator does this. A padded batch > 1 continuation or chunked prefill would
-        pick a pad column, as the old last-column Gather also did.
+        This is right for every mask onnxruntime-genai's Generator API makes, and for other common ones:
+        - a right-padded first prefill: p is the row's real length (genai pads batches on the right);
+        - a left-padded prefill: p is S;
+        - zeros inside the row: the Qwen-VL mask is 0 at every pad-id token, also inside a prompt;
+        - a static mask, zero-filled to max_length for graph capture: the zeros come after p;
+        - decode: S is 1, so n is 1;
+        - a batch-1 continuation: the mask also counts past tokens, so n is S;
+        - a row with no 1: n is 0.
+        After the first prefill, every row must add the same number of new tokens, with no padding at the
+        end of the new chunk. og.Generator does this.
+
+        The nodes have fixed names, so every caller shares them: make_node skips names that already exist.
+        S then comes from the first caller's root_input, which is fine because every caller passes a
+        tensor of the same step.
         """
-        #   attention_mask    root_input -------------------------------+
-        #         |               |                                     |
-        #     ReduceSum     Shape(start=1, end=2)                       |
-        #         |               |                                     |
-        #         |           Expand(1)                                 |
-        #         |               |                                     |
-        #         |           ReduceSum                                 |
-        #          \             /                                      |
-        #           +--- Min ---+                                       |
-        #                 |                                             |
-        #       Sub(1) --> Max(0) --> Unsqueeze --> Expand              |
-        #                                             |                 |
-        #                                     GatherElements(axis=1) ---+
+        #   attention_mask
+        #         |
+        #   Cast(int32) ---------------------+                root_input
+        #         |                          |                    |
+        #   Shape(start=1, end=2)            |            Shape(start=1, end=2)
+        #         |                          |                    |
+        #     Expand(1)                      |                Expand(1)
+        #         |                          |                    |
+        #    CumSum(axis=0)                  |                ReduceSum
+        #    [1, 2, ..., T]                  |                    |
+        #          \                         |                    |
+        #           +--------- Mul ----------+                    |
+        #                       |                                 |
+        #                ReduceMax(axis=1)                        |
+        #                        \                               /
+        #                         +------------ Min ------------+
         #
-        # Shape writes [S] on the CPU and Expand reads its shape input on the CPU, so S reaches the
-        # device as S ones. With CUDA, and with WebGPU when its graph capture is on, this adds no copy
-        # node; a copy node would block graph capture. A plain Shape -> Gather -> Sub was measured to add
-        # one on CUDA. On WebGPU without graph capture, the int64 index math runs on the CPU and the
-        # index tensor is copied to the device on each run.
-        mask_sum_name = f"{basename}/ReduceSum"
-        mask_sum_inputs = [self.input_names["attention_mask"], "/model/constants/INT64/[1]"]
-        self.make_reduce_sum(mask_sum_name, mask_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1], keepdims=True)
+        # Shape writes its output on the CPU, and Expand reads its shape input on the CPU, so T and S reach
+        # the device as rows of ones. With CUDA, and with WebGPU when its graph capture is on, this adds no
+        # copy node; a copy node would block graph capture. Shape -> Gather -> Sub feeding a device op
+        # (measured with Clip) added one on CUDA. The math is int32 because WebGPU has no int64 CumSum or
+        # ReduceMax, and its Shape does not take an int64 input. WebGPU exports built without
+        # enable_webgpu_graph run the Cast on the CPU and copy the int32 mask to the device on each run.
+        basename = "/model/last_real_token"
+
+        mask_name = f"{basename}/Cast"
+        self.make_cast(mask_name, self.input_names["attention_mask"], dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+        mask = f"{mask_name}/output_0"
+        total_shape_name = f"{basename}/positions/Shape"
+        self.make_shape(total_shape_name, mask, shape=[1], start=1, end=2)
+        total_ones_name = f"{basename}/positions/Expand"
+        total_ones_inputs = ["/model/constants/INT32/[1]", f"{total_shape_name}/output_0"]
+        self.make_expand(total_ones_name, total_ones_inputs, dtype=ir.DataType.INT32, shape=["total_sequence_length"])
+        positions_name = f"{basename}/positions/CumSum"
+        self.make_cumsum(positions_name, [f"{total_ones_name}/output_0", "/model/constants/INT64/0"], dtype=ir.DataType.INT32, shape=["total_sequence_length"])
+        mul_name = f"{basename}/Mul"
+        self.make_mul(mul_name, [mask, f"{positions_name}/output_0"], dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+        end_name = f"{basename}/ReduceMax"
+        end_inputs = [f"{mul_name}/output_0", "/model/constants/INT64/[1]"]
+        self.make_reduce_max(end_name, end_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1], keepdims=True)
 
         seq_shape_name = f"{basename}/seq_len/Shape"
         self.make_shape(seq_shape_name, root_input, shape=[1], start=1, end=2)
-        ones_name = f"{basename}/seq_len/Expand"
-        self.make_expand(ones_name, ["/model/constants/INT64/[1]", f"{seq_shape_name}/output_0"], dtype=ir.DataType.INT64, shape=["sequence_length"])
+        seq_ones_name = f"{basename}/seq_len/Expand"
+        seq_ones_inputs = ["/model/constants/INT32/[1]", f"{seq_shape_name}/output_0"]
+        self.make_expand(seq_ones_name, seq_ones_inputs, dtype=ir.DataType.INT32, shape=["sequence_length"])
         seq_len_name = f"{basename}/seq_len/ReduceSum"
-        self.make_reduce_sum(seq_len_name, [f"{ones_name}/output_0"], dtype=ir.DataType.INT64, shape=[1], keepdims=True)
+        self.make_reduce_sum(seq_len_name, [f"{seq_ones_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT32, shape=[1], keepdims=True)
 
         min_name = f"{basename}/Min"
-        self.make_min(min_name, [f"{mask_sum_name}/output_0", f"{seq_len_name}/output_0"], dtype=ir.DataType.INT64, shape=["batch_size", 1])
+        self.make_min(min_name, [f"{end_name}/output_0", f"{seq_len_name}/output_0"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        return f"{min_name}/output_0"
+
+    def make_last_real_token_selection(self, basename, root_input):
+        """Pick each row's last real token from [B, S, H] hidden states and return the [B, 1, H] output name.
+
+        The index is n - 1, with n from make_last_real_token_position. A row with no real token reads
+        column 0.
+        """
+        #   n (make_last_real_token_position)       root_input
+        #         |                                     |
+        #   Sub(1) --> Max(0) --> Unsqueeze --> Expand  |
+        #                                         |     |
+        #                               GatherElements(axis=1)
         sub_name = f"{basename}/Sub"
-        self.make_sub(sub_name, [f"{min_name}/output_0", "/model/constants/INT64/1"], dtype=ir.DataType.INT64, shape=["batch_size", 1])
+        sub_inputs = [self.make_last_real_token_position(root_input), "/model/constants/INT32/1"]
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
         # A row with no real token would give -1, so keep the index at 0 or more.
         max_name = f"{basename}/Max"
-        self.make_max(max_name, [f"{sub_name}/output_0", "/model/constants/INT64/0"], dtype=ir.DataType.INT64, shape=["batch_size", 1])
+        self.make_max(max_name, [f"{sub_name}/output_0", "/model/constants/INT32/0"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
         unsqueeze_name = f"{basename}/Unsqueeze"
-        self.make_unsqueeze(unsqueeze_name, [f"{max_name}/output_0", "/model/constants/INT64/[2]"], dtype=ir.DataType.INT64, shape=["batch_size", 1, 1])
+        self.make_unsqueeze(unsqueeze_name, [f"{max_name}/output_0", "/model/constants/INT64/[2]"], dtype=ir.DataType.INT32, shape=["batch_size", 1, 1])
         # GatherElements returns the shape of its indices, so this assumes the LM head input is hidden_size wide.
         expand_name = f"{basename}/Expand"
         expand_inputs = [f"{unsqueeze_name}/output_0", f"/model/constants/INT64/[1, 1, {self.hidden_size}]"]
-        self.make_expand(expand_name, expand_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1, self.hidden_size])
+        self.make_expand(expand_name, expand_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1, self.hidden_size])
 
         gather_name = f"{basename}/GatherElements"
         self.make_gather_elements(gather_name, [root_input, f"{expand_name}/output_0"], dtype=self.io_dtype, shape=["batch_size", 1, self.hidden_size], axis=1)
@@ -6060,8 +6107,9 @@ class Model:
             if "attention_mask" in self.input_names:
                 root_input = self.make_last_real_token_selection(f"{basename}/prune", root_input)
             else:
-                # Without a mask, take the last column. Among non-paged exports only the Whisper decoder
-                # gets here, and its decoder prompts have the same length in every row, so nothing is padded.
+                # Without a mask, take the last column, as before. Among non-paged exports only the Whisper
+                # decoder gets here. Its decoder prompts usually have the same length in every row, but they
+                # can differ, and then the shorter rows read a pad column, as they did before.
                 # Gather: [B, S, H] + scalar(-1) -> [B, H]
                 gather_name = f"{basename}/prune/Gather"
                 self.make_gather(gather_name, inputs=[root_input, "/model/constants/INT64/-1"], dtype=self.io_dtype, shape=["batch_size", self.hidden_size], axis=1)

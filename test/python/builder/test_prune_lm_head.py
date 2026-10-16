@@ -3,8 +3,8 @@
 
 """Tests for `prune_lm_head=true` on standard (non-paged) models.
 
-A pruned LM head projects one hidden state per row. Batches are padded on the right, so that state
-must be each row's last real token, not the last column. The graph finds it from `attention_mask`.
+A pruned LM head projects one hidden state per row. In a padded batch that state must be each row's
+last real token, not the last column. The graph takes it at the last 1 in `attention_mask`.
 """
 
 from __future__ import annotations
@@ -68,15 +68,20 @@ def _make_lm_head_graph(tmp_path, io_dtype, with_mask):
 @pytest.mark.parametrize(
     "mask, sequence_length, expected_columns",
     [
-        # First prefill of a right-padded batch: past is empty, so the last real token is at sum - 1.
+        # First prefill of a right-padded batch (genai pads on the right): each row's last 1.
         ([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1], [1, 0, 0, 0, 0]], 5, [2, 4, 0]),
+        # Left padding: every row ends at the last column.
+        ([[0, 0, 1, 1, 1], [1, 1, 1, 1, 1]], 5, [4, 4]),
+        # Zeros inside a row: the Qwen-VL mask is 0 at every pad-id token, also inside a prompt.
+        ([[1, 1, 0, 1, 1]], 5, [4]),
+        ([[1, 0, 1, 0, 0], [1, 1, 0, 1, 1]], 5, [2, 4]),
         # Decode: one new token per row, so the only column is picked even though the mask is longer.
         ([[1, 1, 1, 0, 0, 1], [1, 1, 1, 1, 1, 1]], 1, [0, 0]),
         # Batch-1 continuation (chunked prefill or append after generate): the last new token.
         ([[1, 1, 1, 1, 1, 1, 1]], 3, [2]),
         # Continuation over a padded past: every row adds the same 3 tokens, so both pick the last one.
         ([[1, 1, 1, 0, 0, 1, 1, 1], [1, 1, 1, 1, 1, 1, 1, 1]], 3, [2, 2]),
-        # Static mask (graph capture): zeros fill the buffer to max_length, so the sum is unchanged.
+        # Static mask (graph capture): zeros fill the buffer to max_length, after the last real token.
         ([[1, 1, 0, 0, 0, 0, 0, 0], [1, 1, 1, 1, 0, 0, 0, 0]], 4, [1, 3]),
         # A row with no real token reads column 0 instead of going out of range.
         ([[0, 0, 0], [1, 1, 1]], 3, [0, 2]),
@@ -100,14 +105,16 @@ def test_pruned_lm_head_picks_each_rows_last_real_token(
     assert session.get_outputs()[0].shape == ["batch_size", 1, HIDDEN_SIZE]
 
 
-def test_pruned_lm_head_uses_the_shape_only_as_an_expand_shape(tmp_path):
+def test_pruned_lm_head_uses_shapes_only_as_expand_shapes(tmp_path):
     # Shape writes on the CPU. If its output fed device math, CUDA and WebGPU would add a copy node,
     # and a copy node blocks graph capture.
     model, _ = _make_lm_head_graph(tmp_path, ir.DataType.FLOAT, with_mask=True)
     shape_nodes = [node for node in model.model.graph if node.op_type == "Shape"]
-    assert len(shape_nodes) == 1
-    consumers = list(shape_nodes[0].outputs[0].uses())
-    assert [(node.op_type, index) for node, index in consumers] == [("Expand", 1)]
+    # One for the mask length T and one for the sequence length S.
+    assert len(shape_nodes) == 2
+    for shape_node in shape_nodes:
+        consumers = list(shape_node.outputs[0].uses())
+        assert [(node.op_type, index) for node, index in consumers] == [("Expand", 1)]
 
 
 def test_pruned_lm_head_without_attention_mask_keeps_the_last_column(tmp_path):
