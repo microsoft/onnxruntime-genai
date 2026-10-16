@@ -660,7 +660,6 @@ struct CudaBatchedSampler final : BatchedSampler {
 
 struct CudaInterfaceImplBase : DeviceInterface {
   CudaInterfaceImplBase() {
-    CUDA_CHECK(cudaGetDevice(&stream_device_id_));
     g_stream.Create();
   }
 
@@ -681,25 +680,6 @@ struct CudaInterfaceImplBase : DeviceInterface {
                                  OrtAllocatorType::OrtDeviceAllocator,
                                  device_id_,
                                  OrtMemType::OrtMemTypeDefault);
-  }
-
-  // The interface, its stream and the global device allocator are shared by every model in the process,
-  // so they can only be bound to one device. The stream was created on the device that was current at
-  // construction; recreate it on the selected device before it is handed to the EP. Makes the selected
-  // device current on the calling thread.
-  void SelectDevice(int device_id) override {
-    if (device_selected_ && device_id != device_id_)
-      throw std::runtime_error("CUDA device interface is already bound to device " + std::to_string(device_id_) +
-                               ", but this model requested device " + std::to_string(device_id) +
-                               ". Models in one process must target the same device.");
-    CUDA_CHECK(cudaSetDevice(device_id));
-    if (device_id != stream_device_id_) {
-      g_stream.Reset();
-      g_stream.Create();
-      stream_device_id_ = device_id;
-    }
-    device_id_ = device_id;
-    device_selected_ = true;
   }
 
   std::string GetExecutionProviderName() const override { return "cuda"; }
@@ -1041,9 +1021,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   cuda_unique_ptr<cuda::StateUpdateReplayDescGpu> state_update_replay_descriptors_;
   size_t state_update_replay_capacity_{0};
   std::vector<cuda::StateUpdateReplayDescGpu> ordered_replay_descriptors_;  // host scratch, fast kernel first
-  int device_id_{};                                                         // device the allocator binds to; 0 unless SelectDevice chose one
-  int stream_device_id_{};                                                  // device g_stream was created on
-  bool device_selected_{};
+  int device_id_{};                                                         // device the allocator binds to; 0 unless a derived interface binds another
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
@@ -1094,9 +1072,49 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
 };
 
 struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
+  NvTensorRtRtxInterfaceImpl() {
+    // The base constructor created g_stream on the device current at construction.
+    CUDA_CHECK(cudaGetDevice(&stream_device_id_));
+  }
+
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
   std::string GetExecutionProviderName() const override { return "NvTensorRtRtx"; }
   int GetDeviceId(const ProviderOptions*) override { return device_id_; }
+
+  // The interface, its stream and the global device allocator are shared by every model in the process,
+  // so they can only be bound to one device. Recreate the stream on the selected device if it is not yet
+  // bound, i.e. before it is first handed to an EP. Model inits may run concurrently, so binding is
+  // serialized. Makes the selected device current on the calling thread.
+  void SelectDevice(int device_id) override {
+    std::scoped_lock lock{device_binding_mutex_};
+    if (stream_bound_) {
+      if (device_id != device_id_)
+        throw std::runtime_error("NvTensorRtRtx device interface is already bound to CUDA device " +
+                                 std::to_string(device_id_) + ", but this model requested device " +
+                                 std::to_string(device_id) + ". Models in one process must target the same device.");
+      CUDA_CHECK(cudaSetDevice(device_id));
+      return;
+    }
+    CUDA_CHECK(cudaSetDevice(device_id));
+    if (device_id != stream_device_id_) {
+      g_stream.Reset();
+      g_stream.Create();
+      stream_device_id_ = device_id;
+    }
+    device_id_ = device_id;
+    stream_bound_ = true;
+  }
+
+  // Handing the stream to an EP binds the interface to the stream's device: it can no longer be recreated
+  // on another one without invalidating the stream that session holds.
+  void* GetCudaStream() override {
+    std::scoped_lock lock{device_binding_mutex_};
+    if (!stream_bound_) {
+      device_id_ = stream_device_id_;
+      stream_bound_ = true;
+    }
+    return GetStream();
+  }
 
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& /*search*/,
@@ -1136,6 +1154,11 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
 
     return false;
   }
+
+ private:
+  std::mutex device_binding_mutex_;
+  int stream_device_id_{};  // device g_stream was created on
+  bool stream_bound_{};     // device_id_ and g_stream are fixed once set
 };
 
 std::unique_ptr<DeviceInterface> g_cuda_device;
