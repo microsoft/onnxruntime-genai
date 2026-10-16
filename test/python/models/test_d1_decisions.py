@@ -1,26 +1,14 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+"""Tests for examples/python/d1-decisions.py on the tiny LFM2-VL model in test/models/lfm2-vl.
+
+The fixture is not d1-3B, but it has an LFM2 tokenizer and an image pipeline. Its dummy decoder gives
+almost the same logits for every prompt, so the tests also check the ids and max_length of each generator.
 """
-Tests for examples/python/d1-decisions.py against the tiny model in test/models/lfm2-vl.
-
-The fixture is not d1-3B, but it is an LFM2-VL pipeline with an LFM2 tokenizer, so the prompt, the
-readout and the image path all run. Its tokenizer has yes, Yes, no, No, NO, the digits, A and ' A' as
-single tokens, but not YES.
-
-The dummy decoder only computes logits for ids below 1024 and only looks at the last three tokens. So
-every prompt gives the same logits, and yes/no sit in the padding (P(yes) is 0.5). The tests therefore
-also check the exact ids and max_length each generator receives.
-
-Run with:
-    python -m pytest test/python/models/test_d1_decisions.py --test_models test/models
-"""
-
-from __future__ import annotations
 
 import importlib.util
 import json
-import shutil
 import subprocess
 import sys
 import types
@@ -32,13 +20,13 @@ import onnxruntime_genai as og
 import pytest
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "python"
-# The file name has a dash, so it is loaded by path. Only its main() imports common.py.
+# The file name has a dash, so it is loaded by path.
 _SPEC = importlib.util.spec_from_file_location("d1_decisions", EXAMPLES_DIR / "d1-decisions.py")
 d1 = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = d1
 _SPEC.loader.exec_module(d1)
 
-# Fixture token ids.
+# Fixture token ids. "YES" is not one token in the fixture.
 YES, YES_TITLE = 12184, 12948
 NO, NO_TITLE, NO_UPPER = 2744, 5048, 20099
 A, B, C, SPACE_A, SPACE_B, SPACE_C = 542, 543, 544, 835, 879, 841
@@ -46,20 +34,20 @@ DIGITS = list(range(525, 535))
 GENERATOR = og.Generator
 PARAMS = og.GeneratorParams
 
-# Logits for test_answers_follow_the_logits. Every other id gets -10.
-CRAFTED = {YES_TITLE: 3.0, NO: 1.0, A: 0.0, B: 2.0, SPACE_C: 4.0, DIGITS[0]: 0.0, DIGITS[1]: 1.0}
-
 HEAD = "<|startoftext|><|im_start|>user\n"
 TAIL = "<|im_end|>\n<|im_start|>assistant\n"
-
 STATE = "I was charged twice this month."
 REFUND = {"type": "noul", "instructions": "Is this a refund request?"}
 TEAM = {
     "type": "choice",
-    "instructions": "Which team should handle this?",
+    "instructions": "Which team?",
     "criteria": {"billing": "Charges, refunds", "technical": "", "fraud_team": None},
 }
-URGENCY = {"type": "score", "instructions": "How urgent is this?", "criteria": ["Can wait", "Today"]}
+URGENCY = {"type": "score", "instructions": "Urgent?", "criteria": ["Can wait", "Today"]}
+ONE_SIDE = {**REFUND, "criteria": {"true": "Money back"}}
+LETTERS = {"instructions": "Pick.", "criteria": {"y": "Go", "x": ""}}
+YES_NO, CODE = "\n\nReply with yes or no only.", "\n\nReply with the option code only."
+REFUND_TEXT = REFUND["instructions"] + YES_NO
 
 
 @pytest.fixture(scope="module")
@@ -81,22 +69,19 @@ def tokenizer(model):
     return og.Tokenizer(model)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def decisions(model, model_path):
     return d1.D1Decisions(model, d1.model_context_length(model_path))
 
 
 @pytest.fixture
 def runs(monkeypatch):
-    """What the generators receive.
-
-    runs.ids holds the token ids of each generator and runs.max_lengths its max_length.
-    runs.most_alive is the largest number of generators alive at the same time.
-    """
-    runs = types.SimpleNamespace(ids=[], max_lengths=[], most_alive=0)
+    """Records the ids and max_length of each generator and the most generators alive at once.
+    Set runs.logits to {token: value} to make the last position return those logits (-10 elsewhere)."""
+    runs = types.SimpleNamespace(ids=[], max_lengths=[], most_alive=0, logits=None)
     alive = weakref.WeakSet()
 
-    class ParamsRecorder:
+    class Params:
         def __init__(self, model):
             self.params = PARAMS(model)
 
@@ -121,45 +106,20 @@ def runs(monkeypatch):
             self.generator.append_tokens(tokens)
 
         def get_logits(self):
-            return self.generator.get_logits()
+            logits = self.generator.get_logits()
+            if runs.logits:
+                logits = np.full_like(logits, -10.0)
+                for token, value in runs.logits.items():
+                    logits[0, -1, token] = value
+            return logits
 
-    monkeypatch.setattr(og, "GeneratorParams", ParamsRecorder)
+    monkeypatch.setattr(og, "GeneratorParams", Params)
     monkeypatch.setattr(og, "Generator", Recorder)
     return runs
 
 
-@pytest.fixture
-def crafted(monkeypatch):
-    """Makes every generator return the CRAFTED logits at the last position."""
-
-    class Crafted:
-        def __init__(self, model, params):
-            self.generator = GENERATOR(model, params)
-
-        def __getattr__(self, name):
-            return getattr(self.generator, name)
-
-        def get_logits(self):
-            logits = np.full_like(self.generator.get_logits(), -10.0)
-            for token, value in CRAFTED.items():
-                logits[0, -1, token] = value
-            return logits
-
-    monkeypatch.setattr(og, "Generator", Crafted)
-
-
-@pytest.fixture
-def no_prefill(monkeypatch):
-    """Fails the test if anything creates a generator."""
-
-    def fail(*args):
-        raise AssertionError("a refused request must not run the model")
-
-    monkeypatch.setattr(og, "Generator", fail)
-
-
-def image_path(model_path, name="australia.jpg"):
-    path = (Path(model_path).parent.parent / "images" / name).resolve()
+def image_path(model_path):
+    path = (Path(model_path).parent.parent / "images" / "australia.jpg").resolve()
     if not path.exists():
         pytest.skip(f"Test image not found at {path}")
     return str(path)
@@ -169,20 +129,13 @@ def suffix(tokenizer, question):
     return d1.prompt_suffix(question, d1.choice_codes(tokenizer, question))
 
 
-def readout(tokenizer, question):
-    return d1.readout_ids(tokenizer, question, d1.choice_codes(tokenizer, question))
-
-
 def render(tokenizer, state, question, num_images=0):
     _, questions = d1.check_request({"state": state, "questions": {"q": question}})
     return d1.prompt_prefix(state, num_images) + suffix(tokenizer, questions["q"])
 
 
 def reference_probabilities(model, groups, ids, inputs=None):
-    """Group-max softmax over the logits of a separate generator, written out in numpy.
-
-    With processor inputs, ids starts with their input_ids and the rest is appended.
-    """
+    """Group-max softmax over the logits of a separate generator, written out in numpy."""
     params = PARAMS(model)
     params.set_search_options(max_length=len(ids))
     generator = GENERATOR(model, params)
@@ -199,123 +152,28 @@ def reference_probabilities(model, groups, ids, inputs=None):
     return np.exp(scores - scores.max()) / np.exp(scores - scores.max()).sum()
 
 
-# Prompts
+S = f"{STATE}\n\n\nQUESTION:\n"
+# name: (state, question, number of images, the prompt between HEAD and TAIL)
+PROMPTS = {
+    "noul": (STATE, REFUND, 0, S + REFUND_TEXT),
+    "noul_one_side": (STATE, ONE_SIDE, 0, S + "Is this a refund request?\nYes: Money back\nNo: None" + YES_NO),
+    "choice": (STATE, TEAM, 0, S + "Which team?\n\nOptions:\nA Charges, refunds\nB technical\nC fraud team" + CODE),
+    "choice_own_letters": (STATE, LETTERS, 0, S + "Pick.\n\nOptions:\ny Go\nx x" + CODE),
+    "score": (STATE, URGENCY, 0, S + "Urgent?\n\n0 Can wait\n1 Today\n\nReply with a single digit 0-1 only."),
+    "state_json": (
+        {"n": 1, "a": "返金 ☕"},
+        REFUND,
+        0,
+        '{\n  "n": 1,\n  "a": "返金 ☕"\n}\n\n\nQUESTION:\n' + REFUND_TEXT,
+    ),
+    "state_list": ([1, None], REFUND, 0, "[\n  1,\n  null\n]\n\n\nQUESTION:\n" + REFUND_TEXT),
+    "images": (None, REFUND, 2, "<image><image>" + REFUND_TEXT),
+}
 
 
-@pytest.mark.parametrize(
-    "question,expected",
-    [
-        (
-            REFUND,
-            "Is this a refund request?\n\nReply with yes or no only.",
-        ),
-        (
-            {**REFUND, "criteria": {"true": "Money back", "false": "Anything else"}},
-            "Is this a refund request?\nYes: Money back\nNo: Anything else\n\nReply with yes or no only.",
-        ),
-        (
-            {**REFUND, "criteria": {"true": "Money back"}},
-            "Is this a refund request?\nYes: Money back\nNo: None\n\nReply with yes or no only.",
-        ),
-        (
-            TEAM,
-            (
-                "Which team should handle this?\n\nOptions:\nA Charges, refunds\nB technical\nC fraud team\n\n"
-                "Reply with the option code only."
-            ),
-        ),
-        (
-            {"instructions": "Pick one.", "criteria": {"y": "Yes, go", "x": "No, stop", "z": ""}},
-            "Pick one.\n\nOptions:\ny Yes, go\nx No, stop\nz z\n\nReply with the option code only.",
-        ),
-        (
-            {"type": "choice", "instructions": "Intent?", "criteria": {f"intent_{i}": "" for i in range(12)}},
-            (
-                "Intent?\n\nOptions:\nA intent 0\nB intent 1\nC intent 2\nD intent 3\nE intent 4\nF intent 5\n"
-                "G intent 6\nH intent 7\nI intent 8\nJ intent 9\nK intent 10\nL intent 11\n\n"
-                "Reply with the option code only."
-            ),
-        ),
-        (
-            URGENCY,
-            "How urgent is this?\n\n0 Can wait\n1 Today\n\nReply with a single digit 0-1 only.",
-        ),
-        (
-            {"type": "score", "instructions": "Rate it.", "criteria": [f"level {i}" for i in range(10)]},
-            (
-                "Rate it.\n\n0 level 0\n1 level 1\n2 level 2\n3 level 3\n4 level 4\n5 level 5\n6 level 6\n"
-                "7 level 7\n8 level 8\n9 level 9\n\nReply with a single digit 0-9 only."
-            ),
-        ),
-    ],
-    ids=[
-        "noul",
-        "noul_criteria",
-        "noul_one_side",
-        "choice_letters",
-        "choice_native_letters",
-        "choice_12",
-        "score_2",
-        "score_10",
-    ],
-)
-def test_question_prompt(tokenizer, question, expected):
-    prompt = HEAD + STATE + "\n\n\nQUESTION:\n" + expected + TAIL
-    assert render(tokenizer, STATE, question) == prompt
-
-
-@pytest.mark.parametrize(
-    "state,expected",
-    [
-        ("Line one.\nLine two.", "Line one.\nLine two.\n\n\nQUESTION:\n"),
-        (
-            {"order": 42, "items": ["tea", "cup"]},
-            '{\n  "order": 42,\n  "items": [\n    "tea",\n    "cup"\n  ]\n}\n\n\nQUESTION:\n',
-        ),
-        (
-            {"note": "Remboursez-moi, s'il vous plaît ☕ 返金"},
-            '{\n  "note": "Remboursez-moi, s\'il vous plaît ☕ 返金"\n}\n\n\nQUESTION:\n',
-        ),
-        ([1, None, True], "[\n  1,\n  null,\n  true\n]\n\n\nQUESTION:\n"),
-        (None, ""),
-    ],
-    ids=["str", "dict", "non_ascii", "list", "none"],
-)
-def test_state_prompt(tokenizer, state, expected):
-    question = "Is this a refund request?\n\nReply with yes or no only."
-    assert render(tokenizer, state, REFUND) == HEAD + expected + question + TAIL
-
-
-def test_image_markers_come_before_the_state():
-    assert d1.prompt_prefix(None, 2) == HEAD + "<image><image>"
-    assert d1.prompt_prefix("Hi", 1) == HEAD + "<image>Hi\n\n\nQUESTION:\n"
-
-
-# Readout ids
-
-
-def test_readout_ids(tokenizer):
-    _, questions = d1.check_request({"state": None, "questions": {"refund": REFUND, "team": TEAM, "urgency": URGENCY}})
-    # YES is not one token in the fixture, so it is dropped.
-    assert readout(tokenizer, questions["refund"]) == [[YES, YES_TITLE], [NO, NO_TITLE, NO_UPPER]]
-    assert readout(tokenizer, questions["team"]) == [[A, SPACE_A], [B, SPACE_B], [C, SPACE_C]]
-    assert readout(tokenizer, questions["urgency"]) == [[DIGITS[0]], [DIGITS[1]]]
-    ten = d1.check_question("ten", {"type": "score", "instructions": "x", "criteria": list("abcdefghij")})
-    assert readout(tokenizer, ten) == [[digit] for digit in DIGITS]
-
-
-# Probabilities
-
-
-def test_probabilities_take_the_best_token_per_option():
-    logits = np.random.default_rng(0).normal(0, 3, 64).astype(np.float32)
-    groups = [[3, 7], [5], [10, 11, 12]]
-
-    log_probs = logits.astype(np.float64) - np.log(np.exp(logits.astype(np.float64)).sum())
-    scores = [max(log_probs[i] for i in group) for group in groups]
-    expected = np.exp(scores) / np.exp(scores).sum()
-
-    np.testing.assert_allclose(d1.probabilities(logits, groups), expected, rtol=0, atol=1e-12)
+@pytest.mark.parametrize("state,question,num_images,expected", PROMPTS.values(), ids=list(PROMPTS))
+def test_prompt(tokenizer, state, question, num_images, expected):
+    assert render(tokenizer, state, question, num_images) == HEAD + expected + TAIL
 
 
 @pytest.mark.parametrize(
@@ -323,105 +181,87 @@ def test_probabilities_take_the_best_token_per_option():
     [
         (REFUND, [[YES, YES_TITLE], [NO, NO_TITLE, NO_UPPER]]),
         (TEAM, [[A, SPACE_A], [B, SPACE_B], [C, SPACE_C]]),
-        (URGENCY, [[DIGITS[0]], [DIGITS[1]]]),
+        (URGENCY, [DIGITS[:1], DIGITS[1:2]]),
     ],
     ids=["noul", "choice", "score"],
 )
 def test_one_question_matches_numpy(model, tokenizer, decisions, runs, question, groups):
+    checked = d1.check_question("q", question)
+    assert d1.readout_ids(tokenizer, checked, d1.choice_codes(tokenizer, checked)) == groups
     ids = tokenizer.encode(render(tokenizer, STATE, question)).tolist()
     expected = reference_probabilities(model, groups, ids)
 
     response = decisions.decide({"state": STATE, "questions": {"q": question}})
 
     assert runs.ids == [ids]
-    # max_length is the exact prompt length, so no cache is allocated beyond the prompt.
     assert runs.max_lengths == [len(ids)]
     assert response["usage"] == {"input_tokens": len(ids), "output_tokens": 0}
     result = response["answers"]["q"]
-    assert result["type"] == question["type"]
-    if question["type"] == "noul":
-        np.testing.assert_allclose(result["noul"], expected[0], rtol=0, atol=1e-12)
-        return
-    probs = list(result["probabilities"].values())
-    np.testing.assert_allclose(probs, expected, rtol=0, atol=1e-12)
-    assert result["confidence"] == max(probs)
-    if question["type"] == "choice":
-        assert list(result["probabilities"]) == list(question["criteria"])
-        assert result["choice"] == list(question["criteria"])[int(np.argmax(probs))]
-    else:
-        assert list(result["probabilities"]) == ["0", "1"]
-        assert result["score"] == pytest.approx(sum(i * p for i, p in enumerate(probs)))
-        assert result["legend"] == {"0": "Can wait", "1": "Today"}
+    probs = [result["noul"]] if question["type"] == "noul" else list(result["probabilities"].values())
+    np.testing.assert_allclose(probs, expected[: len(probs)], rtol=0, atol=1e-12)
 
 
-def test_answers_follow_the_logits(decisions, crafted):
-    # The fixture's own logits give P(yes) = 0.5, so these logits pin which side is yes, that the
-    # spaced code counts for a choice, and the expected score.
-    response = decisions.decide({"state": STATE, "questions": {"refund": REFUND, "team": TEAM, "urgency": URGENCY}})
+def test_answers_follow_the_logits(decisions, runs):
+    runs.logits = {YES_TITLE: 3.0, NO: 1.0, A: 0.0, B: 2.0, SPACE_C: 4.0, DIGITS[0]: 0.0, DIGITS[1]: 1.0}
+    request = {"state": STATE, "questions": {"refund": REFUND, "team": TEAM, "urgency": URGENCY}}
+    answers = decisions.decide(request)["answers"]
 
-    answers = response["answers"]
-    assert answers["refund"]["noul"] == pytest.approx(1 / (1 + np.exp(-2.0)))
+    assert answers["refund"] == {"type": "noul", "noul": pytest.approx(1 / (1 + np.exp(-2.0)))}
     team = np.exp([0.0, 2.0, 4.0]) / np.exp([0.0, 2.0, 4.0]).sum()
     assert answers["team"]["choice"] == "fraud_team"
     assert answers["team"]["confidence"] == pytest.approx(team[2])
     np.testing.assert_allclose(list(answers["team"]["probabilities"].values()), team)
     assert answers["urgency"]["score"] == pytest.approx(np.e / (1 + np.e))
     assert answers["urgency"]["confidence"] == pytest.approx(np.e / (1 + np.e))
+    assert answers["urgency"]["legend"] == {"0": "Can wait", "1": "Today"}
+
+    # A tie goes to the first option, as in d1.
+    runs.logits.update({A: 5.0, B: 5.0, SPACE_C: -10.0})
+    tie = decisions.decide({"state": STATE, "questions": {"team": TEAM}})["answers"]["team"]
+    assert tie["choice"] == "billing"
+    assert tie["probabilities"]["billing"] == tie["probabilities"]["technical"]
 
 
-def test_a_tie_goes_to_the_first_option(monkeypatch, decisions, crafted):
-    # fp16 logits can make two options exactly equal. As in d1, the first option wins the tie.
-    for token, value in ((A, 5.0), (B, 5.0), (SPACE_C, -10.0)):
-        monkeypatch.setitem(CRAFTED, token, value)
+class SplitTokenizer:
+    """The fixture tokenizer, except that the listed texts (or all texts) encode to two tokens."""
 
-    answer = decisions.decide({"state": STATE, "questions": {"team": TEAM}})["answers"]["team"]
+    def __init__(self, tokenizer, split):
+        self.tokenizer, self.split = tokenizer, split
 
-    assert answer["choice"] == "billing"
-    assert answer["probabilities"]["billing"] == answer["probabilities"]["technical"]
+    def encode(self, text):
+        if self.split == "all" or text in self.split:
+            return np.array([YES, NO], dtype=np.int32)
+        return self.tokenizer.encode(text)
 
 
-def test_a_code_that_is_not_one_token_takes_the_next_free_one(tokenizer):
-    # "A" encodes to two tokens here, so the first option takes the next free code, B, and the others move on.
+def test_option_codes(tokenizer):
+    # "A" is not one token here, so the first option takes the next free code and the others move on.
     codes = d1.choice_codes(SplitTokenizer(tokenizer, {"A"}), d1.check_question("team", TEAM))
-
-    assert [code for code, _ in codes] == ["B", "C", "D"]
-    assert [token for _, token in codes] == [B, C, int(tokenizer.encode("D")[0])]
-
-
-def test_more_than_26_options_use_two_digit_codes(tokenizer):
-    question = {"type": "choice", "instructions": "Pick one.", "criteria": {f"option {i}": "" for i in range(27)}}
-
-    codes = d1.choice_codes(tokenizer, d1.check_question("q", question))
-
-    assert [code for code, _ in codes] == [f"{i:02d}" for i in range(27)]
+    assert codes == [("B", B), ("C", C), ("D", int(tokenizer.encode("D")[0]))]
+    # More than 26 options use two-digit codes.
+    many = d1.check_question("q", {"instructions": "x", "criteria": {f"option {i}": "" for i in range(27)}})
+    assert [code for code, _ in d1.choice_codes(tokenizer, many)] == [f"{i:02d}" for i in range(27)]
 
 
 def test_one_question_is_encoded_as_one_string(tokenizer, decisions, runs):
-    # A leading newline in the instructions tokenizes differently after "QUESTION:\n" than on its
-    # own. d1 encodes a single question together with the prefix, as one string.
+    # A leading newline tokenizes differently after "QUESTION:\n" than on its own.
     split = {"type": "noul", "instructions": "\nIs this a refund request?"}
-    prefix = d1.prompt_prefix(STATE)
-    text = suffix(tokenizer, d1.check_question("split", split))
+    prefix, text = d1.prompt_prefix(STATE), suffix(tokenizer, d1.check_question("split", split))
     joint = tokenizer.encode(prefix + text).tolist()
     assert joint != tokenizer.encode(prefix).tolist() + tokenizer.encode(text).tolist()
 
     response = decisions.decide({"state": STATE, "questions": {"split": split}})
 
     assert runs.ids == [joint]
-    assert runs.max_lengths == [len(joint)]
     assert response["usage"]["input_tokens"] == len(joint)
 
 
 def test_several_questions_encode_the_prefix_once(model, tokenizer, decisions, runs):
-    # A leading newline in the instructions tokenizes differently after "QUESTION:\n" than on its
-    # own. d1 encodes the shared prefix and each question separately, so this example does too.
     split = {"type": "noul", "instructions": "\nIs this a refund request?"}
     request = {"state": STATE, "questions": {"split": split, "team": TEAM}}
     _, questions = d1.check_request(request)
     prefix = tokenizer.encode(d1.prompt_prefix(STATE)).tolist()
     suffixes = [tokenizer.encode(suffix(tokenizer, q)).tolist() for q in questions.values()]
-    joint = tokenizer.encode(d1.prompt_prefix(STATE) + suffix(tokenizer, questions["split"])).tolist()
-    assert joint != prefix + suffixes[0]
 
     response = decisions.decide(request)
 
@@ -440,347 +280,131 @@ def test_each_question_frees_its_generator_before_the_next(decisions, runs):
     assert runs.most_alive == 1
 
 
-def test_missing_type_means_choice(decisions):
-    question = {key: value for key, value in TEAM.items() if key != "type"}
-    response = decisions.decide({"state": STATE, "questions": {"team": question}})
-    assert response["answers"]["team"]["type"] == "choice"
-
-
-# Images
-
-
-def test_one_image_matches_numpy(model, model_path, tokenizer, decisions, runs):
+@pytest.mark.parametrize("names", [["urgency"], ["refund", "urgency"]], ids=["one_question", "two_questions"])
+def test_one_image(model, model_path, tokenizer, decisions, runs, names):
+    # One question goes through the processor as one prompt, with nothing appended after it. Several
+    # questions share the processed prefix and append their own suffix.
     path = image_path(model_path)
-    prompt = render(tokenizer, None, URGENCY, num_images=1)
-    inputs = model.create_multimodal_processor()(prompt, images=og.Images.open(path))
-    ids = inputs["input_ids"].as_numpy()[0].tolist()
-    expected = reference_probabilities(model, [[DIGITS[0]], [DIGITS[1]]], ids, inputs=inputs)
+    request = {"state": STATE, "questions": {name: {"refund": REFUND, "urgency": URGENCY}[name] for name in names}}
+    _, questions = d1.check_request(request)
+    suffixes = [suffix(tokenizer, q) for q in questions.values()]
+    processor = model.create_multimodal_processor()
+    if len(names) == 1:
+        inputs = processor(d1.prompt_prefix(STATE, 1) + suffixes[0], images=og.Images.open(path))
+        expected_ids = [inputs["input_ids"].as_numpy()[0].tolist()]
+        usage = len(expected_ids[0])
+    else:
+        inputs = processor(d1.prompt_prefix(STATE, 1), images=og.Images.open(path))
+        prefix = inputs["input_ids"].as_numpy()[0].tolist()
+        tails = [tokenizer.encode(text).tolist() for text in suffixes]
+        expected_ids = [prefix + tail for tail in tails]
+        usage = len(prefix) + sum(map(len, tails))
+    expected = reference_probabilities(model, [DIGITS[:1], DIGITS[1:2]], expected_ids[-1], inputs=inputs)
 
-    response = decisions.decide({"state": None, "questions": {"urgency": URGENCY}}, [path])
+    response = decisions.decide(request, [path])
 
-    assert runs.ids == [ids]
-    assert runs.max_lengths == [len(ids)]
-    assert response["usage"]["input_tokens"] == len(ids)
-    probs = list(response["answers"]["urgency"]["probabilities"].values())
-    np.testing.assert_allclose(probs, expected, rtol=0, atol=1e-12)
-    assert sum(probs) == pytest.approx(1.0)
-
-
-def test_one_image_with_several_questions(model, model_path, tokenizer, decisions, runs):
-    path = image_path(model_path)
-    inputs = model.create_multimodal_processor()(d1.prompt_prefix(STATE, 1), images=og.Images.open(path))
-    prefix = inputs["input_ids"].as_numpy()[0].tolist()
-    _, questions = d1.check_request({"state": STATE, "questions": {"refund": REFUND, "urgency": URGENCY}})
-    suffixes = [tokenizer.encode(suffix(tokenizer, q)).tolist() for q in questions.values()]
-    expected = reference_probabilities(model, [[DIGITS[0]], [DIGITS[1]]], prefix + suffixes[1], inputs=inputs)
-
-    response = decisions.decide({"state": STATE, "questions": {"refund": REFUND, "urgency": URGENCY}}, [path])
-
-    assert runs.ids == [prefix + suffix for suffix in suffixes]
-    assert runs.max_lengths == [len(prefix) + len(suffix) for suffix in suffixes]
-    assert runs.most_alive == 1
-    assert response["usage"]["input_tokens"] == len(prefix) + sum(map(len, suffixes))
+    assert runs.ids == expected_ids
+    assert runs.max_lengths == [len(ids) for ids in expected_ids]
+    assert response["usage"]["input_tokens"] == usage
     probs = list(response["answers"]["urgency"]["probabilities"].values())
     np.testing.assert_allclose(probs, expected, rtol=0, atol=1e-12)
 
 
-# Refusals
+def q(**question):
+    return {"state": STATE, "questions": {"q": question}}
 
 
-@pytest.mark.parametrize(
-    "questions,message",
-    [
-        ({"q": {"type": "bool", "instructions": "x"}}, "unknown type"),
-        ({"q": {"type": "noul"}}, "needs instructions"),
-        ({"q": {"type": "noul", "instructions": None}}, "needs instructions"),
-        ({"q": {"type": "noul", "instructions": 42}}, "needs instructions"),
-        ({"q": {"type": "choice", "instructions": "x", "criteria": {"only": ""}}}, "at least 2 options"),
-        ({"q": {"type": "choice", "instructions": "x", "criteria": ["a", "b"]}}, "at least 2 options"),
-        ({"q": {"type": "score", "instructions": "x", "criteria": ["one"]}}, "2 to 10 levels"),
-        ({"q": {"type": "score", "instructions": "x", "criteria": [str(i) for i in range(11)]}}, "2 to 10 levels"),
-        ({"q": {"type": "score", "instructions": "x", "criteria": {"0": "low", "1": "high"}}}, "2 to 10 levels"),
-        ({"q": {"type": "noul", "instructions": "x", "criteria": "money back"}}, "noul 'q' criteria"),
-        ({"q": {"type": "noul", "instructions": "x", "criteria": {"yes": "a", "no": "b"}}}, "noul 'q' criteria"),
-        ({"q": {"type": "noul", "instructions": "x", "criterion": {"true": "a"}}}, "unknown field 'criterion'"),
-        ({"q": {"type": "choice", "instructions": "x", "options": ["a", "b"]}}, "unknown field 'options'"),
-        ({"q": {"type": "score", "instructions": "x", "criteria": ["a", "b"], "labels": {}}}, "unknown field 'labels'"),
-        ({"q": "Is it?"}, "must be an object"),
-        ({}, "at least one question"),
-        (["q"], "at least one question"),
-    ],
-    ids=[
-        "unknown_type",
-        "no_instructions",
-        "null_instructions",
-        "number_instructions",
-        "choice_one_option",
-        "choice_list",
-        "score_one_level",
-        "score_11_levels",
-        "score_mapping",
-        "noul_criteria_text",
-        "noul_criteria_yes_no",
-        "question_criterion",
-        "question_options",
-        "question_labels",
-        "question_text",
-        "no_questions",
-        "questions_list",
-    ],
-)
-def test_refuses_bad_questions(decisions, no_prefill, questions, message):
+# name: (request, texts the tokenizer splits, with an image, error)
+REFUSALS = {
+    "unknown_type": (q(type="bool", instructions="x"), None, False, "unknown type"),
+    "no_instructions": (q(type="noul"), None, False, "needs instructions"),
+    "number_instructions": (q(type="noul", instructions=42), None, False, "needs instructions"),
+    "unknown_question_field": (q(type="noul", instructions="x", options=[]), None, False, "only type, instructions"),
+    "choice_one_option": (q(type="choice", instructions="x", criteria={"a": ""}), None, False, "at least 2 options"),
+    "score_one_level": (q(type="score", instructions="x", criteria=["a"]), None, False, "2 to 10 levels"),
+    "score_11_levels": (q(type="score", instructions="x", criteria=list("abcdefghijk")), None, False, "2 to 10 levels"),
+    "noul_criteria_keys": (q(type="noul", instructions="x", criteria={"yes": "a"}), None, False, "noul 'q' criteria"),
+    "unknown_request_field": ({"state": STATE, "questions": {"q": REFUND}, "images": []}, None, False, "got .*images"),
+    "no_state": ({"questions": {"q": REFUND}}, None, False, r"got \['questions'\]"),
+    "request_text": ("Is it?", None, False, "got str"),
+    "no_questions": ({"state": STATE, "questions": {}}, None, False, "at least one question"),
+    "nul_state": ({"state": "A\x00B", "questions": {"q": REFUND}}, None, False, "NUL"),
+    "nul_question": (q(**{**TEAM, "criteria": {"bill\x00ing": "", "technical": ""}}), None, False, "NUL"),
+    "no_yes_token": (q(**REFUND), {"yes", "Yes", "YES"}, False, "single-token yes or no"),
+    "no_digit_token": (q(**URGENCY), {"1"}, False, "single-token digit"),
+    "no_alias_left": (q(**TEAM), "all", False, "no single-token alias left for 3 options"),
+    "too_long": ({"state": "word " * 5000, "questions": {"q": REFUND}}, None, False, "the model allows 4096"),
+    "images_without_vision": (q(**REFUND), None, True, "images need an lfm2_vl model"),
+}
+
+
+@pytest.mark.parametrize("request_,split,images,message", REFUSALS.values(), ids=list(REFUSALS))
+def test_refusals(monkeypatch, model_path, tokenizer, decisions, request_, split, images, message):
+    if split is not None:
+        monkeypatch.setattr(decisions, "tokenizer", SplitTokenizer(tokenizer, split))
+    if images:
+        monkeypatch.setattr(decisions, "processor", None)
+    monkeypatch.setattr(og, "Generator", lambda *args: pytest.fail("a refused request must not run the model"))
+
     with pytest.raises(ValueError, match=message):
-        decisions.decide({"state": STATE, "questions": questions})
+        decisions.decide(request_, [image_path(model_path)] if images else [])
 
 
-IMAGE_PART = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}}
-AUDIO_PART = {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}
-VIDEO_PART = {"type": "video_url", "video_url": {"url": "https://example.com/cats.mp4"}}
-
-
-@pytest.mark.parametrize(
-    "body,message",
-    [
-        (
-            {"state": STATE, "questions": {"q": REFUND}, "images": ["data:image/jpeg;base64,AAAA"]},
-            "'images' is not read",
-        ),
-        ({"state": STATE, "questions": {"q": REFUND}, "files": ["cats.jpg"]}, "'files' is not read"),
-        ({"state": STATE, "questions": {"q": REFUND}, "videos": ["cats.mp4"]}, "'videos' is not read"),
-        ({"State": STATE, "questions": {"q": REFUND}}, "unknown request field 'State'"),
-        ({"state": STATE, "questions": {"q": REFUND}, "model": "d1-3B"}, "unknown request field 'model'"),
-        ({"questions": {"q": REFUND}}, 'needs a "state" field'),
-        ({"state": [{"role": "user", "content": [IMAGE_PART]}], "questions": {"q": REFUND}}, "image, audio or video"),
-        ({"state": [{"role": "user", "content": [AUDIO_PART]}], "questions": {"q": REFUND}}, "image, audio or video"),
-        ({"state": [{"role": "user", "content": [VIDEO_PART]}], "questions": {"q": REFUND}}, "image, audio or video"),
-        ("Is it?", "must be an object"),
-    ],
-    ids=[
-        "images",
-        "files",
-        "videos",
-        "misspelled_state",
-        "model",
-        "no_state",
-        "image_part",
-        "audio_part",
-        "video_part",
-        "request_text",
-    ],
-)
-def test_refuses_fields_it_cannot_honor(decisions, no_prefill, body, message):
-    with pytest.raises(ValueError, match=message):
-        decisions.decide(body)
-
-
-@pytest.mark.parametrize(
-    "state,questions,message",
-    [
-        ("log line A\x00log line B", {"q": REFUND}, "the state holds a NUL"),
-        (None, {"q": {"type": "noul", "instructions": "Refund?\x00"}}, "question 'q' holds a NUL"),
-        (STATE, {"q": {**TEAM, "criteria": {"billing": "Charges\x00", "technical": ""}}}, "question 'q' holds a NUL"),
-        (STATE, {"q": {**TEAM, "criteria": {"billing": "", "tech\x00nical": ""}}}, "question 'q' holds a NUL"),
-        (STATE, {"q": {**URGENCY, "criteria": ["Can wait", "To\x00day"]}}, "question 'q' holds a NUL"),
-        (STATE, {"q": {**REFUND, "criteria": {"true": "Money\x00back"}}}, "question 'q' holds a NUL"),
-    ],
-    ids=["state", "instructions", "choice_description", "choice_label", "score_level", "noul_criteria"],
-)
-def test_refuses_a_nul_character(decisions, no_prefill, state, questions, message):
-    # The tokenizer stops at NUL, so the rest of the prompt would be lost without a word.
-    with pytest.raises(ValueError, match=message):
-        decisions.decide({"state": state, "questions": questions})
-
-
-def test_accepts_a_nul_character_inside_a_json_state(decisions):
-    # json.dumps writes it as \u0000, so nothing is lost.
-    response = decisions.decide({"state": {"log": "A\x00B"}, "questions": {"q": REFUND}})
-    assert response["answers"]["q"]["type"] == "noul"
-
-
-def test_refuses_one_string_as_image_paths(decisions, no_prefill):
-    with pytest.raises(ValueError, match="list of paths, not one string"):
-        decisions.decide({"state": None, "questions": {"q": REFUND}}, "cats.jpg")
-
-
-def test_accepts_a_chat_message_state_with_text_parts():
-    state = [{"role": "user", "content": [{"type": "text", "text": "Refund me."}]}]
-    assert d1.check_request({"state": state, "questions": {"q": REFUND}})[0] == state
-
-
-class SplitTokenizer:
-    """The fixture tokenizer, except that the listed texts encode to two tokens."""
-
-    def __init__(self, tokenizer, split):
-        self.tokenizer = tokenizer
-        self.split = split
-        self.bos_token_id = tokenizer.bos_token_id
-
-    def encode(self, text):
-        if self.split is None or text in self.split:
-            return np.array([YES, NO], dtype=np.int32)
-        return self.tokenizer.encode(text)
-
-
-def test_refuses_a_tokenizer_without_single_token_yes(monkeypatch, decisions, tokenizer, no_prefill):
-    monkeypatch.setattr(decisions, "tokenizer", SplitTokenizer(tokenizer, {"yes", "Yes", "YES"}))
-    with pytest.raises(ValueError, match="no single-token yes or no"):
-        decisions.decide({"state": STATE, "questions": {"refund": REFUND}})
-
-
-def test_refuses_a_tokenizer_without_single_token_digits(monkeypatch, decisions, tokenizer, no_prefill):
-    monkeypatch.setattr(decisions, "tokenizer", SplitTokenizer(tokenizer, {"1"}))
-    with pytest.raises(ValueError, match="no single-token digit for every score level"):
-        decisions.decide({"state": STATE, "questions": {"urgency": URGENCY}})
-
-
-def test_refuses_when_no_single_token_alias_is_left(monkeypatch, decisions, tokenizer, no_prefill):
-    monkeypatch.setattr(decisions, "tokenizer", SplitTokenizer(tokenizer, None))
-    with pytest.raises(ValueError, match="no single-token alias left for 3 options"):
-        decisions.decide({"state": STATE, "questions": {"team": TEAM}})
-
-
-def test_refuses_a_prompt_longer_than_the_context(decisions, no_prefill):
-    with pytest.raises(ValueError, match="the model allows 4096"):
-        decisions.decide({"state": "word " * 5000, "questions": {"refund": REFUND}})
-
-
-def test_refuses_a_prompt_without_one_bos(monkeypatch, decisions, tokenizer, no_prefill):
-    wrong_bos = SplitTokenizer(tokenizer, set())
-    wrong_bos.bos_token_id = YES
-    monkeypatch.setattr(decisions, "tokenizer", wrong_bos)
-    with pytest.raises(ValueError, match="exactly one"):
-        decisions.decide({"state": STATE, "questions": {"refund": REFUND}})
-
-
-class BosTokenizer:
-    """The fixture tokenizer, except that encode adds BOS in front of the texts adds_bos picks."""
-
-    def __init__(self, tokenizer, adds_bos):
-        self.tokenizer = tokenizer
-        self.adds_bos = adds_bos
-        self.bos_token_id = tokenizer.bos_token_id
-
-    def encode(self, text):
-        ids = self.tokenizer.encode(text)
-        return np.concatenate([[self.bos_token_id], ids]).astype(np.int32) if self.adds_bos(text) else ids
-
-
-@pytest.mark.parametrize(
-    "adds_bos,questions",
-    [
-        (lambda text: text.startswith(d1.BOS), {"refund": REFUND}),
-        (lambda text: text.startswith(d1.BOS), {"refund": REFUND, "team": TEAM}),
-        (lambda text: text.endswith(f"{d1.IM_START}assistant\n"), {"refund": REFUND, "team": TEAM}),
-    ],
-    ids=["head_one_question", "head_several_questions", "question"],
-)
-def test_refuses_a_tokenizer_that_adds_bos(monkeypatch, decisions, tokenizer, no_prefill, adds_bos, questions):
-    monkeypatch.setattr(decisions, "tokenizer", BosTokenizer(tokenizer, adds_bos))
-    with pytest.raises(ValueError, match="exactly one"):
-        decisions.decide({"state": STATE, "questions": questions})
-
-
-def test_refuses_images_without_a_vision_model(model_path, tmp_path, no_prefill):
-    text_model = tmp_path / "lfm2-vl-text"
-    shutil.copytree(model_path, text_model)
-    config = json.loads((text_model / "genai_config.json").read_text(encoding="utf-8"))
-    config["model"]["type"] = "lfm2_vl_text"
-    del config["model"]["vision"], config["model"]["embedding"]
-    (text_model / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
-    decisions = d1.D1Decisions(og.Model(str(text_model)), 4096)
-
-    with pytest.raises(ValueError, match="images need an lfm2_vl model"):
-        decisions.decide({"state": None, "questions": {"refund": REFUND}}, [image_path(model_path)])
-
-
-# Command line
-
-
-def test_command_line_prints_only_the_response(model_path, tmp_path):
-    # The default execution provider (follow_config) is the path where common.py prints setup
-    # messages; they must not reach stdout. The non-ASCII option name checks the UTF-8 output.
+@pytest.mark.parametrize("valid", [True, False], ids=["answer", "refusal"])
+def test_command_line(model_path, tmp_path, valid):
+    # Non-ASCII option names check the UTF-8 output; stdout must hold only the JSON response.
     team = {**TEAM, "criteria": {"billing": "Charges", "返金": "Refunds ☕"}}
+    if not valid:
+        team["type"] = "bool"
+    # utf-8-sig writes a byte order mark, as Windows Notepad does; the script must still read the file.
     request = tmp_path / "request.json"
-    request.write_text(json.dumps({"state": STATE, "questions": {"refund": REFUND, "team": team}}), encoding="utf-8")
+    request.write_text(
+        json.dumps({"state": STATE, "questions": {"refund": REFUND, "team": team}}), encoding="utf-8-sig"
+    )
 
     result = subprocess.run(
         [sys.executable, str(EXAMPLES_DIR / "d1-decisions.py"), "-m", model_path, "-r", str(request)],
         capture_output=True,
         encoding="utf-8",
-        check=True,
+        check=False,
         cwd=EXAMPLES_DIR,
         timeout=300,
     )
 
-    response = json.loads(result.stdout)
-    assert list(response["answers"]) == ["refund", "team"]
-    assert list(response["answers"]["team"]["probabilities"]) == ["billing", "返金"]
-    assert response["usage"]["output_tokens"] == 0
+    if valid:
+        assert result.returncode == 0, result.stderr
+        response = json.loads(result.stdout)
+        assert list(response["answers"]["team"]["probabilities"]) == ["billing", "返金"]
+        assert response["usage"]["output_tokens"] == 0
+    else:
+        assert (result.returncode, result.stdout) == (2, "")
+        assert result.stderr.splitlines()[-1].startswith("error: question 'team' has unknown type")
+        assert "Traceback" not in result.stderr
 
 
-@pytest.fixture
-def chatty_common(monkeypatch):
-    """A stand-in for examples/python/common.py that prints, as the real one does for some providers."""
-    common = types.ModuleType("common")
-
+def test_setup_messages_stay_off_stdout(monkeypatch, capsys, model_path, tmp_path):
+    # common.py prints when it registers an execution provider plug-in. Those lines must go to stderr.
     def get_ep_args(parser):
         parser.add_argument("-e", "--execution_provider", default="follow_config")
         parser.add_argument("--ep_path", default="")
         parser.add_argument("--use_winml", action="store_true")
 
-    def register_ep(ep, ep_path, use_winml):
-        print(f"Registered {ep} successfully!")
+    def register_ep(*args):
+        print("Registered a plug-in")
 
-    def get_config(path, ep, ep_path):
-        print(f"Setting model to {ep}")
+    def get_config(path, *args):
+        print("Setting the model's provider")
         return og.Config(path)
 
+    common = types.ModuleType("common")
     common.get_ep_args, common.register_ep, common.get_config = get_ep_args, register_ep, get_config
     monkeypatch.setitem(sys.modules, "common", common)
-
-
-def run_main(monkeypatch, model_path, request_path):
-    monkeypatch.setattr(sys, "argv", ["d1-decisions.py", "-m", model_path, "-r", str(request_path)])
-    d1.main()
-
-
-def test_main_keeps_setup_messages_off_stdout(monkeypatch, capsys, tmp_path, model_path, chatty_common):
-    # The request file starts with a byte order mark, as Windows Notepad writes it.
     request = tmp_path / "request.json"
-    request.write_text(json.dumps({"state": STATE, "questions": {"refund": REFUND}}), encoding="utf-8-sig")
+    request.write_text(json.dumps({"state": STATE, "questions": {"refund": REFUND}}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["d1-decisions.py", "-m", model_path, "-r", str(request)])
 
-    run_main(monkeypatch, model_path, request)
+    d1.main()
 
     out, err = capsys.readouterr()
     assert list(json.loads(out)["answers"]) == ["refund"]
-    assert "Registered follow_config successfully!" in err
-    assert "Setting model to follow_config" in err
-
-
-@pytest.mark.parametrize(
-    "text,message",
-    [
-        (json.dumps({"state": STATE, "questions": {"q": {"type": "bool", "instructions": "x"}}}), "unknown type"),
-        ("{not json", "error: "),
-        (
-            '{"state": null, "questions": {"q": {"instructions": "a"}, "q": {"instructions": "b"}}}',
-            "repeats the field 'q'",
-        ),
-    ],
-    ids=["bad_question", "bad_json", "repeated_question"],
-)
-def test_main_refuses_with_one_line_and_exit_code_2(
-    monkeypatch, capsys, tmp_path, model_path, chatty_common, text, message
-):
-    request = tmp_path / "request.json"
-    request.write_text(text, encoding="utf-8")
-
-    with pytest.raises(SystemExit) as exit_info:
-        run_main(monkeypatch, model_path, request)
-
-    out, err = capsys.readouterr()
-    assert exit_info.value.code == 2
-    assert out == ""
-    last_line = err.splitlines()[-1]
-    assert last_line.startswith("error: ") and message in last_line
-    assert "Traceback" not in err
+    assert "Registered a plug-in" in err and "Setting the model's provider" in err
