@@ -4,7 +4,8 @@
 """Build and validate paged Qwen3.8-27B through GenAI Engine on WebGPU.
 
 With --dflash2, require accepted drafts across multiple rounds for each fixed greedy
-prompt. This checks real Engine activity; floating-point output coverage lives in
+prompt, then compare two concurrent requests against isolated executions, including
+a controlled partial-acceptance round. Floating-point output coverage lives in
 test_dflash2_webgpu_precision.py.
 """
 
@@ -39,6 +40,10 @@ PROMPTS = (
         "List the integers from 1 through 20 in order, separated by commas. Do not skip any numbers.",
         r"\b" + r",\s*".join(str(i) for i in range(1, 21)) + r"\b",
     ),
+)
+MULTI_REQUEST_PROMPTS = (
+    PROMPTS[2][0],
+    "List the even integers from 2 through 40 in order, separated by commas. Reply with the list only.",
 )
 BUILD_METADATA = "qwen38_webgpu_build.json"
 REQUIRED_WEBGPU_OPS = {
@@ -429,6 +434,131 @@ def validate_dflash2_activity(speculative_stats: dict) -> None:
         raise RuntimeError(f"DFlash2 used {speculative_stats['standard_fallback_steps']} standard fallback step(s)")
 
 
+def validate_partial_replay_round(before: dict, after: dict, emitted: list[int]) -> None:
+    """Require one batched verification with distinct, non-full accepted prefixes."""
+    expected_deltas = {
+        "target_forward_passes": 1,
+        "completed_rounds": 2,
+        "partial_accept_rounds": 2,
+        "full_accept_rounds": 0,
+        "zero_accept_rounds": 0,
+        "draft_tokens_proposed": 6,
+        "draft_tokens_accepted": 3,
+    }
+    for key, expected in expected_deltas.items():
+        actual = after[key] - before[key]
+        if actual != expected:
+            raise RuntimeError(f"Two-request replay requires {key} delta={expected}, got {actual}")
+    histogram = [
+        end - start
+        for start, end in zip(before["acceptance_length_histogram"], after["acceptance_length_histogram"], strict=True)
+    ]
+    if histogram != [0, 1, 1] + [0] * (len(histogram) - 3) or emitted != [2, 3]:
+        raise RuntimeError(f"Expected accepted prefixes [1, 2] plus corrections; got {histogram=}, {emitted=}")
+
+
+def run_multi_request_case(model_path: Path, max_new_tokens: int = 32) -> dict:
+    """Exercise real hybrid-state replay with both fixed-state slots occupied."""
+    if max_new_tokens < 8:
+        raise ValueError("The two-request replay case requires at least 8 generated tokens")
+    config_data = json.loads((model_path / "genai_config.json").read_text(encoding="utf-8"))
+    groups = config_data["model"]["decoder"]["state_groups"]
+    if not all(
+        any(group["kind"] == kind and group.get("state_update", {}).get("capacity", 0) >= 3 for group in groups)
+        for kind in ("fixed_conv", "fixed_recurrent")
+    ):
+        raise RuntimeError("Two-request replay requires convolution and recurrent compact state updates")
+    config = make_config(model_path, "webgpu")
+    config.overlay(json.dumps({"engine": {"dynamic_batching": {"max_batch_size": 2}}}))
+    model = og.Model(config)
+    tokenizer = og.Tokenizer(model)
+    tokens = [prompt_tokens(tokenizer, prompt) for prompt in MULTI_REQUEST_PROMPTS]
+    if tokens[0].size == tokens[1].size:
+        raise RuntimeError("The two replay prompts must have different token lengths")
+    if sum(item.size for item in tokens) > config_data["engine"]["dynamic_batching"]["max_scheduled_tokens"]:
+        raise RuntimeError("The two replay prompts must fit in one prefill batch")
+    budgets = [max_new_tokens, max_new_tokens + 4]
+    references = [run_engine(model, item, budget)[0] for item, budget in zip(tokens, budgets, strict=True)]
+    if any(len(reference) < 8 for reference in references) or references[0] == references[1]:
+        raise RuntimeError("Replay references must be distinct and continue beyond the controlled verification")
+
+    engine = og.Engine(model)
+    if engine.get_capabilities().configured_max_batch_size != 2 or engine.max_draft_tokens_per_proposal() < 3:
+        raise RuntimeError("Two-request replay requires batch size 2 and at least three draft tokens")
+    requests = []
+    outputs = [[], []]
+    # Large enough to drain every token/terminal event from one two-request verify, avoiding
+    # event-buffer backpressure obscuring which forward produced the accepted prefixes.
+    events = engine.create_event_buffer(2 * (engine.max_draft_tokens_per_proposal() + 2))
+
+    def step() -> tuple[list[int], set[int]]:
+        emitted = [0, 0]
+        finished = set()
+        for event in engine.run(events):
+            row = next((index for index, request in enumerate(requests) if event.request is request), None)
+            if row is None:
+                raise RuntimeError("Engine returned an event for an unknown replay request")
+            if event.flags & og.EngineEventFlags.FAILED:
+                raise RuntimeError(f"Replay request {row} failed with error_code={event.error_code}")
+            if event.flags & og.EngineEventFlags.TOKEN:
+                outputs[row].append(int(event.token))
+                emitted[row] += 1
+            if event.flags & og.EngineEventFlags.TURN_FINISHED:
+                finished.add(row)
+        return emitted, finished
+
+    try:
+        for item, budget in zip(tokens, budgets, strict=True):
+            options = og.RequestOptions()
+            options.set_max_session_tokens(int(item.size) + budget)
+            request = engine.create_request(options=options)
+            requests.append(request)
+            turn = og.TurnOptions(request)
+            turn.set_do_sample(False)
+            turn.set_max_generated_tokens(budget)
+            request.begin_turn(item, turn)
+        emitted, finished = step()
+        before = engine.get_speculative_stats()
+        if emitted != [1, 1] or finished or before["target_forward_passes"] != 1:
+            raise RuntimeError("Both requests must prefill together and remain resident before replay")
+        # Both slots remain occupied throughout this round, so at least one state slot is nonzero.
+        # Override only this proposal: the real DFlash2 drafter supplies all subsequent rounds.
+        for row, accepted in enumerate((1, 2)):
+            draft = list(references[row][1:4])
+            draft[accepted] = (draft[accepted] + 1) % config_data["model"]["vocab_size"]
+            requests[row].set_draft_tokens(np.asarray(draft, dtype=np.int32))
+        emitted, finished = step()
+        replay_stats = engine.get_speculative_stats()
+        validate_partial_replay_round(before, replay_stats, emitted)
+        if finished:
+            raise RuntimeError("Both replayed states must be read again before either request finishes")
+        for _ in range(sum(budgets)):
+            if not engine.has_pending_requests():
+                break
+            step()
+        else:
+            raise RuntimeError("Two-request replay exceeded its bounded generation steps")
+        stats = engine.get_speculative_stats()
+        validate_dflash2_activity(stats)
+        if stats["completed_rounds"] <= replay_stats["completed_rounds"]:
+            raise RuntimeError("DFlash2 must continue verifying after the controlled partial replay")
+        for row, (actual, reference) in enumerate(zip(outputs, references, strict=True)):
+            if actual != reference:
+                raise RuntimeError(f"Replay request {row} diverged from isolation: {actual=}, {reference=}")
+        return {
+            "max_batch_size": 2,
+            "prompt_lengths": [int(item.size) for item in tokens],
+            "controlled_accepted_prefixes": [1, 2],
+            "controlled_kept_state_tokens": [2, 3],
+            "tokens": outputs,
+            "reference_tokens": references,
+            "speculative_stats": stats,
+        }
+    finally:
+        for request in requests:
+            request.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -490,6 +620,7 @@ def main() -> int:
         prompts,
         profile_prefix,
     )
+    multi_request_result = run_multi_request_case(args.model_path, args.max_new_tokens) if args.dflash2 else None
     webgpu_ops, cpu_ops = read_profile(args.artifacts_dir)
     validate_profile(webgpu_ops, cpu_ops)
     cpu_result = None
@@ -507,6 +638,7 @@ def main() -> int:
     result = {
         "dflash2": args.dflash2,
         "webgpu": webgpu_results,
+        "webgpu_multi_request": multi_request_result,
         "cpu": cpu_result,
         "cpu_reference_error": cpu_reference_error,
         "webgpu_operator_counts": dict(webgpu_ops),

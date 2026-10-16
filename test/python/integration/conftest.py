@@ -35,7 +35,7 @@ def pytest_addoption(parser):
     group.addoption(
         "--dflash2-webgpu-model",
         default=None,
-        help="Exported paged Qwen3.8 WebGPU DFlash2 model directory for opt-in floating-point output tests.",
+        help="Exported paged Qwen3.8 WebGPU DFlash2 model directory for opt-in output and multi-request replay tests.",
     )
     group.addoption(
         "--run-engine-tests",

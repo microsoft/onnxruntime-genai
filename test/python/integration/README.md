@@ -148,6 +148,34 @@ python src/python/py/models/builder.py -m Qwen/Qwen2.5-0.5B-Instruct \
 If the staged files are intentionally regenerated, refresh the three hashes in
 `PINNED_IDENTITY` in the same change.
 
+## Qwen3.8 WebGPU DFlash2 replay
+
+`run_qwen38_webgpu_engine.py --dflash2` keeps the single-request smoke runs and
+also runs two concurrent requests with `max_batch_size=2`, unequal prompt lengths,
+and unequal generation budgets. The two-request case can use an existing export
+without rebuilding it:
+
+```bash
+python -m pytest test/python/integration/test_dflash2_webgpu_precision.py -sv \
+    --dflash2-webgpu-model /path/to/qwen38-webgpu-dflash2 \
+    -k two_requests_match_isolation
+```
+
+The case first obtains isolated greedy references on the same WebGPU model.
+After both prompts prefill together, it replaces exactly one draft proposal per
+request with three reference-derived tokens, deliberately changing the second
+token for one request and the third for the other. Counter deltas, the acceptance
+histogram, and per-request events must prove one shared verification forward with
+accepted draft prefixes of 1 and 2 (retained state prefixes of 2 and 3, including
+the anchor), not full acceptance or a terminal-budget truncation.
+
+Both requests remain resident, so one necessarily occupies a nonzero fixed-state
+slot. Subsequent DFlash2 rounds consume the replayed convolution and recurrent
+state, and both complete token sequences must exactly match their isolated
+references. This is an end-to-end output-isolation check, not a direct comparison
+of internal state tensors. The case fails rather than relaxing equality if the
+quantized model is batch-shape dependent. It does not force scheduler reordering.
+
 ## Adding a new model
 
 The blob container is populated by the Foundry team. The integration

@@ -16,7 +16,13 @@ import onnxruntime as ort
 import pytest
 from transformers import AutoTokenizer
 
-from .run_qwen38_webgpu_engine import PROMPTS, register_webgpu_plugin, validate_dflash2_activity
+from .run_qwen38_webgpu_engine import (
+    PROMPTS,
+    register_webgpu_plugin,
+    run_multi_request_case,
+    validate_dflash2_activity,
+    validate_partial_replay_round,
+)
 
 
 @pytest.fixture(scope="module")
@@ -38,9 +44,7 @@ def drafter_session(pytestconfig, tmp_path_factory):
     options.enable_profiling = True
     options.profile_file_prefix = str(tmp_path_factory.mktemp("dflash2-profile") / "profile")
     drafter = config["model"]["dflash2"]
-    session = ort.InferenceSession(
-        str(model_dir / drafter["filename"]), sess_options=options, providers=[]
-    )
+    session = ort.InferenceSession(str(model_dir / drafter["filename"]), sess_options=options, providers=[])
     assert devices[0].ep_name in session.get_providers(), "WebGPU was not selected for the drafter session"
     target_options = ort.SessionOptions()
     target_options.add_provider_for_devices([devices[0]], {})
@@ -185,3 +189,58 @@ def test_validation_rejects_inactive_or_failed_speculation(field, value):
     stats[field] = value
     with pytest.raises(RuntimeError):
         validate_dflash2_activity(stats)
+
+
+def test_two_requests_match_isolation_after_partial_replay(pytestconfig):
+    model_dir = pytestconfig.getoption("--dflash2-webgpu-model")
+    if model_dir is None:
+        pytest.skip("Pass --dflash2-webgpu-model to test an exported WebGPU DFlash2 model")
+    if "WebGpuExecutionProvider" not in ort.get_available_providers():
+        assert register_webgpu_plugin(), "WebGPU is required for this model test"
+    result = run_multi_request_case(Path(model_dir))
+    print(f"Two-request replay: {json.dumps(result, sort_keys=True)}")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "target_forward_passes",
+        "completed_rounds",
+        "partial_accept_rounds",
+        "draft_tokens_proposed",
+        "draft_tokens_accepted",
+        "full_accept_rounds",
+        "zero_accept_rounds",
+        "acceptance_length_histogram",
+        "emitted",
+    ],
+)
+def test_validation_requires_two_distinct_partial_prefixes(field):
+    before = dict.fromkeys(
+        (
+            "target_forward_passes",
+            "completed_rounds",
+            "partial_accept_rounds",
+            "full_accept_rounds",
+            "zero_accept_rounds",
+            "draft_tokens_proposed",
+            "draft_tokens_accepted",
+        ),
+        0,
+    )
+    before["acceptance_length_histogram"] = [0, 0, 0, 0]
+    after = {
+        **before,
+        "target_forward_passes": 1,
+        "completed_rounds": 2,
+        "partial_accept_rounds": 2,
+        "draft_tokens_proposed": 6,
+        "draft_tokens_accepted": 3,
+        "acceptance_length_histogram": [0, 1, 1, 0],
+    }
+    validate_partial_replay_round(before, after, [2, 3])
+    emitted = [3, 2] if field == "emitted" else [2, 3]
+    if field != "emitted":
+        after[field] = [0, 0, 2, 0] if field == "acceptance_length_histogram" else after[field] + 1
+    with pytest.raises(RuntimeError):
+        validate_partial_replay_round(before, after, emitted)
