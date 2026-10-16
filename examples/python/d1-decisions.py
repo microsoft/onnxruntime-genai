@@ -74,6 +74,8 @@ IM_END = "<|im_end|>"
 IMAGE = "<image>"
 QUESTION_TYPES = ("noul", "choice", "score")
 REQUEST_KEYS = ("state", "questions")
+QUESTION_KEYS = ("type", "instructions", "criteria")
+NOUL_CRITERIA_KEYS = ("true", "false")
 # Request fields that other servers read media from. This script takes images from --image only.
 MEDIA_KEYS = ("images", "files", "videos")
 # Chat-message content parts that hold media instead of text.
@@ -94,6 +96,9 @@ def check_question(name, question):
     """The question with its type filled in. Raises ValueError for a question d1 does not define."""
     if not isinstance(question, Mapping):
         raise ValueError(f"question {name!r} must be an object")
+    unknown = [key for key in question if key not in QUESTION_KEYS]
+    if unknown:
+        raise ValueError(f"question {name!r} has unknown field {unknown[0]!r}; use type, instructions and criteria")
     kind = question.get("type", "choice")
     if kind not in QUESTION_TYPES:
         raise ValueError(f"question {name!r} has unknown type {kind!r}; use noul, choice or score")
@@ -104,8 +109,10 @@ def check_question(name, question):
         raise ValueError(f"choice {name!r} needs criteria {{name: description}} with at least 2 options")
     if kind == "score" and (not isinstance(criteria, (list, tuple)) or not 2 <= len(criteria) <= 10):
         raise ValueError(f"score {name!r} needs criteria: a list of 2 to 10 levels, lowest first")
-    if kind == "noul" and criteria is not None and not isinstance(criteria, Mapping):
-        raise ValueError(f'noul {name!r} criteria must be {{"true": "...", "false": "..."}} if given')
+    if kind == "noul" and criteria is not None:
+        # One side may be left out: d1 prints it as "None". Other keys would be dropped, so they are refused.
+        if not isinstance(criteria, Mapping) or any(key not in NOUL_CRITERIA_KEYS for key in criteria):
+            raise ValueError(f'noul {name!r} criteria must be {{"true": "...", "false": "..."}} if given')
     return {"type": kind, "instructions": question["instructions"], "criteria": criteria}
 
 
@@ -278,6 +285,8 @@ class D1Decisions:
 
     def decide(self, request, image_paths=()):
         """The response for one request: {"answers": {...}, "usage": {...}}."""
+        if isinstance(image_paths, str):
+            raise ValueError("image_paths must be a list of paths, not one string")
         state, questions = check_request(request)
         if image_paths and self.processor is None:
             raise ValueError(f"images need an lfm2_vl model with a vision model; this model is {self.model.type!r}")
@@ -285,6 +294,12 @@ class D1Decisions:
         groups = [readout_ids(self.tokenizer, q, c) for q, c in zip(questions.values(), codes, strict=True)]
         prefix = prompt_prefix(state, len(image_paths))
         suffixes = [prompt_suffix(q, c) for q, c in zip(questions.values(), codes, strict=True)]
+        # The tokenizer stops at a NUL character, so the rest of the prompt would be lost.
+        if "\x00" in prefix:
+            raise ValueError("the state holds a NUL character (\\x00)")
+        for name, text in zip(questions, suffixes, strict=True):
+            if "\x00" in text:
+                raise ValueError(f"question {name!r} holds a NUL character (\\x00)")
 
         # Like d1, one question is encoded as one string. Several questions encode the shared
         # prefix once and each suffix on its own.

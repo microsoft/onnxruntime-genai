@@ -473,6 +473,10 @@ def test_one_image_with_several_questions(model, model_path, tokenizer, decision
         ({"q": {"type": "score", "instructions": "x", "criteria": [str(i) for i in range(11)]}}, "2 to 10 levels"),
         ({"q": {"type": "score", "instructions": "x", "criteria": {"0": "low", "1": "high"}}}, "2 to 10 levels"),
         ({"q": {"type": "noul", "instructions": "x", "criteria": "money back"}}, "noul 'q' criteria"),
+        ({"q": {"type": "noul", "instructions": "x", "criteria": {"yes": "a", "no": "b"}}}, "noul 'q' criteria"),
+        ({"q": {"type": "noul", "instructions": "x", "criterion": {"true": "a"}}}, "unknown field 'criterion'"),
+        ({"q": {"type": "choice", "instructions": "x", "options": ["a", "b"]}}, "unknown field 'options'"),
+        ({"q": {"type": "score", "instructions": "x", "criteria": ["a", "b"], "labels": {}}}, "unknown field 'labels'"),
         ({"q": "Is it?"}, "must be an object"),
         ({}, "at least one question"),
         (["q"], "at least one question"),
@@ -488,6 +492,10 @@ def test_one_image_with_several_questions(model, model_path, tokenizer, decision
         "score_11_levels",
         "score_mapping",
         "noul_criteria_text",
+        "noul_criteria_yes_no",
+        "question_criterion",
+        "question_options",
+        "question_labels",
         "question_text",
         "no_questions",
         "questions_list",
@@ -533,6 +541,35 @@ AUDIO_PART = {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "
 def test_refuses_fields_it_cannot_honor(decisions, no_prefill, body, message):
     with pytest.raises(ValueError, match=message):
         decisions.decide(body)
+
+
+@pytest.mark.parametrize(
+    "state,questions,message",
+    [
+        ("log line A\x00log line B", {"q": REFUND}, "the state holds a NUL"),
+        (None, {"q": {"type": "noul", "instructions": "Refund?\x00"}}, "question 'q' holds a NUL"),
+        (STATE, {"q": {**TEAM, "criteria": {"billing": "Charges\x00", "technical": ""}}}, "question 'q' holds a NUL"),
+        (STATE, {"q": {**TEAM, "criteria": {"billing": "", "tech\x00nical": ""}}}, "question 'q' holds a NUL"),
+        (STATE, {"q": {**URGENCY, "criteria": ["Can wait", "To\x00day"]}}, "question 'q' holds a NUL"),
+        (STATE, {"q": {**REFUND, "criteria": {"true": "Money\x00back"}}}, "question 'q' holds a NUL"),
+    ],
+    ids=["state", "instructions", "choice_description", "choice_label", "score_level", "noul_criteria"],
+)
+def test_refuses_a_nul_character(decisions, no_prefill, state, questions, message):
+    # The tokenizer stops at NUL, so the rest of the prompt would be lost without a word.
+    with pytest.raises(ValueError, match=message):
+        decisions.decide({"state": state, "questions": questions})
+
+
+def test_accepts_a_nul_character_inside_a_json_state(decisions):
+    # json.dumps writes it as \u0000, so nothing is lost.
+    response = decisions.decide({"state": {"log": "A\x00B"}, "questions": {"q": REFUND}})
+    assert response["answers"]["q"]["type"] == "noul"
+
+
+def test_refuses_one_string_as_image_paths(decisions, no_prefill):
+    with pytest.raises(ValueError, match="list of paths, not one string"):
+        decisions.decide({"state": None, "questions": {"q": REFUND}}, "cats.jpg")
 
 
 def test_accepts_a_chat_message_state_with_text_parts():
