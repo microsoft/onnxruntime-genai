@@ -100,7 +100,12 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   }
 
   const Qwen38CycleRecord record = device_->WaitCycle();
-  const std::array<int32_t, 2> predictions{static_cast<int32_t>(record.pred0), static_cast<int32_t>(record.pred1)};
+  const std::array<int32_t, 4> predictions{
+      static_cast<int32_t>(record.pred0),
+      static_cast<int32_t>(record.pred1),
+      static_cast<int32_t>(record.pred2),
+      static_cast<int32_t>(record.pred3),
+  };
   const size_t produced = record.TokenCount();
   size_t count = produced;
   bool stop_in_cycle = false;
@@ -126,18 +131,25 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   ++stats_.completed_rounds;
   ++stats_.target_forward_passes;
   if (mtp) {
+    const size_t n_prop = record.proposed_count > 1 ? static_cast<size_t>(record.proposed_count) : 1;
+    const size_t n_acc = record.accepted_count > 0 ? static_cast<size_t>(record.accepted_count) : (record.accepted ? 1 : 0);
+    const size_t n_eval = std::min(n_prop, n_acc + 1);
     ++stats_.target_verify_forward_passes;
-    ++stats_.draft_forward_passes;
-    ++stats_.draft_tokens_proposed;
-    ++stats_.draft_tokens_evaluated;
-    ++stats_.acceptance_length_histogram[record.accepted ? 1 : 0];
-    if (record.accepted) {
-      ++stats_.draft_tokens_accepted;
+    stats_.draft_forward_passes += n_prop;
+    stats_.draft_tokens_proposed += n_prop;
+    stats_.draft_tokens_evaluated += n_eval;
+    if (n_acc < stats_.acceptance_length_histogram.size()) {
+      ++stats_.acceptance_length_histogram[n_acc];
+    }
+    stats_.draft_tokens_accepted += n_acc;
+    if (n_acc == n_prop) {
       ++stats_.full_accept_rounds;
-      ++stats_.bonus_tokens;
-    } else {
+      stats_.bonus_tokens += 1;
+    } else if (n_acc == 0) {
       ++stats_.zero_accept_rounds;
-      ++stats_.correction_tokens;
+      stats_.correction_tokens += 1;
+    } else {
+      stats_.correction_tokens += 1;
     }
   }
   stats_.tokens_emitted += committed;

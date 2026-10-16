@@ -225,6 +225,304 @@ def rewrite_nvfp4_qmoe_to_offload(
     return rewritten
 
 
+def build_multidraft_target_onnx(in_onnx: Path, out_onnx: Path, verify_rows: int = 3) -> dict:
+    """Extends an S=2 folded target/model.onnx to verify_rows in {3, 4} (2 or 3 chained MTP drafts).
+
+    1. Adds trailing present_mid2.* (and present_mid3.*) state outputs to all 36 GDN layers, 12 QSA layers,
+       the PLE layer, and Stage 1 of the folded MTP head.
+    2. Appends FoldDraftPrep + 1-row chained MTP Head Stage 2 (and Stage 3 when verify_rows == 4), sharing
+       all head.* initializers in-place and chaining head.past_key_values.0.{key,value,index_key} ->
+       head.present_s1.0.* -> (head.present_s2.0.* ->) head.present.0.*.
+    """
+    import copy
+    import re
+    from onnx import numpy_helper
+
+    if verify_rows not in (3, 4):
+        raise ValueError(f"verify_rows must be 3 or 4, got {verify_rows}")
+
+    model = onnx.load(str(in_onnx), load_external_data=False)
+    graph = model.graph
+    output_info = {o.name: o for o in graph.output}
+    init_names = {i.name for i in graph.initializer}
+
+    def add_graph_output(source_name: str, new_name: str, shape_override: list[int] | None = None) -> None:
+        if any(o.name == new_name for o in graph.output):
+            return
+        info = output_info[source_name]
+        new_vi = onnx.ValueInfoProto()
+        new_vi.CopyFrom(info)
+        new_vi.name = new_name
+        if shape_override is not None:
+            del new_vi.type.tensor_type.shape.dim[:]
+            for d in shape_override:
+                dim = new_vi.type.tensor_type.shape.dim.add()
+                dim.dim_value = d
+        graph.output.append(new_vi)
+        output_info[new_name] = new_vi
+
+    def layer_of(name: str, suffix: str) -> str:
+        m = re.fullmatch(r"present\.(\d+)\." + re.escape(suffix), name)
+        if not m:
+            raise ValueError(f"Cannot parse layer from {name!r}")
+        return m.group(1)
+
+    mids_added = 0
+    fold_mid_idx = -1
+    for idx, node in enumerate(graph.node):
+        if node.domain == "qwen.fold" and node.op_type in ("FoldMid", "FoldMid2"):
+            fold_mid_idx = idx
+            break
+        if node.domain == "qwen.fused_attn" and node.op_type in ("GdnProjPrep", "GdnConvPrep"):
+            state_idx = 4 if node.op_type == "GdnProjPrep" else 3
+            src_out = node.output[state_idx]
+            lid = layer_of(src_out, "conv_state")
+            for m_tag in ("present_mid2", "present_mid3")[: verify_rows - 2]:
+                out_name = f"{m_tag}.{lid}.conv_state"
+                node.output.append(out_name)
+                add_graph_output(src_out, out_name)
+                mids_added += 1
+        elif node.domain == "qwen.fused_attn" and node.op_type == "GdnRecurrent":
+            src_out = node.output[1]
+            lid = layer_of(src_out, "recurrent_state")
+            for m_tag in ("present_mid2", "present_mid3")[: verify_rows - 2]:
+                out_name = f"{m_tag}.{lid}.recurrent_state"
+                node.output.append(out_name)
+                add_graph_output(src_out, out_name)
+                mids_added += 1
+        elif node.domain == "qwen.fused_attn" and node.op_type == "PleMidState":
+            for m_tag in ("present_mid2", "present_mid3")[: verify_rows - 2]:
+                st_name = f"{m_tag}.1.ple_conv_state"
+                cx_name = f"{m_tag}.1.ple_context"
+                node.output.extend([st_name, cx_name])
+                add_graph_output("present.1.ple_conv_state", st_name)
+                add_graph_output("present.1.ple_context", cx_name)
+                mids_added += 2
+        elif node.domain == "qwen.capture" and node.op_type == "PackedQSAIndexer":
+            src_buf, src_len = node.output[3], node.output[5]
+            lid = layer_of(src_buf, "index_buffer")
+            for m_tag in ("present_mid2", "present_mid3")[: verify_rows - 2]:
+                b_name = f"{m_tag}.{lid}.index_buffer"
+                l_name = f"{m_tag}.{lid}.index_lengths"
+                node.output.extend([b_name, l_name])
+                add_graph_output(src_buf, b_name)
+                add_graph_output(src_len, l_name)
+                mids_added += 2
+
+    if fold_mid_idx < 0:
+        raise ValueError("FoldMid2 not found in target graph")
+
+    # Update head.capture.cumulative_sequence_lengths to [0, verify_rows] and add head.capture.cu_seqlens_s1 = [0, 1]
+    for init in graph.initializer:
+        if init.name == "head.capture.cumulative_sequence_lengths":
+            init.CopyFrom(
+                numpy_helper.from_array(
+                    __import__("numpy").asarray([0, verify_rows], dtype=__import__("numpy").int32),
+                    name="head.capture.cumulative_sequence_lengths",
+                )
+            )
+    if "head.capture.cu_seqlens_s1" not in init_names:
+        graph.initializer.append(
+            numpy_helper.from_array(
+                __import__("numpy").asarray([0, 1], dtype=__import__("numpy").int32),
+                name="head.capture.cu_seqlens_s1",
+            )
+        )
+        init_names.add("head.capture.cu_seqlens_s1")
+
+    # Extract Stage 1 nodes (after FoldMid2)
+    stage1_nodes = list(graph.node[fold_mid_idx + 1 :])
+    del graph.node[fold_mid_idx + 1 :]
+
+    # Clone template of Stage 1 nodes BEFORE modifying Stage 1's output names
+    stage_template = [copy.deepcopy(n) for n in stage1_nodes if n.op_type not in ("RowSelectBf16x3", "Concat", "FoldTail")]
+    stage1_produced = {o for n in stage1_nodes for o in n.output if o}
+
+    # Modify Stage 1 nodes for multi-stage chaining
+    s1_val_inputs = []
+    for node in stage1_nodes:
+        if node.op_type == "Concat" and node.name == "head.validation/aggregate":
+            s1_val_inputs = list(node.input)
+            continue
+        if node.op_type == "FoldTail":
+            continue
+        if node.domain == "qwen.capture" and node.op_type == "PackedQSAIndexer":
+            node.output[2] = "head.present_s1.0.index_key"
+            add_graph_output("head.present.0.index_key", "head.present_s1.0.index_key")
+            for m_tag in ("head.present_mid2", "head.present_mid3")[: verify_rows - 2]:
+                b_name = f"{m_tag}.0.index_buffer"
+                l_name = f"{m_tag}.0.index_lengths"
+                node.output.extend([b_name, l_name])
+                add_graph_output("head.present.0.index_buffer", b_name)
+                add_graph_output("head.present.0.index_lengths", l_name)
+        elif node.domain == "qwen.static" and node.op_type == "GuardedDSA":
+            node.output[1] = "head.present_s1.0.key"
+            node.output[2] = "head.present_s1.0.value"
+            add_graph_output("head.present.0.key", "head.present_s1.0.key")
+            add_graph_output("head.present.0.value", "head.present_s1.0.value")
+        elif node.domain == "qwen.mtp" and node.op_type == "Bf16ArgMax":
+            node.output[0] = "head.s1.next_token"
+        graph.node.append(node)
+
+    all_val_inputs = list(s1_val_inputs)
+    num_extra_stages = verify_rows - 2  # 1 extra stage for S=3, 2 extra stages for S=4
+
+    for extra_idx in range(num_extra_stages):
+        stage_num = extra_idx + 2  # 2 or 3
+        prefix = f"head.s{stage_num}."
+        is_last_stage = extra_idx == num_extra_stages - 1
+        prev_tok = "head.s1.next_token" if stage_num == 2 else "head.s2.next_token"
+        prev_hidden = "head.hidden_states_out" if stage_num == 2 else "head.s2.head.hidden_states_out"
+        prev_key = "head.present_s1.0.key" if stage_num == 2 else "head.present_s2.0.key"
+        prev_val = "head.present_s1.0.value" if stage_num == 2 else "head.present_s2.0.value"
+        prev_ikey = "head.present_s1.0.index_key" if stage_num == 2 else "head.present_s2.0.index_key"
+
+        if stage_num == 2:
+            prep_inputs = [
+                prev_tok,
+                "fold.ctl",
+                "fold.sel",
+                "head.mtp.rotary_emb.cos_cache",
+                "head.mtp.rotary_emb.sin_cache",
+                "head.present_mid.0.index_buffer",
+                "head.present_mid.0.index_lengths",
+                "head.present_mid2.0.index_buffer",
+                "head.present_mid2.0.index_lengths",
+            ]
+            if verify_rows == 4:
+                prep_inputs.extend(["head.present_mid3.0.index_buffer", "head.present_mid3.0.index_lengths"])
+            prep_inputs.extend(["head.present.0.index_buffer", "head.present.0.index_lengths"])
+        else:
+            prep_inputs = [
+                prev_tok,
+                "fold.ctl",
+                "fold.sel",
+                "head.mtp.rotary_emb.cos_cache",
+                "head.mtp.rotary_emb.sin_cache",
+                "head.s2.out_index_buffer",
+                "head.s2.out_index_lengths",
+            ]
+
+        prep_outputs = [
+            f"{prefix}head_ids",
+            f"{prefix}head_c",
+            f"{prefix}slot_ids",
+            f"{prefix}seqlens_k",
+            f"{prefix}rope_cos",
+            f"{prefix}rope_sin",
+            f"{prefix}in_index_buffer",
+            f"{prefix}in_index_lengths",
+        ]
+        graph.node.append(
+            helper.make_node(
+                "FoldDraftPrep",
+                prep_inputs,
+                prep_outputs,
+                domain="qwen.fold",
+                name=f"fold/FoldDraftPrep_s{stage_num}",
+                stage=stage_num - 1,
+            )
+        )
+
+        input_remap = {
+            "fold.head_ids": f"{prefix}head_ids",
+            "hidden_states": prev_hidden,
+            "head.capture.rope_cos": f"{prefix}rope_cos",
+            "head.capture.rope_sin": f"{prefix}rope_sin",
+            "head.capture.cumulative_sequence_lengths": "head.capture.cu_seqlens_s1",
+            "fold.head_c": f"{prefix}head_c",
+            "head.capture.slot_ids": f"{prefix}slot_ids",
+            "head.capture.seqlens_k": f"{prefix}seqlens_k",
+            "head.past_key_values.0.index_key": prev_ikey,
+            "head.past_key_values.0.index_buffer": f"{prefix}in_index_buffer",
+            "head.past_key_values.0.index_lengths": f"{prefix}in_index_lengths",
+            "head.past_key_values.0.key": prev_key,
+            "head.past_key_values.0.value": prev_val,
+            "head.v_mtp.layers.0.self_attn.Mul_200.sel": f"{prefix}head.v_mtp.layers.0.self_attn.Mul_200",
+            "head.v_mtp.Reshape_23.sel": f"{prefix}head.v_mtp.Reshape_23",
+            "head.v_mtp.layers.0.attn_hyper_connection.Mul_117.sel": f"{prefix}head.v_mtp.layers.0.attn_hyper_connection.Mul_117",
+        }
+
+        for tmpl in stage_template:
+            n = copy.deepcopy(tmpl)
+            n.name = f"{prefix}{n.name}"
+            for i, inp in enumerate(n.input):
+                if not inp:
+                    continue
+                if inp in input_remap:
+                    n.input[i] = input_remap[inp]
+                elif inp in stage1_produced and inp not in init_names:
+                    n.input[i] = f"{prefix}{inp}"
+            for i, out in enumerate(n.output):
+                if out:
+                    n.output[i] = f"{prefix}{out}"
+
+            if n.domain == "qwen.capture" and n.op_type == "PackedQSAIndexer":
+                del n.output[7:]  # 1-row speculative head stage does not need mid_buffer/mid_lengths
+                if is_last_stage:
+                    n.output[2] = "head.present.0.index_key"
+                else:
+                    n.output[2] = f"head.present_s{stage_num}.0.index_key"
+                    add_graph_output("head.present.0.index_key", n.output[2])
+                n.output[3] = f"{prefix}out_index_buffer"
+                n.output[5] = f"{prefix}out_index_lengths"
+                n.output[6] = f"{prefix}validation.qsa"
+                all_val_inputs.append(n.output[6])
+            elif n.domain == "qwen.static" and n.op_type == "GuardedDSA":
+                if is_last_stage:
+                    n.output[1] = "head.present.0.key"
+                    n.output[2] = "head.present.0.value"
+                else:
+                    n.output[1] = f"head.present_s{stage_num}.0.key"
+                    n.output[2] = f"head.present_s{stage_num}.0.value"
+                    add_graph_output("head.present.0.key", n.output[1])
+                    add_graph_output("head.present.0.value", n.output[2])
+                n.output[3] = f"{prefix}validation.dsa"
+                all_val_inputs.append(n.output[3])
+            elif n.domain == "qwen.mtp" and n.op_type == "Bf16ArgMax":
+                n.output[0] = "head.next_token" if is_last_stage else f"{prefix}next_token"
+
+            graph.node.append(n)
+
+    # Update head.validation.aggregate shape and append Concat + FoldTail
+    for o in graph.output:
+        if o.name == "head.validation.aggregate":
+            del o.type.tensor_type.shape.dim[:]
+            dim = o.type.tensor_type.shape.dim.add()
+            dim.dim_value = len(all_val_inputs)
+
+    graph.node.append(
+        helper.make_node(
+            "Concat",
+            all_val_inputs,
+            ["head.validation.aggregate"],
+            name="head.validation/aggregate",
+            axis=0,
+        )
+    )
+    tail_ctl_slot = 8 if verify_rows == 3 else 9
+    graph.node.append(
+        helper.make_node(
+            "FoldTail",
+            ["head.next_token", "head.validation.aggregate", "fold.ctl"],
+            ["fold.tail_done"],
+            domain="qwen.fold",
+            name="fold/FoldTail",
+            ctl_slot=tail_ctl_slot,
+        )
+    )
+
+    out_onnx.parent.mkdir(parents=True, exist_ok=True)
+    onnx.save_model(model, str(out_onnx), save_as_external_data=False)
+    return {
+        "verify_rows": verify_rows,
+        "mids_added": mids_added,
+        "extra_head_stages": num_extra_stages,
+        "total_nodes": len(graph.node),
+        "total_outputs": len(graph.output),
+    }
+
+
 def build_offload_weights_pool(
     source_pkg: Path,
     out_pkg: Path,
@@ -430,10 +728,13 @@ def main() -> None:
     }
     target_rewritten = rewrite_nvfp4_qmoe_to_offload(
         source / "target/model.onnx",
-        out / "target/model.onnx",
+        out / "target/model_s2.onnx",
         extra_attrs=target_attrs,
         per_layer_initial_experts=profile_plan,
     )
+    build_multidraft_target_onnx(out / "target/model_s2.onnx", out / "target/model_s3.onnx", verify_rows=3)
+    build_multidraft_target_onnx(out / "target/model_s2.onnx", out / "target/model_s4.onnx", verify_rows=4)
+    shutil.copy2(out / "target/model_s2.onnx", out / "target/model.onnx")
     if args.dense_gpu_qmoe:
         link_file(source / "dense/model.onnx", out / "dense/model.onnx", args.copy)
         dense_rewritten = 0

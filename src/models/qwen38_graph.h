@@ -294,16 +294,20 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   bool skip_refeed_{};
   bool fold_{};
   bool force_reject_{};  // test hook (fold.force_reject): every draft is replaced before its verify
+  int verify_rows_{2};   // rows verified per target forward pass (2 = 1 draft, 3 = 2 drafts, 4 = 3 drafts)
+  int num_banks_{Qwen38DecodeLedger::kBanks};
   static constexpr int kBanks = Qwen38DecodeLedger::kBanks;
+  static constexpr int kMaxBanks = 5;
+  static constexpr int kMaxVerifyRows = 4;
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
   // target state
   std::map<std::string, std::unique_ptr<DevTensor>> store_;   // in-place KV / positions
   std::map<std::string, std::unique_ptr<DevTensor>> shared_;  // index_key buffers
-  Bank banks_[kBanks + 1];                                    // last = scratch sink for S=1 present_mid
-  RowInputs inputs_[2];
-  Direction dirs_[2][kBanks];  // [rows-1][phase]
+  Bank banks_[kMaxBanks + 1];                                 // last = scratch sink for S=1 present_mid
+  RowInputs inputs_[kMaxVerifyRows];
+  Direction dirs_[kMaxVerifyRows][kMaxBanks];  // [rows-1][phase]
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
   std::vector<std::unique_ptr<DevTensor>> head_views_;
   std::deque<PlaneBuffer> owned_;  // individually allocated tensors
@@ -325,7 +329,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   struct HeadBank {
     PlaneBuffer arena;
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
-  } head_banks_[3];  // two ping-pong banks (S=1/S=2 head sessions) or the three ring phases (fold)
+  } head_banks_[kMaxBanks];  // two ping-pong banks (S=1/S=2 head sessions) or the ring phases (fold)
   int head_length_{};
   int head_turn_{};
   int head_cur_{};  // fold: head ring phase
@@ -343,7 +347,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     uint8_t* next_token{};
     uint8_t* status{};
     size_t status_count{};
-    Direction dirs[3];
+    Direction dirs[kMaxBanks];
   } head_r2_;
   std::map<std::string, std::unique_ptr<DevTensor>> fold_tensors_;  // fold.* inputs (the device control block)
   PlaneBuffer fold_ptrs_;

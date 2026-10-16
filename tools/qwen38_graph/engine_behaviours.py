@@ -254,8 +254,8 @@ def main():
     check(
         "speculative statistics are populated",
         stats["rounds"] > 0
-        and stats["draft_tokens_proposed"] == stats["rounds"]
-        and 0 < stats["draft_tokens_accepted"] < stats["rounds"]
+        and stats["draft_tokens_proposed"] >= stats["rounds"]
+        and 0 < stats["draft_tokens_accepted"] < stats["draft_tokens_proposed"]
         and stats["tokens_emitted"] > stats["rounds"],
         {k: stats[k] for k in ("rounds", "draft_tokens_accepted", "tokens_emitted", "acceptance_rate")},
     )

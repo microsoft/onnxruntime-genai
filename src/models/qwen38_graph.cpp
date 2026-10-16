@@ -79,14 +79,16 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   memory_info_ = model_.p_device_->GetMemoryInfo();
 
   result_ring_ = PlaneHostBuffer(plane_, kRing * 8 * sizeof(int64_t));
-  stage_ = PlaneHostBuffer(plane_, 8 * sizeof(int64_t));
+  stage_ = PlaneHostBuffer(plane_, 16 * sizeof(int64_t));
   result_host_ = result_ring_.data();
   stage_host_ = stage_.data();
 
   // control block (the fold model binds it as input, so it exists before the target bindings)
-  ctl_ = PlaneBuffer(plane_, 8 * sizeof(int64_t), stream_);
+  // Allocated with 16 int64 words so slots [8] and [9] hold draft_1 and draft_2 for S=3 / S=4 multi-draft verify.
+  ctl_ = PlaneBuffer(plane_, 16 * sizeof(int64_t), stream_);
   ctx_commit_ = PlaneBuffer(plane_, 2 * sizeof(int64_t), stream_);
-  ctx_a_ = PlaneBuffer(plane_, 2 * sizeof(int64_t), stream_);
+  // ctx_a_ holds 4 contiguous 2-int64 row contexts (rows 0..3); ctx_b_ is row 1's buffer (also aliased at ctx_a_ + 16).
+  ctx_a_ = PlaneBuffer(plane_, kMaxVerifyRows * 2 * sizeof(int64_t), stream_);
   ctx_b_ = PlaneBuffer(plane_, 2 * sizeof(int64_t), stream_);
   if (fold_) BuildHeadState();  // the fold model binds the head state
   BuildTarget();
@@ -103,11 +105,11 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   scratch_i32_ = PlaneBuffer(plane_, sizeof(int32_t), stream_);
   part_v_ = PlaneBuffer(plane_, kArgmaxBlocks * sizeof(float), stream_);
   part_i_ = PlaneBuffer(plane_, kArgmaxBlocks * sizeof(int32_t), stream_);
-  const size_t slots = static_cast<size_t>(capacity_) + 3;
+  const size_t slots = static_cast<size_t>(capacity_) + kMaxVerifyRows + 1;
   d_tokens_ = PlaneBuffer(plane_, slots * sizeof(int64_t), stream_);
   d_arange64_ = PlaneBuffer(plane_, slots * sizeof(int64_t), stream_);
   d_arange32_ = PlaneBuffer(plane_, slots * sizeof(int32_t), stream_);
-  d_last_hidden_ = PlaneBuffer(plane_, static_cast<size_t>(hidden_width_) * 4, stream_);  // 2 rows: the S=2 head warm-up reads two
+  d_last_hidden_ = PlaneBuffer(plane_, static_cast<size_t>(hidden_width_) * 2 * kMaxVerifyRows, stream_);
   if (keep_hidden_) d_prompt_hidden_ = PlaneBuffer(plane_, slots * hidden_width_ * 2, stream_);
   {
     std::vector<int64_t> a64(slots);
@@ -250,6 +252,18 @@ void Qwen38GraphEngine::BuildTarget() {
       NewDeviceTensor(shared_, name, FixedShape(info.GetInputShape(name)), info.GetInputDataType(name));
   }
 
+  // Detect multi-draft verification width from target graph outputs (present_mid3 -> S=4, present_mid2 -> S=3, else S=2).
+  verify_rows_ = 2;
+  for (const auto& name : out_names) {
+    if (StartsWith(name, "present_mid3.") || StartsWith(name, "head.present_mid3.")) {
+      verify_rows_ = std::max(verify_rows_, 4);
+    } else if (StartsWith(name, "present_mid2.") || StartsWith(name, "head.present_mid2.")) {
+      verify_rows_ = std::max(verify_rows_, 3);
+    }
+  }
+  num_banks_ = fold_ ? (verify_rows_ + 1) : kBanks;
+  ledger_.SetNumBanks(num_banks_);
+
   // Recurrent banks: flat 256-byte-aligned arenas, identical layout in every bank.
   size_t arena_bytes = 0;
   std::map<std::string, size_t> offsets;
@@ -259,7 +273,9 @@ void Qwen38GraphEngine::BuildTarget() {
     arena_bytes += Elements(FixedShape(info.GetInputShape(name))) * Ort::SizeOf(info.GetInputDataType(name));
   }
   arena_bytes = AlignUp(arena_bytes, 256);
-  for (auto& bank : banks_) {
+  const int alloc_banks = fold_ ? num_banks_ : (num_banks_ + 1);
+  for (int b = 0; b < alloc_banks; ++b) {
+    Bank& bank = banks_[b];
     bank.arena = PlaneBuffer(plane_, arena_bytes, stream_);
     for (const auto& name : bank_names)
       bank.tensors[name] = MakeTensor(bank.arena.data() + offsets[name], FixedShape(info.GetInputShape(name)),
@@ -276,12 +292,14 @@ void Qwen38GraphEngine::BuildTarget() {
     fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), {8}, i64);
     fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {2}, i64);
     fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {2}, i64);
-    fold_tensors_["fold.ctx_b"] = MakeTensor(ctx_b_.data(), {2}, i64);
+    fold_tensors_["fold.ctx_b"] = MakeTensor(ctx_a_.data() + 16, {2}, i64);
     fold_tensors_["fold.ptrs"] = MakeTensor(fold_ptrs_.data(), {2}, i64);
   }
 
   // Per-row-count inputs
-  for (int rows = fold_ ? 2 : 1; rows <= 2; ++rows) {
+  const int min_rows = fold_ ? verify_rows_ : 1;
+  const int max_rows = fold_ ? verify_rows_ : 2;
+  for (int rows = min_rows; rows <= max_rows; ++rows) {
     RowInputs& in = inputs_[rows - 1];
     auto set64 = [&](DevTensor* t, const std::vector<int64_t>& v) {
       plane_.Check(plane_.memcpy_h2d(t->ptr, v.data(), v.size() * 8, stream_), "input init");
@@ -308,15 +326,17 @@ void Qwen38GraphEngine::BuildTarget() {
   SyncStream();
 
   // One IO binding per (rows, ring phase). Graph k reads bank k; S=1 writes bank k+1 (present_mid -> scratch bank),
-  // S=2 writes present_mid -> bank k+1 and present -> bank k+2.
+  // S=R writes present_mid -> bank k+1, present_mid2 -> bank k+2, present_mid3 -> bank k+3, and present -> bank k+R.
   const auto dtype_logits = info.GetOutputDataType("logits");
-  for (int rows = fold_ ? 2 : 1; rows <= 2; ++rows) {
-    for (int k = 0; k < kBanks; ++k) {
+  for (int rows = min_rows; rows <= max_rows; ++rows) {
+    for (int k = 0; k < num_banks_; ++k) {
       Direction& d = dirs_[rows - 1][k];
       d.binding = OrtIoBinding::Create(session);
       Bank& in_bank = banks_[k];
-      Bank& out_bank = banks_[(k + rows) % kBanks];
-      Bank& mid_bank = rows == 2 ? banks_[(k + 1) % kBanks] : banks_[kBanks];
+      Bank& out_bank = banks_[(k + rows) % num_banks_];
+      Bank& mid1_bank = rows >= 2 ? banks_[(k + 1) % num_banks_] : banks_[num_banks_];
+      Bank& mid2_bank = rows >= 3 ? banks_[(k + 2) % num_banks_] : banks_[num_banks_];
+      Bank& mid3_bank = rows >= 4 ? banks_[(k + 3) % num_banks_] : banks_[num_banks_];
       std::map<std::string, std::unique_ptr<DevTensor>> own;
       auto add_own = [&](const std::string& name, std::vector<int64_t> shape, ONNXTensorElementDataType type) {
         return NewDeviceTensor(own, name, std::move(shape), type);
@@ -366,15 +386,23 @@ void Qwen38GraphEngine::BuildTarget() {
         };
         auto head_state_for = [&](const std::string& tail, int bank_index) -> DevTensor* {
           if (tail == "index_buffer" || tail == "index_lengths")
-            return head_banks_[bank_index % kBanks].tensors.at("past_key_values.0." + tail).get();
+            return head_banks_[bank_index % num_banks_].tensors.at("past_key_values.0." + tail).get();
           return head_store_.at("past_key_values.0." + tail).get();
         };
         if (fold_ && StartsWith(name, "head.present_mid.0."))
           t = head_state_for(name.substr(19), k + 1);
+        else if (fold_ && StartsWith(name, "head.present_mid2.0."))
+          t = head_state_for(name.substr(20), k + 2);
+        else if (fold_ && StartsWith(name, "head.present_mid3.0."))
+          t = head_state_for(name.substr(20), k + 3);
+        else if (fold_ && StartsWith(name, "head.present_s1.0."))
+          t = head_state_for(name.substr(18), k + rows);
+        else if (fold_ && StartsWith(name, "head.present_s2.0."))
+          t = head_state_for(name.substr(18), k + rows);
         else if (fold_ && StartsWith(name, "head.present.0."))
           t = head_state_for(name.substr(15), k + rows);
         else if (fold_ && name == "head.validation.aggregate")
-          t = add_own(name, {2}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+          t = add_own(name, FixedShape(info.GetOutputShape(name)), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
         else if (fold_ && name == "head.next_token")
           t = add_own(name, {1, 1, 1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
         else if (fold_ && name == "fold.tail_done")
@@ -382,7 +410,11 @@ void Qwen38GraphEngine::BuildTarget() {
         else if (name == "present_position_ids")
           t = store_["past_position_ids"].get();
         else if (StartsWith(name, "present_mid."))
-          t = state_for(name.substr(12), mid_bank);
+          t = state_for(name.substr(12), mid1_bank);
+        else if (StartsWith(name, "present_mid2."))
+          t = state_for(name.substr(13), mid2_bank);
+        else if (StartsWith(name, "present_mid3."))
+          t = state_for(name.substr(13), mid3_bank);
         else if (StartsWith(name, "present."))
           t = state_for(name.substr(8), out_bank);
         else if (name == "logits")
@@ -510,7 +542,7 @@ void Qwen38GraphEngine::BuildHead() {
   SyncStream();
 }
 
-// Head KV / compressed index keys in place, indexer small state in 2 ping-pong banks (S=1/S=2 head sessions) or in the 3-bank
+// Head KV / compressed index keys in place, indexer small state in 2 ping-pong banks (S=1/S=2 head sessions) or in the
 // ring of the fold graph.
 void Qwen38GraphEngine::BuildHeadState() {
   const SessionInfo& info = fold_ ? model_.session_info_ : head_[0].info;
@@ -518,7 +550,7 @@ void Qwen38GraphEngine::BuildHeadState() {
   for (const char* tail : {"key", "value", "index_key"})
     NewDeviceTensor(head_store_, std::string("past_key_values.0.") + tail, FixedShape(info.GetInputShape(prefix + tail)),
                     info.GetInputDataType(prefix + tail));
-  const int banks = fold_ ? 3 : 2;
+  const int banks = fold_ ? kMaxBanks : 2;
   for (int b = 0; b < banks; ++b) {
     for (const char* tail : {"index_buffer", "index_lengths"})
       NewDeviceTensor(head_banks_[b].tensors, std::string("past_key_values.0.") + tail,
@@ -538,7 +570,10 @@ void Qwen38GraphEngine::ClearHead() {
 
 void Qwen38GraphEngine::Reset() {
   SyncStream();
-  for (auto& bank : banks_) plane_.Check(plane_.device_memset(bank.arena.data(), 0, bank.arena.size(), stream_), "clear bank");
+  for (auto& bank : banks_) {
+    if (bank.arena.size() > 0)
+      plane_.Check(plane_.device_memset(bank.arena.data(), 0, bank.arena.size(), stream_), "clear bank");
+  }
   for (auto& entry : store_) plane_.Check(plane_.device_memset(entry.second->ptr, 0, entry.second->Bytes(), stream_), "clear store");
   for (auto& entry : shared_) plane_.Check(plane_.device_memset(entry.second->ptr, 0, entry.second->Bytes(), stream_), "clear index");
   plane_.Check(plane_.device_memset(ctl_.data(), 0, ctl_.size(), stream_), "clear ctl");
@@ -567,7 +602,7 @@ void Qwen38GraphEngine::PrepRow(int rows, int row, const void* tok, const void* 
 }
 
 void Qwen38GraphEngine::RunTarget(int rows, int phase) {
-  Direction& d = dirs_[rows - 1][phase % kBanks];
+  Direction& d = dirs_[rows - 1][phase % num_banks_];
   model_.session_target_->Run(d.run_options.get(), *d.binding);
 }
 
@@ -625,12 +660,13 @@ void Qwen38GraphEngine::StepPrefill(std::span<const int32_t> tokens) {
   MutedPrefill(true);
   const size_t n = tokens.size();
   if (n == 0) throw std::logic_error("qwen38_graph: empty prefill chunk");
-  ledger_.RequireRoom(n, "the prompt", 3);
+  const int R = fold_ ? verify_rows_ : 2;
+  ledger_.RequireRoom(n, "the prompt", static_cast<size_t>(R + 1));
   const size_t base = ledger_.Length();
   {
-    std::vector<int64_t> chunk(n + 1, 0);  // trailing 0 = dummy second row of an odd tail
+    std::vector<int64_t> chunk(n + R, 0);  // trailing 0 = dummy rows of a partial tail
     for (size_t i = 0; i < n; ++i) chunk[i] = tokens[i];
-    plane_.Check(plane_.memcpy_h2d(d_tokens_.data() + 8 * base, chunk.data(), (n + 1) * 8, stream_), "upload prompt");
+    plane_.Check(plane_.memcpy_h2d(d_tokens_.data() + 8 * base, chunk.data(), (n + R) * 8, stream_), "upload prompt");
   }
   prompt_tokens_.insert(prompt_tokens_.end(), tokens.begin(), tokens.end());
   const uint8_t* tp = d_tokens_.data();
@@ -640,22 +676,27 @@ void Qwen38GraphEngine::StepPrefill(std::span<const int32_t> tokens) {
   const Direction* last = nullptr;
   int last_row = 0;
   while (i < n) {
-    const bool two = i + 1 < n;
+    const size_t rem = n - i;
+    const size_t step = std::min<size_t>(rem, static_cast<size_t>(R));
     const size_t gi = base + i;
-    PrepRow(2, 0, tp + 8 * gi, pp + 8 * gi, 0, ctx_commit_.data(), ctx_a_.data());
-    PrepRow(2, 1, tp + 8 * (gi + 1), pp + 8 * (gi + 1), 0, ctx_a_.data(), two ? ctx_commit_.data() : ctx_b_.data());
-    RunTarget(2, ledger_.Bank());
-    Direction& d = dirs_[1][ledger_.Bank()];
+    for (int r = 0; r < R; ++r) {
+      const void* cin = (r == 0) ? ctx_commit_.data() : (ctx_a_.data() + 16 * (r - 1));
+      void* cout = (step == static_cast<size_t>(R) && r == R - 1) ? ctx_commit_.data() : (ctx_a_.data() + 16 * r);
+      PrepRow(R, r, tp + 8 * (gi + r), pp + 8 * (gi + r), 0, cin, cout);
+    }
+    RunTarget(R, ledger_.Bank());
+    Direction& d = dirs_[R - 1][ledger_.Bank()];
     plane_.or_status(stream_, d.status, static_cast<int>(d.status_count), ctl_.data());
-    if (!two) plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_a_.data(), 16, stream_), "ctx commit");
-    const size_t step = two ? 2 : 1;
+    if (step < static_cast<size_t>(R)) {
+      plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_a_.data() + 16 * (step - 1), 16, stream_), "ctx commit");
+    }
     if (keep_hidden_)
       plane_.Check(plane_.memcpy_d2d(d_prompt_hidden_.data() + gi * row_bytes, d.hidden, step * row_bytes, stream_),
                    "keep hidden");
     ledger_.Advance(step);
     i += step;
     last = &d;
-    last_row = two ? 1 : 0;
+    last_row = static_cast<int>(step - 1);
   }
   plane_.Check(plane_.memcpy_d2d(d_last_hidden_.data(), last->hidden + static_cast<size_t>(last_row) * row_bytes, row_bytes,
                                  stream_),
@@ -729,12 +770,12 @@ void Qwen38GraphEngine::BuildHeadR2() {
   h.status = NewDeviceTensor(h.tensors, "validation.aggregate", {static_cast<int64_t>(h.status_count)}, i32)->ptr;
   const auto in_names = h.session->GetInputNames();
   const auto out_names = h.session->GetOutputNames();
-  for (int k = 0; k < 3; ++k) {
+  for (int k = 0; k < num_banks_; ++k) {
     Direction& d = h.dirs[k];
     d.binding = OrtIoBinding::Create(*h.session);
     HeadBank& in_bank = head_banks_[k];
-    HeadBank& mid_bank = head_banks_[(k + 1) % 3];
-    HeadBank& out_bank = head_banks_[(k + 2) % 3];
+    HeadBank& mid_bank = head_banks_[(k + 1) % num_banks_];
+    HeadBank& out_bank = head_banks_[(k + 2) % num_banks_];
     for (const auto& name : in_names) {
       DevTensor* t = nullptr;
       if (h.tensors.count(name))
@@ -784,10 +825,10 @@ void Qwen38GraphEngine::CallHeadR2(const int64_t tokens[2], const int64_t positi
   plane_.Check(plane_.memcpy_h2d(h.committed, &committed, 4, stream_), "head committed");
   plane_.Check(plane_.memcpy_d2d(h.hidden, hidden0, row_bytes, stream_), "head hidden");
   plane_.Check(plane_.memcpy_d2d(h.hidden + row_bytes, hidden1, row_bytes, stream_), "head hidden");
-  Direction& d = h.dirs[head_cur_ % 3];
+  Direction& d = h.dirs[head_cur_ % num_banks_];
   h.session->Run(d.run_options.get(), *d.binding);
   plane_.or_status(stream_, h.status, static_cast<int>(h.status_count), ctl_.data());
-  head_cur_ = (head_cur_ + commit_rows) % 3;
+  head_cur_ = (head_cur_ + commit_rows) % num_banks_;
   head_length_ += commit_rows;
 }
 
@@ -810,10 +851,11 @@ void Qwen38GraphEngine::HeadPrefillFold() {
 }
 
 // Head call on (pending, last hidden) @ L with one committed row: the draft goes to ctl[2]; the head ring is rotated to the
-// verify ring phase; ctl = (pending, L, draft, ..., head length).
+// verify ring phase; ctl = (pending, L, draft, ..., head length). For S=3 / S=4, chained speculative drafts d2/d3 go to ctl[8]/ctl[9].
 void Qwen38GraphEngine::FoldFirstDraft() {
   const size_t length = ledger_.Length();
   const int bank = ledger_.Bank();
+  const size_t row_bytes = static_cast<size_t>(hidden_width_) * 2;
   const int64_t tokens[2] = {pending_, pending_};
   const int64_t positions[2] = {static_cast<int64_t>(length), static_cast<int64_t>(length) + 1};
   CallHeadR2(tokens, positions, d_last_hidden_.data(), d_last_hidden_.data(), 1);
@@ -827,6 +869,31 @@ void Qwen38GraphEngine::FoldFirstDraft() {
                    "rotate head ring");
     head_cur_ = bank;
   }
+  const int committed_head_length = head_length_;
+  if (verify_rows_ >= 3) {
+    uint8_t* h_out = head_r2_.tensors.at("hidden_states_out")->ptr;
+    plane_.Check(plane_.memcpy_d2d(d_last_hidden_.data() + row_bytes, h_out, row_bytes, stream_), "save h_mtp_1");
+    const int64_t d1 = ReadCtl(2);
+    const int64_t tok2[2] = {d1, d1};
+    const int64_t pos2[2] = {static_cast<int64_t>(length) + 1, static_cast<int64_t>(length) + 2};
+    CallHeadR2(tok2, pos2, d_last_hidden_.data() + row_bytes, d_last_hidden_.data() + row_bytes, 1);
+    plane_.Check(plane_.memcpy_d2d(ctl_.data() + 64, head_r2_.next_token, 8, stream_), "second draft");
+    SyncStream();
+    if (ReadCtl(5) != 0) CheckDeviceStatus("second draft", nullptr);
+    if (verify_rows_ >= 4) {
+      plane_.Check(plane_.memcpy_d2d(d_last_hidden_.data() + 2 * row_bytes, h_out, row_bytes, stream_), "save h_mtp_2");
+      const int64_t d2 = ReadCtl(8);
+      const int64_t tok3[2] = {d2, d2};
+      const int64_t pos3[2] = {static_cast<int64_t>(length) + 2, static_cast<int64_t>(length) + 3};
+      CallHeadR2(tok3, pos3, d_last_hidden_.data() + 2 * row_bytes, d_last_hidden_.data() + 2 * row_bytes, 1);
+      plane_.Check(plane_.memcpy_d2d(ctl_.data() + 72, head_r2_.next_token, 8, stream_), "third draft");
+      SyncStream();
+      if (ReadCtl(5) != 0) CheckDeviceStatus("third draft", nullptr);
+    }
+    // Since num_banks_ >= 4 for verify_rows_ >= 3, head_banks_[bank] was only read (mid/out went to bank+1, bank+2, bank+3).
+    head_cur_ = bank;
+    head_length_ = committed_head_length;
+  }
   const int64_t state[2] = {pending_, static_cast<int64_t>(length)};
   WriteCtl(0, state);
   const int64_t head_length = head_length_;
@@ -839,16 +906,30 @@ void Qwen38GraphEngine::ForceRejectDraft() {
   SyncStream();
   const int64_t forced = (ReadCtl(2) + 1) % vocab_;
   WriteCtl(2, {&forced, 1});
+  if (verify_rows_ >= 3) {
+    const int64_t forced2 = (ReadCtl(8) + 1) % vocab_;
+    WriteCtl(8, {&forced2, 1});
+  }
+  if (verify_rows_ >= 4) {
+    const int64_t forced3 = (ReadCtl(9) + 1) % vocab_;
+    WriteCtl(9, {&forced3, 1});
+  }
 }
 
 void Qwen38GraphEngine::EnqueueFold() {
   if (force_reject_) ForceRejectDraft();
-  ledger_.RequireRoom(2, "the next verify step");
+  ledger_.RequireRoom(verify_rows_, "the next verify step");
   const uint8_t* ctl = ctl_.data();
-  PrepRow(2, 0, ctl, ctl + 8, 0, ctx_commit_.data(), ctx_a_.data());
-  PrepRow(2, 1, ctl + 16, ctl + 8, 1, ctx_a_.data(), ctx_b_.data());
-  RunTarget(2, ledger_.Bank());
-  Direction& d = dirs_[1][ledger_.Bank()];
+  PrepRow(verify_rows_, 0, ctl + 0, ctl + 8, 0, ctx_commit_.data(), ctx_a_.data());
+  PrepRow(verify_rows_, 1, ctl + 16, ctl + 8, 1, ctx_a_.data(), ctx_a_.data() + 16);
+  if (verify_rows_ >= 3) {
+    PrepRow(verify_rows_, 2, ctl + 64, ctl + 8, 2, ctx_a_.data() + 16, ctx_a_.data() + 32);
+  }
+  if (verify_rows_ >= 4) {
+    PrepRow(verify_rows_, 3, ctl + 72, ctl + 8, 3, ctx_a_.data() + 32, ctx_a_.data() + 48);
+  }
+  RunTarget(verify_rows_, ledger_.Bank());
+  Direction& d = dirs_[verify_rows_ - 1][ledger_.Bank()];
   last_hidden_ptr_ = d.hidden;
   inflight_dir_ = &d;
   ++seq_;
@@ -943,10 +1024,18 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycle() {
   Qwen38CycleRecord result;
   result.pred0 = record[1];
   result.pred1 = record[2];
-  result.accepted = mtp_enabled_ && record[3] != 0;
+  const int64_t acc_count = mtp_enabled_ ? record[3] : 0;
+  result.accepted = acc_count > 0;
+  result.accepted_count = static_cast<int>(acc_count);
+  result.proposed_count = mtp_enabled_ ? (verify_rows_ - 1) : 1;
   const int64_t status = record[4];
   result.new_pending = record[5];
   result.new_length = record[6];
+  if (verify_rows_ >= 3) {
+    const uint64_t packed23 = static_cast<uint64_t>(record[7]);
+    result.pred2 = static_cast<int64_t>(static_cast<int32_t>(packed23 & 0xFFFFFFFFu));
+    result.pred3 = static_cast<int64_t>(static_cast<int32_t>(packed23 >> 32));
+  }
   inflight_ = false;
   if (status != 0) CheckDeviceStatus("decode", inflight_dir_);
   return result;
@@ -958,18 +1047,28 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
   if (fold_) head_length_ += static_cast<int>(record.TokenCount());
   if (suffix_lookup_mode_ > 0) {
     suffix_drafter_.AppendToken(static_cast<int32_t>(pending_));
-    if (record.accepted) {
-      suffix_drafter_.AppendToken(static_cast<int32_t>(record.pred0));
-    }
+    if (record.accepted_count >= 1) suffix_drafter_.AppendToken(static_cast<int32_t>(record.pred0));
+    if (record.accepted_count >= 2) suffix_drafter_.AppendToken(static_cast<int32_t>(record.pred1));
+    if (record.accepted_count >= 3) suffix_drafter_.AppendToken(static_cast<int32_t>(record.pred2));
     pending_ = static_cast<int32_t>(record.new_pending);
   }
   if (!want_more) return;
   if (fold_) {
     if (suffix_lookup_mode_ == 1 || (suffix_lookup_mode_ == 2 && !record.accepted)) {
-      int32_t lookup_draft = -1;
-      if (suffix_drafter_.ProposeDrafts(static_cast<int32_t>(record.new_pending), 1, &lookup_draft, 3) == 1) {
-        const int64_t draft64 = lookup_draft;
-        WriteCtl(2, {&draft64, 1});
+      int32_t lookup_drafts[3] = {-1, -1, -1};
+      const int max_d = verify_rows_ - 1;
+      const int n_d = suffix_drafter_.ProposeDrafts(static_cast<int32_t>(record.new_pending), max_d, lookup_drafts, 3);
+      if (n_d >= 1) {
+        const int64_t d0 = lookup_drafts[0];
+        WriteCtl(2, {&d0, 1});
+      }
+      if (n_d >= 2 && verify_rows_ >= 3) {
+        const int64_t d1 = lookup_drafts[1];
+        WriteCtl(8, {&d1, 1});
+      }
+      if (n_d >= 3 && verify_rows_ >= 4) {
+        const int64_t d2 = lookup_drafts[2];
+        WriteCtl(9, {&d2, 1});
       }
     }
     head_cur_ = ledger_.Bank();
@@ -1002,16 +1101,17 @@ void Qwen38GraphEngine::Warmup() {
   } warmup_guard;
 #endif
   const bool target_captures_graph = IsGraphCaptureEnabled(model_.config_->model.decoder.session_options);
-  const int warm_tokens = target_captures_graph ? 48 : 6;
+  const int R = fold_ ? verify_rows_ : 2;
+  const int warm_tokens = target_captures_graph ? (R * num_banks_ * 6) : (R * num_banks_);
   std::vector<int32_t> dummy(warm_tokens);
   for (int i = 0; i < warm_tokens; ++i) dummy[i] = 1000 + i;
-  StepPrefill(dummy);  // S=2 target ids (24 steps -> 8 runs per phase); fold: the muted cycle graphs
+  StepPrefill(dummy);  // S=R target ids (6 runs per phase); fold: the muted cycle graphs
   if (fold_) {
-    // standalone R=2 head graphs: one call commits one row, so 18 calls touch every phase 6 times
+    // standalone R=2 head graphs: one call commits one row, so 6 * num_banks_ calls touch every phase 6 times
     const auto& q = model_.config_->model.qwen38_graph;
     const bool head_captures_graph =
         q.fold.head_r2.session_options ? IsGraphCaptureEnabled(*q.fold.head_r2.session_options) : target_captures_graph;
-    const int head_warm_calls = head_captures_graph ? 18 : 3;
+    const int head_warm_calls = head_captures_graph ? (num_banks_ * 6) : num_banks_;
     ClearHead();
     SyncStream();
     for (int i = 0; i < head_warm_calls; ++i) {
@@ -1104,7 +1204,17 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     pool_->AddTo(*session_options_, "target");
   }
 
-  session_target_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  std::string target_filename = config_->model.decoder.filename;
+  if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
+    const int d = std::atoi(drafts_env);
+    if (d >= 1 && d <= 3) {
+      const std::string alt = "target/model_s" + std::to_string(d + 1) + ".onnx";
+      if (std::filesystem::exists(root / alt)) {
+        target_filename = alt;
+      }
+    }
+  }
+  session_target_ = CreateSession(ort_env, target_filename, session_options_.get());
   session_info_.Add(*session_target_);
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
 
