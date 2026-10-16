@@ -148,6 +148,75 @@ python src/python/py/models/builder.py -m Qwen/Qwen2.5-0.5B-Instruct \
 If the staged files are intentionally regenerated, refresh the three hashes in
 `PINNED_IDENTITY` in the same change.
 
+## Qwen3.8 WebGPU DFlash2 output/activity smoke
+
+`run_qwen38_webgpu_engine.py --dflash2` keeps the single-request smoke runs and
+also runs two concurrent requests with `max_batch_size=2`, unequal prompt lengths,
+and unequal generation budgets. Its answer patterns, activity counters, and
+provider checks do not imply token-for-token eager/DFlash2 equivalence. Answer
+patterns are not relaxed to accommodate numerical differences. The two-request
+case can use an existing export without rebuilding it:
+
+```bash
+python -m pytest test/python/integration/test_dflash2_webgpu_precision.py -sv \
+    --dflash2-webgpu-model /path/to/qwen38-webgpu-dflash2 \
+    -k two_request_partial_replay_activity_smoke
+```
+
+The case first obtains isolated greedy references on the same WebGPU model.
+After both prompts prefill together, it replaces exactly one draft proposal per
+request with three reference-derived tokens, deliberately changing the second
+token for one request and the third for the other. Counter deltas, the acceptance
+histogram, and per-request events must prove one shared verification forward with
+accepted draft prefixes of 1 and 2 (retained state prefixes of 2 and 3, including
+the anchor), not full acceptance or a terminal-budget truncation.
+
+Both requests remain resident, so one necessarily occupies a nonzero fixed-state
+slot. Subsequent DFlash2 rounds consume the replayed convolution and recurrent
+state. Isolated versus batched DFlash2 token sequences and `matches_isolation`
+remain visible diagnostics, not equality gates across different target shapes.
+The controlled round still requires exactly one shared forward with the specified
+partial acceptances; unexpected acceptance fails explicitly. This is an activity
+smoke, not a direct inspection of internal state tensors or a scheduler reordering
+test.
+
+### Same-shape target correctness
+
+```bash
+python -m pytest test/python/integration/test_dflash2_webgpu_precision.py -sv \
+    --dflash2-webgpu-model /path/to/qwen38-webgpu-dflash2 \
+    -k target_verification_matches_same_shape_eager
+```
+
+The comparison uses the exported target graph's ordinary ORT inputs and outputs,
+with WebGPU graph capture disabled. Two prompts prefill together, producing
+nonzero paged KV, convolution, and recurrent state. The real drafter supplies
+three greedy lattice proposals per request. The target-only eager and
+verification runs process the identical anchor-plus-three-draft input (eight
+packed rows, batch size two) from independent copies of that same post-prefill
+state. Request order, input lengths, three-plane position IDs, block table,
+cache geometry, output selection, and session are identical. Only compact-update
+controls differ: capture off versus active capture of three transitions.
+
+Every vocabulary logit is checked with `rtol=1e-3, atol=2e-3`, and every row's
+argmax must match exactly, even for near ties. `target-logits.npz` and
+`target-logit-comparison.json` under pytest's temporary directory retain the full
+logits, maximum/mean absolute error, top-two token IDs/logits, and margins.
+A separate one-token versus four-token query-width probe holds incoming state
+and causal anchor fixed and reports differences without an equality assertion.
+Shape-dependent numerical behavior must remain visible, not be hidden by
+loosening the same-shape checks. A short eager-only batch-one/batch-two probe
+on the two activity prompts matched all 32 output tokens in the local validation;
+that does not guarantee shape-invariant output for other contexts.
+
+This tests the target verification **graph contract**, not the Engine's actual
+packed-feed construction or post-acceptance bank publication. Python Engine
+events expose neither raw target feeds nor logits. Capturing an actual Engine
+transaction would minimally need a test-only snapshot at the
+`SimpleDecoder::Decode` session boundary, before aliased state is modified, plus
+the raw output logits and row-to-request mapping after the call. No such hook or
+Engine restructuring is added here.
+
 ## Adding a new model
 
 The blob container is populated by the Foundry team. The integration
