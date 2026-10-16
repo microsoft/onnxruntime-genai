@@ -371,10 +371,15 @@ def main():
     with contextlib.redirect_stdout(sys.stderr):
         register_ep(args.execution_provider, args.ep_path, args.use_winml)
         model = og.Model(get_config(args.model_path, args.execution_provider, args.ep_path))
-    with open(args.request, encoding="utf-8") as f:
-        request = json.load(f)
-    decisions = D1Decisions(model, model_context_length(args.model_path))
-    response = json.dumps(decisions.decide(request, args.image), ensure_ascii=False, indent=2)
+    try:
+        # utf-8-sig also reads files that start with a byte order mark (Windows Notepad, PowerShell).
+        with open(args.request, encoding="utf-8-sig") as f:
+            request = json.load(f)
+        decisions = D1Decisions(model, model_context_length(args.model_path))
+        response = json.dumps(decisions.decide(request, args.image), ensure_ascii=False, indent=2)
+    except ValueError as error:
+        # A bad request (including bad JSON): one line on stderr and exit code 2, no traceback.
+        parser.exit(2, f"error: {error}\n")
     # UTF-8 on every platform: on Windows a redirected stdout uses the ANSI code page otherwise.
     sys.stdout.reconfigure(encoding="utf-8")
     print(response)

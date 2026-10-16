@@ -680,3 +680,67 @@ def test_command_line_prints_only_the_response(model_path, tmp_path):
     assert list(response["answers"]) == ["refund", "team"]
     assert list(response["answers"]["team"]["probabilities"]) == ["billing", "返金"]
     assert response["usage"]["output_tokens"] == 0
+
+
+@pytest.fixture
+def chatty_common(monkeypatch):
+    """A stand-in for examples/python/common.py that prints, as the real one does for some providers."""
+    common = types.ModuleType("common")
+
+    def get_ep_args(parser):
+        parser.add_argument("-e", "--execution_provider", default="follow_config")
+        parser.add_argument("--ep_path", default="")
+        parser.add_argument("--use_winml", action="store_true")
+
+    def register_ep(ep, ep_path, use_winml):
+        print(f"Registered {ep} successfully!")
+
+    def get_config(path, ep, ep_path):
+        print(f"Setting model to {ep}")
+        return og.Config(path)
+
+    common.get_ep_args, common.register_ep, common.get_config = get_ep_args, register_ep, get_config
+    monkeypatch.setitem(sys.modules, "common", common)
+
+
+def run_main(monkeypatch, model_path, request_path):
+    monkeypatch.setattr(sys, "argv", ["d1-decisions.py", "-m", model_path, "-r", str(request_path)])
+    d1.main()
+
+
+def test_main_keeps_setup_messages_off_stdout(monkeypatch, capsys, tmp_path, model_path, chatty_common):
+    # The request file starts with a byte order mark, as Windows Notepad writes it.
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"state": STATE, "questions": {"refund": REFUND}}), encoding="utf-8-sig")
+
+    run_main(monkeypatch, model_path, request)
+
+    out, err = capsys.readouterr()
+    assert list(json.loads(out)["answers"]) == ["refund"]
+    assert "Registered follow_config successfully!" in err
+    assert "Setting model to follow_config" in err
+
+
+@pytest.mark.parametrize(
+    "text,message",
+    [
+        (json.dumps({"state": STATE, "questions": {"q": {"type": "bool", "instructions": "x"}}}), "unknown type"),
+        ("{not json", "error: "),
+    ],
+    ids=["bad_question", "bad_json"],
+)
+def test_main_refuses_with_one_line_and_exit_code_2(
+    monkeypatch, capsys, tmp_path, model_path, chatty_common, text, message
+):
+    request = tmp_path / "request.json"
+    request.write_text(text, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        run_main(monkeypatch, model_path, request)
+
+    out, err = capsys.readouterr()
+    assert exit_info.value.code == 2
+    assert out == ""
+    last_line = err.splitlines()[-1]
+    assert last_line.startswith("error: ") and message in last_line
+    assert "Traceback" not in err
