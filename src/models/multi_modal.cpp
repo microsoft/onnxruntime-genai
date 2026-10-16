@@ -474,8 +474,9 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
     recurrent_state_->RestoreAfterGraphCapture(graph_id);
   }
   State::Run(*model_.decoder_session_, graph_capture_this_run, seq_len, graph_capture_variant);
+  auto logits = logits_.Get();
   cache_phase_.Commit();
-  return logits_.Get();
+  return logits;
 }
 
 bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {

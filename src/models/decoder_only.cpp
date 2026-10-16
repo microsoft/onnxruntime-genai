@@ -92,9 +92,10 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
     recurrent_state_->RestoreAfterGraphCapture(graph_id);
   }
   State::Run(*model_.session_decoder_, graph_capture_this_run, seq_len, graph_capture_variant);
+  auto logits = logits_.Get();
   cache_phase_.Commit();
 
-  return logits_.Get();
+  return logits;
 }
 
 DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
