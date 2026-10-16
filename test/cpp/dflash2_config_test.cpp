@@ -392,6 +392,52 @@ TEST(Dflash2ConfigTest, LatticeWalkTruncatesLikeTheTarget) {
   }
 }
 
+TEST(Dflash2ConfigTest, ParsesAnchorRowIndexInput) {
+  const auto root = fs_std::temp_directory_path() / "ortgenai_dflash_anchor_row_index";
+  std::error_code error;
+  fs_std::remove_all(root, error);
+  fs_std::create_directories(root);
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << R"({"model":{"type":"tiny-test-model","vocab_size":128,"context_length":32,)"
+         R"("decoder":{"filename":"model.onnx"},"dflash2":{"filename":"dflash2.onnx",)"
+         R"("num_hidden_layers":1,"num_key_value_heads":2,"head_size":8,"block_size":4,)"
+         R"("num_draft_tokens":3,"selector_top_k":4,"mask_token_id":31,"sliding_window":17,)"
+         R"("inputs":{"anchor_row_index":"anchor_rows"}}},"search":{}})";
+  out.close();
+
+  Config config(fs::path{root.string()}, "");
+  EXPECT_EQ(config.model.dflash2.inputs.anchor_row_index, "anchor_rows");
+  // Absent by default: DFlash 2 / DSpark drafters do not read an anchor row.
+  EXPECT_TRUE(MakeDflash2Config().model.dflash2.inputs.anchor_row_index.empty());
+}
+
+TEST(Dflash2ConfigTest, AcceptsAnchorRowIndexInput) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.inputs.anchor_row_index = "anchor_row_index";
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.AddInput("anchor_row_index", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1});
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
+}
+
+TEST(Dflash2ConfigTest, RejectsMissingOrMistypedAnchorRowIndexInput) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.inputs.anchor_row_index = "anchor_row_index";
+  {
+    auto [target, drafter] = MakeCompatibleMetadata();
+    EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+  }
+  {
+    auto [target, drafter] = MakeCompatibleMetadata();
+    drafter.AddInput("anchor_row_index", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {-1});
+    EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+  }
+  {
+    auto [target, drafter] = MakeCompatibleMetadata();
+    drafter.AddInput("anchor_row_index", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {2});
+    EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+  }
+}
+
 TEST(Dflash2ConfigTest, RejectsSamplingTemperatureOutsideFloatRange) {
   const auto root = fs_std::temp_directory_path() /
                     "ortgenai_dflash_sampling_temperature_out_of_range";
