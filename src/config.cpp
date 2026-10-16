@@ -490,6 +490,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.input_ids = JSON::Get<std::string_view>(value);
     } else if (name == "inputs_embeds") {
       v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "has_previous_state") {
+      v_.has_previous_state = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {
@@ -1394,6 +1396,8 @@ struct VisionInputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "pixel_values") {
       v_.pixel_values = JSON::Get<std::string_view>(value);
+    } else if (name == "is_video") {
+      v_.is_video = JSON::Get<std::string_view>(value);
     } else if (name == "pixel_position_ids") {
       v_.pixel_position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "image_sizes") {
@@ -1417,6 +1421,10 @@ struct VisionOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "image_features") {
       v_.image_features = JSON::Get<std::string_view>(value);
+    } else if (name == "retention_mask") {
+      v_.retention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "kept_indices") {
+      v_.kept_indices = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

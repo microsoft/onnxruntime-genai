@@ -27,7 +27,8 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
       model_{model},
       kv_cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
       recurrent_state_(CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)),
-      position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
+      position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)},
+      cache_phase_{*this, *model_.session_decoder_} {
   input_ids_.Add();
   position_inputs_->Add();
   logits_.Add();
@@ -47,9 +48,11 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     hidden_states_output_ = std::make_unique<HiddenStatesOutputs>(*this);
     hidden_states_output_->Add();
   }
+  cache_phase_.Add();
 }
 
 void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  cache_phase_.ValidateExtraInputs(extra_inputs);
   extra_inputs_.Add(extra_inputs, model_.session_decoder_->GetInputNames());
 }
 
@@ -59,6 +62,7 @@ void DecoderOnly_State::SetHiddenStates(OrtValue* hidden_states) {
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  cache_phase_.Begin(next_tokens.size() / static_cast<size_t>(params_->search.batch_size));
   size_t num_tokens = next_tokens.size();
   const auto& chunk_size_opt = params_->search.chunk_size;
 
@@ -88,8 +92,10 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
     recurrent_state_->RestoreAfterGraphCapture(graph_id);
   }
   State::Run(*model_.session_decoder_, graph_capture_this_run, seq_len, graph_capture_variant);
+  auto logits = logits_.Get();
+  cache_phase_.Commit();
 
-  return logits_.Get();
+  return logits;
 }
 
 DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
@@ -124,6 +130,7 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
 }
 
 void DecoderOnly_State::RewindTo(size_t index) {
+  RejectCachePhaseOperation(*model_.config_, "rewind");
   position_inputs_->RewindTo(index);
   if (kv_cache_)
     kv_cache_->RewindTo(index);
@@ -132,12 +139,14 @@ void DecoderOnly_State::RewindTo(size_t index) {
 }
 
 void DecoderOnly_State::SnapshotState(size_t position) {
+  RejectCachePhaseOperation(*model_.config_, "snapshot/speculative decoding");
   if (recurrent_state_)
     recurrent_state_->Snapshot(position);
 }
 
 bool DecoderOnly_State::HasCroppableRecurrentState() const {
-  return recurrent_state_ && recurrent_state_->IsWindowed();
+  return model_.config_->model.decoder.inputs.has_previous_state.empty() &&
+         recurrent_state_ && recurrent_state_->IsWindowed();
 }
 
 int64_t DecoderOnly_State::RecurrentStateWindow() const {
@@ -145,6 +154,7 @@ int64_t DecoderOnly_State::RecurrentStateWindow() const {
 }
 
 void DecoderOnly_State::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  RejectCachePhaseOperation(*model_.config_, "crop/speculative decoding");
   // Roll the attention KV cache + position back to the committed length, and crop the recurrent
   // state to the state AFTER verify token `recurrent_position` (no replay forward). Used by
   // lossless multi-token MTP partial accept.

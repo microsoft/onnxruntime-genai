@@ -302,6 +302,7 @@ struct Config {
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
+        std::string is_video{"is_video"};
         std::string pixel_position_ids{Defaults::PixelPositionIdsName};
         std::string image_sizes{Defaults::ImageSizesName};
         std::string image_grid_thw{Defaults::ImageSizesName};          // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
@@ -310,6 +311,8 @@ struct Config {
 
       struct Outputs {
         std::string image_features{Defaults::ImageFeaturesName};
+        std::string retention_mask{"retention_mask"};
+        std::string kept_indices{"kept_indices"};
       } outputs;
     } vision;
 
@@ -494,9 +497,11 @@ struct Config {
       // without rerunning the model. 0 means the model does not export the state-update bindings.
       int state_update_capacity{};
 
+      // Per-layer metadata. Only the legacy "conv"/"full_attention" vocabulary selects
+      // the convolution-only cache manager; other hybrids discover paired states from the graph.
+      std::vector<std::string> layer_types;
       // Hybrid SSM+Attention (LFM2) parameters
-      std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
-      int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
+      int conv_cache_size{};  // Convolution cache width (conv_L_cache from HF config)
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
@@ -549,6 +554,7 @@ struct Config {
         std::string embeddings{Defaults::InputsEmbedsName};
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string has_previous_state;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
         std::string past_key_scale_names;

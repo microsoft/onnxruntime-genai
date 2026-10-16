@@ -19,6 +19,7 @@
 #include "models/io/position_inputs.h"
 #include "model_type.h"
 #include "models/io/recurrent_state.h"
+#include "models/io/cache_phase.h"
 #include "models/lfm2_audio_output.h"
 
 namespace Generators {
@@ -166,6 +167,7 @@ struct DecoderState : State {
                const GeneratorParams& params);
   DecoderState(const DecoderState&) = delete;
   DecoderState& operator=(const DecoderState&) = delete;
+  void RewindTo(size_t index) override;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
@@ -192,6 +194,7 @@ struct DecoderState : State {
   std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
   Logits logits_{*this};                                // Model output
+  CachePhaseInput cache_phase_;
 };
 
 struct MultiModalPipelineState : State {
@@ -199,6 +202,7 @@ struct MultiModalPipelineState : State {
                           const GeneratorParams& params);
   MultiModalPipelineState(const MultiModalPipelineState&) = delete;
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
+  void RewindTo(size_t index) override;
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
@@ -226,6 +230,9 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<Lfm2AudioOutput> audio_output_;  // LFM2-Audio speech output, when the model has it
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
+  bool uses_prepared_image_features_{};
+  bool uses_token_only_text_{};
+  std::shared_ptr<Tensor> prepared_attention_mask_;
 
   const std::string vision_adapter_name_{"vision"};
   const std::string speech_adapter_name_{"speech"};

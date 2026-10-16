@@ -63,3 +63,6 @@ examples/csharp/ModelChat/models
 /src/java/build
 /src/java/CMakeFiles
 /src/java/CMakeCache.txt
+
+!/test/models/cache-dispatch/
+!/test/models/cache-dispatch/**

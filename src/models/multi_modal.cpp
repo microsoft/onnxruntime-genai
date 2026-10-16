@@ -9,11 +9,33 @@
 #include "pixtral_vision_state.h"
 #include "qwen_vl_state.h"
 #include <algorithm>
+#include <cstring>
 #include <numeric>
 
 namespace Generators {
 
 namespace {
+
+std::vector<int64_t> CopyIntegerTensorToCpu(OrtValue& tensor, DeviceInterface& device) {
+  const auto info = tensor.GetTensorTypeAndShapeInfo();
+  const auto type = info->GetElementType();
+  if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 && type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+    throw std::runtime_error("Prepared prompt metadata must use int32 or int64 tensors.");
+  }
+  auto buffer = ByteWrapTensor(DeviceForTensor(tensor, device), tensor);
+  auto bytes = buffer.CopyDeviceToCpu();
+  std::vector<int64_t> values(info->GetElementCount());
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+      std::memcpy(&values[i], bytes.data() + i * sizeof(int64_t), sizeof(int64_t));
+    } else {
+      int32_t value;
+      std::memcpy(&value, bytes.data() + i * sizeof(int32_t), sizeof(int32_t));
+      values[i] = value;
+    }
+  }
+  return values;
+}
 
 int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) {
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
@@ -396,7 +418,8 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
       model_{model},
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
       kv_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
-      recurrent_state_{CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)} {
+      recurrent_state_{CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)},
+      cache_phase_{*this, *model_.decoder_session_} {
   inputs_embeds_.Add();
 
   // Gemma4: decoder accepts per_layer_inputs from the embedding model
@@ -427,6 +450,12 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
     kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
+  cache_phase_.Add();
+}
+
+void DecoderState::RewindTo(size_t index) {
+  RejectCachePhaseOperation(*model_.config_, "rewind");
+  State::RewindTo(index);
 }
 
 DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -445,7 +474,9 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
     recurrent_state_->RestoreAfterGraphCapture(graph_id);
   }
   State::Run(*model_.decoder_session_, graph_capture_this_run, seq_len, graph_capture_variant);
-  return logits_.Get();
+  auto logits = logits_.Get();
+  cache_phase_.Commit();
+  return logits;
 }
 
 bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {
@@ -519,6 +550,7 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
+  cache_phase_.Begin(new_length);
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
   if (kv_cache_)
@@ -532,6 +564,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
 
 // Overload for pipeline to call
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices, size_t new_length) {
+  cache_phase_.Begin(new_length);
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
   if (kv_cache_)
     kv_cache_->Update(beam_indices, total_length);
@@ -569,18 +602,94 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   }
 }
 
-void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  num_image_tokens_ = GetNumImageTokens(extra_inputs);
-  num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
-  num_images_ = GetImageFeatureBatchSize(extra_inputs);
+void MultiModalPipelineState::RewindTo(size_t index) {
+  RejectCachePhaseOperation(*model_.config_, "rewind");
+  State::RewindTo(index);
+}
 
-  if (model_.vision_session_) {
+void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  decoder_state_->cache_phase_.ValidateExtraInputs(extra_inputs);
+  prepared_attention_mask_.reset();
+  std::shared_ptr<Tensor> prepared_features;
+  if (model_.config_->model.type == "nemotron_h_omni") {
+    for (const auto& input : extra_inputs) {
+      if (input.name == model_.config_->model.embedding.inputs.image_features) {
+        prepared_features = input.tensor;
+      }
+    }
+  }
+  uses_prepared_image_features_ = prepared_features != nullptr;
+  uses_token_only_text_ = model_.config_->model.type == "nemotron_h_omni" && !model_.config_->model.decoder.inputs.has_previous_state.empty() && !prepared_features;
+  if (!model_.config_->model.decoder.inputs.has_previous_state.empty() && !prepared_features && !uses_token_only_text_)
+    throw std::runtime_error("has_previous_state Nemotron-H Omni requires prepared image_features (empty for text-only)");
+  if (uses_token_only_text_) {
+    for (const auto& input : extra_inputs) {
+      if (input.name != model_.config_->model.decoder.inputs.attention_mask)
+        throw std::runtime_error("Token-only Nemotron-H Omni does not accept media or extra inputs; use prepared image_features.");
+      prepared_attention_mask_ = input.tensor;
+    }
+    vision_state_.reset();
+  }
+  if (prepared_features) {
+    if (!is_prompt_ || params_->BatchBeamSize() != 1) {
+      throw std::runtime_error("Prepared Nemotron-H Omni features require an initial batch-1, beam-1 prompt.");
+    }
+    const auto shape = prepared_features->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+    if (shape.size() != 2) {
+      throw std::runtime_error("Prepared image_features must have shape [kept_tokens, hidden_size].");
+    }
+    num_image_tokens_ = shape[0];
+    num_images_ = 1;
+    const auto vision_inputs = model_.vision_session_->GetInputNames();
+    for (const auto& input : extra_inputs) {
+      if (std::find(vision_inputs.begin(), vision_inputs.end(), input.name) != vision_inputs.end() ||
+          input.name == model_.config_->model.vision.outputs.retention_mask ||
+          input.name == model_.config_->model.vision.outputs.kept_indices) {
+        throw std::runtime_error("Apply vision retention to the prompt before supplying prepared image_features; do not mix raw media or retention outputs.");
+      }
+      if (input.name == model_.config_->model.decoder.inputs.attention_mask) {
+        prepared_attention_mask_ = input.tensor;
+      }
+      if (input.name == model_.config_->model.decoder.inputs.position_ids) {
+        throw std::runtime_error("Prepared position_ids are generated from compacted input_ids; do not supply dense positions.");
+      }
+      if (input.name == Config::Defaults::NumImageTokens) {
+        const auto info = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+        if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 || info->GetShape().size() != 1) {
+          throw std::runtime_error("Prepared num_image_tokens must be an int64 vector.");
+        }
+        int64_t total = 0;
+        for (const auto count : CopyIntegerTensorToCpu(*input.tensor->ort_tensor_, *model_.p_device_inputs_)) {
+          if (count < 0 || count > num_image_tokens_ - total) {
+            throw std::runtime_error("Prepared num_image_tokens does not match the image_features row count.");
+          }
+          total += count;
+        }
+        if (total != num_image_tokens_) {
+          throw std::runtime_error("Prepared num_image_tokens does not match the image_features row count.");
+        }
+      }
+    }
+    vision_state_.reset();
+  } else {
+    num_image_tokens_ = GetNumImageTokens(extra_inputs);
+    num_images_ = GetImageFeatureBatchSize(extra_inputs);
+  }
+  num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
+
+  if (vision_state_) {
     vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
   }
   if (model_.speech_session_) {
     speech_state_->SetExtraInputs(extra_inputs, num_audio_tokens_);
   }
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
+  if (prepared_features) {
+    embedding_state_->image_features_->UsePreparedFeatures(*prepared_features->ort_tensor_);
+  } else if (uses_token_only_text_) {
+    // Text still traverses the embedding graph, with native graph-typed [0, hidden] features.
+    embedding_state_->image_features_->AllocateEmptyFeatures();
+  }
   // Set the grid tensors for Qwen2-VL if present
   if (auto* qwen_pos_inputs = dynamic_cast<Qwen2VLPositionInputs*>(decoder_state_->position_inputs_.get())) {
     std::shared_ptr<Tensor> img_grid, vid_grid, sec_grid;
@@ -611,6 +720,28 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   // Generation stage:
   //   - input_ids, image_features, audio_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
+
+  if ((is_prompt_ && uses_prepared_image_features_) || uses_token_only_text_) {
+    const auto tokens = next_tokens.CopyDeviceToCpu();
+    if (uses_token_only_text_ && std::find(tokens.begin(), tokens.end(), model_.config_->model.image_token_id) != tokens.end())
+      throw std::runtime_error("Token-only Nemotron-H Omni media placeholders require prepared image_features.");
+    if (std::count(tokens.begin(), tokens.end(), model_.config_->model.image_token_id) != num_image_tokens_) {
+      throw std::runtime_error("The compacted prompt must contain exactly one image placeholder per prepared feature row.");
+    }
+    if (std::find(tokens.begin(), tokens.end(), model_.config_->model.pad_token_id) != tokens.end()) {
+      throw std::runtime_error("Prepared Nemotron-H Omni prompts must be unpadded.");
+    }
+    if (is_prompt_ && prepared_attention_mask_) {
+      const auto info = prepared_attention_mask_->ort_tensor_->GetTensorTypeAndShapeInfo();
+      if (info->GetShape() != std::vector<int64_t>{1, static_cast<int64_t>(tokens.size())}) {
+        throw std::runtime_error("Prepared attention_mask must match the compacted input_ids length.");
+      }
+      const auto mask = CopyIntegerTensorToCpu(*prepared_attention_mask_->ort_tensor_, *model_.p_device_inputs_);
+      if (!std::all_of(mask.begin(), mask.end(), [](int64_t value) { return value == 1; })) {
+        throw std::runtime_error("Prepared Nemotron-H Omni attention_mask must be all ones; padding is not supported.");
+      }
+    }
+  }
 
   if (audio_output_) {
     audio_output_->BeginStep(next_tokens, is_prompt_);

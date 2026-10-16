@@ -15,6 +15,7 @@
 #include "sequences.h"
 #include "models/env_utils.h"
 #include "models/model.h"
+#include "models/io/cache_phase.h"
 #include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "models/io/kv_cache.h"
@@ -742,6 +743,7 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 }
 
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   DurationTrace trace{"Generator::AppendTokens"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
@@ -798,6 +800,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
 }
 
 void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   DurationTrace trace{"Generator::AppendTokensDevice"};
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
@@ -820,6 +823,7 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   const auto& model_type = model_->config_->model.type;
   if (ModelType::IsLLM(model_type) ||
       (ModelType::IsPipe(model_type) && !ModelType::IsVLM(model_type) && !ModelType::IsMMM(model_type))) {
@@ -829,9 +833,21 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
   cpu_span<int32_t> input_ids;
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
+      if (model_type == "nemotron_h_omni") {
+        const auto info = tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+        const auto shape = info->GetShape();
+        if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+            shape.size() != 2 || shape[0] != 1 ||
+            tensor->ort_tensor_->GetTensorMemoryInfo().GetDeviceType() != OrtMemoryInfoDeviceType_CPU) {
+          throw std::runtime_error("Nemotron-H Omni requires CPU int32 input_ids with shape [1, sequence_length].");
+        }
+      }
       input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
                                     tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
     } else {
+      if (model_type == "nemotron_h_omni" && !model_->config_->model.decoder.inputs.has_previous_state.empty() && !set_extra_inputs_) {
+        throw std::runtime_error("has_previous_state Nemotron-H Omni cached SetInputs accepts only input_ids; media and extra inputs are not supported.");
+      }
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
       [[maybe_unused]] const auto [graph_name, found] = model_->config_->GetGraphName(name);
@@ -947,15 +963,18 @@ bool Generator::IsSessionTerminated() const {
 }
 
 void Generator::SetLogits(DeviceSpan<float> logits) {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   search_->SetLogits(logits);
   computed_logits_ = true;
 }
 
 void Generator::PrepareForSetLogits() {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   strategy_->PrepareForSetLogits(*this);
 }
 
 void Generator::GenerateNextToken() {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   DurationTrace trace{"Generator::GenerateNextToken"};
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
@@ -978,6 +997,7 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 }
 
 void Generator::RewindToLength(size_t new_length) {
+  RejectCachePhaseOperation(*model_->config_, "rewind");
   const auto& model_type = model_->config_->model.type;
   // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
   // TransducerState path and never create search_, so rewind is unsupported.
@@ -1012,6 +1032,7 @@ void Generator::RewindToLength(size_t new_length) {
 }
 
 DeviceSpan<float> Generator::GetLogits() {
+  CachePhaseOperation operation{*model_->config_, cache_phase_failed_};
   DeviceSpan<float> strategy_logits;
   if (strategy_->TryGetExternalLogits(*this, strategy_logits)) {
     return strategy_logits;
@@ -1031,6 +1052,7 @@ DeviceSpan<float> Generator::GetLogits() {
 }
 
 void Generator::SnapshotState() {
+  RejectCachePhaseOperation(*model_->config_, "snapshot/speculative decoding");
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   state_->SnapshotState(search_->GetSequenceLength());
 }
@@ -1044,6 +1066,7 @@ int64_t Generator::RecurrentStateWindow() const {
 }
 
 void Generator::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  RejectCachePhaseOperation(*model_->config_, "crop/speculative decoding");
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (new_length > search_->GetSequenceLength())
     throw std::runtime_error("CropToAccepted: new_length exceeds current sequence length");

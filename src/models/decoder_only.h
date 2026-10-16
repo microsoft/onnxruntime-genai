@@ -8,6 +8,7 @@
 #include "models/io/extra_inputs.h"
 #include "models/io/hidden_states.h"
 #include "models/io/recurrent_state.h"
+#include "models/io/cache_phase.h"
 
 namespace Generators {
 
@@ -55,6 +56,7 @@ struct DecoderOnly_State : State {
   std::unique_ptr<HiddenStatesInputs> hidden_states_;          // Only for models with a hidden_states input (MTP head).
   std::unique_ptr<HiddenStatesOutputs> hidden_states_output_;  // Only for models that emit a hidden_states output (CUDA-graph-safe).
   ExtraInputs extra_inputs_{*this};
+  CachePhaseInput cache_phase_;
 };
 
 }  // namespace Generators

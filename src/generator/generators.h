@@ -186,6 +186,7 @@ struct Generator : LeakChecked<Generator> {
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   Action last_action_{Action::standard};
+  bool cache_phase_failed_{};
 
   // Pre-computed per-token decisions: avoid repeated checks each token
   // Non-null when the model is a transducer (RNNT, TDT); points into state_.
