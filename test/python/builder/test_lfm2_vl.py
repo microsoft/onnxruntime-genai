@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -21,6 +22,7 @@ import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
 BUILDERS_DIR = MODELS_DIR / "builders"
+TEST_MODELS_DIR = Path(__file__).parents[2] / "models"
 sys.path.insert(0, str(MODELS_DIR))
 
 
@@ -48,12 +50,8 @@ builder_module = _load_builder_entrypoint_module()
 Model = base_module.Model
 
 
-@pytest.mark.parametrize("auto_map", [False, True], ids=["stock", "d1_auto_map"])
-@pytest.mark.parametrize("exclude_embeds,expected_type", [(True, "lfm2_vl"), (False, "lfm2_vl_text")])
-def test_lfm2_vl_architecture_uses_lfm2_builder_and_labels_the_export(
-    monkeypatch, tmp_path, exclude_embeds, expected_type, auto_map
-):
-    captured = {}
+def _fake_lfm2_model(captured, exclude_embeds):
+    """A stand-in for LFM2Model that records what create_model passes to it."""
 
     class FakeLFM2Model:
         model_type = "lfm2"
@@ -68,25 +66,16 @@ def test_lfm2_vl_architecture_uses_lfm2_builder_and_labels_the_export(
         def save_processing(self, *args):
             pass
 
-    if auto_map:
-        # LiquidAI/d1-3B is a stock Lfm2VlForConditionalGeneration whose config also names its own
-        # AutoModel class. Without remote code, the real AutoConfig must still lead to the LFM2 builder.
-        checkpoint = tmp_path / "input"
-        checkpoint.mkdir()
-        (checkpoint / "config.json").write_text(
-            json.dumps(
-                {
-                    "architectures": ["Lfm2VlForConditionalGeneration"],
-                    "auto_map": {"AutoModel": "modeling_d1.D1Model"},
-                    "model_type": "lfm2_vl",
-                }
-            ),
-            encoding="utf-8",
-        )
-        config = base_module.transformers.AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=False)
-    else:
-        config = types.SimpleNamespace(architectures=["Lfm2VlForConditionalGeneration"])
-    monkeypatch.setattr(builder_module, "LFM2Model", FakeLFM2Model)
+    return FakeLFM2Model
+
+
+@pytest.mark.parametrize("exclude_embeds,expected_type", [(True, "lfm2_vl"), (False, "lfm2_vl_text")])
+def test_lfm2_vl_architecture_uses_lfm2_builder_and_labels_the_export(
+    monkeypatch, tmp_path, exclude_embeds, expected_type
+):
+    captured = {}
+    config = types.SimpleNamespace(architectures=["Lfm2VlForConditionalGeneration"])
+    monkeypatch.setattr(builder_module, "LFM2Model", _fake_lfm2_model(captured, exclude_embeds))
 
     builder_module.create_model(
         "LiquidAI/LFM2.5-VL-1.6B",
@@ -100,6 +89,48 @@ def test_lfm2_vl_architecture_uses_lfm2_builder_and_labels_the_export(
     )
 
     assert captured["args"][0] is config
+    assert captured["model_type"] == expected_type
+
+
+@pytest.mark.parametrize("exclude_embeds,expected_type", [(True, "lfm2_vl"), (False, "lfm2_vl_text")])
+def test_d1_checkpoint_loads_without_remote_code(monkeypatch, tmp_path, exclude_embeds, expected_type):
+    # LiquidAI/d1-3B is a stock Lfm2VlForConditionalGeneration whose config.json also names its own
+    # AutoModel class (auto_map). The builder loads configs with trust_remote_code=False by default,
+    # so it must read this config and tokenizer without modeling_d1.py and pick the LFM2 builder.
+    checkpoint = tmp_path / "d1-3b"
+    checkpoint.mkdir()
+    config = {
+        "architectures": ["Lfm2VlForConditionalGeneration"],
+        "auto_map": {"AutoModel": "modeling_d1.D1Model"},
+        "model_type": "lfm2_vl",
+        "image_token_id": 124907,
+        "text_config": {"model_type": "lfm2", "hidden_size": 64, "num_hidden_layers": 2, "vocab_size": 128000},
+    }
+    (checkpoint / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    # The tiny LFM2-VL test model has the LFM2 tokenizer files.
+    for name in ("tokenizer.json", "tokenizer_config.json"):
+        shutil.copy(TEST_MODELS_DIR / "lfm2-vl" / name, checkpoint / name)
+    assert not (checkpoint / "modeling_d1.py").exists()
+
+    hf_details = builder_module.get_hf_details("LiquidAI/d1-3B", str(checkpoint), str(tmp_path / "cache"), {})
+    loaded = hf_details["hf_config"]
+    assert type(loaded).__name__ == "Lfm2VlConfig"
+    assert loaded.auto_map == {"AutoModel": "modeling_d1.D1Model"}
+
+    captured = {}
+    monkeypatch.setattr(builder_module, "LFM2Model", _fake_lfm2_model(captured, exclude_embeds))
+    builder_module.create_model(
+        "LiquidAI/d1-3B",
+        str(checkpoint),
+        str(tmp_path / "output"),
+        "int4",
+        "cpu",
+        str(tmp_path / "cache"),
+        config_only=True,
+        hf_details=hf_details,
+    )
+
+    assert captured["args"][0] is loaded
     assert captured["model_type"] == expected_type
 
 
