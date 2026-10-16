@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -14,6 +15,8 @@
 #if defined(_WIN32) && !defined(QWEN38_GRAPH_NO_POSIX)
 #define QWEN38_GRAPH_NO_POSIX
 #endif
+
+#include "qwen38_numa.h"
 
 #if !defined(QWEN38_GRAPH_NO_POSIX)
 #include <dlfcn.h>
@@ -299,6 +302,7 @@ Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::
   ThrowUnsupportedPlatform();
 }
 Qwen38FileMapping::~Qwen38FileMapping() = default;
+void Qwen38FileMapping::PrepareNumaRange(size_t, size_t) { ThrowUnsupportedPlatform(); }
 
 Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path&, const std::filesystem::path&, int)
     : plane_{plane} {
@@ -310,7 +314,7 @@ Qwen38PleTable::~Qwen38PleTable() = default;
 
 Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::path& full_path,
                                      bool register_cuda_mapped)
-    : plane_{plane} {
+    : plane_{plane}, path_{full_path} {
   const int fd = open(full_path.c_str(), O_RDONLY);
   if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open weight pool file " + full_path.string());
   const off_t end = lseek(fd, 0, SEEK_END);
@@ -323,54 +327,9 @@ Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::
   close(fd);
   if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full_path.string());
   base_ = base;
-#if defined(__linux__) && defined(__NR_mbind)
-  if (const char* numa_env = std::getenv("ORT_QMOE_NUMA_INTERLEAVE");
-      numa_env == nullptr || std::string(numa_env) != "0") {
-    static const unsigned long kNumaMask = []() -> unsigned long {
-      std::ifstream in("/sys/devices/system/node/has_memory");
-      if (!in) in.open("/sys/devices/system/node/online");
-      std::string line;
-      if (!in || !std::getline(in, line)) return 0UL;
-      unsigned long mask = 0;
-      int count = 0;
-      size_t pos = 0;
-      while (pos < line.size()) {
-        size_t end_p = line.find(',', pos);
-        if (end_p == std::string::npos) end_p = line.size();
-        const std::string tok = line.substr(pos, end_p - pos);
-        const size_t dash = tok.find('-');
-        try {
-          if (dash == std::string::npos) {
-            const int n = std::stoi(tok);
-            if (n >= 0 && static_cast<size_t>(n) < sizeof(unsigned long) * 8) {
-              mask |= (1UL << n);
-              ++count;
-            }
-          } else {
-            const int lo = std::stoi(tok.substr(0, dash));
-            const int hi = std::stoi(tok.substr(dash + 1));
-            for (int n = lo; n <= hi; ++n) {
-              if (n >= 0 && static_cast<size_t>(n) < sizeof(unsigned long) * 8) {
-                mask |= (1UL << n);
-                ++count;
-              }
-            }
-          }
-        } catch (...) {
-        }
-        pos = end_p + 1;
-      }
-      return count >= 2 ? mask : 0UL;
-    }();
-    if (kNumaMask != 0UL) {
-      constexpr int kMpolInterleave = 3;
-      static_cast<void>(syscall(__NR_mbind, base_, static_cast<unsigned long>(length_), kMpolInterleave,
-                                &kNumaMask, static_cast<unsigned long>(sizeof(unsigned long) * 8), 0u));
-    }
-  }
-#endif
   if (register_cuda_mapped) {
     try {
+      PrepareNumaRange(0, length_);
       plane_.Check(plane_.host_register(base_, length_, 2 | 8), "cudaHostRegister(weight pool file)");
       registered_ = base_;
     } catch (...) {
@@ -381,10 +340,41 @@ Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::
     }
   } else if (const char* pin_env = std::getenv("ORTGENAI_PIN_CPU_POOL");
              pin_env != nullptr && std::string(pin_env) == "1") {
+    try {
+      PrepareNumaRange(0, length_);
+    } catch (...) {
+      munmap(base_, length_);
+      throw;
+    }
     if (plane_.host_register(base_, length_, 1 | 8) == 0) {
       registered_ = base_;
     }
   }
+}
+
+void Qwen38FileMapping::PrepareNumaRange(size_t offset, size_t bytes) {
+  if (offset > length_ || bytes > length_ - offset)
+    throw std::runtime_error("qwen38_graph: NUMA range exceeds weight file");
+  const bool interleave = qwen38_numa::Enabled("ORT_QMOE_NUMA_INTERLEAVE", true);
+  const bool diagnostics = qwen38_numa::Enabled("ORT_QMOE_NUMA_DIAGNOSTICS", false);
+  if ((!interleave && !diagnostics) || bytes == 0 || registered_) return;
+  const auto report = qwen38_numa::PrepareFileRange(data() + offset, bytes, offset, interleave,
+                                                  qwen38_numa::Enabled("ORT_QMOE_NUMA_MIGRATE", true));
+  if (diagnostics || report.policy_error || report.query_error || report.move_failures || report.restore_error) {
+    std::ostringstream line;
+    line << "[QMoE NUMA] file=" << path_.filename().string() << " offset=" << offset << " bytes=" << bytes
+         << " policy_applied=" << report.policy_applied << " pages=" << report.pages;
+    for (size_t i = 0; i < report.nodes.size(); ++i)
+      line << " N" << report.nodes[i] << "=" << report.pages_before[i] << "->" << report.pages_after[i];
+    line << " misplaced=" << report.misplaced_before << "->" << report.misplaced_after
+         << " move_attempts=" << report.move_attempts << " move_failures=" << report.move_failures
+         << " unknown=" << report.unknown_pages << " policy_errno=" << report.policy_error
+         << " query_errno=" << report.query_error << " move_errno=" << report.move_error
+         << " restore_errno=" << report.restore_error;
+    std::fprintf(stderr, "%s\n", line.str().c_str());
+  }
+  if (report.restore_error)
+    throw std::runtime_error("qwen38_graph: failed to restore the loader thread NUMA policy");
 }
 
 Qwen38FileMapping::~Qwen38FileMapping() {

@@ -117,9 +117,11 @@ struct Qwen38FileMapping {
 
   uint8_t* data() const { return static_cast<uint8_t*>(base_); }
   size_t size() const { return length_; }
+  void PrepareNumaRange(size_t offset, size_t bytes);
 
  private:
   Qwen38Plane& plane_;
+  std::filesystem::path path_;
   void* base_{};
   size_t length_{};
   void* registered_{};

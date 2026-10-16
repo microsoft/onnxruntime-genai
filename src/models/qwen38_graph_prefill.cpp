@@ -121,6 +121,7 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
       uint8_t* base = file_mappings_.at({file, false})->data();
       for (const auto& [lo, hi] : merged) {
         void* p = base + lo;
+        file_mappings_.at({file, false})->PrepareNumaRange(lo, hi - lo);
         plane_.Check(plane_.host_register(p, hi - lo, 2 | 8), "cudaHostRegister(weight pool range)");
         registered_ranges_.push_back(p);
       }
