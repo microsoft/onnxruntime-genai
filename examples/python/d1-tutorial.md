@@ -44,6 +44,30 @@ pip install "onnxruntime-genai>=0.18.0"
 pip install torch "transformers>=5.14" onnx onnx_ir huggingface_hub
 ```
 
+For an NVIDIA GPU, install `onnxruntime-genai-cuda` instead of `onnxruntime-genai`, in its own virtual
+environment. Do not install both in one environment: each one brings its own ONNX Runtime package. The
+CUDA package of onnxruntime-genai 0.18.0 needs the CUDA 13 runtime libraries (for example `libcudart`
+and `libcublas`) and an NVIDIA driver 580 or newer. `og.is_cuda_available()` can return `True` even
+when these libraries cannot be loaded.
+
+```bash
+pip install "onnxruntime-genai-cuda>=0.18.0"
+pip install torch "transformers>=5.14" onnx onnx_ir huggingface_hub
+```
+
+`d1-decisions.py` imports `common.py` from the same folder. Both are in
+[`examples/python`](https://github.com/microsoft/onnxruntime-genai/tree/main/examples/python). Clone the
+repository, or download the two files into one folder:
+
+```bash
+curl -O https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/d1-decisions.py
+curl -O https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/common.py
+```
+
+The examples can use API from newer onnxruntime-genai versions than the one you have. Replace `main`
+with a release tag or a commit that matches your installed version, or upgrade the package. The script
+was tested with onnxruntime-genai 0.18.0.
+
 ## 2. Build the model
 
 ```bash
@@ -70,8 +94,8 @@ The builder writes `"type": "lfm2_vl_text"` into `genai_config.json`: a text-onl
 [Images](#6-images) for the vision model.
 
 Both exports were measured with `d1-decisions.py` against transformers; see
-[Accuracy and speed](#8-accuracy-and-speed). The CUDA package of onnxruntime-genai 0.18.0
-(`onnxruntime-genai-cuda`) needs CUDA 13, which means an NVIDIA driver 580 or newer.
+[Accuracy and speed](#8-accuracy-and-speed). Build the CUDA export with the CUDA package installed (see
+[Install](#1-install)).
 
 The int8 export logs `[ERROR] Gather only supports 4 bits quantization.` a few times. You can ignore
 it: the export still succeeds and keeps the embedding table in fp32.
@@ -93,13 +117,17 @@ for d1-3B. `d1-decisions.py` sets `max_length` to the exact prompt length of eac
 d1-3B's `tokenizer.json` uses the `'(?i:[sdmt]|ll|ve|re)|...` pre-tokenizer pattern. The tokenizer in
 onnxruntime-extensions cannot parse it yet ("Invalid regex"). Replace it with the equivalent pattern,
 as for LFM2.5-VL-3B (see [Known limitations](lfm2-vl-tutorial.md#5-known-limitations) in the LFM2-VL
-tutorial):
+tutorial).
+
+Run this once for every export folder (`./d1-3b/cpu`, `./d1-3b/cuda`, `./d1-3b/cpu-vl`): set `export`
+to the folder.
 
 ```python
 import json
 from pathlib import Path
 
-path = Path("./d1-3b/cpu/tokenizer.json")
+export = Path("./d1-3b/cpu")
+path = export / "tokenizer.json"
 tokenizer = json.loads(path.read_text(encoding="utf-8"))
 old = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s"
 new = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
@@ -122,8 +150,8 @@ assert tokenizer.encode(text).tolist() == reference.encode(text, add_special_tok
 ```
 
 The ids match on d1's JSON prompts. A few rare whitespace runs still tokenize differently in GenAI, with
-either pattern: for example a line that holds only spaces (`"\n  \n  x"`). Check free-text states of
-this kind before you rely on them.
+either pattern: for example a line that holds only spaces (`"\n  \n  x"`), or U+0085 or U+2028 next to
+a newline. Check free-text states of this kind before you rely on them.
 
 ## 4. Run a request
 
@@ -159,7 +187,8 @@ python d1-decisions.py -m ./d1-3b/cpu -r request.json
 ```
 
 stdout holds only the JSON response, so you can pipe it (for example to `jq`). Setup messages go to
-stderr.
+stderr. When the script refuses a request (see [Request and response format](#5-request-and-response-format)),
+it prints one `error: ...` line to stderr and exits with code 2.
 
 Output from the int8 CPU model:
 
@@ -237,6 +266,8 @@ they may require `type`, and llama.cpp reports a different `confidence` (see bel
 | `questions.<name>.instructions` | the question text, a string |
 | `questions.<name>.criteria` | see the table in [What d1-3B is](#what-d1-3b-is) |
 
+A question has no other fields.
+
 | Answer `type` | Fields |
 | --- | --- |
 | `noul` | `noul`: P(yes) |
@@ -261,16 +292,33 @@ The script refuses a request before it runs the model, with a `ValueError`, when
   or a misspelled `State`;
 - the state is a list of chat messages with an `image_url`, `input_audio` or `video_url` part;
 - `questions` is not an object with at least one question;
-- a question is not an object, has an unknown `type`, or has no string `instructions`;
+- a question is not an object, has a field other than `type`, `instructions` and `criteria`, has an
+  unknown `type`, or has no string `instructions`;
 - a `choice` has fewer than 2 options, or a `score` does not have 2 to 10 levels;
-- `noul` criteria are not an object;
-- the tokenizer has no single-token `yes` or `no`, or no single-token code is left for a choice option;
+- `noul` criteria are not an object, or have keys other than `true` and `false` (one of the two may be
+  left out; it is then shown as `None`, as in d1);
+- the state or a question holds a NUL character (`\x00`), which would cut the prompt short (a JSON
+  state is safe: it writes NUL as `\u0000`);
+- the tokenizer has no single-token `yes` or `no`, no single-token digit for a score level, or no
+  single-token code left for a choice option;
 - the prompt does not start with exactly one `<|startoftext|>` token (a tokenizer that adds its own);
 - the prompt is longer than the model's `context_length`;
-- images are given but the model has no vision model.
+- images are given but the model has no vision model, or `image_paths` is one string instead of a
+  list.
 
-d1's own code is a little looser: it accepts a choice with one option and a score with up to 1000
-levels. This script follows the d1-3B model card (2 to 10 levels), as llama.cpp does.
+Where the rules come from:
+
+- a score has 2 to 10 levels: the d1-3B model card;
+- a choice has at least 2 options: llama.cpp's d1 server.
+
+Some refusals are stricter than d1's own code, which answers these requests:
+
+- an unknown `type` (d1 treats it as a choice);
+- `instructions` that are not a string (d1 formats any value into the prompt);
+- a choice with one option;
+- a score with 1 level, or with more than 10 levels (d1 accepts up to 1000);
+- unknown question fields and unknown `noul` criteria keys (d1 ignores them);
+- a NUL character (d1's tokenizer reads the whole prompt).
 
 Caller text is not escaped, the same as in d1 and llama.cpp. If a state or a question contains special
 tokens such as `<|im_end|>`, the tokenizer reads them as special tokens.
@@ -298,10 +346,11 @@ decoder but not an fp16 one such as the CUDA build above. For d1-3B:
 2. Reuse the vision model of LFM2.5-VL-3B. d1-3B's vision tower and projector are bit-identical to
    LFM2.5-VL-3B's. Download `onnx/vision_encoder.onnx` and its four `onnx/vision_encoder.onnx_data*`
    files from [LiquidAI/LFM2.5-VL-3B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-VL-3B-ONNX) into
-   `./d1-3b/cpu-vl`:
+   `./d1-3b/cpu-vl`. The command pins the revision that was checked:
 
    ```bash
-   hf download LiquidAI/LFM2.5-VL-3B-ONNX --include "onnx/vision_encoder.onnx*" --local-dir ./lfm2.5-vl-3b-onnx
+   hf download LiquidAI/LFM2.5-VL-3B-ONNX --revision 020f9311343b8f3c6d9789b4dd300e749ec52cd1 \
+       --include "onnx/vision_encoder.onnx*" --local-dir ./lfm2.5-vl-3b-onnx
    cp ./lfm2.5-vl-3b-onnx/onnx/vision_encoder.onnx* ./d1-3b/cpu-vl/
    ```
 
@@ -435,13 +484,16 @@ With `"state": null` the images are the whole state. The same model also answers
 - **Batch size 1.** Each question runs alone.
 - **No image tiling.** GenAI resizes each image once, to at most 256 image tokens. d1 cuts images above
   about 0.52 megapixels into 512×512 tiles plus a thumbnail. So answers on larger images differ from d1.
-  d1 also first shrinks each image to at most 1024×1024 pixels. The script leaves all resizing to the
-  GenAI image processor.
+  d1 also first shrinks any image larger than 1024×1024 pixels in area (it keeps the aspect ratio). The
+  script leaves all resizing to the GenAI image processor.
 - **Some image sizes round differently.** The resize picks a size in steps of 32 pixels. When a side
   falls exactly halfway between two steps (for example 400 pixels), GenAI rounds up and d1 rounds to
-  the even step, so GenAI uses one more row or column of image tokens. In a 1000-image test, 6 images
-  (all 500×400) were affected; their answers moved by up to 0.05.
+  the even step, so GenAI uses one more row or column of image tokens. In a POPE test of 1000 questions
+  over 167 images, the one 500×400 image (6 questions) got 16 more image tokens, and its answers moved
+  by up to 0.05.
 - **The vision model runs again for each question** when a request has images and several questions.
+- **Some whitespace tokenizes differently** in GenAI (see [Fix the tokenizer](#3-fix-the-tokenizer)).
+- **No NUL characters.** GenAI's tokenizer stops at `\x00`, so the script refuses text that holds one.
 - **No escaping** of caller text (see [Request and response format](#5-request-and-response-format)).
 
 ## 8. Accuracy and speed
@@ -476,7 +528,12 @@ Public benchmarks, one question per item, first 1000 items:
 | POPE (images) | int8, CPU, image pipeline from [Images](#6-images) | 87.4% | 87.6% | 998 / 1000 |
 
 The answers that changed were all close calls: in transformers the top two options were within 0.09
-of each other.
+of each other. The BoolQ accuracy counts P(yes) above 0.5 as yes, so an exact 0.5 counts as no.
+
+**fp16 on CUDA.** The fp16 export returns fp16 logits, so two close options can get exactly the same
+probability (for a `noul`, P(yes) is then exactly 0.5). For a `choice` or a `score`, a tie goes to the
+first option, as in d1. All 5 changed answers in the CUDA fp16 rows above were such exact ties in GenAI.
+An export with `-p bf16` returns fp32 logits instead.
 
 Long states (one question, Linux):
 
