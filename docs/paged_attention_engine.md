@@ -1633,7 +1633,12 @@ they qualify the allocation, fill, ranged-copy, tensor-binding, and synchronizat
 semantics needed to publish state transactionally. CPU, CUDA, and WebGPU satisfy
 that contract. CPU and CUDA bind offset tensor views directly; WebGPU uses staging
 bindings. Compact partial-acceptance replay is device-native on CUDA and currently
-stages the required ranges through CPU on WebGPU for correctness.
+uses CPU replay on WebGPU. Because the WebGPU transfer interface cannot address arbitrary
+nonzero ranges, each replay call downloads each unique buffer backing once and shares that
+CPU mirror across all descriptor views. Descriptors execute in order against those mirrors,
+including reads of earlier writes, then each modified destination backing is uploaded once.
+Untouched destination rows and bytes are preserved. Host mirrors and transfers scale with
+the unique backings, not the number of replay descriptors; full-backing transfers remain.
 
 Each resident request owns a stable slot identified by request identity and an
 allocation generation. A released and reused slot receives a new generation, so

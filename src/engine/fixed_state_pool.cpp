@@ -1721,6 +1721,19 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
          ++tensor_index) {
       const auto& spec = impl_->tensors[tensor_index];
       auto& staged = *views.staged_outputs[tensor_index];
+      // Shared wrappers let device replay coalesce host mirrors across rows of the same backing.
+      DeviceSpan<uint8_t> input_backing, value_backing, capsule_backing;
+      std::array<DeviceSpan<uint8_t>, 2> bank_backings;
+      const auto row_view = [&](DeviceSpan<uint8_t>& backing, OrtValue* tensor,
+                                size_t row, size_t row_bytes) {
+        if (!tensor) {
+          return DeviceSpan<uint8_t>{};
+        }
+        if (backing.empty()) {
+          backing = ByteWrapTensor(*impl_->device, *tensor);
+        }
+        return backing.subspan(row * row_bytes, row_bytes);
+      };
       for (size_t row = 0; row < storage.handles.size(); ++row) {
         const auto& slot = impl_->slots[storage.handles[row].slot];
         const uint8_t inactive_bank = slot.active_bank ^ 1u;
@@ -1734,21 +1747,12 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         }
 
         const auto& updates = views.state_update_tensors[tensor_index];
-        const auto row_view = [&](const std::unique_ptr<OrtValue>& tensor,
-                                  size_t row_bytes) -> DeviceSpan<const uint8_t> {
-          if (!tensor) {
-            return {};
-          }
-          return ByteWrapTensor(*impl_->device, *tensor)
-              .subspan(row * row_bytes, row_bytes);
-        };
-        const auto source =
-            ByteWrapTensor(*impl_->device, *views.gathered_inputs[tensor_index])
-                .subspan(row * spec.row_bytes, spec.row_bytes);
-        auto destination = ByteWrapTensor(*impl_->device, *spec.banks[inactive_bank])
-                               .subspan(storage.handles[row].slot * spec.row_bytes,
-                                        spec.row_bytes);
-        auto capsule = row_view(updates.capsule, spec.state_update_capsule.row_bytes);
+        const auto source = row_view(input_backing, views.gathered_inputs[tensor_index].get(),
+                                     row, spec.row_bytes);
+        auto destination = row_view(bank_backings[inactive_bank], spec.banks[inactive_bank].get(),
+                                    storage.handles[row].slot, spec.row_bytes);
+        auto capsule = row_view(capsule_backing, updates.capsule.get(),
+                                row, spec.state_update_capsule.row_bytes);
         DeviceSpan<const uint8_t> decay;
         DeviceSpan<const uint8_t> key;
         DeviceSpan<const uint8_t> delta;
@@ -1768,7 +1772,7 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         replay_descriptors.push_back(StateUpdateReplayDesc{
             source,
             destination,
-            row_view(updates.value, spec.state_update_value.row_bytes),
+            row_view(value_backing, updates.value.get(), row, spec.state_update_value.row_bytes),
             decay,
             key,
             delta,

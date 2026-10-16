@@ -65,12 +65,17 @@ struct DeviceSpan {
   bool empty() const { return length_ == 0; }
   size_t size() const { return length_; }
 
-  operator DeviceSpan<const T>() const { return DeviceSpan<const T>(*p_device_memory_, begin_, length_); }
+  operator DeviceSpan<const T>() const {
+    return p_device_memory_ ? DeviceSpan<const T>(*p_device_memory_, begin_, length_) : DeviceSpan<const T>{};
+  }
 
   DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
 
   // True if both spans are views of the same allocation, so that pointer arithmetic between them is meaningful
   bool SameBufferAs(const DeviceSpan<T>& other) const { return p_device_memory_ == other.p_device_memory_; }
+
+  DeviceBuffer& GetBuffer() const { return *p_device_memory_; }
+  size_t ByteOffset() const { return begin_ * sizeof(T); }
 
   // Return the device accessible memory. Should only be done in device specific code, as it's not CPU accessible
   std::span<T> Span() const { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }

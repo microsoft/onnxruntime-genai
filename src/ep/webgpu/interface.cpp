@@ -9,6 +9,8 @@
 #include "models/io/kv_cache.h"
 #include "state_update_replay.h"
 
+#include <unordered_map>
+
 namespace Generators {
 namespace WebGPU {
 
@@ -232,27 +234,48 @@ struct InterfaceImpl : DeviceInterface {
 
   void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
     auto* cpu = GetDeviceInterface(DeviceType::CPU);
+    struct StagedBacking {
+      DeviceSpan<uint8_t> bytes;
+      bool modified{};
+    };
+    std::unordered_map<DeviceBuffer*, StagedBacking> backings;
+    std::vector<DeviceBuffer*> uploads;
     std::vector<StateUpdateReplayDesc> staged;
     staged.reserve(count);
-    const auto stage_input = [cpu](DeviceSpan<const uint8_t> source) {
-      if (source.empty()) {
-        return DeviceSpan<const uint8_t>{};
+    const auto stage_view = [&](DeviceSpan<const uint8_t> view, bool modified = false) {
+      if (view.empty()) {
+        return DeviceSpan<uint8_t>{};
       }
-      auto destination = cpu->Allocate<uint8_t>(source.size());
-      destination.CopyFrom(source);
-      DeviceSpan<const uint8_t> view = destination;
-      return view;
+      auto& buffer = view.GetBuffer();
+      const size_t offset = view.ByteOffset();
+      if (offset > buffer.size_in_bytes_ ||
+          view.size() > buffer.size_in_bytes_ - offset) {
+        throw std::out_of_range("WebGPU replay view exceeds its backing buffer.");
+      }
+      auto entry = backings.find(&buffer);
+      if (entry == backings.end()) {
+        // CopyTensors cannot address subranges. Keep one full mirror per owner, including
+        // destination banks so bytes outside the replayed rows survive the final upload.
+        buffer.CopyDeviceToCpu();
+        auto bytes = cpu->WrapMemory<uint8_t>({buffer.p_cpu_, buffer.size_in_bytes_});
+        entry = backings.emplace(&buffer, StagedBacking{bytes}).first;
+      }
+      if (modified && !entry->second.modified) {
+        uploads.push_back(&buffer);
+        entry->second.modified = true;
+      }
+      return entry->second.bytes.subspan(offset, view.size());
     };
 
     for (size_t index = 0; index < count; ++index) {
       const auto& source = descriptors[index];
       staged.push_back(StateUpdateReplayDesc{
-          stage_input(source.source_state),
-          cpu->Allocate<uint8_t>(source.destination_state.size()),
-          stage_input(source.value),
-          stage_input(source.decay),
-          stage_input(source.key),
-          stage_input(source.delta),
+          stage_view(source.source_state),
+          stage_view(source.destination_state, true),
+          stage_view(source.value),
+          stage_view(source.decay),
+          stage_view(source.key),
+          stage_view(source.delta),
           source.channel_count,
           source.state_width,
           source.key_width,
@@ -263,11 +286,9 @@ struct InterfaceImpl : DeviceInterface {
           source.kind,
       });
     }
-
     ReplayStateUpdatesOnCpu(staged.data(), staged.size());
-    for (size_t index = 0; index < count; ++index) {
-      auto destination = descriptors[index].destination_state;
-      destination.CopyFrom(staged[index].destination_state);
+    for (auto* buffer : uploads) {
+      buffer->CopyCpuToDevice();
     }
     Synchronize();
   }
