@@ -57,6 +57,11 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
     entries_.push_back(std::move(entry));
   }
 
+  const char* cache_env = std::getenv("ORT_QMOE_HOST_CACHE_MIB");
+  const bool bounded_host_cache = cache_env && std::string(cache_env) != "0";
+  const char* pin_pool = std::getenv("ORTGENAI_PIN_CPU_POOL");
+  if (bounded_host_cache && pin_pool && std::string(pin_pool) != "0")
+    throw std::runtime_error("Bounded host cache cannot be combined with ORTGENAI_PIN_CPU_POOL");
   const auto start = Clock::now();
   std::vector<size_t> device_indices;
   std::map<std::filesystem::path, std::vector<std::pair<size_t, size_t>>> raw_ranges;
@@ -79,7 +84,10 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
       const size_t aligned_start = (static_cast<size_t>(entry.offset) / kPage) * kPage;
       const size_t aligned_end =
           std::min(mapping.size(), ((static_cast<size_t>(entry.offset + entry.length) + kPage - 1) / kPage) * kPage);
-      if (aligned_end > aligned_start) {
+      // Large CPU expert banks remain pageable in bounded mode. Global scales and UVA-only
+      // tensors still need registration for the dense session's GPU reads.
+      if (aligned_end > aligned_start &&
+          !(bounded_host_cache && entry.placement == "cpu" && entry.length >= (size_t{1} << 20))) {
         raw_ranges[entry.file].emplace_back(aligned_start, aligned_end);
       }
       if (entry.placement == "host_mapped") {
