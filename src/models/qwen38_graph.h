@@ -49,22 +49,38 @@ struct Qwen38WeightPool {
   // Adds the shared initializers of one session label ("target", "head_r2", "dense", "head_kv", ...) to its options.
   size_t AddTo(OrtSessionOptions& options, const std::string& label) const;
   size_t bytes{};
+  size_t host_mapped_bytes{};
   double seconds{};
 
  private:
+  void Cleanup() noexcept;
   struct Entry {
     int dtype{};
     uint64_t offset{};
     uint64_t length{};
     std::vector<int64_t> shape;
     std::filesystem::path file;
+    std::string placement{"device"};
+    bool host_mapped{false};
+    bool owns_device_ptr{false};
     uint8_t* ptr{};
     std::unique_ptr<OrtValue> value;
   };
   Qwen38Plane& plane_;
   std::vector<Entry> entries_;
+  std::map<std::filesystem::path, std::unique_ptr<Qwen38FileMapping>> file_mappings_;
   std::map<std::string, std::vector<std::pair<std::string, int>>> sessions_;
 };
+
+// Resolves auxiliary session options for head/prefill sessions; when `inherit` is false (dense, head_kv), inherits the
+// parent's provider selection and device options while stripping graph-capture options.
+Config::SessionOptions ResolveQwen38AuxiliarySessionOptions(const Config::SessionOptions& parent,
+                                                            const std::optional<Config::SessionOptions>& configured,
+                                                            bool inherit);
+
+// Returns the effective prompt chunk size advertised by a Qwen38Graph configuration (prefill.chunk when fast prefill is
+// enabled, otherwise prefill_chunk_tokens).
+size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q);
 
 // Constants of the PackedQSAIndexer state conversion (key-norm weights, leading-RoPE tables) for the dense -> packed hand-off.
 struct Qwen38QsaConstants {
