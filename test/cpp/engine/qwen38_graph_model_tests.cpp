@@ -143,6 +143,20 @@ TEST(Qwen38GraphConfigTest, ParsesTheFoldAndPrefillSections) {
   EXPECT_EQ(q.prefill.head_kv.filename, "head_kv/model.onnx");
   EXPECT_FALSE(q.prefill.head_kv.session_options.has_value());
   EXPECT_EQ(q.prefill.warmup_lengths, (std::vector<int>{64, 16}));
+
+  // Also verify "mtp" and "drafter" aliases under fold
+  Config config_mtp;
+  OverlayConfig(config_mtp, R"({"model":{"type":"qwen38_flash_graph","qwen38_graph":{
+    "fold":{"enabled":true,"mtp":{"filename":"mtp/model.onnx","graph_id":81}}
+  }}})");
+  EXPECT_EQ(config_mtp.model.qwen38_graph.fold.head_r2.filename, "mtp/model.onnx");
+
+  Config config_drafter;
+  OverlayConfig(config_drafter, R"({"model":{"type":"qwen38_flash_graph","qwen38_graph":{
+    "fold":{"enabled":true,"drafter":{"filename":"drafter/model.onnx","graph_id":82}}
+  }}})");
+  EXPECT_EQ(config_drafter.model.qwen38_graph.fold.head_r2.filename, "drafter/model.onnx");
+  EXPECT_EQ(config_drafter.model.qwen38_graph.fold.head_r2.graph_id, 82);
 }
 
 TEST(Qwen38GraphConfigTest, RejectsUnknownFoldAndPrefillKeys) {

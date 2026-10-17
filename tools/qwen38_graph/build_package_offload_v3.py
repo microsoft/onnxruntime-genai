@@ -35,6 +35,7 @@ REPLACED = {
     Path("package_manifest.json"),
     Path("README.md"),
     Path("weights_pool.txt"),
+    Path("model.onnx"),
     Path("target/model.onnx"),
     Path("dense/model.onnx"),
     Path("libs/libqwen38_plane.so"),
@@ -78,7 +79,7 @@ def link_tree(src: Path, dst: Path, copy: bool = False) -> int:
     fallback_experts = src.parent / "pkg_v12d_bf16lm_engine/target/source_weights/experts.data"
     if not fallback_experts.exists():
         fallback_experts = src.parent / "qwen_flash_v12c_engine_int8kv_fp8w_fp4moe/target/source_weights/experts.data"
-    exp_rels = [Path("target/source_weights/experts.data")]
+    exp_rels = [Path("source_weights/experts.data")] if (src / "model.onnx").exists() else [Path("target/source_weights/experts.data")]
     if (src / "dense").exists():
         exp_rels.append(Path("dense/source_weights/experts.data"))
     for exp_rel in exp_rels:
@@ -660,7 +661,9 @@ def build_offload_weights_pool(
 
     next_pool_id = len(pool_lines)
     target_bound_names = {name for sess, name, _ in session_lines if sess == "target"}
-    target_model = onnx.load(str(source_pkg / "target/model.onnx"), load_external_data=False)
+    flat_root = (source_pkg / "model.onnx").exists()
+    target_onnx_src = (source_pkg / "model.onnx") if flat_root else (source_pkg / "target/model.onnx")
+    target_model = onnx.load(str(target_onnx_src), load_external_data=False)
     for init in target_model.graph.initializer:
         if init.name in target_bound_names:
             continue
@@ -673,7 +676,7 @@ def build_offload_weights_pool(
             length = int(ext["length"])
             dims = list(init.dims)
             shape_str = f"{len(dims)} " + " ".join(str(d) for d in dims)
-            pool_file = f"target/{loc}"
+            pool_file = loc if flat_root else f"target/{loc}"
             pool_lines.append(
                 f"pool {next_pool_id} {init.data_type} {offset} {length} {shape_str} {pool_file} cpu"
             )
@@ -800,15 +803,18 @@ def main() -> None:
         "stream_min_rows": args.dense_stream_min_rows,
         "stream_wave": args.dense_stream_wave,
     }
+    flat_root = (source / "model.onnx").exists()
+    target_src = (source / "model.onnx") if flat_root else (source / "target/model.onnx")
+    target_out_dir = out if flat_root else (out / "target")
     target_rewritten = rewrite_nvfp4_qmoe_to_offload(
-        source / "target/model.onnx",
-        out / "target/model_s2.onnx",
+        target_src,
+        target_out_dir / "model_s2.onnx",
         extra_attrs=target_attrs,
         per_layer_initial_experts=profile_plan,
     )
-    build_multidraft_target_onnx(out / "target/model_s2.onnx", out / "target/model_s3.onnx", verify_rows=3)
-    build_multidraft_target_onnx(out / "target/model_s2.onnx", out / "target/model_s4.onnx", verify_rows=4)
-    shutil.copy2(out / "target/model_s4.onnx", out / "target/model.onnx")
+    build_multidraft_target_onnx(target_out_dir / "model_s2.onnx", target_out_dir / "model_s3.onnx", verify_rows=3)
+    build_multidraft_target_onnx(target_out_dir / "model_s2.onnx", target_out_dir / "model_s4.onnx", verify_rows=4)
+    shutil.copy2(target_out_dir / "model_s4.onnx", target_out_dir / "model.onnx")
     if (source / "dense/model.onnx").exists():
         if args.dense_gpu_qmoe:
             link_file(source / "dense/model.onnx", out / "dense/model.onnx", args.copy)
@@ -819,7 +825,7 @@ def main() -> None:
             )
     else:
         dense_rewritten = 0
-        for obsolete_dir in ("dense", "head_kv"):
+        for obsolete_dir in ("target", "head_r2", "dense", "head_kv") if flat_root else ("dense", "head_kv"):
             if (out / obsolete_dir).exists():
                 shutil.rmtree(out / obsolete_dir)
     pool_stats = build_offload_weights_pool(
@@ -839,7 +845,8 @@ def main() -> None:
         cuda_opts["gpu_device_mem_limit"] = str(int(args.vram_limit_gib * (1024**3)))
 
     qwen = config["model"]["qwen38_graph"]
-    qwen["fold"]["head_r2"]["session_options"] = {
+    fold_head_key = "mtp" if "mtp" in qwen["fold"] else ("drafter" if "drafter" in qwen["fold"] else "head_r2")
+    qwen["fold"][fold_head_key]["session_options"] = {
         "log_id": "onnxruntime-genai",
         "graph_optimization_level": "ORT_DISABLE_ALL",
         "provider_options": [

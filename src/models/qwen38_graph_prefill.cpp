@@ -229,6 +229,12 @@ Qwen38WeightPool::~Qwen38WeightPool() {
 
 size_t Qwen38WeightPool::AddTo(OrtSessionOptions& options, const std::string& label) const {
   auto it = sessions_.find(label);
+  if (it == sessions_.end() && (label == "head_r2" || label == "mtp" || label == "drafter")) {
+    for (const char* alt : {"mtp", "drafter", "head_r2"}) {
+      it = sessions_.find(alt);
+      if (it != sessions_.end()) break;
+    }
+  }
   if (it == sessions_.end()) return 0;
   const bool use_gpu_mapped = (label == "dense");
   for (const auto& [name, id] : it->second) {

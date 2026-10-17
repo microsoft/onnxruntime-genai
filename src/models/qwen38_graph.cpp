@@ -1269,9 +1269,13 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
     const int d = std::atoi(drafts_env);
     if (d >= 1 && d <= 3) {
-      const std::string alt = "target/model_s" + std::to_string(d + 1) + ".onnx";
+      const std::filesystem::path parent = std::filesystem::path(target_filename).parent_path();
+      const std::string alt_name = "model_s" + std::to_string(d + 1) + ".onnx";
+      const std::string alt = (parent.empty() ? std::filesystem::path(alt_name) : (parent / alt_name)).string();
       if (std::filesystem::exists(root / alt)) {
         target_filename = alt;
+      } else if (std::filesystem::exists(root / ("target/" + alt_name))) {
+        target_filename = "target/" + alt_name;
       }
     }
   }
@@ -1286,14 +1290,16 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     CreateSessionOptionsFromConfig(options, *result, /*is_primary_session_options=*/false,
                                    /*disable_graph_capture=*/false, /*cloned_from_parent=*/false, /*append_providers=*/true);
     if (pool_) pool_->AddTo(*result, label);
-    if (!embed_values_.empty() && (std::string(label) == "head_r2" || std::string(label) == "head")) {
+    if (!embed_values_.empty() &&
+        (std::string(label) == "mtp" || std::string(label) == "drafter" || std::string(label) == "head_r2" ||
+         std::string(label) == "head")) {
       result->AddInitializer("mtp.embed_tokens.weight", *embed_values_.back());
     }
     return result;
   };
 
   if (q.fold.enabled) {
-    head_r2_session_options_ = make_options(q.fold.head_r2.session_options, true, "head_r2");
+    head_r2_session_options_ = make_options(q.fold.head_r2.session_options, true, "mtp");
     session_head_r2_ = CreateSession(ort_env, q.fold.head_r2.filename, head_r2_session_options_.get());
     if (separate_prefill_sessions) {
       // the dense / head-KV sessions are not graph captured and do not inherit the decoder's provider options
