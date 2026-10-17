@@ -715,6 +715,9 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
   // within one of these to prevent loading arbitrary libraries from disk.
   std::vector<std::filesystem::path> allowed_dirs;
   if (!custom_ops_libraries.empty()) {
+    if (config_->memory_assets_only_) {
+      throw std::runtime_error("Memory-only loading does not support custom-ops library paths.");
+    }
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
 
@@ -908,7 +911,35 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
 
 std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
   std::unique_ptr<OrtSession> session;
-  if (auto model_data_it = config_->model_data_spans_.find(model_filename);
+  if (config_->memory_assets_only_) {
+    auto graph = config_->model_data_spans_.find(model_filename);
+    if (graph == config_->model_data_spans_.end() || graph->second.empty()) {
+      throw std::runtime_error("Memory asset bundle is missing graph: " + model_filename);
+    }
+    if (config_->external_data_spans_.empty()) {
+      throw std::runtime_error("Memory asset bundle is missing external initializer buffers.");
+    }
+    auto options = session_options->Clone();
+    std::vector<fs::path> paths;
+    std::vector<char*> buffers;
+    std::vector<size_t> lengths;
+    paths.reserve(config_->external_data_spans_.size());
+    for (const auto& [name, data] : config_->external_data_spans_) {
+      paths.emplace_back(name);
+      // ORT's C API takes char*, but direct-buffer mode does not modify inputs.
+      buffers.push_back(const_cast<char*>(reinterpret_cast<const char*>(data.data())));
+      lengths.push_back(data.size());
+    }
+    std::vector<const ORTCHAR_T*> names;
+    for (const auto& path : paths) {
+      names.push_back(path.c_str());
+    }
+    Ort::ThrowOnError(Ort::api->AddExternalInitializersFromFilesInMemory(
+        options.get(), names.data(), buffers.data(), lengths.data(), names.size()));
+    options->AddConfigEntry("session.use_external_initializer_file_buffers_directly", "1");
+    session = OrtSession::Create(ort_env, graph->second.data(),
+                                 graph->second.size(), options.get());
+  } else if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
     if (model_data_it->second.empty()) {
