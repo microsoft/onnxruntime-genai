@@ -39,6 +39,19 @@ float Bf16ToFloat(uint16_t bits) {
 // ------------------------------------------------------------------------------------------------
 // Shared weight pool
 // ------------------------------------------------------------------------------------------------
+void Qwen38WeightPool::Cleanup() noexcept {
+  for (auto& entry : entries_) {
+    entry.value.reset();
+    if (entry.owns_device_ptr && entry.ptr) {
+      plane_.device_free(entry.ptr);
+      entry.ptr = nullptr;
+      entry.owns_device_ptr = false;
+    }
+  }
+  entries_.clear();
+  file_mappings_.clear();
+}
+
 Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::path& manifest_path,
                                    const std::filesystem::path& root, const OrtMemoryInfo& memory_info, int threads)
     : plane_{plane} {
@@ -51,21 +64,48 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
     entry.length = source.length;
     entry.shape = std::move(source.shape);
     entry.file = root / source.file;
+    entry.placement = std::move(source.placement);
+    entry.host_mapped = source.host_mapped || (entry.placement == "host_mapped");
     entries_.push_back(std::move(entry));
   }
 
   const auto start = Clock::now();
-  for (auto& entry : entries_) {
-    void* p = nullptr;
-    plane_.Check(plane_.device_alloc(&p, std::max<uint64_t>(entry.length, 16)), "cudaMalloc(weight pool)");
-    entry.ptr = static_cast<uint8_t*>(p);
-    bytes += entry.length;
-    entry.value = OrtValue::CreateTensor(memory_info, entry.ptr, static_cast<size_t>(entry.length), entry.shape,
-                                         static_cast<ONNXTensorElementDataType>(entry.dtype));
+  std::vector<size_t> device_indices;
+  try {
+    for (size_t idx = 0; idx < entries_.size(); ++idx) {
+      auto& entry = entries_[idx];
+      if (entry.host_mapped) {
+        auto it = file_mappings_.find(entry.file);
+        if (it == file_mappings_.end()) {
+          it = file_mappings_.emplace(entry.file, std::make_unique<Qwen38FileMapping>(plane_, entry.file, true)).first;
+        }
+        Qwen38FileMapping& mapping = *it->second;
+        if (entry.offset > mapping.size() || entry.length > mapping.size() - entry.offset) {
+          throw std::runtime_error("qwen38_graph: weight pool entry exceeds mapped file size: " + entry.file.string());
+        }
+        entry.ptr = mapping.device_data() + entry.offset;
+        entry.owns_device_ptr = false;
+        host_mapped_bytes += entry.length;
+        entry.value = OrtValue::CreateTensor(memory_info, entry.ptr, static_cast<size_t>(entry.length), entry.shape,
+                                             static_cast<ONNXTensorElementDataType>(entry.dtype));
+      } else {
+        void* p = nullptr;
+        plane_.Check(plane_.device_alloc(&p, std::max<uint64_t>(entry.length, 16)), "cudaMalloc(weight pool)");
+        entry.ptr = static_cast<uint8_t*>(p);
+        entry.owns_device_ptr = true;
+        bytes += entry.length;
+        entry.value = OrtValue::CreateTensor(memory_info, entry.ptr, static_cast<size_t>(entry.length), entry.shape,
+                                             static_cast<ONNXTensorElementDataType>(entry.dtype));
+        device_indices.push_back(idx);
+      }
+    }
+  } catch (...) {
+    Cleanup();
+    throw;
   }
 
-  // Copy the files in parallel: pinned staging buffer per worker, unbuffered reads from the page cache, async H2D on a
-  // private stream.
+  // Copy the device-placed files in parallel: pinned staging buffer per worker, unbuffered reads from the page cache,
+  // async H2D on a private stream.
   constexpr size_t kStage = size_t{64} << 20;
   std::atomic<size_t> next{0};
   std::mutex error_mutex;
@@ -77,8 +117,8 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
     try {
       plane_.Check(plane_.host_alloc(&stage, kStage), "cudaHostAlloc(pool stage)");
       plane_.Check(plane_.stream_create(&stream), "cudaStreamCreate");
-      for (size_t i = next.fetch_add(1); i < entries_.size(); i = next.fetch_add(1)) {
-        Entry& entry = entries_[i];
+      for (size_t k = next.fetch_add(1); k < device_indices.size(); k = next.fetch_add(1)) {
+        Entry& entry = entries_[device_indices[k]];
         auto [found, inserted] = files.try_emplace(entry.file);
         std::ifstream& file = found->second;
         if (inserted) {
@@ -101,34 +141,29 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
     } catch (const std::exception& e) {
       std::lock_guard<std::mutex> lock(error_mutex);
       if (error.empty()) error = e.what();
-      next.store(entries_.size());
+      next.store(device_indices.size());
     }
     if (stream) plane_.stream_destroy(stream);
     if (stage) plane_.host_free(stage);
   };
-  std::vector<std::thread> workers;
-  for (int t = 0; t < threads; ++t) workers.emplace_back(worker);
-  for (auto& t : workers) t.join();
+  if (!device_indices.empty()) {
+    std::vector<std::thread> workers;
+    const int active_threads = std::min<int>(std::max(1, threads), static_cast<int>(device_indices.size()));
+    for (int t = 0; t < active_threads; ++t) workers.emplace_back(worker);
+    for (auto& t : workers) t.join();
+  }
   if (!error.empty()) {
-    for (auto& entry : entries_) {
-      entry.value.reset();
-      if (entry.ptr) plane_.device_free(entry.ptr);
-    }
-    entries_.clear();
+    Cleanup();
     throw std::runtime_error(error);
   }
   seconds = SecondsSince(start);
   if (g_log.enabled)
-    Log("qwen38_graph") << "weight pool: " << entries_.size() << " initializers, " << bytes / double(1 << 30) << " GiB in "
-                        << seconds << " s" << std::endl;
+    Log("qwen38_graph") << "weight pool: " << entries_.size() << " initializers, device=" << bytes / double(1 << 30)
+                        << " GiB, host_mapped=" << host_mapped_bytes / double(1 << 30) << " GiB in " << seconds << " s"
+                        << std::endl;
 }
 
-Qwen38WeightPool::~Qwen38WeightPool() {
-  for (auto& entry : entries_) {
-    entry.value.reset();
-    if (entry.ptr) plane_.device_free(entry.ptr);
-  }
-}
+Qwen38WeightPool::~Qwen38WeightPool() { Cleanup(); }
 
 size_t Qwen38WeightPool::AddTo(OrtSessionOptions& options, const std::string& label) const {
   auto it = sessions_.find(label);
@@ -143,33 +178,47 @@ size_t Qwen38WeightPool::AddTo(OrtSessionOptions& options, const std::string& la
 Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::filesystem::path& index_path,
                                        const std::filesystem::path& root, void* stream) {
   const Qwen38QsaConstantsDescription description = ParseQwen38QsaConstantsIndex(index_path);
+  if (description.width <= 0 || description.width > 128 || (description.width % 2) != 0)
+    throw std::runtime_error("qwen38_graph: invalid QSA RoPE width in " + index_path.string());
   epsilon = description.epsilon;
   target.width = head.width = description.width;
   std::ifstream data(root / description.file, std::ios::binary | std::ios::ate);
   if (!data) throw std::runtime_error("qwen38_graph: cannot open the QSA constants data " + description.file);
-  const size_t total = static_cast<size_t>(data.tellg());
+  const auto end_pos = data.tellg();
+  if (end_pos <= 0) throw std::runtime_error("qwen38_graph: empty QSA constants data " + description.file);
+  const size_t total = static_cast<size_t>(end_pos);
   std::vector<uint8_t> host(total);
   data.seekg(0);
   data.read(reinterpret_cast<char*>(host.data()), static_cast<std::streamsize>(total));
   buffer_ = PlaneBuffer(plane, total, stream);
   plane.Check(plane.memcpy_h2d(buffer_.data(), host.data(), total, stream), "QSA constants upload");
   plane.Check(plane.stream_sync(stream), "QSA constants sync");  // `host` dies here
+  const size_t rope_row_bytes = static_cast<size_t>(description.width) * 2;
   for (const auto& item : description.items) {
-    if (item.offset + item.bytes > total) throw std::runtime_error("qwen38_graph: QSA constant outside of the data file: " + item.name);
+    if (item.bytes == 0 || item.offset > total || item.bytes > total - item.offset)
+      throw std::runtime_error("qwen38_graph: QSA constant outside of the data file: " + item.name);
+    if (item.set != "target" && item.set != "head")
+      throw std::runtime_error("qwen38_graph: unknown QSA constant set: " + item.set);
     Set& set = item.set == "head" ? head : target;
     const uint8_t* ptr = buffer_.data() + item.offset;
-    if (item.name == "cos")
-      set.cos = ptr;
-    else if (item.name == "sin")
-      set.sin = ptr;
-    else if (item.name.rfind("knorm.", 0) == 0)
+    if (item.name == "cos" || item.name == "sin") {
+      if ((item.bytes % rope_row_bytes) != 0)
+        throw std::runtime_error("qwen38_graph: QSA RoPE table byte size is not a multiple of width: " + item.name);
+      if (item.name == "cos")
+        set.cos = ptr;
+      else
+        set.sin = ptr;
+    } else if (item.name.rfind("knorm.", 0) == 0) {
+      if (item.bytes != 128 * 2)
+        throw std::runtime_error("qwen38_graph: unexpected QSA knorm byte size: " + item.name);
       set.knorm[std::stoi(item.name.substr(6))] = ptr;
-    else if (item.name.rfind("kscale.", 0) == 0)
+    } else if (item.name.rfind("kscale.", 0) == 0) {
       set.kscale[std::stoi(item.name.substr(7))] = ptr;
-    else if (item.name.rfind("vscale.", 0) == 0)
+    } else if (item.name.rfind("vscale.", 0) == 0) {
       set.vscale[std::stoi(item.name.substr(7))] = ptr;
+    }
   }
-  if (!target.cos || !head.cos || target.knorm.empty() || head.knorm.empty())
+  if (!target.cos || !target.sin || !head.cos || !head.sin || target.knorm.empty() || head.knorm.empty())
     throw std::runtime_error("qwen38_graph: incomplete QSA constants " + index_path.string());
 }
 
@@ -415,6 +464,7 @@ void Qwen38GraphEngine::FastHandoff() {
       plane_.Check(plane_.memcpy_d2d(t->ptr, src, t->Bytes(), stream_), "handoff state");
     }
   }
+  const int32_t lengths[2] = {static_cast<int32_t>(blocks), static_cast<int32_t>(pending)};
   for (auto& [name, shared] : shared_) {
     const int layer = LayerOf(name);
     const uint8_t* raw = dense_ptr(name);  // raw per-token keys bf16 [1, P, 128]
@@ -427,10 +477,9 @@ void Qwen38GraphEngine::FastHandoff() {
       plane_.Check(plane_.memcpy_d2d(banks_[0].tensors.at(base + "index_buffer")->ptr, raw + blocks * kRatio * 128 * 2,
                                      pending * 128 * 2, stream_),
                    "handoff index buffer");
-    const int32_t lengths[2] = {static_cast<int32_t>(blocks), static_cast<int32_t>(pending)};
     plane_.Check(plane_.memcpy_h2d(banks_[0].tensors.at(base + "index_lengths")->ptr, lengths, 8, stream_), "handoff index lengths");
-    SyncStream();  // `lengths` lives on the stack
   }
+  SyncStream();  // `lengths` lives on the stack
   f.states.clear();
   f.logits.reset();
 }
