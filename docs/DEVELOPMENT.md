@@ -6,6 +6,16 @@ For end-user install instructions (pip / NuGet), see the [README](../README.md) 
 
 For the current continuous-batching architecture and transactional paged KV-cache flow, see [Paged Attention Engine](paged_attention_engine.md). The performance and design history behind the batching implementation is documented separately in [Engine Batching Design](paged_attention_batching.md).
 
+### Memory-backed CPU model loading
+
+The native C/C++ API can load flat CPU text and translation models without opening their model assets by path. Create a config with `OgaCreateConfigFromBuffer` (`OgaConfig::CreateFromBuffer` in C++), register each graph with the existing `OgaConfigAddModelData`, register external weight files with `OgaConfigAddExternalInitializerData`, and supply tokenizer config/vocabulary JSON with `OgaConfigSetTokenizerData`. Then use the normal model, tokenizer and generator APIs. Path-based loading is unchanged.
+
+Config JSON is parsed immediately and tokenizer JSON is copied into shared immutable storage. Graph and external-initializer buffers are borrowed: keep them immutable and alive until every dependent model/session is destroyed. ORT can borrow eligible initializer slices directly; this does not guarantee zero copies for every tensor.
+
+This initial contract requires external initializer data and covers main-graph initializers with flat relative asset names. Model packages, subgraph initializers, other execution providers, processors, adapters and custom-ops libraries are not supported. All graph and external-data references must be supplied by the caller; enforce filesystem denial separately when using this API as a sandbox boundary. The pinned tokenizer extension receives a small build-time patch so memory-backed Unigram/BPE classification does not inspect an empty file path.
+
+`MemoryAssetsTest.*` covers registration errors, owned tokenizer-data lifetime, custom-ops rejection and deterministic CPU generation using the external-weight variant of the existing tiny GPT-2 fixture. Regenerate that variant with `python test/models/hf-internal-testing/tiny-random-gpt2-fp32/export_external_data.py` in an environment containing `onnx`.
+
 ---
 
 ## 1. Prerequisites

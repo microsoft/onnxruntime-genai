@@ -342,6 +342,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSetting
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out);
 
 /**
+ * Creates a memory-backed config without reading genai_config.json from disk.
+ * Config bytes are parsed immediately;
+ * model graph and external initializer buffers must remain unchanged and alive
+ * until the model and its sessions are destroyed. Missing registered assets are
+ * errors. Callers must deny filesystem access to enforce a sandbox boundary; external initializers
+ * in subgraphs and non-text processors are not supported by this initial API.
+ * This API initially covers flat CPU text and translation models with external
+ * initializer data. Other execution providers, subgraphs, model packages,
+ * processors, adapters and custom-ops libraries are outside this contract.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
+                                                           size_t config_json_length,
+                                                           OgaConfig** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
+    OgaConfig* config, const char* filename, const void* data, size_t length);
+// Tokenizer JSON is copied and retained by models/tokenizers using this config.
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetTokenizerData(
+    OgaConfig* config, const char* config_json, size_t config_length,
+    const char* tokenizer_json, size_t tokenizer_length);
+
+/**
  * \brief Creates an OgaConfig from a model package directory, using the supplied execution
  *        provider to select a variant.
  *
