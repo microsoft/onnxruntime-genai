@@ -224,6 +224,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   struct RowInputs {  // fixed-address per-row-count inputs of the target
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
     uint8_t* input_ids{};
+    uint8_t* inputs_embeds{};
     uint8_t* position_ids{};
     uint8_t* committed{};
     uint8_t* ple{};
@@ -352,8 +353,9 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   std::map<std::string, std::unique_ptr<DevTensor>> fold_tensors_;  // fold.* inputs (the device control block)
   PlaneBuffer fold_ptrs_;
 
-  // fast prefill (dense session + hand-off + batched head KV prefill); null when not configured
+  // fast prefill (dense session + hand-off + batched head KV prefill, or unified target/head_r2 prefill); null when not configured
   struct FastPrefillState {
+    bool unified{};
     OrtSession* dense{};
     SessionInfo dense_info;
     std::vector<std::string> dense_inputs, dense_outputs;
@@ -363,6 +365,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     Qwen38QsaConstants* consts{};
 
     PlaneBuffer ones, idx, ples, raw_keys, scratch;  // ones: attention mask; idx: logits_indices; ples: PLE rows of a chunk
+    PlaneBuffer embeds;                              // device buffer for CPU embedding.onnx output [1, m, hidden_width_]
+    PlaneHostBuffer embeds_host;                     // pinned host staging buffer for CPU embedding.onnx output [m, hidden_width_]
     std::deque<PlaneBuffer> zero_buffers;
     std::map<std::string, std::unique_ptr<OrtValue>> initial;  // zero-length / zero initial states of the dense model
     std::map<std::string, std::unique_ptr<OrtValue>> states;   // dense `past` inputs (outputs of the previous chunk)
@@ -400,6 +404,11 @@ struct Qwen38GraphModel : Model {
   // they were given, then the plane library.
   std::unique_ptr<Qwen38Plane> plane_;
   std::unique_ptr<Qwen38WeightPool> pool_;
+  std::unique_ptr<Qwen38FileMapping> embed_mapping_;
+  std::vector<std::unique_ptr<OrtValue>> embed_values_;
+  std::unique_ptr<OrtSessionOptions> embedding_session_options_;
+  std::unique_ptr<OrtSession> session_embedding_;
+  std::unique_ptr<OrtRunOptions> embedding_run_options_;
   std::unique_ptr<Qwen38QsaConstants> qsa_constants_;
   std::unique_ptr<OrtSession> session_target_;
   std::unique_ptr<OrtSessionOptions> head_session_options_;
@@ -407,6 +416,8 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<OrtSessionOptions> head_r2_session_options_, dense_session_options_, head_kv_session_options_;
   std::unique_ptr<OrtSession> session_head_r2_, session_dense_, session_head_kv_;
   std::unique_ptr<Qwen38GraphEngine> engine_;
+
+  void RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const;
 
  private:
   std::atomic<bool> leased_{false};

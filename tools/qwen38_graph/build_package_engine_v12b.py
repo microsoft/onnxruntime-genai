@@ -95,12 +95,16 @@ def inventory(model_path: Path) -> dict:
     return out
 
 
-def write_pool(out: Path, models: dict[str, Path], host_map_embed: bool = False) -> dict:
+def write_pool(out: Path, models: dict[str, Path], host_map_embed: bool = False, exclude_embed: bool = False) -> dict:
     """weights_pool.txt: initializers used (same inode / offset / length / dtype / dims) by >= 2 of the sessions."""
     inv = {label: inventory(path) for label, path in models.items()}
     users = defaultdict(set)
     for label, items in inv.items():
-        for item in items.values():
+        for name, item in items.items():
+            if exclude_embed and (
+                name.endswith("embed_tokens.weight") or Path(item["file"]).name == "embedding.onnx.data"
+            ):
+                continue
             users[item["key"]].add(label)
     pool_ids, lines, sessions = {}, [], []
     total = 0
@@ -108,14 +112,16 @@ def write_pool(out: Path, models: dict[str, Path], host_map_embed: bool = False)
     for label, items in inv.items():
         rel_dir = models[label].parent.relative_to(out)
         for name, item in items.items():
+            if exclude_embed and (
+                name.endswith("embed_tokens.weight") or Path(item["file"]).name == "embedding.onnx.data"
+            ):
+                continue
             if len(users[item["key"]]) < 2:
                 continue
             if item["key"] not in pool_ids:
                 pool_ids[item["key"]] = len(pool_ids)
                 dims = " ".join(str(d) for d in item["dims"])
-                is_host_embed = host_map_embed and (
-                    name.endswith("embed_tokens.weight") or Path(item["file"]).name == "cpu_embed_tokens.data"
-                )
+                is_host_embed = host_map_embed and name.endswith("embed_tokens.weight")
                 prefix = "host_pool" if is_host_embed else "pool"
                 lines.append(
                     f"{prefix} {pool_ids[item['key']]} {item['dtype']} {item['offset']} {item['length']} {len(item['dims'])} "
@@ -1132,11 +1138,12 @@ def copy_file_slice(src_fd: int, src_off: int, dst_fd: int, dst_off: int, length
 
 def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
     """Clean up unreferenced safetensors/dense.data/merged.data/generated.data, compact expert scales,
-    and extract model.embed_tokens.weight into an explicit cpu_embed_tokens.data file."""
+    split model.embed_tokens.weight into a standard CPU embedding.onnx + embedding.onnx.data model,
+    and unify target/model.onnx and head_r2/model.onnx so the same ONNX graph serves both prefill and decode."""
     import onnx  # noqa: PLC0415
-    from onnx import TensorProto  # noqa: PLC0415
+    from onnx import TensorProto, helper, numpy_helper  # noqa: PLC0415
 
-    session_names = ("target", "head_r2", "dense", "head_kv")
+    session_names = ("target", "head_r2")
     models = {}
     for sname in session_names:
         cand = out / sname / "model.onnx"
@@ -1154,41 +1161,225 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
     for sname in session_names:
         (out / sname).mkdir(parents=True, exist_ok=True)
     (out / "target" / "source_weights").mkdir(parents=True, exist_ok=True)
-    (out / "dense" / "source_weights").mkdir(parents=True, exist_ok=True)
+    for obsolete_dir in ("dense", "head_kv"):
+        if (out / obsolete_dir).exists():
+            shutil.rmtree(out / obsolete_dir)
+    for obsolete_file in ("qsa_consts.txt", "qsa_consts.bin", "qsa_consts.data"):
+        (out / obsolete_file).unlink(missing_ok=True)
 
-    # 1. Extract model.embed_tokens.weight into explicit target/cpu_embed_tokens.data
+    # 1. Extract model.embed_tokens.weight into standard embedding.onnx + embedding.onnx.data (Gather on CPU EP)
     embed_names = {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight", "mtp.embed_tokens.weight"}
     embed_src_path = None
     embed_src_off = 0
     embed_len = 0
-    for t in models["target"].graph.initializer:
-        if t.name in embed_names:
-            ext = {e.key: e.value for e in t.external_data}
-            cand_p = source / "target" / ext["location"]
-            if not cand_p.exists():
-                cand_p = out / "target" / ext["location"]
-            embed_src_path = cand_p
-            embed_src_off = int(ext.get("offset", 0))
-            embed_len = int(ext.get("length", 0))
+    embed_dtype = TensorProto.BFLOAT16
+    embed_dims = [248320, 2560]
+    for sname in ("target", "head_r2"):
+        for t in models[sname].graph.initializer:
+            if t.name in embed_names:
+                ext = {e.key: e.value for e in t.external_data}
+                cand_p = source / sname / ext["location"]
+                if not cand_p.exists():
+                    cand_p = source / "target" / ext["location"]
+                if not cand_p.exists():
+                    cand_p = out / sname / ext["location"]
+                embed_src_path = cand_p
+                embed_src_off = int(ext.get("offset", 0))
+                embed_len = int(ext.get("length", 0))
+                embed_dtype = t.data_type
+                embed_dims = list(t.dims)
+                break
+        if embed_src_path is not None:
             break
     if embed_src_path is None or embed_len <= 0:
-        raise RuntimeError("Failed to locate model.embed_tokens.weight in target/model.onnx")
+        raise RuntimeError("Failed to locate model.embed_tokens.weight in target/head_r2 model.onnx")
 
-    dst_embed = out / "target" / "cpu_embed_tokens.data"
-    with open(embed_src_path, "rb") as fin, open(dst_embed, "wb") as fout:
+    dst_embed_data = out / "embedding.onnx.data"
+    with open(embed_src_path, "rb") as fin, open(dst_embed_data, "wb") as fout:
         copy_file_slice(fin.fileno(), embed_src_off, fout.fileno(), 0, embed_len)
-    for sname in ("head_r2", "dense", "head_kv"):
-        link_file(dst_embed, out / sname / "cpu_embed_tokens.data", copy)
+    for sname in ("target", "head_r2"):
+        link_file(dst_embed_data, out / sname / "embedding.onnx.data", copy)
 
-    for sname, m in models.items():
-        for t in m.graph.initializer:
+    # Build standard embedding.onnx with Gather(model.embed_tokens.weight, input_ids) -> inputs_embeds
+    embed_init = TensorProto()
+    embed_init.name = "model.embed_tokens.weight"
+    embed_init.data_type = embed_dtype
+    embed_init.dims.extend(embed_dims)
+    set_ext(embed_init, "embedding.onnx.data", 0, embed_len)
+    gather_node = helper.make_node(
+        "Gather",
+        ["model.embed_tokens.weight", "input_ids"],
+        ["inputs_embeds"],
+        name="/model/embed_tokens/Gather",
+    )
+    std_opset = next((o.version for o in models["target"].opset_import if o.domain in ("", "ai.onnx")), 21)
+    embedding_model = helper.make_model(
+        helper.make_graph(
+            [gather_node],
+            "cpu_embedding",
+            [helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"])],
+            [helper.make_tensor_value_info("inputs_embeds", embed_dtype, ["num_tokens", embed_dims[1]])],
+            [embed_init],
+        ),
+        opset_imports=[helper.make_opsetid("", std_opset)],
+        ir_version=models["target"].ir_version,
+    )
+    onnx.save_model(embedding_model, str(out / "embedding.onnx"), save_as_external_data=False)
+
+    # Point head.mtp.embed_tokens.weight / mtp.embed_tokens.weight to embedding.onnx.data;
+    # replace Gather(model.embed_tokens.weight, input_ids) in target/model.onnx with inputs_embeds.
+    for sname in ("target", "head_r2"):
+        for t in models[sname].graph.initializer:
             if t.name in embed_names:
-                set_ext(t, "cpu_embed_tokens.data", 0, embed_len)
+                set_ext(t, "embedding.onnx.data", 0, embed_len)
+
+    t_graph = models["target"].graph
+    gather_candidates = [
+        n for n in t_graph.node if n.op_type == "Gather" and len(n.input) >= 2 and n.input[0] == "model.embed_tokens.weight"
+    ]
+    if len(gather_candidates) == 1:
+        gnode = gather_candidates[0]
+        old_out = gnode.output[0]
+        t_graph.node.remove(gnode)
+        for consumer in t_graph.node:
+            for i, inp in enumerate(consumer.input):
+                if inp == old_out:
+                    consumer.input[i] = "inputs_embeds"
+        kept_inits = [t for t in t_graph.initializer if t.name != "model.embed_tokens.weight"]
+        del t_graph.initializer[:]
+        t_graph.initializer.extend(kept_inits)
+        if not any(vi.name == "inputs_embeds" for vi in t_graph.input):
+            t_graph.input.append(
+                helper.make_tensor_value_info(
+                    "inputs_embeds", embed_dtype, ["batch_size", "sequence_length", embed_dims[1]]
+                )
+            )
+
+    # Unify target/model.onnx for arbitrary query sequence_length (prefill + decode in one graph):
+    # - Slice hidden_states[:, -2:, :] before final hyper_connection_mixer + lm_head
+    # - Pass hidden_states -> fold.head_hidden through FoldMid2 (head_rows=2)
+    t_nodes = []
+    has_slice_last2 = any(n.name == "model/hyper_connection_mixer/Slice_last2" for n in t_graph.node)
+    for n in t_graph.node:
+        if n.name == "model/hyper_connection_mixer/hc_norm/BranchwiseRMSNorm_node_5816" and not has_slice_last2:
+            t_nodes.append(
+                helper.make_node(
+                    "Slice",
+                    ["hidden_states", "const_1d_0", "const_1d_1", "const_1d_3"],
+                    ["hidden_states.last2"],
+                    name="model/hyper_connection_mixer/Slice_last2",
+                )
+            )
+            n.input[0] = "hidden_states.last2"
+        elif n.op_type == "FoldMid2":
+            if len(n.input) == 10:
+                n.input.append("hidden_states")
+            if len(n.output) == 7:
+                n.output.append("fold.head_hidden")
+            keep_a = [a for a in n.attribute if a.name != "head_rows"]
+            del n.attribute[:]
+            n.attribute.extend(keep_a)
+            n.attribute.append(helper.make_attribute("head_rows", 2))
+        elif n.name == "head.mtp/pre_fc_norm_hidden/BranchwiseRMSNorm_node_15":
+            n.input[0] = "fold.head_hidden"
+        t_nodes.append(n)
+    del t_graph.node[:]
+    t_graph.node.extend(t_nodes)
+
+    # Unify head_r2/model.onnx for arbitrary query sequence_length (prefill + decode in one graph):
+    # - EmbedNorm dynamically produces capture.slot_ids, capture.seqlens_k, capture.cumulative_sequence_lengths
+    # - Slice Mul_200, Reshape_23, Mul_117 to [-2:] before o_proj and MtpMoe
+    h_graph = models["head_r2"].graph
+    h_init_names = {t.name for t in h_graph.initializer}
+    for iname, val in (
+        ("slice_last2_starts", np.array([-2], dtype=np.int64)),
+        ("slice_last2_ends", np.array([9223372036854775807], dtype=np.int64)),
+        ("slice_last2_axes", np.array([1], dtype=np.int64)),
+    ):
+        if iname not in h_init_names:
+            h_graph.initializer.append(numpy_helper.from_array(val, iname))
+    h_nodes = []
+    for n in h_graph.node:
+        if n.name in (
+            "capture/Cast_slot_ids",
+            "capture/Add_slot_ids",
+            "capture/Add_seqlens_k",
+            "mtp/hyper_connection_mixer/Slice_last2",
+            "mtp/Slice_last2_mul200",
+            "mtp/Slice_last2_r23",
+            "mtp/Slice_last2_mul117",
+        ):
+            continue
+        if n.op_type == "EmbedNorm":
+            if len(n.input) == 3:
+                n.input.append("committed_length")
+            if len(n.output) == 1:
+                n.output.extend(["capture.slot_ids", "capture.seqlens_k", "capture.cumulative_sequence_lengths"])
+        elif n.name == "skinny_gemm/3.0":
+            h_nodes.append(
+                helper.make_node(
+                    "Slice",
+                    ["v_mtp.layers.0.self_attn.Mul_200", "slice_last2_starts", "slice_last2_ends", "slice_last2_axes"],
+                    ["v_mtp.layers.0.self_attn.Mul_200.last2"],
+                    name="mtp/Slice_last2_mul200",
+                )
+            )
+            h_nodes.append(
+                helper.make_node(
+                    "Slice",
+                    ["v_mtp.Reshape_23", "slice_last2_starts", "slice_last2_ends", "slice_last2_axes"],
+                    ["v_mtp.Reshape_23.last2"],
+                    name="mtp/Slice_last2_r23",
+                )
+            )
+            h_nodes.append(
+                helper.make_node(
+                    "Slice",
+                    ["v_mtp.layers.0.attn_hyper_connection.Mul_117", "slice_last2_starts", "slice_last2_ends", "slice_last2_axes"],
+                    ["v_mtp.layers.0.attn_hyper_connection.Mul_117.last2"],
+                    name="mtp/Slice_last2_mul117",
+                )
+            )
+            n.input[0] = "v_mtp.layers.0.self_attn.Mul_200.last2"
+        elif n.name == "mtp/layers.0/mlp_hyper_connection/HcPostBlock":
+            n.input[0] = "v_mtp.Reshape_23.last2"
+            n.input[2] = "v_mtp.layers.0.attn_hyper_connection.Mul_117.last2"
+        h_nodes.append(n)
+    del h_graph.node[:]
+    h_graph.node.extend(h_nodes)
+    kept_h_inits = [
+        t
+        for t in h_graph.initializer
+        if t.name not in ("capture.slot_offsets", "capture.rows_minus_one", "capture.cumulative_sequence_lengths")
+    ]
+    del h_graph.initializer[:]
+    h_graph.initializer.extend(kept_h_inits)
+
+    seq_io_names = {
+        "input_ids",
+        "inputs_embeds",
+        "attention_mask",
+        "position_ids",
+        "hidden_states",
+        "hidden_states_out",
+        "logits",
+        "next_tokens",
+        "next_token",
+    }
+    for sname in session_names:
+        g = models[sname].graph
+        for vi in list(g.input) + list(g.output):
+            if vi.name in seq_io_names or vi.name.startswith("ple_embeddings."):
+                dims = vi.type.tensor_type.shape.dim
+                if len(dims) >= 2:
+                    dims[1].ClearField("dim_value")
+                    dims[1].dim_param = "sequence_length"
+        del g.value_info[:]
 
     # 2. Hard-link shared quant_weights.data, hc_tiled.data, attn_consts.data, and experts.data
     for fname, targets in (
-        ("quant_weights.data", ("target", "head_r2", "dense", "head_kv")),
-        ("hc_tiled.data", ("target", "head_r2", "dense", "head_kv")),
+        ("quant_weights.data", ("target", "head_r2")),
+        ("hc_tiled.data", ("target", "head_r2")),
         ("attn_consts.data", ("target", "head_r2")),
     ):
         src_f = out / "target" / fname if (out / "target" / fname).exists() else (source / "target" / fname)
@@ -1207,7 +1398,6 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
     if not src_experts.exists():
         src_experts = source / "target" / "_source_weights" / "experts.data"
     link_file(src_experts, out / "target" / "source_weights" / "experts.data", copy)
-    link_file(out / "target" / "source_weights" / "experts.data", out / "dense" / "source_weights" / "experts.data", copy)
 
     # 3. Compact source_weights/model.onnx.experts.0..7.data (eliminating 56.25 GiB of dead unreferenced bytes)
     compacted_experts_bytes = 0
@@ -1215,11 +1405,10 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
     for idx in range(8):
         rel_exp = f"source_weights/model.onnx.experts.{idx}.data"
         spans = set()
-        for sname in ("target", "dense"):
-            for t in models[sname].graph.initializer:
-                ext = {e.key: e.value for e in t.external_data}
-                if ext.get("location") == rel_exp:
-                    spans.add((int(ext.get("offset", 0)), int(ext["length"])))
+        for t in models["target"].graph.initializer:
+            ext = {e.key: e.value for e in t.external_data}
+            if ext.get("location") == rel_exp:
+                spans.add((int(ext.get("offset", 0)), int(ext["length"])))
         sorted_spans = sorted(spans)
         src_exp = source / "target" / rel_exp
         if not src_exp.exists():
@@ -1239,18 +1428,16 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
                 span_remap[(s_off, s_len)] = pos
                 pos += s_len
         compacted_experts_bytes += pos
-        link_file(dst_exp, out / "dense" / rel_exp, copy)
-        for sname in ("target", "dense"):
-            for t in models[sname].graph.initializer:
-                ext = {e.key: e.value for e in t.external_data}
-                if ext.get("location") == rel_exp:
-                    key = (int(ext.get("offset", 0)), int(ext["length"]))
-                    set_ext(t, rel_exp, span_remap[key], key[1])
+        for t in models["target"].graph.initializer:
+            ext = {e.key: e.value for e in t.external_data}
+            if ext.get("location") == rel_exp:
+                key = (int(ext.get("offset", 0)), int(ext["length"]))
+                set_ext(t, rel_exp, span_remap[key], key[1])
 
-    # 4. Pack all remaining BF16 initializers (from model-bf16-*.safetensors, dense.data, model.onnx.generated.data)
-    # into target/norm_and_rope.data (4096-byte aligned) and deduplicate across all 4 sessions.
+    # 4. Pack all remaining BF16 initializers (from model-bf16-*.safetensors, model.onnx.generated.data)
+    # into target/norm_and_rope.data (4096-byte aligned) and deduplicate across target and head_r2.
     kept_locations = {
-        "cpu_embed_tokens.data",
+        "embedding.onnx.data",
         "quant_weights.data",
         "hc_tiled.data",
         "attn_consts.data",
@@ -1289,22 +1476,22 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
                 set_ext(t, "norm_and_rope.data", norm_rope_map[dedup_key], s_len)
                 packed_tensors += 1
 
-    for sname in ("head_r2", "dense", "head_kv"):
-        link_file(norm_rope_path, out / sname / "norm_and_rope.data", copy)
+    link_file(norm_rope_path, out / "head_r2" / "norm_and_rope.data", copy)
 
-    # 5. Save cleaned ONNX models
+    # 5. Save cleaned unified ONNX models
     for sname, m in models.items():
         onnx.save_model(m, str(out / sname / "model.onnx"), save_as_external_data=False)
 
     return {
         "cpu_embedding": {
-            "file": "target/cpu_embed_tokens.data",
+            "model_file": "embedding.onnx",
+            "data_file": "embedding.onnx.data",
+            "operator": "Gather",
             "dtype": "BFLOAT16",
-            "shape": [248320, 2560],
+            "shape": embed_dims,
             "bytes": embed_len,
             "mib": embed_len / (1024**2),
             "gib": embed_len / (1024**3),
-            "placement": "host_pool (CPU host-mapped UVA zero-copy)",
         },
         "norm_and_rope_data": {
             "file": "target/norm_and_rope.data",
@@ -1621,16 +1808,26 @@ def main() -> None:
 
     if clean_pkg:
         clean_info = clean_and_pack_package(source, out, copy=args.copy)
+        config["model"]["embedding"] = {
+            "filename": "embedding.onnx",
+            "session_options": {"intra_op_num_threads": 1},
+            "inputs": {"input_ids": "input_ids"},
+            "outputs": {"inputs_embeds": "inputs_embeds"},
+        }
+        qwen["prefill"].pop("dense", None)
+        qwen["prefill"].pop("head_kv", None)
+        qwen["prefill"].pop("constants", None)
 
     if transform_models or clean_pkg:
         models_map = {
             "target": out / "target/model.onnx",
             "head_r2": out / "head_r2/model.onnx",
-            "dense": out / "dense/model.onnx",
-            "head_kv": out / "head_kv/model.onnx",
         }
-        use_host_embed = args.host_map_embed or clean_pkg or bool(src_manifest.get("weights_pool", {}).get("host_gib"))
-        pool_info = write_pool(out, models_map, host_map_embed=use_host_embed)
+        if not clean_pkg:
+            models_map["dense"] = out / "dense/model.onnx"
+            models_map["head_kv"] = out / "head_kv/model.onnx"
+        use_host_embed = (args.host_map_embed or bool(src_manifest.get("weights_pool", {}).get("host_gib"))) and not clean_pkg
+        pool_info = write_pool(out, models_map, host_map_embed=use_host_embed, exclude_embed=clean_pkg)
 
     (out / "genai_config.json").write_text(json.dumps(config, indent=2) + "\n")
 
@@ -1664,7 +1861,7 @@ def main() -> None:
         cs = clean_info["compacted_expert_scales"]
         nr = clean_info["norm_and_rope_data"]
         print(
-            f"clean_package: cpu_embed={ce['file']} ({ce['mib']:.2f} MiB), "
+            f"clean_package: cpu_embed={ce['model_file']}+{ce['data_file']} ({ce['mib']:.2f} MiB, op={ce['operator']}), "
             f"norm_and_rope={nr['file']} ({nr['mib']:.2f} MiB, {nr['unique_tensors']} tensors), "
             f"expert_scales saved={cs['saved_gib']:.2f} GiB"
         )

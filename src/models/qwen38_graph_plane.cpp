@@ -72,6 +72,7 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_LOAD)
 #undef QWEN38_PLANE_LOAD
     quantize_kv = reinterpret_cast<decltype(quantize_kv)>(dlsym(handle_, "qwen38_plane_quantize_kv"));
+    embed_rows = reinterpret_cast<decltype(embed_rows)>(dlsym(handle_, "qwen38_plane_embed_rows"));
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
       throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
                                ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));

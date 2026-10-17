@@ -35,6 +35,7 @@ struct Qwen38Plane {
 #undef QWEN38_PLANE_DECLARE
   void (*quantize_kv)(void* stream, const void* src, void* dst, const void* scale, int rows, int src_pitch_elems,
                       int dst_pitch_elems, int mode){};
+  void (*embed_rows)(void* stream, const void* table, const void* ids, void* out, int rows, int width){};
 
  private:
   void* handle_{};

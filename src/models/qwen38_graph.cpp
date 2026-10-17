@@ -319,6 +319,12 @@ void Qwen38GraphEngine::BuildTarget() {
           {0, rows});
     if (info.HasInput("logits_indices"))
       set64(NewDeviceTensor(in.tensors, "logits_indices", {rows}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64), arange);
+    if (info.HasInput("inputs_embeds")) {
+      const int embed_width = model_.config_->model.decoder.hidden_size;
+      in.inputs_embeds = NewDeviceTensor(in.tensors, "inputs_embeds", {1, rows, embed_width},
+                                         ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16)
+                             ->ptr;
+    }
     in.ple = NewDeviceTensor(in.tensors, "ple_embeddings." + std::to_string(ple_layer_), {1, rows, ple_width_},
                              ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16)
                  ->ptr;
@@ -599,6 +605,11 @@ void Qwen38GraphEngine::PrepRow(int rows, int row, const void* tok, const void* 
   plane_.prep(stream_, params_dev_.data(), tok, pos, add, ctx_in, ctx_out, in.input_ids + 8 * row,
               in.position_ids + 8 * row, row == 0 ? in.committed : scratch_i32_.data(), past_pos_,
               in.ple + 2 * static_cast<size_t>(ple_width_) * row, ctl_.data());
+  if (in.inputs_embeds && plane_.embed_rows && model_.embed_mapping_) {
+    const int embed_width = model_.config_->model.decoder.hidden_size;
+    plane_.embed_rows(stream_, model_.embed_mapping_->data(), in.input_ids + 8 * row,
+                      in.inputs_embeds + 2 * static_cast<size_t>(embed_width) * row, 1, embed_width);
+  }
 }
 
 void Qwen38GraphEngine::RunTarget(int rows, int phase) {
@@ -1098,12 +1109,25 @@ void Qwen38GraphEngine::Warmup() {
   // ORT captures a graph id after min_num_runs eager runs: touch every (rows, phase) and head direction enough times.
   // When CUDA graph capture is disabled (eager offload mode), 3 steps (6 tokens) suffice to warm up all 3 bank phases.
 #if !defined(_WIN32)
+  setenv("ORT_FORCE_DETERMINISTIC_MOE", "1", 0);
   struct WarmupEnvGuard {
     WarmupEnvGuard() { setenv("ORT_QMOE_IN_WARMUP", "1", 1); }
     ~WarmupEnvGuard() { setenv("ORT_QMOE_IN_WARMUP", "0", 1); }
   } warmup_guard;
 #endif
   const bool target_captures_graph = IsGraphCaptureEnabled(model_.config_->model.decoder.session_options);
+  if (fast_ && fast_->unified) {
+    // Pre-allocate prefill workspaces and arena blocks on session_target_ / session_head_r2_ before CUDA graph capture.
+    const int warm_len = std::min<int>(fast_->chunk, 512);
+    std::vector<int32_t> prompt(warm_len, 1000);
+    FastAppend(prompt);
+    ClearHead();
+    SyncStream();
+    FastHandoff();
+    if (prefill_head_) FastHeadKvPrefill();
+    SyncStream();
+    Reset();
+  }
   const int R = fold_ ? verify_rows_ : 2;
   const int warm_tokens = target_captures_graph ? (R * num_banks_ * 6) : (R * num_banks_);
   std::vector<int32_t> dummy(warm_tokens);
@@ -1125,7 +1149,7 @@ void Qwen38GraphEngine::Warmup() {
     if (ReadCtl(5) != 0) CheckDeviceStatus("warmup (head)", nullptr);
     ClearHead();
     SyncStream();
-    if (fast_) {
+    if (fast_ && !fast_->unified) {
       // dense / head-KV shapes: arena growth and first-use costs of the prefill sessions (one dummy prompt per length)
       std::mt19937 rng(12345);
       for (int length : model_.config_->model.qwen38_graph.prefill.warmup_lengths) {
@@ -1176,10 +1200,14 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   } else if (q.mtp.enabled && q.head.filename_s2.empty()) {
     throw std::runtime_error("model.qwen38_graph.head.filename_s2 is required when MTP is enabled");
   }
-  if (q.prefill.enabled && (!q.fold.enabled || q.prefill.dense.filename.empty() || q.prefill.head_kv.filename.empty() ||
-                            q.prefill.constants.empty()))
+  if (q.prefill.enabled && !q.fold.enabled)
+    throw std::runtime_error("model.qwen38_graph.prefill requires fold.enabled");
+  const bool separate_prefill_sessions =
+      q.prefill.enabled && !q.prefill.dense.filename.empty() &&
+      q.prefill.dense.filename != config_->model.decoder.filename;
+  if (separate_prefill_sessions && (q.prefill.head_kv.filename.empty() || q.prefill.constants.empty()))
     throw std::runtime_error(
-        "model.qwen38_graph.prefill requires fold.enabled and prefill.{dense.filename,head_kv.filename,constants}");
+        "model.qwen38_graph.prefill with a separate dense graph requires prefill.{head_kv.filename,constants}");
   if (q.prefill.enabled && (q.prefill.chunk < 1 || q.prefill.chunk > q.kv_capacity))
     throw std::runtime_error("model.qwen38_graph.prefill.chunk must be in [1, kv_capacity]");
   if (q.kv_capacity <= Qwen38DecodeDevice::kReservedTail)
@@ -1207,6 +1235,36 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     pool_->AddTo(*session_options_, "target");
   }
 
+  // Standard CPU embedding.onnx session (Gather on CPU EP) + zero-copy UVA mapping of embedding.onnx.data for decode graphs.
+  if (!config_->model.embedding.filename.empty()) {
+    embedding_session_options_ = OrtSessionOptions::Create();
+    Config::SessionOptions cpu_options = config_->model.embedding.session_options.value_or(Config::SessionOptions{});
+    if (!cpu_options.intra_op_num_threads) cpu_options.intra_op_num_threads = 1;
+    CreateSessionOptionsFromConfig(cpu_options, *embedding_session_options_, false, true, false, false);
+    session_embedding_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
+    embedding_run_options_ = OrtRunOptions::Create();
+    if (config_->model.embedding.run_options) {
+      for (const auto& [key, value] : *config_->model.embedding.run_options) {
+        embedding_run_options_->AddConfigEntry(key.c_str(), value.c_str());
+      }
+    }
+    const std::filesystem::path embed_data_path = root / (config_->model.embedding.filename + ".data");
+    if (std::filesystem::exists(embed_data_path)) {
+      embed_mapping_ = std::make_unique<Qwen38FileMapping>(*plane_, embed_data_path, true);
+      const std::vector<int64_t> embed_shape{config_->model.vocab_size, config_->model.decoder.hidden_size};
+      const size_t expected_bytes =
+          static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]) * sizeof(uint16_t);
+      if (embed_mapping_->size() >= expected_bytes) {
+        embed_values_.push_back(OrtValue::CreateTensor(
+            *p_device_->GetMemoryInfo(), embed_mapping_->data(), expected_bytes, embed_shape,
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
+        for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
+          session_options_->AddInitializer(name, *embed_values_.back());
+        }
+      }
+    }
+  }
+
   std::string target_filename = config_->model.decoder.filename;
   if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
     const int d = std::atoi(drafts_env);
@@ -1228,13 +1286,16 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     CreateSessionOptionsFromConfig(options, *result, /*is_primary_session_options=*/false,
                                    /*disable_graph_capture=*/false, /*cloned_from_parent=*/false, /*append_providers=*/true);
     if (pool_) pool_->AddTo(*result, label);
+    if (!embed_values_.empty() && (std::string(label) == "head_r2" || std::string(label) == "head")) {
+      result->AddInitializer("mtp.embed_tokens.weight", *embed_values_.back());
+    }
     return result;
   };
 
   if (q.fold.enabled) {
     head_r2_session_options_ = make_options(q.fold.head_r2.session_options, true, "head_r2");
     session_head_r2_ = CreateSession(ort_env, q.fold.head_r2.filename, head_r2_session_options_.get());
-    if (q.prefill.enabled) {
+    if (separate_prefill_sessions) {
       // the dense / head-KV sessions are not graph captured and do not inherit the decoder's provider options
       dense_session_options_ = make_options(q.prefill.dense.session_options, false, "dense");
       head_kv_session_options_ = make_options(q.prefill.head_kv.session_options, false, "head_kv");
@@ -1254,6 +1315,25 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
 }
 
 Qwen38GraphModel::~Qwen38GraphModel() = default;
+
+void Qwen38GraphModel::RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const {
+  if (!session_embedding_) throw std::runtime_error("qwen38_graph: model.embedding session is not initialized");
+  const auto& emb_cfg = config_->model.embedding;
+  const auto& cpu_mem = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
+  const std::array<int64_t, 1> id_shape{static_cast<int64_t>(num_tokens)};
+  const std::array<int64_t, 2> out_shape{static_cast<int64_t>(num_tokens),
+                                         static_cast<int64_t>(config_->model.decoder.hidden_size)};
+  const size_t out_bytes = num_tokens * static_cast<size_t>(config_->model.decoder.hidden_size) * sizeof(uint16_t);
+  auto in_val = OrtValue::CreateTensor(cpu_mem, const_cast<int64_t*>(ids_host), num_tokens * sizeof(int64_t),
+                                       id_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto out_val = OrtValue::CreateTensor(cpu_mem, dst_host, out_bytes, out_shape,
+                                        ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  const char* in_name = emb_cfg.inputs.input_ids.c_str();
+  const char* out_name = emb_cfg.outputs.embeddings.c_str();
+  OrtValue* in_ptr = in_val.get();
+  OrtValue* out_ptr = out_val.get();
+  session_embedding_->Run(embedding_run_options_.get(), &in_name, &in_ptr, 1, &out_name, &out_ptr, 1);
+}
 
 std::unique_ptr<State> Qwen38GraphModel::CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const {
   throw std::runtime_error(

@@ -95,8 +95,12 @@ def token_hash(tokens):
 
 
 def load_model(package, provider=None, overlay=None):
-    """Registers the plugin CUDA EP (`provider` path, default $QWEN_PROVIDER) and loads the package."""
+    """Registers the plugin CUDA EP (`provider` path, default $QWEN_PROVIDER or <package>/provider/libonnxruntime_providers_cuda.so) and loads the package."""
     provider = provider or os.environ.get("QWEN_PROVIDER")
+    if not provider:
+        pkg_provider = Path(package) / "provider" / "libonnxruntime_providers_cuda.so"
+        if pkg_provider.exists():
+            provider = str(pkg_provider)
     if provider:
         og.register_execution_provider_library("CUDAExecutionProvider", provider)
     config = og.Config(str(package))

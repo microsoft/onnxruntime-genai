@@ -380,6 +380,16 @@ __global__ void k_quantize_kv(const __nv_bfloat16* src, uint8_t* dst, const floa
   dst[(size_t)r * dst_pitch_elems + c] = out_byte;
 }
 
+__global__ void k_embed_rows(const __nv_bfloat16* table, const i64* ids, __nv_bfloat16* out, int rows, int width) {
+  const int r = blockIdx.x;
+  if (r >= rows) return;
+  const i64 tok = ids[r];
+  const uint4* src = reinterpret_cast<const uint4*>(table + (size_t)tok * width);
+  uint4* dst = reinterpret_cast<uint4*>(out + (size_t)r * width);
+  const int n8 = width / 8;
+  for (int i = threadIdx.x; i < n8; i += blockDim.x) dst[i] = src[i];
+}
+
 extern "C" {
 int qwen38_plane_abi_version(void) { return QWEN38_PLANE_ABI_VERSION; }
 int qwen38_plane_sizeof_ple_params(void) { return (int)sizeof(PleParams); }
@@ -447,6 +457,11 @@ void qwen38_plane_quantize_kv(void* s, const void* src, void* dst, const void* s
   if (rows <= 0) return;
   k_quantize_kv<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)src, (uint8_t*)dst, (const float*)scale, rows,
                                                    src_pitch_elems, dst_pitch_elems, mode);
+}
+
+void qwen38_plane_embed_rows(void* s, const void* table, const void* ids, void* out, int rows, int width) {
+  if (rows <= 0) return;
+  k_embed_rows<<<rows, 256, 0, (cudaStream_t)s>>>((const __nv_bfloat16*)table, (const i64*)ids, (__nv_bfloat16*)out, rows, width);
 }
 
 /* ---- CUDA runtime helpers (all return cudaError_t as int, 0 = success) ---- */

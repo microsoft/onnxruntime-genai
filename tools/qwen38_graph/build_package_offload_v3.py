@@ -78,7 +78,10 @@ def link_tree(src: Path, dst: Path, copy: bool = False) -> int:
     fallback_experts = src.parent / "pkg_v12d_bf16lm_engine/target/source_weights/experts.data"
     if not fallback_experts.exists():
         fallback_experts = src.parent / "qwen_flash_v12c_engine_int8kv_fp8w_fp4moe/target/source_weights/experts.data"
-    for exp_rel in (Path("target/source_weights/experts.data"), Path("dense/source_weights/experts.data")):
+    exp_rels = [Path("target/source_weights/experts.data")]
+    if (src / "dense").exists():
+        exp_rels.append(Path("dense/source_weights/experts.data"))
+    for exp_rel in exp_rels:
         dst_exp = dst / exp_rel
         if not dst_exp.exists() and fallback_experts.exists():
             link_file(fallback_experts, dst_exp, copy)
@@ -219,6 +222,8 @@ def rewrite_nvfp4_qmoe_to_offload(
                 node.attribute.append(helper.make_attribute("gpu_working_bytes", 512 << 20))
             if "pinned_staging_bytes" not in existing_attrs:
                 node.attribute.append(helper.make_attribute("pinned_staging_bytes", 64 << 20))
+            if "allow_cuda_graph" not in existing_attrs:
+                node.attribute.append(helper.make_attribute("allow_cuda_graph", 1))
             if per_layer_initial_experts is not None and layer_idx in per_layer_initial_experts:
                 init_exps = per_layer_initial_experts[layer_idx]
                 node.attribute.append(helper.make_attribute("resident_slots", len(init_exps)))
@@ -280,7 +285,21 @@ def build_multidraft_target_onnx(in_onnx: Path, out_onnx: Path, verify_rows: int
     mids_added = 0
     fold_mid_idx = -1
     for idx, node in enumerate(graph.node):
+        if node.name == "model/hyper_connection_mixer/Slice_last2":
+            if "const_last_starts" not in init_names:
+                graph.initializer.append(
+                    numpy_helper.from_array(
+                        __import__("numpy").asarray([-verify_rows], dtype=__import__("numpy").int64),
+                        name="const_last_starts",
+                    )
+                )
+                init_names.add("const_last_starts")
+            node.input[1] = "const_last_starts"
         if node.domain == "qwen.fold" and node.op_type in ("FoldMid", "FoldMid2"):
+            keep_a = [a for a in node.attribute if a.name != "head_rows"]
+            del node.attribute[:]
+            node.attribute.extend(keep_a)
+            node.attribute.append(helper.make_attribute("head_rows", verify_rows))
             fold_mid_idx = idx
             break
         if node.domain == "qwen.fused_attn" and node.op_type in ("GdnProjPrep", "GdnConvPrep"):
@@ -437,6 +456,7 @@ def build_multidraft_target_onnx(in_onnx: Path, out_onnx: Path, verify_rows: int
         input_remap = {
             "fold.head_ids": f"{prefix}head_ids",
             "hidden_states": prev_hidden,
+            "fold.head_hidden": prev_hidden,
             "head.capture.rope_cos": f"{prefix}rope_cos",
             "head.capture.rope_sin": f"{prefix}rope_sin",
             "head.capture.cumulative_sequence_lengths": "head.capture.cu_seqlens_s1",
@@ -522,6 +542,7 @@ def build_multidraft_target_onnx(in_onnx: Path, out_onnx: Path, verify_rows: int
         )
     )
 
+    del graph.value_info[:]
     out_onnx.parent.mkdir(parents=True, exist_ok=True)
     onnx.save_model(model, str(out_onnx), save_as_external_data=False)
     return {
@@ -548,6 +569,7 @@ def build_offload_weights_pool(
     session_lines = []
     qmoe_pool_ids = set()
     mtp_moe_pool_ids = set()
+    embed_pool_ids = set()
     dense_bound_names = set()
 
     for line in src_pool[1:]:
@@ -561,6 +583,8 @@ def build_offload_weights_pool(
                 qmoe_pool_ids.add(pid)
             if "mtp.layers.0.mlp.experts." in name:
                 mtp_moe_pool_ids.add(pid)
+            if name.endswith("embed_tokens.weight"):
+                embed_pool_ids.add(pid)
             if sess == "dense":
                 dense_bound_names.add(name)
             session_lines.append((sess, name, pid))
@@ -613,7 +637,7 @@ def build_offload_weights_pool(
             default_placement = "host_mapped" if parts[0] == "host_pool" else (parts[7 + rank] if len(parts) > 7 + rank else "device")
             if pid in qmoe_pool_ids:
                 pool_lines.append(f"{base_s} cpu")
-            elif pid == 0:
+            elif pid in embed_pool_ids:
                 if embed_placement != "device":
                     pool_lines.append(f"{base_s} {embed_placement}")
                 else:
@@ -635,8 +659,30 @@ def build_offload_weights_pool(
                 pool_lines.append(base_s)
 
     next_pool_id = len(pool_lines)
+    target_bound_names = {name for sess, name, _ in session_lines if sess == "target"}
+    target_model = onnx.load(str(source_pkg / "target/model.onnx"), load_external_data=False)
+    for init in target_model.graph.initializer:
+        if init.name in target_bound_names:
+            continue
+        if ".mlp.fc1_" in init.name or ".mlp.fc2_" in init.name:
+            ext = {e.key: e.value for e in init.external_data}
+            loc = ext.get("location", "")
+            if not loc:
+                continue
+            offset = int(ext.get("offset", "0"))
+            length = int(ext["length"])
+            dims = list(init.dims)
+            shape_str = f"{len(dims)} " + " ".join(str(d) for d in dims)
+            pool_file = f"target/{loc}"
+            pool_lines.append(
+                f"pool {next_pool_id} {init.data_type} {offset} {length} {shape_str} {pool_file} cpu"
+            )
+            session_lines.append(("target", init.name, next_pool_id))
+            qmoe_pool_ids.add(next_pool_id)
+            next_pool_id += 1
+
     added_dense_entries = 0
-    if dense_placement in ("host_mapped", "cpu"):
+    if dense_placement in ("host_mapped", "cpu") and (source_pkg / "dense/model.onnx").exists():
         dense_model = onnx.load(str(source_pkg / "dense/model.onnx"), load_external_data=False)
         for init in dense_model.graph.initializer:
             if init.name in dense_bound_names:
@@ -763,13 +809,19 @@ def main() -> None:
     build_multidraft_target_onnx(out / "target/model_s2.onnx", out / "target/model_s3.onnx", verify_rows=3)
     build_multidraft_target_onnx(out / "target/model_s2.onnx", out / "target/model_s4.onnx", verify_rows=4)
     shutil.copy2(out / "target/model_s4.onnx", out / "target/model.onnx")
-    if args.dense_gpu_qmoe:
-        link_file(source / "dense/model.onnx", out / "dense/model.onnx", args.copy)
-        dense_rewritten = 0
+    if (source / "dense/model.onnx").exists():
+        if args.dense_gpu_qmoe:
+            link_file(source / "dense/model.onnx", out / "dense/model.onnx", args.copy)
+            dense_rewritten = 0
+        else:
+            dense_rewritten = rewrite_nvfp4_qmoe_to_offload(
+                source / "dense/model.onnx", out / "dense/model.onnx", extra_attrs=dense_attrs
+            )
     else:
-        dense_rewritten = rewrite_nvfp4_qmoe_to_offload(
-            source / "dense/model.onnx", out / "dense/model.onnx", extra_attrs=dense_attrs
-        )
+        dense_rewritten = 0
+        for obsolete_dir in ("dense", "head_kv"):
+            if (out / obsolete_dir).exists():
+                shutil.rmtree(out / obsolete_dir)
     pool_stats = build_offload_weights_pool(
         source, out, args.dense_placement, args.mtp_moe_placement, args.embed_placement
     )
@@ -804,12 +856,14 @@ def main() -> None:
     }
     qwen["prefill"]["chunk"] = args.prefill_chunk
     qwen["prefill"]["warmup_lengths"] = [min(args.prefill_chunk, 512), 128, 37]
-    dense_cuda = qwen["prefill"]["dense"]["session_options"]["provider_options"][0]["cuda"]
-    dense_cuda["arena_extend_strategy"] = "kSameAsRequested"
-    dense_cuda["arena.extend_strategy"] = "1"
-    head_kv_cuda = qwen["prefill"]["head_kv"]["session_options"]["provider_options"][0]["cuda"]
-    head_kv_cuda["arena_extend_strategy"] = "kSameAsRequested"
-    head_kv_cuda["arena.extend_strategy"] = "1"
+    if "dense" in qwen["prefill"]:
+        dense_cuda = qwen["prefill"]["dense"]["session_options"]["provider_options"][0]["cuda"]
+        dense_cuda["arena_extend_strategy"] = "kSameAsRequested"
+        dense_cuda["arena.extend_strategy"] = "1"
+    if "head_kv" in qwen["prefill"]:
+        head_kv_cuda = qwen["prefill"]["head_kv"]["session_options"]["provider_options"][0]["cuda"]
+        head_kv_cuda["arena_extend_strategy"] = "kSameAsRequested"
+        head_kv_cuda["arena.extend_strategy"] = "1"
 
     (out / "genai_config.json").write_text(json.dumps(config, indent=2) + "\n")
 

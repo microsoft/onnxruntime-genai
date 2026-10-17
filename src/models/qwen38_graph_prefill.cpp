@@ -299,9 +299,44 @@ std::string TailOf(const std::string& name) {
 
 void Qwen38GraphEngine::BuildFastPrefill() {
   const auto& q = model_.config_->model.qwen38_graph;
+  auto fast = std::make_unique<FastPrefillState>();
+  if (!model_.session_dense_) {
+    if (!model_.session_target_ || !model_.session_head_r2_)
+      throw std::runtime_error("qwen38_graph: unified prefill requires target and head_r2 sessions");
+    fast->unified = true;
+    fast->dense = model_.session_target_.get();
+    fast->head_kv = model_.session_head_r2_.get();
+    fast->dense_info.Add(*fast->dense);
+    fast->head_kv_info.Add(*fast->head_kv);
+    fast->chunk = (q.prefill.chunk > 0) ? std::min<int>(q.prefill.chunk, 2048) : 512;
+    if (fast->chunk < 1 || fast->chunk > capacity_) throw std::runtime_error("qwen38_graph: invalid prefill.chunk");
+    fast->dense_inputs = fast->dense->GetInputNames();
+    fast->dense_outputs = fast->dense->GetOutputNames();
+    const size_t slots = static_cast<size_t>(capacity_) + 8;
+    {
+      std::vector<int64_t> ones(slots, 1);
+      fast->ones = PlaneBuffer(plane_, slots * 8, stream_);
+      plane_.Check(plane_.memcpy_h2d(fast->ones.data(), ones.data(), slots * 8, stream_), "ones");
+      SyncStream();
+    }
+    fast->idx = PlaneBuffer(plane_, 64, stream_);
+    fast->ples = PlaneBuffer(plane_, static_cast<size_t>(fast->chunk) * ple_width_ * 2, stream_);
+    fast->scratch = PlaneBuffer(plane_, 4096, stream_);
+    if (fast->dense_info.HasInput("inputs_embeds") || fast->head_kv_info.HasInput("inputs_embeds")) {
+      const size_t max_emb_bytes =
+          static_cast<size_t>(fast->chunk) * static_cast<size_t>(model_.config_->model.decoder.hidden_size) * 2;
+      fast->embeds = PlaneBuffer(plane_, max_emb_bytes, stream_);
+      fast->embeds_host = PlaneHostBuffer(plane_, max_emb_bytes);
+    }
+    if (d_prompt_hidden_.size() == 0) d_prompt_hidden_ = PlaneBuffer(plane_, slots * hidden_width_ * 2, stream_);
+    SyncStream();
+    fast->run_options = OrtRunOptions::Create();
+    fast->run_options->AddConfigEntry("gpu_graph_id", "-1");
+    fast_ = std::move(fast);
+    return;
+  }
   if (!model_.session_dense_ || !model_.session_head_kv_ || !model_.qsa_constants_)
     throw std::runtime_error("qwen38_graph: prefill.enabled requires the dense, head_kv sessions and the QSA constants");
-  auto fast = std::make_unique<FastPrefillState>();
   fast->dense = model_.session_dense_.get();
   fast->head_kv = model_.session_head_kv_.get();
   fast->dense_info.Add(*fast->dense);
@@ -323,6 +358,12 @@ void Qwen38GraphEngine::BuildFastPrefill() {
   fast->ples = PlaneBuffer(plane_, static_cast<size_t>(fast->chunk) * ple_width_ * 2, stream_);
   fast->raw_keys = PlaneBuffer(plane_, slots * 128 * 2, stream_);
   fast->scratch = PlaneBuffer(plane_, 256, stream_);
+  if (fast->dense_info.HasInput("inputs_embeds") || fast->head_kv_info.HasInput("inputs_embeds")) {
+    const size_t max_emb_bytes =
+        static_cast<size_t>(fast->chunk) * static_cast<size_t>(model_.config_->model.decoder.hidden_size) * 2;
+    fast->embeds = PlaneBuffer(plane_, max_emb_bytes, stream_);
+    fast->embeds_host = PlaneHostBuffer(plane_, max_emb_bytes);
+  }
   if (d_prompt_hidden_.size() == 0) d_prompt_hidden_ = PlaneBuffer(plane_, slots * hidden_width_ * 2, stream_);
 
   // Initial dense state: zero-length KV / index keys / positions, zero recurrent and conv states.
@@ -386,17 +427,154 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   const std::string total_str = std::to_string(total_expected);
   setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", total_str.c_str(), 1);
 #endif
-  {
-    std::vector<int64_t> chunk(n);
-    for (size_t i = 0; i < n; ++i) chunk[i] = tokens[i];
-    plane_.Check(plane_.memcpy_h2d(d_tokens_.data() + 8 * base, chunk.data(), n * 8, stream_), "upload prompt");
-    SyncStream();  // the host vector dies here
-  }
+  std::vector<int64_t> chunk(n);
+  for (size_t i = 0; i < n; ++i) chunk[i] = tokens[i];
+  plane_.Check(plane_.memcpy_h2d(d_tokens_.data() + 8 * base, chunk.data(), n * 8, stream_), "upload prompt");
+  SyncStream();
   prompt_tokens_.insert(prompt_tokens_.end(), tokens.begin(), tokens.end());
   const size_t row_bytes = static_cast<size_t>(hidden_width_) * 2;
+  const int embed_width = model_.config_->model.decoder.hidden_size;
+  const size_t embed_row_bytes = static_cast<size_t>(embed_width) * 2;
   const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+  const auto i32 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
   const auto bf16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
   const std::string ple_name = "ple_embeddings." + std::to_string(ple_layer_);
+
+  if (f.unified) {
+    MutedPrefill(true);
+    size_t last_m = 1;
+    for (size_t lo = 0; lo < n;) {
+      const size_t pos = base + lo;
+      size_t max_m = static_cast<size_t>(f.chunk);
+      if (pos >= 16384 && max_m > 2048) max_m = std::min<size_t>(max_m, 2048);
+      const size_t m = std::min(max_m, n - lo);
+      last_m = m;
+#if !defined(_WIN32)
+      const char* compact_cap = (pos + m <= 2048) ? (m <= 1024 ? "128" : "64") : "128";
+      setenv("ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS", compact_cap, 1);
+#endif
+      plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
+                      ctx_b_.data(), f.ples.data());
+      plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_b_.data(), 16, stream_), "ctx commit");
+      plane_.Check(plane_.memcpy_d2d(past_pos_ + 8 * pos, d_arange64_.data() + 8 * pos, m * 8, stream_), "past_pos");
+      const int32_t meta32[4] = {
+          static_cast<int32_t>(pos),
+          static_cast<int32_t>(m - 1),
+          0,
+          static_cast<int32_t>(m),
+      };
+      plane_.Check(plane_.memcpy_h2d(f.idx.data(), meta32, sizeof(meta32), stream_), "unified prefill meta");
+      if (auto it = head_banks_[0].tensors.find("past_key_values.0.index_lengths"); it != head_banks_[0].tensors.end()) {
+        plane_.Check(plane_.device_memset(it->second->ptr, 0, it->second->Bytes(), stream_), "zero muted head len");
+      }
+      if (f.dense_info.HasInput("inputs_embeds")) {
+        model_.RunCpuEmbedding(chunk.data() + lo, m, f.embeds_host.data());
+        plane_.Check(plane_.memcpy_h2d(f.embeds.data(), f.embeds_host.data(), m * embed_row_bytes, stream_),
+                     "upload inputs_embeds");
+      }
+      SyncStream();
+
+      auto binding = OrtIoBinding::Create(*f.dense);
+      std::vector<std::unique_ptr<OrtValue>> views;
+      auto view = [&](void* ptr, std::vector<int64_t> shape, ONNXTensorElementDataType type) -> OrtValue& {
+        size_t count = 1;
+        for (int64_t d : shape) count *= static_cast<size_t>(d);
+        views.push_back(OrtValue::CreateTensor(*memory_info_, ptr, count * Ort::SizeOf(type), shape, type));
+        return *views.back();
+      };
+      for (const auto& name : f.dense_inputs) {
+        if (name == "input_ids")
+          binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * pos, {1, int64_t(m)}, i64));
+        else if (name == "inputs_embeds")
+          binding->BindInput(name.c_str(), view(f.embeds.data(), {1, int64_t(m), embed_width}, bf16));
+        else if (name == "attention_mask")
+          binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(m)}, i64));
+        else if (name == "position_ids")
+          binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * pos, {1, int64_t(m)}, i64));
+        else if (name == "committed_length")
+          binding->BindInput(name.c_str(), view(f.idx.data() + 0, {1}, i32));
+        else if (name == "sequence_length_minus_one")
+          binding->BindInput(name.c_str(), view(f.idx.data() + 4, {1}, i32));
+        else if (name == "cumulative_sequence_lengths")
+          binding->BindInput(name.c_str(), view(f.idx.data() + 8, {2}, i32));
+        else if (name == ple_name)
+          binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
+        else if (fold_tensors_.count(name))
+          binding->BindInput(name.c_str(), *fold_tensors_.at(name)->value);
+        else if (name.rfind("head.past_key_values.0.", 0) == 0) {
+          const std::string sub = "past_key_values.0." + name.substr(23);
+          OrtValue& val = head_store_.count(sub) ? *head_store_.at(sub)->value : *head_banks_[0].tensors.at(sub)->value;
+          binding->BindInput(name.c_str(), val);
+        } else if (store_.count(name))
+          binding->BindInput(name.c_str(), *store_.at(name)->value);
+        else if (shared_.count(name))
+          binding->BindInput(name.c_str(), *shared_.at(name)->value);
+        else if (banks_[0].tensors.count(name))
+          binding->BindInput(name.c_str(), *banks_[0].tensors.at(name)->value);
+        else
+          throw std::runtime_error("qwen38_graph: unsupported unified target prefill input " + name);
+      }
+      const size_t tok_rows = std::min<size_t>(m, static_cast<size_t>(verify_rows_));
+      for (const auto& name : f.dense_outputs) {
+        if (name == "hidden_states" || name == "hidden_states_out")
+          binding->BindOutput(name.c_str(), view(d_prompt_hidden_.data() + pos * row_bytes, {1, int64_t(m), hidden_width_}, bf16));
+        else if (name == "next_tokens")
+          binding->BindOutput(name.c_str(), view(f.scratch.data(), {1, int64_t(tok_rows)}, i64));
+        else if (name == "validation.aggregate")
+          binding->BindOutput(name.c_str(), view(f.scratch.data() + 64, {int64_t(status_count_)}, i32));
+        else if (name == "present_position_ids")
+          binding->BindOutput(name.c_str(), *store_.at("past_position_ids")->value);
+        else if (name.rfind("present_mid.", 0) == 0) {
+          const std::string in_n = "past_key_values." + name.substr(12);
+          binding->BindOutput(name.c_str(), *banks_[2].tensors.at(in_n)->value);
+        } else if (name.rfind("present_mid2.", 0) == 0 || name.rfind("present_mid3.", 0) == 0) {
+          const std::string in_n = "past_key_values." + name.substr(13);
+          binding->BindOutput(name.c_str(), *banks_[2].tensors.at(in_n)->value);
+        } else if (name.rfind("present.", 0) == 0) {
+          const std::string in_n = "past_key_values." + name.substr(8);
+          OrtValue& val = store_.count(in_n) ? *store_.at(in_n)->value
+                        : shared_.count(in_n) ? *shared_.at(in_n)->value
+                                              : *banks_[1].tensors.at(in_n)->value;
+          binding->BindOutput(name.c_str(), val);
+        } else if (name.rfind("head.present_mid.0.", 0) == 0) {
+          const std::string sub = "past_key_values.0." + name.substr(19);
+          OrtValue& val = head_store_.count(sub) ? *head_store_.at(sub)->value : *head_banks_[2].tensors.at(sub)->value;
+          binding->BindOutput(name.c_str(), val);
+        } else if (name.rfind("head.present_mid2.0.", 0) == 0 || name.rfind("head.present_mid3.0.", 0) == 0) {
+          const std::string sub = "past_key_values.0." + name.substr(20);
+          OrtValue& val = head_store_.count(sub) ? *head_store_.at(sub)->value : *head_banks_[2].tensors.at(sub)->value;
+          binding->BindOutput(name.c_str(), val);
+        } else if (name.rfind("head.present_s1.0.", 0) == 0 || name.rfind("head.present_s2.0.", 0) == 0) {
+          const std::string sub = "past_key_values.0." + name.substr(18);
+          OrtValue& val = head_store_.count(sub) ? *head_store_.at(sub)->value : *head_banks_[1].tensors.at(sub)->value;
+          binding->BindOutput(name.c_str(), val);
+        } else if (name.rfind("head.present.0.", 0) == 0) {
+          const std::string sub = "past_key_values.0." + name.substr(15);
+          OrtValue& val = head_store_.count(sub) ? *head_store_.at(sub)->value : *head_banks_[1].tensors.at(sub)->value;
+          binding->BindOutput(name.c_str(), val);
+        } else {
+          binding->BindOutput(name.c_str(), *memory_info_);
+        }
+      }
+      f.dense->Run(f.run_options.get(), *binding);
+      plane_.or_status(stream_, f.scratch.data() + 64, static_cast<int>(status_count_), ctl_.data());
+      plane_.Check(plane_.memcpy_d2d(banks_[0].arena.data(), banks_[1].arena.data(), banks_[0].arena.size(), stream_),
+                   "commit unified bank 0");
+      SyncStream();
+      f.dense_length += m;
+      lo += m;
+    }
+    ledger_.AdvancePrompt(n);
+    const size_t last_tok_idx = std::min<size_t>(last_m, static_cast<size_t>(verify_rows_)) - 1;
+    plane_.Check(plane_.memcpy_d2d(d_last_hidden_.data(), d_prompt_hidden_.data() + (ledger_.Length() - 1) * row_bytes, row_bytes, stream_),
+                 "last hidden");
+    plane_.Check(plane_.memcpy_d2h(stage_host_ + 4, f.scratch.data() + 8 * last_tok_idx, 8, stream_), "read prediction");
+    SyncStream();
+    if (ReadCtl(5) != 0) CheckDeviceStatus("unified prefill", nullptr);
+    pending_ = static_cast<int32_t>(stage_host_[4]);
+    MutedPrefill(false);
+    return;
+  }
 
   for (size_t lo = 0; lo < n;) {
     const size_t pos = base + lo;  // == f.dense_length
@@ -419,6 +597,11 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
     plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_b_.data(), 16, stream_), "ctx commit");
     const int64_t last_row = static_cast<int64_t>(m) - 1;
     plane_.Check(plane_.memcpy_h2d(f.idx.data(), &last_row, 8, stream_), "logits_indices");
+    if (f.dense_info.HasInput("inputs_embeds")) {
+      model_.RunCpuEmbedding(chunk.data() + lo, m, f.embeds_host.data());
+      plane_.Check(plane_.memcpy_h2d(f.embeds.data(), f.embeds_host.data(), m * embed_row_bytes, stream_),
+                   "upload inputs_embeds");
+    }
 
     auto binding = OrtIoBinding::Create(*f.dense);
     std::vector<std::unique_ptr<OrtValue>> views;
@@ -431,6 +614,8 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
     for (const auto& name : f.dense_inputs) {
       if (name == "input_ids")
         binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * pos, {1, int64_t(m)}, i64));
+      else if (name == "inputs_embeds")
+        binding->BindInput(name.c_str(), view(f.embeds.data(), {1, int64_t(m), embed_width}, bf16));
       else if (name == "attention_mask")
         binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(pos + m)}, i64));
       else if (name == "position_ids")
@@ -505,6 +690,13 @@ void Qwen38GraphEngine::FastHandoff() {
   const size_t P = ledger_.Length();
   if (ledger_.Bank() != 0) throw std::logic_error("qwen38_graph: the dense hand-off writes bank 0");
   if (f.dense_length != P) throw std::runtime_error("qwen38_graph: dense state length differs from the prompt length");
+  if (f.unified) {
+#if !defined(_WIN32)
+    setenv("ORT_QMOE_PREFILL_HANDOFF_DONE", "1", 1);
+    setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0", 1);
+#endif
+    return;
+  }
   auto dense_ptr = [&](const std::string& name) -> uint8_t* {
     auto it = f.states.find(name);
     if (it == f.states.end()) throw std::runtime_error("qwen38_graph: dense state lacks " + name);
@@ -587,8 +779,68 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
   }
   const size_t rows = P - 1;
   const size_t row_bytes = static_cast<size_t>(hidden_width_) * 2;
+  const int embed_width = model_.config_->model.decoder.hidden_size;
+  const size_t embed_row_bytes = static_cast<size_t>(embed_width) * 2;
   const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+  const auto i32 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
   const auto bf16 = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+  if (f.unified) {
+    const size_t head_chunk = static_cast<size_t>(f.chunk);
+    head_cur_ = 0;
+    for (size_t lo = 0; lo < rows; lo += head_chunk) {
+      const size_t m = std::min(head_chunk, rows - lo);
+      const int32_t committed = static_cast<int32_t>(lo);
+      plane_.Check(plane_.memcpy_h2d(f.idx.data(), &committed, sizeof(committed), stream_), "head committed");
+      auto binding = OrtIoBinding::Create(*f.head_kv);
+      std::vector<std::unique_ptr<OrtValue>> views;
+      auto view = [&](void* ptr, std::vector<int64_t> shape, ONNXTensorElementDataType type) -> OrtValue& {
+        size_t count = 1;
+        for (int64_t d : shape) count *= static_cast<size_t>(d);
+        views.push_back(OrtValue::CreateTensor(*memory_info_, ptr, count * Ort::SizeOf(type), shape, type));
+        return *views.back();
+      };
+      for (const auto& name : f.head_kv->GetInputNames()) {
+        if (name == "input_ids")
+          binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
+        else if (name == "position_ids")
+          binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
+        else if (name == "hidden_states")
+          binding->BindInput(name.c_str(), view(d_prompt_hidden_.data() + lo * row_bytes, {1, int64_t(m), hidden_width_}, bf16));
+        else if (name == "committed_length")
+          binding->BindInput(name.c_str(), view(f.idx.data(), {1}, i32));
+        else if (head_store_.count(name))
+          binding->BindInput(name.c_str(), *head_store_.at(name)->value);
+        else if (head_banks_[0].tensors.count(name))
+          binding->BindInput(name.c_str(), *head_banks_[0].tensors.at(name)->value);
+        else
+          throw std::runtime_error("qwen38_graph: unsupported unified head_r2 prefill input " + name);
+      }
+      for (const auto& name : f.head_kv->GetOutputNames()) {
+        const std::string state = "past_key_values." + name.substr(name.find('.') + 1);
+        if (name == "validation.aggregate")
+          binding->BindOutput(name.c_str(), view(f.scratch.data(), {int64_t(head_r2_.status_count)}, i32));
+        else if (name.rfind("present_mid.", 0) == 0) {
+          OrtValue& val = head_store_.count(state) ? *head_store_.at(state)->value : *head_banks_[2].tensors.at(state)->value;
+          binding->BindOutput(name.c_str(), val);
+        } else if (name.rfind("present.", 0) == 0) {
+          OrtValue& val = head_store_.count(state) ? *head_store_.at(state)->value : *head_banks_[1].tensors.at(state)->value;
+          binding->BindOutput(name.c_str(), val);
+        } else {
+          binding->BindOutput(name.c_str(), *memory_info_);
+        }
+      }
+      f.head_kv->Run(f.run_options.get(), *binding);
+      plane_.or_status(stream_, f.scratch.data(), static_cast<int>(head_r2_.status_count), ctl_.data());
+      for (auto& entry : head_banks_[1].tensors) {
+        plane_.Check(plane_.memcpy_d2d(head_banks_[0].tensors.at(entry.first)->ptr, entry.second->ptr, entry.second->Bytes(), stream_),
+                     "commit unified head bank 0");
+      }
+      SyncStream();
+    }
+    if (ReadCtl(5) != 0) CheckDeviceStatus("unified head prefill", nullptr);
+    head_length_ = static_cast<int>(rows);
+    return;
+  }
   const DevTensor& key_tensor = *head_store_.at("past_key_values.0.key");
   const DevTensor& value_tensor = *head_store_.at("past_key_values.0.value");
   uint8_t* key = key_tensor.ptr;
@@ -614,6 +866,13 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
   const size_t head_chunk = std::min<size_t>(static_cast<size_t>(f.chunk), 512);
   for (size_t lo = 0; lo < rows; lo += head_chunk) {
     const size_t m = std::min(head_chunk, rows - lo);
+    if (f.head_kv_info.HasInput("inputs_embeds")) {
+      std::vector<int64_t> h_ids(m);
+      for (size_t i = 0; i < m; ++i) h_ids[i] = prompt_tokens_[1 + lo + i];
+      model_.RunCpuEmbedding(h_ids.data(), m, f.embeds_host.data());
+      plane_.Check(plane_.memcpy_h2d(f.embeds.data(), f.embeds_host.data(), m * embed_row_bytes, stream_),
+                   "upload head_kv inputs_embeds");
+    }
     auto binding = OrtIoBinding::Create(*f.head_kv);
     std::vector<std::unique_ptr<OrtValue>> views;
     auto view = [&](void* ptr, std::vector<int64_t> shape, ONNXTensorElementDataType type) -> OrtValue& {
@@ -625,6 +884,8 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
     for (const auto& name : f.head_kv->GetInputNames()) {
       if (name == "input_ids")
         binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
+      else if (name == "inputs_embeds")
+        binding->BindInput(name.c_str(), view(f.embeds.data(), {1, int64_t(m), embed_width}, bf16));
       else if (name == "attention_mask")
         binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(m)}, i64));
       else if (name == "position_ids")
