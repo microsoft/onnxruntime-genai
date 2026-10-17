@@ -552,6 +552,7 @@ void Qwen38GraphEngine::FastHandoff() {
       plane_.Check(plane_.memcpy_d2d(t->ptr, src, t->Bytes(), stream_), "handoff state");
     }
   }
+  const int32_t lengths[2] = {static_cast<int32_t>(blocks), static_cast<int32_t>(pending)};
   for (auto& [name, shared] : shared_) {
     const int layer = LayerOf(name);
     const uint8_t* raw = dense_ptr(name);  // raw per-token keys bf16 [1, P, 128]
@@ -564,10 +565,9 @@ void Qwen38GraphEngine::FastHandoff() {
       plane_.Check(plane_.memcpy_d2d(banks_[0].tensors.at(base + "index_buffer")->ptr, raw + blocks * kRatio * 128 * 2,
                                      pending * 128 * 2, stream_),
                    "handoff index buffer");
-    const int32_t lengths[2] = {static_cast<int32_t>(blocks), static_cast<int32_t>(pending)};
     plane_.Check(plane_.memcpy_h2d(banks_[0].tensors.at(base + "index_lengths")->ptr, lengths, 8, stream_), "handoff index lengths");
-    SyncStream();  // `lengths` lives on the stack
   }
+  SyncStream();  // `lengths` lives on the stack
   f.states.clear();
   f.logits.reset();
 #if !defined(_WIN32)

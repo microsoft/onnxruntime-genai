@@ -1015,6 +1015,9 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycle() {
   const auto start = Clock::now();
   uint32_t spins = 0;
   while (record[0] != static_cast<int64_t>(seq_)) {
+#if defined(__x86_64__) || defined(_M_X64)
+    __builtin_ia32_pause();
+#endif
     if (((++spins) & (kStatusRingSpinCheck - 1)) == 0) {
       if (SecondsSince(start) > 180.0) throw std::runtime_error("qwen38_graph: timeout waiting for the cycle record");
       std::this_thread::yield();

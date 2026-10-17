@@ -68,10 +68,20 @@ def link_tree(src: Path, dst: Path, copy: bool = False) -> int:
             if not alias.exists() and not alias.is_symlink():
                 alias.symlink_to("_source_weights")
         for name in files:
+            if name.startswith(".azDownload"):
+                continue
             relative = rel / name
             if relative in REPLACED:
                 continue
             link_file(Path(root) / name, dst / relative, copy)
+            count += 1
+    fallback_experts = src.parent / "pkg_v12d_bf16lm_engine/target/source_weights/experts.data"
+    if not fallback_experts.exists():
+        fallback_experts = src.parent / "qwen_flash_v12c_engine_int8kv_fp8w_fp4moe/target/source_weights/experts.data"
+    for exp_rel in (Path("target/source_weights/experts.data"), Path("dense/source_weights/experts.data")):
+        dst_exp = dst / exp_rel
+        if not dst_exp.exists() and fallback_experts.exists():
+            link_file(fallback_experts, dst_exp, copy)
             count += 1
     return count
 
@@ -559,7 +569,7 @@ def build_offload_weights_pool(
     need_aligned_mtp_copy = False
     for line in src_pool[1:]:
         parts = line.strip().split()
-        if parts and parts[0] == "pool" and int(parts[1]) in mtp_moe_pool_ids:
+        if parts and parts[0] in ("pool", "host_pool") and int(parts[1]) in mtp_moe_pool_ids:
             if int(parts[3]) % 16 != 0:
                 need_aligned_mtp_copy = True
 
@@ -595,15 +605,22 @@ def build_offload_weights_pool(
         if not s:
             continue
         parts = s.split()
-        if parts[0] == "pool":
+        if parts[0] in ("pool", "host_pool"):
             pid = int(parts[1])
+            rank = int(parts[5])
+            base_tokens = ["pool", *parts[1 : 7 + rank]]
+            base_s = " ".join(base_tokens)
+            default_placement = "host_mapped" if parts[0] == "host_pool" else (parts[7 + rank] if len(parts) > 7 + rank else "device")
             if pid in qmoe_pool_ids:
-                pool_lines.append(f"{s} cpu")
-            elif pid == 0 and embed_placement != "device":
-                pool_lines.append(f"{s} {embed_placement}")
+                pool_lines.append(f"{base_s} cpu")
+            elif pid == 0:
+                if embed_placement != "device":
+                    pool_lines.append(f"{base_s} {embed_placement}")
+                else:
+                    pool_lines.append(base_s)
             elif pid in mtp_moe_pool_ids and mtp_moe_placement != "device":
                 if not need_aligned_mtp_copy:
-                    pool_lines.append(f"{s} {mtp_moe_placement}")
+                    pool_lines.append(f"{base_s} {mtp_moe_placement}")
                 elif pid == 607:
                     pool_lines.append(
                         f"pool 607 16 0 3355443200 3 512 1280 2560 {aligned_mtp_rel} {mtp_moe_placement}"
@@ -612,8 +629,10 @@ def build_offload_weights_pool(
                     pool_lines.append(
                         f"pool 608 16 3355443200 1677721600 3 512 2560 640 {aligned_mtp_rel} {mtp_moe_placement}"
                     )
+            elif default_placement != "device":
+                pool_lines.append(f"{base_s} {default_placement}")
             else:
-                pool_lines.append(s)
+                pool_lines.append(base_s)
 
     next_pool_id = len(pool_lines)
     added_dense_entries = 0
@@ -662,6 +681,12 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--plane-lib", type=Path, default=None)
     parser.add_argument("--provider-lib", type=Path, default=None)
+    parser.add_argument(
+        "--ops-dir",
+        type=Path,
+        default=Path("/home/tianlei/git/qwen38-flash-ops/build/lib"),
+        help="Directory containing rebased libqwen_*.so custom op libraries",
+    )
     parser.add_argument("--stop-token-id", type=int, default=None)
     parser.add_argument("--prefill-chunk", type=int, default=512)
     parser.add_argument("--target-resident-slots", type=int, default=None)
@@ -698,6 +723,9 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     linked = link_tree(source, out, args.copy)
+    if args.ops_dir is not None and args.ops_dir.exists():
+        for so_file in sorted(args.ops_dir.glob("libqwen_*.so")):
+            link_file(so_file.resolve(), out / "libs" / so_file.name, copy=True)
     link_file(args.plane_lib.resolve(), out / "libs/libqwen38_plane.so", copy=True)
     link_file(args.provider_lib.resolve(), out / "provider/libonnxruntime_providers_cuda.so", copy=True)
 

@@ -237,9 +237,10 @@ Qwen38WeightPoolManifest ParseQwen38WeightPoolManifest(const std::filesystem::pa
     std::istringstream fields(line);
     std::string key;
     fields >> key;
-    if (key == "pool") {
+    if (key == "pool" || key == "host_pool") {
       size_t id, rank;
       Qwen38WeightPoolManifest::Entry entry;
+      if (key == "host_pool") entry.placement = "host_mapped";
       fields >> id >> entry.dtype >> entry.offset >> entry.length >> rank;
       if (fields.fail() || rank > 8) throw std::runtime_error("qwen38_graph: malformed weight pool line: " + line);
       entry.shape.resize(rank);
