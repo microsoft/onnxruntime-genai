@@ -36,17 +36,17 @@ std::string ReadAsset(const std::filesystem::path& path) {
   return result;
 }
 
-struct ScopedTokenizerAssets {
-  ScopedTokenizerAssets()
+struct ScopedAssetDirectory {
+  ScopedAssetDirectory()
       : path{std::filesystem::temp_directory_path() /
              ("ortgenai_memory_assets_" +
               std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))} {
     if (!std::filesystem::create_directory(path)) {
-      throw std::runtime_error("Cannot create tokenizer test directory: " + path.string());
+      throw std::runtime_error("Cannot create model test directory: " + path.string());
     }
   }
 
-  ~ScopedTokenizerAssets() {
+  ~ScopedAssetDirectory() {
     std::error_code error;
     std::filesystem::remove_all(path, error);
     EXPECT_FALSE(error) << error.message();
@@ -266,7 +266,7 @@ TEST_F(MemoryAssetsTest, ConfigOnlyAddedTokenMatchesPathBasedTokenizer) {
       object + 1,
       R"("60000":{"content":"<|config_only_added_token|>","lstrip":false,"normalized":false,"rstrip":false,"single_word":false,"special":true},)");
 
-  ScopedTokenizerAssets assets;
+  ScopedAssetDirectory assets;
   assets.Write("genai_config.json", config_json_);
   assets.Write("tokenizer_config.json", tokenizer_config);
   assets.Write("tokenizer.json", tokenizer_json_);
@@ -343,6 +343,69 @@ TEST_F(MemoryAssetsTest, GeneratesExpectedTokensFromRegisteredBuffers) {
   auto sequence = OgaSequences::Create();
   tokenizer->Encode("hello", *sequence);
   EXPECT_GT(sequence->SequenceCount(0), 0u);
+}
+
+TEST_F(MemoryAssetsTest, PipelineSessionResetPreservesLoadingMode) {
+  enum class LoadingMode { kPath,
+                           kLegacyModelData,
+                           kMemoryAssets };
+  const std::filesystem::path source{MODEL_PATH "engine/dummy-decoder"};
+  const auto json = ReadAsset(source / "genai_config.json");
+  const auto graph = ReadAsset(source / "external-data/decoder.onnx");
+  const auto weights = ReadAsset(source / "external-data/weights.data");
+
+  for (const auto mode : {LoadingMode::kPath, LoadingMode::kLegacyModelData, LoadingMode::kMemoryAssets}) {
+    const bool memory = mode == LoadingMode::kMemoryAssets;
+    const bool legacy = mode == LoadingMode::kLegacyModelData;
+    SCOPED_TRACE(memory ? "memory-backed" : legacy ? "legacy-model-data"
+                                                   : "path-based");
+    ScopedAssetDirectory assets;
+    const auto filename = assets.path.filename().string() + ".onnx";
+    ASSERT_FALSE(std::filesystem::exists(filename));
+    assets.Write("genai_config.json", json);
+    assets.Write(filename.c_str(), graph);
+    assets.Write("weights.data", weights);
+    auto config = memory ? OgaConfig::CreateFromBuffer(json)
+                         : OgaConfig::Create(assets.path.string().c_str());
+    config->ClearProviders();
+    const auto overlay =
+        R"({"model":{"type":"decoder-pipeline","decoder":{"pipeline":[{"stage":{"filename":")" +
+        filename +
+        R"(","reset_session_idx":0,)"
+        R"("inputs":["input_ids","position_ids","attention_mask","past_key_values.0.key","past_key_values.0.value"],)"
+        R"("outputs":["logits","present.0.key","present.0.value"]}}]}}})";
+    config->Overlay(overlay.c_str());
+    auto registered_graph = graph;
+    if (memory || legacy) {
+      config->AddModelData(filename, registered_graph.data(), registered_graph.size());
+    }
+    if (memory) {
+      config->AddExternalInitializerData("weights.data", weights.data(), weights.size());
+    }
+    auto model = OgaModel::Create(*config);
+    config.reset();
+    if (memory) {
+      ASSERT_TRUE(std::filesystem::remove(assets.path / filename));
+      ASSERT_TRUE(std::filesystem::remove(assets.path / "weights.data"));
+    } else if (legacy) {
+      registered_graph.assign(registered_graph.size(), '\0');
+    }
+
+    for (int iteration = 0; iteration < 2; ++iteration) {
+      SCOPED_TRACE(iteration);
+      auto parameters = OgaGeneratorParams::Create(*model);
+      parameters->SetSearchOption("batch_size", 2);
+      parameters->SetSearchOption("max_length", 3);
+      auto generator = OgaGenerator::Create(*model, *parameters);
+      const std::array<int32_t, 4> input{0, 2, 0, 3};
+      generator->AppendTokens(input.data(), input.size());
+      generator->GenerateNextToken();
+      for (size_t batch = 0; batch < 2; ++batch) {
+        ASSERT_EQ(generator->GetSequenceCount(batch), 3u);
+        EXPECT_EQ(generator->GetSequenceData(batch)[2], 0);
+      }
+    }
+  }
 }
 
 }  // namespace
