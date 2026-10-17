@@ -3,22 +3,27 @@
 
 """Generate the external-data variant used by the memory asset API tests."""
 
+import argparse
 from pathlib import Path
 
 import onnx
 
 
 def main():
-    source = Path(__file__).parent
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-dir", type=Path, default=Path(__file__).parent)
+    parser.add_argument("--filename", default="past.onnx")
+    args = parser.parse_args()
+    source = args.model_dir
     destination = source / "external-data"
     destination.mkdir(exist_ok=True)
     weights = destination / "weights.data"
     if weights.exists():
         weights.unlink()
-    model = onnx.load(source / "past.onnx")
+    model = onnx.load(source / args.filename)
     onnx.save_model(
         model,
-        destination / "past.onnx",
+        destination / args.filename,
         save_as_external_data=True,
         all_tensors_to_one_file=True,
         location=weights.name,

@@ -386,10 +386,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config,
  * If using session options such as `session.use_ort_model_bytes_directly`, the model data must remain valid
  * until the OgaModel is destroyed, as the model data will be used directly by the Ort::Session.
  * Please see the relevant ONNX Runtime documentation for more details on this option.
+ * For configs created with OgaCreateConfigFromBuffer, graph buffers must remain valid until
+ * the model and all its sessions are destroyed, including recreated pipeline sessions.
  *
  * \param[in] config The config to add the model data to.
  * \param[in] model_filename The name of the model file as defined in the config.
- * \param[in] model_data The model data to add. The data is expected to be valid at least until the model is created.
+ * \param[in] model_data The model data to add, with the lifetime requirements described above.
  * \param[in] model_data_length The length of the model data.
  * \return OgaResult containing the error message if the addition of the model data failed.
  */
