@@ -276,6 +276,55 @@ def test_component_package_rejects_backbone_external_data_collision(tmp_path):
     assert not (output_dir / "head.onnx").exists()
 
 
+@pytest.mark.parametrize(
+    "reserved_name",
+    ["genai_config.json", "tokenizer.json", "model.onnx.data"],
+)
+def test_component_package_rejects_exporter_owned_external_data(
+    tmp_path, reserved_name
+):
+    output_dir = tmp_path / "package"
+    _write_backbone(output_dir)
+    graph = output_dir / "head.onnx"
+    _write_component_model(graph, [reserved_name])
+    (output_dir / reserved_name).write_bytes(b"owned")
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="conflicts with packaged file"):
+        export_component_package(options, str(output_dir))
+    assert (output_dir / reserved_name).read_bytes() == b"owned"
+
+
+def test_component_package_rejects_source_overwritten_by_backbone(tmp_path):
+    output_dir = tmp_path / "package"
+    _write_backbone(output_dir)
+    source = output_dir / "model.onnx"
+    _write_component_model(source)
+    original = source.read_bytes()
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "head",
+                    "source": str(source),
+                    "filename": "head.onnx",
+                }
+            ]
+        },
+    ).component_options
+
+    with pytest.raises(ValueError, match="exporter-owned output"):
+        export_component_package(options, str(output_dir))
+    assert source.read_bytes() == original
+    assert not (output_dir / "head.onnx").exists()
+
+
 def test_component_package_validates_graph_binding_names(tmp_path):
     graph = tmp_path / "head.onnx"
     _write_component_model(graph)
@@ -354,6 +403,52 @@ def test_component_package_rejects_manifest_symlink(tmp_path):
         export_component_package(options, str(output_dir))
     assert outside.read_text() == "unchanged"
     assert not (output_dir / "head.onnx").exists()
+
+
+def test_component_package_rejects_non_directory_parent(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    _write_component_model(graph, ["weights/chunk.bin"])
+    (source_dir / "weights").mkdir()
+    (source_dir / "weights" / "chunk.bin").write_bytes(b"weights")
+    output_dir = tmp_path / "package"
+    _write_backbone(output_dir)
+    (output_dir / "weights").write_bytes(b"not a directory")
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="parent is not a directory"):
+        export_component_package(options, str(output_dir))
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_symlinked_component_uses_external_data_beside_link(tmp_path):
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = target_dir / "head.onnx"
+    _write_component_model(target, ["weights.bin"])
+    (target_dir / "weights.bin").write_bytes(b"target weights")
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    linked = source_dir / "head.onnx"
+    linked.symlink_to(target)
+    (source_dir / "weights.bin").write_bytes(b"linked weights")
+    output_dir = tmp_path / "package"
+    _write_backbone(output_dir)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(linked)}]},
+    ).component_options
+
+    export_component_package(options, str(output_dir))
+
+    assert (output_dir / "weights.bin").read_bytes() == b"linked weights"
 
 
 def test_component_package_can_replace_its_own_previous_outputs(tmp_path):

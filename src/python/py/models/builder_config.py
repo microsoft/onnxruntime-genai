@@ -75,6 +75,22 @@ GRAPH_OPTIMIZATION_LEVELS = (
     "ORT_ENABLE_ALL",
 )
 
+COMPONENT_EXPORTER_OWNED_FILES = {
+    "added_tokens.json",
+    "chat_template.jinja",
+    "config.json",
+    "generation_config.json",
+    "genai_config.json",
+    "merges.txt",
+    "preprocessor_config.json",
+    "processor_config.json",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "vocab.json",
+}
+
 
 @dataclass(frozen=True)
 class ComponentBinding:
@@ -385,6 +401,7 @@ def plan_component_package(
         output_root / f"{options.backbone_filename}.data",
         output_root / "component_manifest.json",
         *(output_root / head.filename for head in options.heads),
+        *(output_root / filename for filename in COMPONENT_EXPORTER_OWNED_FILES),
     }
 
     for head in options.heads:
@@ -414,6 +431,11 @@ def plan_component_package(
             raise ValueError(
                 f"component copy source {source.name!r} is also another "
                 "component destination; overlapping copy chains are unsupported"
+            )
+        if source in reserved and source != destination:
+            raise ValueError(
+                f"component copy source {source.name!r} can be overwritten "
+                "by another exporter-owned output"
             )
     return ComponentPackagePlan(
         copies=tuple(copy_plan.items()), manifest=component_manifest_dict(options)
@@ -451,7 +473,7 @@ def add_component_copy(
         raise ValueError(
             f"component {component_name!r} file {destination.name!r} conflicts with another packaged file"
         )
-    if reserved is not None and source != destination:
+    if reserved is not None:
         conflict = next(
             (
                 path
@@ -492,12 +514,21 @@ def validate_destination_path(
             f"component {component_name!r} destination escapes the package"
         ) from error
     current = output_root
-    for part in relative.parts:
+    for index, part in enumerate(relative.parts):
         current = current / part
         if current.is_symlink():
             raise ValueError(
                 f"component {component_name!r} destination contains symlink "
                 f"{current}"
+            )
+        if (
+            index < len(relative.parts) - 1
+            and current.exists()
+            and not current.is_dir()
+        ):
+            raise ValueError(
+                f"component {component_name!r} destination parent is not a "
+                f"directory: {current}"
             )
     if destination.exists() and destination.is_dir():
         raise ValueError(
@@ -576,7 +607,7 @@ def find_external_data_files(
     traversing, malformed, or missing locations raise ``ValueError`` to prevent
     external-data references from escaping either source or destination roots.
     """
-    source_root = model_path.resolve().parent
+    source_root = model_path.parent.resolve()
     files = {}
     for tensor in iter_tensor_protos(model):
         entries = {entry.key: entry.value for entry in tensor.external_data}

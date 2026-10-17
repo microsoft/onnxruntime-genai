@@ -107,39 +107,6 @@ def load_kev_checkpoint(source: str | Path) -> dict:
     return {"state": state, "head_dim": 256, "temperature": float(temperature)}
 
 
-def load_kev_adapter(base_container, source: str | Path, cache_dir=None, token=None):
-    """Load KEV's adapter on the matching text backbone and merge it strictly."""
-    from peft import PeftConfig, get_peft_model
-    from peft.utils.save_and_load import (
-        load_peft_weights,
-        set_peft_model_state_dict,
-    )
-
-    if not hasattr(base_container, "model"):
-        raise ValueError("KEV base model must expose its text backbone as model")
-    config = PeftConfig.from_pretrained(
-        source, cache_dir=cache_dir, token=token
-    )
-    adapted = get_peft_model(base_container.model, config)
-    weights = load_peft_weights(source, device="cpu")
-    load_result = set_peft_model_state_dict(
-        adapted, weights, adapter_name="default"
-    )
-    missing_adapter_keys = [
-        key
-        for key in load_result.missing_keys
-        if "lora_" in key or "modules_to_save" in key
-    ]
-    if missing_adapter_keys or load_result.unexpected_keys:
-        raise ValueError(
-            "KEV adapter weights did not load exactly: "
-            f"missing={missing_adapter_keys}, "
-            f"unexpected={load_result.unexpected_keys}"
-        )
-    base_container.model = adapted.merge_and_unload()
-    return base_container
-
-
 def build_kev_model(checkpoint: dict) -> onnx.ModelProto:
     """Build KEV's grouped option-scoring ONNX graph.
 

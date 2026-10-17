@@ -544,27 +544,33 @@ class Qwen35TextModel(Model):
         basename = f"/model/layers.{layer_id}/linear_attn"
 
         qkv_name = f"{basename}/qkv_proj/MatMul"
-        qkv_output = self.make_matmul(
-            attention.in_proj_qkv, qkv_name, root_input
+        qkv_output = (
+            self.make_matmul(attention.in_proj_qkv, qkv_name, root_input)
+            + "/output_0"
         )
 
         z_name = f"{basename}/z_proj/MatMul"
-        z_output = self.make_matmul(attention.in_proj_z, z_name, root_input)
+        z_output = (
+            self.make_matmul(attention.in_proj_z, z_name, root_input)
+            + "/output_0"
+        )
 
         # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
         # ~0.1% of the model, so they stay dense regardless of which loader supplied them.
         b_name = f"{basename}/b_proj/MatMul"
         self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
         self.exclude_node_from_quantization(b_name)
-        b_output = self.make_matmul(
-            attention.in_proj_b, b_name, root_input
+        b_output = (
+            self.make_matmul(attention.in_proj_b, b_name, root_input)
+            + "/output_0"
         )
 
         a_name = f"{basename}/a_proj/MatMul"
         self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
         self.exclude_node_from_quantization(a_name)
-        a_output = self.make_matmul(
-            attention.in_proj_a, a_name, root_input
+        a_output = (
+            self.make_matmul(attention.in_proj_a, a_name, root_input)
+            + "/output_0"
         )
 
         conv_input = qkv_output
@@ -690,8 +696,13 @@ class Qwen35TextModel(Model):
         )
 
         o_name = f"{basename}/out_proj/MatMul"
-        o_output = self.make_matmul(
-            attention.out_proj, o_name, f"{gated_norm_name}/output_0"
+        o_output = (
+            self.make_matmul(
+                attention.out_proj,
+                o_name,
+                f"{gated_norm_name}/output_0",
+            )
+            + "/output_0"
         )
 
         self.layernorm_attrs["skip_input"] = o_output

@@ -17,6 +17,7 @@ clm = load_builder_module("clm")
 kev = load_builder_module("kev")
 dispatch = load_builder_module("non_generative")
 qwen = load_builder_module("qwen")
+base = load_builder_module("base")
 
 
 def _tiny_clm_head(seed):
@@ -144,6 +145,23 @@ def test_clm_logit_scale_is_finite_and_clamped_before_exp():
     checkpoint["logit_scale"] = torch.tensor(float("nan"))
     with pytest.raises(ValueError, match="logit_scale must be finite"):
         clm.build_clm_model(checkpoint)
+
+
+def test_clm_checkpoint_preflight_validates_heads_and_scale(
+    tmp_path
+):
+    checkpoint = _real_clm_checkpoint()
+    checkpoint["state_head"]["inp.weight"] = torch.zeros(5, 4096)
+    path = tmp_path / "invalid-head.pt"
+    torch.save(checkpoint, path)
+    with pytest.raises(ValueError, match="state_head.inp.weight"):
+        clm.load_clm_checkpoint(path)
+
+    checkpoint = _real_clm_checkpoint()
+    checkpoint["logit_scale"] = torch.tensor(float("inf"))
+    torch.save(checkpoint, path)
+    with pytest.raises(ValueError, match="logit_scale must be finite"):
+        clm.load_clm_checkpoint(path)
 
 
 def _tiny_kev_checkpoint():
@@ -396,13 +414,13 @@ def test_kev_adapter_loads_on_text_backbone_and_rejects_missing_weights(
         sys.modules, "peft.utils.save_and_load", save_and_load
     )
 
-    assert kev.load_kev_adapter(container, "adapter") is container
+    assert base.load_text_backbone_adapter(container, "adapter") is container
     assert calls["model"] is base_text
     assert container.model is merged
 
     load_result.missing_keys = ["base_model.model.layer.lora_A.default.weight"]
     with pytest.raises(ValueError, match="did not load exactly"):
-        kev.load_kev_adapter(
+        base.load_text_backbone_adapter(
             types.SimpleNamespace(model=base_text), "adapter"
         )
 
@@ -437,11 +455,11 @@ def test_qwen35_linear_attention_uses_adapter_aware_matmul_outputs():
     z, b, a, conv, _ = builder.make_linear_attention_input_proj(
         0, attention, "root"
     )
-    assert z.endswith("z_proj/MatMul/with_lora")
-    assert b.endswith("b_proj/MatMul/with_lora")
-    assert a.endswith("a_proj/MatMul/with_lora")
+    assert z.endswith("z_proj/MatMul/with_lora/output_0")
+    assert b.endswith("b_proj/MatMul/with_lora/output_0")
+    assert a.endswith("a_proj/MatMul/with_lora/output_0")
     assert calls["transpose"][0][1].endswith(
-        "qkv_proj/MatMul/with_lora"
+        "qkv_proj/MatMul/with_lora/output_0"
     )
     assert conv.endswith("qkv_proj/Transpose/output_0")
 
@@ -461,7 +479,7 @@ def test_qwen35_linear_attention_uses_adapter_aware_matmul_outputs():
     )
     assert calls["gated_norm"][0][1]["gate"] == z
     assert builder.layernorm_attrs["skip_input"].endswith(
-        "out_proj/MatMul/with_lora"
+        "out_proj/MatMul/with_lora/output_0"
     )
 
 
@@ -487,6 +505,12 @@ def test_model_specific_hf_pipeline_keeps_base_tokenizer_and_component_separate(
         "adapter": str(kev_source),
         "component": str(kev_source),
     }
+
+    conflicting = {"adapter_path": str(tmp_path / "other-adapter")}
+    with pytest.raises(ValueError, match="must match adapter_path"):
+        dispatch.prepare_model_specific_hf(
+            kev_options, conflicting, policy["base_model"]
+        )
 
     clm_source = tmp_path / "clm"
     clm_source.mkdir()
