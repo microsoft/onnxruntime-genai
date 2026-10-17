@@ -256,7 +256,7 @@ struct OgaConfig : OgaAbstract {
 
   void SetTokenizerData(std::string_view config_json, std::string_view tokenizer_json) {
     OgaCheckResult(OgaConfigSetTokenizerData(this, config_json.data(), config_json.size(),
-                                          tokenizer_json.data(), tokenizer_json.size()));
+                                             tokenizer_json.data(), tokenizer_json.size()));
   }
 
   void SetDecoderProviderOptionsHardwareDeviceType(const char* provider, const char* hardware_device_type) {

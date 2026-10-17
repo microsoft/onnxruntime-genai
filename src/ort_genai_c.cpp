@@ -366,8 +366,8 @@ OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out
 }
 
 OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
-                                                size_t config_json_length,
-                                                OgaConfig** out) {
+                                                  size_t config_json_length,
+                                                  OgaConfig** out) {
   OGA_TRY
   if (!out) {
     throw std::invalid_argument("Expected config JSON bytes and an output pointer.");
