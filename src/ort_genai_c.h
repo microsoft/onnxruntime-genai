@@ -350,7 +350,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaC
  * in subgraphs and non-text processors are not supported by this initial API.
  * This API initially covers flat CPU text and translation models with external
  * initializer data. Other execution providers, subgraphs, model packages,
- * processors, adapters and custom-ops libraries are outside this contract.
+ * processors and adapters are outside this contract. File-backed shared
+ * initializer descriptors and custom-ops library paths are rejected.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
                                                              size_t config_json_length,
