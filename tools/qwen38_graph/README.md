@@ -55,23 +55,28 @@ tolerance level and not run-to-run reproducible. `fold.force_reject` (default of
 stream is the no-MTP greedy stream. A v12b package is built from an existing v12b package with `build_package_engine_v12b.py`
 (hard links, the plane library of this build, optional unreachable stop id).
 
-### v12c memory-reduced quantized package (`pkg_v12b_engine_int8kv_fp8w_fp4moe`)
+### v12c and v12d memory-reduced quantized packages (`pkg_v12b_engine_int8kv_fp8w_fp4moe`, `pkg_v12d_engine`)
 
-`build_package_engine_v12b.py` also builds the **v12c** quantized package from a v12b package, reducing peak GPU memory by
-**12.47 GiB** (`113.40 -> 100.93 GiB` on H200) and improving decode speed (`261.2 -> 265.3` MMLU decode tok/s) while achieving
-`667/800` (`83.375%`) on MMLU-Pro 800:
+`build_package_engine_v12b.py` also builds the **v12c** and **v12d** quantized packages from a v12b package, reducing peak GPU
+memory by up to **28.95 GiB** (`113.40 -> 100.79 GiB` in v12c, **`84.45 GiB`** in v12d on H200) and improving decode speed
+(`260.0 -> 286.99` MMLU decode tok/s in v12c, **`290.26` tok/s** in v12d) while maintaining MMLU-Pro 800 accuracy (`668/800 =
+83.50%` in v12c, `664/800 = 83.00%` in v12d BF16 LM-Head, `663/800 = 82.88%` in v12d FP8 LM-Head):
 
 1. **Per-channel INT8 (or FP8) KV cache** (`--kv-quant {int8,fp8} --kv-scale-file <json>`): quantizes the 12 target sparse-attention
    KV caches and 1 MTP-head sparse-attention KV cache in `GuardedDSA` (`qwen.static::GuardedDSA` with `k_scale` / `v_scale`
    attributes) and during the dense-to-packed hand-off (`qwen38_plane_quantize_kv`). Scales are calibrated with
    `calibrate_qwen38_kv.py` (partial-rotary `rotary_dim=64` pair envelope, 99.99th percentile on the calibration corpus).
-2. **16-bit weight quantization + dense-prefill weight sharing** (`--weight-quant fp8 --mtp-moe-quant nvfp4 --share-dense-weights`):
+2. **16-bit weight quantization + dense/head-KV weight sharing** (`--weight-quant fp8 --mtp-moe-quant nvfp4 --lm-head-quant fp8 --share-dense-weights`):
    quantizes the 48-layer + head attention and shared-expert projections (`merged_proj`, `out_proj`, `o_proj`,
-   `shared_expert.down_proj`) from BF16 to per-column FP8 E4M3FN (or block-16 NVFP4) in `qwen.fused_gemm::{SkinnyGemm,SharedExpertDown}`,
-   quantizes the 512 MTP-head routed experts (`4.69 GiB` BF16 -> `1.32 GiB` NVFP4 or `2.36 GiB` FP8) in `qwen.mtp::MtpMoe`, and
-   rewrites `dense/model.onnx` with `qwen.fused_gemm::{DequantWeightBf16,UntileHcBf16}` so the dense prefill graph shares all
-   `merged_proj`, `out_proj`/`o_proj`/`shared_expert.down_proj`, and `hc_tiled.data` weights with `target/model.onnx` in
-   `weights_pool.txt` (`100.90 GiB` -> `86.26 GiB` pool).
+   `shared_expert.down_proj`) and `lm_head.weight_t` from BF16 to per-column FP8 E4M3FN in `qwen.fused_gemm::{SkinnyGemm,SharedExpertDown}`,
+   quantizes the 512 MTP-head routed experts (`4.69 GiB` BF16 -> `1.32 GiB` NVFP4) in `qwen.mtp::MtpMoe`, merges the MTP head's
+   hyper-connection blocks into `HcBlock`/`HcPostBlock`, and rewrites `dense/model.onnx` and `head_kv/model.onnx` with
+   `qwen.fused_gemm::{DequantWeightBf16,UntileHcBf16}` (`col_offset` slice dequantization in `head_kv`) plus rotary-cache and
+   `attn_consts.data` deduplication across all 4 sessions (`177.8 MiB -> 4.21 MiB` session-private initializers).
+3. **v12d FP8 hyper-connection weights, host-mapped embeddings, and bounded prefill chunk** (`--hc-quant fp8 --host-map-embed --prefill-chunk 2048`):
+   quantizes all 196 `[160, 20480]` hyper-connection `w_down`/`w_up` tensors in `hc_tiled.data` from BF16 (`1,225 MiB`) to FP8
+   E4M3FN (`612.5 MiB`), maps `model.embed_tokens.weight` (`1.184 GiB`) read-only on the host via `host_pool` (`cudaHostRegisterMapped`),
+   and caps `prefill.chunk` at `2048` (or `4096`) to bound the `dense` BFC arena activation peak.
 
 ## Engine usage
 

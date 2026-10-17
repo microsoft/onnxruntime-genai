@@ -41,6 +41,19 @@ CHAT_QUESTIONS = [
 ]
 
 
+def _split_reference_stream(entry: dict) -> tuple[list[int], bool]:
+    """Return (delivered_tokens_without_eos, ended_with_eos) for a reference stream."""
+    tokens = list(entry.get("tokens", []))
+    if "ended_with_eos" in entry:
+        ended_with_eos = bool(entry["ended_with_eos"])
+        if ended_with_eos and tokens and tokens[-1] in EOS_IDS:
+            tokens = tokens[:-1]
+        return tokens, ended_with_eos
+    if tokens and tokens[-1] in EOS_IDS:
+        return tokens[:-1], True
+    return tokens, False
+
+
 def load_reference(path):
     """Reference streams by case spec: {spec: {"prompt_tokens": N|None, "old": {...}, "new": {...}}}."""
     data = json.loads(Path(path).read_text())
@@ -51,8 +64,8 @@ def load_reference(path):
             "prompt_tokens": r["prompt_len"],
             # no cycle counts: a recording of another configuration (--no-mtp, --force-reject) has different ones by design
             "old": {
-                "tokens": [*r["tokens"], EOS_IDS[0]] if r["ended_with_eos"] else r["tokens"],
-                "ended_with_eos": r["ended_with_eos"],
+                "tokens": list(r["tokens"]),
+                "ended_with_eos": bool(r["ended_with_eos"]),
             },
         }
         for r in data["results"]
@@ -72,6 +85,12 @@ def main():
         "--prefill", choices=("steps", "fast"), default=None, help="overlay prefill.enabled (default: package)"
     )
     parser.add_argument("--reference", type=Path, help="reference streams (see the module documentation)")
+    parser.add_argument(
+        "--min-fast-prefix",
+        type=int,
+        default=1,
+        help="minimum identical-prefix length required per case in --prefill fast mode (default: 1, i.e. first token equal)",
+    )
     parser.add_argument(
         "--force-reject", action="store_true", help="test hook fold.force_reject: every draft is replaced"
     )
@@ -134,17 +153,23 @@ def main():
         if spec in reference:
             key = "new" if args.prefill == "fast" and "new" in reference[spec] else "old"
             ref = reference[spec][key]
-            full = [*tokens, ref["tokens"][-1]] if ended_with_eos else tokens
+            ref_tokens, ref_ended_with_eos = _split_reference_stream(ref)
             common = 0
-            while common < min(len(full), len(ref["tokens"])) and full[common] == ref["tokens"][common]:
+            while common < min(len(tokens), len(ref_tokens)) and tokens[common] == ref_tokens[common]:
                 common += 1
+            first_equal = (
+                (tokens[0] == ref_tokens[0])
+                if (tokens and ref_tokens)
+                else (not tokens and not ref_tokens and ended_with_eos == ref_ended_with_eos)
+            )
             entry["reference"] = {
                 "key": key,
                 "prompt_tokens_equal": reference[spec].get("prompt_tokens") in (None, len(prompt)),
-                "identical": full == ref["tokens"] and ref.get("ended_with_eos", ended_with_eos) == ended_with_eos,
+                "identical": tokens == ref_tokens and ended_with_eos == ref_ended_with_eos,
+                "ended_with_eos_equal": ended_with_eos == ref_ended_with_eos,
                 "identical_prefix": common,
-                "n": len(ref["tokens"]),
-                "first_equal": ref["tokens"][0] == entry["first"],
+                "n": len(ref_tokens),
+                "first_equal": first_equal,
                 "cycles": ref.get("cycles"),
                 "accepted": ref.get("accepted"),
                 "cycles_equal": ref.get("cycles") in (None, entry["cycles"])
@@ -155,6 +180,13 @@ def main():
                     entry["reference"]["identical"]
                     and entry["reference"]["cycles_equal"]
                     and entry["reference"]["prompt_tokens_equal"]
+                )
+            else:
+                required_prefix = min(max(1, args.min_fast_prefix), len(ref_tokens)) if ref_tokens else 0
+                check = (
+                    entry["reference"]["prompt_tokens_equal"]
+                    and entry["reference"]["first_equal"]
+                    and entry["reference"]["identical_prefix"] >= required_prefix
                 )
         elif args.reference:
             check = False  # a reference was given but has no stream for this case

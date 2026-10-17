@@ -56,9 +56,9 @@ def link_tree(src: Path, dst: Path, copy: bool) -> None:
         (dst / rel).mkdir(parents=True, exist_ok=True)
         for name in files:
             s, d = Path(root) / name, dst / rel / name
-            if d.exists():
-                continue
             if s.is_symlink():
+                if d.exists() or d.is_symlink():
+                    d.unlink()
                 d.symlink_to(os.readlink(s))
             else:
                 link_file(s, d, copy)
@@ -140,21 +140,45 @@ def main() -> None:
     for name, domain in {**TARGET_LIBS, **HEAD_EXTRA_LIBS}.items():
         parser.add_argument(f"--lib-{name.replace('_', '-')}", type=Path, required=True, help=f"provides {domain}")
     args = parser.parse_args()
-    out: Path = args.out
-    out.mkdir(parents=True, exist_ok=True)
+    out: Path = args.out.resolve()
+    target_bundle: Path = args.target_bundle.resolve()
+    head_bundle: Path = args.head_bundle.resolve()
+    checkpoint: Path = args.checkpoint.resolve()
+
+    for label, src_dir in (
+        ("--target-bundle", target_bundle),
+        ("--head-bundle", head_bundle),
+        ("--checkpoint", checkpoint),
+    ):
+        if out == src_dir or out.is_relative_to(src_dir) or src_dir.is_relative_to(out):
+            raise SystemExit(f"--out ({out}) must not be equal to or nested inside {label} ({src_dir})")
+    if args.tokenizer_from is not None:
+        tok_dir = args.tokenizer_from.resolve()
+        if out == tok_dir or out.is_relative_to(tok_dir) or tok_dir.is_relative_to(out):
+            raise SystemExit(f"--out ({out}) must not be equal to or nested inside --tokenizer-from ({tok_dir})")
+    if out.exists() and any(out.iterdir()):
+        raise SystemExit(f"--out directory already exists and is not empty: {out}")
 
     libs = {name: getattr(args, f"lib_{name}") for name in {**TARGET_LIBS, **HEAD_EXTRA_LIBS}}
+    seen_basenames: dict[str, str] = {"libqwen38_plane.so": "--plane-lib"}
     for name, path in libs.items():
         if not path.exists():
             raise SystemExit(f"missing library {name}: {path}")
+        flag = f"--lib-{name.replace('_', '-')}"
+        if path.name in seen_basenames:
+            raise SystemExit(
+                f"duplicate custom-op library basename '{path.name}' between {seen_basenames[path.name]} and {flag}"
+            )
+        seen_basenames[path.name] = flag
     if args.plane_lib is None or not args.plane_lib.exists():
         raise SystemExit(
             f"missing plane library: {args.plane_lib} (configure with -DENABLE_QWEN38_PLANE=ON, build the "
             "qwen38_plane target and pass --plane-lib or set QWEN38_PLANE_LIB)"
         )
 
-    link_tree(args.target_bundle, out / "target", args.copy)
-    link_tree(args.head_bundle, out / "mtp_head", args.copy)
+    out.mkdir(parents=True, exist_ok=True)
+    link_tree(target_bundle, out / "target", args.copy)
+    link_tree(head_bundle, out / "mtp_head", args.copy)
     (out / "libs").mkdir(exist_ok=True)
     rel_libs = {}
     for name, path in libs.items():
