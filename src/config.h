@@ -140,6 +140,7 @@ struct Config {
     std::optional<std::string> enable_profiling;
     std::optional<std::string> custom_ops_library;
     std::vector<std::string> custom_ops_libraries;  // Additional custom-op libraries, registered after custom_ops_library
+    bool custom_ops_libraries_present{false};
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.

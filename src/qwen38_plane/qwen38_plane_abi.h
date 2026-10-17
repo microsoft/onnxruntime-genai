@@ -39,6 +39,7 @@ typedef struct Qwen38PleParams {
   X(int, host_free, (void* ptr))                                                                                   \
   X(int, host_register, (void* ptr, size_t bytes, unsigned flags))                                                 \
   X(int, host_unregister, (void* ptr))                                                                             \
+  X(int, host_get_device_pointer, (void** device_ptr, void* host_ptr, unsigned flags))                             \
   X(int, device_memset, (void* ptr, int value, size_t bytes, void* stream))                                        \
   X(int, memcpy_h2d, (void* dst, const void* src, size_t bytes, void* stream))                                     \
   X(int, memcpy_d2h, (void* dst, const void* src, size_t bytes, void* stream))                                     \

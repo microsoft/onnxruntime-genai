@@ -53,12 +53,15 @@ TEST(CustomOpsLibrariesConfigTest, RejectsNonStringEntries) {
   Config config;
   EXPECT_THROW(OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"custom_ops_libraries":[1]}}}})"),
                std::exception);
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"custom_ops_libraries":"single.so"}}}})"),
+               std::exception);
 }
 
 TEST(CustomOpsLibrariesConfigTest, InheritsOnlyWhenChildLeavesTheListEmpty) {
   Config::SessionOptions parent;
   parent.custom_ops_library = "parent_single.so";
   parent.custom_ops_libraries = {"parent_a.so", "parent_b.so"};
+  parent.custom_ops_libraries_present = true;
 
   Config::SessionOptions inheriting;
   InheritSessionOptionsFromParent(parent, inheriting);
@@ -69,6 +72,37 @@ TEST(CustomOpsLibrariesConfigTest, InheritsOnlyWhenChildLeavesTheListEmpty) {
   overriding.custom_ops_libraries = {"child.so"};
   InheritSessionOptionsFromParent(parent, overriding);
   EXPECT_EQ(overriding.custom_ops_libraries, std::vector<std::string>{"child.so"});
+
+  // An explicit empty array in JSON opts out of inheriting parent custom_ops_libraries.
+  Config explicit_empty_cfg;
+  OverlayConfig(explicit_empty_cfg, R"({
+    "model": {
+      "decoder": {
+        "hidden_size": 64,
+        "session_options": {
+          "custom_ops_library": "parent_single.so",
+          "custom_ops_libraries": ["parent_a.so", "parent_b.so"]
+        }
+      },
+      "mtp": {
+        "enabled": true,
+        "filename": "mtp.onnx",
+        "num_hidden_layers": 1,
+        "num_key_value_heads": 2,
+        "head_size": 32,
+        "session_options": {
+          "custom_ops_libraries": []
+        }
+      }
+    }
+  })");
+  EXPECT_TRUE(explicit_empty_cfg.model.mtp.session_options.has_value());
+  EXPECT_TRUE(explicit_empty_cfg.model.mtp.session_options->custom_ops_libraries_present);
+  EXPECT_TRUE(explicit_empty_cfg.model.mtp.session_options->custom_ops_libraries.empty());
+
+  auto mtp_cfg = CreateMtpDecoderConfig(explicit_empty_cfg);
+  EXPECT_EQ(mtp_cfg->model.decoder.session_options.custom_ops_library, "parent_single.so");
+  EXPECT_TRUE(mtp_cfg->model.decoder.session_options.custom_ops_libraries.empty());
 }
 
 TEST(CustomOpsLibrariesConfigTest, EveryEntryPassesTheAllowListBeforeAnyIsRegistered) {

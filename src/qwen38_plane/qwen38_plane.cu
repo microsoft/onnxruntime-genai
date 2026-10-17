@@ -346,13 +346,17 @@ __global__ void k_transpose_f32(const float* src, float* dst, int n) {
   const int x = blockIdx.x * 32 + threadIdx.x;
   for (int j = 0; j < 32; j += 8) {
     const int y = blockIdx.y * 32 + threadIdx.y + j;
-    tile[threadIdx.y + j][threadIdx.x] = src[base + (size_t)y * n + x];
+    if (x < n && y < n) {
+      tile[threadIdx.y + j][threadIdx.x] = src[base + (size_t)y * n + x];
+    }
   }
   __syncthreads();
   const int tx = blockIdx.y * 32 + threadIdx.x;
   for (int j = 0; j < 32; j += 8) {
     const int ty = blockIdx.x * 32 + threadIdx.y + j;
-    dst[base + (size_t)ty * n + tx] = tile[threadIdx.x][threadIdx.y + j];
+    if (tx < n && ty < n) {
+      dst[base + (size_t)ty * n + tx] = tile[threadIdx.x][threadIdx.y + j];
+    }
   }
 }
 
@@ -425,6 +429,7 @@ void qwen38_plane_or_status(void* s, const void* st, int nst, void* state) {
 /* ---- fast prefill kernels: batched PLE rows, dense -> packed state hand-off ---- */
 void qwen38_plane_ple_rows(void* s, const void* P, const void* tokens, int n, const void* ctx_in, void* ctx_out,
                            void* ple_out) {
+  if (n <= 0) return;
   k_ple_rows<<<n, 1024, 0, (cudaStream_t)s>>>((const PleParams*)P, (const i64*)tokens, n, (const i64*)ctx_in, (i64*)ctx_out,
                                               (__nv_bfloat16*)ple_out);
 }
@@ -438,7 +443,9 @@ void qwen38_plane_pool_keys(void* s, const void* raw, int nb, const void* knorm,
 }
 
 void qwen38_plane_transpose_f32(void* s, const void* src, void* dst, int n, int batch) {
-  dim3 grid(n / 32, n / 32, batch), block(32, 8);
+  if (n <= 0 || batch <= 0) return;
+  const unsigned int blocks = static_cast<unsigned int>((n + 31) / 32);
+  dim3 grid(blocks, blocks, static_cast<unsigned int>(batch)), block(32, 8);
   k_transpose_f32<<<grid, block, 0, (cudaStream_t)s>>>((const float*)src, (float*)dst, n);
 }
 
@@ -458,6 +465,9 @@ int qwen38_plane_host_alloc(void** p, size_t bytes) { return (int)cudaHostAlloc(
 int qwen38_plane_host_free(void* p) { return (int)cudaFreeHost(p); }
 int qwen38_plane_host_register(void* p, size_t bytes, unsigned flags) { return (int)cudaHostRegister(p, bytes, flags); }
 int qwen38_plane_host_unregister(void* p) { return (int)cudaHostUnregister(p); }
+int qwen38_plane_host_get_device_pointer(void** dp, void* hp, unsigned flags) {
+  return (int)cudaHostGetDevicePointer(dp, hp, flags);
+}
 int qwen38_plane_device_memset(void* p, int value, size_t bytes, void* s) {
   return (int)cudaMemsetAsync(p, value, bytes, (cudaStream_t)s);
 }

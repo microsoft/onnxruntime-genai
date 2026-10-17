@@ -81,7 +81,10 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
   if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
   if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
   if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
-  if (child.custom_ops_libraries.empty()) child.custom_ops_libraries = parent.custom_ops_libraries;
+  if (!child.custom_ops_libraries_present && child.custom_ops_libraries.empty()) {
+    child.custom_ops_libraries = parent.custom_ops_libraries;
+    child.custom_ops_libraries_present = parent.custom_ops_libraries_present;
+  }
   if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
   InheritNamedStrings(parent.config_entries, child.config_entries);
   InheritProviderOptions(parent, child);
@@ -421,6 +424,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     } else if (name == "custom_ops_library") {
       v_.custom_ops_library = JSON::Get<std::string_view>(value);
+    } else if (name == "custom_ops_libraries") {
+      throw std::runtime_error("custom_ops_libraries must be an array of strings");
     } else {
       // Session options that are set with AddConfigEntry
       v_.config_entries.emplace_back(name, JSON::Get<std::string_view>(value));
@@ -432,6 +437,8 @@ struct SessionOptions_Element : JSON::Element {
       return provider_options_;
     }
     if (name == "custom_ops_libraries") {
+      v_.custom_ops_libraries.clear();
+      v_.custom_ops_libraries_present = true;
       return custom_ops_libraries_;
     }
     throw JSON::unknown_value_error{};
