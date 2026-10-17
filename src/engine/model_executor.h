@@ -78,6 +78,10 @@ struct ModelExecutor {
   /** @brief Adds this executor's own speculative-decoding counters to `stats` (Engine::GetSpeculativeStats). */
   virtual void AddSpeculativeStats(SpeculativeStats& /*stats*/) const {}
 
+  /** @brief Notifies an executor that selects its own tokens of the committed step outcomes. */
+  virtual void OnStepCommitted(const ScheduledRequests& /*scheduled_requests*/,
+                               std::span<const RequestStepResult> /*results*/) {}
+
   virtual ~ModelExecutor() = default;
 };
 

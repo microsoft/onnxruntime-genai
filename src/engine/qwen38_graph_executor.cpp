@@ -29,7 +29,7 @@ Qwen38GraphSession::Qwen38GraphSession(std::shared_ptr<Qwen38DecodeDevice> devic
 }
 
 Qwen38GraphSession::~Qwen38GraphSession() {
-  Release();
+  ReleaseForTeardown();
 }
 
 size_t Qwen38GraphSession::MaxRequestLength() const {
@@ -44,8 +44,18 @@ void Qwen38GraphSession::Begin(const Qwen38StepRequest& request) {
   if (request.tokens.empty()) {
     throw std::logic_error("A Request must have at least one token before it can be decoded.");
   }
-  // A cycle may still be in flight from a turn that stopped early (stop string, cancellation); Reset waits for it.
+  // A cycle may still be in flight from a turn that stopped early (stop string, cancellation); drain and check its
+  // decode status before Reset clears the device error bits.
   owner_ = nullptr;
+  pending_step_ = {};
+  if (deferred_error_) {
+    std::rethrow_exception(std::exchange(deferred_error_, nullptr));
+  }
+  if (!status_checked_) {
+    device_->Drain();
+    status_checked_ = true;
+    device_->CheckDecodeStatus();
+  }
   if (device_dirty_) {
     device_->Reset();
     device_dirty_ = false;
@@ -56,14 +66,35 @@ void Qwen38GraphSession::Begin(const Qwen38StepRequest& request) {
   decoding_ = false;
 }
 
-void Qwen38GraphSession::Release() noexcept {
+void Qwen38GraphSession::Release() {
   device_->Drain();
   owner_ = nullptr;
   prefilled_ = 0;
   decoding_ = false;
+  pending_step_ = {};
+  if (deferred_error_) {
+    std::rethrow_exception(std::exchange(deferred_error_, nullptr));
+  }
+  if (!status_checked_) {
+    status_checked_ = true;
+    device_->CheckDecodeStatus();
+  }
+}
+
+void Qwen38GraphSession::ReleaseForTeardown() noexcept {
+  try {
+    Release();
+  } catch (...) {
+    if (!deferred_error_) {
+      deferred_error_ = std::current_exception();
+    }
+  }
 }
 
 Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
+  if (deferred_error_) {
+    std::rethrow_exception(std::exchange(deferred_error_, nullptr));
+  }
   if (request.owner != owner_ || request.turn_id != turn_id_) {
     Begin(request);
   }
@@ -73,6 +104,7 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   }
 
   Qwen38StepResult result;
+  pending_step_ = {};
   if (!decoding_) {
     const size_t remaining = request.tokens.size() - prefilled_;
     const size_t chunk = std::min(options_.prefill_chunk_tokens, remaining);
@@ -85,11 +117,15 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
     // The first token is the target's prediction after the prompt. The head prefill, the first draft and the first verify
     // are enqueued before it is returned so that the next step finds the GPU already busy.
     const int32_t first = device_->PendingToken();
-    device_->BeginDecode(/*run_cycle=*/!IsStopToken(first) && limit > 1);
+    const bool run_cycle = !IsStopToken(first) && limit > 1;
+    device_->BeginDecode(run_cycle);
+    if (run_cycle) {
+      status_checked_ = false;
+    }
     decoding_ = true;
     result.tokens[0] = first;
     result.count = 1;
-    stats_.tokens_emitted += 1;
+    pending_step_ = PendingStep{/*active=*/true, /*is_decode_cycle=*/false, /*mtp=*/false, /*accepted=*/false, /*produced=*/1};
     return result;
   }
 
@@ -112,35 +148,60 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   // only be known after delivery, so one cycle may be wasted; Reset/Release wait for it.
   device_->Advance(record, /*want_more=*/!ended);
   if (ended) {
+    status_checked_ = true;
     device_->CheckDecodeStatus();  // nothing is in flight now: a device that accumulated an error reports it here
   }
 
-  const bool mtp = device_->MtpEnabled();
-  ++stats_.rounds;
-  ++stats_.completed_rounds;
-  ++stats_.target_forward_passes;
-  if (mtp) {
-    ++stats_.target_verify_forward_passes;
-    ++stats_.draft_forward_passes;
-    ++stats_.draft_tokens_proposed;
-    ++stats_.draft_tokens_evaluated;
-    ++stats_.acceptance_length_histogram[record.accepted ? 1 : 0];
-    if (record.accepted) {
-      ++stats_.draft_tokens_accepted;
-      ++stats_.full_accept_rounds;
-      ++stats_.bonus_tokens;
-    } else {
-      ++stats_.zero_accept_rounds;
-      ++stats_.correction_tokens;
-    }
-  }
-  stats_.tokens_emitted += committed;
-  stats_.tokens_discarded += produced - committed;
   for (size_t i = 0; i < committed; ++i) {
     result.tokens[i] = predictions[i];
   }
   result.count = committed;
+  pending_step_ = PendingStep{/*active=*/true, /*is_decode_cycle=*/true, /*mtp=*/device_->MtpEnabled(),
+                              /*accepted=*/record.accepted, /*produced=*/produced};
   return result;
+}
+
+void Qwen38GraphSession::OnStepCommitted(const RequestStepResult& result) {
+  if (!pending_step_.active) {
+    return;
+  }
+  const PendingStep step = pending_step_;
+  pending_step_ = {};
+  const size_t emitted = result.visible_token_count;
+  stats_.tokens_emitted += emitted;
+  if (!step.is_decode_cycle) {
+    return;
+  }
+
+  ++stats_.rounds;
+  ++stats_.completed_rounds;
+  ++stats_.target_forward_passes;
+  if (step.mtp) {
+    ++stats_.target_verify_forward_passes;
+    ++stats_.draft_forward_passes;
+    ++stats_.draft_tokens_proposed;
+    ++stats_.draft_tokens_evaluated;
+    // Row 0 verifies the draft token; row 1 produces the bonus token when accepted. If row 0 ended the turn (e.g., EOS
+    // on row 0 so 0 tokens emitted, or a stop string / limit on row 0 so only 1 token emitted out of an accepted 2-token
+    // cycle), do not count tokens past the stop condition on row 0.
+    const bool draft_accepted = step.accepted && emitted > 0;
+    ++stats_.acceptance_length_histogram[draft_accepted ? 1 : 0];
+    if (draft_accepted) {
+      ++stats_.draft_tokens_accepted;
+      ++stats_.full_accept_rounds;
+      if (emitted >= 2) {
+        ++stats_.bonus_tokens;
+      }
+    } else {
+      ++stats_.zero_accept_rounds;
+      if (emitted > 0) {
+        ++stats_.correction_tokens;
+      }
+    }
+  }
+  if (step.produced >= emitted) {
+    stats_.tokens_discarded += step.produced - emitted;
+  }
 }
 
 void Qwen38GraphSession::AddStats(SpeculativeStats& stats) const {
@@ -187,7 +248,7 @@ void Qwen38GraphCacheManager::Allocate(const std::vector<std::shared_ptr<Request
     throw std::runtime_error("The qwen38_flash_graph backend serves one Request at a time.");
   }
   if (resident_) {
-    session_->Release();
+    session_->ReleaseForTeardown();
   }
   resident_ = requests.front();
 }
@@ -216,7 +277,7 @@ void Qwen38GraphCacheManager::DetachRequestForTeardown(const std::shared_ptr<Req
   if (!IsResident(request)) {
     return;
   }
-  session_->Release();
+  session_->ReleaseForTeardown();
   resident_.reset();
 }
 
@@ -274,6 +335,16 @@ void Qwen38GraphExecutor::Decode(ScheduledRequests& scheduled_requests, Executio
     const Qwen38StepResult result = session_->Step(step);
     scheduled_requests.StageExecutorTokens(row, std::span<const int32_t>{result.tokens.data(), result.count});
     return;  // one resident row
+  }
+}
+
+void Qwen38GraphExecutor::OnStepCommitted(const ScheduledRequests& scheduled_requests,
+                                          std::span<const RequestStepResult> results) {
+  for (size_t row = 0; row < scheduled_requests.size() && row < results.size(); ++row) {
+    if (scheduled_requests[row].get() == session_->Owner()) {
+      session_->OnStepCommitted(results[row]);
+      return;
+    }
   }
 }
 
