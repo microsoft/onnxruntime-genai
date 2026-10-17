@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
@@ -19,6 +20,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -27,6 +29,7 @@ namespace Generators {
 namespace {
 
 constexpr int kMaxPleHeads = 32;
+constexpr int kMaxPleLaunchElems = 3 * 1024;
 constexpr size_t kMaxPleShards = 256;
 
 #if defined(QWEN38_GRAPH_NO_POSIX)
@@ -163,28 +166,41 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
 
   Qwen38PleDescription description;
   Qwen38PleParams& params = description.params;
+  bool has_vocab = false;
+  bool has_offset = false;
   while (std::getline(in, line)) {
     std::istringstream fields(line);
     std::string key;
-    fields >> key;
+    if (!(fields >> key)) continue;
     if (key == "n_heads") {
       fields >> params.n_heads;
+      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed PLE n_heads line: " + line);
     } else if (key == "head_dim") {
       fields >> params.head_dim;
+      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed PLE head_dim line: " + line);
     } else if (key == "heads_per_ngram") {
       fields >> params.heads_per_ngram;
+      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed PLE heads_per_ngram line: " + line);
     } else if (key == "eos") {
       fields >> params.eos;
+      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed PLE eos line: " + line);
     } else if (key == "scale") {
       fields >> params.scale;
+      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed PLE scale line: " + line);
     } else if (key == "mult") {
       for (long long& m : params.mult) fields >> m;
+      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed PLE mult line: " + line);
     } else if (key == "vocab" || key == "offset") {
       if (params.n_heads <= 0 || params.n_heads > kMaxPleHeads)
         throw std::runtime_error("qwen38_graph: the PLE table must declare n_heads (1.." + std::to_string(kMaxPleHeads) +
                                  ") before " + key);
       long long* values = key == "vocab" ? params.vocab : params.offset;
       for (int h = 0; h < params.n_heads; ++h) fields >> values[h];
+      if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed PLE " + key + " line: " + line);
+      if (key == "vocab")
+        has_vocab = true;
+      else
+        has_offset = true;
     } else if (key == "shard") {
       Qwen38PleDescription::Shard shard;
       fields >> shard.path >> shard.offset >> shard.rows;
@@ -200,9 +216,22 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
       description.shards.push_back(std::move(shard));
     }
   }
-  if (params.n_heads <= 0 || params.n_heads > kMaxPleHeads || params.head_dim <= 0 || description.shards.empty() ||
+  if (params.n_heads <= 0 || params.n_heads > kMaxPleHeads || params.head_dim <= 0 ||
+      params.n_heads > kMaxPleLaunchElems / params.head_dim || params.heads_per_ngram < 0 ||
+      params.heads_per_ngram > params.n_heads || !has_vocab || !has_offset || description.shards.empty() ||
       description.shards.size() > kMaxPleShards)
     throw std::runtime_error("qwen38_graph: malformed PLE table " + table_path.string());
+  long long total_rows = 0;
+  for (const auto& shard : description.shards) {
+    if (shard.rows <= 0 || shard.rows > std::numeric_limits<long long>::max() - total_rows)
+      throw std::runtime_error("qwen38_graph: malformed PLE table " + table_path.string());
+    total_rows += shard.rows;
+  }
+  for (int h = 0; h < params.n_heads; ++h) {
+    if (params.vocab[h] <= 0 || params.offset[h] < 0 || params.vocab[h] > total_rows - params.offset[h])
+      throw std::runtime_error("qwen38_graph: PLE head " + std::to_string(h) +
+                               " vocab/offset out of shard row bounds in " + table_path.string());
+  }
   params.n_shards = static_cast<int>(description.shards.size());
   return description;
 }
@@ -233,15 +262,27 @@ Qwen38WeightPoolManifest ParseQwen38WeightPoolManifest(const std::filesystem::pa
     std::istringstream fields(line);
     std::string key;
     fields >> key;
-    if (key == "pool") {
+    if (key == "pool" || key == "host_pool") {
       size_t id, rank;
       Qwen38WeightPoolManifest::Entry entry;
+      if (key == "host_pool") {
+        entry.placement = "host_mapped";
+        entry.host_mapped = true;
+      }
       fields >> id >> entry.dtype >> entry.offset >> entry.length >> rank;
       if (fields.fail() || rank > 8) throw std::runtime_error("qwen38_graph: malformed weight pool line: " + line);
       entry.shape.resize(rank);
       for (auto& d : entry.shape) fields >> d;
       fields >> entry.file;
       if (fields.fail()) throw std::runtime_error("qwen38_graph: malformed weight pool line: " + line);
+      std::string placement;
+      if (fields >> placement) {
+        if (placement != "device" && placement != "cpu" && placement != "host_mapped") {
+          throw std::runtime_error("qwen38_graph: invalid weight pool placement '" + placement + "' in line: " + line);
+        }
+        entry.placement = std::move(placement);
+        entry.host_mapped = (entry.placement == "host_mapped");
+      }
       if (id != manifest.entries.size()) throw std::runtime_error("qwen38_graph: weight pool ids must be consecutive");
       RequireInsideModelFolder(entry.file, "a weight pool file");
       manifest.entries.push_back(std::move(entry));
@@ -287,6 +328,11 @@ Qwen38QsaConstantsDescription ParseQwen38QsaConstantsIndex(const std::filesystem
 
 #if defined(QWEN38_GRAPH_NO_POSIX)
 
+Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::path&, bool) : plane_{plane} {
+  ThrowUnsupportedPlatform();
+}
+Qwen38FileMapping::~Qwen38FileMapping() = default;
+
 Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path&, const std::filesystem::path&, int)
     : plane_{plane} {
   ThrowUnsupportedPlatform();
@@ -294,6 +340,43 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path&,
 Qwen38PleTable::~Qwen38PleTable() = default;
 
 #else
+
+Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::path& full_path,
+                                     bool register_cuda_mapped)
+    : plane_{plane} {
+  const int fd = open(full_path.c_str(), O_RDONLY);
+  if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open weight pool file " + full_path.string());
+  struct stat st{};
+  if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+    close(fd);
+    throw std::runtime_error("qwen38_graph: empty or invalid weight pool file " + full_path.string());
+  }
+  length_ = static_cast<size_t>(st.st_size);
+  void* base = mmap(nullptr, length_, PROT_READ, MAP_SHARED, fd, 0);
+  close(fd);
+  if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full_path.string());
+  base_ = base;
+  if (register_cuda_mapped) {
+    try {
+      plane_.Check(plane_.host_register(base_, length_, 2 | 8), "cudaHostRegister(weight pool file)");
+      registered_ = base_;
+      plane_.Check(plane_.host_get_device_pointer(&dev_ptr_, base_, 0), "cudaHostGetDevicePointer(weight pool file)");
+    } catch (...) {
+      if (registered_) plane_.host_unregister(registered_);
+      munmap(base_, length_);
+      base_ = nullptr;
+      length_ = 0;
+      registered_ = nullptr;
+      dev_ptr_ = nullptr;
+      throw;
+    }
+  }
+}
+
+Qwen38FileMapping::~Qwen38FileMapping() {
+  if (registered_) plane_.host_unregister(registered_);
+  if (base_) munmap(base_, length_);
+}
 
 Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& table_path,
                                const std::filesystem::path& root, int capacity)
@@ -303,6 +386,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
   params.capacity = capacity;
   const auto start = std::chrono::steady_clock::now();
   const long page = sysconf(_SC_PAGESIZE);
+  const size_t page_sz = page > 0 ? static_cast<size_t>(page) : size_t{4096};
   long long first_row = 0;
   try {
     for (size_t i = 0; i < description.shards.size(); ++i) {
@@ -310,18 +394,41 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       const std::filesystem::path full = root / shard.path;
       const int fd = open(full.c_str(), O_RDONLY);
       if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open the PLE shard file " + full.string());
-      const size_t bytes = static_cast<size_t>(shard.rows) * static_cast<size_t>(params.head_dim);
-      const size_t aligned = shard.offset / page * page;
-      const size_t delta = shard.offset - aligned;
-      void* base = mmap(nullptr, bytes + delta, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(aligned));
+      struct stat st{};
+      if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        throw std::runtime_error("qwen38_graph: cannot stat the PLE shard file " + full.string());
+      }
+      const uint64_t file_size = static_cast<uint64_t>(st.st_size);
+      const uint64_t rows_u64 = static_cast<uint64_t>(shard.rows);
+      const uint64_t hd_u64 = static_cast<uint64_t>(params.head_dim);
+      if (hd_u64 == 0 || rows_u64 > std::numeric_limits<size_t>::max() / hd_u64) {
+        close(fd);
+        throw std::runtime_error("qwen38_graph: PLE shard byte size overflows for " + full.string());
+      }
+      const size_t bytes = static_cast<size_t>(rows_u64 * hd_u64);
+      if (shard.offset > file_size || static_cast<uint64_t>(bytes) > file_size - shard.offset) {
+        close(fd);
+        throw std::runtime_error("qwen38_graph: PLE shard range exceeds file size for " + full.string());
+      }
+      const size_t aligned = static_cast<size_t>(shard.offset / page_sz * page_sz);
+      const size_t delta = static_cast<size_t>(shard.offset) - aligned;
+      if (bytes > std::numeric_limits<size_t>::max() - delta) {
+        close(fd);
+        throw std::runtime_error("qwen38_graph: PLE shard mapped length overflows for " + full.string());
+      }
+      const size_t map_len = bytes + delta;
+      void* base = mmap(nullptr, map_len, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(aligned));
       close(fd);
       if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full.string());
-      mappings_.push_back(Mapping{base, bytes + delta, nullptr});
+      mappings_.push_back(Mapping{base, map_len, nullptr});
       auto* rows = static_cast<unsigned char*>(base) + delta;
       // cudaHostRegisterMapped | cudaHostRegisterReadOnly: the gather kernel reads the table zero-copy over PCIe.
       plane.Check(plane.host_register(rows, bytes, 2 | 8), "cudaHostRegister(PLE shard)");
       mappings_.back().registered = rows;
-      params.shard_ptr[i] = rows;
+      void* dev_rows = nullptr;
+      plane.Check(plane.host_get_device_pointer(&dev_rows, rows, 0), "cudaHostGetDevicePointer(PLE shard)");
+      params.shard_ptr[i] = static_cast<const unsigned char*>(dev_rows);
       first_row += shard.rows;
       params.shard_end[i] = first_row;
     }
