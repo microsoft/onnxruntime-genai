@@ -247,7 +247,7 @@ void Qwen38GraphEngine::BuildTarget() {
       NewDeviceTensor(shared_, name, FixedShape(info.GetInputShape(name)), info.GetInputDataType(name));
   }
 
-  // Recurrent banks: flat 256-byte-aligned arenas, identical layout in every bank.
+  // Recurrent banks: flat 256-byte-aligned arenas, identical layout in every bank (the 4th scratch bank is only used by S=1).
   size_t arena_bytes = 0;
   std::map<std::string, size_t> offsets;
   for (const auto& name : bank_names) {
@@ -256,7 +256,9 @@ void Qwen38GraphEngine::BuildTarget() {
     arena_bytes += Elements(FixedShape(info.GetInputShape(name))) * Ort::SizeOf(info.GetInputDataType(name));
   }
   arena_bytes = AlignUp(arena_bytes, 256);
-  for (auto& bank : banks_) {
+  const int num_banks = fold_ ? kBanks : (kBanks + 1);
+  for (int b = 0; b < num_banks; ++b) {
+    Bank& bank = banks_[b];
     bank.arena = PlaneBuffer(plane_, arena_bytes, stream_);
     for (const auto& name : bank_names)
       bank.tensors[name] = MakeTensor(bank.arena.data() + offsets[name], FixedShape(info.GetInputShape(name)),
@@ -535,7 +537,8 @@ void Qwen38GraphEngine::ClearHead() {
 
 void Qwen38GraphEngine::Reset() {
   SyncStream();
-  for (auto& bank : banks_) plane_.Check(plane_.device_memset(bank.arena.data(), 0, bank.arena.size(), stream_), "clear bank");
+  for (auto& bank : banks_)
+    if (bank.arena.data()) plane_.Check(plane_.device_memset(bank.arena.data(), 0, bank.arena.size(), stream_), "clear bank");
   for (auto& entry : store_) plane_.Check(plane_.device_memset(entry.second->ptr, 0, entry.second->Bytes(), stream_), "clear store");
   for (auto& entry : shared_) plane_.Check(plane_.device_memset(entry.second->ptr, 0, entry.second->Bytes(), stream_), "clear index");
   plane_.Check(plane_.device_memset(ctl_.data(), 0, ctl_.size(), stream_), "clear ctl");
@@ -595,8 +598,13 @@ void Qwen38GraphEngine::CheckDeviceStatus(const char* where, const Direction* di
 }
 
 // ---- prompt ingestion -------------------------------------------------------------------------
+size_t EffectiveQwen38PrefillChunkTokens(const Config::Model::Qwen38Graph& q) {
+  if (q.prefill.enabled) return q.prefill.chunk > 0 ? static_cast<size_t>(q.prefill.chunk) : 0;
+  return q.prefill_chunk_tokens > 0 ? static_cast<size_t>(q.prefill_chunk_tokens) : 0;
+}
+
 size_t Qwen38GraphEngine::PrefillChunkTokens() const {
-  return fast_ ? static_cast<size_t>(fast_->chunk) : 0;
+  return fast_ ? static_cast<size_t>(fast_->chunk) : EffectiveQwen38PrefillChunkTokens(model_.config_->model.qwen38_graph);
 }
 
 // ctl[3] = mute: the fold graph runs without its decode bookkeeping while it ingests prompt rows.
@@ -927,6 +935,9 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycle() {
   const auto start = Clock::now();
   uint32_t spins = 0;
   while (record[0] != static_cast<int64_t>(seq_)) {
+#if defined(__x86_64__) || defined(_M_X64)
+    __builtin_ia32_pause();
+#endif
     if (((++spins) & (kStatusRingSpinCheck - 1)) == 0) {
       if (SecondsSince(start) > 180.0) throw std::runtime_error("qwen38_graph: timeout waiting for the cycle record");
       std::this_thread::yield();
@@ -973,16 +984,27 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
 
 void Qwen38GraphEngine::Warmup() {
   // ORT captures a graph id after min_num_runs eager runs: touch every (rows, phase) and head direction enough times.
+  const int max_prompt = capacity_ - Qwen38DecodeDevice::kReservedTail - 3;
+  if (max_prompt < 2) return;
   const int warm_tokens = 48;
-  std::vector<int32_t> dummy(warm_tokens);
-  for (int i = 0; i < warm_tokens; ++i) dummy[i] = 1000 + i;
-  StepPrefill(dummy);  // S=2 target ids (24 steps -> 8 runs per phase); fold: the muted cycle graphs
+  const int chunk_tokens = std::min(warm_tokens, (max_prompt / 2) * 2);
+  for (int done = 0; done < warm_tokens; done += chunk_tokens) {
+    if (done > 0) Reset();
+    const int n = std::min(chunk_tokens, warm_tokens - done);
+    std::vector<int32_t> dummy(n);
+    for (int i = 0; i < n; ++i) dummy[i] = 1000 + done + i;
+    StepPrefill(dummy);  // S=2 target ids (24 steps -> 8 runs per phase); fold: the muted cycle graphs
+  }
   if (fold_) {
     // standalone R=2 head graphs: one call commits one row, so 18 calls touch every phase 6 times
     ClearHead();
     SyncStream();
     for (int i = 0; i < 18; ++i) {
-      const int64_t tokens[2] = {1000 + i, 1000 + i}, positions[2] = {i + 1, i + 2};
+      if (head_length_ + 2 > capacity_) {
+        ClearHead();
+        SyncStream();
+      }
+      const int64_t tokens[2] = {1000 + i, 1000 + i}, positions[2] = {head_length_ + 1, head_length_ + 2};
       CallHeadR2(tokens, positions, d_last_hidden_.data(), d_last_hidden_.data(), 1);
     }
     SyncStream();
@@ -993,7 +1015,7 @@ void Qwen38GraphEngine::Warmup() {
       // dense / head-KV shapes: arena growth and first-use costs of the prefill sessions (one dummy prompt per length)
       std::mt19937 rng(12345);
       for (int length : model_.config_->model.qwen38_graph.prefill.warmup_lengths) {
-        if (length < 2 || static_cast<size_t>(length) + 4 > static_cast<size_t>(capacity_)) continue;
+        if (length < 2 || length > max_prompt) continue;
         Reset();
         std::vector<int32_t> prompt(length);
         for (auto& t : prompt) t = static_cast<int32_t>(1000 + rng() % 199000);
@@ -1008,7 +1030,13 @@ void Qwen38GraphEngine::Warmup() {
     Reset();
     return;
   }
+  const size_t max_usable = static_cast<size_t>(capacity_ - Qwen38DecodeDevice::kReservedTail);
   for (int i = 0; i < 24; ++i) {  // S=1 target ids
+    if (ledger_.Length() + 1 > max_usable) {
+      Reset();
+      const std::vector<int32_t> pair = {1000 + i, 1001 + i};
+      StepPrefill(pair);
+    }
     const int64_t state[2] = {pending_, static_cast<int64_t>(ledger_.Length())};
     WriteCtl(0, state);
     EnqueueStep();
@@ -1018,8 +1046,20 @@ void Qwen38GraphEngine::Warmup() {
   if (mtp_enabled_) {
     ClearHead();
     SyncStream();
-    for (int i = 0; i < 24; ++i) EnqueueHead(1, d_last_hidden_.data());
-    for (int i = 0; i < 24; ++i) EnqueueHead(2, d_last_hidden_.data());
+    for (int i = 0; i < 24; ++i) {
+      if (head_length_ + 1 > capacity_) {
+        ClearHead();
+        SyncStream();
+      }
+      EnqueueHead(1, d_last_hidden_.data());
+    }
+    for (int i = 0; i < 24; ++i) {
+      if (head_length_ + 2 > capacity_) {
+        ClearHead();
+        SyncStream();
+      }
+      EnqueueHead(2, d_last_hidden_.data());
+    }
     SyncStream();
     if (ReadCtl(5) != 0) CheckDeviceStatus("warmup", nullptr);
   }
@@ -1029,6 +1069,54 @@ void Qwen38GraphEngine::Warmup() {
 // ------------------------------------------------------------------------------------------------
 // Model
 // ------------------------------------------------------------------------------------------------
+Config::SessionOptions ResolveQwen38AuxiliarySessionOptions(const Config::SessionOptions& parent,
+                                                            const std::optional<Config::SessionOptions>& configured,
+                                                            bool inherit) {
+  Config::SessionOptions options = configured.value_or(Config::SessionOptions{});
+  for (const auto& po : options.provider_options) {
+    if (std::find(options.providers.begin(), options.providers.end(), po.name) == options.providers.end()) {
+      options.providers.push_back(po.name);
+    }
+  }
+  if (inherit) {
+    InheritSessionOptionsFromParent(parent, options);
+    return options;
+  }
+  if (options.providers.empty()) {
+    options.providers = parent.providers;
+  }
+  for (const auto& parent_provider : parent.provider_options) {
+    if (std::find(options.providers.begin(), options.providers.end(), parent_provider.name) == options.providers.end()) {
+      options.providers.push_back(parent_provider.name);
+    }
+    auto child_provider = std::find_if(options.provider_options.begin(), options.provider_options.end(),
+                                       [&parent_provider](const Config::ProviderOptions& provider) {
+                                         return provider.name == parent_provider.name;
+                                       });
+    if (child_provider == options.provider_options.end()) {
+      options.provider_options.push_back(
+          Config::ProviderOptions{parent_provider.name, {}, parent_provider.device_filtering_options});
+      child_provider = std::prev(options.provider_options.end());
+    } else if (!child_provider->device_filtering_options) {
+      child_provider->device_filtering_options = parent_provider.device_filtering_options;
+    }
+    for (const auto& parent_option : parent_provider.options) {
+      if (parent_option.first == "enable_cuda_graph" || parent_option.first == "enable_graph_capture" ||
+          parent_option.first == "enableGraphCapture") {
+        continue;
+      }
+      const bool overridden = std::any_of(child_provider->options.begin(), child_provider->options.end(),
+                                          [&parent_option](const Config::NamedString& option) {
+                                            return option.first == parent_option.first;
+                                          });
+      if (!overridden) {
+        child_provider->options.push_back(parent_option);
+      }
+    }
+  }
+  return options;
+}
+
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env) : Model{std::move(config)} {
   const auto& q = config_->model.qwen38_graph;
   if (!q.IsConfigured() || q.plane_library.empty() || q.ple_table.empty())
@@ -1046,6 +1134,8 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
         "model.qwen38_graph.prefill requires fold.enabled and prefill.{dense.filename,head_kv.filename,constants}");
   if (q.prefill.enabled && (q.prefill.chunk < 1 || q.prefill.chunk > q.kv_capacity))
     throw std::runtime_error("model.qwen38_graph.prefill.chunk must be in [1, kv_capacity]");
+  if (!q.prefill.enabled && (q.prefill_chunk_tokens <= 0 || (q.prefill_chunk_tokens % 2) != 0))
+    throw std::runtime_error("model.qwen38_graph.prefill_chunk_tokens must be a positive even integer");
   if (q.kv_capacity <= Qwen38DecodeDevice::kReservedTail)
     throw std::runtime_error("model.qwen38_graph.kv_capacity must exceed " + std::to_string(Qwen38DecodeDevice::kReservedTail));
   if (!p_device_ || p_device_->GetType() != DeviceType::CUDA)
@@ -1076,11 +1166,12 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
 
   auto make_options = [&](const std::optional<Config::SessionOptions>& configured, bool inherit, const char* label) {
-    Config::SessionOptions options = configured.value_or(Config::SessionOptions{});
-    if (inherit) InheritSessionOptionsFromParent(config_->model.decoder.session_options, options);
+    Config::SessionOptions options =
+        ResolveQwen38AuxiliarySessionOptions(config_->model.decoder.session_options, configured, inherit);
     auto result = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(options, *result, /*is_primary_session_options=*/false,
-                                   /*disable_graph_capture=*/false, /*cloned_from_parent=*/false, /*append_providers=*/true);
+                                   /*disable_graph_capture=*/!inherit, /*cloned_from_parent=*/false,
+                                   /*append_providers=*/true);
     if (pool_) pool_->AddTo(*result, label);
     return result;
   };
