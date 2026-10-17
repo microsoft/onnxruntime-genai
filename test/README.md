@@ -26,7 +26,7 @@ installed package providers must supply the equivalent fix.
 Run the isolated processes from the configured build directory:
 
 ```sh
-ctest -C Release -R '^Telemetry(Windows)?Shutdown-' --output-on-failure --repeat until-fail:50
+ctest -C Release -R '^TelemetryShutdown-' --output-on-failure --repeat until-fail:50
 ```
 
 The cases exercise the actual singleton, initialization on an application thread, explicit
@@ -47,11 +47,10 @@ SDK initialization remains lazy; priming creates no uploader or collector event.
 exception latches the existing full suppression state rather than retrying mutex initialization
 after singleton construction.
 
-Windows also includes DLL lifecycle regressions for process termination (including a terminated
-thread holding the telemetry lock), normal destruction, explicit shutdown, and explicit unload.
-Process termination skips uploader teardown before taking telemetry locks;
-normal shutdown and explicit unload retain cleanup. These tests use a mock uploader and bounded
-child processes, with a parent-observed event requiring that destructor assertions actually run.
+These regressions link GenAI into an executable. They cover ordinary static destruction and explicit
+shutdown, not Windows DLL process detach or explicit `FreeLibrary`. Production Windows process
+termination skips uploader teardown before taking telemetry locks; normal shutdown and explicit
+unload retain cleanup.
 
 Production `MAX_TEARDOWN_TIME` remains zero: exit is not extended to upload pending events.
 Events already persisted in the offline cache can be uploaded in a later GenAI session using
