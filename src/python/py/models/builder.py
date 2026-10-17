@@ -66,7 +66,11 @@ from builders import (
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from builders.non_generative import configure_model_specific_export, prepare_model_specific_hf
+from builders.non_generative import (
+    configure_model_specific_export,
+    prepare_model_specific_hf,
+    validate_model_specific_components,
+)
 from builders.qwen import Qwen35Model, Qwen35MoEModel
 from loaders.resolver import resolve_input
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
@@ -867,8 +871,6 @@ def create_model(
             require_exists=config_only,
         )
         if effective_config.component_options.model_source is not None:
-            from builders.non_generative import validate_model_specific_components
-
             validate_model_specific_components(
                 effective_config.component_options, Path(output_dir).resolve()
             )

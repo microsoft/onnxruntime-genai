@@ -129,6 +129,13 @@ def prepare_model_specific_hf(options, extra_options, base_source: str | None = 
                 f"KEV base_revision must be {policy['base_revision']}"
             )
         load_kev_checkpoint(options.model_source)
+        existing = extra_options.get("adapter_path")
+        if existing is not None and Path(existing).resolve() != Path(
+            options.model_source
+        ).resolve():
+            raise ValueError(
+                "KEV component model_source must match adapter_path"
+            )
         extra_options["adapter_path"] = options.model_source
     else:
         revision = clm_artifact_revision()

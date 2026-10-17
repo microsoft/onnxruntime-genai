@@ -100,6 +100,17 @@ def load_clm_checkpoint(source: str | Path) -> dict:
         raise ValueError("CLM hidden_size/projection_dim must be 4096/512")
     if not torch.is_tensor(data["logit_scale"]) or data["logit_scale"].numel() != 1:
         raise ValueError("CLM logit_scale must be a scalar tensor")
+    if not math.isfinite(float(data["logit_scale"].item())):
+        raise ValueError("CLM logit_scale must be finite")
+    for name in ("state_head", "action_head"):
+        validate_head(
+            name,
+            data[name],
+            int(data["hidden_size"]),
+            int(cfg["width"]),
+            int(data["projection_dim"]),
+            int(cfg["depth"]),
+        )
     return data
 
 

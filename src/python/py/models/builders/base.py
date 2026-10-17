@@ -32,6 +32,43 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 
 
+def load_text_backbone_adapter(
+    base_container, source, cache_dir=None, token=None
+):
+    """Load and merge an adapter whose keys target the nested text backbone."""
+    from peft import PeftConfig, get_peft_model
+    from peft.utils.save_and_load import (
+        load_peft_weights,
+        set_peft_model_state_dict,
+    )
+
+    if not hasattr(base_container, "model"):
+        raise ValueError(
+            "model-specific adapter base must expose its text backbone as model"
+        )
+    config = PeftConfig.from_pretrained(
+        source, cache_dir=cache_dir, token=token
+    )
+    adapted = get_peft_model(base_container.model, config)
+    weights = load_peft_weights(source, device="cpu")
+    load_result = set_peft_model_state_dict(
+        adapted, weights, adapter_name="default"
+    )
+    missing_adapter_keys = [
+        key
+        for key in load_result.missing_keys
+        if "lora_" in key or "modules_to_save" in key
+    ]
+    if missing_adapter_keys or load_result.unexpected_keys:
+        raise ValueError(
+            "model-specific adapter weights did not load exactly: "
+            f"missing={missing_adapter_keys}, "
+            f"unexpected={load_result.unexpected_keys}"
+        )
+    base_container.model = adapted.merge_and_unload()
+    return base_container
+
+
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.extra_options = extra_options
@@ -6361,25 +6398,20 @@ class Model:
             auto_class = self.resolve_model_loader()
 
             # Load PyTorch model
+            revision = getattr(self, "revision", None)
+            if revision is not None:
+                extra_kwargs["revision"] = revision
             model = auto_class.from_pretrained(
                 self.model_name_or_path,
                 cache_dir=self.cache_dir,
                 token=self.hf_token,
                 trust_remote_code=self.hf_remote,
-                revision=getattr(self, "revision", None),
                 **extra_kwargs,
             )
 
         if "adapter_path" in self.extra_options:
             if self.extra_options.get("_model_specific_hf", {}).get("adapter"):
-                try:
-                    from builders.kev import load_kev_adapter
-                except ImportError:
-                    from onnxruntime_genai.models.builders.kev import (
-                        load_kev_adapter,
-                    )
-
-                model = load_kev_adapter(
+                model = load_text_backbone_adapter(
                     model,
                     self.extra_options["adapter_path"],
                     cache_dir=self.cache_dir,
