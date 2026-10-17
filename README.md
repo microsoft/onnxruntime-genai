@@ -6,6 +6,10 @@
 
 [![Nightly Build](https://github.com/microsoft/onnxruntime-genai/actions/workflows/linux-cpu-x64-nightly-build.yml/badge.svg)](https://github.com/microsoft/onnxruntime-genai/actions/workflows/linux-cpu-x64-nightly-build.yml)
 
+<p align="center">
+  <b>English</b> · <a href="https://github.com/microsoft/onnxruntime-genai/blob/main/README.zh.md">简体中文</a>
+</p>
+
 ## Description
 
 Run generative AI models with ONNX Runtime. This API gives you an easy, flexible and performant way of running LLMs on device. It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, KV cache management, and grammar specification for tool calling.
