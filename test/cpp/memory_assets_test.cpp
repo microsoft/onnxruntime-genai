@@ -19,6 +19,11 @@
 
 namespace {
 
+constexpr std::string_view kSharedInitializers =
+    R"("shared_initializers":[{"name":"transformer.wte.weight",)"
+    R"("data_file":"weights.data","offset":"0","length":"128000",)"
+    R"("data_type":1,"shape":[1000,32]}])";
+
 std::string ReadAsset(const std::filesystem::path& path) {
   std::ifstream input(path, std::ios::binary);
   if (!input) {
@@ -128,6 +133,52 @@ TEST_F(MemoryAssetsTest, RejectsMissingExternalInitializerBuffers) {
   OgaModel* output = nullptr;
   ExpectError(OgaCreateModelFromConfig(config.get(), &output),
               "missing external initializer buffers");
+  EXPECT_EQ(output, nullptr);
+}
+
+TEST_F(MemoryAssetsTest, RejectsSharedInitializersFromConfig) {
+  auto json = config_json_;
+  const auto decoder = json.find("\"decoder\"");
+  ASSERT_NE(decoder, std::string::npos);
+  const auto object = json.find('{', decoder);
+  ASSERT_NE(object, std::string::npos);
+  json.insert(object + 1, std::string(kSharedInitializers) + ',');
+  auto config = OgaConfig::CreateFromBuffer(json);
+  config->ClearProviders();
+  AddModelAssets(*config);
+
+  OgaModel* output = nullptr;
+  ExpectError(OgaCreateModelFromConfig(config.get(), &output),
+              "Memory-only loading does not support shared initializer descriptors");
+  EXPECT_EQ(output, nullptr);
+}
+
+TEST_F(MemoryAssetsTest, RejectsSharedInitializersFromOverlay) {
+  auto config = CreateConfig();
+  const auto overlay = R"({"model":{"decoder":{)" + std::string(kSharedInitializers) + "}}}";
+  config->Overlay(overlay.c_str());
+  AddModelAssets(*config);
+
+  OgaModel* output = nullptr;
+  ExpectError(OgaCreateModelFromConfig(config.get(), &output),
+              "Memory-only loading does not support shared initializer descriptors");
+  EXPECT_EQ(output, nullptr);
+}
+
+TEST_F(MemoryAssetsTest, PathBasedSharedInitializersRetainMetadataValidation) {
+  auto config = OgaConfig::Create(model_dir_.string().c_str());
+  config->ClearProviders();
+  auto initializers = std::string(kSharedInitializers);
+  constexpr std::string_view data_type = R"("data_type":1)";
+  const auto position = initializers.find(data_type);
+  ASSERT_NE(position, std::string::npos);
+  initializers.replace(position, data_type.size(), R"("data_type":0)");
+  const auto overlay = R"({"model":{"decoder":{)" + initializers + "}}}";
+  config->Overlay(overlay.c_str());
+
+  OgaModel* output = nullptr;
+  ExpectError(OgaCreateModelFromConfig(config.get(), &output),
+              "Invalid shared initializer metadata");
   EXPECT_EQ(output, nullptr);
 }
 
