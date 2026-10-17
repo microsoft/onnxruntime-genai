@@ -54,13 +54,14 @@ def validate_model_specific_backbone(options, config) -> str:
     """
     model_type = detect_model_specific_artifact(options.model_source)
     architecture = config.architectures[0]
+    text_config = getattr(config, "text_config", config)
     if model_type == "clm":
         revision = clm_artifact_revision()
         if options.artifact_revision != revision:
             raise ValueError(f"CLM artifact_revision must be {revision}")
         if architecture != "Qwen3ForCausalLM":
             raise ValueError("CLM requires a Qwen3ForCausalLM backbone")
-        if int(config.hidden_size) != 4096:
+        if int(text_config.hidden_size) != 4096:
             raise ValueError("CLM requires the Qwen/Qwen3-8B hidden size (4096)")
     else:
         policy = kev_policy()
@@ -74,7 +75,7 @@ def validate_model_specific_backbone(options, config) -> str:
             )
         if architecture != "Qwen3_5ForConditionalGeneration":
             raise ValueError("KEV requires a Qwen3.5 dense backbone")
-        if int(config.hidden_size) != 2560:
+        if int(text_config.hidden_size) != 2560:
             raise ValueError("KEV requires the Qwen/Qwen3.5-4B-Base hidden size (2560)")
     return model_type
 
@@ -93,6 +94,7 @@ def configure_model_specific_export(options, config, extra_options) -> str:
             raise ValueError("KEV component model_source must match adapter_path")
         extra_options["adapter_path"] = options.model_source
     extra_options["exclude_lm_head"] = True
+    extra_options["exclude_mtp"] = True
     return model_type
 
 
@@ -166,3 +168,28 @@ def export_model_specific_components(options, output_root: Path):
         manifest = export_kev_components(options, output_root)
     with open(output_root / "component_manifest.json", "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=4)
+
+
+def validate_model_specific_components(options, output_root: Path) -> None:
+    """Validate model-specific heads and package destinations before export."""
+    model_type = detect_model_specific_artifact(options.model_source)
+    head_filename = "clm_heads.onnx" if model_type == "clm" else "kev_head.onnx"
+    if options.backbone_filename.casefold() == head_filename.casefold():
+        raise ValueError(
+            "component backbone filename conflicts with model-specific head "
+            f"{head_filename!r}"
+        )
+    from builder_config import validate_destination_path  # noqa: PLC0415
+
+    validate_destination_path(
+        output_root, output_root / head_filename, f"{model_type} head"
+    )
+    validate_destination_path(
+        output_root,
+        output_root / "component_manifest.json",
+        "component manifest",
+    )
+    if model_type == "clm":
+        load_clm_checkpoint(options.model_source)
+    else:
+        load_kev_checkpoint(options.model_source)

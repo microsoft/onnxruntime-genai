@@ -251,6 +251,10 @@ def normalize_model_specific_component_options(
         revision = data.get(revision_name)
         if not isinstance(revision, str) or not revision.strip():
             raise ValueError(f"component_options.{revision_name} is required for model-specific exports")
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+            raise ValueError(
+                f"component_options.{revision_name} must be a 40-character commit ID"
+            )
     return ComponentOptions(
         backbone_filename=backbone_filename,
         heads=(),
@@ -371,13 +375,17 @@ def plan_component_package(
 ) -> ComponentPackagePlan:
     """Validate a generic package and return an immutable copy/write plan."""
     copy_plan: dict[Path, Path] = {}
+    validate_destination_path(
+        output_root,
+        output_root / "component_manifest.json",
+        "component manifest",
+    )
     reserved = {
         output_root / options.backbone_filename,
         output_root / f"{options.backbone_filename}.data",
         output_root / "component_manifest.json",
         *(output_root / head.filename for head in options.heads),
     }
-    reserved.update(path for path in output_root.rglob("*"))
 
     for head in options.heads:
         source = Path(head.source)
@@ -399,6 +407,13 @@ def plan_component_package(
             )
             add_component_copy(
                 copy_plan, external_destination, external_source, head.name, reserved=reserved
+            )
+    destinations = set(copy_plan)
+    for destination, source in copy_plan.items():
+        if source in destinations and source != destination:
+            raise ValueError(
+                f"component copy source {source.name!r} is also another "
+                "component destination; overlapping copy chains are unsupported"
             )
     return ComponentPackagePlan(
         copies=tuple(copy_plan.items()), manifest=component_manifest_dict(options)

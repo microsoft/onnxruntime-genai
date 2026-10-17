@@ -3,6 +3,7 @@
 
 import json
 import math
+import sys
 import types
 
 import numpy as np
@@ -15,6 +16,7 @@ from onnx.reference import ReferenceEvaluator
 clm = load_builder_module("clm")
 kev = load_builder_module("kev")
 dispatch = load_builder_module("non_generative")
+qwen = load_builder_module("qwen")
 
 
 def _tiny_clm_head(seed):
@@ -330,7 +332,7 @@ def test_dispatch_validates_provenance_and_backbone(tmp_path):
     _write_kev_artifact(source)
     config = types.SimpleNamespace(
         architectures=["Qwen3_5ForConditionalGeneration"],
-        hidden_size=2560,
+        text_config=types.SimpleNamespace(hidden_size=2560),
     )
     options = types.SimpleNamespace(
         model_source=str(source),
@@ -342,10 +344,125 @@ def test_dispatch_validates_provenance_and_backbone(tmp_path):
     assert dispatch.configure_model_specific_export(options, config, extra_options) == "kev"
     assert extra_options["adapter_path"] == str(source)
     assert extra_options["exclude_lm_head"] is True
+    assert extra_options["exclude_mtp"] is True
 
     options.base_revision = "unpinned"
     with pytest.raises(ValueError, match="base_revision"):
         dispatch.validate_model_specific_backbone(options, config)
+
+
+def test_kev_adapter_loads_on_text_backbone_and_rejects_missing_weights(
+    monkeypatch
+):
+    base_text = object()
+    container = types.SimpleNamespace(model=base_text)
+    merged = object()
+    load_result = types.SimpleNamespace(
+        missing_keys=[], unexpected_keys=[]
+    )
+
+    class FakeAdapted:
+        def merge_and_unload(self):
+            return merged
+
+    calls = {}
+
+    class FakeConfig:
+        @staticmethod
+        def from_pretrained(source, **kwargs):
+            calls["config"] = (source, kwargs)
+            return object()
+
+    def fake_get_peft_model(model, config):
+        calls["model"] = model
+        return FakeAdapted()
+
+    def fake_load_weights(source, device):
+        calls["weights"] = (source, device)
+        return {"adapter": torch.tensor(1.0)}
+
+    def fake_set_state(model, weights, adapter_name):
+        calls["state"] = (model, weights, adapter_name)
+        return load_result
+
+    peft = types.ModuleType("peft")
+    peft.PeftConfig = FakeConfig
+    peft.get_peft_model = fake_get_peft_model
+    save_and_load = types.ModuleType("peft.utils.save_and_load")
+    save_and_load.load_peft_weights = fake_load_weights
+    save_and_load.set_peft_model_state_dict = fake_set_state
+    monkeypatch.setitem(sys.modules, "peft", peft)
+    monkeypatch.setitem(
+        sys.modules, "peft.utils.save_and_load", save_and_load
+    )
+
+    assert kev.load_kev_adapter(container, "adapter") is container
+    assert calls["model"] is base_text
+    assert container.model is merged
+
+    load_result.missing_keys = ["base_model.model.layer.lora_A.default.weight"]
+    with pytest.raises(ValueError, match="did not load exactly"):
+        kev.load_kev_adapter(
+            types.SimpleNamespace(model=base_text), "adapter"
+        )
+
+
+def test_qwen35_linear_attention_uses_adapter_aware_matmul_outputs():
+    builder = object.__new__(qwen.Qwen35TextModel)
+    builder.use_paged_attention = False
+    builder.io_dtype = "float32"
+    builder.linear_conv_dim = 6
+    calls = {"transpose": [], "gated_norm": []}
+
+    def make_matmul(_projection, name, _input):
+        return f"{name}/with_lora"
+
+    builder.make_matmul = make_matmul
+    builder.require_dense_linear_attention_gate = lambda *_: None
+    builder.exclude_node_from_quantization = lambda *_: None
+    builder.make_initializer = lambda *_args, **_kwargs: None
+    builder.make_transpose = (
+        lambda name, value, *_args: calls["transpose"].append(
+            (name, value)
+        )
+    )
+    attention = types.SimpleNamespace(
+        in_proj_qkv=object(),
+        in_proj_z=object(),
+        in_proj_b=types.SimpleNamespace(quant_type="none"),
+        in_proj_a=types.SimpleNamespace(quant_type="none"),
+        conv1d=types.SimpleNamespace(weight=torch.ones(1)),
+    )
+
+    z, b, a, conv, _ = builder.make_linear_attention_input_proj(
+        0, attention, "root"
+    )
+    assert z.endswith("z_proj/MatMul/with_lora")
+    assert b.endswith("b_proj/MatMul/with_lora")
+    assert a.endswith("a_proj/MatMul/with_lora")
+    assert calls["transpose"][0][1].endswith(
+        "qkv_proj/MatMul/with_lora"
+    )
+    assert conv.endswith("qkv_proj/Transpose/output_0")
+
+    builder.linear_value_dim = 4
+    builder.linear_num_value_heads = 1
+    builder.use_paged_attention = False
+    builder.layernorm_attrs = {"epsilon": 1e-5}
+    builder.make_gated_rms_norm = (
+        lambda name, **kwargs: calls["gated_norm"].append(
+            (name, kwargs)
+        )
+    )
+    attention.norm = types.SimpleNamespace(weight=torch.ones(4))
+    attention.out_proj = object()
+    builder.make_linear_attention_output_proj(
+        0, attention, "attention", z
+    )
+    assert calls["gated_norm"][0][1]["gate"] == z
+    assert builder.layernorm_attrs["skip_input"].endswith(
+        "out_proj/MatMul/with_lora"
+    )
 
 
 def test_model_specific_hf_pipeline_keeps_base_tokenizer_and_component_separate(tmp_path):

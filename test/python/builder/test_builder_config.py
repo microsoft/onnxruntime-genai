@@ -336,6 +336,78 @@ def test_component_package_rejects_destination_symlink(tmp_path):
     assert outside.read_bytes() == b"unchanged"
 
 
+def test_component_package_rejects_manifest_symlink(tmp_path):
+    graph = tmp_path / "head.onnx"
+    _write_component_model(graph)
+    outside = tmp_path / "outside.json"
+    outside.write_text("unchanged")
+    output_dir = tmp_path / "package"
+    _write_backbone(output_dir)
+    (output_dir / "component_manifest.json").symlink_to(outside)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="destination contains symlink"):
+        export_component_package(options, str(output_dir))
+    assert outside.read_text() == "unchanged"
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_component_package_can_replace_its_own_previous_outputs(tmp_path):
+    graph = tmp_path / "head.onnx"
+    _write_component_model(graph)
+    output_dir = tmp_path / "package"
+    _write_backbone(output_dir)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    export_component_package(options, str(output_dir))
+    export_component_package(options, str(output_dir))
+
+    assert (output_dir / "head.onnx").read_bytes() == graph.read_bytes()
+    assert (output_dir / "component_manifest.json").is_file()
+
+
+def test_component_package_rejects_copy_source_destination_chain(tmp_path):
+    output_dir = tmp_path / "package"
+    _write_backbone(output_dir)
+    first = output_dir / "a.onnx"
+    second = output_dir / "b.onnx"
+    _write_component_model(first)
+    _write_component_model(second)
+    first_bytes = first.read_bytes()
+    second_bytes = second.read_bytes()
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "first",
+                    "source": str(first),
+                    "filename": "b.onnx",
+                },
+                {
+                    "name": "second",
+                    "source": str(second),
+                    "filename": "a.onnx",
+                },
+            ]
+        },
+    ).component_options
+
+    with pytest.raises(ValueError, match="overlapping copy chains"):
+        export_component_package(options, str(output_dir))
+    assert first.read_bytes() == first_bytes
+    assert second.read_bytes() == second_bytes
+
+
 def test_component_backbone_rejects_symlink_and_missing_config_only_file(tmp_path):
     output_dir = tmp_path / "package"
     output_dir.mkdir()
@@ -363,6 +435,20 @@ def test_generic_component_options_reject_revision_fields():
             component_options={
                 "artifact_revision": "unused",
                 "heads": [{"name": "head", "source": "head.onnx"}],
+            },
+        )
+
+
+@pytest.mark.parametrize("revision", ["main", "v1", "a" * 39, "g" * 40])
+def test_model_specific_component_options_require_commit_ids(revision):
+    with pytest.raises(ValueError, match="40-character commit ID"):
+        normalize_builder_config(
+            "fp32",
+            "cpu",
+            component_options={
+                "model_source": "artifact",
+                "artifact_revision": "a" * 40,
+                "base_revision": revision,
             },
         )
 
