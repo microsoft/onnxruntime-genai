@@ -115,6 +115,8 @@ class GenAiTelemetry {
                        std::string_view context);
 
  private:
+  friend class GenAiTelemetryWindowsTestPeer;
+
   GenAiTelemetry();
   ~GenAiTelemetry();
   GenAiTelemetry(const GenAiTelemetry&) = delete;

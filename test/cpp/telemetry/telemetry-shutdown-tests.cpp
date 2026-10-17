@@ -4,6 +4,8 @@
 #include "telemetry/telemetry.h"
 #include "DebugEvents.hpp"
 #include "ITaskDispatcher.hpp"
+#include "mat/config.h"
+#include "http/HttpClientFactory.hpp"
 #include "pal/PAL.hpp"
 
 #include <chrono>
@@ -16,6 +18,10 @@
 #include <system_error>
 #include <thread>
 
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
+
 namespace {
 namespace sdk = Microsoft::Applications::Events;
 namespace pal = Microsoft::Applications::Events::PlatformAbstraction;
@@ -23,6 +29,11 @@ using namespace std::chrono_literals;
 
 [[noreturn]] void Fail(int code, const char* message) {
   std::fprintf(stderr, "FAIL: %s\n", message);
+#if defined(_WIN32)
+  // _Exit can wait for the CRT exit lock held by the thread currently joining this SDK worker.
+  std::fflush(stderr);
+  TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
+#endif
   std::_Exit(code);
 }
 
@@ -41,6 +52,11 @@ struct State {
   bool callback_completed = false;
   bool release_callback = false;
   bool worker_joined = false;
+  bool upload_at_exit = false;
+  bool encode_started = false;
+  bool version_destroyed = false;
+  int version_reads = 0;
+  int uploads_completed = 0;
   int workers_started = 0;
   int collector_events = 0;
   int priming_failure = 0;
@@ -58,11 +74,14 @@ struct State {
       if (workers_started != 0 || collector_events != 0) {
         Fail(32, "priming or suppression started a worker or emitted a collector event");
       }
-    } else if (!callback_started ||
-               !callback_completed || !worker_joined || !worker.expired()) {
+    } else if ((!upload_at_exit && (!callback_started || !callback_completed)) ||
+               !worker_joined || !worker.expired()) {
       Fail(32, "owner, native SDK worker, and mutex teardown were not fully exercised");
     }
-    std::fputs("PASS: actual telemetry owner preserved SDK mutex lifetime\n", stderr);
+    if (upload_at_exit && (!encode_started || uploads_completed == 0 || version_reads < 2)) {
+      Fail(32, "shutdown did not exercise production decoration, encoding, and upload completion");
+    }
+    std::fputs("PASS: actual telemetry owner preserved SDK dependency lifetimes\n", stderr);
   }
 };
 
@@ -84,7 +103,7 @@ struct MutexLifetime {
     std::lock_guard lock(state.mutex);
     // The observer is registered immediately after the real mutex. Fail before libc++ destroys it.
     if (!state.no_worker_expected &&
-        (!state.callback_completed || !state.worker_joined || !state.worker.expired())) {
+        ((!state.upload_at_exit && !state.callback_completed) || !state.worker_joined || !state.worker.expired())) {
       Fail(21, "SDK mutex retired before its actual owner joined the worker");
     }
     state.mutex_retired = true;
@@ -109,7 +128,7 @@ class DiagnosticTask final : public sdk::Task {
       std::unique_lock lock(state.mutex);
       state.callback_started = true;
       state.changed.notify_all();
-      if (!state.changed.wait_for(lock, 10s, [&] { return state.release_callback; })) {
+      if (!state.changed.wait_for(lock, 30s, [&] { return state.release_callback; })) {
         Fail(32, "process exit did not release the SDK diagnostic task");
       }
     }
@@ -145,7 +164,58 @@ void InitializeOwner(bool initialize_sdk) {
     }
   }
 }
+
+class LocalHttpClient final : public sdk::IHttpClient {
+ public:
+  sdk::IHttpRequest* CreateRequest() override { return new sdk::SimpleHttpRequest(pal::generateUuidString()); }
+
+  void SendRequestAsync(sdk::IHttpRequest* request, sdk::IHttpResponseCallback* callback) override {
+    if (request->GetHeaders().get("SDK-Version").empty() || request->GetBody().empty()) {
+      Fail(32, "upload did not contain an encoded event and SDK version");
+    }
+    auto* response = new sdk::SimpleHttpResponse(request->GetId());
+    response->m_result = sdk::HttpResult_OK;
+    response->m_statusCode = 200;
+    {
+      auto& state = GetState();
+      std::lock_guard lock(state.mutex);
+      ++state.uploads_completed;
+    }
+    callback->OnHttpResponse(response);
+  }
+
+  void CancelRequestAsync(const std::string&) override {}
+};
 }  // namespace
+
+namespace Microsoft::Applications::Events {
+// Keep production event processing, but never transmit collector data from a regression process.
+std::shared_ptr<IHttpClient> HttpClientFactory::Create() { return std::make_shared<LocalHttpClient>(); }
+}  // namespace Microsoft::Applications::Events
+
+extern "C" void TelemetryTestVersionDestroyed() {
+  auto& state = GetState();
+  std::lock_guard lock(state.mutex);
+  state.version_destroyed = true;
+}
+
+extern "C" void TelemetryTestVersionAccess() {
+  auto& state = GetState();
+  std::lock_guard lock(state.mutex);
+  if (state.version_destroyed) Fail(21, "SDK read its version after string destruction");
+  ++state.version_reads;
+}
+
+extern "C" void TelemetryTestBeforeEncode() {
+  auto& state = GetState();
+  std::unique_lock lock(state.mutex);
+  if (!state.upload_at_exit) return;
+  state.encode_started = true;
+  state.changed.notify_all();
+  if (!state.changed.wait_for(lock, 10s, [&] { return state.release_callback; })) {
+    Fail(32, "process exit did not release production upload encoding");
+  }
+}
 
 void TelemetryTestBeforeDebugLock() {
   auto& state = GetState();
@@ -183,7 +253,6 @@ extern "C" void TelemetryTestWorkerJoined(void* address) {
 }
 
 extern "C" void TelemetryTestCollectorEvent(const char*) {
-  // Test-only Logger::LogEvent instrumentation consumes events before persistence/transmission.
   auto& state = GetState();
   std::lock_guard lock(state.mutex);
   ++state.collector_events;
@@ -194,10 +263,18 @@ int main(int argc, char* argv[]) {
   const std::string_view mode{argv[1]};
   if (mode != "retained" && mode != "threaded" && mode != "recreated" &&
       mode != "explicit" && mode != "prime-only" && mode != "disabled" && mode != "ci-disabled" &&
-      mode != "prime-failed" && mode != "prime-allocation-failed") {
+      mode != "prime-failed" && mode != "prime-allocation-failed" &&
+      mode != "upload-at-exit" && mode != "upload-after-reinit") {
     Fail(32, "unknown shutdown regression mode");
   }
   auto& state = GetState();
+  state.upload_at_exit = mode == "upload-at-exit" || mode == "upload-after-reinit";
+  // Register after the singleton, but before the first event lazily initializes the SDK version.
+  // The original SDK destroys that version before this callback releases the blocked encoder.
+  if (state.upload_at_exit) {
+    InitializeOwner(false);
+    if (std::atexit(ReleaseCallback) != 0) Fail(32, "cannot register production upload release");
+  }
   state.priming_failure = mode == "prime-failed" ? 1 : mode == "prime-allocation-failed" ? 2
                                                                                          : 0;
   state.no_worker_expected =
@@ -216,13 +293,30 @@ int main(int argc, char* argv[]) {
   }
   if (state.no_worker_expected) return 0;
 
-  if (mode == "recreated") {
+  if (mode == "recreated" || mode == "upload-after-reinit") {
     auto previous_worker = pal::getDefaultTaskDispatcher();
     std::weak_ptr<sdk::ITaskDispatcher> previous = previous_worker;
     previous_worker.reset();
     Generators::GenAiTelemetry::Instance().Shutdown();
     if (!previous.expired()) Fail(32, "ordinary shutdown retained the SDK worker");
     InitializeOwner(true);
+  }
+
+  if (state.upload_at_exit) {
+    auto dispatcher = pal::getDefaultTaskDispatcher();
+    if (!dispatcher) Fail(32, "actual SDK upload dispatcher unavailable");
+    {
+      std::lock_guard lock(state.mutex);
+      state.worker = dispatcher;
+      state.worker_address = dispatcher.get();
+    }
+    dispatcher.reset();
+    Generators::GenAiTelemetry::Instance().LogProcessInfo();
+    std::unique_lock lock(state.mutex);
+    if (!state.changed.wait_for(lock, 30s, [&] { return state.encode_started; })) {
+      Fail(32, "production event never reached upload encoding");
+    }
+    return 0;
   }
 
   if (std::atexit(ReleaseCallback) != 0) Fail(32, "cannot register task release");

@@ -19,12 +19,14 @@ This directory contains assets, scripts, and definitions used by the test suite.
 Native desktop builds with `ENABLE_TESTS=ON` and `ENABLE_TELEMETRY=ON` include
 `telemetry_shutdown_tests` when building 1DS from source. When using an installed static
 `MSTelemetry` package, also set `TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR` to the exact source tree used
-to build that package. Private SDK instrumentation must match the linked archive.
+to build that package. Private SDK instrumentation must match the linked archive, including the
+SDK version-lifetime fix. Source builds compile a patched PAL with process-lifetime version storage;
+installed package providers must supply the equivalent fix.
 
 Run the isolated processes from the configured build directory:
 
 ```sh
-ctest -C Release -R '^TelemetryShutdown-' --output-on-failure --repeat until-fail:50
+ctest -C Release -R '^Telemetry(Windows)?Shutdown-' --output-on-failure --repeat until-fail:50
 ```
 
 The cases exercise the actual singleton, initialization on an application thread, explicit
@@ -33,10 +35,24 @@ suppression, and injected mutex/allocation failures during priming. Failed primi
 suppresses telemetry, including after ordinary shutdown/reinitialization. Test-only SDK objects
 observe real mutex initialization and native worker joins, including in the no-worker modes;
 the lifetime observer also makes the destruction-order defect deterministic on GCC/MSVC.
-Collector events are intercepted before queuing, and each case uses a private cache directory.
-Missing SDK initialization fails enabled cases rather than silently passing.
+The upload-at-exit cases, including after shutdown/reinitialization, pass real events through
+decoration, queuing, storage, and encoding. Encoding is held until process exit to exercise late
+SDK-version reads; a successful in-process HTTP responder prevents any collector transmission.
+Test-only observers detect version-string access after destruction, including with the original
+SDK used as a negative control. Each case uses a private cache directory. Missing SDK
+initialization fails enabled cases rather than silently passing.
 
 The constructor primes only an empty diagnostic source before singleton destruction is registered.
-SDK initialization remains lazy; priming creates no uploader or collector event. No process-exit
-callback or shutdown-state machinery is added. A priming exception latches the existing full
-suppression state rather than retrying mutex initialization after singleton construction.
+SDK initialization remains lazy; priming creates no uploader or collector event. A priming
+exception latches the existing full suppression state rather than retrying mutex initialization
+after singleton construction.
+
+Windows also includes DLL lifecycle regressions for process termination (including a terminated
+thread holding the telemetry lock), normal destruction, explicit shutdown, and explicit unload.
+Process termination skips uploader teardown before taking telemetry locks;
+normal shutdown and explicit unload retain cleanup. These tests use a mock uploader and bounded
+child processes, with a parent-observed event requiring that destructor assertions actually run.
+
+Production `MAX_TEARDOWN_TIME` remains zero: exit is not extended to upload pending events.
+Events already persisted in the offline cache can be uploaded in a later GenAI session using
+that cache. Abrupt process termination does not guarantee persistence of events still in memory.
