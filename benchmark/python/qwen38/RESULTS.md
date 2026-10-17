@@ -168,17 +168,47 @@ development measurement on the same stack (median of the runs reported there);
 the 2k and 8k rows were re-measured for this table on the stacked branch
 (`tlwu/20261013/ga-b5-qwen38-qualification-tools`), where ms per cycle matched
 the development run (7.71 / 7.88). Tokens per second follows draft acceptance;
-ms per cycle is the steadier metric. Peak GPU memory of the static-graph
-backend is 113.4 GiB (`nvidia-smi`, 0.5 s samples, 2k-32k decode), compared
-with the 100.09 GiB sampled above; the two samplers differ. With the v12c
-quantized package (`pkg_v12b_engine_int8kv_fp8w_fp4moe`: calibrated per-channel
-INT8 KV cache, FP8 attention/shared-expert projections, NVFP4 MTP-head routed
-experts, and dense-prefill weight sharing via `build_package_engine_v12b.py`),
-peak GPU memory drops by **12.47 GiB** to **100.93 GiB** (`103,353 MiB` across
-2k-32k decode), cycle time improves to **7.66 / 7.84 / 8.04 ms/cycle**
-(`250.3 / 241.0 / 233.6` decode tokens/s on 2k / 8k / 32k natural text), and
-MMLU-Pro (800 items, 8,192 new tokens) scores **667/800** (`83.375%`, `265.3`
-decode tokens/s).
+ms per cycle is the steadier metric. Peak GPU memory of the baseline (`v12b`)
+static-graph backend is 113.40 GiB (`116,123 MiB` `nvidia-smi`, 0.5 s samples,
+2k-32k decode; `90,063 MiB / 87.95 GiB` static load), compared with the
+100.09 GiB sampled above; the two samplers differ.
+
+### Quantized and memory-reduced static-graph packages (`v12c` and `v12d`)
+
+Subsequent package and kernel optimizations (`build_package_engine_v12b.py`,
+`qwen38_graph.cpp`, `qwen38_graph_prefill.cpp`, and `qwen38-flash-ops`) reduce
+both static and peak GPU memory while increasing decode throughput and
+preserving MMLU-Pro 800 accuracy (`664/800 = 83.000%` on `v12b` at `260.0 TPS`
+median):
+
+- **Optimized `v12c` (`INT8` KV + `FP8` Attn/SharedExp + `NVFP4` MTP MoE + dense weight sharing)**:
+  - `pkg_v12b_engine_int8kv_fp8w_fp4moe` (BF16 LM-Head): **`77,237 MiB (75.43 GiB)`** static load, **`103,207 MiB (100.79 GiB)`** peak GPU memory (**`-12.61 GiB`** vs `v12b`), decode **`6.959 / 7.126 / 7.314 ms/cycle`** (**`265.1 / 252.2 / 243.4 TPS`** on 2k / 8k / 32k natural text), TTFT `0.101 / 0.155 / 0.296 / 0.761 / 3.182 s` (`128 / 512 / 2k / 8k / 32k`), and MMLU-Pro 800 **`668/800 (83.500%)`** ($p=0.54$ vs `v12b`) @ **`286.99 TPS` median** (`+10.4%` vs `v12b`).
+  - `pkg_v12b_engine_int8kv_fp8w_fp4moe_fp8lm` (+ per-column FP8 LM-Head): **`76,635 MiB (74.84 GiB)`** static load, **`102,573 MiB (100.17 GiB)`** peak GPU memory (**`-13.23 GiB`** vs `v12b`), decode **`6.660 / 6.841 / 7.047 ms/cycle`** (**`275.4 / 263.8 / 252.9 TPS`** on 2k / 8k / 32k natural text), TTFT `0.100 / 0.153 / 0.293 / 0.756 / 3.170 s`, and MMLU-Pro 800 **`672/800 (84.000%)`** ($p=0.22$ vs `v12b`) @ **`287.71 TPS` median** (**`289.81 TPS`** with `--fuse-dense-ops`, `+11.5%` vs `v12b`).
+- **Engine `v12d` (`P1 + P2 + P3 + P4`)**:
+  - `P1`: `--prefill-chunk 2048` / `4096` reduces the dense-prefill BFC arena high-water mark by **`-13.93 GiB`** / **`-8.01 GiB`**.
+  - `P2`: `--hc-quant fp8` quantizes `hc_tiled.data` (`1,225.00 -> 612.50 MiB` FP8, **`-612.50 MiB`** VRAM) with templated FP8 `HcBlock` / `HcPostBlock` and `UntileHcBf16`.
+  - `P3`: `--host-map-embed` maps `model.embed_tokens.weight` (`1,212.50 MiB`) zero-copy over PCIe via `host_pool` (`cudaHostRegisterMapped`), saving **`-1.184 GiB`** GPU VRAM with 0% accuracy loss.
+  - `P4`: Full initializer deduplication across `target`, `head_r2`, `dense`, and `head_kv` reduces session-private initializers from `177.84 MiB` to **`4.21 MiB`** (`68.80 GiB` device weight pool).
+
+| Package / Configuration | LM Head | Prefill Chunk | Static Load GPU Memory | Peak GPU Memory (2k-32k) | Saved vs `v12b` Peak | Decode ms/cycle (2k / 8k / 32k) | Natural-Text Decode TPS (2k / 8k / 32k) | TTFT Median (`128 / 512 / 2k / 8k / 32k`) | MMLU-Pro 800 @ 8192 | MMLU Decode TPS (median) |
+|---|---:|---:|---:|---:|---:|---|---|---|---:|---:|
+| **`v12b` baseline** (`pkg_v12b_engine`) | BF16 | 8,192 | 90,063 MiB (87.95 GiB) | 116,123 MiB (113.40 GiB) | — | 7.713 / 7.879 / 8.068 | 249.0 / 239.8 / 231.5 | 0.105 / 0.159 / 0.298 / 0.750 / 3.150 s | 664/800 (83.000%) | 260.0 |
+| **`v12c` Optimized** (`pkg_v12b_engine_int8kv_fp8w_fp4moe`) | BF16 | 8,192 | 77,237 MiB (75.43 GiB) | 103,207 MiB (100.79 GiB) | -12.61 GiB | 6.959 / 7.126 / 7.314 | 265.1 / 252.2 / 243.4 | 0.101 / 0.155 / 0.296 / 0.761 / 3.182 s | 668/800 (83.500%) | 286.99 |
+| **`v12c` + FP8 LM** (`pkg_v12b_engine_int8kv_fp8w_fp4moe_fp8lm`) | FP8 | 8,192 | 76,635 MiB (74.84 GiB) | 102,573 MiB (100.17 GiB) | -13.23 GiB | 6.660 / 6.841 / 7.047 | 275.4 / 263.8 / 252.9 | 0.100 / 0.153 / 0.293 / 0.756 / 3.170 s | 672/800 (84.000%) | 287.71 (289.81 fused) |
+| **`v12d` BF16 LM** (`pkg_v12d_bf16lm_engine`) | BF16 | 2,048 | 75,071 MiB (73.31 GiB) | 87,111 MiB (85.07 GiB) | -28.33 GiB | 7.185 / 7.364 / 7.291 | 262.8 / 258.2 / 263.1 | 0.112 / 0.158 / 0.303 / 1.247 / 5.241 s | 664/800 (83.000%) | 279.51 |
+| **`v12d` FP8 LM (`chunk=4096`)** (`pkg_v12d_c4096_fixed`) | FP8 | 4,096 | 74,469 MiB (72.72 GiB) | 92,199 MiB (90.04 GiB) | -23.36 GiB | 6.918 / 6.846 / 7.035 | 279.2 / 268.0 / 255.4 | 0.104 / 0.157 / 0.299 / 0.947 / 3.942 s | 663/800 (82.875%) | 290.26 |
+| **`v12d` FP8 LM (`chunk=2048`, recommended)** (`pkg_v12d_engine`) | FP8 | 2,048 | **74,469 MiB (72.72 GiB)** | **86,477 MiB (84.45 GiB)** | **-28.95 GiB (-29,646 MiB)** | **6.918 / 6.845 / 7.019** | **279.1 / 271.9 / 250.6** | **0.112 / 0.158 / 0.303 / 1.252 / 5.253 s** | **663/800 (82.875%, $p=1.00$)** | **290.26** |
+
+### 24 GiB & 32 GiB GPU QMoE CPU Offload (Offload v3 on Engine `v12c` & `v12d`)
+
+Combining `pkg_v12d_engine` (`-1,392.38 MiB` non-expert device weights vs `v12c`
+offload) with `com.microsoft::QMoEOffload` (Offload v3, multi-draft chained MTP
+`S=2..4`, and CPU/GPU expert overlap) adds `+288` GPU-resident QMoE expert
+slots (`+6` slots/layer) while remaining strictly inside 24 GiB (`<= 24,576 MiB`)
+and 32 GiB (`<= 32,768 MiB`) VRAM budgets across 2k-32k prefill and decode:
+
+- **24 GiB GPU budget (`v12d` `s3648`: `3,648 + 96` physical slots = `14.84%` resident)**: **`24,241 MiB (23.67 GiB)`** peak GPU memory (`<= 24,576 MiB`), adaptive decode **`156.81 tok/s` median / `175.45 tok/s` peak** at 2k context, **`141.73 tok/s`** at 8k (`173.90 tok/s` peak), **`122.40 tok/s`** at 32k (`135.63 tok/s` at `S=3`), TTFT `0.537 / 0.868 / 1.286 / 2.797 s` (`128 / 512 / 2k / 8k`), and `6/6` bit-exact `engine_gate.py` / `27/27` `engine_behaviours.py`.
+- **32 GiB GPU budget (`v12d` `s6768`: `6,768 + 96` physical slots = `27.54%` resident)**: **`32,403 MiB (31.64 GiB)`** peak GPU memory (`<= 32,768 MiB`), adaptive decode **`196.48 tok/s` median / `208.35 tok/s` peak** at 2k context (`15.89 ms/cycle`), **`167.57 tok/s` median / `191.04 tok/s` peak** at 8k, **`150.75 tok/s` median / `167.74 tok/s` peak** at 32k (`155.74 tok/s` median at `S=3`), TTFT `0.450 / 0.736 / 1.129 / 2.564 s` (`128 / 512 / 2k / 8k`), MMLU-Pro 800 **`661/800 (82.63%)`** (`663/800 = 82.88%` on `v12c` 32 GiB), and **`189.03 tok/s`** (`169.66 tok/s` median / `182.09 tok/s` peak on 2k text, `51.14 GiB` peak RSS) under a **`64 GiB` enforced host RAM** budget.
 
 Read the comparison with these caveats:
 
