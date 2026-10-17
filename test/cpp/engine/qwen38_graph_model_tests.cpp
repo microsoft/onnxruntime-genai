@@ -1,15 +1,19 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "config.h"
 #include "models/model_type.h"
 #include "models/qwen38_decode_device.h"
+#include "models/qwen38_graph.h"
 
 namespace Generators::test {
 
@@ -23,9 +27,95 @@ std::filesystem::path MakeScratchDir(const std::string& suffix) {
 }
 
 std::filesystem::path WriteFile(const std::filesystem::path& path, const std::string& text) {
-  std::ofstream out{path};
+  std::ofstream out{path, std::ios::binary};
   out << text;
   return path;
+}
+
+struct MockPlaneTracker {
+  static inline int alloc_calls = 0;
+  static inline int fail_on_alloc_call = -1;
+  static inline std::vector<void*> live_device_ptrs;
+  static inline std::vector<void*> registered_host_ptrs;
+  static inline std::vector<void*> unregistered_host_ptrs;
+  static constexpr uintptr_t kDevBias = 0x200000u;
+
+  static void Reset(int fail_alloc = -1) {
+    for (void* p : live_device_ptrs) std::free(p);
+    live_device_ptrs.clear();
+    registered_host_ptrs.clear();
+    unregistered_host_ptrs.clear();
+    alloc_calls = 0;
+    fail_on_alloc_call = fail_alloc;
+  }
+
+  static const char* ErrorString(int) { return "mock cuda error"; }
+  static int DeviceAlloc(void** p, size_t bytes) {
+    ++alloc_calls;
+    if (fail_on_alloc_call > 0 && alloc_calls == fail_on_alloc_call) return 2;  // cudaErrorMemoryAllocation
+    *p = std::calloc(1, bytes ? bytes : 16);
+    live_device_ptrs.push_back(*p);
+    return 0;
+  }
+  static int DeviceFree(void* p) {
+    auto it = std::find(live_device_ptrs.begin(), live_device_ptrs.end(), p);
+    if (it != live_device_ptrs.end()) {
+      live_device_ptrs.erase(it);
+      std::free(p);
+    }
+    return 0;
+  }
+  static int HostAlloc(void** p, size_t bytes) {
+    *p = std::calloc(1, bytes ? bytes : 16);
+    return 0;
+  }
+  static int HostFree(void* p) {
+    std::free(p);
+    return 0;
+  }
+  static int HostRegister(void* p, size_t, unsigned) {
+    registered_host_ptrs.push_back(p);
+    return 0;
+  }
+  static int HostUnregister(void* p) {
+    unregistered_host_ptrs.push_back(p);
+    return 0;
+  }
+  static int HostGetDevicePointer(void** dp, void* hp, unsigned) {
+    *dp = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(hp) + kDevBias);
+    return 0;
+  }
+  static int DeviceMemset(void* p, int v, size_t bytes, void*) {
+    std::memset(p, v, bytes);
+    return 0;
+  }
+  static int MemcpyH2D(void* dst, const void* src, size_t bytes, void*) {
+    std::memcpy(dst, src, bytes);
+    return 0;
+  }
+  static int StreamCreate(void** s) {
+    *s = reinterpret_cast<void*>(uintptr_t{1});
+    return 0;
+  }
+  static int StreamDestroy(void*) { return 0; }
+  static int StreamSync(void*) { return 0; }
+};
+
+void InitMockPlane(Qwen38Plane& plane, int fail_alloc = -1) {
+  MockPlaneTracker::Reset(fail_alloc);
+  plane.error_string = &MockPlaneTracker::ErrorString;
+  plane.device_alloc = &MockPlaneTracker::DeviceAlloc;
+  plane.device_free = &MockPlaneTracker::DeviceFree;
+  plane.host_alloc = &MockPlaneTracker::HostAlloc;
+  plane.host_free = &MockPlaneTracker::HostFree;
+  plane.host_register = &MockPlaneTracker::HostRegister;
+  plane.host_unregister = &MockPlaneTracker::HostUnregister;
+  plane.host_get_device_pointer = &MockPlaneTracker::HostGetDevicePointer;
+  plane.device_memset = &MockPlaneTracker::DeviceMemset;
+  plane.memcpy_h2d = &MockPlaneTracker::MemcpyH2D;
+  plane.stream_create = &MockPlaneTracker::StreamCreate;
+  plane.stream_destroy = &MockPlaneTracker::StreamDestroy;
+  plane.stream_sync = &MockPlaneTracker::StreamSync;
 }
 
 }  // namespace
@@ -279,5 +369,137 @@ TEST(Qwen38CycleRecordTest, AcceptedCyclesCommitTwoTokens) {
   record.accepted = true;
   EXPECT_EQ(record.TokenCount(), 2u);
 }
+
+TEST(Qwen38GraphConfigTest, EffectivePrefillChunkUsesStepOrFastPrefillSetting) {
+  Config config;
+  EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph), 2048u);
+
+  OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill_chunk_tokens":512}}})");
+  EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph), 512u);
+
+  OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill":{"enabled":true,"chunk":4096}}}})");
+  EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph), 4096u);
+
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill_chunk_tokens":0}}})"), std::runtime_error);
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"qwen38_graph":{"prefill_chunk_tokens":15}}})"), std::runtime_error);
+}
+
+TEST(Qwen38GraphConfigTest, NonInheritedPrefillSessionOptionsRetainCudaProviderWithoutGraphCapture) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{
+    "custom_ops_libraries":["libs/a.so"],
+    "provider_options":[{"cuda":{"device_id":"1","enable_cuda_graph":"1"}}]
+  }}}})");
+  config.model.decoder.session_options.providers = {"cuda"};
+
+  // Omitted prefill.head_kv.session_options (inherit=false): retains CUDA + device_id, drops enable_cuda_graph and custom_ops_libraries.
+  const auto resolved_omitted =
+      ResolveQwen38AuxiliarySessionOptions(config.model.decoder.session_options, std::nullopt, /*inherit=*/false);
+  EXPECT_EQ(resolved_omitted.providers, (std::vector<std::string>{"cuda"}));
+  EXPECT_TRUE(resolved_omitted.custom_ops_libraries.empty());
+  ASSERT_EQ(resolved_omitted.provider_options.size(), 1u);
+  EXPECT_EQ(resolved_omitted.provider_options[0].name, "cuda");
+  EXPECT_FALSE(IsGraphCaptureEnabled(resolved_omitted));
+  bool found_device_id = false;
+  for (const auto& [k, v] : resolved_omitted.provider_options[0].options) {
+    if (k == "device_id" && v == "1") found_device_id = true;
+    EXPECT_NE(k, "enable_cuda_graph");
+  }
+  EXPECT_TRUE(found_device_id);
+
+  // Inherited head session (inherit=true): keeps custom_ops_libraries and enable_cuda_graph.
+  const auto resolved_inherited =
+      ResolveQwen38AuxiliarySessionOptions(config.model.decoder.session_options, std::nullopt, /*inherit=*/true);
+  EXPECT_EQ(resolved_inherited.custom_ops_libraries, (std::vector<std::string>{"libs/a.so"}));
+  EXPECT_TRUE(IsGraphCaptureEnabled(resolved_inherited));
+}
+
+TEST(Qwen38QsaConstantsTest, RequiresBothCosAndSinForTargetAndHead) {
+  const auto dir = MakeScratchDir("qsa_complete");
+  WriteFile(dir / "qsa_consts.bin", std::string(4096, '\0'));
+
+  const auto check_index = [&](const std::string& text) {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    const auto idx = WriteFile(dir / "qsa.txt", text);
+    Qwen38QsaConstants consts{plane, idx, dir, nullptr};
+    (void)consts;
+  };
+
+  // Missing target sin
+  EXPECT_THROW(check_index("qwen38_qsa_consts 1\nfile qsa_consts.bin\nepsilon 1e-06\nwidth 64\n"
+                           "tensor target cos 0 512\n"
+                           "tensor target knorm.3 512 256\n"
+                           "tensor head cos 768 512\n"
+                           "tensor head sin 1280 512\n"
+                           "tensor head knorm.0 1792 256\n"),
+               std::runtime_error);
+
+  // Missing head sin
+  EXPECT_THROW(check_index("qwen38_qsa_consts 1\nfile qsa_consts.bin\nepsilon 1e-06\nwidth 64\n"
+                           "tensor target cos 0 512\n"
+                           "tensor target sin 512 512\n"
+                           "tensor target knorm.3 1024 256\n"
+                           "tensor head cos 1280 512\n"
+                           "tensor head knorm.0 1792 256\n"),
+               std::runtime_error);
+
+  // Complete index succeeds
+  EXPECT_NO_THROW(check_index("qwen38_qsa_consts 1\nfile qsa_consts.bin\nepsilon 1e-06\nwidth 64\n"
+                              "tensor target cos 0 512\n"
+                              "tensor target sin 512 512\n"
+                              "tensor target knorm.3 1024 256\n"
+                              "tensor head cos 1280 512\n"
+                              "tensor head sin 1792 512\n"
+                              "tensor head knorm.0 2304 256\n"));
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+#if !defined(_WIN32)
+TEST(Qwen38WeightPoolTest, CleansUpEarlierAllocationsOnConstructorFailureAndSupportsHostPool) {
+  const auto dir = MakeScratchDir("weight_pool");
+  WriteFile(dir / "w0.bin", std::string(64, 'a'));
+  WriteFile(dir / "w1.bin", std::string(64, 'b'));
+  WriteFile(dir / "embed.bin", std::string(128, 'e'));
+  const auto manifest_path = WriteFile(dir / "pool.txt",
+                                       "qwen38_weights_pool 1\n"
+                                       "pool 0 1 0 32 1 8 w0.bin\n"
+                                       "pool 1 1 0 32 1 8 w1.bin\n"
+                                       "host_pool 2 1 32 64 2 2 8 embed.bin\n"
+                                       "session target w0 0\n"
+                                       "session target w1 1\n"
+                                       "session target embed 2\n");
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+  // Fail on the 2nd device_alloc call: the 1st device allocation and the host_pool mapping must be cleaned up.
+  {
+    Qwen38Plane plane;
+    InitMockPlane(plane, /*fail_alloc=*/2);
+    EXPECT_THROW((Qwen38WeightPool{plane, manifest_path, dir, *mem_info, 1}), std::runtime_error);
+    EXPECT_TRUE(MockPlaneTracker::live_device_ptrs.empty());
+    EXPECT_EQ(MockPlaneTracker::unregistered_host_ptrs, MockPlaneTracker::registered_host_ptrs);
+  }
+
+  // Succeed and verify device bytes, host_mapped_bytes, and cleanup on destruction.
+  {
+    Qwen38Plane plane;
+    InitMockPlane(plane);
+    {
+      Qwen38WeightPool pool{plane, manifest_path, dir, *mem_info, 2};
+      EXPECT_EQ(pool.bytes, 64u);
+      EXPECT_EQ(pool.host_mapped_bytes, 64u);
+      EXPECT_EQ(MockPlaneTracker::live_device_ptrs.size(), 2u);
+      EXPECT_EQ(MockPlaneTracker::registered_host_ptrs.size(), 1u);
+    }
+    EXPECT_TRUE(MockPlaneTracker::live_device_ptrs.empty());
+    EXPECT_EQ(MockPlaneTracker::unregistered_host_ptrs, MockPlaneTracker::registered_host_ptrs);
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+#endif
 
 }  // namespace Generators::test
