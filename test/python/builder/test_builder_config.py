@@ -46,9 +46,32 @@ def _write_component_model(path, external_locations=()):
     path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
 
 
-def _write_backbone(output_dir, filename="model.onnx"):
+def _write_backbone(
+    output_dir, filename="model.onnx", output_name="hidden_states"
+):
     output_dir.mkdir(exist_ok=True)
-    (output_dir / filename).write_bytes(b"backbone")
+    input_value = onnx.helper.make_tensor_value_info(
+        "input_ids", onnx.TensorProto.INT64, [None, None]
+    )
+    output_value = onnx.helper.make_tensor_value_info(
+        output_name, onnx.TensorProto.FLOAT, [None, None, 4]
+    )
+    model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [
+                onnx.helper.make_node(
+                    "Cast",
+                    ["input_ids"],
+                    [output_name],
+                    to=onnx.TensorProto.FLOAT,
+                )
+            ],
+            "backbone",
+            [input_value],
+            [output_value],
+        )
+    )
+    onnx.save(model, output_dir / filename)
 
 
 def test_legacy_configuration_preserves_options():
@@ -258,8 +281,7 @@ def test_component_package_rejects_backbone_external_data_collision(tmp_path):
     _write_component_model(graph, ["backbone.onnx.data"])
     (source_dir / "backbone.onnx.data").write_bytes(b"head")
     output_dir = tmp_path / "package"
-    output_dir.mkdir()
-    (output_dir / "backbone.onnx").write_bytes(b"backbone graph")
+    _write_backbone(output_dir, "backbone.onnx")
     (output_dir / "backbone.onnx.data").write_bytes(b"backbone weights")
     effective = normalize_builder_config(
         "fp32",
@@ -303,7 +325,6 @@ def test_component_package_rejects_source_overwritten_by_backbone(tmp_path):
     output_dir = tmp_path / "package"
     _write_backbone(output_dir)
     source = output_dir / "model.onnx"
-    _write_component_model(source)
     original = source.read_bytes()
     options = normalize_builder_config(
         "fp32",
@@ -314,6 +335,7 @@ def test_component_package_rejects_source_overwritten_by_backbone(tmp_path):
                     "name": "head",
                     "source": str(source),
                     "filename": "head.onnx",
+                    "inputs": {"hidden_states": "input_ids"},
                 }
             ]
         },
@@ -520,6 +542,42 @@ def test_component_backbone_rejects_symlink_and_missing_config_only_file(tmp_pat
     (output_dir / "model.onnx").unlink()
     with pytest.raises(ValueError, match="backbone does not exist"):
         validate_component_backbone_destination(options, output_dir, require_exists=True)
+
+
+def test_component_backbone_rejects_external_data_directory(tmp_path):
+    output_dir = tmp_path / "package"
+    _write_backbone(output_dir)
+    (output_dir / "model.onnx.data").mkdir()
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="existing directory"):
+        validate_component_backbone_destination(
+            options, output_dir, require_exists=False
+        )
+
+
+def test_config_only_backbone_requires_hidden_states_output(tmp_path):
+    output_dir = tmp_path / "package"
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    ).component_options
+
+    _write_backbone(output_dir)
+    validate_component_backbone_destination(
+        options, output_dir, require_exists=True
+    )
+
+    _write_backbone(output_dir, output_name="logits")
+    with pytest.raises(ValueError, match="hidden_states output"):
+        validate_component_backbone_destination(
+            options, output_dir, require_exists=True
+        )
 
 
 def test_generic_component_options_reject_revision_fields():

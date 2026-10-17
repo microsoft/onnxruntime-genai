@@ -547,10 +547,22 @@ def validate_component_backbone_destination(
     output_root = Path(output_root).resolve()
     destination = output_root / options.backbone_filename
     validate_destination_path(output_root, destination, "backbone")
+    validate_destination_path(
+        output_root,
+        output_root / f"{options.backbone_filename}.data",
+        "backbone external data",
+    )
     if require_exists and not destination.is_file():
         raise ValueError(
             f"component backbone does not exist: {destination}"
         )
+    if require_exists:
+        model = load_component_model(destination, "backbone")
+        output_names = {value.name for value in model.graph.output}
+        if "hidden_states" not in output_names:
+            raise ValueError(
+                "component backbone must expose a hidden_states output"
+            )
     return destination
 
 

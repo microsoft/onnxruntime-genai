@@ -144,7 +144,10 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     if extra_options.get("adapter_path", False):
         from peft import PeftConfig
 
-        adapter_source = model_specific_hf.get("adapter", extra_options["adapter_path"])
+        adapter_source = (
+            model_specific_hf.get("adapter")
+            or extra_options["adapter_path"]
+        )
         adapter_kwargs = {} if os.path.isdir(adapter_source) else {"cache_dir": cache_dir}
         peft_config = PeftConfig.from_pretrained(
             adapter_source,
