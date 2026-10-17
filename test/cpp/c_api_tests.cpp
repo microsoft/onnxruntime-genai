@@ -3428,7 +3428,7 @@ TEST(CAPITests, TokenId_FromConfig) {
   // Copy minimal model files from tiny-random-gpt2
   std::string src_dir = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
   for (const auto& entry : std::filesystem::directory_iterator(src_dir)) {
-    if (entry.path().filename() != "genai_config.json") {
+    if (entry.is_regular_file() && entry.path().filename() != "genai_config.json") {
       std::filesystem::copy_file(entry.path(), temp_dir / entry.path().filename(),
                                  std::filesystem::copy_options::overwrite_existing);
     }
