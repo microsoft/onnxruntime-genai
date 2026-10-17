@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import textwrap
+from pathlib import Path
 from typing import Any
 
 import onnx_ir as ir
@@ -23,6 +24,7 @@ from builder_config import (
     export_component_package,
     load_json_object,
     normalize_builder_config,
+    plan_component_package,
     validate_component_backbone_destination,
     validate_model_dependent_config,
 )
@@ -864,6 +866,16 @@ def create_model(
             output_dir,
             require_exists=config_only,
         )
+        if effective_config.component_options.model_source is not None:
+            from builders.non_generative import validate_model_specific_components
+
+            validate_model_specific_components(
+                effective_config.component_options, Path(output_dir).resolve()
+            )
+        else:
+            plan_component_package(
+                effective_config.component_options, Path(output_dir).resolve()
+            )
 
     if not config_only:
         # Make ONNX model

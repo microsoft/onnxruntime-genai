@@ -505,8 +505,8 @@ class Qwen35TextModel(Model):
             "q_path": head_paths[0],
             "k_path": head_paths[1],
             "v_path": head_paths[2],
-            "decay": f"{a_name}/output_0",
-            "beta": f"{b_name}/output_0",
+            "decay": a_name,
+            "beta": b_name,
             "a_log": a_log_name,
             "dt_bias": dt_bias_name,
             "gate_shape": [*token_shape, value_heads],
@@ -554,8 +554,10 @@ class Qwen35TextModel(Model):
         basename = f"/model/layers.{layer_id}/linear_attn"
 
         qkv_name = self.make_matmul(attention.in_proj_qkv, f"{basename}/qkv_proj/MatMul", root_input)
+        qkv_output = f"{qkv_name}/output_0"
 
         z_name = self.make_matmul(attention.in_proj_z, f"{basename}/z_proj/MatMul", root_input)
+        z_output = f"{z_name}/output_0"
 
         # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
         # ~0.1% of the model, so they stay dense regardless of which loader supplied them.
@@ -563,19 +565,21 @@ class Qwen35TextModel(Model):
         self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
         self.exclude_node_from_quantization(b_name)
         b_name = self.make_matmul(attention.in_proj_b, b_name, root_input)
+        b_output = f"{b_name}/output_0"
 
         a_name = f"{basename}/a_proj/MatMul"
         self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
         self.exclude_node_from_quantization(a_name)
         a_name = self.make_matmul(attention.in_proj_a, a_name, root_input)
+        a_output = f"{a_name}/output_0"
 
-        conv_input = f"{qkv_name}/output_0"
+        conv_input = qkv_output
         if not self.use_paged_attention:
             qkv_t_name = f"{basename}/qkv_proj/Transpose"
             conv_input = f"{qkv_t_name}/output_0"
             self.make_transpose(
                 qkv_t_name,
-                f"{qkv_name}/output_0",
+                qkv_output,
                 self.io_dtype,
                 ["batch_size", self.linear_conv_dim, "sequence_length"],
                 [0, 2, 1],
@@ -584,7 +588,7 @@ class Qwen35TextModel(Model):
         conv_weight_name = f"model.layers.{layer_id}.linear_attn.conv1d.weight"
         self.make_initializer(attention.conv1d.weight, conv_weight_name, to=self.io_dtype)
 
-        return z_name, b_name, a_name, conv_input, conv_weight_name
+        return z_output, b_output, a_output, conv_input, conv_weight_name
 
     def require_dense_linear_attention_gate(self, projection, name):
         if hasattr(projection, "qweight") or getattr(projection, "quant_type", "none") != "none":
@@ -654,10 +658,10 @@ class Qwen35TextModel(Model):
         gate_shape = ["batch_size", "sequence_length", self.linear_num_value_heads]
         self.make_linear_attention_gate(
             gate_name,
-            a=f"{a_name}/output_0",
+            a=a_name,
             dt_bias=dt_bias_init,
             decay_scale=neg_exp_a_name,
-            b=f"{b_name}/output_0",
+            b=b_name,
             shape=gate_shape,
         )
         g_output = f"{gate_name}/output_0"
@@ -686,14 +690,15 @@ class Qwen35TextModel(Model):
             gated_norm_name,
             root_input=attn_output_3d,
             scale=norm_weight,
-            gate=f"{z_name}/output_0",
+            gate=z_name,
             shape=output_shape,
             epsilon=self.layernorm_attrs["epsilon"],
         )
 
         o_name = self.make_matmul(attention.out_proj, f"{basename}/out_proj/MatMul", f"{gated_norm_name}/output_0")
+        o_output = f"{o_name}/output_0"
 
-        self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
+        self.layernorm_attrs["skip_input"] = o_output
 
     def make_l2_normalize(self, basename, root_input):
         """Per-head L2 normalize: reshape [B, S, N*H] -> [B, S, N, H], norm, reshape back.

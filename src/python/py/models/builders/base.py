@@ -6371,11 +6371,26 @@ class Model:
             )
 
         if "adapter_path" in self.extra_options:
-            from peft import PeftModel
+            if self.extra_options.get("_model_specific_hf", {}).get("adapter"):
+                try:
+                    from builders.kev import load_kev_adapter
+                except ImportError:
+                    from onnxruntime_genai.models.builders.kev import (
+                        load_kev_adapter,
+                    )
 
-            model = PeftModel.from_pretrained(
-                model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token
-            )
+                model = load_kev_adapter(
+                    model,
+                    self.extra_options["adapter_path"],
+                    cache_dir=self.cache_dir,
+                    token=self.hf_token,
+                )
+            else:
+                from peft import PeftModel
+
+                model = PeftModel.from_pretrained(
+                    model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token
+                )
 
         return model
 
