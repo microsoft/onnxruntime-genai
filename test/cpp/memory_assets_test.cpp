@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -29,6 +30,33 @@ std::string ReadAsset(const std::filesystem::path& path) {
   }
   return result;
 }
+
+struct ScopedTokenizerAssets {
+  ScopedTokenizerAssets()
+      : path{std::filesystem::temp_directory_path() /
+             ("ortgenai_memory_assets_" +
+              std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))} {
+    if (!std::filesystem::create_directory(path)) {
+      throw std::runtime_error("Cannot create tokenizer test directory: " + path.string());
+    }
+  }
+
+  ~ScopedTokenizerAssets() {
+    std::error_code error;
+    std::filesystem::remove_all(path, error);
+    EXPECT_FALSE(error) << error.message();
+  }
+
+  void Write(const char* filename, std::string_view contents) const {
+    std::ofstream output;
+    output.exceptions(std::ios::badbit | std::ios::failbit);
+    output.open(path / filename, std::ios::binary);
+    output << contents;
+    output.close();
+  }
+
+  const std::filesystem::path path;
+};
 
 void ExpectError(OgaResult* raw_result, std::string_view message) {
   std::unique_ptr<OgaResult> result{raw_result};
@@ -172,6 +200,41 @@ TEST_F(MemoryAssetsTest, TokenizerCopiesJsonAndOutlivesConfig) {
   auto sequence = OgaSequences::Create();
   tokenizer->Encode("hello", *sequence);
   EXPECT_GT(sequence->SequenceCount(0), 0u);
+}
+
+TEST_F(MemoryAssetsTest, ConfigOnlyAddedTokenMatchesPathBasedTokenizer) {
+  constexpr const char* token = "<|config_only_added_token|>";
+  constexpr int32_t token_id = 60000;
+  ASSERT_EQ(tokenizer_json_.find(token), std::string::npos);
+  auto tokenizer_config = tokenizer_config_;
+  const auto decoder = tokenizer_config.find("\"added_tokens_decoder\"");
+  ASSERT_NE(decoder, std::string::npos);
+  const auto object = tokenizer_config.find('{', decoder);
+  ASSERT_NE(object, std::string::npos);
+  tokenizer_config.insert(
+      object + 1,
+      R"("60000":{"content":"<|config_only_added_token|>","lstrip":false,"normalized":false,"rstrip":false,"single_word":false,"special":true},)");
+
+  ScopedTokenizerAssets assets;
+  assets.Write("genai_config.json", config_json_);
+  assets.Write("tokenizer_config.json", tokenizer_config);
+  assets.Write("tokenizer.json", tokenizer_json_);
+  auto path_config = OgaConfig::Create(assets.path.string().c_str());
+  auto path_tokenizer = OgaTokenizer::Create(*path_config);
+  auto memory_config = CreateConfig();
+  memory_config->SetTokenizerData(tokenizer_config, tokenizer_json_);
+  auto memory_tokenizer = OgaTokenizer::Create(*memory_config);
+
+  ASSERT_EQ(path_tokenizer->ToTokenId(token), token_id);
+  EXPECT_EQ(memory_tokenizer->ToTokenId(token), token_id);
+  auto path_tokens = OgaSequences::Create();
+  auto memory_tokens = OgaSequences::Create();
+  path_tokenizer->Encode(token, *path_tokens);
+  memory_tokenizer->Encode(token, *memory_tokens);
+  ASSERT_EQ(path_tokens->SequenceCount(0), 1u);
+  ASSERT_EQ(memory_tokens->SequenceCount(0), 1u);
+  EXPECT_EQ(path_tokens->SequenceData(0)[0], token_id);
+  EXPECT_EQ(memory_tokens->SequenceData(0)[0], token_id);
 }
 
 TEST_F(MemoryAssetsTest, UnigramClassWithBpeVocabularyLoadsFromBlob) {
