@@ -2368,6 +2368,7 @@ void Engine::RunStatic() {
         ++speculative_stats_.target_forward_passes;
       }
       scheduled_requests.GenerateNextTokens(step_results_);
+      model_executor_->OnStepCommitted(scheduled_requests, step_results_);
     } catch (...) {
       MarkUnhealthyAndThrow(
           StepOutcomeKind::FatalExecutionFailure,

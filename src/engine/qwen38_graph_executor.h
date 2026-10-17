@@ -67,12 +67,29 @@ class Qwen38GraphSession {
   // step waits for the cycle in flight, commits it and enqueues the next one before returning its tokens.
   Qwen38StepResult Step(const Qwen38StepRequest& request);
 
-  // The owner leaves (finished, rewound, closed or torn down): waits for work in flight and forgets the owner.
-  void Release() noexcept;
+  // Records the committed token counts after Request::CommitExternalTokens applies EOS, limits, and stop strings.
+  void OnStepCommitted(const RequestStepResult& result);
+
+  const void* Owner() const noexcept { return owner_; }
+
+  // The owner leaves (finished, rewound, replaced, or deallocated): drains work in flight, checks any unchecked decode
+  // status, and forgets the owner.
+  void Release();
+
+  // No-throw variant used by destructors and teardown: captures any status-check failure to report on the next operation.
+  void ReleaseForTeardown() noexcept;
 
   void AddStats(SpeculativeStats& stats) const;
 
  private:
+  struct PendingStep {
+    bool active{};
+    bool is_decode_cycle{};
+    bool mtp{};
+    bool accepted{};
+    size_t produced{};
+  };
+
   bool IsStopToken(int32_t token) const;
   void Begin(const Qwen38StepRequest& request);
 
@@ -85,6 +102,9 @@ class Qwen38GraphSession {
   // Unknown until proven otherwise: the device may hold a previous Engine's state (it outlives its Engine), so the first
   // request always starts with a Reset.
   bool device_dirty_{true};
+  bool status_checked_{true};
+  std::exception_ptr deferred_error_;
+  PendingStep pending_step_{};
   SpeculativeStats stats_;
 };
 
@@ -119,6 +139,8 @@ struct Qwen38GraphExecutor final : ModelExecutor {
   bool SelectsOwnTokens() const override { return true; }
   void ValidateTurn(const EffectiveTurnPolicy& policy, const TurnOptions& options) const override;
   void AddSpeculativeStats(SpeculativeStats& stats) const override { session_->AddStats(stats); }
+  void OnStepCommitted(const ScheduledRequests& scheduled_requests,
+                       std::span<const RequestStepResult> results) override;
 
  private:
   std::shared_ptr<Qwen38GraphSession> session_;

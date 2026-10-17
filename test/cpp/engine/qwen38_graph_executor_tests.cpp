@@ -174,6 +174,11 @@ TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceTokenFirstInACycleEndsTheTurnWithou
   EXPECT_EQ(device_->calls.back(), "advance:0");
   EXPECT_FALSE(device_->inflight());
   EXPECT_EQ(device_->CallCount("wait"), 1u);
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.tokens_emitted, 1u);
+  EXPECT_EQ(stats.tokens_discarded, 2u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 0u);
+  EXPECT_EQ(stats.bonus_tokens, 0u);
 }
 
 TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceTokenSecondInAnAcceptedCycleKeepsTheFirstToken) {
@@ -187,6 +192,11 @@ TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceTokenSecondInAnAcceptedCycleKeepsTh
   EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::EosToken);
   EXPECT_EQ(outcome.usage.generated_tokens, 2u);
   EXPECT_EQ(device_->calls.back(), "advance:0");
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.tokens_emitted, 2u);
+  EXPECT_EQ(stats.tokens_discarded, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+  EXPECT_EQ(stats.bonus_tokens, 0u);
 }
 
 TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceFirstTokenNeverStartsACycle) {
@@ -202,6 +212,10 @@ TEST_F(Qwen38GraphEngineTest, AnEndOfSequenceFirstTokenNeverStartsACycle) {
   EXPECT_EQ(device_->CallCount("begin:0"), 1u);
   EXPECT_EQ(device_->CallCount("wait"), 0u);
   EXPECT_EQ(device_->cycles_enqueued, 0u);
+  const auto stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.tokens_emitted, 0u);
+  EXPECT_EQ(stats.tokens_discarded, 0u);
+  EXPECT_EQ(stats.rounds, 0u);
 }
 
 TEST_F(Qwen38GraphEngineTest, TheSessionLimitEndsTheTurnWithTheContextLimitReason) {
@@ -234,6 +248,11 @@ TEST_F(Qwen38GraphEngineTest, AStopStringEndsTheTurnAndTheWastedLookAheadCycleIs
   EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::StopString);
   EXPECT_EQ(outcome.matched_stop_string_index, 0);
   EXPECT_EQ(outcome.tokens, (std::vector<int32_t>{5, 6}));
+  const auto stop_stats = engine->GetSpeculativeStats();
+  EXPECT_EQ(stop_stats.tokens_emitted, 2u);
+  EXPECT_EQ(stop_stats.tokens_discarded, 1u);
+  EXPECT_EQ(stop_stats.draft_tokens_accepted, 1u);
+  EXPECT_EQ(stop_stats.bonus_tokens, 0u);
   // The device cannot know about stop strings: the cycle after the one that matched is still in flight...
   EXPECT_TRUE(device_->inflight());
 
@@ -243,6 +262,7 @@ TEST_F(Qwen38GraphEngineTest, AStopStringEndsTheTurnAndTheWastedLookAheadCycleIs
   auto next = Begin(*engine, Prompt(5), /*max_generated_tokens=*/3);
   const auto next_outcome = RunToCompletion(*engine, next);
   EXPECT_EQ(device_->CallCount("reset"), resets + 1);
+  EXPECT_EQ(device_->status_checks, 2u);
   EXPECT_EQ(next_outcome.tokens, Expected(5, 3));
 }
 
@@ -612,6 +632,58 @@ TEST_F(Qwen38GraphEngineTest, DeviceErrorBitsAtTheEndOfATurnAreReportedAsAnExecu
     }
   }
   EXPECT_TRUE(saw_failure);
+}
+
+TEST_F(Qwen38GraphEngineTest, DeviceErrorBitsAfterAStopStringTurnAreSurfacedBeforeReset) {
+  device_->overrides[5] = 5;
+  device_->overrides[6] = 6;
+  device_->fail_status_check = true;
+  auto engine = MakeEngine();
+  auto request = engine->CreateRequest();
+  TurnOptions options;
+  options.request = request;
+  options.max_generated_tokens = 20;
+  options.stop_strings = {"STOP"};
+  const uint64_t turn = request->BeginTurn(Prompt(5), options);
+
+  const auto outcome = RunToCompletion(*engine, request);
+  EXPECT_EQ(outcome.finish_reason, GenerationFinishReason::StopString);
+
+  // Releasing the slot for rewind (or starting a new turn/request) drains the look-ahead cycle and checks decode status.
+  EXPECT_THROW(request->RewindToStartOfTurn(turn), std::runtime_error);
+  EXPECT_EQ(device_->status_checks, 1u);
+}
+
+TEST_F(Qwen38GraphEngineTest, DeviceErrorBitsAfterACanceledTurnAreSurfacedOnTheNextRun) {
+  model_->config_->model.qwen38_graph.prefill_chunk_tokens = 64;
+  auto engine = MakeEngine();
+  auto request = engine->CreateRequest();
+  TurnOptions options;
+  options.request = request;
+  const uint64_t turn = request->BeginTurn(Prompt(5), options);
+  std::array<EngineEvent, 8> buffer;
+  ASSERT_GE(engine->Run(buffer), 1u);
+  ASSERT_TRUE(device_->inflight());
+
+  device_->fail_status_check = true;
+  EXPECT_TRUE(engine->CancelRequest(request, turn));
+  ASSERT_EQ(engine->Run(buffer), 1u);
+  EXPECT_EQ(buffer[0].finish_reason, GenerationFinishReason::Canceled);
+
+  // When the next request claims the slot, Release() drains the canceled cycle and surfaces the device status error.
+  auto next = Begin(*engine, Prompt(5, 25), /*max_generated_tokens=*/4);
+  bool saw_failure = false;
+  for (int i = 0; i < 10 && engine->HasPendingRequests() && !saw_failure; ++i) {
+    const size_t count = engine->Run(buffer);
+    for (size_t j = 0; j < count; ++j) {
+      if (buffer[j].flags & EngineEventFlagFailed) {
+        saw_failure = true;
+        EXPECT_EQ(buffer[j].error_code, EngineErrorCode::EngineExecutionFailure);
+      }
+    }
+  }
+  EXPECT_TRUE(saw_failure);
+  EXPECT_EQ(device_->status_checks, 1u);
 }
 
 // ---- capabilities and errors -----------------------------------------------------------------
