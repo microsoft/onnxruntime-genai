@@ -422,6 +422,23 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true prune_lm_head=true
 ```
 
+WebGPU requires a fixed cache capacity. Set `num_blocks` through legacy extra
+options or `runtime_config.engine.dynamic_batching.num_blocks`. Structured
+runtime settings take precedence, and the final configuration must retain a
+positive integer block count.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true num_blocks=1024
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true num_blocks=1024
+```
+
+```bash
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu --runtime_config '{"engine":{"dynamic_batching":{"num_blocks":1024}}}' --extra_options use_paged_attention=true
+```
+
 #### Build a DFlash 2 Block Drafter
 
 Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx` block drafter beside a Qwen3.5 MoE target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DFlash checkpoint. The drafter reuses the target's embedding and LM-head initializers, so both checkpoints must use compatible tensors.
@@ -661,7 +678,7 @@ A multi-token verify forward can additionally carry a window of recurrent/conv s
 
 #### Compact State Updates (Qwen3.5/3.8)
 
-Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled) and requires `use_paged_attention=true`. It must be an integer from `0` through `8`, matching the kernel and runtime-parser bound, because the kernel packs every captured transition for a layer into a single fixed-width capsule output. Paged Qwen3.5/3.8 exports use GatedDeltaNet regardless of `linear_attn_op` and support CUDA with `fp16` or `bf16` model I/O. When enabled, `genai_config.json` records the capacity, the `state_update_capture_count` and `state_update_active` input bindings, and the per-layer convolution-value and recurrent-capsule output templates. All compact state-update inputs and outputs are omitted when `state_update_capacity=0`.
+Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled) and requires `use_paged_attention=true`. It must be an integer from `0` through `8`, matching the kernel and runtime-parser bound, because the kernel packs every captured transition for a layer into a single fixed-width capsule output. Compact state updates support CUDA with `fp16` or `bf16` model I/O. The builder rejects `state_update_capacity > 0` on WebGPU because the GenAI Engine does not yet implement compact state replay on that provider; regular paged WebGPU exports remain supported with `state_update_capacity=0`. Paged Qwen3.5/3.8 exports use GatedDeltaNet regardless of `linear_attn_op`. When enabled, `genai_config.json` records the capacity, the `state_update_capture_count` and `state_update_active` input bindings, and the per-layer convolution-value and recurrent-capsule output templates. All compact state-update inputs and outputs are omitted when `state_update_capacity=0`.
 
 ```bash
 # From wheel:
@@ -673,7 +690,7 @@ python builder.py -m model_name -o path_to_output_folder -p bf16 -e cuda -c cach
 
 #### Select the Qwen3.5/3.8 Recurrent Operator
 
-This scenario is for when you want to choose which contrib operator implements the linear-attention layers of a non-paged Qwen3.5/3.8 export. `linear_attn_op` accepts `linear_attention` (the default), which emits `CausalConvWithState` + `LinearAttention`, or `gated_delta_net`, which emits `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. `gated_delta_net` is CUDA-only, requires `state_window=0`, and supports `fp16` or `bf16` model I/O. Paged exports (`use_paged_attention=true`) always use GatedDeltaNet and therefore also require CUDA; they ignore this option. The default `linear_attention` path requires an ONNX Runtime kernel that implements the selected contrib operator.
+This scenario is for when you want to choose which contrib operator implements the linear-attention layers of a non-paged Qwen3.5/3.8 export. `linear_attn_op` accepts `linear_attention` (the default), which emits `CausalConvWithState` + `LinearAttention`, or `gated_delta_net`, which emits `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. `gated_delta_net` supports CUDA or WebGPU and requires `state_window=0`; CUDA supports `fp16` or `bf16` model I/O, while WebGPU supports `fp16` or `fp32`. Paged exports (`use_paged_attention=true`) always use GatedDeltaNet and ignore this option. They support CUDA with `fp16` or `bf16`, or WebGPU with `fp16` and a fixed `num_blocks` cache capacity. The default `linear_attention` path requires an ONNX Runtime kernel that implements the selected contrib operator.
 
 ```bash
 # From wheel:
@@ -681,6 +698,14 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 
 # From source:
 python builder.py -m model_name -o path_to_output_folder -p bf16 -e cuda -c cache_dir_for_hf_files --extra_options linear_attn_op=gated_delta_net
+```
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p fp16 -e webgpu --extra_options use_paged_attention=true num_blocks=128
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p fp16 -e webgpu --extra_options use_paged_attention=true num_blocks=128
 ```
 
 #### Enable WebGPU Graph Capture

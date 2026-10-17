@@ -224,36 +224,44 @@ def create_dummy_decoder_model(
     # Create a minimal graph: Identity pass-through for state tensors, zeros for logits
     nodes = []
 
-    # Logits: zeros from the decoder input's batch and sequence dimensions.
-    shape_node = helper.make_node("Shape", [decoder_input_name], ["embed_shape"])
-    nodes.append(shape_node)
-
-    gather_batch = helper.make_node("Gather", ["embed_shape", "idx_0"], ["batch_dim"], axis=0)
-    gather_seq = helper.make_node("Gather", ["embed_shape", "idx_1"], ["seq_dim"], axis=0)
+    # Derive the logits shape through WebGPU data operators. Shape/ConstantOfShape would be
+    # assigned to CPU, which makes the decoder ineligible for WebGPU graph capture.
     idx_0_const = helper.make_node(
         "Constant", [], ["idx_0"], value=helper.make_tensor("idx_0", TensorProto.INT64, [], [0])
     )
-    idx_1_const = helper.make_node(
-        "Constant", [], ["idx_1"], value=helper.make_tensor("idx_1", TensorProto.INT64, [], [1])
-    )
-    vocab_const = helper.make_node(
-        "Constant", [], ["vocab_dim"], value=helper.make_tensor("vocab_dim", TensorProto.INT64, [1], [vocab_size])
-    )
-    nodes.extend([idx_0_const, idx_1_const, gather_batch, gather_seq, vocab_const])
+    if use_input_ids:
+        logits_seed = helper.make_node("Cast", [decoder_input_name], ["logits_seed_2d"], to=TensorProto.FLOAT)
+        logits_axes = helper.make_node(
+            "Constant", [], ["logits_axes"], value=helper.make_tensor("logits_axes", TensorProto.INT64, [1], [2])
+        )
+        logits_seed_3d = helper.make_node(
+            "Unsqueeze", ["logits_seed_2d", "logits_axes"], ["logits_seed"]
+        )
+        nodes.extend([logits_seed, logits_axes, logits_seed_3d])
+    else:
+        slice_starts = helper.make_node(
+            "Constant", [], ["slice_starts"], value=helper.make_tensor("slice_starts", TensorProto.INT64, [1], [0])
+        )
+        slice_ends = helper.make_node(
+            "Constant", [], ["slice_ends"], value=helper.make_tensor("slice_ends", TensorProto.INT64, [1], [1])
+        )
+        slice_axes = helper.make_node(
+            "Constant", [], ["slice_axes"], value=helper.make_tensor("slice_axes", TensorProto.INT64, [1], [2])
+        )
+        logits_seed = helper.make_node(
+            "Slice", [decoder_input_name, "slice_starts", "slice_ends", "slice_axes"], ["logits_seed"]
+        )
+        nodes.extend([slice_starts, slice_ends, slice_axes, logits_seed])
 
-    reshape_batch = helper.make_node("Reshape", ["batch_dim", "one_shape"], ["batch_1d"])
-    reshape_seq = helper.make_node("Reshape", ["seq_dim", "one_shape"], ["seq_1d"])
-    one_shape_const = helper.make_node(
-        "Constant", [], ["one_shape"], value=helper.make_tensor("one_shape", TensorProto.INT64, [1], [1])
-    )
-    concat_logits_shape = helper.make_node("Concat", ["batch_1d", "seq_1d", "vocab_dim"], ["logits_shape"], axis=0)
-    zero_logits_node = helper.make_node(
-        "ConstantOfShape",
+    zero_logits_seed = helper.make_node("Sub", ["logits_seed", "logits_seed"], ["zero_logits_seed"])
+    logits_shape = helper.make_node(
+        "Constant",
+        [],
         ["logits_shape"],
-        ["zero_logits"],
-        value=helper.make_tensor("val", TensorProto.FLOAT, [1], [0.0]),
+        value=helper.make_tensor("logits_shape", TensorProto.INT64, [3], [1, 1, vocab_size]),
     )
-    nodes.extend([one_shape_const, reshape_batch, reshape_seq, concat_logits_shape, zero_logits_node])
+    zero_logits_node = helper.make_node("Expand", ["zero_logits_seed", "logits_shape"], ["zero_logits"])
+    nodes.extend([idx_0_const, zero_logits_seed, logits_shape, zero_logits_node])
 
     # Make logits observe the first recurrent-state value. The state starts at zero and is
     # incremented below after every forward, so an integration test can verify that graph capture
