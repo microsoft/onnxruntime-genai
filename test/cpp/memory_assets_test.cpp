@@ -119,7 +119,7 @@ TEST_F(MemoryAssetsTest, RejectsDuplicateAndNonFlatInitializerNames) {
                                  "subdir/weights", "subdir\\weights", "C:weights"}) {
     SCOPED_TRACE(name);
     ExpectError(OgaConfigAddExternalInitializerData(config.get(), name.c_str(),
-                                                   weights_.data(), weights_.size()),
+                                                    weights_.data(), weights_.size()),
                 "flat relative asset name");
   }
 }
@@ -127,15 +127,15 @@ TEST_F(MemoryAssetsTest, RejectsDuplicateAndNonFlatInitializerNames) {
 TEST_F(MemoryAssetsTest, RejectsInvalidInitializerArguments) {
   auto config = CreateConfig();
   ExpectError(OgaConfigAddExternalInitializerData(nullptr, "weights.data",
-                                                 weights_.data(), weights_.size()),
+                                                  weights_.data(), weights_.size()),
               "memory-only config");
   ExpectError(OgaConfigAddExternalInitializerData(config.get(), nullptr,
-                                                 weights_.data(), weights_.size()),
+                                                  weights_.data(), weights_.size()),
               "initializer bytes");
   ExpectError(OgaConfigAddExternalInitializerData(config.get(), "weights.data", nullptr, 1),
               "initializer bytes");
   ExpectError(OgaConfigAddExternalInitializerData(config.get(), "weights.data",
-                                                 weights_.data(), 0),
+                                                  weights_.data(), 0),
               "initializer bytes");
 }
 
@@ -220,7 +220,7 @@ TEST_F(MemoryAssetsTest, GeneratesExpectedTokensFromRegisteredBuffers) {
   const std::vector<int32_t> expected{0, 0, 0, 52, 204, 204, 204, 204, 204, 204};
   ASSERT_EQ(generator->GetSequenceCount(0), expected.size());
   EXPECT_EQ(std::vector<int32_t>(generator->GetSequenceData(0),
-                                generator->GetSequenceData(0) + generator->GetSequenceCount(0)),
+                                 generator->GetSequenceData(0) + generator->GetSequenceCount(0)),
             expected);
   generator.reset();
   parameters.reset();

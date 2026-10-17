@@ -353,8 +353,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaC
  * processors, adapters and custom-ops libraries are outside this contract.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
-                                                           size_t config_json_length,
-                                                           OgaConfig** out);
+                                                             size_t config_json_length,
+                                                             OgaConfig** out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
     OgaConfig* config, const char* filename, const void* data, size_t length);
 // Tokenizer JSON is copied and retained by models/tokenizers using this config.

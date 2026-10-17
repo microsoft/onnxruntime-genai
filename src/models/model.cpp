@@ -952,7 +952,7 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     session = OrtSession::Create(ort_env, graph->second.data(),
                                  graph->second.size(), options.get());
   } else if (auto model_data_it = config_->model_data_spans_.find(model_filename);
-      model_data_it != config_->model_data_spans_.end()) {
+             model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
