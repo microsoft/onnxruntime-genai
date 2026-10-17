@@ -925,7 +925,8 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   return session_options_.get();
 }
 
-std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                                 OrtSessionOptions* session_options, bool is_session_recreation) {
   std::unique_ptr<OrtSession> session;
   if (config_->memory_assets_only_) {
     auto graph = config_->model_data_spans_.find(model_filename);
@@ -956,7 +957,7 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     session = OrtSession::Create(ort_env, graph->second.data(),
                                  graph->second.size(), options.get());
   } else if (auto model_data_it = config_->model_data_spans_.find(model_filename);
-             model_data_it != config_->model_data_spans_.end()) {
+             !is_session_recreation && model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
