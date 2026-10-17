@@ -77,22 +77,25 @@ FetchContent_Declare(
 set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)
 
-# Keep the pinned extension's in-memory Unigram loader from inspecting an empty
-# filesystem path. The reverse check makes repeated configuration idempotent.
-set(_ortx_memory_tokenizer_patch "${CMAKE_CURRENT_LIST_DIR}/onnxruntime_extensions/memory-tokenizer-json-vocab.patch")
-execute_process(
-  COMMAND git apply --reverse --check "${_ortx_memory_tokenizer_patch}"
-  WORKING_DIRECTORY "${onnxruntime_extensions_SOURCE_DIR}"
-  RESULT_VARIABLE _ortx_memory_tokenizer_patch_applied
-  OUTPUT_QUIET ERROR_QUIET
-)
-if(NOT _ortx_memory_tokenizer_patch_applied EQUAL 0)
+# Keep memory tokenizer loading consistent with path-based loading and avoid
+# inspecting an empty filesystem path. Reverse checks make configuration idempotent.
+foreach(_ortx_memory_tokenizer_patch IN ITEMS
+    "${CMAKE_CURRENT_LIST_DIR}/onnxruntime_extensions/memory-tokenizer-json-vocab.patch"
+    "${CMAKE_CURRENT_LIST_DIR}/onnxruntime_extensions/memory-tokenizer-added-tokens.patch")
   execute_process(
-    COMMAND git apply -- "${_ortx_memory_tokenizer_patch}"
+    COMMAND git apply --reverse --check "${_ortx_memory_tokenizer_patch}"
     WORKING_DIRECTORY "${onnxruntime_extensions_SOURCE_DIR}"
-    COMMAND_ERROR_IS_FATAL ANY
+    RESULT_VARIABLE _ortx_memory_tokenizer_patch_applied
+    OUTPUT_QUIET ERROR_QUIET
   )
-endif()
+  if(NOT _ortx_memory_tokenizer_patch_applied EQUAL 0)
+    execute_process(
+      COMMAND git apply -- "${_ortx_memory_tokenizer_patch}"
+      WORKING_DIRECTORY "${onnxruntime_extensions_SOURCE_DIR}"
+      COMMAND_ERROR_IS_FATAL ANY
+    )
+  endif()
+endforeach()
 
 list(APPEND EXTERNAL_LIBRARIES
   onnxruntime_extensions
