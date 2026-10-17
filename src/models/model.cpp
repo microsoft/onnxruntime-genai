@@ -532,6 +532,10 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 }
 
 void Model::AddSharedInitializers() {
+  if (config_->memory_assets_only_ && !config_->model.decoder.shared_initializers.empty()) {
+    throw std::runtime_error("Memory-only loading does not support shared initializer descriptors.");
+  }
+
   for (const auto& initializer : config_->model.decoder.shared_initializers) {
     if (initializer.name.empty() || initializer.data_file.empty() || initializer.length.empty() ||
         initializer.shape.empty() || initializer.data_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
