@@ -77,6 +77,23 @@ FetchContent_Declare(
 set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)
 
+# Keep the pinned extension's in-memory Unigram loader from inspecting an empty
+# filesystem path. The reverse check makes repeated configuration idempotent.
+set(_ortx_memory_tokenizer_patch "${CMAKE_CURRENT_LIST_DIR}/onnxruntime_extensions/memory-tokenizer-json-vocab.patch")
+execute_process(
+  COMMAND git apply --reverse --check "${_ortx_memory_tokenizer_patch}"
+  WORKING_DIRECTORY "${onnxruntime_extensions_SOURCE_DIR}"
+  RESULT_VARIABLE _ortx_memory_tokenizer_patch_applied
+  OUTPUT_QUIET ERROR_QUIET
+)
+if(NOT _ortx_memory_tokenizer_patch_applied EQUAL 0)
+  execute_process(
+    COMMAND git apply -- "${_ortx_memory_tokenizer_patch}"
+    WORKING_DIRECTORY "${onnxruntime_extensions_SOURCE_DIR}"
+    COMMAND_ERROR_IS_FATAL ANY
+  )
+endif()
+
 list(APPEND EXTERNAL_LIBRARIES
   onnxruntime_extensions
   ocos_operators
