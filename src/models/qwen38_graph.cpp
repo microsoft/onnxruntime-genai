@@ -13,6 +13,9 @@
 #include <random>
 #include <sstream>
 #include <thread>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 namespace Generators {
 
@@ -607,7 +610,7 @@ void Qwen38GraphEngine::PrepRow(int rows, int row, const void* tok, const void* 
               in.ple + 2 * static_cast<size_t>(ple_width_) * row, ctl_.data());
   if (in.inputs_embeds && plane_.embed_rows && model_.embed_mapping_) {
     const int embed_width = model_.config_->model.decoder.hidden_size;
-    plane_.embed_rows(stream_, model_.embed_mapping_->data(), in.input_ids + 8 * row,
+    plane_.embed_rows(stream_, model_.embed_mapping_->device_data(), in.input_ids + 8 * row,
                       in.inputs_embeds + 2 * static_cast<size_t>(embed_width) * row, 1, embed_width);
   }
 }
@@ -1026,7 +1029,9 @@ Qwen38CycleRecord Qwen38GraphEngine::WaitCycle() {
   const auto start = Clock::now();
   uint32_t spins = 0;
   while (record[0] != static_cast<int64_t>(seq_)) {
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(_MSC_VER) && defined(_M_X64)
+    _mm_pause();
+#elif defined(__x86_64__) || defined(_M_X64)
     __builtin_ia32_pause();
 #endif
     if (((++spins) & (kStatusRingSpinCheck - 1)) == 0) {
@@ -1108,7 +1113,15 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
 void Qwen38GraphEngine::Warmup() {
   // ORT captures a graph id after min_num_runs eager runs: touch every (rows, phase) and head direction enough times.
   // When CUDA graph capture is disabled (eager offload mode), 3 steps (6 tokens) suffice to warm up all 3 bank phases.
-#if !defined(_WIN32)
+#if defined(_WIN32)
+  if (std::getenv("ORT_FORCE_DETERMINISTIC_MOE") == nullptr) {
+    _putenv_s("ORT_FORCE_DETERMINISTIC_MOE", "1");
+  }
+  struct WarmupEnvGuard {
+    WarmupEnvGuard() { _putenv_s("ORT_QMOE_IN_WARMUP", "1"); }
+    ~WarmupEnvGuard() { _putenv_s("ORT_QMOE_IN_WARMUP", "0"); }
+  } warmup_guard;
+#else
   setenv("ORT_FORCE_DETERMINISTIC_MOE", "1", 0);
   struct WarmupEnvGuard {
     WarmupEnvGuard() { setenv("ORT_QMOE_IN_WARMUP", "1", 1); }
@@ -1256,7 +1269,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
           static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]) * sizeof(uint16_t);
       if (embed_mapping_->size() >= expected_bytes) {
         embed_values_.push_back(OrtValue::CreateTensor(
-            *p_device_->GetMemoryInfo(), embed_mapping_->data(), expected_bytes, embed_shape,
+            *p_device_->GetMemoryInfo(), embed_mapping_->device_data(), expected_bytes, embed_shape,
             ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
         for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
           session_options_->AddInitializer(name, *embed_values_.back());

@@ -15,6 +15,23 @@ import random
 import time
 from pathlib import Path
 
+_WIN_DLL_HANDLES = []
+if os.name == "nt":
+    _extra_dirs = [d for d in os.environ.get("ORT_GENAI_DLL_DIRS", "").split(os.pathsep) if d]
+    _cudnn_home = os.environ.get("CUDNN_HOME", r"C:\cuDNN\9.27.0.42_cuda13")
+    if _cudnn_home:
+        for _sub in (os.path.join("bin", "x64"), "bin"):
+            _extra_dirs.append(os.path.join(_cudnn_home, _sub))
+    _cuda_path = os.environ.get("CUDA_PATH")
+    if _cuda_path:
+        for _sub in (os.path.join("bin", "x64"), "bin"):
+            _extra_dirs.append(os.path.join(_cuda_path, _sub))
+    for _d in _extra_dirs:
+        if os.path.isdir(_d):
+            _WIN_DLL_HANDLES.append(os.add_dll_directory(_d))
+            if _d not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
+
 import numpy as np
 import onnxruntime_genai as og
 
@@ -96,12 +113,20 @@ def token_hash(tokens):
 
 def load_model(package, provider=None, overlay=None):
     """Registers the plugin CUDA EP (`provider` path, default $QWEN_PROVIDER or <package>/provider/libonnxruntime_providers_cuda.so) and loads the package."""
+    if os.name == "nt":
+        pkg_libs = Path(package) / "libs"
+        if pkg_libs.is_dir():
+            _WIN_DLL_HANDLES.append(os.add_dll_directory(str(pkg_libs)))
     provider = provider or os.environ.get("QWEN_PROVIDER")
     if not provider:
-        pkg_provider = Path(package) / "provider" / "libonnxruntime_providers_cuda.so"
+        pkg_provider = Path(package) / "provider" / ("onnxruntime_providers_cuda.dll" if os.name == "nt" else "libonnxruntime_providers_cuda.so")
         if pkg_provider.exists():
             provider = str(pkg_provider)
     if provider:
+        if os.name == "nt":
+            prov_dir = Path(provider).parent
+            if prov_dir.is_dir():
+                _WIN_DLL_HANDLES.append(os.add_dll_directory(str(prov_dir)))
         og.register_execution_provider_library("CUDAExecutionProvider", provider)
     config = og.Config(str(package))
     if overlay:

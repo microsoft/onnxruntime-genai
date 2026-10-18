@@ -35,6 +35,14 @@ float Bf16ToFloat(uint16_t bits) {
   return value;
 }
 
+void SetQwen38EnvVar(const char* name, const char* value) {
+#if defined(_WIN32)
+  _putenv_s(name, value);
+#else
+  setenv(name, value, 1);
+#endif
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------
@@ -84,10 +92,16 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
       const size_t aligned_start = (static_cast<size_t>(entry.offset) / kPage) * kPage;
       const size_t aligned_end =
           std::min(mapping.size(), ((static_cast<size_t>(entry.offset + entry.length) + kPage - 1) / kPage) * kPage);
-      // Large CPU expert banks remain pageable in bounded mode. Global scales and UVA-only
-      // tensors still need registration for the dense session's GPU reads.
+      // Large CPU expert banks remain pageable in bounded mode (and on Windows when no separate dense UVA session exists).
+      // Global scales and UVA-only tensors still need registration for the dense session's GPU reads.
+#if defined(_WIN32)
+      const bool skip_large_cpu_pin =
+          (bounded_host_cache || (sessions_.count("dense") == 0 && (!pin_pool || std::string(pin_pool) != "1")));
+#else
+      const bool skip_large_cpu_pin = bounded_host_cache;
+#endif
       if (aligned_end > aligned_start &&
-          !(bounded_host_cache && entry.placement == "cpu" && entry.length >= (size_t{1} << 20))) {
+          !(skip_large_cpu_pin && entry.placement == "cpu" && entry.length >= (size_t{1} << 20))) {
         raw_ranges[entry.file].emplace_back(aligned_start, aligned_end);
       }
       if (entry.placement == "host_mapped") {
@@ -130,8 +144,34 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::filesystem::pa
       for (const auto& [lo, hi] : merged) {
         void* p = base + lo;
         file_mappings_.at({file, false})->PrepareNumaRange(lo, hi - lo);
+#if defined(_WIN32)
+        if (plane_.host_register(p, hi - lo, 2 | 8) == 0) {
+          registered_ranges_.push_back(p);
+        } else if (sessions_.count("dense") > 0) {
+          plane_.Check(plane_.host_register(p, hi - lo, 2 | 8), "cudaHostRegister(weight pool range)");
+        }
+#else
         plane_.Check(plane_.host_register(p, hi - lo, 2 | 8), "cudaHostRegister(weight pool range)");
         registered_ranges_.push_back(p);
+#endif
+      }
+    }
+    if (plane_.host_get_device_pointer) {
+      for (auto& entry : entries_) {
+        if (entry.placement == "host_mapped" || entry.placement == "cpu") {
+          void* dev_ptr = nullptr;
+          if (plane_.host_get_device_pointer(&dev_ptr, entry.ptr, 0) == 0 && dev_ptr != nullptr &&
+              dev_ptr != entry.ptr) {
+            if (entry.placement == "host_mapped") {
+              entry.value = OrtValue::CreateTensor(memory_info, dev_ptr, static_cast<size_t>(entry.length), entry.shape,
+                                                   static_cast<ONNXTensorElementDataType>(entry.dtype));
+            } else {
+              entry.gpu_mapped_value =
+                  OrtValue::CreateTensor(memory_info, dev_ptr, static_cast<size_t>(entry.length), entry.shape,
+                                         static_cast<ONNXTensorElementDataType>(entry.dtype));
+            }
+          }
+        }
       }
     }
   } catch (...) {
@@ -405,11 +445,9 @@ void Qwen38GraphEngine::FastReset() {
   fast_->states.clear();
   fast_->logits.reset();
   fast_->dense_length = 0;
-#if !defined(_WIN32)
-  setenv("ORT_QMOE_PREFILL_HANDOFF_DONE", "1", 1);
-  setenv("ORT_QMOE_PREFILL_NEW_TURN", "1", 1);
-  setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0", 1);
-#endif
+  SetQwen38EnvVar("ORT_QMOE_PREFILL_HANDOFF_DONE", "0");
+  SetQwen38EnvVar("ORT_QMOE_PREFILL_NEW_TURN", "1");
+  SetQwen38EnvVar("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0");
 }
 
 // One call = whole chunk loop over `tokens`, continuing the dense state of earlier calls (chunked AppendTokens).
@@ -421,18 +459,16 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   ledger_.RequireRoom(n, "the prompt", 3);
   const size_t base = ledger_.Length();
   size_t total_expected = base + n;
-#if !defined(_WIN32)
   if (base == 0) {
-    setenv("ORT_QMOE_PREFILL_NEW_TURN", "1", 1);
+    SetQwen38EnvVar("ORT_QMOE_PREFILL_NEW_TURN", "1");
   }
-  setenv("ORT_QMOE_PREFILL_HANDOFF_DONE", "0", 1);
+  SetQwen38EnvVar("ORT_QMOE_PREFILL_HANDOFF_DONE", "0");
   if (const char* env_tot = std::getenv("ORT_QMOE_PREFILL_TOTAL_TOKENS")) {
     const size_t parsed = static_cast<size_t>(std::strtoull(env_tot, nullptr, 10));
     if (parsed > total_expected) total_expected = parsed;
   }
   const std::string total_str = std::to_string(total_expected);
-  setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", total_str.c_str(), 1);
-#endif
+  SetQwen38EnvVar("ORT_QMOE_PREFILL_TOTAL_TOKENS", total_str.c_str());
   std::vector<int64_t> chunk(n);
   for (size_t i = 0; i < n; ++i) chunk[i] = tokens[i];
   plane_.Check(plane_.memcpy_h2d(d_tokens_.data() + 8 * base, chunk.data(), n * 8, stream_), "upload prompt");
@@ -455,10 +491,12 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       if (pos >= 16384 && max_m > 2048) max_m = std::min<size_t>(max_m, 2048);
       const size_t m = std::min(max_m, n - lo);
       last_m = m;
-#if !defined(_WIN32)
+#if defined(_WIN32)
+      const char* compact_cap = "64";
+#else
       const char* compact_cap = (pos + m <= 2048) ? (m <= 1024 ? "128" : "64") : "128";
-      setenv("ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS", compact_cap, 1);
 #endif
+      SetQwen38EnvVar("ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS", compact_cap);
       plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
                       ctx_b_.data(), f.ples.data());
       plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_b_.data(), 16, stream_), "ctx commit");
@@ -589,15 +627,17 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       max_m = std::min<size_t>(max_m, 2048);
     }
     const size_t m = std::min(max_m, n - lo);
-#if !defined(_WIN32)
     // With Step 3 prefill memory lending:
     // - At m <= 1024 (pos + m <= 2048): 0 layers lent, 128-expert compaction (4 passes) fits in free HBM.
     // - At m == 2048 (pos + m <= 2048): 0 layers lent, 64-expert compaction (8 passes) fits in free HBM.
     // - At pos + m > 2048 (up to 32k): 4,400-7,200 MiB lent, 128-expert compaction (4 passes) with double-buffered DMA.
+#if defined(_WIN32)
+    const char* compact_cap = "64";
+#else
     const char* compact_cap =
         (pos + m <= 2048) ? (m <= 1024 ? "128" : "64") : "128";
-    setenv("ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS", compact_cap, 1);
 #endif
+    SetQwen38EnvVar("ORT_QMOE_CURRENT_MAX_COMPACT_EXPERTS", compact_cap);
     plane_.ple_rows(stream_, params_dev_.data(), d_tokens_.data() + 8 * pos, static_cast<int>(m), ctx_commit_.data(),
                     ctx_b_.data(), f.ples.data());
     plane_.Check(plane_.memcpy_d2d(ctx_commit_.data(), ctx_b_.data(), 16, stream_), "ctx commit");
@@ -697,10 +737,8 @@ void Qwen38GraphEngine::FastHandoff() {
   if (ledger_.Bank() != 0) throw std::logic_error("qwen38_graph: the dense hand-off writes bank 0");
   if (f.dense_length != P) throw std::runtime_error("qwen38_graph: dense state length differs from the prompt length");
   if (f.unified) {
-#if !defined(_WIN32)
-    setenv("ORT_QMOE_PREFILL_HANDOFF_DONE", "1", 1);
-    setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0", 1);
-#endif
+    SetQwen38EnvVar("ORT_QMOE_PREFILL_HANDOFF_DONE", "1");
+    SetQwen38EnvVar("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0");
     return;
   }
   auto dense_ptr = [&](const std::string& name) -> uint8_t* {
@@ -768,10 +806,8 @@ void Qwen38GraphEngine::FastHandoff() {
   SyncStream();  // `lengths` lives on the stack
   f.states.clear();
   f.logits.reset();
-#if !defined(_WIN32)
-  setenv("ORT_QMOE_PREFILL_HANDOFF_DONE", "1", 1);
-  setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0", 1);
-#endif
+  SetQwen38EnvVar("ORT_QMOE_PREFILL_HANDOFF_DONE", "1");
+  SetQwen38EnvVar("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0");
 }
 
 // Batched head prompt prefill: KV-only head model over rows p = 1..P-1 = (token p, target hidden p-1) in chunks, written to

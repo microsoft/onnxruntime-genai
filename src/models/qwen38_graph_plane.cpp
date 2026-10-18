@@ -10,15 +10,14 @@
 #include <stdexcept>
 #include <type_traits>
 
-// The plane loader and the PLE mapping need POSIX (dlopen, mmap). Elsewhere the same entry points report that the model type
-// is unsupported; QWEN38_GRAPH_NO_POSIX forces that variant on any platform (used to compile-check it).
-#if defined(_WIN32) && !defined(QWEN38_GRAPH_NO_POSIX)
-#define QWEN38_GRAPH_NO_POSIX
-#endif
-
 #include "qwen38_numa.h"
 
-#if !defined(QWEN38_GRAPH_NO_POSIX)
+#if defined(_WIN32) && !defined(QWEN38_GRAPH_NO_POSIX)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif !defined(QWEN38_GRAPH_NO_POSIX)
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -37,7 +36,25 @@ constexpr size_t kMaxPleShards = 256;
 
 #if defined(QWEN38_GRAPH_NO_POSIX)
 [[noreturn]] void ThrowUnsupportedPlatform() {
-  throw std::runtime_error("The qwen38_flash_graph model type is only supported on Linux with the CUDA execution provider.");
+  throw std::runtime_error("The qwen38_flash_graph model type is not supported when QWEN38_GRAPH_NO_POSIX is set.");
+}
+#endif
+
+#if defined(_WIN32) && !defined(QWEN38_GRAPH_NO_POSIX)
+bool ReadExactWin32(HANDLE hFile, uint64_t offset, void* dst, size_t bytes) {
+  LARGE_INTEGER li{};
+  li.QuadPart = static_cast<LONGLONG>(offset);
+  if (!SetFilePointerEx(hFile, li, nullptr, FILE_BEGIN)) return false;
+  uint8_t* out = static_cast<uint8_t*>(dst);
+  size_t remaining = bytes;
+  while (remaining > 0) {
+    const DWORD chunk = static_cast<DWORD>(std::min<size_t>(remaining, 64u * 1024u * 1024u));
+    DWORD read_bytes = 0;
+    if (!ReadFile(hFile, out, chunk, &read_bytes, nullptr) || read_bytes == 0) return false;
+    out += read_bytes;
+    remaining -= read_bytes;
+  }
+  return true;
 }
 #endif
 
@@ -50,6 +67,64 @@ constexpr size_t kMaxPleShards = 256;
 
 Qwen38Plane::Qwen38Plane(const std::filesystem::path&) { ThrowUnsupportedPlatform(); }
 Qwen38Plane::~Qwen38Plane() = default;
+
+#elif defined(_WIN32)
+
+Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
+  std::filesystem::path actual_path = path;
+  std::error_code ec;
+  if (actual_path.extension() == ".so") {
+    auto dll_path = actual_path;
+    dll_path.replace_extension(".dll");
+    if (std::filesystem::exists(dll_path, ec)) {
+      actual_path = dll_path;
+    } else {
+      std::string stem = actual_path.stem().string();
+      if (stem.rfind("lib", 0) == 0) {
+        auto stripped = actual_path.parent_path() / (stem.substr(3) + ".dll");
+        if (std::filesystem::exists(stripped, ec)) actual_path = stripped;
+      }
+    }
+  }
+  HMODULE mod = LoadLibraryW(actual_path.wstring().c_str());
+  if (!mod) {
+    const DWORD err = GetLastError();
+    throw std::runtime_error("qwen38_graph: failed to load the plane library " + actual_path.string() +
+                             " (Win32 error " + std::to_string(err) + ")");
+  }
+  handle_ = static_cast<void*>(mod);
+  auto load = [mod](auto& function, const char* symbol_name) {
+    FARPROC symbol = GetProcAddress(mod, symbol_name);
+    if (!symbol) {
+      throw std::runtime_error(std::string("qwen38_graph: the plane library lacks the symbol ") + symbol_name);
+    }
+    function = reinterpret_cast<std::remove_reference_t<decltype(function)> >(symbol);
+  };
+  try {
+#define QWEN38_PLANE_LOAD(ret, name, args) load(name, "qwen38_plane_" #name);
+    QWEN38_PLANE_FUNCTIONS(QWEN38_PLANE_LOAD)
+#undef QWEN38_PLANE_LOAD
+    quantize_kv = reinterpret_cast<decltype(quantize_kv)>(GetProcAddress(mod, "qwen38_plane_quantize_kv"));
+    embed_rows = reinterpret_cast<decltype(embed_rows)>(GetProcAddress(mod, "qwen38_plane_embed_rows"));
+    host_get_device_pointer =
+        reinterpret_cast<decltype(host_get_device_pointer)>(GetProcAddress(mod, "qwen38_plane_host_get_device_pointer"));
+    if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
+      throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
+                               ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
+    }
+    if (sizeof_ple_params() != static_cast<int>(sizeof(Qwen38PleParams))) {
+      throw std::runtime_error("qwen38_graph: the plane library's PLE parameter layout differs from the host definition");
+    }
+  } catch (...) {
+    FreeLibrary(mod);
+    handle_ = nullptr;
+    throw;
+  }
+}
+
+Qwen38Plane::~Qwen38Plane() {
+  if (handle_) FreeLibrary(static_cast<HMODULE>(handle_));
+}
 
 #else
 
@@ -73,6 +148,8 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
 #undef QWEN38_PLANE_LOAD
     quantize_kv = reinterpret_cast<decltype(quantize_kv)>(dlsym(handle_, "qwen38_plane_quantize_kv"));
     embed_rows = reinterpret_cast<decltype(embed_rows)>(dlsym(handle_, "qwen38_plane_embed_rows"));
+    host_get_device_pointer =
+        reinterpret_cast<decltype(host_get_device_pointer)>(dlsym(handle_, "qwen38_plane_host_get_device_pointer"));
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
       throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
                                ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));
@@ -311,6 +388,218 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path&,
   ThrowUnsupportedPlatform();
 }
 Qwen38PleTable::~Qwen38PleTable() = default;
+
+#elif defined(_WIN32)
+
+Qwen38FileMapping::Qwen38FileMapping(Qwen38Plane& plane, const std::filesystem::path& full_path,
+                                     bool register_cuda_mapped)
+    : plane_{plane}, path_{full_path} {
+  HANDLE hFile = CreateFileW(full_path.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (hFile == INVALID_HANDLE_VALUE) {
+    throw std::runtime_error("qwen38_graph: cannot open weight pool file " + full_path.string());
+  }
+  LARGE_INTEGER file_size{};
+  if (!GetFileSizeEx(hFile, &file_size) || file_size.QuadPart <= 0) {
+    CloseHandle(hFile);
+    throw std::runtime_error("qwen38_graph: empty or invalid weight pool file " + full_path.string());
+  }
+  length_ = static_cast<size_t>(file_size.QuadPart);
+  HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+  if (!hMap) {
+    CloseHandle(hFile);
+    throw std::runtime_error("qwen38_graph: CreateFileMappingW failed for " + full_path.string());
+  }
+  void* base = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+  if (!base) {
+    CloseHandle(hMap);
+    CloseHandle(hFile);
+    throw std::runtime_error("qwen38_graph: MapViewOfFile failed for " + full_path.string());
+  }
+  file_handle_ = hFile;
+  map_handle_ = hMap;
+  base_ = base;
+  device_ptr_ = base;
+  if (register_cuda_mapped) {
+    int err = plane_.host_register(base_, length_, 2 | 8);
+    if (err == 0) {
+      registered_ = base_;
+      void* dev_ptr = nullptr;
+      if (plane_.host_get_device_pointer && plane_.host_get_device_pointer(&dev_ptr, base_, 0) == 0 &&
+          dev_ptr != nullptr) {
+        device_ptr_ = dev_ptr;
+      }
+    } else {
+      UnmapViewOfFile(base_);
+      CloseHandle(hMap);
+      map_handle_ = nullptr;
+      base_ = nullptr;
+      void* vbuf = VirtualAlloc(nullptr, length_, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+      if (!vbuf || !ReadExactWin32(hFile, 0, vbuf, length_)) {
+        if (vbuf) VirtualFree(vbuf, 0, MEM_RELEASE);
+        CloseHandle(hFile);
+        file_handle_ = nullptr;
+        throw std::runtime_error("qwen38_graph: failed to read weight pool file into VirtualAlloc buffer: " +
+                                 full_path.string());
+      }
+      CloseHandle(hFile);
+      file_handle_ = nullptr;
+      base_ = vbuf;
+      device_ptr_ = vbuf;
+      virtual_alloc_ = true;
+      try {
+        plane_.Check(plane_.host_register(base_, length_, 2), "cudaHostRegister(weight pool file)");
+        registered_ = base_;
+        void* dev_ptr = nullptr;
+        if (plane_.host_get_device_pointer && plane_.host_get_device_pointer(&dev_ptr, base_, 0) == 0 &&
+            dev_ptr != nullptr) {
+          device_ptr_ = dev_ptr;
+        }
+      } catch (...) {
+        VirtualFree(base_, 0, MEM_RELEASE);
+        base_ = nullptr;
+        device_ptr_ = nullptr;
+        length_ = 0;
+        throw;
+      }
+    }
+  } else if (const char* pin_env = std::getenv("ORTGENAI_PIN_CPU_POOL");
+             pin_env != nullptr && std::string(pin_env) == "1") {
+    if (plane_.host_register(base_, length_, 1 | 8) == 0) {
+      registered_ = base_;
+    }
+  }
+}
+
+void Qwen38FileMapping::PrepareNumaRange(size_t offset, size_t bytes) {
+  if (offset > length_ || bytes > length_ - offset)
+    throw std::runtime_error("qwen38_graph: NUMA range exceeds weight file");
+}
+
+Qwen38FileMapping::~Qwen38FileMapping() {
+  if (registered_) plane_.host_unregister(registered_);
+  if (base_) {
+    if (virtual_alloc_) {
+      VirtualFree(base_, 0, MEM_RELEASE);
+    } else {
+      UnmapViewOfFile(base_);
+    }
+  }
+  if (map_handle_) CloseHandle(static_cast<HANDLE>(map_handle_));
+  if (file_handle_) CloseHandle(static_cast<HANDLE>(file_handle_));
+}
+
+Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& table_path,
+                               const std::filesystem::path& root, int capacity)
+    : plane_{plane} {
+  Qwen38PleDescription description = ParseQwen38PleDescription(table_path);
+  params = description.params;
+  params.capacity = capacity;
+  const auto start = std::chrono::steady_clock::now();
+  SYSTEM_INFO si{};
+  GetSystemInfo(&si);
+  const size_t page = si.dwAllocationGranularity ? static_cast<size_t>(si.dwAllocationGranularity) : 65536u;
+  const char* pin_ple_env = std::getenv("ORT_QMOE_WIN_PIN_PLE");
+  const bool pin_ple = (pin_ple_env != nullptr && std::string(pin_ple_env) == "1");
+  params.pad_ = pin_ple ? 0 : 1;
+  long long first_row = 0;
+  try {
+    for (size_t i = 0; i < description.shards.size(); ++i) {
+      const auto& shard = description.shards[i];
+      const std::filesystem::path full = root / shard.path;
+      HANDLE hFile = CreateFileW(full.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (hFile == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("qwen38_graph: cannot open the PLE shard file " + full.string());
+      }
+      const size_t bytes = static_cast<size_t>(shard.rows) * static_cast<size_t>(params.head_dim);
+      const uint64_t aligned = (shard.offset / page) * page;
+      const size_t delta = static_cast<size_t>(shard.offset - aligned);
+      HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+      void* base = nullptr;
+      if (hMap) {
+        base = MapViewOfFile(hMap, FILE_MAP_READ, static_cast<DWORD>(aligned >> 32),
+                             static_cast<DWORD>(aligned & 0xFFFFFFFFu), bytes + delta);
+      }
+      if (base && !pin_ple) {
+        auto* rows = static_cast<unsigned char*>(base) + delta;
+        mappings_.push_back(Mapping{base, bytes + delta, nullptr, hFile, hMap, false});
+        params.shard_ptr[i] = rows;
+        first_row += shard.rows;
+        params.shard_end[i] = first_row;
+        continue;
+      }
+      if (base) {
+        auto* rows = static_cast<unsigned char*>(base) + delta;
+        if (plane.host_register(rows, bytes, 2 | 8) == 0) {
+          mappings_.push_back(Mapping{base, bytes + delta, rows, hFile, hMap, false});
+          void* dev_rows = nullptr;
+          if (plane.host_get_device_pointer && plane.host_get_device_pointer(&dev_rows, rows, 0) == 0 &&
+              dev_rows != nullptr) {
+            params.shard_ptr[i] = static_cast<const unsigned char*>(dev_rows);
+          } else {
+            params.shard_ptr[i] = rows;
+          }
+          first_row += shard.rows;
+          params.shard_end[i] = first_row;
+          continue;
+        }
+        UnmapViewOfFile(base);
+      }
+      if (hMap) CloseHandle(hMap);
+      void* vbuf = VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+      if (!vbuf || !ReadExactWin32(hFile, shard.offset, vbuf, bytes)) {
+        if (vbuf) VirtualFree(vbuf, 0, MEM_RELEASE);
+        CloseHandle(hFile);
+        throw std::runtime_error("qwen38_graph: failed to read PLE shard into VirtualAlloc buffer: " + full.string());
+      }
+      CloseHandle(hFile);
+      mappings_.push_back(Mapping{vbuf, bytes, nullptr, nullptr, nullptr, true});
+      plane.Check(plane.host_register(vbuf, bytes, 2), "cudaHostRegister(PLE shard)");
+      mappings_.back().registered = vbuf;
+      void* dev_vbuf = nullptr;
+      if (plane.host_get_device_pointer && plane.host_get_device_pointer(&dev_vbuf, vbuf, 0) == 0 &&
+          dev_vbuf != nullptr) {
+        params.shard_ptr[i] = static_cast<const unsigned char*>(dev_vbuf);
+      } else {
+        params.shard_ptr[i] = static_cast<unsigned char*>(vbuf);
+      }
+      first_row += shard.rows;
+      params.shard_end[i] = first_row;
+    }
+  } catch (...) {
+    for (auto& mapping : mappings_) {
+      if (mapping.registered) plane_.host_unregister(mapping.registered);
+      if (mapping.base) {
+        if (mapping.virtual_alloc) {
+          VirtualFree(mapping.base, 0, MEM_RELEASE);
+        } else {
+          UnmapViewOfFile(mapping.base);
+        }
+      }
+      if (mapping.map_handle) CloseHandle(static_cast<HANDLE>(mapping.map_handle));
+      if (mapping.file_handle) CloseHandle(static_cast<HANDLE>(mapping.file_handle));
+    }
+    mappings_.clear();
+    throw;
+  }
+  register_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
+Qwen38PleTable::~Qwen38PleTable() {
+  for (auto& mapping : mappings_) {
+    if (mapping.registered) plane_.host_unregister(mapping.registered);
+    if (mapping.base) {
+      if (mapping.virtual_alloc) {
+        VirtualFree(mapping.base, 0, MEM_RELEASE);
+      } else {
+        UnmapViewOfFile(mapping.base);
+      }
+    }
+    if (mapping.map_handle) CloseHandle(static_cast<HANDLE>(mapping.map_handle));
+    if (mapping.file_handle) CloseHandle(static_cast<HANDLE>(mapping.file_handle));
+  }
+}
 
 #else
 

@@ -36,6 +36,7 @@ struct Qwen38Plane {
   void (*quantize_kv)(void* stream, const void* src, void* dst, const void* scale, int rows, int src_pitch_elems,
                       int dst_pitch_elems, int mode){};
   void (*embed_rows)(void* stream, const void* table, const void* ids, void* out, int rows, int width){};
+  int (*host_get_device_pointer)(void** dev_ptr, void* host_ptr, unsigned flags){};
 
  private:
   void* handle_{};
@@ -117,6 +118,7 @@ struct Qwen38FileMapping {
   Qwen38FileMapping& operator=(const Qwen38FileMapping&) = delete;
 
   uint8_t* data() const { return static_cast<uint8_t*>(base_); }
+  uint8_t* device_data() const { return static_cast<uint8_t*>(device_ptr_ ? device_ptr_ : base_); }
   size_t size() const { return length_; }
   void PrepareNumaRange(size_t offset, size_t bytes);
 
@@ -124,8 +126,12 @@ struct Qwen38FileMapping {
   Qwen38Plane& plane_;
   std::filesystem::path path_;
   void* base_{};
+  void* device_ptr_{};
   size_t length_{};
   void* registered_{};
+  void* file_handle_{};
+  void* map_handle_{};
+  bool virtual_alloc_{};
 };
 
 // Throws std::runtime_error on a wrong header, non-consecutive pool ids, an unknown pool id in a session line, or a file
@@ -167,6 +173,9 @@ struct Qwen38PleTable {
     void* base{};
     size_t length{};
     void* registered{};
+    void* file_handle{};
+    void* map_handle{};
+    bool virtual_alloc{};
   };
   Qwen38Plane& plane_;
   std::vector<Mapping> mappings_;
