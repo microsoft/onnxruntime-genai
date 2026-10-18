@@ -441,13 +441,13 @@ void Qwen38GraphEngine::BuildFastPrefill() {
 }
 
 void Qwen38GraphEngine::FastReset() {
+  SetQwen38EnvVar("ORT_QMOE_PREFILL_HANDOFF_DONE", "0");
+  SetQwen38EnvVar("ORT_QMOE_PREFILL_NEW_TURN", "1");
+  SetQwen38EnvVar("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0");
   if (!fast_) return;
   fast_->states.clear();
   fast_->logits.reset();
   fast_->dense_length = 0;
-  SetQwen38EnvVar("ORT_QMOE_PREFILL_HANDOFF_DONE", "0");
-  SetQwen38EnvVar("ORT_QMOE_PREFILL_NEW_TURN", "1");
-  SetQwen38EnvVar("ORT_QMOE_PREFILL_TOTAL_TOKENS", "0");
 }
 
 // One call = whole chunk loop over `tokens`, continuing the dense state of earlier calls (chunked AppendTokens).

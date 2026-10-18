@@ -33,13 +33,22 @@ static PleParams g_host_ple_params{};
 static bool g_has_host_ple_params = false;
 
 struct StagedPleWorkspace {
-  i64* scalars = nullptr;            // pinned [4]: tok, pos, c0, c1
+  i64* scalars = nullptr;            // pinned [64]: tok/ctl words + ctx_in
   unsigned char* prep_ring = nullptr; // pinned mapped [64 * 8192]
   unsigned int ring_idx = 0;
   i64* prefill_tokens = nullptr;     // pinned [cap_rows]
   unsigned char* prefill_fp8 = nullptr; // pinned mapped [cap_rows * max_total]
   size_t prefill_cap_rows = 0;
   size_t prefill_cap_bytes = 0;
+  const void* cached_state_ptr = nullptr;
+  const void* cached_ctx_out_ptr = nullptr;
+  i64 cached_c0 = 0;
+  i64 cached_c1 = 0;
+  static constexpr size_t kCacheSlots = 2048;
+  static constexpr size_t kMaxRowBytes = 8192;
+  unsigned char* ngram_cache_data = nullptr;
+  i64 ngram_cache_keys[kCacheSlots][3]{};
+  unsigned char ngram_cache_valid[kCacheSlots]{};
 };
 
 static StagedPleWorkspace g_staged_ple{};
@@ -50,6 +59,11 @@ static inline void ensure_prep_workspace() {
   }
   if (!g_staged_ple.prep_ring) {
     cudaHostAlloc((void**)&g_staged_ple.prep_ring, 64 * 8192, cudaHostAllocMapped | cudaHostAllocPortable);
+  }
+  if (!g_staged_ple.ngram_cache_data) {
+    g_staged_ple.ngram_cache_data =
+        (unsigned char*)malloc(StagedPleWorkspace::kCacheSlots * StagedPleWorkspace::kMaxRowBytes);
+    memset(g_staged_ple.ngram_cache_valid, 0, sizeof(g_staged_ple.ngram_cache_valid));
   }
 }
 
@@ -74,6 +88,23 @@ static inline void host_gather_ple_row(const PleParams& HP, i64 tok, i64 s_c0, i
   const i64 c1 = s_c1;
   const i64 c0 = (c1 == HP.eos) ? HP.eos : s_c0;
   const int hd = HP.head_dim;
+  const size_t total_bytes = (size_t)HP.n_heads * (size_t)hd;
+  size_t cache_slot = 0;
+  const bool use_cache = (g_staged_ple.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
+  if (use_cache) {
+    const unsigned long long h =
+        ((unsigned long long)tok * 11400714819323198485ULL) ^
+        ((unsigned long long)c1 * 14029467366897019727ULL) ^
+        ((unsigned long long)c0 * 1609587929392839161ULL);
+    cache_slot = (size_t)(h & (StagedPleWorkspace::kCacheSlots - 1));
+    if (g_staged_ple.ngram_cache_valid[cache_slot] &&
+        g_staged_ple.ngram_cache_keys[cache_slot][0] == tok &&
+        g_staged_ple.ngram_cache_keys[cache_slot][1] == c0 &&
+        g_staged_ple.ngram_cache_keys[cache_slot][2] == c1) {
+      memcpy(dst_fp8, g_staged_ple.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, total_bytes);
+      return;
+    }
+  }
   for (int h = 0; h < HP.n_heads; ++h) {
     unsigned long long mixed = (unsigned long long)tok * (unsigned long long)HP.mult[0];
     mixed ^= (unsigned long long)c1 * (unsigned long long)HP.mult[1];
@@ -94,6 +125,13 @@ static inline void host_gather_ple_row(const PleParams& HP, i64 tok, i64 s_c0, i
     const i64 row_idx = id - first;
     const unsigned char* src = HP.shard_ptr[lo] + (size_t)row_idx * (size_t)hd;
     memcpy(dst_fp8 + (size_t)h * (size_t)hd, src, (size_t)hd);
+  }
+  if (use_cache) {
+    memcpy(g_staged_ple.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, dst_fp8, total_bytes);
+    g_staged_ple.ngram_cache_keys[cache_slot][0] = tok;
+    g_staged_ple.ngram_cache_keys[cache_slot][1] = c0;
+    g_staged_ple.ngram_cache_keys[cache_slot][2] = c1;
+    g_staged_ple.ngram_cache_valid[cache_slot] = 1;
   }
 }
 
@@ -540,14 +578,51 @@ QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* t
   if (g_has_host_ple_params && g_host_ple_params.pad_ == 1) {
     ensure_prep_workspace();
     cudaStream_t stream = (cudaStream_t)s;
-    cudaMemcpyAsync(&g_staged_ple.scalars[0], tok_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(&g_staged_ple.scalars[1], pos_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(&g_staged_ple.scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-    const i64 tok = g_staged_ple.scalars[0];
-    const i64 pos = g_staged_ple.scalars[1] + pos_add;
-    const i64 s_c0 = g_staged_ple.scalars[2];
-    const i64 s_c1 = g_staged_ple.scalars[3];
+    const i64* state_i64 = (const i64*)state;
+    i64 tok = 0, pos = 0, s_c0 = 0, s_c1 = 0;
+    const i64* expected_fold_tok_ptr =
+        (pos_add == 1) ? (state_i64 + 2) : ((pos_add == 2) ? (state_i64 + 8) : ((pos_add == 3) ? (state_i64 + 9) : nullptr));
+    if (pos_add >= 1 && pos_add <= 3 && state != nullptr &&
+        state == g_staged_ple.cached_state_ptr &&
+        pos_ptr == (state_i64 + 1) &&
+        tok_ptr == expected_fold_tok_ptr &&
+        ctx_in == g_staged_ple.cached_ctx_out_ptr) {
+      // Fast path for folded multi-draft rows 1..3: reuse the 10-word `ctl` snapshot copied on row 0
+      // with zero additional D2H copies and zero cudaStreamSynchronize calls!
+      const int ctl_idx = (pos_add == 1) ? 2 : ((pos_add == 2) ? 8 : 9);
+      tok = g_staged_ple.scalars[ctl_idx];
+      pos = g_staged_ple.scalars[1] + pos_add;
+      s_c0 = g_staged_ple.cached_c0;
+      s_c1 = g_staged_ple.cached_c1;
+      g_staged_ple.cached_ctx_out_ptr = ctx_out;
+      g_staged_ple.cached_c0 = s_c1;
+      g_staged_ple.cached_c1 = tok;
+    } else if (pos_add == 0 && state != nullptr && tok_ptr == state_i64 && pos_ptr == (state_i64 + 1)) {
+      // Row 0 of EnqueueFold / EnqueueVerify / EnqueueStep: copy all 10 words of `ctl` (`ctl[0..9]`)
+      // plus `ctx_in[0..1]` in one batch so subsequent draft rows 1..3 need no stream synchronization.
+      cudaMemcpyAsync(&g_staged_ple.scalars[0], state_i64, 10 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+      cudaMemcpyAsync(&g_staged_ple.scalars[10], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+      cudaStreamSynchronize(stream);
+      tok = g_staged_ple.scalars[0];
+      pos = g_staged_ple.scalars[1];
+      s_c0 = g_staged_ple.scalars[10];
+      s_c1 = g_staged_ple.scalars[11];
+      g_staged_ple.cached_state_ptr = state;
+      g_staged_ple.cached_ctx_out_ptr = ctx_out;
+      g_staged_ple.cached_c0 = s_c1;
+      g_staged_ple.cached_c1 = tok;
+    } else {
+      g_staged_ple.cached_state_ptr = nullptr;
+      g_staged_ple.cached_ctx_out_ptr = nullptr;
+      cudaMemcpyAsync(&g_staged_ple.scalars[0], tok_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
+      cudaMemcpyAsync(&g_staged_ple.scalars[1], pos_ptr, sizeof(i64), cudaMemcpyDeviceToHost, stream);
+      cudaMemcpyAsync(&g_staged_ple.scalars[2], ctx_in, 2 * sizeof(i64), cudaMemcpyDeviceToHost, stream);
+      cudaStreamSynchronize(stream);
+      tok = g_staged_ple.scalars[0];
+      pos = g_staged_ple.scalars[1] + pos_add;
+      s_c0 = g_staged_ple.scalars[2];
+      s_c1 = g_staged_ple.scalars[3];
+    }
     unsigned char* slot = g_staged_ple.prep_ring + ((g_staged_ple.ring_idx++ & 63u) * 8192u);
     host_gather_ple_row(g_host_ple_params, tok, s_c0, s_c1, slot);
     k_prep_staged<<<1, 1024, 0, stream>>>((const PleParams*)P, tok, pos, s_c1, slot, (i64*)ctx_out, (i64*)input_ids,
