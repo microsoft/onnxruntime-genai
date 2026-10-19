@@ -6,18 +6,19 @@ every other vision-language model in ONNX Runtime GenAI it runs as three ONNX mo
 
 | Model | Inputs | Outputs |
 | --- | --- | --- |
-| `vision.onnx` | `pixel_values`, `pixel_attention_mask`, `spatial_shapes` | `image_features` |
+| `vision_encoder.onnx` | `pixel_values`, `pixel_attention_mask`, `spatial_shapes` | `image_features` |
 | `embeddings.onnx` | `input_ids`, `image_features` | `inputs_embeds` |
 | `model.onnx` (decoder) | `inputs_embeds`, `attention_mask`, `position_ids`, KV + conv cache | `logits` |
 
-Only the decoder is produced by the model builder in this repository; the vision tower and the
-embedding model are exported separately, as with Gemma-3 and Phi-3 vision.
+The model builder produces the decoder, and the vision model comes from the published ONNX exports.
+`lfm2_vl_embedding`, a tool next to the model builder, builds the embedding model from the checkpoint
+and writes the configs.
 
 ## Steps
 
 1. [Build the decoder](#1-build-the-decoder)
-2. [Get the vision and embedding models](#2-get-the-vision-and-embedding-models)
-3. [Write `genai_config.json` and `processor_config.json`](#3-write-genai_configjson-and-processor_configjson)
+2. [Get the vision model](#2-get-the-vision-model)
+3. [Add the embedding model and the configs](#3-add-the-embedding-model-and-the-configs)
 4. [Run the model](#4-run-the-model)
 5. [Known limitations](#5-known-limitations)
 
@@ -25,7 +26,7 @@ embedding model are exported separately, as with Gemma-3 and Phi-3 vision.
 
 ```bash
 # Download the PyTorch model
-$ huggingface-cli download LiquidAI/LFM2.5-VL-1.6B --local-dir ./lfm2.5-vl-1.6b/pytorch
+$ hf download LiquidAI/LFM2.5-VL-1.6B --local-dir ./lfm2.5-vl-1.6b/pytorch
 
 # Build the decoder as INT4 with FP32 inputs/outputs for CPU
 $ python3 -m onnxruntime_genai.models.builder \
@@ -43,7 +44,7 @@ token embeddings before the decoder runs. The builder writes `"type": "lfm2_vl"`
 second form is a plain text-only LFM2 model that happens to come from a VLM checkpoint, and it runs
 through the normal `AppendTokens` path with no vision or embedding model.
 
-## 2. Get the vision and embedding models
+## 2. Get the vision model
 
 ONNX exports of the vision tower and projector exist for every model in the line. The vision graph
 is `onnx/embed_images.onnx` in
@@ -55,7 +56,18 @@ onnx-community [LFM2-VL-450M-ONNX](https://huggingface.co/onnx-community/LFM2-VL
 [LFM2-VL-1.6B-ONNX](https://huggingface.co/onnx-community/LFM2-VL-1.6B-ONNX) and
 [LFM2-VL-3B-ONNX](https://huggingface.co/onnx-community/LFM2-VL-3B-ONNX) repositories for the first
 generation. Download the graph together with every `*.onnx_data*` file next to it (the LFM2.5-VL-3B
-export is split into four). All of them have the signature ONNX Runtime GenAI expects:
+export is split into four) and copy them into the decoder folder:
+
+```bash
+$ hf download LiquidAI/LFM2.5-VL-1.6B-ONNX --include "onnx/embed_images.onnx*" \
+    --local-dir ./lfm2.5-vl-1.6b/onnx
+$ cp ./lfm2.5-vl-1.6b/onnx/onnx/embed_images.onnx* ./lfm2.5-vl-1.6b/cpu/
+```
+
+Copy the files rather than symlink them (hard links are fine): ONNX Runtime refuses an external data
+file that resolves outside the model folder.
+
+All of these graphs have the signature ONNX Runtime GenAI expects:
 
 | Name | Shape | Type |
 | --- | --- | --- |
@@ -69,77 +81,51 @@ grid as `(rows, cols)`, and the graph drops the masked padding positions itself,
 `image_features` is the concatenation of every image's projected tokens with nothing in between.
 `hidden_size` is the decoder's hidden size (1024 for 450M, 2048 for 1.6B and 3B).
 
-The embedding model is a small graph that looks up `input_ids` in the decoder's embedding table and
-scatters `image_features` into the positions holding the image token (`image_token_id` in
-`config.json`: 396 for the 450M and 1.6B models, 124907 for the 3B model). A Gather followed by a
-ScatterND over the flattened sequence is enough; build it from
-`model.language_model.embed_tokens.weight` in the checkpoint, or reuse `onnx/embed_tokens.onnx` from
-the repository above and add the scatter.
+## 3. Add the embedding model and the configs
 
-## 3. Write `genai_config.json` and `processor_config.json`
-
-Add `embedding` and `vision` sections to the `genai_config.json` the builder produced. Leave the
-`decoder` and `search` sections it wrote alone:
-
-```json
-{
-    "model": {
-        "bos_token_id": 1,
-        "context_length": 128000,
-        "decoder": { "...": "written by the model builder" },
-        "embedding": {
-            "filename": "embeddings.onnx",
-            "inputs": {
-                "input_ids": "input_ids",
-                "image_features": "image_features"
-            },
-            "outputs": {
-                "inputs_embeds": "inputs_embeds"
-            },
-            "session_options": {
-                "log_id": "onnxruntime-genai",
-                "provider_options": []
-            }
-        },
-        "eos_token_id": 7,
-        "pad_token_id": 0,
-        "type": "lfm2_vl",
-        "vision": {
-            "filename": "vision.onnx",
-            "config_filename": "processor_config.json",
-            "patch_size": 16,
-            "spatial_merge_size": 2,
-            "max_num_patches": 1024,
-            "inputs": {
-                "pixel_values": "pixel_values",
-                "attention_mask": "pixel_attention_mask",
-                "image_sizes": "spatial_shapes"
-            },
-            "outputs": {
-                "image_features": "image_features"
-            },
-            "session_options": {
-                "log_id": "onnxruntime-genai",
-                "provider_options": []
-            }
-        },
-        "vocab_size": 65536
-    },
-    "search": { "...": "written by the model builder" }
-}
+```bash
+$ curl -O https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/src/python/py/models/lfm2_vl_embedding.py
+$ python3 lfm2_vl_embedding.py \
+    -i ./lfm2.5-vl-1.6b/pytorch \
+    -o ./lfm2.5-vl-1.6b/cpu \
+    --vision embed_images.onnx
 ```
 
-The three vision fields drive the image processor and must match the model's `config.json`:
+The tool is newer than onnxruntime-genai 0.18.0, so the first line downloads it. With a newer wheel,
+run `python3 -m onnxruntime_genai.models.lfm2_vl_embedding` with the same arguments instead.
+`--vision` names the vision graph in the decoder folder; leave it out for `vision_encoder.onnx`. The
+tool:
 
-| `genai_config.json` | `config.json` | LFM2-VL / LFM2.5-VL value |
+- builds `embeddings.onnx`. It looks up `input_ids` in the checkpoint's
+  `model.language_model.embed_tokens.weight` and scatters `image_features` into the positions holding
+  the image token (`image_token_id` in `config.json`: 124907 for LFM2.5-VL-3B, 396 for the others).
+  The table takes the type of the decoder's `inputs_embeds` (float32 or float16), and
+  `image_features` are cast to that type when they differ.
+- adds the `embedding` and `vision` sections to the `genai_config.json` the builder wrote. Both
+  models get the decoder's execution provider options without graph capture, which only suits the
+  decoder: a captured graph replays the shapes of its first run. This was checked on CPU, CUDA and
+  WebGPU.
+- writes `processor_config.json` from the checkpoint's image processor settings.
+
+It checks the folder and the checkpoint before it writes anything. Run it again after every
+decoder build, since the builder rewrites `genai_config.json`.
+
+The three vision fields drive the image processor and come from the image processor settings:
+
+| `genai_config.json` | image processor setting | LFM2-VL / LFM2.5-VL value |
 | --- | --- | --- |
 | `vision.patch_size` | `encoder_patch_size` | 16 |
 | `vision.spatial_merge_size` | `downsample_factor` | 2 |
-| `vision.max_num_patches` | `max_image_tokens * downsample_factor²` | 1024 |
+| `vision.max_num_patches` | `max_num_patches` (`max_image_tokens * downsample_factor²`) | 1024 |
 
-Every LFM2-VL and LFM2.5-VL model published so far shares these values, so the same
-`processor_config.json` serves the whole line, with one exception: the `Resize` step's
-`interpolation` must follow the upstream model's `resample`, which is not the same across the line:
+`max_num_patches` is the sequence length every image is padded to so that several images can share
+one vision run; set it to `0` to pad each batch to its own longest image instead, which is cheaper
+but only valid if the vision graph accepts a dynamic patch count.
+
+`processor_config.json` decodes each image, smart-resizes it so the patch count lands between
+`min_image_tokens` and `max_image_tokens` after the projector's 2× pixel unshuffle, then rescales and
+normalizes with mean/std `0.5`. The `Resize` step's `interpolation` follows the upstream model's
+`resample`, which is not the same across the line:
 
 | Model | Upstream `resample` | `interpolation` |
 | --- | --- | --- |
@@ -147,41 +133,9 @@ Every LFM2-VL and LFM2.5-VL model published so far shares these values, so the s
 | LFM2.5-VL-3B | `3` (bicubic), in `processor_config.json` | `CUBIC` |
 | LFM2.5-VL-450M, LFM2.5-VL-1.6B | `2` (bilinear), in `processor_config.json` | `LINEAR` |
 
-`max_num_patches` is the sequence length every image is padded to so that several images can share
-one vision run; set it to `0` to pad each batch to its own longest image instead, which is cheaper
-but only valid if the vision graph accepts a dynamic patch count.
-
-Start from [`test/models/lfm2-vl/processor_config.json`](../../test/models/lfm2-vl/processor_config.json).
-It decodes each image, smart-resizes it so the patch count lands between `min_image_tokens` and
-`max_image_tokens` after the projector's 2× pixel unshuffle, then rescales and normalizes with
-mean/std `0.5`. The shipped file uses `LINEAR`, so write it next to `genai_config.json` with the
-interpolation taken from the upstream model rather than copying it as is:
-
-```python
-import json
-from pathlib import Path
-
-pytorch_dir = Path("./lfm2.5-vl-1.6b/pytorch")
-output_dir = Path("./lfm2.5-vl-1.6b/cpu")
-
-# LFM2.5-VL keeps the image processor settings in processor_config.json, LFM2-VL in preprocessor_config.json.
-upstream = json.loads((pytorch_dir / "processor_config.json").read_text())
-upstream = upstream.get("image_processor", upstream)
-if "resample" not in upstream:
-    upstream = json.loads((pytorch_dir / "preprocessor_config.json").read_text())
-interpolation = {2: "LINEAR", 3: "CUBIC"}[upstream["resample"]]
-
-config = json.loads(Path("test/models/lfm2-vl/processor_config.json").read_text())
-for transform in config["processor"]["transforms"]:
-    if transform["operation"]["type"] == "Resize":
-        transform["operation"]["attrs"]["interpolation"] = interpolation
-(output_dir / "processor_config.json").write_text(json.dumps(config, indent=2))
-```
-
 Using `LINEAR` on a bicubic model still runs, but the pixels drift from the reference: on
 LFM2-VL-450M the largest per-pixel difference from the Hugging Face processor grows from 1 to 33
-levels out of 255. If you change `min_image_tokens` or `max_image_tokens`, update the `min_pixels` /
-`max_pixels` attributes of the `Resize` step to `tokens * encoder_patch_size² * downsample_factor²`.
+levels out of 255. The tool refuses other `resample` values.
 
 ## 4. Run the model
 
