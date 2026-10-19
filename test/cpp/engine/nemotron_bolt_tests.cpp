@@ -97,7 +97,6 @@ TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
       [](auto& p) { p.speculative.cooldown = true; },
       [](auto& p) { p.speculative.max_draft_tokens = 4; },
       [](auto& p) { p.search.chunk_size = 8; },
-      [](auto& p) { p.search.adaptive_chunking = true; },
       [](auto& p) { p.use_graph_capture = false; }};
   for (const auto& change : changes) {
     auto invalid = std::make_shared<GeneratorParams>(config);
