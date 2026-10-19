@@ -24,6 +24,9 @@ onnx = pytest.importorskip("onnx")
 # Extractor runs a part of a graph.
 onnx_utils = pytest.importorskip("onnx.utils")
 ort = pytest.importorskip("onnxruntime")
+if not hasattr(ort, "InferenceSession"):
+    # _builder_test_utils puts an empty onnxruntime module in place when the package is missing.
+    pytest.skip("onnxruntime is not installed", allow_module_level=True)
 
 lfm2_module = load_builder_module("lfm2")
 ir = lfm2_module.ir

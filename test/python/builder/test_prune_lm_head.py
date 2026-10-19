@@ -18,6 +18,9 @@ from _builder_test_utils import load_builder_module, ort_runs_causal_conv_with_s
 torch = pytest.importorskip("torch")
 pytest.importorskip("onnx")
 ort = pytest.importorskip("onnxruntime")
+if not hasattr(ort, "InferenceSession"):
+    # _builder_test_utils puts an empty onnxruntime module in place when the package is missing.
+    pytest.skip("onnxruntime is not installed", allow_module_level=True)
 
 base_module = load_builder_module("base")
 ir = base_module.ir
