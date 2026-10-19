@@ -614,17 +614,6 @@ struct DecoderOutputs_Element : JSON::Element {
   Config::Model::Decoder::Outputs& v_;
 };
 
-struct StringArray_Element : JSON::Element {
-  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
-  }
-
- private:
-  std::vector<std::string>& v_;
-};
-
 struct IntArray_Element : JSON::Element {
   explicit IntArray_Element(std::vector<int>& v) : v_{v} {}
 
@@ -3472,14 +3461,6 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
 
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
   ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{total_device_memory_bytes, std::nullopt});
-}
-
-void OverlayMetadataCoreConfig(MetadataCoreConfig& config, std::string_view json) {
-  MetadataCoreConfig candidate{config};
-  MetadataCoreConfig_Element root{candidate};
-  RootObject_Element element{root};
-  JSON::Parse(element, json);
-  std::swap(config, candidate);
 }
 
 fs::path Config::ResolvePath(std::string_view value) const {
