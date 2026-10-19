@@ -1650,6 +1650,7 @@ def test_qwen38_config_assigns_embedding_annotation_to_cpu():
     model = object.__new__(Qwen4ExpTextModel)
     model.ep = "cuda"
     model.ple_token_pad_id = 248044
+    model.indexer_compress_ratio = 4
     model.fixed_indexer_cache = True
     model.input_names = {"past_sequence_length": "past_sequence_length"}
     genai_config = {"model": {"decoder": {"inputs": {}, "outputs": {}, "session_options": {}}}}
@@ -1667,6 +1668,7 @@ def test_qwen38_external_engram_keeps_decoder_cuda_only():
     model.ep = "cuda"
     model.external_engram = True
     model.ple_token_pad_id = 248044
+    model.indexer_compress_ratio = 4
     model.fixed_indexer_cache = True
     model.input_names = {"past_sequence_length": "past_sequence_length"}
     genai_config = {"model": {"decoder": {"inputs": {}, "outputs": {}, "session_options": {}}}}

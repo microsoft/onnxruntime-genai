@@ -18,6 +18,7 @@ class Qwen38Engram:
         )
         flatten_dims = [-1, self.ple_embed_dim] if self.use_paged_attention else [0, 0, self.ple_embed_dim]
         if not getattr(self, "external_engram", False) or self.use_paged_attention:
+            eos_token_id = self.get_engram_pad_id(embedding.eos_token_id)
             multipliers = f"model.layers.{layer_id}.ple.layer_multipliers"
             vocab_sizes = f"model.layers.{layer_id}.ple.head_vocab_sizes"
             offsets = f"model.layers.{layer_id}.ple.head_offsets"
@@ -25,7 +26,7 @@ class Qwen38Engram:
             self.make_initializer(embedding.layer_multipliers, multipliers)
             self.make_initializer(embedding.ngram_heads_vocab_sizes, vocab_sizes)
             self.make_initializer(embedding.ngram_heads_offsets, offsets)
-            self.make_initializer(torch.tensor(embedding.eos_token_id, dtype=torch.int64), eos)
+            self.make_initializer(torch.tensor(eos_token_id, dtype=torch.int64), eos)
             ngram_inputs = [self.input_names["input_ids"], multipliers, vocab_sizes]
             if self.use_paged_attention:
                 ngram_inputs.append(self.input_names["cumulative_sequence_lengths"])
@@ -46,7 +47,7 @@ class Qwen38Engram:
                 domain="com.microsoft",
                 max_ngram_size=self.ngram_size,
                 n_head_per_ngram=self.heads_per_ngram,
-                pad_id=embedding.eos_token_id,
+                pad_id=eos_token_id,
                 reset_on_eos=1,
                 **(
                     {"state_update_capacity": state_update_capacity}

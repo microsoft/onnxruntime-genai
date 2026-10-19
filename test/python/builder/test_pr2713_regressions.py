@@ -17,6 +17,19 @@ qwen = load_builder_module("qwen3_8")
 graph_module = load_builder_module("qwen3_8_graph")
 
 
+@pytest.mark.parametrize("eos,expected", [(0, 0), (42, 42), ([7, 8], 7), ((9, 10), 9)])
+def test_engram_pad_id_normalizes_scalar_or_multiple_eos_ids(eos, expected):
+    model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
+    assert model.get_engram_pad_id(eos) == expected
+
+
+@pytest.mark.parametrize("eos", [[], None, -1, 1.5, True])
+def test_engram_pad_id_rejects_missing_or_invalid_ids(eos):
+    model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
+    with pytest.raises(ValueError, match="Engram requires"):
+        model.get_engram_pad_id(eos)
+
+
 @pytest.mark.parametrize("op_type", ["EngramGate", "NGramHashMapping"])
 @pytest.mark.parametrize("missing_operator", [True, False])
 def test_engram_capability_probe_only_skips_unregistered_operators(monkeypatch, op_type, missing_operator):

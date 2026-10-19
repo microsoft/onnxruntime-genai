@@ -7,6 +7,15 @@ import torch
 class EngramWeights:
     CPU_EMBEDDING_ANNOTATION = "cpu_embedding"
 
+    def get_engram_pad_id(self, eos_token_id):
+        if isinstance(eos_token_id, (list, tuple)):
+            if not eos_token_id:
+                raise ValueError("Engram requires a nonempty eos_token_id list.")
+            eos_token_id = eos_token_id[0]
+        if type(eos_token_id) is not int or eos_token_id < 0:
+            raise ValueError("Engram requires a nonnegative integer eos_token_id.")
+        return eos_token_id
+
     def prepare_engram_embedding(self, table):
         weight = table.weight.detach().cpu()
         scale = getattr(table, "weight_scale", None)
@@ -31,10 +40,12 @@ class EngramWeights:
 
 
 class Qwen38EngramLoader:
+    get_engram_pad_id = EngramWeights.get_engram_pad_id
+
     def make_ple(self, prefix):
         ple = self.make_namespace(prefix)
         embedding = ple.ple_embedding
-        embedding.eos_token_id = self.text_config["eos_token_id"]
+        embedding.eos_token_id = self.get_engram_pad_id(self.text_config["eos_token_id"])
         table = embedding.ngram_embedding
         if not hasattr(table, "weight"):
             shard_names = [name for name in vars(table) if name.startswith("shard_")]

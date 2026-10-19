@@ -410,6 +410,7 @@ def test_qwen4_exp_config_emits_packed_indexer_state_group(monkeypatch, tmp_path
     model.num_layers = 1
     model.ple_layer_ids = set()
     model.ple_token_pad_id = 248044
+    model.indexer_compress_ratio = 4
     model.fixed_indexer_cache = False
     model.input_names.update(
         {

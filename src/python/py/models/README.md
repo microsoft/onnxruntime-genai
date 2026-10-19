@@ -711,6 +711,11 @@ require vision or embedding companion graphs.
 
 Engram token history follows the decoder's `past.%d.ple_tokens` / `present.%d.ple_tokens` naming convention, using the zero-based PLE layer ID. Its config uses `inputs.past_ple_token_names` and `outputs.present_ple_token_names` with concrete bindings such as `past.1.ple_tokens` and `present.1.ple_tokens`. The runtime also accepts the legacy `past_tokens` and `present_tokens` keys for older exports.
 
+`model.decoder.ple_token_pad_id` is always emitted as a scalar integer. If the
+checkpoint lists multiple EOS IDs, the first is the Engram reset/padding ID.
+The decoder also records `indexer_compress_ratio` from the architecture config
+so dense speculative rollback does not assume a four-token compression block.
+
 For paged decoding, the runtime packs Engram's `[batch_size, sequence_length, ple_embed_dim]` output into the decoder's `[num_tokens, ple_embed_dim]` `engram_embeddings` input. The decoder does not consume or forward Engram's token-history output. Its small token-history operation supplies the final PLE history directly and, with compact speculative-state capture enabled, records per-token rollback snapshots; it does not perform another embedding lookup.
 
 ```bash
