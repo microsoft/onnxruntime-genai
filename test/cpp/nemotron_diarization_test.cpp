@@ -115,7 +115,7 @@ struct DiarizationTestPipeline {
     state = source.get();
     generator->state_ = std::move(source);
     config.type = "nemotron_speech";
-    processor = std::make_unique<Generators::TokenPostProcessor>(*model, *generator);
+    processor = std::make_unique<Generators::TokenPostProcessor>(*generator);
   }
 };
 }  // namespace

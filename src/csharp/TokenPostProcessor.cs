@@ -8,11 +8,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         private readonly Generator _generator;
         private object _resultLifetime = new object();
 
-        public TokenPostProcessor(Model model, Generator generator)
+        public TokenPostProcessor(Generator generator)
         {
-            if (model == null) throw new ArgumentNullException(nameof(model));
             _generator = generator ?? throw new ArgumentNullException(nameof(generator));
-            Result.VerifySuccess(NativeMethods.OgaCreateTokenPostProcessor(model.Handle, generator.Handle, out _handle));
+            Result.VerifySuccess(NativeMethods.OgaCreateTokenPostProcessor(generator.Handle, out _handle));
         }
 
         private IntPtr Handle
