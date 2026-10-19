@@ -1,222 +1,219 @@
-# Metadata Decoding
+# Token Post-Processing
 
-`TokenizerStream` owns the Extensions decoder cache and its private
-`MetadataCoreState`. Public C/C++/C#/Python bindings expose decode and finalize
-operations returning typed metadata, never a state handle.
+`TokenPostProcessor(model, generator)` owns a tokenizer, an ordinary tokenizer
+stream, `MetadataCoreState`, word grouping, acoustic interval buffers, and the
+results completed by the latest processing call. Configuration comes from the
+model's `genai_config.json`. Callers do not create or pass token metadata records.
 
-For plain text (including when a timestamp-configured tokenizer is used for text
-only), the generator returns token IDs; decode and append each incremental text
-fragment. A stream that selects text decoding drops its unused default metadata state:
+## Processing Loop
 
-```cpp
-auto stream = OgaTokenizerStream::Create(*tokenizer);
-while (!generator->IsDone()) {
-  generator->GenerateNextToken();
-  for (int32_t token_id : generator->GetNextTokens()) {
-    ProcessText(stream->Decode(token_id));
-  }
-}
-```
-
-For timestamps (`word` or `segment`) or diarization, the stream initializes metadata state
-from the tokenizer configuration when created. The generator returns each ID with
-an acoustic frame interval; Extensions
-returns decoded text and completed word token spans. The stream joins the spans
-to buffered intervals and returns word/segment events:
+Create the generator and processor from the same model, after configuring the
+model's timestamp level. The generator must outlive the processor. Only
+`batch_size=1` and `num_beams=1` are supported; other values are rejected.
 
 ```cpp
-auto stream = OgaTokenizerStream::Create(*tokenizer);
+auto postprocessor = OgaTokenPostProcessor::Create(*model, *generator);
 while (!generator->IsDone()) {
   generator->GenerateNextToken();
-  const auto tokens = generator->GetNextTokensWithMetadata();
-  for (const auto& token : tokens) {
-    const auto& metadata = stream->DecodeWithMetadata(token);
-    ProcessText(metadata.text);
-    if (metadata.timestampMetadata) {
-      const auto& timestamps = *metadata.timestampMetadata;
-      for (size_t word_index = 0; word_index < timestamps.word_count; ++word_index)
-        ProcessWord(timestamps.words[word_index]);
+  postprocessor->ProcessNextTokens();
+  for (const auto* result : postprocessor->GetNextTokenResults()) {
+    ProcessText(result->GetText());
+    if (const auto* timestamps = result->GetTimestamps()) {
+      for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
+        ProcessWord(timestamps->GetWord(index));
+      for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index)
+        ProcessSegment(timestamps->GetSegment(index));
     }
   }
 }
-ProcessTrailingMetadata(stream->FinalizeMetadata());
+postprocessor->Finalize();
+for (const auto* result : postprocessor->GetNextTokenResults()) {
+  if (const auto* timestamps = result->GetTimestamps()) {
+    for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
+      ProcessWord(timestamps->GetWord(index));
+    for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index)
+      ProcessSegment(timestamps->GetSegment(index));
+  }
+}
 ```
 
-`ProcessText` may display partial text as it arrives, while `ProcessWord` handles
-completed timestamped words; they should not both be appended to the same transcript.
-`FinalizeMetadata()` flushes a trailing word or segment without generating another token.
+`ProcessNextTokens()` consumes all emissions from the current generation step in
+order. A step can emit zero tokens or multiple sequential tokens. Call it once
+after each generation step, before advancing the generator again. There is no
+generation-step counter or duplicate-processing detection.
 
-The loop assumes one decoding sequence, such as a Nemotron transducer stream.
-For batches or beams, route each independent sequence to its own tokenizer stream.
-`GetNextTokensWithMetadata()` reads the latest generated tokens without advancing
-generation. Pass each returned record directly to `DecodeWithMetadata(token)`;
-callers need not unpack or interpret the metadata fields. Each record contains a
-`token_id` and optional `token_acoustic_frame_interval`, a pair of 64-bit integers
-ordered `(start, stop)`. The absolute acoustic frame interval is half-open
-`[start, stop)`; it is not restricted to one frame. When the generator's model
-timestamp level is `off` and diarization is disabled, the getter does not read or validate acoustic timing and
-marks it absent. Models without acoustic timing also return records without it.
-Timestamp- or diarization-enabled decoding rejects absent timing before consuming the token;
-fully disabled decoding accepts the record and skips timing retention.
-Plain `GetNextTokens()` still returns IDs only and is unchanged.
+`GetNextTokenResults()` only reads the latest results. Repeated reads do not
+decode, flush, or otherwise change state. Results are per-call events, not
+cumulative history; retain any history the application needs. Incremental text
+and completed words/segments are alternative transcript representations: do not
+append both to the same transcript.
 
-The C getter `OgaGenerator_GetNextTokensWithMetadata` returns a borrowed array of
-records valid until the next generator operation or destruction. Each record stores
-its interval inline; `has_token_acoustic_frame_interval == 0` means timing is absent.
-Copying a record by value also copies its interval, so the copy survives subsequent
-generator operations and generator destruction.
+`Finalize()` flushes the final word and unfinished segment without inserting a
+token. Read its results through the same getter. Repeated finalization emits no
+duplicate words or segments. `Reset()` discards pending decoding, grouping,
+intervals, segments, and results together, using the processor's copied model
+configuration for a fresh sequence. It does not reset the generator.
 
-The C++ wrapper returns a vector of copied `OgaTokenMetadataInput` records. Python
-binds the same value type as `TokenMetadataInput` and exposes timing as a tuple or
-`None`. C# copies the record into a managed `TokenMetadataInput` with a nullable
-`(long start, long stop)` tuple. The C decoder takes a pointer to a whole
-`OgaTokenMetadataInput`; the wrappers pass their copied values for the decode call.
-Callers still pass the returned token object directly to decoding. Reading result
-fields does not advance decoding.
+## Internal Flow
 
-`OgaTokenMetadataOutput` contains decoded `text` and nullable `timestampMetadata`. Timestamp
-data contains `words`/`word_count` and `segments`/`segment_count`, with text, frame,
-and second intervals in each record. No per-field native getter calls are required.
-The C entry points are `OgaTokenizerStreamDecodeWithMetadata` and
-`OgaTokenizerStreamFinalizeMetadata` for both timestamps and diarization.
-C# returns `TokenMetadataOutput` with `Text` and nullable
-`TokenMetadataTimestamp`. Python returns an owned `TokenMetadataOutput` with `.text` and
-`.timestamp_metadata` (None when disabled); the timestamp object contains `.words` and
-`.segments` lists of `TokenMetadataTimestampRecord` objects. Words and segments remain
-nested under the timestamp field in both bindings.
+The following native method flow starts after `Generator::GenerateNextToken()`
+has produced a step's token IDs and acoustic intervals. It shows timestamps
+enabled; the processor handles every emission in order, including empty decoded
+fragments. The language bindings forward processing to this same native path.
 
-`Tokenizer` stores internal model-derived metadata settings, including timestamp
-level, frame duration, and segment rules. Each stream automatically copies those
-settings when metadata is enabled. Configure them on the model before creating the
-tokenizer; the stream has no public metadata-state creation or override methods.
-When all features are disabled, metadata state is created only if metadata
-decoding or finalization is requested.
-`Tokenizer::UpdateOptions()` forwards Extensions string options; it does not
-change these GenAI model-derived settings. Per-cache producer configuration is
-determined by the tokenizer configuration.
-Enabled timestamps require a positive sample rate, hop length, and subsampling
-factor. Configuration is copied into the state and stays fixed until reset.
-
-Metadata state creation configures the stream's Extensions cache through
-`OrtxSetDetokenizerCacheMetadataConfig`. This overrides shared tokenizer metadata
-options only for that cache. Streams sharing a tokenizer have independent
-accumulators and decoder caches. When timestamps and diarization are both disabled, streams do not buffer
-token intervals or accumulate words and segments, return a null
-`timestampMetadata`, and impose no timing requirement.
-
-## Decode and Process
-
-The public `DecodeWithMetadata(token)`
-retains the supplied ID and enabled feature data, decodes once through Extensions, and runs enabled
-post-processing before returning. Generator-specific retrieval belongs to
-`GetNextTokensWithMetadata()`, not the tokenizer. Callers pass the records to decoding
-in order, keeping independent sequences in separate streams.
-Creating metadata state does not enable timing collection in an existing generator;
-configure the model's timestamp/diarization options before creating the generator.
-
-The stream has one metadata decoder and one finalizer, both using its owned state.
-Decode validates the selected token and timing before advancing Extensions, then
-`MetadataCoreState` buffers the token interval, matches completed-word token spans
-to their first and last intervals, and directly publishes per-call word/segment
-records. It retains intervals until Extensions' pending-token watermark releases
-them; unfinished segments persist between calls. When timestamp production is enabled,
-the generator getter checks that model-produced interval counts match emitted token
-counts and pairs them by position; missing intervals are an error. IDs can repeat
-and cannot be used to look up timing.
-
-An enabled timestamp consumer receives each token's timing, including steps that
-complete no words. Results contain only events completed by the current call, not
-cumulative history. Completed text is owned by the state and the C records borrow
-it until the next stream operation.
-
-Finalization flushes Extensions, completes trailing words and segments, and publishes
-the same result shape without adding a token. Repeating stream
-finalization returns no duplicate words or segments. Finalization does not inject
-a token. Decoding may resume after finalization; use reset for an independent sequence.
-
-## Ownership and Lifecycle
-
-Text and calculated timestamp records are GenAI-owned. Native result pointers are
-borrowed from the stream: do not retain them across decoding, finalization, reset,
-or destruction. Copy any output that must survive the next operation. Reads and
-operations on the same stream require external serialization.
-
-Each stream has independent state. Mixing text-only and metadata decoding requires
-`Reset()`, which discards pending work, recreates the decoder cache and restores
-fresh model-derived metadata state if enabled. Destruction releases that state.
-
-Metadata decode and finalization use the stream's model-derived state automatically.
-If all features are off, they create a disabled state on first use. Disabled features
-return null data, while ordinary decoded text remains available. `Reset()` restores
-the tokenizer defaults. The first decode or
-metadata finalization chooses a mode; switching modes afterward requires another reset.
-
-Public native metadata outputs and all nested pointers are stream-owned until the next
-decode/finalize/reset or destruction. Python and C# copy them into owned snapshots.
-The C-compatible field layouts are the contract; use compatible headers and native
-packages. Never free borrowed result pointers.
-
-## Configuration and Public Bindings
-
-In C/C++/C#/Python, configure the model, create a tokenizer and a tokenizer stream,
-then call metadata decode directly. Model-enabled features are initialized on stream
-creation and restored on reset. Neither the state nor its configuration is exposed
-through the stream's public API.
-
-```csharp
-using var config = new Config(modelPath);
-config.Overlay(@"{""model"":{""timestamp_level"":""segment"",
-  ""segment_separators"":[""."",""!"",""?""],
-  ""segment_gap_threshold_seconds"":0.26}}");
-using var tokenizer = new Tokenizer(config);
-using var stream = tokenizer.CreateStream();
+```mermaid
+flowchart TD
+  process["TokenPostProcessor::ProcessNextTokens()"] --> clear["Clear previous results"]
+  clear --> outputs["Generator::GetTokenOutputs() - private"]
+  outputs --> tokens["TransducerState::GetStepTokens()"]
+  tokens --> config["Check generator model timestamp_level != Off"]
+  config --> intervals["TransducerState::GetStepTokenIntervals()<br/>Validate interval count equals token count"]
+  intervals --> set["TokenOutputs::SetTimestamps()"]
+  set --> access["TokenOutputs::GetTokens() / GetTimestamps()"]
+  access --> each{"Another emitted token?"}
+  each -->|Yes| validate["MetadataCoreState::ValidateInput()<br/>TimestampsEnabled(): require 0 <= start < stop"]
+  validate --> enabled["MetadataCoreState::TimestampsEnabled()"]
+  enabled --> facts["Tokenizer::GetWordPieceInfo(token_id)"]
+  facts --> lookup["Extensions: OrtxGetTokenWordPieceInfo()"]
+  lookup --> decode["TokenizerStream::Decode(token_id)"]
+  decode --> cache["Extensions: OrtxDetokenizeCached()"]
+  cache --> result["Create processor-owned result<br/>Store exact decoded text"]
+  result --> metadata["MetadataCoreState::ProcessDecoded(token, piece, result)<br/>Detailed flow below"]
+  metadata --> each
+  each -->|No| done["ProcessNextTokens() returns"]
+  done -.->|Caller reads| read["TokenPostProcessor::GetNextTokenResults()<br/>GetText() / nullable GetTimestamps()"]
 ```
 
-The tokenizer reads `sample_rate`, `hop_length`, and `subsampling_factor` from
-`model` in the package's `genai_config.json`. Levels are `off`, `word`, and `segment`;
-`all` is rejected. The default is `off`. The optional gap is specified in non-negative
-seconds (or `null` to disable it), then rounded to the nearest acoustic frame.
-Zero and positive gaps below half a frame split each word into its own segment.
-The model's default separators are `.`, `?`, and `!`. A model that requests timestamps
-without positive timing values fails rather than silently disabling timestamps.
-The native result metadata remains a directly readable typed structure.
+The private generator getter views existing token and interval storage without
+advancing generation. It is accessible only to the native processor, not through
+the public C, C++, C#, or Python generator APIs. `GenerateNextToken()` is unchanged.
+`TokenOutputs` hides its storage behind accessors; disabled timestamp data is null.
+The getter selects optional timestamp output from
+`model_->config_->model.timestamp_level` directly. The transducer's cached
+timestamp flag controls interval production only; it does not select the getter's
+output fields. A token/interval count mismatch fails before per-token decoding.
 
-## Adding a Feature
+Extensions owns vocabulary-specific facts: `is_special`, `starts_word`,
+`ends_word`, and `boundary_style`. Its standalone lookup is independent of decoder
+history and runs before ordinary decoding only when timestamps are enabled. It neither groups words nor owns
+timestamp state. The tokenizer and stream have no timestamp configuration or
+special metadata decode mode.
 
-Add model-derived settings to the stream's internal metadata configuration, configure the corresponding Extensions
-producer per cache, and process its per-step data in `MetadataCoreState` (or an owned
-helper). Keep unfinished work across calls and clear only completed per-call outputs
-at the start of each decode/finalize operation. Validate inputs before advancing
-Extensions. Finalization and invalidation must include the feature. No additional
-feature-specific stream decode method or runtime registry is required.
+GenAI consumes every token, including empty decoded fragments caused by buffered
+UTF-8 or skipped special tokens. Grouping preserves exact whitespace and
+punctuation. Half-open token spans map to the first and last contributing acoustic
+intervals by position, never by token ID. Intervals remain buffered until no
+pending word or decoder output needs them. Unfinished segments persist across
+processing calls.
 
-This workflow requires Extensions with the per-cache configuration API. The local
-integration build uses the modified Extensions checkout; the packaged dependency
-revision must be updated once that API is committed and available.
+### MetadataCoreState Calls
 
-## Speaker attribution
+`ProcessDecoded()` writes into the result created by the processor; it does not
+construct another output representation. `PublishWord()` evaluates word output
+first, then segment output. The conditional branches below show its possible
+helper calls, not concurrent processing.
 
-The token record includes a presence flag and inline speaker-evidence boundary
-snapshots: eight cumulative probability sums at the start and stop boundaries,
-plus their evaluated-frame counts. Tokens still decode once. Zero-token audio
-chunks contribute internally; they require no metadata-only input or drain call.
-`MetadataCoreState` retains evidence with token intervals until Extensions' pending
-token watermark releases it. Extensions' `TokenizerDiarization` class provides
-speaker aggregation and speaker-change detection. Its methods are stateless;
-buffer ownership remains in `MetadataCoreState`. Timestamp-only segment helpers
-remain separate, and there is no additional metadata-state lifecycle.
+```mermaid
+flowchart TD
+  decoded["MetadataCoreState::ProcessDecoded()"] --> enabled["TimestampsEnabled()"]
+  enabled --> retain["Create result.timestamps<br/>Append this token's acoustic interval to pending buffer"]
+  retain --> group["TokenWordGroupingState::Process(piece, result.text)"]
+  group -.->|For nonempty text parts| parts["ProcessTextPart()<br/>IsWhitespace() / IsPunctuation()<br/>Append() / CompleteWord() as needed"]
+  group --> completed["MetadataCoreState::ProcessCompletedWords()"]
+  completed --> words["TokenWordGroupingState::CompletedWords()"]
+  words --> align["For each completed word:<br/>validate token span; take first.start and last.stop"]
+  align --> publish["MetadataCoreState::PublishWord(text, interval, timestamps)"]
+  publish -->|word or all| word["AddRecord(timestamps.words)<br/>RoundTimestamp(start and stop seconds)"]
+  publish -->|segment or all| gap["Check gap against pending segment"]
+  gap -->|Gap completes prior segment| prior["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
+  gap --> pending["Start or extend pending segment text and interval"]
+  prior --> pending
+  pending --> separator["EndsWithSeparator() for configured suffixes"]
+  separator -->|Suffix completes segment| finish["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
+  completed --> release["After all completed words:<br/>TokenWordGroupingState::FirstPendingTokenIndex()<br/>Release intervals before that watermark"]
+  release --> returned["Return to TokenPostProcessor with result populated"]
+```
 
-Output records include `has_timestamp` and nullable `speaker_label`. Diarization
-with timestamps off returns speaker-turn segments under the same metadata member,
-with timing absent. Python timing fields become `None`, and C# timing fields become
-nullable; labels are `.speaker_label` and `.SpeakerLabel`. Do not interpret zero
-native timing values as presence: inspect `has_timestamp`.
+The grouper buffers incomplete words, whitespace, and UTF-8 output. It may
+complete zero or multiple words from one token. `AddRecord()` preserves text and
+frame bounds and converts each bound to seconds with `RoundTimestamp()`. No
+completed-word event means no word/segment publication, but pending intervals and
+grouping state still advance. A suffix-BPE end marker can also call
+`CompleteWord()` directly from `Process()`.
 
-There is one metadata contract for all feature combinations. The original C
-records include the speaker-evidence, timestamp-presence, and speaker-label
-fields; their layouts differ from the timestamp-only draft. Rebuild native callers
-against matching headers and binaries, and upgrade managed bindings together
-with the native library. No runtime layout negotiation or legacy conversion is provided.
+After the last generation step, flush pending work without decoding a token:
 
-See [Nemotron streaming diarization](nemotron_speech_timestamps.md#streaming-diarization)
-for graph requirements, shared VAD, right-context, and finalization.
+```mermaid
+flowchart TD
+  finalize["TokenPostProcessor::Finalize()<br/>Clear previous results; create final result"] --> state["MetadataCoreState::ProcessFinalized()"]
+  state --> enabled["TimestampsEnabled()"]
+  enabled --> group["TokenWordGroupingState::Finalize()<br/>Append() pending delimiter; CompleteWord()"]
+  group --> words["MetadataCoreState::ProcessCompletedWords()<br/>Same alignment/publication path as above"]
+  words --> segment["MetadataCoreState::CompleteSegment()<br/>Flush any remaining segment with AddRecord()"]
+  segment -.->|Caller reads| results["GetNextTokenResults()"]
+```
+
+## Configuration
+
+Timestamp levels are `off` (default), `word`, `segment`, and `all`. Enabled
+timestamps require a model that produces acoustic intervals, currently
+`nemotron_speech`, with positive `sample_rate`, `hop_length`, and
+`subsampling_factor`. Being an ASR model alone is not sufficient. Missing or
+invalid intervals fail before decoding the affected token.
+
+`segment_separators` defaults to `.`, `?`, and `!`. The optional
+`segment_gap_threshold_seconds` is non-negative or `null`; it is rounded to the
+nearest acoustic frame. Zero and positive gaps below half a frame split each word
+into its own segment. When timestamps are off, ordinary text is still returned,
+without timestamp records, interval buffering, or word/segment accumulation.
+
+See [Nemotron speech timestamps](nemotron_speech_timestamps.md) for acoustic
+origins and interval semantics. Diarization is not implemented by this processor.
+
+## Bindings and Lifetime
+
+C exposes opaque `OgaTokenPostProcessor`, `OgaTokenPostProcessorResult`,
+`OgaTokenPostProcessorTimestamp`, and
+`OgaTokenPostProcessorTimestampRecord` handles, with typed getters for text,
+timestamp presence, word/segment counts, records, frame bounds, and second bounds.
+Result and record layouts are private. An out-of-range C result or record lookup
+returns null; the C++ record accessor throws `std::out_of_range`.
+
+Results, nested timestamp records, and native strings are borrowed until the next processor mutation
+or destruction, not the next getter or generator operation. Never free them;
+copy anything needed afterward. Operations and borrowed reads on one processor
+must be externally serialized. Independent processors have independent state.
+
+`MetadataCoreState` populates the processor's canonical results directly. There
+is no intermediate metadata output or conversion to a second result model. The
+processor owns one immutable configuration; metadata state reads that same object.
+
+Python uses `TokenPostProcessor(model, generator)`, `process_next_tokens()`,
+`get_next_token_results()`, `finalize()`, and `reset()`. Borrowed
+`TokenPostProcessorResult` objects expose `get_text()` and nullable
+`get_timestamps()`. Timestamp objects expose `get_words()` and `get_segments()`;
+records expose `get_text()`, `get_start_frame()`, `get_stop_frame()`,
+`get_start_time()`, and `get_stop_time()`.
+
+C# uses `TokenPostProcessor(model, generator)`, `ProcessNextTokens()`,
+`GetNextTokenResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
+`TokenPostProcessorResult` objects expose `GetText()` and nullable `GetTimestamps()`.
+Timestamp objects expose `GetWords()` and `GetSegments()`; records expose
+`GetText()`, `GetStartFrame()`, `GetStopFrame()`, `GetStartTime()`, and `GetStopTime()`.
+
+Python and C# wrap the same native results without copying their payload. They
+reject access to results or nested records invalidated by processing, finalization,
+reset, or disposal. Repeated getters do not invalidate results. Read the result,
+append needed strings and scalar values to application-owned transcript storage,
+and discard the borrowed object before processing more tokens. Returned strings
+and scalar values are independent values; the result wrappers are not snapshots.
+
+Bindings retain the generator against garbage collection. C# rejects explicitly
+disposed generators before entering native processing. Native C/C++ callers must
+keep the generator alive until after processor destruction; no native lifetime
+sentinel or generation-step counter is used.
+
+Ordinary `TokenizerStream.Decode()` and `Reset()` remain available and unchanged
+for callers needing only text. No public generator-output getter, metadata input
+type, tokenizer metadata decode method, or separate metadata state handle is
+required.

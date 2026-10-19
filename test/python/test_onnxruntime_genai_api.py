@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -78,72 +79,236 @@ def test_requested_timestamps_reject_invalid_model_config(test_data_path, model_
         config.overlay(json.dumps({"model": {"type": model_type, "timestamp_level": "word", **timing}}))
 
 
-def test_tokenizer_stream_timestamp_initialization(test_data_path):
-    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
-    config = og.Config(model_path)
-    config.overlay(json.dumps({"model": {
-        "type": "nemotron_speech", "timestamp_level": "word", "segment_separators": ["."],
-        "sample_rate": 100, "hop_length": 10, "subsampling_factor": 1,
-    }}))
-    tokenizer = og.Tokenizer(config)
-    stream = tokenizer.create_stream()
-    result = stream.finalize_metadata()
-    assert isinstance(result, og.TokenMetadataOutput)
-    assert result.text == ""
-    assert isinstance(result.timestamp_metadata, og.TokenMetadataTimestamp)
-    assert result.timestamp_metadata.words == []
-    assert result.timestamp_metadata.segments == []
-    stream.reset()
-    assert stream.finalize_metadata().timestamp_metadata.words == []
-
-    stream.reset()
-    assert stream.decode(0) is not None
-    with pytest.raises(RuntimeError, match="Cannot mix text and metadata"):
-        stream.finalize_metadata()
-    stream.reset()
-    assert stream.finalize_metadata().timestamp_metadata.segments == []
-    assert result.timestamp_metadata.words == []
+@pytest.fixture
+def asr_example(monkeypatch):
+    examples_path = Path(__file__).resolve().parents[2] / "examples" / "python"
+    monkeypatch.syspath_prepend(os.fspath(examples_path))
+    spec = importlib.util.spec_from_file_location("model_asr_example", examples_path / "model-asr.py")
+    assert spec is not None and spec.loader is not None
+    example = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(example)
+    return example
 
 
-def test_tokenizer_generic_metadata_from_generator(test_data_path):
+@pytest.mark.parametrize("use_segments", [False, True])
+def test_asr_example_formats_empty_results(test_data_path, asr_example, use_segments):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
-    tokenizer_config = og.Config(model_path)
-    tokenizer_config.overlay(json.dumps({"model": {
-        "type": "nemotron_speech", "sample_rate": 100, "hop_length": 10,
-        "subsampling_factor": 1,
-    }}))
-    tokenizer = og.Tokenizer(tokenizer_config)
+    generator = og.Generator(model, og.GeneratorParams(model))
+    postprocessor = og.TokenPostProcessor(model, generator)
+    postprocessor.finalize()
+    result = postprocessor.get_next_token_results()[0]
+    assert isinstance(result, og.TokenPostProcessorResult)
+    assert asr_example.format_timestamp_records(result, use_segments) == ""
+    postprocessor.reset()
+    postprocessor.finalize()
+    for result in postprocessor.get_next_token_results():
+        assert asr_example.format_timestamp_records(result, use_segments) == ""
+
+
+def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, capsys):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=10)
     generator = og.Generator(model, params)
-    generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
-    generator.generate_next_token()
-    stream = tokenizer.create_stream()
-    tokens = generator.get_next_tokens_with_metadata()
-    assert len(tokens) == 1
-    token = tokens[0]
-    token_id = int(generator.get_next_tokens()[0])
-    assert token.token_id == token_id
-    assert token.token_acoustic_frame_interval is None
-    result = stream.decode_with_metadata(token)
+    prompt = np.array([[0, 0, 0, 52]], dtype=np.int32)
+    generator.append_tokens(prompt)
+    postprocessor = og.TokenPostProcessor(model, generator)
+    transcript = asr_example.decode_tokens(generator, postprocessor, "off", [])
+    tokenizer = og.Tokenizer(model)
     plain = tokenizer.create_stream()
-    assert isinstance(result, og.TokenMetadataOutput)
-    assert result.text == plain.decode(int(generator.get_next_tokens()[0]))
-    assert result.timestamp_metadata is None
-    assert stream.finalize_metadata().timestamp_metadata is None
-    assert result.text == tokenizer.create_stream().decode(int(generator.get_next_tokens()[0]))
-    stream.reset()
-    assert stream.decode_with_metadata(token).timestamp_metadata is None
-    generator.generate_next_token()
-    generator.get_next_tokens_with_metadata()
+    expected = "".join(plain.decode(int(token_id)) for token_id in generator.get_sequence(0)[prompt.size:])
+    assert transcript == expected
+    assert capsys.readouterr().out == expected
+
+
+@pytest.mark.parametrize(
+    "timestamp_level,use_vad",
+    [("off", False), ("word", False), ("segment", False), ("all", False), ("all", True)],
+)
+def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, timestamp_level, use_vad):
+    model_path = os.getenv("NEMOTRON_STREAMING_MODEL_PATH") or os.fspath(
+        Path(test_data_path) / "models" / "nemotron-speech-streaming"
+    )
+    audio_path = Path(test_data_path) / "audios" / "jfk.flac"
+    if not Path(model_path).is_dir() or not audio_path.is_file():
+        pytest.skip("Nemotron streaming model and JFK audio are required")
+
+    config = og.Config(model_path)
+    config.clear_providers()
+    config.overlay(
+        json.dumps(
+            {
+                "model": {
+                    "timestamp_level": timestamp_level,
+                    "encoder": {"session_options": {"provider_options": []}},
+                    "decoder": {"session_options": {"provider_options": []}},
+                    "joiner": {"session_options": {"provider_options": []}},
+                }
+            }
+        )
+    )
+    model = og.Model(config)
+    processor = og.StreamingProcessor(model)
+    processor.set_option("use_vad", "true" if use_vad else "false")
+    tokenizer = og.Tokenizer(model)
+    plain_stream = tokenizer.create_stream()
+    generator = og.Generator(model, og.GeneratorParams(model))
+    postprocessor = og.TokenPostProcessor(model, generator)
+    sample_rate, chunk_samples, _ = asr_example.load_config(model_path)
+    audio = asr_example.load_audio(audio_path, sample_rate)[: 2 * sample_rate]
+    if use_vad:
+        audio = np.concatenate((np.zeros(4 * sample_rate, dtype=np.float32), audio))
+
+    words = []
+    segments = []
+    word_start_times = []
+    text_fragments = []
+    skipped_chunks = 0
+
+    def process_result(result):
+        timestamps = result.get_timestamps()
+        if timestamp_level == "off":
+            assert timestamps is None
+            assert asr_example.format_timestamp_records(result, False) == ""
+            assert asr_example.format_timestamp_records(result, True) == ""
+            return
+        word_records = timestamps.get_words()
+        segment_records = timestamps.get_segments()
+        assert asr_example.format_timestamp_records(result, False) == "".join(
+            f"[{word.get_start_time():.2f} - {word.get_stop_time():.2f}]{word.get_text().strip()} "
+            for word in word_records
+        )
+        assert asr_example.format_timestamp_records(result, True) == "".join(
+            f"[{segment.get_start_time():.2f} - {segment.get_stop_time():.2f}]"
+            f"{'' if segment.get_text()[:1].isspace() else ' '}{segment.get_text()}"
+            for segment in segment_records
+        )
+        words.extend(word.get_text() for word in word_records)
+        segments.extend(segment.get_text() for segment in segment_records)
+        word_start_times.extend(word.get_start_time() for word in word_records)
+
+    def decode_inputs(inputs):
+        generator.set_inputs(inputs)
+        while not generator.is_done():
+            generator.generate_next_token()
+            text = "".join(plain_stream.decode(int(token_id)) for token_id in generator.get_next_tokens())
+            postprocessor.process_next_tokens()
+            step_results = postprocessor.get_next_token_results()
+            assert "".join(result.get_text() for result in step_results) == text
+            text_fragments.append(text)
+            for result in step_results:
+                process_result(result)
+
+    for offset in range(0, len(audio), chunk_samples):
+        inputs = processor.process(audio[offset : offset + chunk_samples])
+        if inputs is None:
+            skipped_chunks += 1
+            continue
+        decode_inputs(inputs)
+
+    inputs = processor.flush()
+    if inputs is not None:
+        decode_inputs(inputs)
+
+    postprocessor.finalize()
+    for result in postprocessor.get_next_token_results():
+        assert result.get_text() == ""
+        process_result(result)
+    transcript = "".join(text_fragments)
+    assert transcript.strip()
+    if timestamp_level in ("word", "all"):
+        assert "".join(words) == transcript
+    if timestamp_level in ("segment", "all"):
+        assert "".join(segments) == transcript
+    if use_vad:
+        assert skipped_chunks > 0
+        assert word_start_times[0] >= 3.0
+    postprocessor.finalize()
+    for result in postprocessor.get_next_token_results():
+        assert asr_example.format_timestamp_records(result, False) == ""
+        assert asr_example.format_timestamp_records(result, True) == ""
+
+
+def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    plain = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10)
+    generator = og.Generator(model, params)
+    processor = og.TokenPostProcessor(model, generator)
+    assert processor.get_next_token_results() == []
+    processor.finalize()
+    initial = processor.get_next_token_results()[0]
+    assert initial.get_text() == ""
+    assert initial.get_timestamps() is None
+    processor.reset()
+    with pytest.raises(RuntimeError, match="expired"):
+        initial.get_text()
+    generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
+    retained = []
+    for _ in range(2):
+        generator.generate_next_token()
+        for previous, expected_text in retained:
+            assert previous.get_text() == expected_text
+        expected = plain.decode(int(generator.get_next_tokens()[0]))
+        processor.process_next_tokens()
+        for previous, _ in retained:
+            with pytest.raises(RuntimeError, match="expired"):
+                previous.get_text()
+            with pytest.raises(RuntimeError, match="expired"):
+                previous.get_timestamps()
+        retained.clear()
+        results = processor.get_next_token_results()
+        assert len(results) == 1
+        result = results[0]
+        assert isinstance(result, og.TokenPostProcessorResult)
+        assert result.get_text() == expected
+        assert result.get_timestamps() is None
+        assert processor.get_next_token_results()[0].get_text() == expected
+        retained.append((result, expected))
     del generator
-    del tokens
-    assert token.token_id == token_id
-    assert token.token_acoustic_frame_interval is None
-    stream.reset()
-    assert stream.decode_with_metadata(token).text == result.text
-    assert stream.finalize_metadata().timestamp_metadata is None
+    processor.finalize()
+    with pytest.raises(RuntimeError, match="expired"):
+        result.get_text()
+    processor.finalize()
+    final_result = processor.get_next_token_results()[0]
+    assert final_result.get_text() == ""
+    processor.reset()
+    assert processor.get_next_token_results() == []
+    with pytest.raises(RuntimeError, match="expired"):
+        final_result.get_text()
+    processor.finalize()
+    before_destruction = processor.get_next_token_results()[0]
+    copied_text = before_destruction.get_text()
+    del processor
+    with pytest.raises(RuntimeError, match="expired"):
+        before_destruction.get_text()
+    assert copied_text == ""
+
+
+@pytest.mark.parametrize("search", [{"batch_size": 2}, {"num_beams": 2}])
+def test_token_postprocessor_rejects_multiple_sequences(test_data_path, search):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10, **search)
+    generator = og.Generator(model, params)
+    with pytest.raises(RuntimeError, match="batch_size=1 and num_beams=1"):
+        og.TokenPostProcessor(model, generator)
+
+
+def test_token_postprocessor_rejects_mismatched_model(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    other_model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+    with pytest.raises(RuntimeError, match="model must match"):
+        og.TokenPostProcessor(other_model, generator)
 
 
 def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):

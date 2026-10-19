@@ -124,6 +124,9 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   bool IsPastPresentShareBufferEnabled(const std::string& model_type) const;
 };
 
+class TokenOutputs;
+class TokenPostProcessor;
+
 struct Generator : LeakChecked<Generator> {
   enum class Action {
     standard,   // Default, set in any other case
@@ -140,7 +143,6 @@ struct Generator : LeakChecked<Generator> {
   // Internal continuous-decoding path for tokens already resident on the model device.
   void AppendTokens(DeviceSpan<int32_t> input_ids);
   void GenerateNextToken();
-  std::span<const OgaTokenMetadataInput> GetNextTokensWithMetadata() const;
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   void SnapshotState();                    // Snapshot recurrent state for speculative rollback (e.g. MTP)
   // Lossless multi-token MTP: commit the accepted prefix without a replay forward by cropping the
@@ -178,13 +180,14 @@ struct Generator : LeakChecked<Generator> {
   bool IsGreedySampling() const;
 
  private:
+  friend class TokenPostProcessor;
+  TokenOutputs GetTokenOutputs() const;
 #if defined(_MSC_VER)
   [[msvc::no_unique_address]]
 #else
   [[no_unique_address]]
 #endif
   GenerationTelemetry generation_telemetry_;
-  mutable std::vector<OgaTokenMetadataInput> next_tokens_with_metadata_;
   void LogGeneratorCreate(const GeneratorParams& params);
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);

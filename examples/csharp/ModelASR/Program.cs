@@ -17,6 +17,7 @@ using CommonUtils;
 using Microsoft.ML.OnnxRuntimeGenAI;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
+using System.Text;
 using System.Text.Json;
 
 if (args.Length < 2) {
@@ -42,12 +43,9 @@ using var configJson = JsonDocument.Parse(File.ReadAllText(Path.Combine(modelPat
 var modelConfig = configJson.RootElement.GetProperty("model");
 int sampleRate = modelConfig.GetProperty("sample_rate").GetInt32();
 int chunkSize = modelConfig.GetProperty("chunk_samples").GetInt32();
-bool timestampsEnabled = modelConfig.TryGetProperty("timestamp_level", out var timestampLevel) &&
-                         timestampLevel.GetString() != "off";
-bool diarizationEnabled = modelConfig.TryGetProperty("diarization", out var diarization) &&
-                          diarization.TryGetProperty("filename", out var diarizationFilename) &&
-                          !string.IsNullOrEmpty(diarizationFilename.GetString());
-bool metadataEnabled = timestampsEnabled || diarizationEnabled;
+string timestampLevel = modelConfig.TryGetProperty("timestamp_level", out var timestampLevelElement)
+  ? timestampLevelElement.GetString() ?? "off"
+  : "off";
 
 // Load audio, convert to mono, and resample to match the model's expected sample rate
 float[] audio = LoadAudio(audioFile, sampleRate);
@@ -72,10 +70,9 @@ if (useVad == "true") {
     Console.WriteLine("  VAD threshold: " + processor.GetOption("vad_threshold"));
 }
 
-using var tokenizer = new Tokenizer(model);
-using var tokenizerStream = tokenizer.CreateStream();
 using var genParams = new GeneratorParams(model);
 using var generator = new Generator(model, genParams);
+using var postprocessor = new TokenPostProcessor(model, generator);
 Console.WriteLine(new string('-', 60));
 string fullTranscript = "";
 int chunksTotal = 0;
@@ -91,7 +88,7 @@ for (int i = 0; i < audio.Length; i += chunkSize) {
   if (inputs != null) {
     chunksProcessed++;
     generator.SetInputs(inputs);
-    fullTranscript += DecodeTokens(generator, tokenizerStream, metadataEnabled);
+    fullTranscript += DecodeTokens(generator, postprocessor, timestampLevel);
   }
 }
 
@@ -101,9 +98,13 @@ while (true) {
   if (flushInputs == null) break;
   chunksProcessed++;
   generator.SetInputs(flushInputs);
-  fullTranscript += DecodeTokens(generator, tokenizerStream, metadataEnabled);
+  fullTranscript += DecodeTokens(generator, postprocessor, timestampLevel);
 }
-if (metadataEnabled) PrintMetadata(tokenizerStream.FinalizeMetadata());
+
+postprocessor.FinalizeProcessing();
+foreach (var result in postprocessor.GetNextTokenResults()) {
+  Console.Write(FormatTimestampRecords(result, timestampLevel != "word"));
+}
 int chunksSkipped = chunksTotal - chunksProcessed;
 
 Console.WriteLine($"\n{new string('=', 60)}");
@@ -115,37 +116,37 @@ if (useVad == "true") {
                     $"{chunksSkipped} skipped ({pctSaved:F1}% compute saved)");
 }
 
-static void PrintMetadata(TokenMetadataOutput result) {
-  if (result.TimestampMetadata == null) return;
-  foreach (var record in result.TimestampMetadata.Words.Concat(result.TimestampMetadata.Segments)) {
-    if (record.StartTime.HasValue) Console.Write($"[{record.StartTime:F2} - {record.StopTime:F2}] ");
-    if (record.SpeakerLabel != null) Console.Write($"[{record.SpeakerLabel}] ");
-    Console.Write(record.Text);
-  }
-}
-
-static string DecodeTokens(Generator generator, TokenizerStream tokenizerStream, bool metadataEnabled) {
+static string DecodeTokens(Generator generator, TokenPostProcessor postprocessor, string timestampLevel) {
   string text = "";
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
-    if (metadataEnabled) {
-      foreach (var token in generator.GetNextTokensWithMetadata()) {
-        var result = tokenizerStream.DecodeWithMetadata(token);
-        text += result.Text;
-        PrintMetadata(result);
-      }
-      continue;
-    }
-    var tokens = generator.GetNextTokens();
-    if (tokens.Length > 0) {
-      string tokenText = tokenizerStream.Decode(tokens[0]);
-      if (!string.IsNullOrEmpty(tokenText)) {
+    postprocessor.ProcessNextTokens();
+    foreach (var result in postprocessor.GetNextTokenResults()) {
+      text += result.GetText();
+      if (result.GetTimestamps() == null) {
+        string tokenText = result.GetText();
         Console.Write(tokenText);
-        text += tokenText;
+      } else {
+        string timestampedText = FormatTimestampRecords(result, timestampLevel != "word");
+        Console.Write(timestampedText);
       }
     }
   }
   return text;
+}
+
+static string FormatTimestampRecords(TokenPostProcessorResult result, bool useSegments) {
+  var timestamps = result.GetTimestamps();
+  if (timestamps == null) return "";
+  var records = useSegments ? timestamps.GetSegments() : timestamps.GetWords();
+  return string.Concat(records.Select(record => {
+    string text = useSegments ? record.GetText() : record.GetText().Trim();
+    string separator = useSegments && (text.Length == 0 || !char.IsWhiteSpace(text[0])) ? " " : "";
+    string suffix = useSegments ? "" : " ";
+    string prefix = record.HasTimestamp() ? $"[{record.GetStartTime():F2} - {record.GetStopTime():F2}]" : "";
+    if (record.GetSpeakerLabel() is string speaker) prefix += $"[{speaker}]";
+    return $"{prefix}{separator}{text}{suffix}";
+  }));
 }
 
 static float[] LoadAudio(string path, int targetSampleRate) {

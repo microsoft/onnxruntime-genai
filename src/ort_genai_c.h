@@ -87,63 +87,36 @@ typedef struct OgaRequestOptions OgaRequestOptions;
 typedef struct OgaTurnOptions OgaTurnOptions;
 typedef struct OgaTurnUsage OgaTurnUsage;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
+typedef struct OgaTokenPostProcessor OgaTokenPostProcessor;
+typedef struct OgaTokenPostProcessorResult OgaTokenPostProcessorResult;
+typedef struct OgaTokenPostProcessorTimestamp OgaTokenPostProcessorTimestamp;
+typedef struct OgaTokenPostProcessorTimestampRecord OgaTokenPostProcessorTimestampRecord;
+
+/** The generator must outlive the processor. Results are borrowed until its next mutation. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenPostProcessor(const OgaModel* model, const OgaGenerator* generator, OgaTokenPostProcessor** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTokenPostProcessor(OgaTokenPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorProcessNextTokens(OgaTokenPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorFinalize(OgaTokenPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorReset(OgaTokenPostProcessor* processor);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorGetResultCount(const OgaTokenPostProcessor* processor);
+OGA_EXPORT const OgaTokenPostProcessorResult* OGA_API_CALL OgaTokenPostProcessorGetResult(const OgaTokenPostProcessor* processor, size_t index);
+OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorResultGetText(const OgaTokenPostProcessorResult* result);
+OGA_EXPORT const OgaTokenPostProcessorTimestamp* OGA_API_CALL OgaTokenPostProcessorResultGetTimestamps(const OgaTokenPostProcessorResult* result);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampGetWordCount(const OgaTokenPostProcessorTimestamp* timestamps);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampGetSegmentCount(const OgaTokenPostProcessorTimestamp* timestamps);
+OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampGetWord(const OgaTokenPostProcessorTimestamp* timestamps, size_t index);
+OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampGetSegment(const OgaTokenPostProcessorTimestamp* timestamps, size_t index);
+OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetText(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record);
 
 /** Half-open [start, stop) interval in absolute acoustic frames. */
 typedef struct OgaTokenMetadataAcousticFrameInterval {
   int64_t start;
   int64_t stop;
 } OgaTokenMetadataAcousticFrameInterval;
-
-/** Cumulative speaker-probability sums and evaluated-frame counts at word-window boundaries. */
-typedef struct OgaTokenMetadataSpeakerEvidence {
-  double start_probability_sums[8];
-  double stop_probability_sums[8];
-  int64_t start_frame_count;
-  int64_t stop_frame_count;
-} OgaTokenMetadataSpeakerEvidence;
-
-/** One emitted token with optional acoustic alignment and speaker evidence stored by value.
- * The generator's returned array is borrowed, but individual records may be copied.
- * A zero presence field means that feature is unavailable or disabled.
- * Use matching headers and native binaries; metadata layouts have no runtime version negotiation.
- */
-typedef struct OgaTokenMetadataInput {
-  int32_t token_id;
-  int32_t has_token_acoustic_frame_interval;
-  OgaTokenMetadataAcousticFrameInterval token_acoustic_frame_interval;
-  int32_t has_speaker_evidence;
-  OgaTokenMetadataSpeakerEvidence speaker_evidence;
-} OgaTokenMetadataInput;
-
-/** Completed word or segment with text, optional timestamp bounds, and an optional speaker label. */
-typedef struct OgaTokenMetadataTimestampRecord {
-  const char* text;
-  int64_t start_frame;
-  int64_t stop_frame;
-  double start_time;
-  double stop_time;
-  /** Nonzero when frame bounds and times are present. */
-  int32_t has_timestamp;
-  /** NULL when diarization is disabled. */
-  const char* speaker_label;
-} OgaTokenMetadataTimestampRecord;
-
-/** Word and segment events completed by the current decode/finalize call, not cumulative history. */
-typedef struct OgaTokenMetadataTimestamp {
-  const OgaTokenMetadataTimestampRecord* words;
-  size_t word_count;
-  const OgaTokenMetadataTimestampRecord* segments;
-  size_t segment_count;
-} OgaTokenMetadataTimestamp;
-
-/** Decoded text and optional timestamp events from one decode/finalize operation.
- * Owned by the stream; all pointers expire at its next decode/finalize/reset or destruction.
- * Feature data is NULL when disabled. Read fields directly; do not free these pointers.
- */
-typedef struct OgaTokenMetadataOutput {
-  const char* text;
-  const OgaTokenMetadataTimestamp* timestampMetadata;
-} OgaTokenMetadataOutput;
 
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
@@ -770,11 +743,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* 
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count);
 
-/** Read the latest generation step; does not advance generation.
- * Returned records are borrowed until the next generator operation or destruction.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithMetadata(const OgaGenerator* generator, const OgaTokenMetadataInput** out, size_t* out_count);
-
 /**
  * \brief Set a runtime option's name and value.
  * \param[in] generator The generator to rewind to the given length.
@@ -1121,14 +1089,6 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  * 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
-
-/** Decode a generated token record. Timestamps or diarization require a valid acoustic interval.
- * Enabled diarization also requires valid speaker evidence.
- * Uses the tokenizer's model-derived metadata settings.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadata(OgaTokenizerStream*, const OgaTokenMetadataInput* token, const OgaTokenMetadataOutput** out);
-/** Flush enabled metadata processing without generating or injecting a token. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadata(OgaTokenizerStream*, const OgaTokenMetadataOutput** out);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream*);
 
