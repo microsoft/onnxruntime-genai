@@ -372,8 +372,8 @@ struct PyGenerator {
     return ToPython(generator_->GetNextTokens());
   }
 
-  std::unique_ptr<OgaTokenPostProcessor> CreatePostProcessor(const OgaModel& model) {
-    return OgaTokenPostProcessor::Create(model, *generator_);
+  std::unique_ptr<OgaTokenPostProcessor> CreatePostProcessor() {
+    return OgaTokenPostProcessor::Create(*generator_);
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
@@ -576,10 +576,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       });
 
   pybind11::class_<PyTokenPostProcessor>(m, "TokenPostProcessor")
-      .def(pybind11::init([](const OgaModel& model, PyGenerator& generator) {
-             return std::make_unique<PyTokenPostProcessor>(generator.CreatePostProcessor(model));
+      .def(pybind11::init([](PyGenerator& generator) {
+             return std::make_unique<PyTokenPostProcessor>(generator.CreatePostProcessor());
            }),
-           pybind11::keep_alive<1, 3>())
+           pybind11::keep_alive<1, 2>())
       .def("process_next_tokens", &PyTokenPostProcessor::ProcessNextTokens)
       .def("get_next_token_results", &PyTokenPostProcessor::GetNextTokenResults)
       .def("finalize", &PyTokenPostProcessor::Finalize)

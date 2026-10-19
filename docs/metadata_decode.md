@@ -1,18 +1,21 @@
 # Token Post-Processing
 
-`TokenPostProcessor(model, generator)` owns a tokenizer, an ordinary tokenizer
+`TokenPostProcessor(generator)` owns a tokenizer, an ordinary tokenizer
 stream, `MetadataCoreState`, word grouping, acoustic interval buffers, and the
 results completed by the latest processing call. Configuration comes from the
-model's `genai_config.json`. Callers do not create or pass token metadata records.
+generator's model and its `genai_config.json`. Callers do not pass a model or
+create token metadata records.
 
 ## Processing Loop
 
-Create the generator and processor from the same model, after configuring the
-model's timestamp level. The generator must outlive the processor. Only
+Configure the model's timestamp level before creating the generator, then create
+the processor from that generator alone. The generator retains its native model,
+which supplies the processor configuration and tokenizer; no public model getter
+or separate model ownership is required. The generator must outlive the processor. Only
 `batch_size=1` and `num_beams=1` are supported; other values are rejected.
 
 ```cpp
-auto postprocessor = OgaTokenPostProcessor::Create(*model, *generator);
+auto postprocessor = OgaTokenPostProcessor::Create(*generator);
 while (!generator->IsDone()) {
   generator->GenerateNextToken();
   postprocessor->ProcessNextTokens();
@@ -188,14 +191,14 @@ must be externally serialized. Independent processors have independent state.
 is no intermediate metadata output or conversion to a second result model. The
 processor owns one immutable configuration; metadata state reads that same object.
 
-Python uses `TokenPostProcessor(model, generator)`, `process_next_tokens()`,
+Python uses `TokenPostProcessor(generator)`, `process_next_tokens()`,
 `get_next_token_results()`, `finalize()`, and `reset()`. Borrowed
 `TokenPostProcessorResult` objects expose `get_text()` and nullable
 `get_timestamps()`. Timestamp objects expose `get_words()` and `get_segments()`;
 records expose `get_text()`, `get_start_frame()`, `get_stop_frame()`,
 `get_start_time()`, and `get_stop_time()`.
 
-C# uses `TokenPostProcessor(model, generator)`, `ProcessNextTokens()`,
+C# uses `TokenPostProcessor(generator)`, `ProcessNextTokens()`,
 `GetNextTokenResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
 `TokenPostProcessorResult` objects expose `GetText()` and nullable `GetTimestamps()`.
 Timestamp objects expose `GetWords()` and `GetSegments()`; records expose

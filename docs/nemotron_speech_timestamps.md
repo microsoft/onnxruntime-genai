@@ -86,8 +86,10 @@ For a locally installed Nemotron model outside the test fixtures, set
 `AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
 That test uses CPU session options, even when the model package specifies CUDA.
 
-For the timed path, create `TokenPostProcessor(model, generator)` after configuring
-the model. The generator supplies *when* each token occurred; Extensions supplies
+For the timed path, create `TokenPostProcessor(generator)` after configuring
+the model and creating the generator. The processor obtains its model from the
+generator rather than taking a separate model argument. The generator supplies
+*when* each token occurred; Extensions supplies
 vocabulary-derived lexical facts and ordinary decoded text. GenAI groups the words.
 Each processor result also contains the ordinary incremental text fragment. Use it for live text, or collect
 completed word/segment events for stable timestamped output; do not append both to one transcript.
@@ -108,8 +110,8 @@ Configure timestamp level and segment rules before creating the generator and
 including steps that emit zero or multiple tokens. Reading results repeatedly
 does not change them. The private generator getter is not exposed to applications.
 Enabled timestamps require present, valid acoustic timing. Intervals are half-open
-`[start, stop)` and may span multiple frames. A processor requires the same model
-as its generator, `batch_size=1`, and `num_beams=1`.
+`[start, stop)` and may span multiple frames. A processor always uses its
+generator's model and requires `batch_size=1` and `num_beams=1`.
 
 `GetText()` / `get_text()` returns the ordinary incremental decoded fragment for partial
 display. Applications that need only stable output can instead append completed word or segment

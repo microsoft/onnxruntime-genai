@@ -625,7 +625,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             using var parameters = new GeneratorParams(model);
             parameters.SetSearchOption("max_length", 10);
             using var generator = new Generator(model, parameters);
-            using var processor = new TokenPostProcessor(model, generator);
+            using var processor = new TokenPostProcessor(generator);
             Assert.Empty(processor.GetNextTokenResults());
             processor.FinalizeProcessing();
             Assert.Null(Assert.Single(processor.GetNextTokenResults()).GetTimestamps());
@@ -673,19 +673,31 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             using var parameters = new GeneratorParams(model);
             parameters.SetSearchOption(option, 2);
             using var generator = new Generator(model, parameters);
-            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new TokenPostProcessor(model, generator));
+            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new TokenPostProcessor(generator));
             Assert.Contains("batch_size=1 and num_beams=1", error.Message);
         }
 
         [Fact]
-        public void TestTokenPostProcessorRejectsMismatchedModel()
+        public void TestTokenPostProcessorUsesGeneratorsModel()
         {
             using var model = new Model(_tinyRandomGpt2ModelPath);
-            using var otherModel = new Model(_tinyRandomGpt2ModelPath);
+            using var tokenizer = new Tokenizer(model);
+            using var plain = tokenizer.CreateStream();
             using var parameters = new GeneratorParams(model);
+            parameters.SetSearchOption("max_length", 10);
             using var generator = new Generator(model, parameters);
-            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new TokenPostProcessor(otherModel, generator));
-            Assert.Contains("model must match", error.Message);
+            model.Dispose();
+            using var processor = new TokenPostProcessor(generator);
+            generator.AppendTokens(new int[] { 0, 0, 0, 52 });
+            generator.GenerateNextToken();
+            processor.ProcessNextTokens();
+            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextTokenResults()).GetText());
+        }
+
+        [Fact]
+        public void TestTokenPostProcessorRejectsNullGenerator()
+        {
+            Assert.Throws<ArgumentNullException>(() => new TokenPostProcessor(null));
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]

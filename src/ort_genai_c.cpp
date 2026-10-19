@@ -1187,10 +1187,10 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer* p, OgaToken
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaCreateTokenPostProcessor(const OgaModel* model, const OgaGenerator* generator, OgaTokenPostProcessor** out) {
+OgaResult* OGA_API_CALL OgaCreateTokenPostProcessor(const OgaGenerator* generator, OgaTokenPostProcessor** out) {
   OGA_TRY
-  if (!model || !generator || !out) throw std::invalid_argument("Postprocessor arguments must not be null");
-  *out = ReturnUnique<OgaTokenPostProcessor>(std::make_unique<Generators::TokenPostProcessor>(*model, *generator));
+  if (!generator || !out) throw std::invalid_argument("Postprocessor arguments must not be null");
+  *out = ReturnUnique<OgaTokenPostProcessor>(std::make_unique<Generators::TokenPostProcessor>(*generator));
   return nullptr;
   OGA_CATCH
 }
