@@ -164,6 +164,7 @@ def test_sub_models_follow_the_decoder_without_graph_capture(tmp_path, decoder, 
         ("vision", "32-wide image_features"),
         ("table", "table is 16 wide"),
         ("resample", "Unsupported resample 1"),
+        ("name", "named embeddings.onnx"),
     ],
 )
 def test_refuses_before_writing(tmp_path, case, message):
@@ -183,6 +184,11 @@ def test_refuses_before_writing(tmp_path, case, message):
             [helper.make_tensor_value_info("image_features", TensorProto.FLOAT, ["n", 64])],
         )
         onnx.save(helper.make_model(graph), out / "vision_encoder.onnx")
+    if case == "name":  # a decoder exported with --extra_options filename=embeddings.onnx
+        (out / "model.onnx").rename(out / "embeddings.onnx")
+        config = json.loads((out / "genai_config.json").read_text())
+        config["model"]["decoder"]["filename"] = "embeddings.onnx"
+        (out / "genai_config.json").write_text(json.dumps(config))
     if case == "resample":
         path = tmp_path / "pt" / "processor_config.json"
         image_processor = json.loads(path.read_text())["image_processor"]

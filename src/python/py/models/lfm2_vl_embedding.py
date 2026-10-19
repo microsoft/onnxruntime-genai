@@ -131,6 +131,8 @@ def convert(checkpoint, output, vision="vision_encoder.onnx"):
         raise ValueError(
             f'Expected type "lfm2_vl", got "{model["type"]}": build with --extra_options exclude_embeds=true'
         )
+    if "embeddings.onnx" in (model["decoder"]["filename"], vision):
+        raise ValueError("The decoder or vision model is named embeddings.onnx, which this tool writes")
     decoder = onnx.load(output / model["decoder"]["filename"], load_external_data=False)
     embeds_type = tensor_type(decoder.graph.input, model["decoder"]["inputs"]["inputs_embeds"]).elem_type
     if embeds_type not in (TensorProto.FLOAT, TensorProto.FLOAT16):
