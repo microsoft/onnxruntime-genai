@@ -25,7 +25,7 @@ Add timestamp options under `model` in `genai_config.json`:
 | `word` | Words |
 | `segment` | Segments |
 
-`all` is no longer supported; choose `word` or `segment`.
+`all` is not supported. Diarization also uses these three levels; see below.
 
 `segment_separators` is an optional array of decoded text suffixes that complete a segment. When
 present, it replaces the default separators (`.`, `?`, and `!`). An empty array disables
@@ -46,9 +46,9 @@ thresholds are rejected while loading the configuration.
 ## Decoding flows
 
 Both paths start with audio processed into features, followed by generated token IDs. Model
-configuration determines whether acoustic timing is produced; the first decode chooses each
-stream's mode. A tokenizer stream cannot switch decode modes without `Reset()`.
-
+configuration determines whether acoustic timing is produced. `TokenPostProcessor` owns
+decoding and timestamp processing; ordinary tokenizer stream decoding is unchanged.
+`timestamp_level` controls timestamp generation:
 ```mermaid
 flowchart TB
   audio[Audio chunks] --> processor[StreamingProcessor]
@@ -61,12 +61,13 @@ flowchart TB
   end
 
   subgraph timed[With timestamps: word or segment]
-    setup[Stream starts with tokenizer metadata defaults] --> stream
-    timed_tokens[GetNextTokensWithMetadata: IDs + absolute frame intervals] --> stream[TokenizerStream.DecodeWithMetadata]
-    stream --> ortx[Extensions: decoded text + completed word token spans]
-    ortx --> align[Stream metadata state: align word spans with buffered frames]
+    setup[Processor copies model configuration] --> stream
+    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNextTokens]
+    stream --> ortx[Extensions: vocabulary facts + ordinary cached decode]
+    ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
     align --> events[Per-call word / segment events with frame and second bounds]
-    stream --> final[FinalizeMetadata: flush trailing word / segment]
+    events --> read[GetNextTokenResults: read only]
+    stream --> final[Finalize: flush trailing word / segment]
     final --> trailing[Trailing word / segment events]
   end
 
@@ -86,14 +87,14 @@ For a locally installed Nemotron model outside the test fixtures, set
 `AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
 That test uses CPU session options, even when the model package specifies CUDA.
 
-For the timed path, create a tokenizer stream; its metadata state is initialized from
-the tokenizer configuration. The generator supplies
-*when* each token occurred; Extensions supplies *which tokens* form each word. `DecodeWithMetadata`
-also returns the ordinary incremental text fragment. Use that fragment for live text, or collect
+For the timed path, create `TokenPostProcessor(model, generator)` after configuring
+the model. The generator supplies *when* each token occurred; Extensions supplies
+vocabulary-derived lexical facts and ordinary decoded text. GenAI groups the words.
+Each processor result also contains the ordinary incremental text fragment. Use it for live text, or collect
 completed word/segment events for stable timestamped output; do not append both to one transcript.
 The plain path needs no metadata state or finalization call.
 
-Internally, the stream buffers the frame intervals in token order until Extensions reports
+Internally, GenAI buffers the frame intervals in token order until its word grouper reports
 completed word spans and a pending-token watermark. It uses the first and last token
 intervals of each word, accumulates unfinished segments across calls, and owns the
 completed event text for the lifetime of the returned per-call result. The generator
@@ -101,51 +102,42 @@ pairs tokens and intervals by emission position, not by token ID.
 
 ## Decoding
 
-For the timestamp path, create the tokenizer stream and use metadata decoding
-directly. The stream initializes enabled model-derived metadata when created
-and restores it after `Reset()`. Configure timestamp level and grouping rules on
-the model before creating the tokenizer; the stream does not expose its internal
-metadata state. Plain-text `Decode()` still works on a timestamp-configured
-tokenizer when selected first. When timestamps and diarization are both disabled,
-timestamp data is null.
+Configure timestamp level and segment rules before creating the generator and
+`TokenPostProcessor`. After each generation step, call `ProcessNextTokens()`
+(C++/C#) or `process_next_tokens()` (Python), then read `GetNextTokenResults()` or
+`get_next_token_results()`. All sequential emissions are processed in order,
+including steps that emit zero or multiple tokens. Reading results repeatedly
+does not change them. The private generator getter is not exposed to applications.
+Enabled timestamps require present, valid acoustic timing. Intervals are half-open
+`[start, stop)` and may span multiple frames. A processor requires the same model
+as its generator, `batch_size=1`, and `num_beams=1`.
 
-When diarization is enabled, internal acoustic alignment remains enabled even with
-`timestamp_level: off`. That mode returns speaker-turn segments with absent timing.
-See [Streaming diarization](#streaming-diarization).
-
-For each generation step, use `GetNextTokensWithMetadata()` (C++/C#) or
-`get_next_tokens_with_metadata()` (Python). Pass each whole record directly to
-`DecodeWithMetadata(token)` or `decode_with_metadata(token)`; no field extraction
-is needed. The optional acoustic interval is a pair of 64-bit integers ordered
-`(start, stop)`, half-open and not restricted to one frame. With both generator timestamps
-and diarization disabled, timing is not read or supplied. C and C++ records indicate absence with
-`has_token_acoustic_frame_interval == 0`; C# uses a null `TokenAcousticFrameInterval`
-and Python uses `None`. The interval is stored inline, so copying a record retains
-its timing independently of the generator's storage.
-An enabled timestamp consumer requires present, valid timing.
-Use a separate stream for each independent sequence.
-
-The returned `text` is the ordinary incremental decoded fragment and remains available for partial
+`GetText()` / `get_text()` returns the ordinary incremental decoded fragment for partial
 display. Applications that need only stable output can instead append completed word or segment
 event text as it arrives.
 
 Completed words retain their original leading whitespace and attached punctuation. Segment text is
 the exact concatenation of its words; no whitespace is trimmed or synthesized. After finalization,
 concatenating all emitted words or all emitted segments reproduces the decoded transcript exactly.
-Copy native records before the next stream call. C# and Python bindings perform this copy
-automatically.
+In every binding, read and copy needed text and scalar values into the application's
+transcript before the next processor mutation. Result wrappers do not retain old native output.
 
-Word and segment collections are nested under `timestampMetadata` in C/C++,
-`TokenMetadataTimestamp` in C#, and `TokenMetadataOutput.timestamp_metadata` in Python.
-Python exposes typed `TokenMetadataTimestampRecord` entries rather than dictionaries.
+C/C++ expose opaque result and timestamp-record handles with typed accessors.
+C# and Python expose the same borrowed timestamp output through nullable
+`GetTimestamps()` and `get_timestamps()`. Read records using `GetWords()` / `GetSegments()`
+or `get_words()` / `get_segments()`, then the record's text/frame/time accessors.
+The returned objects are opaque wrappers, not dictionaries or copied metadata objects.
 They are per-call event lists,
 not cumulative history. Each list is
 empty when that call completes no records, and it may contain multiple records when one decoded
 token spans multiple word or segment boundaries. Callers retain any history they need.
 
-After the final audio chunk, call `FinalizeMetadata()` or `finalize_metadata()` once and retain
-its completed records. Finalization returns pending words and segments but no additional transcript
-text.
+After the final audio chunk, call `Finalize()` (C++), `FinalizeProcessing()` (C#),
+or `finalize()` (Python), then read the results through the usual getter. It
+completes pending words and segments without adding transcript text. Repeated
+finalization emits no duplicate events. `Reset()` / `reset()` clears all processor
+state together; it does not reset the generator. The generator must outlive its
+processor. See [Token post-processing](metadata_decode.md) for the full lifecycle.
 
 ## Interval semantics
 
@@ -162,22 +154,7 @@ token intervals, and the tokenizer stream does not buffer intervals or build tim
 
 ## Streaming diarization
 
-```mermaid
-flowchart TB
-  audio[PCM audio] --> processor[One ASR-driven processor and shared VAD]
-  processor --> asr[ASR central chunk and encoder cache]
-  processor --> diar[Diarization central chunk plus right-context]
-  diar --> cache[ONNX speaker-cache and FIFO updates]
-  cache --> evidence[Central probabilities and boundary sum/count snapshots]
-  asr --> tokens[Token IDs and absolute acoustic intervals]
-  tokens --> metadata[Unified token metadata]
-  evidence --> metadata
-  metadata --> grouping[TokenizerStream and Extensions word grouping]
-  grouping --> attribution[Extensions word aggregation and speaker-turn construction]
-  attribution --> output[Words or segments with optional timestamps and speaker labels]
-```
-
-Add a `diarization` block to the ASR package configuration:
+Configure the ASR package with a stateful streaming export and its external weights:
 
 ```json
 {
@@ -192,101 +169,62 @@ Add a `diarization` block to the ASR package configuration:
 }
 ```
 
-Keep external ONNX weights beside their graph. Relative filenames are resolved from
-the ASR configuration directory. A nonempty filename enables diarization; omitting
-the block disables it. `right_context` is a non-negative count of additional
-diarization encoder frames, not milliseconds or input mel frames. Its default of
-4 means **320 ms total**, because each default encoder frame represents 80 ms.
-Session/run options use the existing GenAI options schema.
+The nonempty filename enables diarization. Paths are relative to the ASR package.
+The graph must expose `input_features`, `num_lookahead_frames`, six `past_*` inputs,
+`speaker_probs`, and six matching `present_*` outputs. The offline single-input
+export is not supported. Cache updates/compression remain in ONNX; capacities and
+embedding dimensions are derived from graph I/O, with eight speaker channels.
 
-The block declares the export's preprocessing and temporal geometry:
+The diarization block declares these export-specific defaults:
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `sample_rate` | 16000 | Audio samples per second; must match ASR |
-| `num_mels` | 128 | Mel bins; must match the graph's feature dimension |
-| `fft_size` | 512 | STFT FFT size in samples |
-| `win_length` | 400 | STFT window size in samples; positive and no larger than FFT |
-| `hop_length` | 160 | Samples per feature frame and output probability frame |
-| `subsampling_factor` | 8 | Feature frames per diarization encoder frame |
-| `preemph` | 0.97 | Finite pre-emphasis coefficient |
-| `log_eps` | 5.96046448e-8 | Positive finite log-mel guard |
-| `right_context` | 4 | Additional encoder frames |
+| Field | Default |
+| --- | --- |
+| `sample_rate` | 16000 |
+| `num_mels` | 128 |
+| `fft_size` | 512 |
+| `win_length` | 400 |
+| `hop_length` | 160 |
+| `subsampling_factor` | 8 |
+| `preemph` | 0.97 |
+| `log_eps` | 5.96046448e-8 |
+| `right_context` | 4 |
 
-Defaults describe the supplied Nemotron-3 checkpoint. Other values require an
-export/checkpoint trained for the declared preprocessing; changing configuration
-does not alter learned weights or graph-internal feature stacking. These temporal
-and preprocessing values cannot be inferred from ONNX input dimensions alone.
-Declare them from the export's preprocessing/model configuration. ASR and
-diarization may use different feature extractors while evaluating the same samples.
+Sample rate must match ASR. Each ASR acoustic frame must cover an integer number
+of diarization feature/probability frames, and central chunks must align to both
+encoder strides. Other values require a compatible trained/exported model, not
+just editing this configuration. Preprocessing/time parameters are declared
+because they cannot be inferred from ONNX tensor dimensions alone.
 
-Conversions are derived rather than hardcoded:
+Right-context counts additional diarization encoder frames:
+`duration = right_context * hop_length * subsampling_factor / sample_rate`.
+Thus four default frames mean **320 ms total**, not 80 ms. With 560 ms central
+chunks, initial buffering is 880 ms plus 16 ms STFT context, excluding compute.
+Future context is not committed twice or used to advance ASR feature state.
+EOF uses only available complete encoder frames for look-ahead.
 
-```text
-diarization encoder stride = hop_length * subsampling_factor samples
-right-context duration = right_context * encoder stride / sample_rate seconds
-probability frames per ASR frame = ASR acoustic stride / diarization hop_length
-```
+One generator runs both models serially for each retained chunk before exposing
+tokens/evidence to `TokenPostProcessor`. VAD gates both central inference paths,
+preserves their caches, and advances original audio time through skipped chunks.
+Future audio may influence look-ahead even if VAD later drops its central chunk.
+Skipped intervals contribute no probability sums or evaluated-frame count.
 
-The last ratio must be a positive integer, and central `chunk_samples` must be a
-positive multiple of both encoder strides. Sample rates must match. Right-context
-is not limited by FIFO capacity; it must fit supported feature tensor dimensions
-and the chosen export's operating limits.
-
-This integration supports the stateful Nemotron-3 export with `input_features`,
-`num_lookahead_frames`, six `past_*` state inputs, `speaker_probs`, and six
-`present_*` state outputs. The runtime derives fixed cache/FIFO capacities and
-embedding size from the graph, checks input/output compatibility and types, and
-requires eight speaker channels. The supplied graph has capacities of 264 and
-embedding size 512; these are not universal runtime constants. Cache updates and compression remain inside ONNX.
-The offline single-input export is not supported.
-
-ASR drives central chunking; the same processor provides additional future audio
-only to diarization. With default geometry, 560 ms chunks and four right-context frames, initial
-buffering is 880 ms plus 16 ms STFT context, excluding compute time. Future audio
-is not committed twice and does not advance the ASR feature cache. At EOF only
-available complete encoder frames are used for look-ahead; missing future audio
-does not increase the declared right-context.
-
-The diarization sub-state follows the existing encoder pattern: `SetFeaturesInput`
-binds the feature tensor and look-ahead, and `Run` executes inference, adopts
-returned cache tensors, and builds probability boundary sums.
-`GetTokenSpeakerEvidence(local_asr_frame)` returns cumulative boundary sums/counts
-for one chunk-local ASR encoder frame. It does not run inference or select a
-speaker, and includes one ASR frame of left context.
-
-VAD gates both central inference branches. Dropped audio advances absolute time,
-but does not advance probability sums or cache state. Future audio may influence
-look-ahead even if its later central chunk is dropped. Retained chunks that emit
-no tokens still update speaker state and probability sums.
-
-Use the same `GetNextTokensWithMetadata` and `DecodeWithMetadata` loop as timestamps.
-Tokens carry cumulative sum/count snapshots by value. Extensions averages the
-word's evaluated probability frames (10 ms with default geometry), includes a one-ASR-frame left shift, clamps scores
-to at least 0.01, normalizes, and assigns the first maximum as `speaker_0` through
-`speaker_7`. Labels are recording-local, not persistent person identities.
+`TokenPostProcessor` averages each completed word's evaluated probabilities using
+internal boundary sums/counts, includes one ASR frame of left context, clamps to
+at least 0.01, normalizes, and chooses one maximum label (`speaker_0`..`speaker_7`).
+Multiple speakers may be active; the transcript determines emitted words rather
+than a diarization threshold. Labels are recording-local anonymous identities.
 
 | Timestamp level | Diarization enabled |
 | --- | --- |
-| `off` | Speaker-turn segments without public timestamps |
-| `word` | Timestamped words with speaker labels |
-| `segment` | Timestamped speaker-turn segments |
+| `off` | Speaker-turn segments, no timing |
+| `word` | Timestamped labeled words |
+| `segment` | Timestamped labeled speaker turns |
 
-Speaker turns split only on label changes or finalization, ignoring configured
-punctuation and gap rules. Each word receives one label, including overlapping
-speech. The transcript, rather than a probability threshold, determines emitted
-words. Without diarization, existing punctuation/gap rules remain unchanged.
+`GetTimestamps()` remains non-null in diarization-only mode. Record accessors
+expose optional times and speaker labels, with the same borrowed-result lifetime
+as timestamp-only output. Speaker turns split only on speaker change/finalization;
+timestamp-only segments retain punctuation/gap rules.
 
-At EOF, call processor `Flush()` repeatedly until it returns no input, running
-inference and decoding for every returned input. Then call `FinalizeMetadata()`
-once. There is no additional drain or diarization-specific finalizer. For a new
-recording recreate processor/generator and reset or recreate the tokenizer stream.
-Native records have `has_timestamp` and nullable `speaker_label`; Python/C#
-use optional timing and `speaker_label`/`SpeakerLabel`. Timestamps and diarization
-use the same original metadata types and entry points. The extended native record
-layouts require matching headers and binaries; rebuild existing native callers.
-
-For a two-repository development build, configure GenAI with
-`-DFETCHCONTENT_SOURCE_DIR_ONNXRUNTIME_EXTENSIONS=/path/to/onnxruntime-extensions`.
-Extensions must include `tokenizer_speech_metadata.h`; update the pinned dependency
-after those changes are published.
+Flush all remaining audio through inference before calling the postprocessor's
+single finalizer. Resetting it clears word/turn/evidence state, not inference.
+See [Token post-processing](metadata_decode.md) for binding and lifetime details.

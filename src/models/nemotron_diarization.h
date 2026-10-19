@@ -4,6 +4,7 @@
 
 #include "model.h"
 #include "ort_genai_c.h"
+#include "generator/token_outputs.h"
 #include <array>
 
 namespace Generators {
@@ -17,7 +18,7 @@ struct NemotronDiarizationState : State {
   void SetFeaturesInput(OrtValue& features, int64_t lookahead);
   // Returns cumulative word-window bounds for a chunk-local ASR encoder-frame index,
   // including one ASR frame of left context. No inference or speaker selection occurs here.
-  OgaTokenMetadataSpeakerEvidence GetTokenSpeakerEvidence(int64_t local_asr_frame) const;
+  TokenSpeakerEvidence GetTokenSpeakerEvidence(int64_t local_asr_frame) const;
   void Reset();
 
  private:

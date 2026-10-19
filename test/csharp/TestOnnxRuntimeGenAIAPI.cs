@@ -617,60 +617,75 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.Contains(reason, error.Message);
         }
 
-        [Fact(DisplayName = "TestTokenizerStreamTimestampInitialization")]
-        public void TestTokenizerStreamTimestampInitialization()
-        {
-            Assert.NotNull(_tinyRandomGpt2ModelPath);
-            using var config = new Config(_tinyRandomGpt2ModelPath);
-            config.Overlay("{\"model\":{\"type\":\"nemotron_speech\",\"timestamp_level\":\"word\",\"sample_rate\":100,\"hop_length\":10,\"subsampling_factor\":1}}");
-            using var tokenizer = new Tokenizer(config);
-            using var stream = tokenizer.CreateStream();
-            var result = stream.FinalizeMetadata();
-            Assert.Empty(result.TimestampMetadata.Words);
-            Assert.Empty(result.TimestampMetadata.Segments);
-            stream.Reset();
-            Assert.Empty(stream.FinalizeMetadata().TimestampMetadata.Words);
-            stream.Reset();
-            Assert.NotNull(stream.Decode(0));
-            Assert.Throws<OnnxRuntimeGenAIException>(() => stream.FinalizeMetadata());
-            stream.Reset();
-            Assert.Empty(stream.FinalizeMetadata().TimestampMetadata.Words);
-        }
-
-        [Fact(DisplayName = "TestTokenizerMetadataFromGenerator")]
-        public void TestTokenizerMetadataFromGenerator()
+        [Fact(DisplayName = "TestTokenPostProcessorResults")]
+        public void TestTokenPostProcessorResults()
         {
             using var model = new Model(_tinyRandomGpt2ModelPath);
-            using var tokenizerConfig = new Config(_tinyRandomGpt2ModelPath);
-            tokenizerConfig.Overlay("{\"model\":{\"type\":\"nemotron_speech\",\"sample_rate\":100,\"hop_length\":10,\"subsampling_factor\":1}}");
-            using var tokenizer = new Tokenizer(tokenizerConfig);
+            using var tokenizer = new Tokenizer(model);
             using var parameters = new GeneratorParams(model);
             parameters.SetSearchOption("max_length", 10);
             using var generator = new Generator(model, parameters);
+            using var processor = new TokenPostProcessor(model, generator);
+            Assert.Empty(processor.GetNextTokenResults());
+            processor.FinalizeProcessing();
+            Assert.Null(Assert.Single(processor.GetNextTokenResults()).GetTimestamps());
+            processor.Reset();
             generator.AppendTokens(new int[] { 0, 0, 0, 52 });
             generator.GenerateNextToken();
-            using var stream = tokenizer.CreateStream();
             using var plain = tokenizer.CreateStream();
-            var token = Assert.Single(generator.GetNextTokensWithMetadata());
             var tokenId = generator.GetNextTokens()[0];
-            Assert.Equal(tokenId, token.TokenId);
-            Assert.Null(token.TokenAcousticFrameInterval);
-            var result = stream.DecodeWithMetadata(token);
+            processor.ProcessNextTokens();
+            var result = Assert.Single(processor.GetNextTokenResults());
             var expectedText = plain.Decode(tokenId);
-            Assert.Equal(expectedText, result.Text);
-            Assert.Null(result.TimestampMetadata);
-            Assert.Null(stream.FinalizeMetadata().TimestampMetadata);
-            Assert.Equal(expectedText, result.Text);
-            stream.Reset();
-            Assert.Null(stream.DecodeWithMetadata(token).TimestampMetadata);
+            var copiedText = result.GetText();
+            Assert.Equal(expectedText, result.GetText());
+            Assert.Null(result.GetTimestamps());
+            Assert.Equal(expectedText, Assert.Single(processor.GetNextTokenResults()).GetText());
             generator.GenerateNextToken();
-            generator.GetNextTokensWithMetadata();
+            Assert.Equal(expectedText, Assert.Single(processor.GetNextTokenResults()).GetText());
+            processor.ProcessNextTokens();
+            Assert.Throws<InvalidOperationException>(() => result.GetText());
+            Assert.Throws<InvalidOperationException>(() => result.GetTimestamps());
+            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextTokenResults()).GetText());
+            var beforeFinalize = Assert.Single(processor.GetNextTokenResults());
+            processor.FinalizeProcessing();
+            Assert.Throws<InvalidOperationException>(() => beforeFinalize.GetText());
+            processor.FinalizeProcessing();
+            Assert.Equal("", Assert.Single(processor.GetNextTokenResults()).GetText());
+            var beforeReset = Assert.Single(processor.GetNextTokenResults());
+            processor.Reset();
+            Assert.Empty(processor.GetNextTokenResults());
+            Assert.Throws<InvalidOperationException>(() => beforeReset.GetText());
             generator.Dispose();
-            Assert.Equal(tokenId, token.TokenId);
-            Assert.Null(token.TokenAcousticFrameInterval);
-            stream.Reset();
-            Assert.Equal(expectedText, stream.DecodeWithMetadata(token).Text);
-            Assert.Null(stream.FinalizeMetadata().TimestampMetadata);
+            Assert.Throws<ObjectDisposedException>(() => processor.ProcessNextTokens());
+            processor.Dispose();
+            Assert.Equal(expectedText, copiedText);
+            Assert.Throws<ObjectDisposedException>(() => result.GetText());
+            Assert.Throws<ObjectDisposedException>(() => processor.GetNextTokenResults());
+        }
+
+        [Theory]
+        [InlineData("batch_size")]
+        [InlineData("num_beams")]
+        public void TestTokenPostProcessorRejectsMultipleSequences(string option)
+        {
+            using var model = new Model(_tinyRandomGpt2ModelPath);
+            using var parameters = new GeneratorParams(model);
+            parameters.SetSearchOption(option, 2);
+            using var generator = new Generator(model, parameters);
+            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new TokenPostProcessor(model, generator));
+            Assert.Contains("batch_size=1 and num_beams=1", error.Message);
+        }
+
+        [Fact]
+        public void TestTokenPostProcessorRejectsMismatchedModel()
+        {
+            using var model = new Model(_tinyRandomGpt2ModelPath);
+            using var otherModel = new Model(_tinyRandomGpt2ModelPath);
+            using var parameters = new GeneratorParams(model);
+            using var generator = new Generator(model, parameters);
+            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new TokenPostProcessor(otherModel, generator));
+            Assert.Contains("model must match", error.Message);
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]

@@ -173,7 +173,7 @@ DeviceSpan<float> NemotronDiarizationState::Run(int, DeviceSpan<int32_t>&, Devic
   return {};
 }
 
-OgaTokenMetadataSpeakerEvidence NemotronDiarizationState::GetTokenSpeakerEvidence(int64_t local_asr_frame) const {
+TokenSpeakerEvidence NemotronDiarizationState::GetTokenSpeakerEvidence(int64_t local_asr_frame) const {
   const size_t stride = static_cast<size_t>(feature_frames_per_asr_frame_);
   if (boundaries_.empty() || local_asr_frame < 0 ||
       static_cast<uint64_t>(local_asr_frame) >= (boundaries_.size() - 1 + stride - 1) / stride)
@@ -182,7 +182,7 @@ OgaTokenMetadataSpeakerEvidence NemotronDiarizationState::GetTokenSpeakerEvidenc
   const size_t stop = std::min(static_cast<size_t>(local_asr_frame + 1) * stride, boundaries_.size() - 1);
   const auto& left = local_asr_frame == 0 ? chunk_previous_ : boundaries_[start];
   const auto& right = boundaries_[stop];
-  OgaTokenMetadataSpeakerEvidence result{};
+  TokenSpeakerEvidence result{};
   std::copy(left.sums.begin(), left.sums.end(), result.start_probability_sums);
   std::copy(right.sums.begin(), right.sums.end(), result.stop_probability_sums);
   result.start_frame_count = left.count;

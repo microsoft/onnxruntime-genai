@@ -5,7 +5,6 @@
 
 #include "generator/generators.h"
 #include "models/utils.h"
-#include "metadata_core_state.h"
 #include "ortx_tokenizer.h"
 #include "span.h"
 
@@ -22,31 +21,18 @@ struct Tensor;
 struct Tokenizer;
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {
-  enum class DecodeMode {
-    Unset,
-    Text,
-    Metadata,
-  };
-
   TokenizerStream(const Tokenizer& tokenizer);
   ~TokenizerStream();
   TokenizerStream(const TokenizerStream&) = delete;
   TokenizerStream& operator=(const TokenizerStream&) = delete;
 
-  const OgaTokenMetadataOutput& DecodeWithMetadata(const OgaTokenMetadataInput& token);
-  const OgaTokenMetadataOutput& FinalizeMetadata();
-
   const std::string& Decode(int32_t token);
   void Reset();
 
  private:
-  void InitializeDefaultMetadataState();
-  void EnsureMetadataState();
   std::shared_ptr<const Tokenizer> tokenizer_;
   OrtxPtr<OrtxObject> cache_;
   std::string chunk_;
-  DecodeMode decode_mode_{DecodeMode::Unset};
-  std::unique_ptr<MetadataCoreState> metadata_state_;
 };
 
 // Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model.
@@ -82,6 +68,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 
  private:
   friend struct TokenizerStream;
+  friend class TokenPostProcessor;
+  OrtxWordPieceInfo GetWordPieceInfo(int32_t vocab_id) const;
 
   int32_t bos_token_id_;
   std::vector<int32_t> eos_token_id_;
@@ -90,7 +78,6 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::optional<int32_t> eot_token_id_;
   std::optional<int32_t> bor_token_id_;
   std::optional<int32_t> eor_token_id_;
-  MetadataCoreConfig metadata_config_;
 };
 
 }  // namespace Generators

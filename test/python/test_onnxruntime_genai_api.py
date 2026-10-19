@@ -78,72 +78,84 @@ def test_requested_timestamps_reject_invalid_model_config(test_data_path, model_
         config.overlay(json.dumps({"model": {"type": model_type, "timestamp_level": "word", **timing}}))
 
 
-def test_tokenizer_stream_timestamp_initialization(test_data_path):
-    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
-    config = og.Config(model_path)
-    config.overlay(json.dumps({"model": {
-        "type": "nemotron_speech", "timestamp_level": "word", "segment_separators": ["."],
-        "sample_rate": 100, "hop_length": 10, "subsampling_factor": 1,
-    }}))
-    tokenizer = og.Tokenizer(config)
-    stream = tokenizer.create_stream()
-    result = stream.finalize_metadata()
-    assert isinstance(result, og.TokenMetadataOutput)
-    assert result.text == ""
-    assert isinstance(result.timestamp_metadata, og.TokenMetadataTimestamp)
-    assert result.timestamp_metadata.words == []
-    assert result.timestamp_metadata.segments == []
-    stream.reset()
-    assert stream.finalize_metadata().timestamp_metadata.words == []
-
-    stream.reset()
-    assert stream.decode(0) is not None
-    with pytest.raises(RuntimeError, match="Cannot mix text and metadata"):
-        stream.finalize_metadata()
-    stream.reset()
-    assert stream.finalize_metadata().timestamp_metadata.segments == []
-    assert result.timestamp_metadata.words == []
-
-
-def test_tokenizer_generic_metadata_from_generator(test_data_path):
+def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
-    tokenizer_config = og.Config(model_path)
-    tokenizer_config.overlay(json.dumps({"model": {
-        "type": "nemotron_speech", "sample_rate": 100, "hop_length": 10,
-        "subsampling_factor": 1,
-    }}))
-    tokenizer = og.Tokenizer(tokenizer_config)
+    tokenizer = og.Tokenizer(model)
+    plain = tokenizer.create_stream()
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=10)
     generator = og.Generator(model, params)
+    processor = og.TokenPostProcessor(model, generator)
+    assert processor.get_next_token_results() == []
+    processor.finalize()
+    initial = processor.get_next_token_results()[0]
+    assert initial.get_text() == ""
+    assert initial.get_timestamps() is None
+    processor.reset()
+    with pytest.raises(RuntimeError, match="expired"):
+        initial.get_text()
     generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
-    generator.generate_next_token()
-    stream = tokenizer.create_stream()
-    tokens = generator.get_next_tokens_with_metadata()
-    assert len(tokens) == 1
-    token = tokens[0]
-    token_id = int(generator.get_next_tokens()[0])
-    assert token.token_id == token_id
-    assert token.token_acoustic_frame_interval is None
-    result = stream.decode_with_metadata(token)
-    plain = tokenizer.create_stream()
-    assert isinstance(result, og.TokenMetadataOutput)
-    assert result.text == plain.decode(int(generator.get_next_tokens()[0]))
-    assert result.timestamp_metadata is None
-    assert stream.finalize_metadata().timestamp_metadata is None
-    assert result.text == tokenizer.create_stream().decode(int(generator.get_next_tokens()[0]))
-    stream.reset()
-    assert stream.decode_with_metadata(token).timestamp_metadata is None
-    generator.generate_next_token()
-    generator.get_next_tokens_with_metadata()
+    retained = []
+    for _ in range(2):
+        generator.generate_next_token()
+        for previous, expected_text in retained:
+            assert previous.get_text() == expected_text
+        expected = plain.decode(int(generator.get_next_tokens()[0]))
+        processor.process_next_tokens()
+        for previous, _ in retained:
+            with pytest.raises(RuntimeError, match="expired"):
+                previous.get_text()
+            with pytest.raises(RuntimeError, match="expired"):
+                previous.get_timestamps()
+        retained.clear()
+        results = processor.get_next_token_results()
+        assert len(results) == 1
+        result = results[0]
+        assert isinstance(result, og.TokenPostProcessorResult)
+        assert result.get_text() == expected
+        assert result.get_timestamps() is None
+        assert processor.get_next_token_results()[0].get_text() == expected
+        retained.append((result, expected))
     del generator
-    del tokens
-    assert token.token_id == token_id
-    assert token.token_acoustic_frame_interval is None
-    stream.reset()
-    assert stream.decode_with_metadata(token).text == result.text
-    assert stream.finalize_metadata().timestamp_metadata is None
+    processor.finalize()
+    with pytest.raises(RuntimeError, match="expired"):
+        result.get_text()
+    processor.finalize()
+    final_result = processor.get_next_token_results()[0]
+    assert final_result.get_text() == ""
+    processor.reset()
+    assert processor.get_next_token_results() == []
+    with pytest.raises(RuntimeError, match="expired"):
+        final_result.get_text()
+    processor.finalize()
+    before_destruction = processor.get_next_token_results()[0]
+    copied_text = before_destruction.get_text()
+    del processor
+    with pytest.raises(RuntimeError, match="expired"):
+        before_destruction.get_text()
+    assert copied_text == ""
+
+
+@pytest.mark.parametrize("search", [{"batch_size": 2}, {"num_beams": 2}])
+def test_token_postprocessor_rejects_multiple_sequences(test_data_path, search):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10, **search)
+    generator = og.Generator(model, params)
+    with pytest.raises(RuntimeError, match="batch_size=1 and num_beams=1"):
+        og.TokenPostProcessor(model, generator)
+
+
+def test_token_postprocessor_rejects_mismatched_model(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    other_model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+    with pytest.raises(RuntimeError, match="model must match"):
+        og.TokenPostProcessor(other_model, generator)
 
 
 def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):
