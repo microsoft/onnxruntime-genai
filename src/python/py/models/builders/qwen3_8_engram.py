@@ -10,7 +10,10 @@ from loaders.engram import EngramWeights
 from .qwen3_8_graph import Qwen4ExpGraphModel
 
 
-class Qwen4ExpEngramModel(EngramWeights, Qwen4ExpGraphModel):
+class Qwen4ExpEngramModel(Qwen4ExpGraphModel):
+    CPU_EMBEDDING_ANNOTATION = EngramWeights.CPU_EMBEDDING_ANNOTATION
+    prepare_engram_embedding = EngramWeights.prepare_engram_embedding
+
     def __init__(self, ple, config, io_dtype, scale_dtype=None):
         super().__init__(io_dtype, "engram.onnx", "qwen4_exp_engram")
         self.graph.opset_imports["com.microsoft"] = 1

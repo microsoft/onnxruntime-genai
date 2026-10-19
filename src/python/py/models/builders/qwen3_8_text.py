@@ -11,10 +11,11 @@ from .expansions.qwen3_8 import Qwen38
 from .qwen3_5 import Qwen35MoETextModel
 
 
-class Qwen4ExpTextModel(EngramWeights, Qwen38, Qwen35MoETextModel):
+class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
     """Qwen4-Exp decoder builder using external token/vision embeddings."""
 
     CPU_EMBEDDING_ANNOTATION = "cpu_embedding"
+    prepare_engram_embedding = EngramWeights.prepare_engram_embedding
 
     def is_packed_matmul_supported(self):
         return Model.is_packed_matmul_supported(self)

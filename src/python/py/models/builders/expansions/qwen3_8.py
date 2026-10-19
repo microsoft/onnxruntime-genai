@@ -158,7 +158,7 @@ class Qwen38(Qwen38Engram):
             self.attention_attrs["v_path"] = ""
             self.attention_attrs["gate_path"] = gate_output
             self.attention_attrs["indexer_qk_path"] = indexer_output
-            return
+            return None
 
         if not self.attention_attrs["use_packed_matmul"] or not packable:
             return super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
