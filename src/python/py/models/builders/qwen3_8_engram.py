@@ -13,11 +13,13 @@ from .qwen3_8_graph import Qwen4ExpGraphModel
 class Qwen4ExpEngramModel(Qwen4ExpGraphModel):
     CPU_EMBEDDING_ANNOTATION = EngramWeights.CPU_EMBEDDING_ANNOTATION
     prepare_engram_embedding = EngramWeights.prepare_engram_embedding
+    get_engram_pad_id = EngramWeights.get_engram_pad_id
 
     def __init__(self, ple, config, io_dtype, scale_dtype=None):
         super().__init__(io_dtype, "engram.onnx", "qwen4_exp_engram")
         self.graph.opset_imports["com.microsoft"] = 1
         embedding = ple.ple_embedding
+        eos_token_id = self.get_engram_pad_id(embedding.eos_token_id)
         ngram_size = config.ngram_size
         heads_per_ngram = config.heads_per_ngram
         ngram_heads = (ngram_size - 1) * heads_per_ngram
@@ -45,7 +47,7 @@ class Qwen4ExpEngramModel(Qwen4ExpGraphModel):
         self.make_initializer(embedding.layer_multipliers, multipliers)
         self.make_initializer(embedding.ngram_heads_vocab_sizes, vocab_sizes)
         self.make_initializer(embedding.ngram_heads_offsets, offsets)
-        self.make_initializer(torch.tensor(embedding.eos_token_id, dtype=torch.int64), eos)
+        self.make_initializer(torch.tensor(eos_token_id, dtype=torch.int64), eos)
 
         ngram_ids = "/model/ple/NGramHashMapping/output_0"
         self.make_node(
@@ -56,7 +58,7 @@ class Qwen4ExpEngramModel(Qwen4ExpGraphModel):
             domain="com.microsoft",
             max_ngram_size=ngram_size,
             n_head_per_ngram=heads_per_ngram,
-            pad_id=embedding.eos_token_id,
+            pad_id=eos_token_id,
             reset_on_eos=1,
         )
         self.make_value(

@@ -16,6 +16,7 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
 
     CPU_EMBEDDING_ANNOTATION = "cpu_embedding"
     prepare_engram_embedding = EngramWeights.prepare_engram_embedding
+    get_engram_pad_id = EngramWeights.get_engram_pad_id
 
     def is_packed_matmul_supported(self):
         return Model.is_packed_matmul_supported(self)
@@ -53,7 +54,7 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
         self.ple_conv_kernel_size = config.ple_conv_kernel_size
         self.ple_conv_dilation = config.ngram_size
         self.ngram_size = config.ngram_size
-        self.ple_token_pad_id = config.eos_token_id
+        self.ple_token_pad_id = self.get_engram_pad_id(config.eos_token_id)
         self.rope_attrs["cast"]["use_fp32"] = False
         self.heads_per_ngram = config.heads_per_ngram
         self.indexer_num_heads = config.indexer_n_heads
@@ -238,6 +239,7 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
             decoder["outputs"]["state_update_indexer_value_names"] = "state_update.%d.indexer_value"
             decoder["outputs"]["state_update_indexer_row_names"] = "state_update.%d.indexer_row"
         decoder["ple_token_pad_id"] = self.ple_token_pad_id
+        decoder["indexer_compress_ratio"] = self.indexer_compress_ratio
         if self.ep != "cpu" and not getattr(self, "external_engram", False):
             session_options = decoder["session_options"]
             session_options["session.layer_assignment_settings"] = f"cpu(={self.CPU_EMBEDDING_ANNOTATION})"
