@@ -966,11 +966,18 @@ void Generator::GenerateNextToken() {
 TokenOutputs Generator::GetTokenOutputs() const {
   if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
     TokenOutputs outputs{transducer->GetStepTokens()};
-    if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off) {
+    if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off ||
+        model_->config_->model.diarization.Enabled()) {
       const auto intervals = transducer->GetStepTokenIntervals();
       if (intervals.size() != outputs.GetTokens().size())
         throw std::runtime_error("Generator timing count does not match emitted tokens");
       outputs.SetTimestamps(intervals);
+    }
+    if (model_->config_->model.diarization.Enabled()) {
+      const auto evidence = transducer->GetStepSpeakerEvidence();
+      if (evidence.size() != outputs.GetTokens().size())
+        throw std::runtime_error("Generator speaker evidence count does not match emitted tokens");
+      outputs.SetSpeakerEvidence(evidence);
     }
     return outputs;
   }

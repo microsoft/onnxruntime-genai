@@ -63,6 +63,9 @@ Without diarization, timestamp-only modes still work and `off` preserves ordinar
 incremental text. `all` is not supported.
 
 Metadata output consists of completed records rather than duplicate text fragments.
+`TokenPostProcessor` owns the tokenizer/stream internally. Its borrowed record
+accessors `has_timestamp()` and `get_speaker_label()` distinguish optional timing
+from attribution; `get_timestamps()` remains non-null for diarization-only output.
 The example drains all remaining audio through `processor.flush()` before one
 metadata finalization. VAD statistics distinguish skipped chunks from initial
 look-ahead buffering. The final summary remains the plain transcript.

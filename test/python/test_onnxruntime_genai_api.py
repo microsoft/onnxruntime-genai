@@ -115,7 +115,7 @@ def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, 
     prompt = np.array([[0, 0, 0, 52]], dtype=np.int32)
     generator.append_tokens(prompt)
     postprocessor = og.TokenPostProcessor(model, generator)
-    transcript = asr_example.decode_tokens(generator, postprocessor, "off", [])
+    transcript = asr_example.decode_tokens(generator, postprocessor, "off")
     tokenizer = og.Tokenizer(model)
     plain = tokenizer.create_stream()
     expected = "".join(plain.decode(int(token_id)) for token_id in generator.get_sequence(0)[prompt.size:])
@@ -125,7 +125,7 @@ def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, 
 
 @pytest.mark.parametrize(
     "timestamp_level,use_vad",
-    [("off", False), ("word", False), ("segment", False), ("all", False), ("all", True)],
+    [("off", False), ("word", False), ("segment", False), ("word", True)],
 )
 def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, timestamp_level, use_vad):
     model_path = os.getenv("NEMOTRON_STREAMING_MODEL_PATH") or os.fspath(
@@ -218,9 +218,9 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
         process_result(result)
     transcript = "".join(text_fragments)
     assert transcript.strip()
-    if timestamp_level in ("word", "all"):
+    if timestamp_level == "word":
         assert "".join(words) == transcript
-    if timestamp_level in ("segment", "all"):
+    if timestamp_level == "segment":
         assert "".join(segments) == transcript
     if use_vad:
         assert skipped_chunks > 0

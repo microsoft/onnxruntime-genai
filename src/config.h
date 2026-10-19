@@ -385,7 +385,17 @@ struct Config {
 
     struct Diarization {
       std::string filename;
-      int right_context{4};  // Additional 80 ms encoder frames.
+      // Declare the export's preprocessing and encoder geometry; defaults match Nemotron-3.
+      int sample_rate{16000};
+      int num_mels{128};
+      int fft_size{512};
+      int win_length{400};
+      int hop_length{160};
+      int subsampling_factor{8};
+      float preemph{0.97f};
+      float log_eps{5.96046448e-8f};
+      int right_context{4};  // Additional encoder frames; default 4 = 320 ms with the default geometry.
+      int64_t SamplesPerEncoderFrame() const { return static_cast<int64_t>(hop_length) * subsampling_factor; }
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
       bool Enabled() const { return !filename.empty(); }

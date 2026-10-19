@@ -158,6 +158,7 @@ struct NemotronSpeechModel : Model {
   std::unique_ptr<OrtSession> session_diarization_;
   std::unique_ptr<OrtSessionOptions> diarization_session_options_;
   DeviceInterface* diarization_device_{};
+  SessionInfo diarization_session_info_;
 
   std::unique_ptr<OrtSessionOptions> encoder_session_options_;
   std::unique_ptr<OrtSessionOptions> decoder_session_options_;
@@ -258,7 +259,7 @@ struct NemotronSpeechState : TransducerState {
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
   void StepToken() override;
-  std::span<const OgaTokenMetadataSpeakerEvidence> GetStepSpeakerEvidence() const override { return last_speaker_evidence_; }
+  std::span<const TokenSpeakerEvidence> GetStepSpeakerEvidence() const override { return last_speaker_evidence_; }
   void ResetStreamingState();
 
   void SetLangId(int lang_id);
@@ -293,7 +294,7 @@ struct NemotronSpeechState : TransducerState {
   int64_t chunk_start_sample_{0};
   int symbol_step_{0};
   bool need_encoder_run_{false};
-  std::vector<OgaTokenMetadataSpeakerEvidence> last_speaker_evidence_;
+  std::vector<TokenSpeakerEvidence> last_speaker_evidence_;
 
   void RunEncoder();
 };

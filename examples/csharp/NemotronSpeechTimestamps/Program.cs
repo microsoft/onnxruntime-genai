@@ -58,8 +58,9 @@ for (int offset = 0; offset < audio.Length; offset += chunkSize) {
   }
 }
 
-using var flushInputs = processor.Flush();
-if (flushInputs != null) {
+while (true) {
+  using var flushInputs = processor.Flush();
+  if (flushInputs == null) break;
   generator.SetInputs(flushInputs);
   DecodeSegments(generator, postprocessor, timestampedTranscript);
 }
@@ -90,7 +91,9 @@ static void AppendSegments(TokenPostProcessorResult result, StringBuilder timest
   foreach (var segment in timestamps.GetSegments()) {
     string text = segment.GetText();
     string separator = text.Length > 0 && char.IsWhiteSpace(text[0]) ? "" : " ";
-    string timestampedSegment = $"[{segment.GetStartTime():F2} - {segment.GetStopTime():F2}]{separator}{text}";
+    string prefix = segment.HasTimestamp() ? $"[{segment.GetStartTime():F2} - {segment.GetStopTime():F2}]" : "";
+    if (segment.GetSpeakerLabel() is string speaker) prefix += $"[{speaker}]";
+    string timestampedSegment = $"{prefix}{separator}{text}";
     timestampedTranscript.Append(timestampedSegment);
     Console.Write(timestampedSegment);
   }

@@ -1,5 +1,47 @@
 # Token Post-Processing
 
+## Speaker attribution
+
+One generator owns both ASR and diarization inference. Its private `GetTokenOutputs()`
+returns sequential token IDs, required acoustic intervals, and optional cumulative
+speaker-probability boundary sums/counts from the same generation step. The speaker
+payload is internal: no public generator-output getter or token-metadata DTO is exposed.
+ASR encoding and diarization run once per retained central audio chunk, not once per
+emitted token. Even zero-token chunks advance diarization caches and probability sums.
+
+`TokenPostProcessor.ProcessNextTokens()` validates each interval and speaker snapshot
+before ordinary decoding, fetches Extensions lexical facts when either speech feature
+needs grouping, and writes directly into its canonical `PostProcessorResult`.
+Its existing `MetadataCoreState` owns grouping, pending intervals/evidence, word
+speaker attribution, and unfinished turns. `TokenDiarization` supplies stateless
+validation and probability-mean/argmax helpers in GenAI; Extensions owns no speech
+metadata accumulation, grouping, aggregation, or segment construction.
+
+Speaker snapshots must be finite and non-negative, with valid evaluated-frame counts
+and stream-wide nondecreasing sums/counts. The last accepted snapshot remains separate
+from pending words, survives finalization, and clears on processor reset. Equal
+snapshots are allowed for tokens sharing a frame. Word labels are computed only when
+the word completes, using its own first/last contributing token boundaries.
+
+The same `TimestampRecord` has optional timing components and an optional speaker
+label. `GetTimestamps()` is non-null when either timestamps or diarization are enabled.
+With timestamps off and diarization on, it contains speaker-turn segments with no
+times. `word` returns labeled words; `segment` returns labeled speaker turns.
+Turns split only on speaker changes or finalization, not punctuation or silence gaps.
+Timestamp-only segmentation keeps the configured punctuation/gap rules.
+
+Native C/C++ callers check `HasTimestamp()` before scalar timing accessors, whose
+absent value is zero. Python/C# timing getters return `None`/null when absent.
+`GetSpeakerLabel()` / `get_speaker_label()` returns null/`None` without diarization.
+These accessors use the existing borrowed handles and stale-result guards; no copied
+result hierarchy or V2 API is introduced.
+
+Flush buffered audio and run all remaining inference before the single postprocessor
+finalization. Processor reset clears decoding and post-processing, not the generator
+or either inference cache. Recreate/reset recording inference state separately.
+If either model fails, generation fails rather than publishing incomplete combined
+outputs; do not blindly retry after one branch may have advanced state.
+
 `TokenPostProcessor(model, generator)` owns a tokenizer, an ordinary tokenizer
 stream, `MetadataCoreState`, word grouping, acoustic interval buffers, and the
 results completed by the latest processing call. Configuration comes from the
@@ -87,15 +129,16 @@ flowchart TD
 The private generator getter views existing token and interval storage without
 advancing generation. It is accessible only to the native processor, not through
 the public C, C++, C#, or Python generator APIs. `GenerateNextToken()` is unchanged.
-`TokenOutputs` hides its storage behind accessors; disabled timestamp data is null.
-The getter selects optional timestamp output from
-`model_->config_->model.timestamp_level` directly. The transducer's cached
+`TokenOutputs` hides its storage behind accessors. It supplies acoustic intervals
+when timestamps or diarization are enabled, and speaker evidence only for diarization.
+Fully disabled acoustic metadata is null. The getter selects optional output from
+the generator model's configuration directly. The transducer's cached
 timestamp flag controls interval production only; it does not select the getter's
 output fields. A token/interval count mismatch fails before per-token decoding.
 
 Extensions owns vocabulary-specific facts: `is_special`, `starts_word`,
 `ends_word`, and `boundary_style`. Its standalone lookup is independent of decoder
-history and runs before ordinary decoding only when timestamps are enabled. It neither groups words nor owns
+history and runs before ordinary decoding when timestamps or diarization require word grouping. It neither groups words nor owns
 timestamp state. The tokenizer and stream have no timestamp configuration or
 special metadata decode mode.
 
@@ -123,8 +166,8 @@ flowchart TD
   completed --> words["TokenWordGroupingState::CompletedWords()"]
   words --> align["For each completed word:<br/>validate token span; take first.start and last.stop"]
   align --> publish["MetadataCoreState::PublishWord(text, interval, timestamps)"]
-  publish -->|word or all| word["AddRecord(timestamps.words)<br/>RoundTimestamp(start and stop seconds)"]
-  publish -->|segment or all| gap["Check gap against pending segment"]
+  publish -->|word| word["AddRecord(timestamps.words)<br/>RoundTimestamp(start and stop seconds)"]
+  publish -->|segment| gap["Check gap against pending segment"]
   gap -->|Gap completes prior segment| prior["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
   gap --> pending["Start or extend pending segment text and interval"]
   prior --> pending
@@ -155,7 +198,7 @@ flowchart TD
 
 ## Configuration
 
-Timestamp levels are `off` (default), `word`, `segment`, and `all`. Enabled
+Timestamp levels are `off` (default), `word`, and `segment`; `all` is rejected. Enabled
 timestamps require a model that produces acoustic intervals, currently
 `nemotron_speech`, with positive `sample_rate`, `hop_length`, and
 `subsampling_factor`. Being an ASR model alone is not sufficient. Missing or

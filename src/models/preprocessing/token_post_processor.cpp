@@ -9,7 +9,8 @@ TokenPostProcessor::TokenPostProcessor(const Model& model, const Generator& gene
     : generator_{generator},
       config_{{model.config_->model.timestamp_level, model.config_->model.segment_separators,
                model.config_->model.segment_gap_threshold_seconds, model.config_->model.sample_rate,
-               model.config_->model.hop_length, model.config_->model.subsampling_factor}} {
+               model.config_->model.hop_length, model.config_->model.subsampling_factor},
+              model.config_->model.diarization.Enabled()} {
   if (generator.model_.get() != &model)
     throw std::runtime_error("TokenPostProcessor model must match the generator model");
   const auto& search = generator.state_->params_->search;
@@ -26,15 +27,17 @@ void TokenPostProcessor::ProcessNextTokens() {
   const auto outputs = generator_.GetTokenOutputs();
   const auto tokens = outputs.GetTokens();
   const auto* timestamps = outputs.GetTimestamps();
+  const auto* speaker_evidence = outputs.GetSpeakerEvidence();
   for (size_t index = 0; index < tokens.size(); ++index) {
     TokenMetadataInput token{tokens[index], 0, {}};
     if (timestamps) {
       token.has_token_acoustic_frame_interval = 1;
       token.token_acoustic_frame_interval = (*timestamps)[index];
     }
+    if (speaker_evidence) token.speaker_evidence = (*speaker_evidence)[index];
     metadata_state_->ValidateInput(token);
     OrtxWordPieceInfo piece{};
-    if (metadata_state_->TimestampsEnabled()) piece = tokenizer_->GetWordPieceInfo(token.token_id);
+    if (metadata_state_->AlignmentEnabled()) piece = tokenizer_->GetWordPieceInfo(token.token_id);
     const auto& text = stream_->Decode(token.token_id);
     auto& result = results_.emplace_back();
     result.text = text;

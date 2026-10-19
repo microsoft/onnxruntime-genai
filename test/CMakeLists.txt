@@ -276,7 +276,6 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
 list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/nemotron_diarization_test.cpp"
-  "${onnxruntime_extensions_SOURCE_DIR}/test/static_test/test_speech_metadata.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp"

@@ -225,26 +225,8 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
     const auto& options = config_->model.diarization.session_options.value_or(config_->model.decoder.session_options);
     diarization_device_ = CreateSessionOptionsFromConfig(options, *diarization_session_options_, true, true);
     session_diarization_ = CreateSession(ort_env, config_->model.diarization.filename, diarization_session_options_.get());
-    SessionInfo info;
-    info.Add(*session_diarization_);
-    for (const char* name : {"past_cache_embeds", "past_cache_probs", "past_fifo"})
-      if (info.GetInputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-        throw std::runtime_error("Diarization cache inputs must be float32");
-    for (const char* name : {"num_lookahead_frames", "past_num_cache_frames", "past_num_fifo_frames"})
-      if (info.GetInputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
-          !info.GetInputShape(name).empty())
-        throw std::runtime_error("Diarization frame counts must be scalar int64");
-    if (info.GetInputDataType("past_is_compressed") != ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL ||
-        !info.GetInputShape("past_is_compressed").empty() ||
-        info.GetOutputDataType("speaker_probs") != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-      throw std::runtime_error("Invalid diarization compression flag or probability output type");
-    if (info.GetInputDataType("input_features") != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-        info.GetInputShape("input_features").size() != 3 ||
-        info.GetInputShape("input_features")[1] != 128 ||
-        info.GetInputShape("past_cache_embeds") != std::vector<int64_t>{-1, 264, 512} ||
-        info.GetInputShape("past_fifo") != std::vector<int64_t>{-1, 264, 512} ||
-        info.GetInputShape("past_cache_probs") != std::vector<int64_t>{-1, 264, 8})
-      throw std::runtime_error("Unsupported Nemotron-3 streaming diarization graph contract");
+    diarization_session_info_.Add(*session_diarization_);
+    ValidateNemotronDiarizationGraph(config_->model, diarization_session_info_);
   }
 
   auto float_types = std::array<ONNXTensorElementDataType, 14>{
@@ -634,8 +616,10 @@ void NemotronSpeechState::RunEncoder() {
       .CopyFrom(ByteWrapTensor(DeviceFor(*encoded_len_owner, *model_.p_device_inputs_), *encoded_len_owner));
   encoded_len_ = *encoded_len_cpu->GetTensorData<int64_t>();
   if (diarization_state_) {
-    encoded_len_ = std::min(encoded_len_, (current_valid_samples_ + 1279) / 1280);
-    diarization_state_->Process(*current_diarization_features_->ort_tensor_, current_diarization_lookahead_);
+    const int64_t asr_frame_samples = static_cast<int64_t>(nemotron_config_.hop_length) * nemotron_config_.subsampling_factor;
+    encoded_len_ = std::min(encoded_len_, (current_valid_samples_ + asr_frame_samples - 1) / asr_frame_samples);
+    diarization_state_->SetFeaturesInput(*current_diarization_features_->ort_tensor_, current_diarization_lookahead_);
+    diarization_state_->Run(0, dummy_tokens);
     current_diarization_features_.reset();
   }
 
@@ -757,7 +741,7 @@ void NemotronSpeechState::StepToken() {
     if (timestamps_enabled_) {
       last_token_intervals_.push_back({token_frame, token_frame + 1});
     }
-    if (diarization_state_) last_speaker_evidence_.push_back(diarization_state_->Evidence(token_frame -
+    if (diarization_state_) last_speaker_evidence_.push_back(diarization_state_->GetTokenSpeakerEvidence(token_frame -
         GetNemotronGlobalFrame(chunk_start_sample_, 0, nemotron_config_.hop_length, nemotron_config_.subsampling_factor)));
     return;
   }

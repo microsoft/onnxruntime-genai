@@ -38,3 +38,8 @@ next process, finalize, reset, or disposal. The sample reads each record's
 `GetText()`, `GetStartTime()`, and `GetStopTime()` and appends the formatted string
 to its own transcript before advancing. The processor supports one sequence and
 one beam and must use its generator's model.
+
+If the package enables diarization, segment boundaries are speaker turns and the
+sample adds `[speaker_N]` to each completed segment. It still explicitly enables
+segment timestamps. Every pending audio chunk is flushed before postprocessor
+finalization, including diarization look-ahead tails.

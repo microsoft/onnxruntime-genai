@@ -4,6 +4,7 @@
 #include "ort_genai_c.h"
 #include "ortx_tokenizer.h"
 #include "token_word_grouping.h"
+#include "generator/token_outputs.h"
 
 #include <cstddef>
 #include <deque>
@@ -18,14 +19,16 @@ struct TokenMetadataInput {
   int32_t token_id;
   int32_t has_token_acoustic_frame_interval;
   OgaTokenMetadataAcousticFrameInterval token_acoustic_frame_interval;
+  std::optional<TokenSpeakerEvidence> speaker_evidence;
 };
 
 struct TimestampRecord {
   std::string text;
-  int64_t start_frame;
-  int64_t stop_frame;
-  double start_time;
-  double stop_time;
+  std::optional<int64_t> start_frame;
+  std::optional<int64_t> stop_frame;
+  std::optional<double> start_time;
+  std::optional<double> stop_time;
+  std::optional<std::string> speaker_label;
 };
 
 struct TimestampResult {
@@ -51,6 +54,7 @@ struct TimestampPostProcessorConfig {
 // Model-derived metadata options copied into each processor.
 struct MetadataCoreConfig {
   TimestampPostProcessorConfig timestamps;
+  bool diarization{};
 };
 
 class MetadataCoreState {
@@ -61,24 +65,27 @@ class MetadataCoreState {
   MetadataCoreState(const MetadataCoreState&) = delete;
   MetadataCoreState& operator=(const MetadataCoreState&) = delete;
   bool TimestampsEnabled() const { return config_.timestamps.level != Config::TimestampLevel::Off; }
+  bool AlignmentEnabled() const { return TimestampsEnabled() || config_.diarization; }
   void ValidateInput(const TokenMetadataInput& token) const;
   void ProcessDecoded(const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, PostProcessorResult& result);
   void ProcessFinalized(PostProcessorResult& result);
   void ProcessCompletedWords(TimestampResult& result);
-  void PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval, TimestampResult& result);
+  void PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval, int speaker, TimestampResult& result);
   void CompleteSegment(TimestampResult& result);
   void AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
-                 OgaTokenMetadataAcousticFrameInterval interval);
+                 OgaTokenMetadataAcousticFrameInterval interval, int speaker);
 
   const MetadataCoreConfig& config_;
   TokenWordGroupingState word_grouping_;
   std::optional<int> segment_gap_threshold_frames_;
   double seconds_per_frame_{};
   // Keep intervals until the word grouper's pending-token watermark releases them.
-  std::deque<OgaTokenMetadataAcousticFrameInterval> pending_token_intervals_;
+  std::deque<TokenMetadataInput> pending_tokens_;
+  std::optional<TokenSpeakerEvidence> last_speaker_evidence_;
   size_t first_pending_token_index_{};
   std::optional<std::string> pending_segment_text_;
   OgaTokenMetadataAcousticFrameInterval pending_segment_interval_{};
+  int pending_segment_speaker_{-1};
 };
 
 }  // namespace Generators

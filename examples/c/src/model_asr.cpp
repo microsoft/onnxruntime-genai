@@ -255,9 +255,9 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   // Flush remaining audio
   while (auto inputs = processor->Flush()) {
-      chunks_processed++;
-      generator->SetInputs(*inputs);
-      full_transcript += DecodeTokens(*generator, *postprocessor, timestamp_level);
+    chunks_processed++;
+    generator->SetInputs(*inputs);
+    full_transcript += DecodeTokens(*generator, *postprocessor, timestamp_level);
   }
 
   postprocessor->Finalize();

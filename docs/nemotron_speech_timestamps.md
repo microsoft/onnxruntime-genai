@@ -10,7 +10,7 @@ Add timestamp options under `model` in `genai_config.json`:
 ```json
 {
   "model": {
-    "timestamp_level": "all",
+    "timestamp_level": "segment",
     "segment_separators": [".", "?", "!"],
     "segment_gap_threshold_seconds": 1.0
   }
@@ -24,7 +24,8 @@ Add timestamp options under `model` in `genai_config.json`:
 | `off` | None (default) |
 | `word` | Words |
 | `segment` | Segments |
-| `all` | Words and segments |
+
+`all` is not supported. Diarization also uses these three levels; see below.
 
 `segment_separators` is an optional array of decoded text suffixes that complete a segment. When
 present, it replaces the default separators (`.`, `?`, and `!`). An empty array disables
@@ -59,7 +60,7 @@ flowchart TB
     decode --> transcript[Plain-text transcript]
   end
 
-  subgraph timed[With timestamps: word, segment, or all]
+  subgraph timed[With timestamps: word or segment]
     setup[Processor copies model configuration] --> stream
     timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNextTokens]
     stream --> ortx[Extensions: vocabulary facts + ordinary cached decode]
@@ -74,7 +75,7 @@ flowchart TB
   generator --> timed_tokens
 ```
 
-When timestamps are enabled, the streaming processor includes a scalar int64
+When timestamps or diarization are enabled, the streaming processor includes a scalar int64
 `chunk_start_sample` tensor alongside `audio_features` in `NamedTensors`.
 The origin counts samples in chunks dropped by VAD; `Flush()` pads the final chunk
 for feature extraction but advances the origin by only the actual input samples.
@@ -138,58 +139,6 @@ finalization emits no duplicate events. `Reset()` / `reset()` clears all process
 state together; it does not reset the generator. The generator must outlive its
 processor. See [Token post-processing](metadata_decode.md) for the full lifecycle.
 
-The Nemotron examples demonstrate the complete flow:
-
-- `examples/c/src/model_asr.cpp`
-- `examples/csharp/ModelASR/Program.cs`
-- `examples/csharp/NemotronSpeechTimestamps/Program.cs`
-- `examples/python/model-asr.py`
-
-The timestamp-focused C# sample enables segment mode and builds output only from completed segment
-events. It prints each segment as `[StartTime - StopTime] SegmentText`; it does not concatenate token
-fragments.
-
-The general Nemotron examples render word mode as `[StartTime - StopTime]WordText` followed by one
-space, with no space after the interval. Segment mode renders
-`[StartTime - StopTime] SegmentText`. All mode reports both views separately: the segment-timestamp
-transcript followed by the per-word timestamp transcript.
-
-### Building the examples
-
-These examples require headers, language bindings, and a native GenAI library from a build containing
-the processor APIs, together with the corresponding ONNX Runtime Extensions lexical lookup API.
-Existing packages such as GenAI `0.17.0` do not provide those APIs. Until a feature-containing release
-is published:
-
-- For Python, use the wheel built from the implementation branch. Call `process_next_tokens()`
-  after generation and `finalize()` at the end, then read typed objects from
-  `get_next_token_results()`: use nullable `result.get_timestamps()`, then
-  `get_words()` or `get_segments()`, and each record's `get_text()`,
-  `get_start_time()`, and `get_stop_time()` accessors. Append the needed values to
-  application-owned transcript storage before the next processing call; the
-  returned objects are borrowed, not independent snapshots.
-- For C++, build the `model_asr` target with `MODEL_ASR=ON` and set `OGA_INCLUDE_DIR` and `OGA_LIB_DIR`
-  to the matching headers and native library.
-- For C#, pass `-p:UseLocalGenAI=true` to build against the local managed project. Run with matching
-  native libraries on the platform library search path; the project reference alone does not supply
-  the Linux native GenAI library. See the [general ASR sample](../examples/csharp/ModelASR/README.md)
-  and [segment timestamp sample](../examples/csharp/NemotronSpeechTimestamps/README.md).
-
-The C# package references remain at the common `0.17.0` baseline and must be updated to a release
-containing these APIs before using package-based builds. Selecting `timestamp_level: "off"` does not
-remove the timestamp API references from the C++ or C# example source.
-
-With a feature-enabled Python package installed, run the example regressions from the repository root:
-
-```bash
-python -m pytest test/python/test_onnxruntime_genai_api.py --test_models test/models -k asr_example
-```
-
-The real-speech cases use `test/models/nemotron-speech-streaming` and `test/audios/jfk.flac`. Set
-`NEMOTRON_STREAMING_MODEL_PATH` to use a model outside the test fixtures. They exercise every timestamp
-level, trailing finalization, and VAD-skipped silence; they skip when the model or audio is absent.
-The VAD case requires a model with a configured VAD component. These tests run inference on CPU.
-
 ## Interval semantics
 
 Frame and time intervals are half-open: `[start, stop)`. Each RNNT token initially covers one
@@ -199,7 +148,83 @@ by VAD. Time values are seconds rounded to two decimal places.
 Punctuation remains attached to its word. Segments complete on configured suffixes, configured
 frame gaps, or finalization.
 
-When `timestamp_level` is `off`, the examples use the processor's ordinary text results.
-Applications needing only text may also use `GetNextTokens()` and tokenizer stream `Decode()`.
+When `timestamp_level` is `off` and diarization is disabled, use ordinary `GetNextTokens()` and tokenizer stream `Decode()`.
 The streaming processor does not create timestamp origin metadata, the transducer does not append
 token intervals, and the tokenizer stream does not buffer intervals or build timestamp events.
+
+## Streaming diarization
+
+Configure the ASR package with a stateful streaming export and its external weights:
+
+```json
+{
+  "model": {
+    "timestamp_level": "segment",
+    "diarization": {
+      "filename": "diarization/model.onnx",
+      "right_context": 4,
+      "session_options": {"provider_options": []}
+    }
+  }
+}
+```
+
+The nonempty filename enables diarization. Paths are relative to the ASR package.
+The graph must expose `input_features`, `num_lookahead_frames`, six `past_*` inputs,
+`speaker_probs`, and six matching `present_*` outputs. The offline single-input
+export is not supported. Cache updates/compression remain in ONNX; capacities and
+embedding dimensions are derived from graph I/O, with eight speaker channels.
+
+The diarization block declares these export-specific defaults:
+
+| Field | Default |
+| --- | --- |
+| `sample_rate` | 16000 |
+| `num_mels` | 128 |
+| `fft_size` | 512 |
+| `win_length` | 400 |
+| `hop_length` | 160 |
+| `subsampling_factor` | 8 |
+| `preemph` | 0.97 |
+| `log_eps` | 5.96046448e-8 |
+| `right_context` | 4 |
+
+Sample rate must match ASR. Each ASR acoustic frame must cover an integer number
+of diarization feature/probability frames, and central chunks must align to both
+encoder strides. Other values require a compatible trained/exported model, not
+just editing this configuration. Preprocessing/time parameters are declared
+because they cannot be inferred from ONNX tensor dimensions alone.
+
+Right-context counts additional diarization encoder frames:
+`duration = right_context * hop_length * subsampling_factor / sample_rate`.
+Thus four default frames mean **320 ms total**, not 80 ms. With 560 ms central
+chunks, initial buffering is 880 ms plus 16 ms STFT context, excluding compute.
+Future context is not committed twice or used to advance ASR feature state.
+EOF uses only available complete encoder frames for look-ahead.
+
+One generator runs both models serially for each retained chunk before exposing
+tokens/evidence to `TokenPostProcessor`. VAD gates both central inference paths,
+preserves their caches, and advances original audio time through skipped chunks.
+Future audio may influence look-ahead even if VAD later drops its central chunk.
+Skipped intervals contribute no probability sums or evaluated-frame count.
+
+`TokenPostProcessor` averages each completed word's evaluated probabilities using
+internal boundary sums/counts, includes one ASR frame of left context, clamps to
+at least 0.01, normalizes, and chooses one maximum label (`speaker_0`..`speaker_7`).
+Multiple speakers may be active; the transcript determines emitted words rather
+than a diarization threshold. Labels are recording-local anonymous identities.
+
+| Timestamp level | Diarization enabled |
+| --- | --- |
+| `off` | Speaker-turn segments, no timing |
+| `word` | Timestamped labeled words |
+| `segment` | Timestamped labeled speaker turns |
+
+`GetTimestamps()` remains non-null in diarization-only mode. Record accessors
+expose optional times and speaker labels, with the same borrowed-result lifetime
+as timestamp-only output. Speaker turns split only on speaker change/finalization;
+timestamp-only segments retain punctuation/gap rules.
+
+Flush all remaining audio through inference before calling the postprocessor's
+single finalizer. Resetting it clears word/turn/evidence state, not inference.
+See [Token post-processing](metadata_decode.md) for binding and lifetime details.

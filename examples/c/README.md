@@ -119,6 +119,9 @@ incremental text. `all` is not supported.
 All remaining audio chunks are flushed before metadata finalization. Printed
 records include timestamps only when enabled and speaker labels only when
 diarization is enabled. The final summary remains the plain transcript.
+The example uses one generator and one `TokenPostProcessor`; `HasTimestamp()`
+and `GetSpeakerLabel()` read optional fields from opaque borrowed records before
+the next processing mutation.
 
 ## Tool Calling
 

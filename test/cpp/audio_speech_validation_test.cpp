@@ -70,7 +70,7 @@ TEST(AudioSpeechValidationTests, NemotronEncoderOutputRankValidation) {
 TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
   Generators::Config config;
   config.model.type = "nemotron_speech";
-  config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config.model.timestamp_level = Generators::Config::TimestampLevel::Word;
   config.model.sample_rate = 16000;
   config.model.hop_length = 160;
   config.model.subsampling_factor = 8;
@@ -79,7 +79,7 @@ TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
 
   Generators::NemotronConfig nemotron_config;
   EXPECT_NO_THROW(nemotron_config.PopulateFromConfig(config));
-  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::All);
+  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::Word);
   EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(config.model), 13);
 }
 
@@ -159,7 +159,7 @@ TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path.string();
 
   auto config = std::make_unique<Generators::Config>(model_path, "");
-  config->model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config->model.timestamp_level = Generators::Config::TimestampLevel::Word;
   const auto chunk_samples = static_cast<size_t>(config->model.chunk_samples);
   ASSERT_GT(chunk_samples, 1U);
   // The downloaded CUDA export uses standard ONNX operators; run this metadata test on CPU too.
@@ -304,7 +304,7 @@ class MetadataCoreStateTests : public testing::Test {
   void SetUp() override {
     Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
     config.model.type = "nemotron_speech";
-    config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+    config.model.timestamp_level = Generators::Config::TimestampLevel::Word;
     config.model.sample_rate = 100;
     config.model.hop_length = 10;
     config.model.subsampling_factor = 1;
@@ -313,7 +313,7 @@ class MetadataCoreStateTests : public testing::Test {
     tokens = tokenizer->Encode("Hello world.");
     ASSERT_GT(tokens.size(), 1U);
     model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-    model->config_->model.timestamp_level = Generators::Config::TimestampLevel::All;
+    model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Word;
     params = std::make_shared<Generators::GeneratorParams>(*model);
     generator = std::make_unique<Generators::Generator>(*model, *params);
     auto transducer = std::make_unique<TestTransducerState>(*params, *model);
@@ -447,13 +447,14 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
   EXPECT_EQ(words[1].text, words[0].text);
   EXPECT_EQ(words[0].start_frame, 2);
   EXPECT_EQ(words[0].stop_frame, 7);
-  EXPECT_DOUBLE_EQ(words[0].start_time, 0.2);
-  EXPECT_DOUBLE_EQ(words[0].stop_time, 0.7);
+  EXPECT_DOUBLE_EQ(*words[0].start_time, 0.2);
+  EXPECT_DOUBLE_EQ(*words[0].stop_time, 0.7);
   EXPECT_EQ(words[1].start_frame, 20);
   EXPECT_EQ(words[1].stop_frame, 23);
 }
 
 TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
+  model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Segment;
   for (double threshold : {0.0, 0.01, 1.0}) {
     model->config_->model.segment_gap_threshold_seconds = threshold;
     Generators::TokenPostProcessor processor{*model, *generator};
@@ -480,7 +481,7 @@ TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
 
 TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
   using Level = Generators::Config::TimestampLevel;
-  for (auto level : {Level::Off, Level::Word, Level::Segment, Level::All}) {
+  for (auto level : {Level::Off, Level::Word, Level::Segment}) {
     model->config_->model.timestamp_level = level;
     source->SetTimestampsEnabled(level != Level::Off);
     Generators::TokenPostProcessor processor{*model, *generator};
@@ -497,8 +498,8 @@ TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
     collect();
     processor.Finalize();
     collect();
-    EXPECT_EQ(words, level == Level::Word || level == Level::All ? 2U : 0U);
-    EXPECT_EQ(segments, level == Level::Segment || level == Level::All ? 1U : 0U);
+    EXPECT_EQ(words, level == Level::Word ? 2U : 0U);
+    EXPECT_EQ(segments, level == Level::Segment ? 1U : 0U);
   }
 }
 
