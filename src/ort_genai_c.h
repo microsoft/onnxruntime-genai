@@ -35,7 +35,7 @@ extern "C" {
 
 /** \addtogroup Global
  * ONNX Runtime Generative AI C API
- * This API is not thread safe.
+ * This API is not thread safe unless a function explicitly documents otherwise.
  * @{
  */
 
@@ -863,6 +863,16 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  *
  * Supported options:
  *
+ * - `literal`
+ *   - Purpose: Encodes text without interpreting registered added/special token
+ *     strings or inserting automatic control tokens. Applies to single and batch
+ *     encoding, including processor calls using this tokenizer.
+ *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
+ *   - Default: `"false"`, preserving existing encoding behavior.
+ *   - When enabled, overrides automatic insertion from `add_special_tokens`
+ *     without changing that option. Returns an error for invalid UTF-8 or text
+ *     requiring added/special IDs or unknown-token fallbacks.
+ *
  * - `add_special_tokens`
  *   - Purpose: Controls whether to add special tokens (e.g., BOS/EOS) during tokenization.
  *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
@@ -880,6 +890,8 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  *
  * Future tokenizer options may be added without changing this API signature.
  * Passing unknown keys will result in an error.
+ * Option updates must not overlap with encoding or other tokenizer operations.
+ * Use separate tokenizer instances when concurrent callers need different modes.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
     OgaTokenizer* tokenizer,
@@ -947,11 +959,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer*
 /**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
  * when it is no longer needed.
+ *
+ * Uses the tokenizer's `literal` option. Successful calls append one sequence,
+ * including an empty sequence for empty literal input. Errors leave the output
+ * sequences unchanged. Input strings must be null-terminated UTF-8.
+ *
+ * Thread safety: OgaTokenizerEncode calls may run concurrently on the same
+ * tokenizer with fixed options. Each concurrent call must use a distinct
+ * OgaSequences output, which must not be accessed or destroyed until that call
+ * completes. Keep the tokenizer alive until all encoding calls finish.
+ * Do not update tokenizer options or run other operations on that tokenizer
+ * while encoding calls are in progress.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
 /**
  * Batch encode an array of strings and return a single tensor output
+ * using the tokenizer's `literal` option. Padding retains the model's pad token ID.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const char** strings, size_t count, OgaTensor** out);
 
@@ -1256,6 +1280,16 @@ OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetConfiguredMaxBatchSize(
 OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetMaxScheduledTokens(
     const OgaEngineCapabilities* capabilities);
 
+/**
+ * \brief Returns the maximum logical token length of one Request, or zero when unavailable.
+ *
+ * The value reflects the resolved target cache after runtime-profile selection and auxiliary
+ * drafter allocations. It is an exclusive-use structural limit, not current free capacity. Zero
+ * means the cache-backed ceiling is unsupported or unavailable, including for non-paged Engines.
+ */
+OGA_EXPORT uint64_t OGA_API_CALL OgaEngineCapabilitiesGetMaxRequestLength(
+    const OgaEngineCapabilities* capabilities);
+
 /** \brief Destroys an Engine capability snapshot. */
 OGA_EXPORT void OGA_API_CALL OgaDestroyEngineCapabilities(
     OgaEngineCapabilities* capabilities);
@@ -1386,7 +1420,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
  *
  * \param[in] engine The owning Engine.
  * \param[in] options Nullable request-scoped options. Null options, or zero max_session_tokens, use
- * the model-configured search.max_length, which is also the ceiling for an explicit value.
+ * model-configured search.max_length capped by the Engine's max_request_length when that capability
+ * is nonzero. A zero capability means the ceiling is unavailable and preserves search.max_length.
  * \param[out] out The caller-owned Request handle.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
@@ -1403,9 +1438,11 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyRequestOptions(
 /**
  * \brief Sets the total tokens (prompt plus generated, across every Turn) the Request may reach.
  *
- * Zero restores the default, which is the model-configured search.max_length. A nonzero value may
- * be lower than that ceiling but never higher. This is the Request's one session limit: Search
- * completion, cache sizing, speculative bounds, and the MaxSessionTokens finish reason all use it.
+ * Zero restores the default, which is model-configured search.max_length capped by the Engine's
+ * max_request_length when that capability is nonzero. A nonzero value may not exceed the capability
+ * when available; otherwise it may not exceed search.max_length. This is the Request's one session
+ * limit: Search completion, cache sizing, speculative bounds, and the MaxSessionTokens finish reason
+ * all use it.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestOptionsSetMaxSessionTokens(
     OgaRequestOptions* options, uint64_t max_session_tokens);
@@ -1517,12 +1554,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options, const char* guidance_type,
     const char* guidance_data);
-/** \brief Removes the configured grammar, so the Turn is unguided. */
+/** \brief Removes either whole-turn or delimited guidance, so the Turn is unguided. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsClearGuidance(
     OgaTurnOptions* options);
 /** \brief Restores every Turn option to its unset state. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsReset(
     OgaTurnOptions* options);
+/**
+ * \brief Sets marker-delimited Lark guidance for this Turn.
+ *
+ * Copies grammar immediately. opening_token and closing_token must be distinct nonnegative token
+ * IDs; grammar must be nonempty. The grammar describes only the body after the committed opening
+ * token and before the closing token. Outside that region generation is unguided. Marker IDs and
+ * grammar are validated against the model when the Turn is admitted, before Request mutation.
+ * An invalid setter call leaves the previous options unchanged. This mode and whole-turn guidance
+ * are mutually exclusive: call OgaTurnOptionsClearGuidance (or OgaTurnOptionsReset) before
+ * switching modes. The Engine must use dynamic batching. ClearGuidance and Reset both remove
+ * this configuration.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetDelimitedGuidance(
+    OgaTurnOptions* options, int32_t opening_token,
+    int32_t closing_token, const char* grammar);
 
 /** \brief Begins a Turn, copying input and supported options before return. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
@@ -1539,6 +1591,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCancelTurn(
     OgaRequest* request, uint64_t turn_id, bool* out_cancelled);
+
+/**
+ * \brief Rewinds a completed Request to the sequence boundary before a Turn began.
+ *
+ * Rewind is synchronous and owner-thread-only. The current Turn must be complete, its events must
+ * have been drained, and its finish reason must not be Failed. turn_id must identify a Turn
+ * previously begun by this Request and still present in its active history. The named Turn and all
+ * later Turns are discarded. Turn IDs are never reused, and sampling continues from its current
+ * random stream rather than restoring a previous sampling state. The operation releases the
+ * Request's model-state ownership, including auxiliary MTP or DFlash/DSpark state; indexed prefix
+ * blocks may remain cached. Another rewind to an earlier retained Turn is allowed before the next
+ * OgaRequestBeginTurn even though the Request is no longer resident. That call creates a new Turn
+ * and replays the retained prefix together with its new input before generation, possibly adopting
+ * matching cached blocks.
+ *
+ * Dynamic paged Requests release their paged blocks and any fixed recurrent/convolution slot
+ * atomically. Static Requests are rewindable only when they are the sole resident row, because one
+ * row cannot be removed from a shared contiguous allocation. No event is emitted by rewind.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestRewindToStartOfTurn(
+    OgaRequest* request, uint64_t turn_id);
 
 /**
  * \brief Permanently closes a Request and releases its Engine resources.

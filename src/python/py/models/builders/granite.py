@@ -27,6 +27,8 @@ class GraniteModel(MistralModel):
             location="input",
         )
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+        if layer_id == self.num_layers - 1 and self.prunes_hidden_rows():
+            self.make_selected_hidden_rows()
 
         residual_mul_1_name = f"/model/layers.{layer_id}/residual_mul/Mul_1"
         residual_mul_1_inputs = [
@@ -37,7 +39,7 @@ class GraniteModel(MistralModel):
             residual_mul_1_name,
             residual_mul_1_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.hidden_size],
+            shape=self.make_hidden_state_shape(),
         )
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_mul_1_name}/output_0"
@@ -60,7 +62,7 @@ class GraniteModel(MistralModel):
             residual_mul_2_name,
             residual_mul_2_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.hidden_size],
+            shape=self.make_hidden_state_shape(),
         )
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_mul_2_name}/output_0"

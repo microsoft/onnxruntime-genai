@@ -181,6 +181,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
       mtp_cache_manager_{std::move(dependencies.mtp_cache_manager)},
       mtp_model_executor_{std::move(dependencies.mtp_model_executor)},
       dflash2_drafter_{std::move(dependencies.dflash2_drafter)},
+      dflash2_prefix_checkpoints_enabled_{dependencies.dflash2_prefix_checkpoints_enabled},
       make_step_error_{dependencies.make_step_error
                            ? dependencies.make_step_error
                            : MakeEngineStepError} {
@@ -221,6 +222,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     dflash2_draft_widths_.reserve(max_batch_size);
     dflash2_drafts_.reserve(max_batch_size);
     dflash2_draft_distributions_.reserve(max_batch_size);
+    dflash2_lattices_.reserve(max_batch_size);
     dflash2_rng_checkpoints_.reserve(max_batch_size);
   }
   WarnOnClampedDraftWidth();
@@ -328,7 +330,8 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   size_t dflash2_reserved_memory_bytes = 0;
   size_t dflash2_max_batch_size = 0;
   size_t dflash2_pool_blocks = 0;
-  constexpr size_t dflash2_prefix_checkpoint_slots = 0;
+  size_t dflash2_prefix_checkpoint_bytes = 0;
+  bool dflash2_prefix_checkpoints_enabled = false;
   if (!model->config_->model.dflash2.filename.empty()) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
@@ -359,8 +362,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
         *model->config_, model->session_info_, dflash2_model->session_info_, paged_block_size);
     model->config_->engine.aux_hidden_states_output_required = true;
     dflash2_pool_blocks = Dflash2Drafter::PoolBlocks(
-        *model->config_, paged_block_size, dflash2_max_batch_size,
-        dflash2_prefix_checkpoint_slots);
+        *model->config_, paged_block_size, dflash2_max_batch_size);
     if (dflash2_pool_blocks != 0) {
       if (batching.num_blocks.has_value()) {
         // Explicit num_blocks bypasses the free-memory probe. CacheManager validates and deducts
@@ -370,8 +372,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       } else {
         // Automatic sizing measures free memory after allocating the fixed drafter pool.
         dflash2_drafter = std::make_unique<Dflash2Drafter>(
-            dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size,
-            dflash2_prefix_checkpoint_slots);
+            dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
       }
     } else {
       // A full-attention drafter mirrors the target pool, so it is billed per target block instead
@@ -391,6 +392,12 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
         throw std::runtime_error("DFlash 2 reserved memory bytes overflow size_t.");
       }
       dflash2_reserved_memory_bytes += embedding_bytes;
+    }
+    if (dflash2_pool_blocks != 0 && mtp_bytes_per_block == 0 && !dflash2.is_dspark &&
+        ModelStateManifest{model->config_->model.decoder}.HasFixedStateGroups() &&
+        ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0)) {
+      dflash2_prefix_checkpoint_bytes = Dflash2Drafter::PrefixCheckpointBytes(
+          *model->config_, paged_block_size, dflash2_cache_type);
     }
   }
 
@@ -420,14 +427,15 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   }
   std::shared_ptr<CacheManager> cache_manager =
       CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
-                           dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes);
+                           dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes,
+                           dflash2_prefix_checkpoint_bytes,
+                           &dflash2_prefix_checkpoints_enabled);
   if (dflash2_model && !dflash2_drafter) {
     const size_t paged_block_size =
         static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
     if (dflash2_pool_blocks != 0) {
       dflash2_drafter = std::make_unique<Dflash2Drafter>(
-          dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size,
-          dflash2_prefix_checkpoint_slots);
+          dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
     } else {
       const auto& dflash2 = model->config_->model.dflash2;
       dflash2_drafter = std::make_unique<Dflash2Drafter>(
@@ -437,6 +445,9 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
               static_cast<size_t>(dflash2.block_size), dflash2_max_batch_size),
           dflash2_max_batch_size);
     }
+  }
+  if (dflash2_drafter) {
+    dflash2_drafter->SetPrefixCheckpointCapacity(cache_manager->DraftCheckpointCapacity());
   }
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
@@ -456,7 +467,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   return EngineDependencies{
       std::move(cache_manager), std::move(scheduler), std::move(model_executor),
       std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor),
-      std::move(dflash2_drafter)};
+      std::move(dflash2_drafter), dflash2_prefix_checkpoints_enabled};
 }
 
 void Engine::PrepareDflash2Feeds(const StepPlan& plan,
@@ -469,8 +480,13 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& entry = plan.requests[i];
     const bool greedy = entry.request->TurnPolicy().IsGreedy();
-    const bool independent_sampling =
-        model_->config_->model.dflash2.independent_sampling && !greedy;
+    using Proposal = Config::Model::Dflash2::SampledProposal;
+    const Proposal sampled_proposal =
+        greedy ? Proposal::None : model_->config_->model.dflash2.sampled_proposal;
+    const bool independent_sampling = sampled_proposal == Proposal::Independent;
+    // A sampled turn without a positive top_k fails draft validation, so it should not take a slot.
+    const bool drafts_enabled =
+        greedy || (sampled_proposal != Proposal::None && entry.request->TurnPolicy().top_k > 0);
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
     if (accepted > entry.draft_token_count) {
       throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
@@ -485,18 +501,16 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
 
     Dflash2Drafter::Feed feed;
     feed.request = entry.request.get();
+    if (entry.prefix_match) {
+      feed.prefix_checkpoint = entry.prefix_match->draft_checkpoint;
+      feed.adopted_prefix_match = entry.prefix_match;
+    }
     feed.aux_row_begin = entry.packed_token_offset;
     feed.aux_row_count = valid_rows;
     feed.first_position = first_position;
-    feed.draft_eligible = greedy || independent_sampling;
+    feed.draft_eligible = drafts_enabled;
     feed.wants_independent_sampling = independent_sampling;
-    feed.is_prefill = entry.is_prefill;
-    if (entry.prefix_match &&
-        entry.prefix_match->token_count == first_position) {
-      feed.adopted_prefix_identity =
-          entry.prefix_match->blocks.back()->IdentityPtr();
-      feed.adopted_prefix_match = entry.prefix_match;
-    }
+    feed.wants_lattice = sampled_proposal == Proposal::Lattice;
 
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
@@ -511,7 +525,7 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
         max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
-    feed.wants_drafts = (greedy || independent_sampling) && width > 0 &&
+    feed.wants_drafts = drafts_enabled && width > 0 &&
                         results[i].token_appended && !results[i].done &&
                         !entry.request->DraftTokenValidationError();
     feed.anchor_token = results[i].token;
@@ -528,21 +542,48 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
   if (!aux_hidden_states) {
     throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
   }
-  for (auto& feed : dflash2_feeds_) {
-    if (feed.is_prefill) {
-      feed.sealed_prefix_identity = cache_manager_->SealedPrefixIdentity(
-          feed.request, feed.first_position + feed.aux_row_count);
-    }
-    if (feed.adopted_prefix_match && dflash2_drafter_->RestorePrefix(feed)) {
-      ++speculative_stats_.draft_forward_passes;
-    }
-  }
 
   if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_,
-                                &dflash2_draft_distributions_)) {
+                                &dflash2_draft_distributions_, &dflash2_lattices_)) {
     ++speculative_stats_.draft_forward_passes;
   }
+  ReleaseConsumedDflash2Checkpoints();
   PublishDflash2DraftResults();
+  if (!dflash2_prefix_checkpoints_enabled_) {
+    return;
+  }
+  for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
+    const auto& entry = step_plan_.requests[i];
+    const auto& feed = dflash2_feeds_[i];
+    if (!entry.is_prefill || !feed.draft_eligible ||
+        feed.first_position + feed.aux_row_count != entry.target_cache_slots) {
+      continue;
+    }
+    auto boundary = cache_manager_->DraftBoundary(entry.request_id, entry.target_cache_slots);
+    if (!boundary ||
+        !dflash2_drafter_->CanCapturePrefix(feed.request, entry.target_cache_slots)) {
+      continue;
+    }
+    try {
+      if (dflash2_drafter_->AvailablePrefixCheckpoints() == 0 &&
+          !cache_manager_->ReclaimDraftCheckpoint()) {
+        continue;
+      }
+      auto checkpoint = dflash2_drafter_->CapturePrefix(feed.request, entry.target_cache_slots);
+      if (checkpoint && !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
+        cache_manager_->RecordPrefixPublicationRefusal();
+      }
+    } catch (const std::bad_alloc&) {
+      cache_manager_->RecordPrefixPublicationRefusal();
+    }
+  }
+}
+
+void Engine::ReleaseConsumedDflash2Checkpoints() noexcept {
+  for (auto& feed : dflash2_feeds_) {
+    feed.prefix_checkpoint.reset();
+    feed.adopted_prefix_match.reset();
+  }
 }
 
 void Engine::PublishDflash2DraftResults() {
@@ -551,7 +592,20 @@ void Engine::PublishDflash2DraftResults() {
     for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
       auto& drafts = dflash2_drafts_[i];
       auto& distributions = dflash2_draft_distributions_[i];
-      if (drafts.empty() && distributions.empty()) {
+      const Dflash2Lattice* lattice =
+          i < dflash2_lattices_.size() && dflash2_lattices_[i].top_k != 0 ? &dflash2_lattices_[i]
+                                                                          : nullptr;
+      if (drafts.empty() && distributions.empty() && !lattice) {
+        continue;
+      }
+      Request& request = *dflash2_feeds_[i].request;
+      if (lattice) {
+        dflash2_rng_checkpoints_.emplace_back(&request, request.draft_rng_);
+        const auto& policy = request.TurnPolicy();
+        Dflash2SampleLatticePath(*lattice, dflash2_draft_widths_[i], policy.temperature,
+                                 policy.top_k, policy.top_p, request.draft_rng_, drafts,
+                                 distributions);
+        request.SetSampledDraftTokens(drafts, distributions);
         continue;
       }
       // The drafter always emits its full block; a request with a narrower budget takes the prefix
@@ -717,7 +771,9 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       // match: it is true for any committed StopString result exactly like any other finish
       // reason, so this check below already skips proposing a new draft block for it with no
       // stop-specific condition needed.
-      if (!result.token_appended || result.done ||
+      // MTP is intentionally unavailable for scoped turns: its chained proposals may cross
+      // an opener before the target can switch to the grammar cursor.
+      if (!result.token_appended || result.done || entry.request->HasDelimitedGuidance() ||
           entry.request->DraftTokenValidationError() ||
           max_draft_tokens == 0) {
         continue;
@@ -1225,14 +1281,21 @@ std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
         R"(config.overlay('{"search": {"num_beams": 1}}') -- )"
         "and batch across Requests instead.");
   }
-  const size_t model_ceiling = static_cast<size_t>(model_search.max_length);
+  const size_t configured_default = static_cast<size_t>(model_search.max_length);
+  const uint64_t capability = GetCapabilities().max_request_length;
+  if (capability > std::numeric_limits<size_t>::max()) {
+    throw std::overflow_error("Engine max_request_length exceeds size_t.");
+  }
+  const size_t engine_ceiling = capability == 0 ? configured_default : static_cast<size_t>(capability);
   const size_t max_session_tokens =
-      options.max_session_tokens.value_or(model_ceiling);
-  if (max_session_tokens == 0 || max_session_tokens > model_ceiling) {
+      options.max_session_tokens.value_or(std::min(configured_default, engine_ceiling));
+  if (max_session_tokens == 0 || max_session_tokens > engine_ceiling) {
+    const char* ceiling_name =
+        capability == 0 ? "model-configured search.max_length" : "Engine's max_request_length";
     throw std::runtime_error(
         "max_session_tokens (" + std::to_string(max_session_tokens) +
-        ") must be greater than zero and no greater than the model-configured search.max_length (" +
-        std::to_string(model_ceiling) + ").");
+        ") must be greater than zero and no greater than the " + ceiling_name + " (" +
+        std::to_string(engine_ceiling) + ").");
   }
   auto request = std::make_shared<Request>(
       *model_, max_session_tokens, abandonment_pending_);
@@ -1289,6 +1352,9 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   // Request joins the batch rather than inside a rollback-capable step. Reject both before any
   // Request mutation rather than letting a turn run without the guarantee its options promise.
   if (!dynamic_batching) {
+    if (options.delimited_guidance) {
+      throw std::runtime_error("Delimited guidance requires an Engine configured for dynamic batching.");
+    }
     if (!options.stop_strings.empty()) {
       throw std::runtime_error(
           "Stop strings require an Engine configured for dynamic batching.");
@@ -1308,8 +1374,13 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     const bool restartable_canceled_turn =
         request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
-    ValidateRequestCanContinue(request, restartable_canceled_turn);
-    if (!restartable_canceled_turn) {
+    const bool replay_rewound_request =
+        request->NeedsReplayAfterRewind() &&
+        !cache_manager_->IsResident(request);
+    const bool allow_nonresident =
+        restartable_canceled_turn || replay_rewound_request;
+    ValidateRequestCanContinue(request, allow_nonresident);
+    if (!allow_nonresident) {
       request->ValidateContinuousDecodingSupport();
     }
   }
@@ -1412,6 +1483,65 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
     pending_events_.push_back(std::move(terminal));
   }
   return true;
+}
+
+void Engine::RewindRequestToStartOfTurn(
+    const std::shared_ptr<Request>& request,
+    uint64_t turn_id) {
+  ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
+  ReclaimAbandonedRequests();
+  if (health_ == EngineHealth::Unhealthy) {
+    std::rethrow_exception(fatal_error_);
+  }
+  if (!request || !request->BelongsTo(*this)) {
+    throw std::runtime_error(
+        "Cannot rewind a request that does not belong to this engine.");
+  }
+  if (!IsTurnComplete(request->Status())) {
+    if (IsClosed(request->Status())) {
+      throw std::runtime_error("Cannot rewind a closed request.");
+    }
+    throw std::runtime_error(
+        "Request rewind is only valid after the current turn is complete.");
+  }
+  if (request->FinishReason() == GenerationFinishReason::Failed) {
+    throw std::runtime_error(
+        "Cannot rewind a Request whose current turn failed.");
+  }
+  if (std::find_if(
+          pending_events_.begin() +
+              static_cast<ptrdiff_t>(pending_event_index_),
+          pending_events_.end(),
+          [&request](const EngineEvent& event) {
+            return event.request == request;
+          }) != pending_events_.end()) {
+    throw std::runtime_error(
+        "Cannot rewind a request while an Engine event is pending; "
+        "call Engine::Run() to drain the event before rewinding.");
+  }
+
+  const bool resident = cache_manager_->IsResident(request);
+  if (!resident && !request->IsRestartableCanceledTurn() &&
+      !request->NeedsReplayAfterRewind()) {
+    throw std::runtime_error(
+        "Cannot rewind a request whose model state is no longer resident.");
+  }
+
+  // Every fallible preparation and temporary allocation completes before committed target-cache
+  // ownership changes. The cache managers validate their complete release up front, then publish
+  // the ownership change through allocation-free no-throw operations.
+  cache_manager_->ValidateRewind(request);
+  auto rewind_state =
+      request->PrepareRewindToStartOfTurn(turn_id);
+  // Auxiliary decoders mirror a generated suffix that is no longer authoritative after rewind.
+  // Release them before the target cache so any fallible cleanup leaves target ownership intact.
+  CloseMtpRequest(request);
+  if (dflash2_drafter_) {
+    dflash2_drafter_->Release(request.get());
+  }
+  cache_manager_->ReleaseForRewind(request);
+  request->CommitRewind(std::move(rewind_state));
 }
 
 void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
@@ -1585,6 +1715,9 @@ void Engine::ValidateRequestCanContinue(
   }
   if (!request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot continue a request that does not belong to this engine.");
+  }
+  if (request->FinishReason() == GenerationFinishReason::Failed) {
+    throw std::runtime_error("Cannot continue a Request whose current turn failed.");
   }
 
   if (!allow_nonresident && !cache_manager_->IsResident(request)) {
@@ -2117,11 +2250,8 @@ void Engine::RunDynamic() {
       }
       try {
         cache_manager_->SealCommittedBlocks(
-            step_plan_, dflash2_drafter_ ? scheduled_requests.AuxHiddenStates() : nullptr);
+            step_plan_, scheduled_requests.AuxHiddenStates());
       } catch (const std::bad_alloc&) {
-        if (dflash2_drafter_ && model_->config_->engine.dynamic_batching->prefix_caching) {
-          throw;
-        }
         cache_manager_->RecordPrefixPublicationRefusal();
       }
       if (mtp_step) {
@@ -2446,6 +2576,20 @@ const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
 
 std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
     const TurnOptions& options) const {
+  if (options.delimited_guidance) {
+    if (!options.guidance_type.empty() || !options.guidance_data.empty()) {
+      throw std::invalid_argument("Delimited and whole-turn guidance cannot be combined.");
+    }
+    const auto& region = *options.delimited_guidance;
+    const auto& config = model_->config_->model;
+    auto params = std::make_shared<GeneratorParams>(*model_);
+    params->search.batch_size = 1;
+    params->SetGuidance("lark_grammar", region.grammar, false);
+    auto body = CreateGuidanceLogitsProcessor(std::move(params));
+    return std::make_unique<DelimitedGuidanceLogitsProcessor>(
+        std::move(body), *model_->p_device_, config.vocab_size,
+        config.eos_token_id, region.opening_token, region.closing_token);
+  }
   if (options.guidance_type.empty() && options.guidance_data.empty()) {
     return nullptr;
   }
@@ -2484,6 +2628,16 @@ EngineCapabilities Engine::GetCapabilities() const {
     const auto& batching = *model_->config_->engine.dynamic_batching;
     capabilities.configured_max_batch_size = batching.max_batch_size;
     capabilities.max_scheduled_tokens = batching.max_scheduled_tokens;
+    const size_t block_count = cache_manager_->TargetBlockCount();
+    const size_t block_size = cache_manager_->TargetBlockSize();
+    if (block_count != 0 && block_size != 0) {
+      if (block_count > (std::numeric_limits<uint64_t>::max() - 1) / block_size) {
+        throw std::overflow_error("Engine max_request_length exceeds uint64_t.");
+      }
+      const uint64_t cache_limit = static_cast<uint64_t>(block_count) * block_size + 1;
+      capabilities.max_request_length =
+          std::min<uint64_t>(static_cast<uint64_t>(model_->config_->model.context_length), cache_limit);
+    }
   } else if (model_->config_->engine.static_batching) {
     capabilities.configured_max_batch_size =
         model_->config_->engine.static_batching->max_batch_size;

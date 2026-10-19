@@ -33,6 +33,8 @@ struct CpuEmbedding {
   int64_t hidden_size_{};
 
  private:
+  void Prefault(int vocab_size) const;
+
   Config::Model::Embedding config_;
   std::unique_ptr<OrtSession> session_;
   std::unique_ptr<OrtRunOptions> run_options_;

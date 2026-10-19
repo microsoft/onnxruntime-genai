@@ -36,6 +36,7 @@ def _recording_native_matmul_model(use_paged_attention):
     model.io_dtype = ir.DataType.FLOAT16
     model.hidden_size = 8
     model.use_paged_attention = use_paged_attention
+    model.hidden_rows_dim = "num_tokens"
     model.values = []
     model.make_initializer = lambda *args, **kwargs: None
     model.make_node = lambda *args, **kwargs: None

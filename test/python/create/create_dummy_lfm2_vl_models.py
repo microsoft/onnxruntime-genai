@@ -119,8 +119,12 @@ def create_dummy_embedding_model(output_path: str, rng: np.random.Generator):
     _save(helper.make_graph(nodes, "embedding", inputs, outputs, initializer=[table]), output_path)
 
 
-def create_dummy_decoder_model(output_path: str, rng: np.random.Generator):
-    """inputs_embeds, attention_mask, KV cache, conv state -> logits, present KV cache, present conv state"""
+def create_dummy_decoder_model(output_path: str, rng: np.random.Generator, hidden_states_output: bool = False):
+    """inputs_embeds, attention_mask, KV cache, conv state -> logits, present KV cache, present conv state
+
+    With hidden_states_output the values the logits are projected from come out too, as a decoder built
+    with include_hidden_states=true gives them.
+    """
     conv_layers = [i for i, t in enumerate(LAYER_TYPES) if t == "conv"]
     attention_layers = [i for i, t in enumerate(LAYER_TYPES) if t == "full_attention"]
     kv_shape_past = ["batch_size", NUM_KV_HEADS, "past_sequence_length", HEAD_SIZE]
@@ -188,6 +192,14 @@ def create_dummy_decoder_model(output_path: str, rng: np.random.Generator):
             nodes.append(
                 helper.make_node("Concat", [f"past_key_values.{i}.{kind}", "kv_new"], [f"present.{i}.{kind}"], axis=2)
             )
+
+    if hidden_states_output:
+        outputs.append(
+            helper.make_tensor_value_info(
+                "hidden_states", TensorProto.FLOAT, ["batch_size", "sequence_length", HIDDEN_SIZE]
+            )
+        )
+        nodes.append(helper.make_node("Identity", ["mixed_bsh"], ["hidden_states"]))
 
     _save(helper.make_graph(nodes, "decoder", inputs, outputs, initializer=initializers), output_path)
 

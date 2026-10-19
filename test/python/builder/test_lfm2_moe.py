@@ -320,6 +320,7 @@ def test_make_moe_router_shape_follows_the_token_layout(use_paged_attention, row
     model = Model.__new__(Model)
     model.moe_attrs = {"num_experts": 8}
     model.use_paged_attention = use_paged_attention
+    model.hidden_rows_dim = "num_tokens"
     assert model.make_moe_router_shape() == [rows, 8]
     assert model.make_moe_router_shape(last_dim=2) == [rows, 2]
 
@@ -449,7 +450,9 @@ def test_lfm2_moe_executed_graph_matches_hf_routing(tmp_path, routed_scaling_fac
 
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("hidden,inter", [(40, 64), (64, 40)])
-def test_lfm2_qmoe_cpu_executes_partial_blocks(tmp_path, bits, hidden, inter):
+def test_lfm2_qmoe_cpu_executes_partial_blocks(tmp_path, monkeypatch, bits, hidden, inter):
+    # Test the weight layout without the int8 activation quantization used by ORT's 8-bit fast path.
+    monkeypatch.setenv("ORT_QMOE_CPU_QNBIT_GEMM", "fp32")
     model, graph = _executable_model(2, 1, hidden, inter)
     model.moe_attrs.update(op_type="QMoE", expert_weight_bits=bits)
     model.quant_attrs["qmoe_block_size"] = 32
@@ -466,7 +469,9 @@ def test_lfm2_qmoe_cpu_executes_partial_blocks(tmp_path, bits, hidden, inter):
     hidden_states = torch.linspace(-0.1, 0.2, 2 * hidden).reshape(1, 2, hidden)
     (actual,) = session.run(None, {"hidden": hidden_states.numpy()})
     expected = _hf_reference(hidden_states, moe, 1, 1.0).numpy()
-    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-6)
+    # The 8-bit ORT kernel quantizes activations, while the reference keeps them in float.
+    # Adjust tolerance accordingly.
+    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=5e-5 if bits == 8 else 1e-6)
 
 
 @pytest.mark.parametrize("hidden,inter", [(33, 64), (64, 33)])

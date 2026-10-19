@@ -55,7 +55,9 @@ struct CacheManager {
 
   static std::unique_ptr<CacheManager> Create(std::shared_ptr<Model> model,
                                               size_t auxiliary_bytes_per_block = 0,
-                                              size_t auxiliary_reserved_memory_bytes = 0);
+                                              size_t auxiliary_reserved_memory_bytes = 0,
+                                              size_t optional_draft_checkpoint_bytes = 0,
+                                              bool* draft_checkpoint_enabled = nullptr);
 
   virtual bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const = 0;
 
@@ -71,6 +73,14 @@ struct CacheManager {
   KeyValueCacheState* Cache() { return key_value_cache_state_.get(); };
 
   virtual void Deallocate(std::vector<std::shared_ptr<Request>>& requests) = 0;
+
+  // Validates and then releases all committed model state for a completed Request so its retained
+  // token prefix can be replayed after rewind. Validation must not mutate state. The release keeps
+  // scheduler ownership and Request identity intact.
+  virtual void ValidateRewind(
+      const std::shared_ptr<Request>& request) const = 0;
+  virtual void ReleaseForRewind(
+      const std::shared_ptr<Request>& request) = 0;
 
   // Engine teardown cannot use the normal Request close path because the Request's weak Engine
   // reference has already expired. This no-throw path must release any cache ownership for the
@@ -93,6 +103,11 @@ struct CacheManager {
   // `attention_metadata`.
   virtual size_t BlockTableColumns() const { return 0; }
 
+  // Immutable target-cache geometry after profile selection, automatic sizing, and auxiliary
+  // cache deductions. Non-paged caches return zero.
+  virtual size_t TargetBlockCount() const { return 0; }
+  virtual size_t TargetBlockSize() const { return 0; }
+
   // Maximum query tokens one request can contribute to a step, or 0 when the cache imposes no
   // per-request limit. Sliding-window rings use this to prevent a step from overwriting live KV.
   virtual size_t MaxQueryTokensPerRequest() const { return 0; }
@@ -106,8 +121,16 @@ struct CacheManager {
   }
   virtual void RecordDeferredPrefixMatches(size_t) noexcept {}
   virtual void SealCommittedBlocks(const StepPlan&, Tensor* = nullptr) {}
-  virtual std::shared_ptr<const BlockIdentity> SealedPrefixIdentity(
-      const void*, size_t) const { return nullptr; }
+  virtual std::optional<DraftPrefixBoundary> DraftBoundary(const void*, size_t) const {
+    return std::nullopt;
+  }
+  virtual bool AttachDraftCheckpoint(
+      const DraftPrefixBoundary&, std::shared_ptr<const Dflash2PrefixCheckpoint>) {
+    return false;
+  }
+  virtual void DropUnleasedDraftCheckpoints() {}
+  virtual bool ReclaimDraftCheckpoint() { return false; }
+  virtual size_t DraftCheckpointCapacity() const noexcept { return 0; }
   virtual void RecordPrefixPublicationRefusal() noexcept {}
   virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
 
@@ -151,6 +174,11 @@ struct StaticCacheManager : CacheManager {
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
 
+  void ValidateRewind(
+      const std::shared_ptr<Request>& request) const override;
+  void ReleaseForRewind(
+      const std::shared_ptr<Request>& request) override;
+
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept override;
 
@@ -171,7 +199,10 @@ struct StaticCacheManager : CacheManager {
 struct PagedCacheManager : CacheManager {
   PagedCacheManager(std::shared_ptr<Model> model,
                     size_t auxiliary_bytes_per_block = 0,
-                    size_t auxiliary_reserved_memory_bytes = 0);
+                    size_t auxiliary_reserved_memory_bytes = 0,
+                    size_t optional_draft_checkpoint_bytes = 0);
+  bool DraftCheckpointEnabled() const noexcept { return draft_checkpoint_capacity_ != 0; }
+  size_t DraftCheckpointCapacity() const noexcept override { return draft_checkpoint_capacity_; }
 
   bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const override;
 
@@ -183,6 +214,11 @@ struct PagedCacheManager : CacheManager {
                    ExecutionContext& context) override;
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
+
+  void ValidateRewind(
+      const std::shared_ptr<Request>& request) const override;
+  void ReleaseForRewind(
+      const std::shared_ptr<Request>& request) override;
 
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept override;
@@ -200,6 +236,8 @@ struct PagedCacheManager : CacheManager {
   size_t ResidentRequestCount() const override { return cache_allocated_requests_.size(); }
 
   size_t BlockTableColumns() const override { return key_value_cache_->BlockTableColumns(); }
+  size_t TargetBlockCount() const override { return key_value_cache_->MaxRequestBlockCount(); }
+  size_t TargetBlockSize() const override { return key_value_cache_->BlockSize(); }
 
   size_t MaxQueryTokensPerRequest() const override;
 
@@ -210,9 +248,20 @@ struct PagedCacheManager : CacheManager {
     key_value_cache_->RecordDeferredPrefixMatches(count);
   }
   void SealCommittedBlocks(const StepPlan& plan, Tensor* auxiliary = nullptr) override;
-  std::shared_ptr<const BlockIdentity> SealedPrefixIdentity(
-      const void* request_id, size_t token_count) const override {
-    return key_value_cache_->SealedPrefixIdentity(request_id, token_count);
+  std::optional<DraftPrefixBoundary> DraftBoundary(const void* request_id,
+                                                   size_t token_count) const override {
+    return key_value_cache_->DraftBoundary(request_id, token_count);
+  }
+  bool AttachDraftCheckpoint(
+      const DraftPrefixBoundary& boundary,
+      std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint) override {
+    return key_value_cache_->AttachDraftCheckpoint(boundary, std::move(checkpoint));
+  }
+  void DropUnleasedDraftCheckpoints() override {
+    key_value_cache_->DropUnleasedDraftCheckpoints();
+  }
+  bool ReclaimDraftCheckpoint() override {
+    return key_value_cache_->ReclaimDraftCheckpoint();
   }
   void RecordPrefixPublicationRefusal() noexcept override {
     key_value_cache_->RecordPrefixPublicationRefusal();
@@ -244,6 +293,7 @@ struct PagedCacheManager : CacheManager {
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<PagedKeyValueCache> key_value_cache_;
   std::unique_ptr<FixedStatePool> fixed_state_pool_;
+  size_t draft_checkpoint_capacity_{};
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
 };
 

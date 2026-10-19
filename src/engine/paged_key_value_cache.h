@@ -35,6 +35,9 @@ inline size_t GetGraphBlockTableColumns(size_t max_blocks, size_t max_columns) {
   return columns;
 }
 
+// Shared automatic-sizing budget, including the fragmentation allowance.
+size_t PagedCacheMemoryBudget(size_t available_memory_bytes, float gpu_utilization_factor);
+
 // Blocks the target pool can hold in `available_memory_bytes`, after a fragmentation allowance and
 // the caller's utilization factor. `primary_bytes_per_block` is the target's own cost for one block
 // across all full-attention layers -- use PagedKeyValueCacheBytesPerBlock() to obtain it, so that
@@ -115,16 +118,36 @@ struct PagedKeyValueCache {
   bool RequiresAuxiliaryPrefix() const;
   std::shared_ptr<const BlockIdentity> SealedPrefixIdentity(
       const void* request_id, size_t token_count) const;
+  void SealCheckpointedPrefix(
+      const void* request_id, std::span<const int32_t> tokens, size_t token_count,
+      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint);
+  bool CanSealPrefixCheckpoint(const void* request_id,
+                               size_t token_count,
+                               std::span<const int32_t> tokens);
   bool CanAttachPrefixCheckpoint(const void* request_id,
                                  size_t token_count) const;
   bool AttachPrefixCheckpoint(
       const void* request_id,
       std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+  std::optional<DraftPrefixBoundary> DraftBoundary(const void* request_id,
+                                                   size_t token_count) const;
+  bool AttachDraftCheckpoint(const DraftPrefixBoundary& boundary,
+                             std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint);
+  void DropUnleasedDraftCheckpoints();
+  bool ReclaimDraftCheckpoint();
   size_t ReclaimPrefixCheckpoints(size_t checkpoints_needed);
+  bool ReclaimPrefixCheckpoint(const FixedStatePrefixCheckpoint* checkpoint);
   size_t ReclaimablePrefixCheckpoints() const;
+  const FixedStatePrefixCheckpoint* ReclaimablePrefixCheckpoint(
+      const void* request_id = nullptr) const;
   bool PrefixCachingEnabled() const;
   bool RequiresPrefixCheckpoint() const;
   size_t BlockSize() const { return block_pool_->BlockSize(); }
+  size_t MaxRequestBlockCount() const {
+    return max_block_table_columns_ == 0
+               ? block_pool_->Capacity()
+               : std::min(block_pool_->Capacity(), max_block_table_columns_);
+  }
   const PrefixCacheMetrics& PrefixMetrics() const;
 
   // Selects the active and pending requests whose immediate cache growth fits this step.

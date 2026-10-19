@@ -67,6 +67,15 @@ def test_tokenizer_create_from_config_and_path(test_data_path):
     assert tokenizer_from_path.decode(tokenizer_from_config.encode(text)) == text
 
 
+def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):
+    # What is left after the prompt when generation stops on its first token; it used to SIGFPE.
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    tokenizer = og.Tokenizer(model_path)
+
+    assert tokenizer.decode(np.array([], dtype=np.int32)) == ""
+    assert tokenizer.decode(np.arange(4, dtype=np.int32)[4:]) == ""
+
+
 def test_telemetry_control():
     og.disable_telemetry_events()
     og.enable_telemetry_events()
@@ -243,10 +252,23 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     while not generator.is_done():
         generator.generate_next_token()
 
-    assert generator.get_sequence(0) is not None
+    expected_sequence = np.copy(generator.get_sequence(0))
+    rewind_length = 3
+    boundary_prefix = expected_sequence[: rewind_length + 1]
+    control = og.Generator(model, search_params)
+    control.append_tokens(boundary_prefix[np.newaxis, :])
+    control_logits = np.copy(control.get_logits())
 
-    generator.rewind_to(3)
+    generator.rewind_to(rewind_length)
+    actual_logits = np.copy(generator.get_logits())
+    assert np.allclose(control_logits, actual_logits, rtol=0, atol=1e-6)
+    assert np.array_equal(boundary_prefix, generator.get_sequence(0))
 
+    control.generate_next_token()
+    generator.generate_next_token()
+    assert np.array_equal(control.get_sequence(0), generator.get_sequence(0))
+
+    generator.rewind_to(rewind_length)
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
@@ -306,12 +328,36 @@ def test_rewind(test_data_path, relative_model_path):
 
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
-    generator.rewind_to(3)
+    rewind_length = 3
+    boundary_prefix = expected_sequence[: rewind_length + 1]
+    control = og.Generator(model, search_params)
+    control.append_tokens(boundary_prefix[np.newaxis, :])
+    control_logits = np.copy(control.get_logits())
 
+    generator.rewind_to(rewind_length)
+    actual_logits = np.copy(generator.get_logits())
+    assert np.allclose(control_logits, actual_logits, rtol=0, atol=1e-6)
+    assert np.array_equal(boundary_prefix, generator.get_sequence(0))
+
+    control.generate_next_token()
+    generator.generate_next_token()
+    assert np.array_equal(control.get_sequence(0), generator.get_sequence(0))
+
+    generator.rewind_to(rewind_length)
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
 
+    assert np.array_equal(expected_sequence, generator.get_sequence(0))
+
+    generator.rewind_to(0)
+    with pytest.raises(RuntimeError, match="no prior state"):
+        generator.get_logits()
+    assert len(generator.get_sequence(0)) == 0
+
+    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
+    while not generator.is_done():
+        generator.generate_next_token()
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
 
@@ -977,6 +1023,26 @@ def test_whisper_preprocessing_multiple_audios(test_data_path, relative_model_pa
     decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
     prompts = ["".join(decoder_prompt_tokens)] * batch_size
     _ = processor(prompts, audios=audios)
+
+
+@pytest.mark.parametrize("opener", ["images", "audios"])
+def test_open_keeps_short_paths_alive(test_data_path, tmp_path, opener):
+    # The paths are copied into a vector first and only then turned into char pointers: a short
+    # string keeps its characters inside the string object, so taking the pointer as the vector
+    # grows leaves the earlier entries pointing at moved-from memory.
+    source = Path(test_data_path) / ("images/cars.jpg" if opener == "images" else "audios/jfk.flac")
+    suffix = source.suffix
+    short_dir = tmp_path / "s"
+    short_dir.mkdir()
+    paths = []
+    for index in range(4):
+        path = short_dir / f"{index}{suffix}"
+        shutil.copy(source, path)
+        paths.append(os.fspath(path))
+
+    opened = (og.Images if opener == "images" else og.Audios).open(*paths)
+
+    assert opened is not None
 
 
 def test_streaming_asr_create(asr_speech_model_path):

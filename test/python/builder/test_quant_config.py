@@ -194,6 +194,32 @@ def test_moe_rejects_bad_prepacked():
         MoEConfig.from_dict({"type": "int4", "weights_prepacked": 2})
 
 
+def test_moe_mixed_width_round_trip():
+    config = MoEConfig.from_dict({"type": "int4", "fc1_type": "int2", "fc2_type": "int4", "block_size": 64})
+
+    assert config.fc1_type == "int2"
+    assert config.fc2_type == "int4"
+    assert MoEConfig.from_dict(config.to_dict()) == config
+
+
+def test_moe_mixed_width_rejects_non_integer_type():
+    with pytest.raises(ValueError, match="only supported for integer QMoE"):
+        MoEConfig.from_dict({"type": "mxfp4", "fc1_type": "int2"})
+
+
+@pytest.mark.parametrize("projection_type", ["uint4", "uint8"])
+def test_moe_mixed_width_rejects_unsigned_integer_type(projection_type):
+    with pytest.raises(ValueError, match="must be int2, int4, or int8"):
+        MoEConfig.from_dict({"type": "int4", "fc1_type": projection_type})
+
+
+def test_dense_weights_accept_int2_for_component_validation():
+    config = QuantConfig.from_dict({"weights": {"type": "int2"}})
+
+    assert config.weights.type == "int2"
+    assert QuantConfig.from_dict(config.to_dict()) == config
+
+
 def test_runtime_rejects_bad_prepacked():
     with pytest.raises(ValueError, match="matmulnbits_weights_prepacked must be"):
         RuntimeConfig.from_dict({"matmulnbits_weights_prepacked": 3})

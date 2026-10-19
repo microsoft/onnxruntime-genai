@@ -48,6 +48,7 @@ struct Config {
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
     static constexpr std::string_view AudioSizesName = "audio_sizes";
+    static constexpr std::string_view AudioLengthsName = "audio_lengths";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
@@ -136,7 +137,13 @@ struct Config {
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
+    // Custom-op library or libraries registered on the session options: custom_ops_library is registered first,
+    // followed by custom_ops_libraries in order, with duplicate resolved paths registered once. Every entry must
+    // resolve to an existing file in the model folder, a registered EP library directory, or the current working
+    // directory (entries are not searched via LD_LIBRARY_PATH / PATH). OverlayConfig appends to custom_ops_libraries
+    // (an empty [] overlay leaves existing entries unchanged).
     std::optional<std::string> custom_ops_library;
+    std::vector<std::string> custom_ops_libraries;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
@@ -242,6 +249,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      bool prefault{true};
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
@@ -317,6 +325,7 @@ struct Config {
         std::string audio_embeds{Defaults::AudioEmbedsName};
         std::string attention_mask{Defaults::AudioAttentionMaskName};
         std::string audio_sizes{Defaults::AudioSizesName};
+        std::string audio_lengths{Defaults::AudioLengthsName};  // per-clip valid frame count of audio_embeds (LFM2-Audio)
         std::string audio_projection_mode{Defaults::AudioProjectionModeName};
       } inputs;
 
@@ -324,6 +333,24 @@ struct Config {
         std::string audio_features{Defaults::AudioFeaturesName};
       } outputs;
     } speech;
+
+    // Speech output of LFM2-Audio: the depthformer turns one decoder hidden state into a frame of
+    // audio codes, one per codebook, and the audio embedding turns that frame back into the decoder's
+    // next input. Empty filenames leave the model answering in text only.
+    struct AudioOutput {
+      struct Graph {
+        std::string filename;
+        std::optional<SessionOptions> session_options;
+      };
+      Graph depthformer;
+      Graph embedding;
+      int num_codebooks{8};
+      int codebook_size{2049};        // entries per codebook; the last one is the end-of-audio code
+      int audio_start_token_id{128};  // <|audio_start|>: the rest of a sequential answer is speech
+      int text_end_token_id{130};     // <|text_end|>: the text of an interleaved answer is over
+      int interleaved_n_text{6};      // text tokens per turn of an interleaved answer
+      int interleaved_n_audio{12};    // audio frames per turn of an interleaved answer
+    } audio_output;
 
     struct Joiner {
       std::string filename;
@@ -544,6 +571,8 @@ struct Config {
         // ones. Empty when the model has no windowed paged layers.
         std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
+        // Packed token rows to project through the LM head. Empty for legacy full-logits models.
+        std::string logits_indices;
         std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
         std::string past_recurrent_names{Defaults::PastRecurrentName};
         std::string state_update_capture_count{Defaults::StateUpdateCaptureCountName};  // Per-sequence capture count
@@ -678,6 +707,14 @@ struct Config {
       int selector_top_k{};
       int mask_token_id{};
       int sliding_window{-1};
+      // How a sampled (non-greedy) turn drafts. Greedy turns always walk the lattice greedily.
+      enum class SampledProposal {
+        None,         // Sampled turns decode without block drafts.
+        GreedyPath,   // Greedy lattice path, verified by sampling the target and matching.
+        Independent,  // Each slot sampled from its own proposal; ratio-verified.
+        Lattice,      // Path sampled through the lattice at the turn's policy; ratio-verified.
+      };
+      SampledProposal sampled_proposal{SampledProposal::Lattice};
       bool independent_sampling{};
       float sampling_temperature{0.1f};
       float sampling_top_p{0.95f};
@@ -739,6 +776,9 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
+    bool audio_interleaved{};          // LFM2-Audio: alternate text tokens and audio frames by count (interleaved mode) rather than switching on <|audio_start|>.
+    float audio_temperature{1.0f};     // LFM2-Audio: temperature the audio codes are sampled with. 0 takes the most likely code.
+    int audio_top_k{4};                // LFM2-Audio: number of most likely audio codes kept when sampling. 1 takes the most likely code.
   } search;
 
   struct Speculative {
@@ -763,6 +803,7 @@ struct Config {
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       bool prefix_caching{true};
       bool prefix_caching_explicitly_set{};
+      size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -786,18 +827,30 @@ struct Config {
     struct Eligibility {
       std::optional<uint64_t> minimum_total_device_memory_bytes;
       std::optional<uint64_t> maximum_total_device_memory_bytes;
+      std::optional<uint64_t> minimum_free_device_memory_bytes;
+      std::optional<uint64_t> maximum_free_device_memory_bytes;
+      std::optional<bool> is_integrated;
     } eligibility;
 
     struct Overlay {
+      struct Model {
+        std::optional<std::string> decoder_filename;
+      } model;
+
       struct DynamicBatching {
         std::optional<size_t> num_blocks;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
+        std::optional<size_t> dflash2_max_snapshots;
       } dynamic_batching;
 
       struct Search {
         std::optional<size_t> chunk_size;
       } search;
+
+      struct Speculative {
+        std::optional<int> max_draft_tokens;
+      } speculative;
     } overlay;
   };
   std::vector<RuntimeProfile> runtime_profiles;
@@ -819,9 +872,20 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // the main model's device, batching and paged-attention contract, but replaces model-specific
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
+// Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
+// custom_ops_library and custom_ops_libraries are inherited together only when the child sets neither; because
+// custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+struct RuntimeProfileDeviceFacts {
+  uint64_t total_device_memory_bytes{};
+  std::optional<bool> is_integrated;
+  // Unset means unknown: profiles with free-memory bounds do not match.
+  std::optional<uint64_t> free_device_memory_bytes;
+};
+void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
 

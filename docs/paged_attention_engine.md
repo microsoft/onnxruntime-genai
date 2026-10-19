@@ -17,13 +17,17 @@ The dynamic path manages paged KV decoder state together with per-request search
 > synchronous progress and writes zero or more typed `EngineEvent` records into caller-provided
 > storage; capacity one preserves one-event pacing. Token and completion payloads are selected by
 > event flags.
-> `CancelTurn(turn_id)` stops only the named Turn, and `Close()` releases Engine resources.
+> `CancelTurn(turn_id)` stops only the named Turn.
+> `RewindToStartOfTurn(turn_id)` retains the prefix before a named Turn after the current completed
+> attempt's events are drained. The next Turn replays that prefix with its new input.
+> The operation is `OgaRequestRewindToStartOfTurn` in C and `rewind_to_start_of_turn` in Python.
+> `Close()` releases Engine resources.
 > `OgaCreateEngine` retains shared ownership of the underlying Model, so the caller may release its
 > `OgaModel` handle after successful Engine creation. The Model remains alive until Engine teardown
 > and the release of any other retaining objects.
 >
 > **Single-owner requirement:** One host-owned thread must perform all Engine and Request operations,
-> including request creation, `BeginTurn()`, `Run()`, `CancelTurn()`,
+> including request creation, `BeginTurn()`, `Run()`, `CancelTurn()`, `RewindToStartOfTurn()`,
 > and `Close()`. Other host threads marshal commands and copied inputs to that owner. The
 > Engine enforces its owner thread and has no worker thread. Final
 > Request-handle release may occur on another thread because it only publishes abandonment work.
@@ -52,6 +56,11 @@ The main implementation is under `src/engine/`:
 Continuous batching allows requests to enter and leave the active batch independently. The engine does not create one fixed batch and run it until every sequence is finished. Instead, every engine step builds a new batch from the requests that can make progress at that moment.
 
 Each request keeps its own sequence, search options, random state, completion state, and sequence-length counters. The engine combines only the work needed for the current model invocation.
+
+For rewind, the Request records one compact boundary for each successful `BeginTurn()`. Each
+boundary stores the Turn ID and the token-prefix length that existed before that Turn. Rewind does
+not record per-token random-stream checkpoints and does not restore sampling state. Stochastic
+sampling continues from the Request's current CPU or device stream.
 
 The paged KV cache makes this practical. A request does not need one large contiguous cache allocation sized for its maximum sequence length. It owns a block table that points to smaller physical KV-cache blocks. Blocks are added as the sequence grows and returned to the pool when the request leaves the engine.
 
@@ -121,19 +130,18 @@ admission pressure; prefix retention never reserves a separate share of the
 pool. Blocks being adopted by an in-flight reservation are protected by
 reservation-owned references.
 
+Rewinding a completed request releases its reference to every paged block,
+including blocks shared with other requests. Full indexed blocks keep the
+prefix cache's reference and become reclaimable once no request holds them;
+unindexed tail blocks return to the pool immediately. A later turn replaying
+the retained prefix can adopt matching cached blocks on admission.
+
 Prefix adoption participates in the normal Engine transaction. Planning stages
 the request's processed-token cursor at the matched block boundary, reservation
 takes references to the shared blocks, rollback restores the cursor and releases
 those references, and commit transfers them to the request's block table. Newly
 completed full blocks are indexed only after the cache and request transaction
 commits.
-
-For a paged-only target, this also covers speculative verification: only the
-accepted draft prefix and the preceding unprocessed token advance committed KV
-slots, so full blocks completed by those tokens are indexed like ordinary
-decode blocks. Rejected proposals have no committed target KV to share. A later
-request whose prompt repeats the verified tokens can adopt those blocks, while
-still executing its final prompt token. This is target-prefix reuse, not reuse of unverified draft proposals.
 
 For a hybrid target with `fixed_conv` or `fixed_recurrent` groups, a paged-block
 match is usable only when the same prefix identity owns an immutable checkpoint
@@ -149,8 +157,35 @@ fixed-state checkpoints.
 
 Hybrid prefix caching does not reduce the configured prefill chunk size. A
 checkpoint is attached only when a successful step's committed endpoint is
-block-aligned; paged-only descendants remain indexed but are not adoptable by a
-hybrid request. After adoption, prefill resumes at that checkpoint and may
+block-aligned and a checkpoint row is available. Newly completed blocks remain
+private until that checkpoint can be published with the entire new suffix;
+partial chunks and exhausted checkpoint capacity do not index orphan blocks.
+Failed suffix publication rolls back its new identities without changing the
+request's committed state. When replacing a retained checkpoint, suffix metadata,
+checkpoint ownership metadata, and tensor-copy views are allocated before
+reclaiming its row, so a metadata allocation failure preserves the earlier hit.
+When prompts branch between fixed-state checkpoints, an identical intermediate KV
+block can belong to an older suffix that the new request cannot adopt. With
+capacity for multiple checkpoints, the index may retain distinct physical
+histories for the same logical tokens. Logical identity verifies token content;
+physical ancestry identifies the exact KV chain that belongs with a checkpoint.
+Physical variants share immutable logical token metadata rather than retaining
+duplicate token arrays. Paged-only identities store their tokens directly and
+do not allocate a separate logical-identity chain.
+A hybrid match selects a complete checkpointed history, never a mixture of
+blocks from different histories.
+
+Checkpoint reclamation prefers intermediate checkpoints in the publishing
+history before independent deep endpoints. This allows two warm branches to
+remain reusable without increasing the configured block or checkpoint budgets.
+A usable checkpoint at the same complete logical boundary still prevents
+redundant publication. When only one checkpoint or insufficient block capacity
+is available, publication stages its replacement before retiring an unleased
+conflicting suffix. Active block owners, pending fixed-state matches, and leased
+draft snapshots protect the old history. Metadata or capture-allocation failure
+preserves earlier hits; a later publication may retry after capacity or leases
+change. Recomputed private KV is never spliced into a different physical history.
+After adoption, prefill resumes at that checkpoint and may
 process the full configured chunk, so later checkpoint positions can shift
 relative to the original request's chunk boundaries. A match pins both its
 paged blocks and fixed checkpoint through reservation. The fixed reservation
@@ -160,35 +195,106 @@ prepare/publish ordering then advances both components atomically; rollback
 discards the provisional fixed row, releases adopted paged references, and
 restores the request cursor.
 
+A windowed DFlash2 drafter without a matching optional draft checkpoint first
+replays the most recent target auxiliary rows retained with the adopted prefix
+into a fresh ring. The replay is bounded to the drafter attention window and
+uses its ordinary context path; it does not rerun the target layers. Once the
+ring is reconstructed, drafting can resume on the warm request's executed
+suffix. If replay is unavailable or drafter ring capacity is occupied, the
+request remains target-only and can ingest newly executed target rows until it
+has a complete attention window.
+Full-attention drafters still require their entire prefix; their admission behavior
+is unchanged.
+
 The implementation applies only to newly admitted requests and does not splice
 a prefix into resident continuation turns. It still rejects target
 sliding-window KV rings and auxiliary caches that mirror every target block when
 `prefix_caching` is explicitly set to `true`. Existing configurations that omit
 the setting keep loading with caching disabled for those layouts, and builders
-emit an explicit `false` opt-out. A
-fixed-size Engine-hosted auxiliary pool can coexist with target prefix caching.
-A windowed DFlash 2 drafter retains the target's auxiliary hidden-state rows
-alongside each indexed full prefix block, including blocks completed by accepted
-speculative tokens. A prefix match pins both the target KV blocks and their
-auxiliary rows. On admission, the drafter replays only the most recent
-`sliding_window + block_size` rows through its ordinary context path to
-reconstruct its own KV before proposing drafts. DFlash 2 projects context KV
-independently from each target auxiliary row; its query block never needs to
-recompute the target prefix. This adds no permanent GPU checkpoint rings, but
-retained host memory grows with the number of indexed target tokens times the
-auxiliary width. The replay adds a drafter forward pass to a warm admission.
-When projected DFlash K/V is narrower than the packed target auxiliary output,
-retaining auxiliary rows is not necessarily the minimum-total-memory design.
-Full-attention drafters and Engine-hosted DSpark still reject explicit prefix
-caching under their separate compatibility guard.
+emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
+can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
+optional ring checkpoint can be attached to the exact indexed target boundary
+after its fixed-state checkpoint and the complete drafter proposal succeed.
+The ring is restored into newly allocated drafter blocks before a cached
+request joins at a nonzero position. A matching snapshot is preferred over
+auxiliary replay and avoids the extra drafter forward pass. Set
+`engine.dynamic_batching.dflash2_max_snapshots` in the GenAI configuration to set the maximum number of
+retained DFlash 2 ring snapshots for a hybrid target with fixed state and prefix
+caching enabled. It defaults to `1`; `0` disables only drafter
+snapshots, not target prefix caching. Values must be integers from `0` through
+`2147483647`. The effective capacity is capped by the target fixed-state checkpoint
+capacity (`max_batch_size`) and the shared cache memory budget, reserving at least
+one target block. This applies to both explicit `num_blocks` and automatic
+`gpu_utilization_factor` sizing; insufficient memory reduces the snapshot count
+rather than exhausting the target pool. The setting is also supported in runtime-profile
+overlays. Snapshots are captured lazily. When the pool is full, only one unleased
+ring checkpoint is replaced at a later boundary, without evicting target
+blocks or fixed state. Selection deliberately follows target block eviction
+order, not snapshot capture age: descendants precede ancestors on the same
+physical path. For snapshots at tokens 4 and 8, the token-8 snapshot is removed
+first, preserving the shorter prefix for broader reuse. A longer target hit
+can therefore lose its draft snapshot and initially run without DFlash drafts.
+Leased snapshots are skipped and never overwritten.
+Increasing the snapshot limit trades target-cache capacity for draft reuse.
+The budget guarantees only one remaining target block, not that a previously
+fitting prompt still fits or that a cached prefix plus a private suffix can
+coexist. For example, increasing the limit from 1 to 4 can shrink an eight-block
+target pool to one block; such a pool cannot retain a full cached block and
+execute the remaining prompt token at the same time. Reduce the snapshot limit
+or increase the cache budget when target admission becomes constrained.
+With `og.set_log_options(enabled=True)`, Engine construction logs the requested
+and effective snapshot counts, actual target block count, block size, target
+cache bytes, and draft snapshot reservation bytes under `engine_cache`.
+If the matching draft checkpoint is absent, the request retains the full
+target hit. Every indexed target block for an eligible windowed DFlash model
+also retains its packed target auxiliary rows in host memory. The drafter
+replays the most recent
+`model.dflash2.sliding_window + model.dflash2.block_size` rows through its
+context path and can then draft immediately, subject to normal turn
+eligibility and generation limits. This fallback also applies when
+`dflash2_max_snapshots` is explicitly `0`; that setting disables GPU snapshot
+rings, not host auxiliary retention or target prefix caching. Retained rows
+share the indexed blocks' lifetime and are released on eviction. Their host
+cost is the indexed-token count times the packed auxiliary width, which can
+exceed the GPU memory saved when projected draft K/V is narrower. A matching
+snapshot avoids the replay forward pass.
+Full-attention DSpark remains target-only
+after a nonzero-position prefix hit.
 
-The target KV pool is allocated independently of whether prefix caching is
-enabled; retained prefix blocks share that pool with active requests and are
-reclaimed when needed. To reduce allocated GPU memory, lower
-`engine.dynamic_batching.gpu_utilization_factor` or set `num_blocks`, at the
-cost of capacity for concurrent sequences. Retained DFlash auxiliary rows
-share the target prefix cache's lifetime and are released with its blocks;
-they do not consume its GPU KV-block budget.
+The selected runtime profile overrides the base configuration (default `1`),
+including an explicit `0` to disable drafter snapshots. The Engine allocates its
+snapshot pool from the resolved GenAI configuration; there is no separate
+Engine-construction API override. This is Engine-wide resource policy, not a
+property of the ONNX graph or a per-session, per-Request, or per-Turn setting.
+The pool is not resized during active request processing.
+
+For example, retain up to four snapshots on a larger device while preserving
+the one-snapshot base default:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 512,
+      "max_batch_size": 8,
+      "dflash2_max_snapshots": 1
+    }
+  },
+  "runtime_profiles": [{
+    "id": "larger-snapshot-pool",
+    "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
+    "overlay": {
+      "engine": {"dynamic_batching": {"dflash2_max_snapshots": 4}}
+    }
+  }]
+}
+```
+
+For operator-run boundary, request-order, branching, lease, cancellation, and
+bounded-pool checks on the intended GPU stack, see
+[Prefix-cache validation](prefix-cache-validation.md). The dedicated runner
+compares exact greedy output against cache-disabled references and checks
+post-release reuse progress independently of timing.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
@@ -270,7 +376,9 @@ generated token below the Request's `max_session_tokens`.
 `max_session_tokens` is the cumulative total
 sequence limit for the entire Request: the initial
 prompt, generated output, and every continuation input all count against the same limit. It defaults
-to the model-configured `search.max_length`, cannot exceed it, and is not reset by `BeginTurn()`.
+to the model-configured `search.max_length` capped by a nonzero Engine `max_request_length`. An
+explicit value may exceed `search.max_length` but cannot exceed a nonzero `max_request_length`. When
+the capability is zero, `search.max_length` remains the ceiling. The limit is not reset by `BeginTurn()`.
 It is the Request's one session limit: Search completion, static cache sizing, speculative bounds,
 and the `MaxSessionTokens` finish reason all read the same value.
 
@@ -282,10 +390,11 @@ do not count. A later turn may begin whenever its input still leaves room for at
 token under the cumulative limit, and it may choose a different per-Turn limit.
 
 `OgaRequestOptions` is an opaque, reusable handle carrying resident-session policy only. Null
-options and zero `max_session_tokens` use the model-configured `search.max_length`, which normally
-defaults from the model context length. Request creation takes no generation parameters at all: the
-Engine builds each Request's private, Model-derived search configuration itself, forcing one
-sequence and one beam.
+options and zero `max_session_tokens` use the model-configured `search.max_length` capped by the
+Engine's `max_request_length` when that capability is nonzero. A zero capability preserves
+`search.max_length` as both the default and ceiling. Request creation takes no generation parameters
+at all: the Engine builds each Request's private, Model-derived search configuration itself, forcing
+one sequence and one beam.
 
 `OgaTurnOptions` is opaque and reusable and carries the whole generation policy of one turn;
 `BeginTurn()` snapshots it. See "Per-turn generation policy" below.
@@ -305,7 +414,7 @@ the Model:
   contract and its next tokens would never be copied back. Forcing it to one would decode something
   the caller never asked for, so it is rejected instead:
   `config.overlay('{"search": {"num_beams": 1}}')`, and batch across Requests.
-- A `search.max_length` of zero or less, since it is the Request's session ceiling.
+- A `search.max_length` of zero or less, since it supplies the default Request length.
 - A nonzero `search.chunk_size` when static batching is selected. Chunking is an Engine/model
   scheduler policy, so this is rejected at Engine creation; disable it with
   `config.overlay('{"search": {"chunk_size": 0}}')`.
@@ -314,11 +423,11 @@ the Model:
 wider configured batch simply means "configured for the classic Generator"; the Request derives its
 own single-row search and decodes exactly one sequence either way.
 
-The same overlay route raises the session ceiling where that is what the caller wants: because
-`max_session_tokens` cannot exceed the model-configured `search.max_length`, a model whose
-`search.max_length` is lower than the context length its cache can serve is raised with
-`config.overlay('{"search": {"max_length": <tokens>}}')` before the Model is created. A future API
-will report the cache-backed per-request maximum so hosts can choose this value safely.
+`search.max_length` supplies the default Request length. A caller may set a larger
+`max_session_tokens` explicitly when a nonzero `EngineCapabilities.max_request_length` permits it.
+The capability is derived from the resolved target cache and model context after Engine
+construction. Zero means that cache-backed ceiling is unavailable, so `search.max_length` remains
+the ceiling.
 
 ### `Active`
 
@@ -349,14 +458,37 @@ while any event for the Request is pending fails without mutation. Turn-scoped
 generated count and limit reset only after all validation, input allocation, Search append, and
 scheduler preparation succeeds.
 
-Request Rewind has not yet been implemented. Cancellation does not rewind the Search sequence or
-committed cache, so accepted continuation input and generated output remain part of the logical
-request. A canceled resident request can begin a later turn after its terminal notification is
-drained. A first turn canceled before admission has no cache state, but it can likewise begin a
-later turn: the retained initial input and new continuation input are prefetched together. If
-retained model state has otherwise ceased to be resident, continuation still fails. Until Request
-Rewind is implemented, callers that need to discard canceled input or release capacity must
-`Close()` and create a new Request.
+`RewindToStartOfTurn(turn_id)` is valid only in `TurnComplete`, after every event for that Request
+has been drained. The current Turn must not have failed. The named Turn must have been successfully
+begun and must remain in the active branch. The operation also rejects queued or active Turns,
+closed Requests, and model state that is unexpectedly nonresident. A first Turn canceled before
+admission is supported while it still has scheduler ownership and has processed no model tokens.
+A Request already rewound but not yet restarted is also eligible for another rewind to an earlier
+Turn remaining in its active branch, even though it is no longer resident. The discarded Turn ID
+cannot be rewound again. Rewind does not cancel or replace an active Turn and emits no event.
+
+The operation retains the token prefix that existed immediately before the named Turn's
+`BeginTurn()`, then discards that Turn and all later Turn boundaries. It preserves Request identity
+and leaves the current completed attempt's historical Turn ID and finish reason observable until
+the next `BeginTurn()`. Turn IDs are never reused, so that call receives the monotonic next ID.
+Rewind clears speculative drafts and resets the guidance cursor for the next Turn.
+
+Unlike rollback of an in-flight Engine transaction, completed-turn rewind does not restore
+sampling state. CPU and device stochastic sampling continue from their current random streams
+rather than returning to the retained token boundary.
+
+Rewind deliberately releases all resident physical model state instead of cropping it in place.
+Dynamic Requests return their complete paged KV block table, paired fixed-state slot, and auxiliary
+MTP or DFlash/DSpark state, if present. A later `BeginTurn()` re-admits the same Request and prefills the retained
+prefix together with new input, rebuilding paged KV, sliding-window rings, fixed convolution state,
+and fixed recurrent state from the token sequence. The MTP shadow state is recreated when drafting
+resumes. The request's physical state is released without persistent rewind checkpoints; indexed
+prefix blocks may stay cached until reused or reclaimed under pressure. Static
+Requests use the same strategy only when they are the sole resident row; multi-row static rewind
+fails before mutation because a row cannot be removed from the shared contiguous cache allocation.
+
+Cancellation itself still does not rewind Search or cache state. A canceled Request can either
+continue from retained state after draining its terminal event or explicitly rewind first.
 
 Every completed Turn publishes exactly one terminal event. A final visible token and completion may
 be combined in one event. An unserviceable Request receives `TurnFinished | Failed`; fatal Engine
@@ -375,6 +507,8 @@ Planning skips turn-complete residents and does not release their cache. Retaine
 consume paged-cache blocks and a batch slot, so applications must call `Close()` when they no
 longer need continuation. Dynamic resources are reclaimed immediately; static resources remain
 until the shared batch is recycled.
+Call `RewindToStartOfTurn()` instead when retaining the prefix before an active-branch Turn while
+releasing capacity for replay.
 
 ### `Close()`
 
@@ -550,10 +684,13 @@ token budget. The proposal width an automatic drafter aims for is model/Engine c
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
-proposals remain deterministic. A turn that enables guidance, a `repetition_penalty` other than 1,
-no-repeat-ngram processing, or a not-yet-met minimum generated token count is not draft-eligible,
-because the verification rows do not reproduce those logits processors. Eligibility is per turn: the
-next turn that drops those options can draft again. Passing an empty sequence clears a pending
+proposals remain deterministic. Whole-turn guidance, a `repetition_penalty` other than 1,
+no-repeat-ngram processing, or a not-yet-met minimum generated token count makes a turn
+ineligible for drafts, because the verification rows do not reproduce those logits processors.
+Delimited guidance permits drafts outside its constrained regions: proposals stop before the
+opening marker, drafts pause inside the region, and resume after the closing marker. Automatic
+MTP drafting remains disabled throughout a delimited turn. Eligibility is per turn: the next turn
+that drops an ineligible option can draft again. Passing an empty sequence clears a pending
 proposal.
 
 For a decode with K scheduled drafts, the packed input is the request's one unprocessed token
@@ -609,8 +746,10 @@ head failure therefore degrades to ordinary decoding without repeatedly running 
 
 **Shadow lifecycle.** The head's shadow Request mirrors only the suffix the target committed during
 the current turn. Beginning a continuation and canceling a turn both drop the shadow and release its
-auxiliary blocks, so the next drafted step rebuilds it from the new turn's suffix. Closing the
-request releases it as well.
+auxiliary blocks, so the next drafted step rebuilds it from the new turn's suffix. Rewinding also
+drops the shadow before releasing the target's model state because neither the shadow sequence nor
+its auxiliary cache remains authoritative for the retained prefix. Closing the request releases it
+as well.
 
 **Mixed prefill batches.** Drafts are proposed only for requests that committed a decode token in
 the step. A request that was prefilling, finished its turn, or has a proposal the Engine cannot
@@ -762,7 +901,8 @@ request checkpointing, model execution, or cache commit.
 
 ### 6. Checkpoint request and sampler state
 
-Before model execution, `ScheduledRequests::BeginTransaction()` checkpoints every selected request's search state.
+Before model execution, `ScheduledRequests::BeginTransaction()` checkpoints every selected
+request's Search state, processed cursor, host-token length, guidance state, and host RNG.
 
 If the device supports transactional batched sampling, the scheduler-owned sampler state is checkpointed as well. Each request keeps its own persistent sampler state, including its random stream, even though sampling work can be batched.
 
@@ -815,6 +955,10 @@ use continuation/replay invariants, tolerant logits or top-k comparisons, and ta
 bitwise token equality across batch compositions is available only when every selected backend is
 batch-invariant.
 
+After logits processing, greedy selection must return a token with a maximum score in the current
+row. Selecting a lower-scoring token or using results from an earlier step is a correctness error,
+not expected floating-point variability.
+
 ### 9. Run the decoder once
 
 `SimpleDecoder::Decode()` calls the ONNX Runtime decoder session once for the complete scheduled batch.
@@ -830,7 +974,7 @@ For eligible decode shapes, the decoder may capture or replay a CUDA graph. Pref
 `ScheduledRequests::GenerateNextTokensForTransaction()` then:
 
 1. Applies each request's logits processors to its own logits row.
-2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path.
+2. Samples a next token using the scheduler-owned batched sampler when supported, otherwise uses the per-request search path. A greedy request that verified drafts this step skips sampling: drafted requests run without logits processors, so the argmax that verification already computed for the row after the accepted prefix is committed directly.
 3. Runs the per-request sequence and EOS handling.
 4. Produces a `RequestStepResult` for each request.
 
@@ -1259,6 +1403,11 @@ before the step began. `Run()` translates `RetryableBatchAbort` into a `Retryabl
 `Run()` again with unchanged memory availability and workload composition may produce the same
 failure.
 
+Restoring a Request truncates `tokens_host_` to the saved transaction boundary while restoring the
+processed cursor, Search, guidance, host RNG, and transactional sampler state together. New-Turn
+admission uses the same additive checkpoint, so a failed continuation cannot leave the host
+sequence, guidance cursor, or either random stream at a newer transaction boundary.
+
 Planning allocation failures occur before reservation or request mutation. They propagate to the
 caller without marking the Engine unhealthy, so a later `Run()` may retry. A
 `StepPlanningConsistencyError`, by contrast, proves that committed paged and fixed ownership
@@ -1521,11 +1670,16 @@ and then publish them at a single infallible boundary:
   cannot overflow a generation, and that no row regresses below its slot's
   `committed_tokens`.
 - **`PrepareCommit()`** is the fallible device-completion phase: it re-validates,
-  copies fallback outputs into the **inactive** bank, or replays a partially accepted
-  compact update over a direct output, and synchronizes. A fully accepted direct
+  copies fallback outputs into the **inactive** bank, and synchronizes. A partially
+  accepted compact update over a direct output is replayed into the inactive bank by
+  the pool's next operation (`Reserve()`, `CapturePrefixCheckpoint()`, or the next
+  `PrepareCommit()`), which enqueues it ahead of every later reader of the banks on
+  the same stream, so the device runs the replay while the host prepares the next
+  step; discarding the prepared reservation drops it. A fully accepted direct
   output needs no state copy. The active (visible) bank is never touched, so a
   failure leaves committed state exactly as it was; it drains the device and marks
-  the pool unhealthy because the inactive banks may be left partially written. The
+  the pool unhealthy because the inactive banks may be left partially written. A
+  deferred replay that fails to launch also marks the pool unhealthy. The
   reservation becomes `Prepared`.
 - **`PublishCommit()`** is `noexcept` and performs no fallible or device work: it
   flips each slot to its freshly written bank, advances `state_generation`, sets
@@ -1632,6 +1786,11 @@ If batched sampling or transactional sampler checkpoints are unsupported on the 
 
 Logits processing remains per request. Minimum length, repetition penalty, no-repeat n-gram processing, EOS handling, maximum length, and sequence ownership continue to use each request's own state.
 
+Sampled deterministic-draft verification is sequential and therefore consumes the Request's host
+RNG once per evaluated target row. On CUDA, the already selected tokens can still use Search's
+externally bound token slot for batched commit, but that staging operation does not consume or
+advance the scheduler-owned batched-sampler state.
+
 ## CUDA graph capture
 
 CUDA graph capture is an optimization for stable decode shapes.
@@ -1721,37 +1880,89 @@ page size, before allocating cache resources. The drafter run is synchronous bec
 inputs and outputs are owned by one proposal call, so its run options cannot disable
 execution-provider synchronization.
 
-The direct drafter session also uses graph id `-1`: it reuses proposal tensor allocations but
-reshapes them for each step, so they cannot be captured safely. If this optional post-commit drafter
-run fails, the Engine discards any partial proposal and still publishes the already committed target
-events. A recoverable failure also makes the drafter forget every request it is currently tracking,
+The direct drafter session captures uniform shapes with stable proposal buffers, including
+batches containing a request restored from a DFlash2 prefix checkpoint. Graph replay requires
+a CUDA plugin EP version `v0.2.0` or later, which includes the per-session device-arena fix in
+[microsoft/onnxruntime#32807](https://github.com/microsoft/onnxruntime/pull/32807).
+Older plugin EPs share an arena across target and drafter sessions, allowing
+one session to overwrite memory retained by another's captured graph. GenAI cannot detect
+this at runtime: bad or missing drafts, reduced target accuracy, or a hang can result.
+No graphs are discarded on cached admission.
+On ORT builds without per-graph release, graph captures retired by buffer growth still live
+until their session is destroyed.
+The opt-in `Dflash2GraphRestoreTest.ExtendedCachedPrefixReplaysWithoutStaleGraphOrLostDrafts`
+exercises the real Engine with CUDA graph capture: set `D_FLASH2_GRAPH_TEST_MODEL` to a
+graph-enabled Qwen package with 256-token blocks and 512-token prefill, then run
+`engine_unit_tests` with `--ep_dir` pointing at a CUDA plugin with session-scoped device arenas
+and the test's `--gtest_filter`. The test enables prefix caching with a 512-token prefill chunk
+through a configuration overlay. With the reference tokenizer, it checks the 534-to-1146-token
+extension, two longer cached replays, draft acceptance, and output parity; a tokenizer whose
+prompt lengths fall outside the required cache-boundary ranges skips the test. Ordinary CPU CI
+skips this model-dependent test.
+
+If this optional post-commit drafter run fails, the Engine discards any partial proposal
+and still publishes the already committed target events.
+A recoverable failure also makes the drafter forget every request it is currently tracking,
 because the step whose rows it failed to ingest leaves its cached context no longer contiguous with
 the target. Those in-flight requests finish without block drafts while requests admitted afterwards
 still get them, and the retry budget is therefore spent on real drafter failures: three consecutive
 failures disable the drafter for the Engine, and a proposal contract violation disables it at once.
 `dflash2_failures` and `dflash2_disables` report those events.
 
-Automatic block drafting is greedy-only by default. A request joins on its position-zero step only
-when the current turn is greedy. If a sampled first turn executes that step, eligibility is not
-reconsidered and the request decodes without block drafts for the rest of its life. Once a request
-has joined, later sampled turns continue feeding their committed context into its cache without
-requesting drafts, so a subsequent greedy turn can resume drafting without a cache hole. These
-ingest-only steps still execute the drafter session to preserve that continuity.
+Greedy turns draft the greedy lattice path. How sampled turns draft is set by
+`model.dflash2.sampled_proposal`; every mode preserves the target distribution and they differ only
+in how many drafts the target accepts.
 
-Set `model.dflash2.independent_sampling` to opt sampled turns into the reference DFlash proposal
-contract. Each draft position then samples independently from the drafter's sparse top-k
-distribution, and target verification uses the probability ratio $\min(1, p(x) / q(x))$ with the
-residual distribution after rejection. The drafter distribution defaults to temperature `0.1`,
-top-p `0.95`, and min-p `0.3`; override them with `sampling_temperature`, `sampling_top_p`, and
-`sampling_min_p` in the same section. Min-p truncates only the proposal distribution; verification
-continues to use the target model's canonical distribution for the current turn. The learned-lattice
-greedy path remains unchanged when this option is absent or false.
+| Value | Proposal | Verification |
+|---|---|---|
+| `lattice` (default) | A path sampled through the lattice: each slot draws from the edge-score row its predecessor's draw selects, tempered and truncated with the turn's own temperature, top-k and top-p. | $\min(1, p(x) / q(x))$, residual on rejection. |
+| `greedy_path` | The same greedy lattice path a greedy turn drafts. | Sample the target row and accept while it matches the draft. |
+| `independent` | Each slot samples independently from its own sparse top-k distribution. | $\min(1, p(x) / q(x))$, residual on rejection. |
+| `none` | Sampled turns do not draft. | - |
+
+On Qwen3.8-27B with temperature 1.0, top-k 20 and top-p 0.95 (MMLU-Pro, 800 prompts, batch 1),
+`lattice` averaged 5.01 tokens per target step against 4.78 for `greedy_path` and 4.66 for
+`independent`, and decoded 3.1x faster than `none`.
+
+With `none`, a request joins on its position-zero step only when the current turn is greedy; with
+any other mode, a sampled turn also joins, provided its top-k is positive (draft validation rejects
+top-p-only sampled turns). If an ineligible first turn executes that step, eligibility is not reconsidered during the same residency
+and the request decodes without block drafts until rewind or close. Once a request has joined,
+later sampled turns continue feeding their committed context into its cache without requesting
+drafts, so a subsequent greedy turn can resume drafting without a cache hole. These ingest-only
+steps still execute the drafter session to preserve that continuity.
+
+`independent_sampling: true` is the older spelling of `sampled_proposal: "independent"`. A
+section that sets both keys must agree (`independent_sampling` is true exactly when
+`sampled_proposal` is `"independent"`); otherwise the config is rejected, whatever the key order.
+That mode's proposal defaults to temperature `0.1`, top-p `0.95`, and min-p `0.3`; override them with
+`sampling_temperature`, `sampling_top_p`, and `sampling_min_p` in the same section. Min-p
+truncates only the proposal distribution; verification continues to use the target model's
+canonical distribution for the current turn. `lattice` ignores these three settings and uses the
+turn's policy, so $q$ approximates $p$ wherever the drafter is calibrated.
 
 A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
 pool is sized for `max_batch_size` rings and its footprint is independent of context length. With
 automatic sizing, that pool is allocated before the target measures free memory. When `num_blocks`
 is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
-by that baseline target block count before either cache pool is allocated. A full-attention block
+by that baseline target block count before either cache pool is allocated.
+A windowed DFlash 2 model with hybrid target prefix caching reserves one
+additional ring per retained snapshot, independent of context length. The
+maximum comes from the Engine construction override or
+`engine.dynamic_batching.dflash2_max_snapshots` (default `1`, with `0` disabling
+draft snapshots), capped by target fixed-state checkpoint capacity. The shared
+memory budget can reduce that count, including to zero, so at least one target
+paged block remains after the auxiliary pool and snapshot reservations.
+More snapshots can substantially reduce target capacity and reject prompts
+that fitted with a smaller limit; the one-block minimum is not an admission
+guarantee. Engine construction logs the effective count and target-cache size
+when logging is enabled. Readers lease immutable snapshots through admission;
+replacement cannot overwrite an in-flight adopter. Without a matching draft
+snapshot, the target prefix still hits, but DFlash cannot draft immediately.
+It can ingest newly executed target tokens into a fresh windowed ring and resume
+drafting only after those tokens fill the required context window; a short
+request can remain target-only throughout. The skipped prefix is not rebuilt.
+A full-attention block
 drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
 query-spill bytes are charged against the same budget before target capacity is selected, using the
 cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same
@@ -1759,12 +1970,21 @@ layer geometry as the target roughly halves the target's paged-cache capacity fo
 memory budget, and it attends the whole resident sequence on every step rather than a window.
 
 Both pools are only sufficient while at most `max_batch_size` requests are tracked. A request denied
-cache blocks at its join point is skipped for the rest of its life and decodes without block drafts;
+cache blocks at its join point is skipped until rewind or close and decodes without block drafts;
 the drafter keeps serving requests that already hold blocks. This makes `max_batch_size` the
 drafter's service-capacity limit across both active and idle long-lived requests, not merely the
 per-step scheduler limit. `dflash2_admission_misses` reports requests denied cache blocks because
 that capacity was occupied. A tracked request remains part of this capacity while a sampled turn is
 ingest-only, because retaining its cache is what lets a later greedy turn resume drafting.
+Rewind releases any tracked DFlash/DSpark state, including its cache blocks. On replay, a request
+that was previously sampled or admission-denied can try to join again if its new position-zero
+step is draft-eligible and capacity is available. A nonzero-position hit also joins a windowed
+DFlash 2 drafter immediately when its exact target boundary still has a draft checkpoint and a
+free ring. Without a matching checkpoint, an eligible windowed drafter can reconstruct its recent
+window from the auxiliary rows retained with the adopted target blocks. If reconstruction cannot
+run because drafter capacity is occupied, it can later claim a free ring and warm it from newly
+executed target tokens. Full-attention DSpark cannot join at a nonzero position without its prior context.
+Rewind therefore does not guarantee renewed drafting.
 
 ## Backpressure and fairness
 
@@ -1803,6 +2023,13 @@ single-request batch remains resident. The per-turn generated-token budget and t
 turn policy both apply on this path, although static execution does not use the dynamic
 reservation/checkpoint transaction. Because it cannot stage, roll back, or replay, static admission
 rejects stop strings and a per-turn seed before mutating the Request.
+
+`RewindToStartOfTurn()` is supported for a sole resident static Request. It destroys that one-row
+contiguous cache allocation, retains the prefix before the named Turn, and lets the next
+`BeginTurn()` allocate a fresh static batch and replay that prefix with the new input. Rewind is
+rejected when two or more rows remain resident because releasing the shared allocation would also
+destroy peers' continuation state. A logically closed peer remains resident until the static batch
+recycles and therefore can temporarily keep another completed Request from rewinding.
 
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
 A closed Request that is already resident in a static batch nevertheless remains part of that

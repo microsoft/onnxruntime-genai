@@ -7,6 +7,7 @@
 // create/begin/schedule/continue/close move a request between Unassigned, Assigned, Active,
 // TurnComplete, and Closed.
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <memory>
@@ -233,6 +234,7 @@ class RequestLifecycleTest : public ::testing::Test {
 TEST(ContinuousDecodingDeviceSupportTest, MatchesKvCacheCapabilityContract) {
   EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::CPU));
   EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::CUDA));
+  EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::AMDGPU));
   EXPECT_FALSE(SupportsContinuousDecoding(DeviceType::DML));
   EXPECT_FALSE(SupportsContinuousDecoding(DeviceType::QnnHtp));
 }
@@ -544,6 +546,26 @@ TEST_F(RequestLifecycleTest, CapabilitiesReportDefaultStaticBatchSetting) {
 
   EXPECT_EQ(capabilities.configured_max_batch_size, 4u);
   EXPECT_EQ(capabilities.max_scheduled_tokens, 0u);
+  EXPECT_EQ(capabilities.max_request_length, 0u);
+
+  const auto configured_max_length = static_cast<size_t>(model->config_->search.max_length);
+  EXPECT_NO_THROW(engine.engine->CreateRequest());
+
+  RequestOptions boundary_options;
+  boundary_options.max_session_tokens = configured_max_length;
+  EXPECT_NO_THROW(engine.engine->CreateRequest(boundary_options));
+
+  RequestOptions excessive_options;
+  excessive_options.max_session_tokens = configured_max_length + 1;
+  try {
+    static_cast<void>(engine.engine->CreateRequest(excessive_options));
+    FAIL() << "Expected max_session_tokens above search.max_length to fail.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("model-configured search.max_length"),
+              std::string::npos);
+    EXPECT_EQ(std::string(error.what()).find("max_request_length"),
+              std::string::npos);
+  }
 }
 
 TEST_F(RequestLifecycleTest, CapabilitiesReportExplicitStaticBatchSetting) {
@@ -557,6 +579,7 @@ TEST_F(RequestLifecycleTest, CapabilitiesReportExplicitStaticBatchSetting) {
 
   EXPECT_EQ(capabilities.configured_max_batch_size, 8u);
   EXPECT_EQ(capabilities.max_scheduled_tokens, 0u);
+  EXPECT_EQ(capabilities.max_request_length, 0u);
 }
 
 TEST_F(RequestLifecycleTest, StaticEngineDoesNotLoadDisabledMtpHead) {
@@ -664,6 +687,89 @@ TEST_F(RequestLifecycleTest, BeginTurnIsRejectedWhileActive) {
   EXPECT_THROW(request->BeginTurn(more), std::runtime_error);
   EXPECT_EQ(request->status_, RequestStatus::Active);
   EXPECT_EQ(request->CurrentSequenceLength(), length_before);
+}
+
+TEST_F(RequestLifecycleTest, RewindToTurnStartRejectsInvalidLifecycleAndUnknownTurn) {
+  auto request = NewRequest();
+  EXPECT_THROW(request->RewindToStartOfTurn(1), std::runtime_error);
+
+  const auto prompt = Prompt();
+  const uint64_t turn_id = request->BeginTurn(prompt);
+  EXPECT_THROW(request->RewindToStartOfTurn(turn_id), std::runtime_error);
+  request->Schedule();
+  EXPECT_THROW(request->RewindToStartOfTurn(turn_id), std::runtime_error);
+
+  ASSERT_TRUE(request->Cancel(turn_id));
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  const auto completed = request->Snapshot();
+  EXPECT_THROW(request->RewindToStartOfTurn(turn_id + 1), std::runtime_error);
+  const auto rejected = request->Snapshot();
+  EXPECT_EQ(rejected.current_sequence_length,
+            completed.current_sequence_length);
+  EXPECT_EQ(rejected.processed_sequence_length,
+            completed.processed_sequence_length);
+
+  EXPECT_NO_THROW(request->RewindToStartOfTurn(turn_id));
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_EQ(request->CurrentTurnId(), 1u);
+  EXPECT_EQ(request->FinishReason(),
+            GenerationFinishReason::Canceled);
+
+  request->Close();
+  EXPECT_THROW(request->RewindToStartOfTurn(turn_id), std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, RewindToTurnStartPrunesBranchAndKeepsTurnIdsMonotonic) {
+  const auto prompt = Prompt();
+  auto request = CreateRequestWithPrompt(engine_.engine, prompt);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+  const int64_t retained_length = request->CurrentSequenceLength();
+
+  const std::array<int32_t, 1> continuation{9};
+  const uint64_t discarded_turn =
+      request->BeginTurn(continuation, std::optional<size_t>{1});
+  ASSERT_EQ(discarded_turn, 2u);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+
+  request->RewindToStartOfTurn(discarded_turn);
+  EXPECT_EQ(request->CurrentSequenceLength(), retained_length);
+
+  const uint64_t replacement_turn =
+      request->BeginTurn(continuation, std::optional<size_t>{1});
+  EXPECT_EQ(replacement_turn, 3u);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  EXPECT_THROW(
+      request->RewindToStartOfTurn(discarded_turn),
+      std::runtime_error);
+  EXPECT_NO_THROW(request->RewindToStartOfTurn(1));
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_EQ(request->CurrentTurnId(), replacement_turn);
+}
+
+TEST_F(RequestLifecycleTest, ConsecutiveRewindsCanDiscardEarlierTurnsWithoutResidency) {
+  auto request = CreateRequestWithPrompt(engine_.engine, Prompt());
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  const std::array<int32_t, 1> continuation{9};
+  ASSERT_EQ(request->BeginTurn(continuation, std::optional<size_t>{1}), 2u);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+  ASSERT_EQ(engine_.cache->AllocatedCount(), 1u);
+
+  request->RewindToStartOfTurn(2);
+  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+  EXPECT_FALSE(engine_.engine->HasPendingRequests());
+  EXPECT_NO_THROW(request->RewindToStartOfTurn(1));
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+  EXPECT_FALSE(engine_.engine->HasPendingRequests());
+  EXPECT_THROW(request->RewindToStartOfTurn(2), std::runtime_error);
+
+  EXPECT_EQ(request->BeginTurn(continuation, std::optional<size_t>{1}), 3u);
+  EXPECT_EQ(RunOne(*engine_.engine).request, request);
+  EXPECT_TRUE(request->IsTurnComplete());
 }
 
 // After a turn completes, BeginTurn appends another input fragment and queues the resident request.
@@ -1377,6 +1483,76 @@ TurnOptions GuidedOptions(std::string grammar) {
   options.guidance_type = "regex";
   options.guidance_data = std::move(grammar);
   return options;
+}
+
+TEST_F(RequestLifecycleTest, DelimitedGuidanceAdmitsAndMasksOnlyBetweenCommittedMarkers) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto tokenizer = guidance_model->CreateTokenizer();
+  auto single_token = [&](const char* text) {
+    const auto tokens = tokenizer->Encode(text);
+    EXPECT_EQ(tokens.size(), 1u) << text;
+    return tokens.size() == 1 ? tokens.front() : -1;
+  };
+  const int32_t opening = single_token("{");
+  const int32_t closing = single_token("}");
+  const int32_t body = single_token("!");
+  const int32_t before = single_token("a");
+  const int32_t after = single_token("b");
+  ASSERT_GE(std::min({opening, closing, body, before, after}), 0);
+  ASSERT_NE(opening, closing);
+  ASSERT_NE(body, opening);
+  ASSERT_NE(body, closing);
+
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8, before);
+  auto request = CreateEngineRequest(guidance_engine.engine);
+  TurnOptions options;
+  options.delimited_guidance = TurnOptions::DelimitedGuidance{opening, closing, "start: \"!\""};
+  options.max_generated_tokens = 8;
+
+  // Admission validates both the marker IDs and the grammar without consuming the first turn.
+  options.delimited_guidance->opening_token = EosToken(*guidance_model);
+  EXPECT_THROW(request->BeginTurn(Prompt(), options), std::invalid_argument);
+  EXPECT_TRUE(request->IsAwaitingFirstTurn());
+  options.delimited_guidance->opening_token = opening;
+  options.delimited_guidance->grammar = "start: /[/";
+  EXPECT_THROW(request->BeginTurn(Prompt(), options), std::runtime_error);
+  EXPECT_TRUE(request->IsAwaitingFirstTurn());
+  options.delimited_guidance->grammar = "start: \"!\"";
+  ASSERT_EQ(request->BeginTurn(Prompt(), options), 1u);
+  EXPECT_TRUE(request->HasDelimitedGuidance());
+  EXPECT_FALSE(request->HasGuidance());
+
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, before);
+  guidance_engine.executor->SetForcedToken(opening);
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, opening);
+  ASSERT_TRUE(request->HasGuidance());
+  EXPECT_NE(request->DraftTokenValidationError(), nullptr);
+
+  const auto mask = request->GetReadyGuidanceMask();
+  const auto allows = [&](int32_t token) {
+    const auto index = static_cast<size_t>(token);
+    return (mask[index / 32] & (uint32_t{1} << (index % 32))) != 0;
+  };
+  ASSERT_FALSE(mask.empty());
+  EXPECT_TRUE(allows(body));
+  EXPECT_FALSE(allows(closing));
+  EXPECT_FALSE(allows(after));
+
+  std::vector<float> body_logits(static_cast<size_t>(guidance_model->config_->model.vocab_size), 0.0f);
+  body_logits[closing] = 100.0f;
+  body_logits[body] = 50.0f;
+  guidance_engine.executor->SetVerifyRowLogits({std::move(body_logits)});
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, body);
+  guidance_engine.executor->SetVerifyRowLogits({});
+  guidance_engine.executor->SetForcedToken(closing);
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, closing);
+  EXPECT_FALSE(request->HasGuidance());
+  EXPECT_EQ(request->DraftTokenValidationError(), nullptr);
+
+  guidance_engine.executor->SetForcedToken(after);
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, after);
+  EXPECT_FALSE(request->IsTurnComplete());
 }
 
 TEST_F(RequestLifecycleTest, TerminalGuidanceTakesPrecedenceOverMinimumGeneratedTokens) {

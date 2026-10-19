@@ -5,10 +5,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "../span.h"
@@ -36,6 +38,9 @@
 namespace Generators {
 
 class FixedStatePrefixCheckpoint;
+struct Dflash2PrefixCheckpoint;
+using DraftPrefixBoundary =
+    std::pair<std::shared_ptr<const BlockIdentity>, std::shared_ptr<const FixedStatePrefixCheckpoint>>;
 
 struct PrefixCacheOptions {
   bool enabled{};
@@ -45,6 +50,8 @@ struct PrefixCacheOptions {
   // Hybrid target models require a fixed-state checkpoint at the same boundary as the paged
   // blocks. Paged-only models leave this false and continue matching every complete block.
   bool requires_checkpoint{};
+  // Windowed DFlash prefix hits retain the target auxiliary rows needed to reconstruct the
+  // drafter ring when no optional GPU snapshot is attached to the matched boundary.
   bool requires_auxiliary{};
   size_t max_checkpoints{};
   // Content hash used to address a block. Left null in production, where PrefixCache::ChainHash is
@@ -61,6 +68,7 @@ struct PrefixCacheMatch {
   std::vector<std::shared_ptr<Block>> blocks;
   std::vector<std::shared_ptr<const std::vector<uint8_t>>> auxiliary_blocks;
   std::shared_ptr<const FixedStatePrefixCheckpoint> fixed_state_checkpoint;
+  std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint;
 
   bool Empty() const { return blocks.empty(); }
 };
@@ -149,6 +157,25 @@ class PrefixCache final : private BlockReferenceObserver {
       const std::shared_ptr<const BlockIdentity>& parent,
       std::shared_ptr<const std::vector<uint8_t>> auxiliary = nullptr);
 
+  // Publishes a hybrid suffix only with its checkpoint. Failed publication removes all identities
+  // created by this call, leaving the physical blocks private and eligible for a later retry.
+  PrefixCacheRegistrationStatus CheckCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent);
+  PrefixCacheRegistration RegisterCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent,
+      std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint,
+      std::span<const uint8_t> auxiliary = {});
+  PrefixCacheRegistration RegisterCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent,
+      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint,
+      std::span<const uint8_t> auxiliary = {});
+
   // Publishes and refreshes a match only after its adopting cache transaction commits.
   void RecordAdoption(
       std::span<const std::shared_ptr<Block>> blocks) noexcept;
@@ -164,9 +191,21 @@ class PrefixCache final : private BlockReferenceObserver {
   bool AttachCheckpoint(
       const std::shared_ptr<const BlockIdentity>& identity,
       std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+  bool CanAttachDraftCheckpoint(const std::shared_ptr<const BlockIdentity>& identity,
+                                size_t token_count) const;
+  std::shared_ptr<const FixedStatePrefixCheckpoint> DraftBoundary(
+      const std::shared_ptr<const BlockIdentity>& identity, size_t token_count) const;
+  bool AttachDraftCheckpoint(const std::shared_ptr<const BlockIdentity>& identity,
+                             const std::shared_ptr<const FixedStatePrefixCheckpoint>& fixed_checkpoint,
+                             std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint);
+  void DropUnleasedDraftCheckpoints();
+  bool ReclaimDraftCheckpoint();
   size_t ReclaimCheckpoints(size_t checkpoints_needed);
+  bool ReclaimCheckpoint(const FixedStatePrefixCheckpoint* checkpoint);
   size_t ReclaimableCheckpoints() const;
-  size_t CheckpointCount() const { return checkpoint_count_; }
+  const FixedStatePrefixCheckpoint* ReclaimableCheckpoint(
+      const std::shared_ptr<const BlockIdentity>& current_path = nullptr) const;
+  size_t CheckpointCount() const { return checkpoint_entries_.size(); }
 
   /**
    * @brief Identity hash a chain starts from, before any block has contributed to it.
@@ -202,6 +241,7 @@ class PrefixCache final : private BlockReferenceObserver {
     std::shared_ptr<const BlockIdentity> identity;
     std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint;
     std::shared_ptr<const std::vector<uint8_t>> auxiliary;
+    std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint;
     std::list<Entry*>::iterator recency;
     std::list<Entry*>::iterator reference_state;
     std::optional<size_t> parent_block_id;
@@ -209,16 +249,50 @@ class PrefixCache final : private BlockReferenceObserver {
     bool promote_on_release{true};
   };
 
+  struct CheckpointedPrefixPlan {
+    PrefixCacheRegistrationStatus status{PrefixCacheRegistrationStatus::Indexed};
+    std::vector<size_t> retiring_block_ids;
+    std::vector<std::shared_ptr<const LogicalPrefixIdentity>> logical_identities;
+  };
+  CheckpointedPrefixPlan PlanCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent);
+  PrefixCacheRegistration ReplaceCheckpointedPrefix(
+      std::span<const std::shared_ptr<Block>> blocks,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent,
+      const CheckpointedPrefixPlan& plan,
+      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint,
+      std::span<const uint8_t> auxiliary);
+
   // Keeps `entry` ordered immediately before the entry it chains from, so a chain is always
   // evicted from its tail rather than its head.
   void Reorder(Entry& entry, const std::shared_ptr<const BlockIdentity>& parent);
+  Entry* FindEntry(const std::shared_ptr<const BlockIdentity>& identity) const noexcept;
+  Entry* FindPhysical(uint64_t hash, const std::shared_ptr<const BlockIdentity>& parent,
+                      std::span<const int32_t> tokens) const;
+  Entry* FindLogical(uint64_t hash,
+                     const std::shared_ptr<const LogicalPrefixIdentity>& parent,
+                     std::span<const int32_t> tokens) const;
+  bool HasRetainedPhysicalPath(
+      const Entry& endpoint, size_t block_count,
+      std::span<const int32_t> tokens = {},
+      std::vector<std::shared_ptr<Block>>* blocks = nullptr) const;
+  size_t MarkLeasedReclaimableBlocks() const;
+  static bool IsCheckpointUnleased(const Entry& entry);
+  bool HasCheckpointedDescendant(const Entry& ancestor) const;
+  void PromoteCheckpoint(Entry& entry) noexcept;
   void OnBlockBecameReferenced(Block& block, void* cookie) noexcept override;
   void OnBlockBecameReclaimable(Block& block, void* cookie) noexcept override;
-  void Evict(std::unordered_map<uint64_t, Entry>::iterator it);
+  void Evict(std::unordered_map<size_t, Entry>::iterator it);
 
   BlockPool& block_pool_;
   PrefixCacheOptions options_;
-  std::unordered_map<uint64_t, Entry> entries_;
+  // Physical block ID owns entries. Hash lookup is a non-owning multimap because hybrid
+  // checkpointed publication may retain several exact physical histories for one logical prefix.
+  std::unordered_map<size_t, Entry> entries_;
+  std::unordered_multimap<uint64_t, Entry*> entries_by_hash_;
   // Front is the least recently used identity, back the most recently used.
   std::list<Entry*> recency_;
   // Every entry always owns one preallocated node in exactly one of these lists. Reference-count
@@ -226,7 +300,11 @@ class PrefixCache final : private BlockReferenceObserver {
   std::list<Entry*> referenced_entries_;
   std::list<Entry*> reclaimable_entries_;
   std::vector<Entry*> entries_by_block_id_;
-  size_t checkpoint_count_{};
+  // Scratch is rebuilt for each query: shared checkpoint leases can change without cache callbacks.
+  mutable std::vector<uint8_t> leased_ancestry_;
+  // LRU checkpoint endpoints. Capacity is reserved at construction, so promotion and publication
+  // are allocation-free after checkpoint capture starts.
+  std::vector<Entry*> checkpoint_entries_;
   PrefixCacheMetrics metrics_;
 };
 

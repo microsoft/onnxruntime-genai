@@ -421,6 +421,8 @@ struct OgaTokenizer : OgaAbstract {
     return token_id;
   }
 
+  // Encode follows the C API's encoding-only concurrency rules:
+  // distinct output sequences, no concurrent option updates or other tokenizer operations.
   void Encode(const char* str, OgaSequences& sequences) const {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
@@ -960,6 +962,10 @@ struct OgaEngineCapabilities : OgaAbstract {
     return OgaEngineCapabilitiesGetMaxScheduledTokens(this);
   }
 
+  uint64_t MaxRequestLength() const {
+    return OgaEngineCapabilitiesGetMaxRequestLength(this);
+  }
+
   static void operator delete(void* p) {
     OgaDestroyEngineCapabilities(reinterpret_cast<OgaEngineCapabilities*>(p));
   }
@@ -1052,8 +1058,8 @@ struct OgaRequestOptions : OgaAbstract {
     return std::unique_ptr<OgaRequestOptions>(options);
   }
 
-  /** Total tokens (prompt plus generated, across every Turn) the Request may reach. Zero restores
-   *  the model-configured search.max_length, which is also the ceiling for any explicit value. */
+  /** Total tokens (prompt plus generated, across every Turn) the Request may reach. Zero uses the
+   *  configured default capped by a nonzero EngineCapabilities.max_request_length. */
   void SetMaxSessionTokens(uint64_t value) {
     OgaCheckResult(OgaRequestOptionsSetMaxSessionTokens(this, value));
   }
@@ -1121,11 +1127,17 @@ struct OgaTurnOptions : OgaAbstract {
     OgaCheckResult(OgaTurnOptionsSetStopStrings(this, &values));
   }
   /** Constrains this Turn's output to a grammar ("json_schema", "regex", or "lark_grammar"),
-   *  copying both strings immediately. Guidance is strictly Turn-scoped. */
+   *  copying both strings immediately. Guidance is strictly Turn-scoped and cannot be combined
+   *  with delimited guidance. */
   void SetGuidance(const char* type, const char* data) {
     OgaCheckResult(OgaTurnOptionsSetGuidance(this, type, data));
   }
-  /** Removes the configured grammar, so the Turn is unguided. */
+  /** Copies a Lark grammar for the body between distinct opening and closing token IDs.
+   *  Cannot be combined with whole-turn guidance; ClearGuidance or Reset switches modes. */
+  void SetDelimitedGuidance(int32_t opening_token, int32_t closing_token, const char* grammar) {
+    OgaCheckResult(OgaTurnOptionsSetDelimitedGuidance(this, opening_token, closing_token, grammar));
+  }
+  /** Removes whole-turn or delimited guidance, so the Turn is unguided. */
   void ClearGuidance() {
     OgaCheckResult(OgaTurnOptionsClearGuidance(this));
   }
@@ -1164,6 +1176,10 @@ struct OgaRequest : OgaAbstract {
     bool cancelled{};
     OgaCheckResult(OgaRequestCancelTurn(this, turn_id, &cancelled));
     return cancelled;
+  }
+
+  void RewindToStartOfTurn(uint64_t turn_id) {
+    OgaCheckResult(OgaRequestRewindToStartOfTurn(this, turn_id));
   }
 
   /**

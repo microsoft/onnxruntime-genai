@@ -70,6 +70,12 @@ DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
 
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
 
+// The interface that matches where a tensor's memory actually is. A model that runs on a device does
+// not necessarily keep its tensors there: WebGPU without graph capture leaves them host-side, and ORT
+// places some outputs on the CPU whatever the EP. Wrapping such a tensor with the device interface
+// hands a host pointer to the EP's copy, which crashes inside it.
+DeviceInterface& DeviceForTensor(const OrtValue& value, DeviceInterface& device);
+
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
 
@@ -103,6 +109,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   int max_graph_capture_length{1};
   bool use_multi_profile{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
+  bool IsGreedySampling() const { return !search.do_sample || search.top_k == 1 || search.temperature == 0; }
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
 
@@ -210,6 +217,11 @@ struct OrtGlobals {
   ~OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
+
+  // True when genai (not a host) registered the AMDGPU umbrella EP library on env_. Scoped to this
+  // OrtGlobals so it is cleared whenever the env is torn down (Shutdown / re-init), keeping ownership
+  // tied to the registration's lifetime. Read/written by the AMDGPU session-options teardown gate.
+  bool amdgpu_owns_ep_registration_ = false;
 
   // Get-or-create the DeviceInterface for a device type. The interface is owned by this
   // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every
