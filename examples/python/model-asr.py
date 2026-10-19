@@ -212,7 +212,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
 
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
-    postprocessor = og.TokenPostProcessor(model, generator)
+    postprocessor = og.TokenPostProcessor(generator)
     # Per-generator language selection
     if selected_lang is not None:
         generator.set_runtime_option("lang_id", str(int(selected_lang[0])))

@@ -43,7 +43,7 @@ if (useVadOverride == "true") {
 
 using var generatorParams = new GeneratorParams(model);
 using var generator = new Generator(model, generatorParams);
-using var postprocessor = new TokenPostProcessor(model, generator);
+using var postprocessor = new TokenPostProcessor(generator);
 var timestampedTranscript = new StringBuilder();
 
 for (int offset = 0; offset < audio.Length; offset += chunkSize) {

@@ -4,7 +4,7 @@ This sample streams audio through Nemotron Speech and builds its output only fro
 events. It enables `timestamp_level: "segment"` with a configuration overlay and prints each segment
 as `[StartTime - StopTime] SegmentText` when the segment completes.
 
-`TokenPostProcessor(model, generator)` owns decoding and timestamp state, using the model
+`TokenPostProcessor(generator)` owns decoding and timestamp state, using the model
 configuration. `Reset()` clears all processor state together; no explicit metadata-state
 initialization is needed. The generator must outlive its processor.
 

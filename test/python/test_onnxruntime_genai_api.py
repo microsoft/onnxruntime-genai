@@ -95,7 +95,7 @@ def test_asr_example_formats_empty_results(test_data_path, asr_example, use_segm
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
     generator = og.Generator(model, og.GeneratorParams(model))
-    postprocessor = og.TokenPostProcessor(model, generator)
+    postprocessor = og.TokenPostProcessor(generator)
     postprocessor.finalize()
     result = postprocessor.get_next_token_results()[0]
     assert isinstance(result, og.TokenPostProcessorResult)
@@ -114,7 +114,7 @@ def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, 
     generator = og.Generator(model, params)
     prompt = np.array([[0, 0, 0, 52]], dtype=np.int32)
     generator.append_tokens(prompt)
-    postprocessor = og.TokenPostProcessor(model, generator)
+    postprocessor = og.TokenPostProcessor(generator)
     transcript = asr_example.decode_tokens(generator, postprocessor, "off", [])
     tokenizer = og.Tokenizer(model)
     plain = tokenizer.create_stream()
@@ -155,7 +155,7 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
     tokenizer = og.Tokenizer(model)
     plain_stream = tokenizer.create_stream()
     generator = og.Generator(model, og.GeneratorParams(model))
-    postprocessor = og.TokenPostProcessor(model, generator)
+    postprocessor = og.TokenPostProcessor(generator)
     sample_rate, chunk_samples, _ = asr_example.load_config(model_path)
     audio = asr_example.load_audio(audio_path, sample_rate)[: 2 * sample_rate]
     if use_vad:
