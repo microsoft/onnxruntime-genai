@@ -119,7 +119,7 @@ struct State {
 
  protected:
   void Run(OrtSession& session, bool graph_capture_this_run = false, int graph_capture_length = 1,
-           int graph_capture_variant = 0);
+           int graph_capture_variant = 0, OrtIoBinding* binding = nullptr);
   int GraphIdForLength(int graph_capture_length, int graph_capture_variant);
   bool first_run_{true};
 
