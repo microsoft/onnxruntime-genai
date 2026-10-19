@@ -232,7 +232,7 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
-  auto postprocessor = OgaTokenPostProcessor::Create(*model, *generator);
+  auto postprocessor = OgaTokenPostProcessor::Create(*generator);
 
   std::cout << "  Sample rate: " << sample_rate << ", Chunk: " << chunk_samples << " samples" << std::endl;
   std::cout << "  Audio duration: " << duration << "s" << std::endl;

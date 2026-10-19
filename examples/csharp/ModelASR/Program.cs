@@ -73,7 +73,7 @@ if (useVad == "true") {
 
 using var genParams = new GeneratorParams(model);
 using var generator = new Generator(model, genParams);
-using var postprocessor = new TokenPostProcessor(model, generator);
+using var postprocessor = new TokenPostProcessor(generator);
 Console.WriteLine(new string('-', 60));
 string fullTranscript = "";
 var allWordTranscript = new StringBuilder();
