@@ -4,6 +4,7 @@
 #include "engine/request.h"
 #include "search.h"
 
+#include <array>
 #include <limits>
 #include <set>
 
@@ -249,7 +250,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
 
   // The view is zero-copy: DFlash2 packs only the committed rows, never the padded/rejected ones.
   auto& aux = *tensors_.at("aux_hidden_states");
-  const int64_t shape[]{8, static_cast<int64_t>(model.aux_width_)};
+  const std::array<int64_t, 2> shape{8, static_cast<int64_t>(model.aux_width_)};
   aux_view_ = std::make_unique<Tensor>(OrtValue::CreateTensor(
       *model.p_device_->GetMemoryInfo(), aux.GetMutableRawData(), aux.GetByteSpan().size(),
       shape, aux.GetType()));
