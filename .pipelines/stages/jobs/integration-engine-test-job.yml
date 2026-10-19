@@ -22,7 +22,9 @@ parameters:
 jobs:
 - job: engine_${{ parameters.ep }}_${{ replace(replace(parameters.model, '.', '_'), '-', '_') }}
   displayName: '${{ parameters.ep }} · ${{ parameters.model }}'
-  pool: 'onnxruntime-ado-ubuntu-A10-NV32'
+  name: 'onnxruntime-ado-ubuntu-A10-NV32'
+  demands:
+    - 1ES.ImageOverride -equals onnxruntime-ubuntu2404-A10
 
   timeoutInMinutes: 60
   workspace:
