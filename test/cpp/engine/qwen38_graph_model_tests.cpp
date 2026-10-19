@@ -368,6 +368,45 @@ TEST(Qwen38CycleRecordTest, AcceptedCyclesCommitTwoTokens) {
   EXPECT_EQ(record.TokenCount(), 1u);
   record.accepted = true;
   EXPECT_EQ(record.TokenCount(), 2u);
+  record.accepted_count = 3;
+  EXPECT_EQ(record.TokenCount(), 4u);
+}
+
+TEST(Qwen38DecodeLedgerTest, SupportsMultiDraftFiveBankRing) {
+  Qwen38DecodeLedger ledger{64};
+  ledger.SetNumBanks(5);
+  EXPECT_EQ(ledger.NumBanks(), 5);
+  ledger.Advance(4);
+  EXPECT_EQ(ledger.Bank(), 4);
+  EXPECT_EQ(ledger.Length(), 4u);
+  ledger.Advance(3);
+  EXPECT_EQ(ledger.Bank(), 2);
+  EXPECT_EQ(ledger.Length(), 7u);
+  EXPECT_THROW(ledger.Advance(5), std::logic_error);
+}
+
+TEST(Qwen38SuffixDrafterTest, ProposesMatchingNgramContinuations) {
+  Qwen38SuffixDrafter drafter;
+  const int32_t prompt[] = {10, 20, 30, 40, 50, 60};
+  drafter.AppendSpan(std::span<const int32_t>(prompt, 6));
+  drafter.AppendToken(10);
+  drafter.AppendToken(20);
+  int32_t drafts[3] = {-1, -1, -1};
+  const int n = drafter.ProposeDrafts(30, 3, drafts, 3);
+  ASSERT_EQ(n, 3);
+  EXPECT_EQ(drafts[0], 40);
+  EXPECT_EQ(drafts[1], 50);
+  EXPECT_EQ(drafts[2], 60);
+}
+
+TEST(Qwen38GraphConfigTest, FoldAcceptsMtpAndDrafterAliases) {
+  Config c1, c2;
+  OverlayConfig(c1, R"({"model":{"qwen38_graph":{"fold":{"enabled":true,"mtp":{"filename":"mtp.onnx","graph_id":85}}}}})");
+  EXPECT_EQ(c1.model.qwen38_graph.fold.head_r2.filename, "mtp.onnx");
+  EXPECT_EQ(c1.model.qwen38_graph.fold.head_r2.graph_id, 85);
+
+  OverlayConfig(c2, R"({"model":{"qwen38_graph":{"fold":{"enabled":true,"drafter":{"filename":"drafter.onnx"}}}}})");
+  EXPECT_EQ(c2.model.qwen38_graph.fold.head_r2.filename, "drafter.onnx");
 }
 
 TEST(Qwen38GraphConfigTest, EffectivePrefillChunkUsesStepOrFastPrefillSetting) {
