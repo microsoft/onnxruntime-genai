@@ -7,11 +7,14 @@
   mtp_pool_keys     pooled / RMS-normalised / half-RoPE compressed index keys vs handoff_lib.pooled_block_keys (fp32)
   mtp_transpose_f32 GDN state transpose (bitwise)
 
-usage (research env: mobius, torch; any GPU, < 2 GB): test_plane_kernels.py <package dir> [--lib libqwen38_plane.so] [--out json]
+usage (mobius, torch; any GPU, < 2 GB): test_plane_kernels.py <package dir>
+  --plane-module <plane.py> --handoff-module <handoff_lib.py> --checkpoint <directory>
+  [--lib libqwen38_plane.so] [--out json]
 """
 
 import argparse
 import ctypes
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -19,10 +22,33 @@ from pathlib import Path
 import numpy as np
 import torch
 
-CG = Path("/home/tianlei/git/eval_runs/qwen38_cuda_graph_20261010_01")
-sys.path.insert(0, str(CG / "mtp_runner"))
-sys.path.insert(0, "/home/tianlei/git/eval_runs/qwen38_prefill_20261012_01")
 c_vp = ctypes.c_void_p
+
+
+def reference_file(value):
+    path = Path(value).expanduser().resolve()
+    if not path.is_file() or path.suffix != ".py":
+        raise argparse.ArgumentTypeError(f"expected an existing Python reference module: {path}")
+    return path
+
+
+def checkpoint_dir(value):
+    path = Path(value).expanduser().resolve()
+    if not path.is_dir() or not (path / "config.json").is_file():
+        raise argparse.ArgumentTypeError(f"expected a checkpoint directory containing config.json: {path}")
+    return path
+
+
+def load_reference(name, path, required):
+    sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    for symbol in required:
+        if not callable(getattr(module, symbol, None)):
+            raise ValueError(f"{path} must provide {symbol}")
+    return module
 
 
 def main():
@@ -30,7 +56,14 @@ def main():
     ap.add_argument("package", type=Path)
     ap.add_argument("--lib", type=Path)
     ap.add_argument("--out", type=Path)
+    ap.add_argument("--plane-module", type=reference_file, required=True, help="trusted plane.py reference file")
+    ap.add_argument(
+        "--handoff-module", type=reference_file, required=True, help="trusted handoff_lib.py reference file"
+    )
+    ap.add_argument("--checkpoint", type=checkpoint_dir, required=True, help="local Hugging Face checkpoint directory")
     args = ap.parse_args()
+    plane = load_reference("plane", args.plane_module, ("PleDevice", "PleParams"))
+    handoff_lib = load_reference("handoff_lib", args.handoff_module, ("pooled_block_keys",))
     lib = ctypes.CDLL(str(args.lib or args.package / "libs/libqwen38_plane.so"))
     ci = ctypes.c_int
     lib.mtp_ple_rows.argtypes = [c_vp, c_vp, c_vp, ci, c_vp, c_vp, c_vp]
@@ -41,12 +74,11 @@ def main():
     result = {}
 
     # ---- PLE rows ----
-    import plane  # noqa: PLC0415
     from mobius._configs import Qwen4ExpConfig  # noqa: PLC0415
     from mobius.generation._qwen4_exp_ple import Qwen4ExpCPUPLELookup  # noqa: PLC0415
     from mobius.integrations.transformers._builder import _load_transformers_config  # noqa: PLC0415
 
-    checkpoint = "/home/tianlei/git/Qwen3.8-Flash-Next-NVFP4"
+    checkpoint = str(args.checkpoint)
     hf_config, _ = _load_transformers_config(checkpoint, revision=None, trust_remote_code=False)
     config = Qwen4ExpConfig.from_transformers(hf_config)
     layer = next(int(i) - 1 for i in config.ple_layer_ids)
@@ -88,8 +120,6 @@ def main():
     result["ple_rows"] = ok_ple
 
     # ---- pooled keys ----
-    import handoff_lib  # noqa: PLC0415
-
     index, consts = {}, {}
     for line in (args.package / "qsa_consts.txt").read_text().splitlines():
         f = line.split()

@@ -23,7 +23,8 @@ def main():
     parser.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
     args = parser.parse_args()
 
-    og.register_execution_provider_library("CUDAExecutionProvider", args.provider)
+    if args.provider:
+        og.register_execution_provider_library("CUDAExecutionProvider", args.provider)
     config = og.Config(args.model)
     if args.no_mtp:
         config.overlay(json.dumps({"model": {"qwen38_graph": {"mtp": {"enabled": False}}}}))

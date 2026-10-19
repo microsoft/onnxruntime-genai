@@ -185,7 +185,7 @@ __global__ void k_post(const float* v0, const int* i0, const float* v1, const in
   r[1] = pred0;
   r[2] = pred1;
   r[3] = accept ? 1 : 0;
-  r[4] = status;
+  r[4] = status | state[5];
   r[5] = new_pending;
   r[6] = new_len;
   __threadfence_system();
@@ -215,7 +215,7 @@ __global__ void k_post_tok(const i64* tok01, i64* state, i64* ctx_commit, const 
   r[1] = pred0;
   r[2] = pred1;
   r[3] = accept ? 1 : 0;
-  r[4] = status;
+  r[4] = status | state[5];
   r[5] = new_pending;
   r[6] = new_len;
   __threadfence_system();
@@ -237,7 +237,7 @@ __global__ void k_post1(const float* v0, const int* i0, int nb, i64* state, i64*
   state[4] += 1;
   state[5] |= status ? 2 : 0;
   r[1] = pred0;
-  r[4] = status;
+  r[4] = status | state[5];
   r[5] = pred0;
   r[6] = state[1];
   __threadfence_system();

@@ -25,7 +25,7 @@ def prefix(a, b):
     return next((i for i in range(n) if a[i] != b[i]), n)
 
 
-def generate(model, prompt, new, chunks=1, generator=None):
+def generate(model, prompt, new, chunks=1, generator=None, observer=None):
     if generator is None:
         params = og.GeneratorParams(model)
         params.set_search_options(max_length=len(prompt) + new, do_sample=False)
@@ -37,9 +37,13 @@ def generate(model, prompt, new, chunks=1, generator=None):
         for i in range(0, len(prompt), step):
             generator.append_tokens(prompt[i : i + step])
     tokens = []
+    if observer:
+        observer(generator, tokens)
     while not generator.is_done():
         generator.generate_next_token()
         tokens.append(int(generator.get_next_tokens()[0]))
+        if observer:
+            observer(generator, tokens)
     return generator, tokens
 
 
@@ -53,7 +57,8 @@ def main():
     if args.out.exists():
         raise FileExistsError(args.out)
 
-    og.register_execution_provider_library("CUDAExecutionProvider", args.provider)
+    if args.provider:
+        og.register_execution_provider_library("CUDAExecutionProvider", args.provider)
     config = og.Config(args.model)
     config.overlay(json.dumps({"model": {"qwen38_graph": {"prefill": {"enabled": args.prefill == "fast"}}}}))
     model = og.Model(config)
@@ -79,13 +84,64 @@ def main():
     prompt = [int(x) for x in tokenizer.encode(tokenizer.apply_chat_template(messages, add_generation_prompt=True))]
     new = 40
 
-    generator, reference = generate(model, prompt, new)
+    def logits_observer(label):
+        previous_stats = None
+        expected_next = None
+        accepted_pending = False
+        observed_buffered = False
+
+        def observe(generator, tokens):
+            nonlocal previous_stats, expected_next, accepted_pending, observed_buffered
+            count = len(tokens)
+            stats_before = dict(generator.get_speculative_stats())
+            sequence_before = np.asarray(generator.get_sequence(0)).copy()
+            check(f"{label}_emitted_{count}", stats_before["tokens_emitted"] == count, stats_before)
+            check(
+                f"{label}_queued_accounting_{count}",
+                stats_before["tokens_queued"]
+                == stats_before["tokens_emitted"] + stats_before["tokens_buffered"] + stats_before["tokens_discarded"],
+                stats_before,
+            )
+            if expected_next is not None:
+                check(
+                    f"{label}_logits_predict_next_emission_{count}",
+                    tokens[-1] == expected_next,
+                    f"argmax {expected_next}, emitted {tokens[-1]}",
+                )
+            if previous_stats is not None:
+                if accepted_pending and stats_before["rounds"] == previous_stats["rounds"]:
+                    observed_buffered = True
+                accepted_pending = stats_before["draft_tokens_accepted"] > previous_stats["draft_tokens_accepted"]
+            previous_stats = stats_before
+            if generator.is_done():
+                for repeat in range(2):
+                    ok, detail = raises(generator.get_logits, "")
+                    check(f"{label}_completed_logits_rejected_{repeat}", ok, detail)
+                check(f"{label}_accepted_buffered_cycle_observed", observed_buffered, stats_before)
+            else:
+                logits = np.asarray(generator.get_logits()).copy()
+                repeated = np.asarray(generator.get_logits()).copy()
+                expected_next = int(np.argmax(logits))
+                check(
+                    f"{label}_logits_repeated_{count}",
+                    logits.shape[-1] == 248320 and np.isfinite(logits).all() and np.array_equal(logits, repeated),
+                    f"shape {logits.shape}",
+                )
+            check(f"{label}_get_logits_preserves_stats_{count}", generator.get_speculative_stats() == stats_before)
+            check(
+                f"{label}_get_logits_preserves_sequence_{count}",
+                np.array_equal(np.asarray(generator.get_sequence(0)), sequence_before),
+            )
+
+        return observe
+
+    generator, reference = generate(model, prompt, new, observer=logits_observer("initial"))
     check("generate_to_max_length", len(reference) == new and generator.is_done(), f"{len(reference)} tokens")
     sequence = [int(x) for x in generator.get_sequence(0)]
     check("sequence_is_prompt_plus_tokens", sequence == prompt + reference, f"len {len(sequence)}")
     check("token_count", generator.token_count() == len(prompt) + new, generator.token_count())
     stats = generator.get_speculative_stats()
-    check("stats_tokens_emitted", stats["tokens_emitted"] in (new - 1, new), stats["tokens_emitted"])
+    check("stats_tokens_emitted", stats["tokens_emitted"] == new, stats["tokens_emitted"])
 
     # second concurrent generator on the same model
     ok, detail = raises(lambda: og.Generator(model, og.GeneratorParams(model)), "already leased")
@@ -96,7 +152,23 @@ def main():
 
     # rewind(0) reuse: same tokens again
     generator.rewind_to(0)
-    generator, again = generate(model, prompt, new, generator=generator)
+    reset_stats = generator.get_speculative_stats()
+    check(
+        "rewind0_clears_emission_and_acceptance_stats",
+        all(
+            reset_stats[key] == 0
+            for key in (
+                "tokens_emitted",
+                "tokens_queued",
+                "tokens_buffered",
+                "tokens_discarded",
+                "rounds",
+                "draft_tokens_accepted",
+            )
+        ),
+        reset_stats,
+    )
+    generator, again = generate(model, prompt, new, generator=generator, observer=logits_observer("rewound"))
     check("rewind0_reuse_identical", same(again, reference), f"common prefix {prefix(again, reference)}")
     del generator
 

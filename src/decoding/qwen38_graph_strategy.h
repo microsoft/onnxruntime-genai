@@ -6,6 +6,7 @@
 
 #include "decoding/decoding_strategy.h"
 #include "decoding/speculative_stats.h"
+#include "smartptrs.h"
 
 namespace Generators {
 
@@ -24,12 +25,17 @@ struct Qwen38GraphStrategy : DecodingStrategy {
   void Reset() override;
   void PrepareForAppend(Generator& generator) override;
   void PrepareForSetLogits(Generator& generator) override;
+  bool TryGetExternalLogits(Generator& generator, DeviceSpan<float>& logits) override;
 
  private:
   bool IsEos(const Generator& generator, int64_t token) const;
 
   Qwen38GraphState& state_;
   std::deque<int32_t> queue_;
+  size_t emitted_{};
+  size_t queued_{};
+  size_t discarded_{};
+  DeviceSpan<float> external_logits_;
   bool started_{};
 };
 

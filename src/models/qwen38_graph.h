@@ -24,6 +24,8 @@ struct Qwen38GraphModel;
 // C ABI of libqwen38_plane.so (CUDA data plane + CUDA runtime helpers), loaded with dlopen so that the core library does
 // not link cudart.
 struct Qwen38Plane {
+  // CPU resource-lifetime tests inject callbacks instead of loading CUDA.
+  Qwen38Plane() = default;
   explicit Qwen38Plane(const std::string& path);
   ~Qwen38Plane();
   Qwen38Plane(const Qwen38Plane&) = delete;
@@ -116,12 +118,16 @@ struct Qwen38PleTable {
 
  private:
   struct Mapping {
+    explicit Mapping(Qwen38Plane& plane) : plane{plane} {}
+    ~Mapping();
+    Mapping(const Mapping&) = delete;
+    Mapping& operator=(const Mapping&) = delete;
+    Qwen38Plane& plane;
     void* base{};
     size_t length{};
     void* registered{};
   };
-  Qwen38Plane& plane_;
-  std::vector<Mapping> mappings_;
+  std::vector<std::unique_ptr<Mapping>> mappings_;
 };
 
 // Device copy of every initializer that several sessions of the stack have in common (decode/fold, head, dense prefill,
@@ -147,7 +153,7 @@ struct Qwen38WeightPool {
     uint64_t length{};
     std::vector<int64_t> shape;
     std::string file;
-    uint8_t* ptr{};
+    std::unique_ptr<uint8_t, int (*)(void*)> buffer{nullptr, nullptr};
     std::unique_ptr<OrtValue> value;
   };
   Qwen38Plane& plane_;
@@ -204,12 +210,14 @@ struct Qwen38GraphEngine {
   // d_last_hidden_, its argmax in PendingToken() and its logits row reachable through LastLogits().
   void PrefillChunk(std::span<const int32_t> tokens);
   void LastLogits(std::span<float> out) const;  // fp32 copy of the logits row of the last prompt token
+  void SaveBufferedLogits();
+  void DecodeLogits(bool buffered, std::span<float> out) const;
   size_t Length() const { return length_; }
   int32_t PendingToken() const { return pending_; }
   bool DecodeStarted() const { return decode_started_; }
   bool Fold() const { return fold_; }
   bool FastPrefill() const { return fast_ != nullptr; }
-  void CheckErrorBits();  // fold: device error bits of the whole decode (ctl[5])
+  void CheckErrorBits();  // accumulated device error bits of the whole decode (ctl[5])
 
   // --- decode ---
   bool mtp_enabled() const { return mtp_enabled_; }
@@ -330,6 +338,7 @@ struct Qwen38GraphEngine {
   // control block / plane buffers
   PlaneBuffer ctl_, ctx_commit_, ctx_a_, ctx_b_, scratch_i32_, part_v_, part_i_, params_dev_;
   PlaneBuffer d_tokens_, d_arange64_, d_arange32_, d_prompt_hidden_, d_last_hidden_;
+  PlaneBuffer buffered_logits_;
   int64_t* result_host_{};
   int64_t* stage_host_{};
   std::unique_ptr<Qwen38PleTable> ple_;

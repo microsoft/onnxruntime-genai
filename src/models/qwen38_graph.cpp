@@ -131,8 +131,10 @@ void Qwen38Plane::Check(int error, const char* what) const {
 PlaneBuffer::PlaneBuffer(Qwen38Plane& plane, size_t bytes, void* stream) : plane_{&plane}, bytes_{bytes} {
   void* p = nullptr;
   plane.Check(plane.malloc_(&p, std::max<size_t>(bytes, 16)), "cudaMalloc");
+  std::unique_ptr<void, int (*)(void*)> allocation{p, plane.free_};
   ptr_ = static_cast<uint8_t*>(p);
   plane.Check(plane.memset_(ptr_, 0, bytes_, stream), "cudaMemsetAsync");
+  allocation.release();
 }
 
 PlaneBuffer::~PlaneBuffer() {
@@ -163,8 +165,7 @@ size_t DevTensor::Bytes() const {
 // ------------------------------------------------------------------------------------------------
 // PLE table
 // ------------------------------------------------------------------------------------------------
-Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::string& table_path, const std::string& root, int capacity)
-    : plane_{plane} {
+Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::string& table_path, const std::string& root, int capacity) {
   std::ifstream in(table_path);
   if (!in) throw std::runtime_error("qwen38_graph: cannot open PLE table " + table_path);
   std::string line;
@@ -180,9 +181,10 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::string& table_path
     std::istringstream fields(line);
     std::string key;
     fields >> key;
-    if (key == "n_heads")
-      fields >> params.n_heads;
-    else if (key == "head_dim")
+    if (key == "n_heads") {
+      if (!(fields >> params.n_heads) || params.n_heads <= 0 || params.n_heads > 32)
+        throw std::runtime_error("qwen38_graph: invalid PLE head count in " + table_path);
+    } else if (key == "head_dim")
       fields >> params.head_dim;
     else if (key == "heads_per_ngram")
       fields >> params.heads_per_ngram;
@@ -193,16 +195,21 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::string& table_path
     else if (key == "mult") {
       for (long long& m : params.mult) fields >> m;
     } else if (key == "vocab") {
+      if (params.n_heads <= 0 || params.n_heads > 32)
+        throw std::runtime_error("qwen38_graph: PLE head count must precede vocab in " + table_path);
       for (int h = 0; h < params.n_heads; ++h) fields >> params.vocab[h];
     } else if (key == "offset") {
+      if (params.n_heads <= 0 || params.n_heads > 32)
+        throw std::runtime_error("qwen38_graph: PLE head count must precede offset in " + table_path);
       for (int h = 0; h < params.n_heads; ++h) fields >> params.offset[h];
     } else if (key == "shard") {
-      Shard shard;
-      fields >> shard.path >> shard.offset >> shard.rows;
+      Shard shard{};
+      if (!(fields >> shard.path >> shard.offset >> shard.rows) || shard.rows <= 0)
+        throw std::runtime_error("qwen38_graph: malformed PLE shard in " + table_path);
       shards.push_back(shard);
     }
   }
-  if (params.n_heads <= 0 || params.n_heads > 32 || shards.empty() || shards.size() > 256)
+  if (params.n_heads <= 0 || params.n_heads > 32 || params.head_dim <= 0 || shards.empty() || shards.size() > 256)
     throw std::runtime_error("qwen38_graph: malformed PLE table " + table_path);
   params.n_shards = static_cast<int>(shards.size());
   params.capacity = capacity;
@@ -211,6 +218,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::string& table_path
   const long page = sysconf(_SC_PAGESIZE);
   for (size_t i = 0; i < shards.size(); ++i) {
     const Shard& shard = shards[i];
+    auto mapping = std::make_unique<Mapping>(plane);
     if (shard.path.find("..") != std::string::npos)
       throw std::runtime_error("qwen38_graph: PLE shard path must not contain '..': " + shard.path);
     const std::string full = shard.path[0] == '/' ? shard.path : root + "/" + shard.path;
@@ -222,14 +230,13 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::string& table_path
     void* base = mmap(nullptr, bytes + delta, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(aligned));
     close(fd);
     if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full);
-    Mapping mapping;
-    mapping.base = base;
-    mapping.length = bytes + delta;
+    mapping->base = base;
+    mapping->length = bytes + delta;
     auto* rows = static_cast<unsigned char*>(base) + delta;
     // cudaHostRegisterMapped | cudaHostRegisterReadOnly: the gather kernel reads the table zero-copy over PCIe.
     plane.Check(plane.host_register(rows, bytes, 2 | 8), "cudaHostRegister(PLE shard)");
-    mapping.registered = rows;
-    mappings_.push_back(mapping);
+    mapping->registered = rows;
+    mappings_.push_back(std::move(mapping));
     params.shard_ptr[i] = rows;
     first_row += shard.rows;
     params.shard_end[i] = first_row;
@@ -237,13 +244,12 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::string& table_path
   register_seconds = SecondsSince(start);
 }
 
-Qwen38PleTable::~Qwen38PleTable() {
-  for (auto& mapping : mappings_) {
-    if (mapping.registered) plane_.host_unregister(mapping.registered);
-    if (mapping.base) munmap(mapping.base, mapping.length);
-  }
+Qwen38PleTable::Mapping::~Mapping() {
+  if (registered) plane.host_unregister(registered);
+  if (base) munmap(base, length);
 }
 
+Qwen38PleTable::~Qwen38PleTable() = default;
 // ------------------------------------------------------------------------------------------------
 // Engine
 // ------------------------------------------------------------------------------------------------
@@ -292,6 +298,7 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
   scratch_i32_ = PlaneBuffer(plane_, sizeof(int32_t), stream_);
   part_v_ = PlaneBuffer(plane_, kArgmaxBlocks * sizeof(float), stream_);
   part_i_ = PlaneBuffer(plane_, kArgmaxBlocks * sizeof(int32_t), stream_);
+  buffered_logits_ = PlaneBuffer(plane_, static_cast<size_t>(vocab_) * sizeof(uint16_t), stream_);
   const size_t slots = static_cast<size_t>(capacity_) + 3;
   d_tokens_ = PlaneBuffer(plane_, slots * sizeof(int64_t), stream_);
   d_arange64_ = PlaneBuffer(plane_, slots * sizeof(int64_t), stream_);
@@ -874,6 +881,24 @@ void Qwen38GraphEngine::LastLogits(std::span<float> out) const {
   for (size_t i = 0; i < raw.size() && i < out.size(); ++i) out[i] = Bf16ToFloat(raw[i]);
 }
 
+void Qwen38GraphEngine::SaveBufferedLogits() {
+  if (!inflight_dir_) throw std::logic_error("qwen38_graph: no completed cycle logits");
+  // Row 1 predicts the buffered bonus token; look-ahead must not overwrite it before delivery.
+  plane_.Check(plane_.memcpy_d2d(buffered_logits_.data(), inflight_dir_->logits + buffered_logits_.size(),
+                                 buffered_logits_.size(), stream_),
+               "save buffered target logits");
+}
+
+void Qwen38GraphEngine::DecodeLogits(bool buffered, std::span<float> out) const {
+  if (!buffered && !inflight_) throw std::runtime_error("qwen38_graph: logits are unavailable after generation is complete");
+  const uint8_t* source = buffered ? buffered_logits_.data() : inflight_dir_->logits;
+  std::vector<uint16_t> raw(static_cast<size_t>(vocab_));
+  if (out.size() != raw.size()) throw std::logic_error("qwen38_graph: incorrect decode logits size");
+  plane_.Check(plane_.memcpy_d2h(raw.data(), source, raw.size() * sizeof(uint16_t), stream_), "read decode logits");
+  plane_.Check(plane_.stream_sync(stream_), "sync decode logits");
+  for (size_t i = 0; i < raw.size(); ++i) out[i] = Bf16ToFloat(raw[i]);
+}
+
 // ---- head -------------------------------------------------------------------------------------
 void Qwen38GraphEngine::RunHeadOnce(HeadSession& head, int rows) {
   (void)rows;
@@ -1031,7 +1056,7 @@ void Qwen38GraphEngine::FoldFirstDraft() {
     head_cur_ = cur_;
   }
   const int64_t state[2] = {pending_, static_cast<int64_t>(length_)};
-  WriteCtl(0, state);
+  WriteCtl(0, {state, 2});
   const int64_t head_length = head_length_;
   WriteCtl(7, {&head_length, 1});
 }
@@ -1059,7 +1084,7 @@ void Qwen38GraphEngine::EnqueueFold() {
 }
 
 void Qwen38GraphEngine::CheckErrorBits() {
-  if (!fold_ || !decode_started_) return;
+  if (!decode_started_) return;
   const int64_t bits = ReadCtl(5);
   if (bits != 0) throw std::runtime_error("qwen38_graph: device error bits " + std::to_string(bits) + " after decode");
 }
@@ -1119,7 +1144,7 @@ void Qwen38GraphEngine::BeginDecode(bool run_cycles) {
     if (prefill_head_) HeadPrefill();
   }
   const int64_t state[2] = {pending_, static_cast<int64_t>(length_)};
-  WriteCtl(0, state);
+  WriteCtl(0, {state, 2});
   if (!run_cycles) return;
   if (mtp_enabled_) {
     EnqueueHead(1, d_last_hidden_.data());
@@ -1230,7 +1255,7 @@ void Qwen38GraphEngine::Warmup() {
   }
   for (int i = 0; i < 24; ++i) {  // S=1 target ids
     const int64_t state[2] = {pending_, static_cast<int64_t>(length_)};
-    WriteCtl(0, state);
+    WriteCtl(0, {state, 2});
     EnqueueStep();
     WaitCycle();
     cur_ = (cur_ + 1) % kBanks;

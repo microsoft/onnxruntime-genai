@@ -96,9 +96,9 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::string& manife
   for (auto& entry : entries_) {
     void* p = nullptr;
     plane_.Check(plane_.malloc_(&p, std::max<uint64_t>(entry.length, 16)), "cudaMalloc(weight pool)");
-    entry.ptr = static_cast<uint8_t*>(p);
+    entry.buffer = {static_cast<uint8_t*>(p), plane_.free_};
     bytes += entry.length;
-    entry.value = OrtValue::CreateTensor(memory_info, entry.ptr, static_cast<size_t>(entry.length), entry.shape,
+    entry.value = OrtValue::CreateTensor(memory_info, entry.buffer.get(), static_cast<size_t>(entry.length), entry.shape,
                                          static_cast<ONNXTensorElementDataType>(entry.dtype));
   }
 
@@ -117,11 +117,10 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::string& manife
       plane_.Check(plane_.stream_create(&stream), "cudaStreamCreate");
       for (size_t i = next.fetch_add(1); i < entries_.size(); i = next.fetch_add(1)) {
         Entry& entry = entries_[i];
-        int& fd = fds[entry.file];
-        if (fd == 0) {
-          fd = open(entry.file.c_str(), O_RDONLY);
-          if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open weight file " + entry.file);
-        }
+        auto [it, inserted] = fds.emplace(entry.file, -1);
+        int& fd = it->second;
+        if (inserted) fd = open(entry.file.c_str(), O_RDONLY);
+        if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open weight file " + entry.file);
         for (uint64_t done = 0; done < entry.length;) {
           const size_t n = static_cast<size_t>(std::min<uint64_t>(kStage, entry.length - done));
           size_t got = 0;
@@ -130,7 +129,7 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::string& manife
             if (r <= 0) throw std::runtime_error("qwen38_graph: short read of weight file " + entry.file);
             got += static_cast<size_t>(r);
           }
-          plane_.Check(plane_.memcpy_h2d(entry.ptr + done, stage, n, stream), "weight upload");
+          plane_.Check(plane_.memcpy_h2d(entry.buffer.get() + done, stage, n, stream), "weight upload");
           plane_.Check(plane_.stream_sync(stream), "weight upload sync");
           done += n;
         }
@@ -141,13 +140,21 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::string& manife
       next.store(entries_.size());
     }
     for (auto& f : fds)
-      if (f.second > 0) close(f.second);
+      if (f.second >= 0) close(f.second);
     if (stream) plane_.stream_destroy(stream);
     if (stage) plane_.host_free(stage);
   };
   if (!plane_.stream_create) throw std::runtime_error("qwen38_graph: the plane library lacks the weight pool helpers");
+  if (threads <= 0) throw std::runtime_error("qwen38_graph: weight upload requires at least one worker");
   std::vector<std::thread> pool;
-  for (int t = 0; t < threads; ++t) pool.emplace_back(worker);
+  pool.reserve(static_cast<size_t>(threads));
+  try {
+    for (int t = 0; t < threads; ++t) pool.emplace_back(worker);
+  } catch (...) {
+    next.store(entries_.size());
+    for (auto& t : pool) t.join();
+    throw;
+  }
   for (auto& t : pool) t.join();
   if (!error.empty()) throw std::runtime_error(error);
   seconds = SecondsSince(start);
@@ -156,12 +163,7 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::string& manife
               << " GiB in " << seconds << " s" << std::endl;
 }
 
-Qwen38WeightPool::~Qwen38WeightPool() {
-  for (auto& entry : entries_) {
-    entry.value.reset();
-    if (entry.ptr) plane_.free_(entry.ptr);
-  }
-}
+Qwen38WeightPool::~Qwen38WeightPool() = default;
 
 size_t Qwen38WeightPool::AddTo(OrtSessionOptions& options, const std::string& label) const {
   auto it = sessions_.find(label);
@@ -197,8 +199,9 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::string& in
     else if (key == "width")
       fields >> target.width, head.width = target.width;
     else if (key == "tensor") {
-      Item item;
-      fields >> item.set >> item.name >> item.offset >> item.bytes;
+      Item item{};
+      if (!(fields >> item.set >> item.name >> item.offset >> item.bytes))
+        throw std::runtime_error("qwen38_graph: malformed QSA constant in " + index_path);
       items.push_back(item);
     }
   }
@@ -208,6 +211,11 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::string& in
   std::vector<uint8_t> host(total);
   data.seekg(0);
   data.read(reinterpret_cast<char*>(host.data()), static_cast<std::streamsize>(total));
+  if (!data) throw std::runtime_error("qwen38_graph: short read of QSA constants data " + file);
+  for (const Item& item : items) {
+    if (item.bytes == 0 || item.offset > total || item.bytes > total - item.offset)
+      throw std::runtime_error("qwen38_graph: QSA constant range exceeds data blob: " + item.set + "." + item.name);
+  }
   buffer_ = PlaneBuffer(plane, total, stream);
   plane.Check(plane.memcpy_h2d(buffer_.data(), host.data(), total, stream), "QSA constants upload");
   plane.Check(plane.stream_sync(stream), "QSA constants sync");
@@ -221,7 +229,7 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::string& in
     else if (item.name.rfind("knorm.", 0) == 0)
       set.knorm[std::stoi(item.name.substr(6))] = ptr;
   }
-  if (!target.cos || !head.cos || target.knorm.empty() || head.knorm.empty())
+  if (!target.cos || !target.sin || !head.cos || !head.sin || target.knorm.empty() || head.knorm.empty())
     throw std::runtime_error("qwen38_graph: incomplete QSA constants " + index_path);
 }
 
