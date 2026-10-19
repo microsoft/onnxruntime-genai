@@ -49,10 +49,6 @@ void Gemma4VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
 
 DeviceSpan<float> Gemma4VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                                          DeviceSpan<int32_t> next_indices) {
-  if (model_.config_->model.vision.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.vision.run_options.value());
-  }
-
   if (num_images_ <= 1) {
     State::Run(*model_.vision_session_);
     return {};

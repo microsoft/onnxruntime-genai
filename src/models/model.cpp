@@ -83,7 +83,9 @@ bool IsPathValuedSessionOption(std::string_view key) {
 
 }  // namespace
 
-State::State(const GeneratorParams& params, const Model& model, DeviceInterface* session_device)
+State::State(const GeneratorParams& params, const Model& model,
+             const std::optional<Config::RunOptions>& configured_run_options,
+             DeviceInterface* session_device)
     : model_{model},
       params_{params.shared_from_this()},
       p_session_device_{session_device ? session_device : model.p_device_},
@@ -92,6 +94,9 @@ State::State(const GeneratorParams& params, const Model& model, DeviceInterface*
       p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
+  if (configured_run_options.has_value()) {
+    SetRunOptions(configured_run_options.value());
+  }
   // Generate a random id for graph capture of the default (1-token) decode shape.
   if (params_->use_graph_capture) {
     GraphIdForLength(1, 0);
@@ -137,13 +142,14 @@ void State::DumpOutputs() {
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
                 int graph_capture_variant) {
   DurationTrace trace{"State::Run"};
+  auto& run_options = GetRunOptions(session);
 
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
     if (graph_capture_this_run) {
-      run_options_->AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
+      run_options.AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
     } else {
-      run_options_->AddConfigEntry("gpu_graph_id", "-1");
+      run_options.AddConfigEntry("gpu_graph_id", "-1");
     }
   }
 
@@ -151,13 +157,13 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     extra_outputs_.Add(session.GetOutputNames());
     if (params_->use_multi_profile) {
       // Run the context phase profile for the first run
-      run_options_->AddConfigEntry("nv_profile_index", "0");
+      run_options.AddConfigEntry("nv_profile_index", "0");
     }
     first_run_ = false;
   } else {
     extra_outputs_.Update();
     if (params_->use_multi_profile) {
-      run_options_->AddConfigEntry("nv_profile_index", "1");
+      run_options.AddConfigEntry("nv_profile_index", "1");
     }
   }
 
@@ -175,10 +181,10 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
   }
 
   if (model_.p_device_ && model_.p_device_->GetType() == DeviceType::NvTensorRtRtx) {
-    run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
+    run_options.AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+  session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
   extra_outputs_.RegisterOutputs();
@@ -187,13 +193,20 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
 }
 
 void State::SetRunOption(const char* key, const char* value) {
+  SetRunOption(*run_options_, key, value);
+  for (auto& entry : session_run_options_) {
+    SetRunOption(*entry.second, key, value);
+  }
+}
+
+void State::SetRunOption(OrtRunOptions& run_options, const char* key, const char* value) {
   if (strcmp(key, "terminate_session") == 0) {
     if (strcmp(value, "0") == 0) {
       session_terminated_ = false;
-      run_options_->UnsetTerminate();
+      run_options.UnsetTerminate();
     } else if (strcmp(value, "1") == 0) {
       session_terminated_ = true;
-      run_options_->SetTerminate();
+      run_options.SetTerminate();
     } else {
       // Value not expected
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
@@ -202,20 +215,20 @@ void State::SetRunOption(const char* key, const char* value) {
   } else if (strcmp(key, "enable_profiling") == 0) {
 #if ORT_API_VERSION >= 25
     if (strcmp(value, "0") == 0) {
-      run_options_->DisableProfiling();
+      run_options.DisableProfiling();
     } else {
       // Enable run-level profiling. The profiling output file is named: <prefix>_<timestamp>.json
       // Value "1" uses the default prefix; any other value is treated as a custom prefix.
       constexpr const char* default_profile_prefix = "onnxruntime_run_profile";
       const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
-      run_options_->EnableProfiling(fs::path(prefix).c_str());
+      run_options.EnableProfiling(fs::path(prefix).c_str());
     }
 #else
     throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
 #endif
     return;
   }
-  run_options_->AddConfigEntry(key, value);
+  run_options.AddConfigEntry(key, value);
 }
 
 /*
@@ -226,6 +239,22 @@ void State::SetRunOptions(const Config::RunOptions& config_run_options) {
   for (auto& config_entry : config_run_options) {
     SetRunOption(config_entry.first.c_str(), config_entry.second.c_str());
   }
+}
+
+void State::RegisterSessionRunOptions(
+    OrtSession& session, const std::optional<Config::RunOptions>& configured_run_options) {
+  auto options = OrtRunOptions::Create();
+  if (configured_run_options.has_value()) {
+    for (const auto& [key, value] : configured_run_options.value()) {
+      SetRunOption(*options, key.c_str(), value.c_str());
+    }
+  }
+  session_run_options_.emplace(&session, std::move(options));
+}
+
+OrtRunOptions& State::GetRunOptions(OrtSession& session) {
+  const auto it = session_run_options_.find(&session);
+  return it == session_run_options_.end() ? *run_options_ : *it->second;
 }
 
 OrtValue* State::GetInput(const char* name) {

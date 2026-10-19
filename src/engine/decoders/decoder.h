@@ -16,7 +16,8 @@ namespace Generators {
  * This class can be extended for specific model types that require input/output management.
  */
 struct ModelIO : State {
-  ModelIO(const GeneratorParams& params, const Model& model) : State(params, model) {}
+  ModelIO(const GeneratorParams& params, const Model& model)
+      : State(params, model, model.config_->model.decoder.run_options) {}
 
   DeviceSpan<float> Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t> next_indices = {}) override {
     throw std::runtime_error("Unexpected call to ModelIO::Run, this function is not implemented for ModelIO.");

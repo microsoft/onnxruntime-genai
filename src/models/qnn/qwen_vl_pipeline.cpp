@@ -148,7 +148,8 @@ std::unique_ptr<State> Qwen2_5_VL_PipelineModel::CreateState(DeviceSpan<int32_t>
 Qwen2_5_VL_PipelineState::Qwen2_5_VL_PipelineState(const Qwen2_5_VL_PipelineModel& model,
                                                    DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)
-    : DecoderOnlyPipelineState(model, sequence_lengths, params), vl_model_{model} {
+    : DecoderOnlyPipelineState(model, sequence_lengths, params, model.config_->model.vision.run_options),
+      vl_model_{model} {
   InitializeFeatureInputs();
 }
 
@@ -451,9 +452,6 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   const char* output_name_ptrs[] = {output_names[output_index].c_str()};
 
   auto run_encoder = [&]() {
-    if (vl_model_.config_->model.vision.run_options.has_value()) {
-      State::SetRunOptions(vl_model_.config_->model.vision.run_options.value());
-    }
     OrtValue* raw_output = nullptr;
     vl_model_.vision_session_->Run(run_options_.get(), input_name_ptrs.data(), input_values.data(),
                                    input_name_ptrs.size(), output_name_ptrs, &raw_output, 1);

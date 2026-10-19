@@ -18,7 +18,7 @@ void Gpt_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
 }
 
 Gpt_State::Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.decoder.run_options},
       model_{model},
       position_inputs_{model, *this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask} {
   input_ids_.Add();
@@ -30,9 +30,6 @@ Gpt_State::Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_length
 DeviceSpan<float> Gpt_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
   State::Run(*model_.session_decoder_);
 
   return logits_.Get();

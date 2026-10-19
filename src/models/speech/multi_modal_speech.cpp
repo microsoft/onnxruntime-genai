@@ -13,7 +13,7 @@
 namespace Generators {
 
 SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params)
-    : State{params, model, model.speech_device_},
+    : State{params, model, model.config_->model.speech.run_options, model.speech_device_},
       model_{model} {}
 
 void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
@@ -27,9 +27,6 @@ void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, co
 }
 
 DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  if (model_.config_->model.speech.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.speech.run_options.value());
-  }
   State::Run(*model_.speech_session_);
   return {};
 }

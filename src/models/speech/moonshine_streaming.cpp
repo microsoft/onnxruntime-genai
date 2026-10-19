@@ -222,7 +222,7 @@ std::unique_ptr<State> MoonshineStreamingModel::CreateState(DeviceSpan<int32_t> 
 
 MoonshineFrontendSubState::MoonshineFrontendSubState(const MoonshineStreamingModel& model,
                                                      const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.encoder.run_options},
       model_{model},
       config_{model.moonshine_config_} {
   AllocateStateBuffers();
@@ -325,9 +325,6 @@ void MoonshineFrontendSubState::Reset() {
 DeviceSpan<float> MoonshineFrontendSubState::Run(int /*total_length*/,
                                                  DeviceSpan<int32_t>& /*next_tokens*/,
                                                  DeviceSpan<int32_t> /*next_indices*/) {
-  if (model_.config_->model.encoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
-  }
   State::Run(*model_.session_frontend_);
   return {};
 }
@@ -336,7 +333,7 @@ DeviceSpan<float> MoonshineFrontendSubState::Run(int /*total_length*/,
 
 MoonshineEncoderSubState::MoonshineEncoderSubState(const MoonshineStreamingModel& model,
                                                    const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.encoder.run_options},
       model_{model} {
   const auto& cfg = model_.moonshine_config_;
   input_names_.push_back(cfg.encoder.in_features.c_str());
@@ -352,9 +349,6 @@ void MoonshineEncoderSubState::SetFeaturesInput(OrtValue* features) {
 DeviceSpan<float> MoonshineEncoderSubState::Run(int /*total_length*/,
                                                 DeviceSpan<int32_t>& /*next_tokens*/,
                                                 DeviceSpan<int32_t> /*next_indices*/) {
-  if (model_.config_->model.encoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
-  }
   State::Run(*model_.session_encoder_);
   return {};
 }
@@ -363,7 +357,7 @@ DeviceSpan<float> MoonshineEncoderSubState::Run(int /*total_length*/,
 
 MoonshineAdapterSubState::MoonshineAdapterSubState(const MoonshineStreamingModel& model,
                                                    const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.encoder.run_options},
       model_{model} {
   const auto& cfg = model_.moonshine_config_;
   auto pos_type = model_.session_info_.GetInputDataType(cfg.adapter.in_pos_offset);
@@ -392,9 +386,6 @@ void MoonshineAdapterSubState::SetInputs(OrtValue* encoded, int64_t pos_offset) 
 DeviceSpan<float> MoonshineAdapterSubState::Run(int /*total_length*/,
                                                 DeviceSpan<int32_t>& /*next_tokens*/,
                                                 DeviceSpan<int32_t> /*next_indices*/) {
-  if (model_.config_->model.encoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
-  }
   State::Run(*model_.session_adapter_);
   return {};
 }
@@ -403,7 +394,7 @@ DeviceSpan<float> MoonshineAdapterSubState::Run(int /*total_length*/,
 
 MoonshineCrossKvSubState::MoonshineCrossKvSubState(const MoonshineStreamingModel& model,
                                                    const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.encoder.run_options},
       model_{model} {
   const auto& cfg = model_.moonshine_config_;
   input_names_.push_back(cfg.cross_kv.in_memory.c_str());
@@ -421,9 +412,6 @@ void MoonshineCrossKvSubState::SetMemoryInput(OrtValue* memory) {
 DeviceSpan<float> MoonshineCrossKvSubState::Run(int /*total_length*/,
                                                 DeviceSpan<int32_t>& /*next_tokens*/,
                                                 DeviceSpan<int32_t> /*next_indices*/) {
-  if (model_.config_->model.encoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
-  }
   State::Run(*model_.session_cross_kv_);
   return {};
 }
@@ -432,7 +420,7 @@ DeviceSpan<float> MoonshineCrossKvSubState::Run(int /*total_length*/,
 
 MoonshineDecoderKvSubState::MoonshineDecoderKvSubState(const MoonshineStreamingModel& model,
                                                        const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.decoder.run_options},
       model_{model} {
   const auto& cfg = model_.moonshine_config_;
   token_input_idx_ = inputs_.size();
@@ -479,16 +467,13 @@ void MoonshineDecoderKvSubState::SetInputs(OrtValue* token, OrtValue* k_self, Or
 DeviceSpan<float> MoonshineDecoderKvSubState::Run(int /*total_length*/,
                                                   DeviceSpan<int32_t>& /*next_tokens*/,
                                                   DeviceSpan<int32_t> /*next_indices*/) {
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
   State::Run(*model_.session_decoder_kv_);
   return {};
 }
 
 MoonshineStreamingState::MoonshineStreamingState(const MoonshineStreamingModel& model,
                                                  const GeneratorParams& params)
-    : TransducerState{params, model},
+    : TransducerState{params, model, std::nullopt},
       moonshine_model_{model},
       config_{model.moonshine_config_} {
   // Create the five ONNX sub-states (each needs the real GeneratorParams).

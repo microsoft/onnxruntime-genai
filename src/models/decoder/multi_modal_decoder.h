@@ -75,7 +75,6 @@ struct DecoderState : State {
   DeviceSpan<float> RunWithChunking(int current_length, DeviceSpan<int32_t>& next_tokens,
                                     DeviceSpan<int32_t> next_indices, size_t chunk_size);
   DeviceSpan<float> RunDecoder(int sequence_length, bool graph_capture_this_run);
-  void ApplyRunOptions();
   void Initialize();
   bool UsesEmbeddings() const { return inputs_embeds_ != nullptr; }
 

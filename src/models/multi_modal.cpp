@@ -68,7 +68,7 @@ std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> 
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, std::nullopt},
       model_{model},
       adapters_{std::make_shared<Adapters>(&model_)} {
   if (model_.vision_session_) {

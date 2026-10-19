@@ -113,9 +113,6 @@ std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bi
 }
 
 DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  if (model_.config_->model.speech.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.speech.run_options.value());
-  }
   // A single clip fills the whole mel tensor and the whole feature buffer; run it as it stands.
   if (tokens_per_clip_.size() <= 1) {
     State::Run(*model_.speech_session_);

@@ -24,7 +24,7 @@ std::unique_ptr<State> LFM2_Model::CreateState(DeviceSpan<int32_t> sequence_leng
 }
 
 LFM2_State::LFM2_State(const LFM2_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.decoder.run_options},
       model_{model},
       cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
@@ -40,10 +40,6 @@ void LFM2_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
 
 DeviceSpan<float> LFM2_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
-
   bool graph_capture_this_run = params_->use_graph_capture && input_ids_.GetShape()[1] == 1;
   State::Run(*model_.session_decoder_, graph_capture_this_run);
 

@@ -55,7 +55,8 @@ struct IntermediatePipelineState : State {
 
 struct DecoderOnlyPipelineState : State {
   DecoderOnlyPipelineState(const DecoderOnlyPipelineModel& model, DeviceSpan<int32_t> sequence_lengths,
-                           const GeneratorParams& params);
+                           const GeneratorParams& params,
+                           const std::optional<Config::RunOptions>& configured_run_options = std::nullopt);
 
   DecoderOnlyPipelineState(const DecoderOnlyPipelineState&) = delete;
   DecoderOnlyPipelineState& operator=(const DecoderOnlyPipelineState&) = delete;

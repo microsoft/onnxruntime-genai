@@ -30,7 +30,7 @@ std::unique_ptr<State> DecoderModel::CreateState(DeviceSpan<int32_t> sequence_le
 
 DecoderState::DecoderState(const GeneratorParams& params, const Model& model, OrtSession& session,
                            DeviceSpan<int32_t> sequence_lengths)
-    : State{params, model},
+    : State{params, model, model.config_->model.decoder.run_options},
       decoder_session_{session},
       position_inputs_{model.p_device_inputs_->CreatePositionInputs(
           *this, sequence_lengths, model.config_->model.decoder.inputs.attention_mask)},
@@ -89,12 +89,6 @@ void DecoderState::SetHiddenStates(OrtValue* hidden_states) {
     hidden_states_->SetValue(hidden_states);
 }
 
-void DecoderState::ApplyRunOptions() {
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
-}
-
 DeviceSpan<float> DecoderState::RunDecoder(int sequence_length, bool graph_capture_this_run) {
   const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
   const int graph_id = sequence_length * 2 + graph_capture_variant;
@@ -119,7 +113,6 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
     UpdateInputsOutputs(next_tokens, current_length, next_indices);
   }
 
-  ApplyRunOptions();
   const int sequence_length = static_cast<int>(
       UsesEmbeddings() ? inputs_embeds_->GetShape()[1] : input_ids_->GetShape()[1]);
   const bool graph_capture_this_run =
@@ -133,8 +126,6 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
 DeviceSpan<float> DecoderState::RunWithChunking(
     int current_length, DeviceSpan<int32_t>& next_tokens,
     DeviceSpan<int32_t> next_indices, size_t chunk_size) {
-  ApplyRunOptions();
-
   const size_t num_tokens = next_tokens.size();
   size_t processed_tokens = 0;
   int length = current_length - static_cast<int>(num_tokens);

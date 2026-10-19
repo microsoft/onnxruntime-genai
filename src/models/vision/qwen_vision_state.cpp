@@ -67,10 +67,6 @@ int64_t QwenVisionState::GetImageFeatureBatchSize(const std::vector<ExtraInput>&
 
 DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                                        DeviceSpan<int32_t> next_indices) {
-  if (model_.config_->model.vision.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.vision.run_options.value());
-  }
-
   if (num_images_ <= 1) {
     State::Run(*model_.vision_session_);
     return {};

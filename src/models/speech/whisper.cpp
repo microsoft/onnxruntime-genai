@@ -27,7 +27,7 @@ std::unique_ptr<State> WhisperModel::CreateState(DeviceSpan<int32_t> sequence_le
 }
 
 AudioEncoderState::AudioEncoderState(const WhisperModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.encoder.run_options},
       model_{model} {}
 
 void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
@@ -46,15 +46,12 @@ void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
 }
 
 DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  if (model_.config_->model.encoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
-  }
   State::Run(*model_.session_encoder_);
   return {};
 }
 
 WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const GeneratorParams& params, const int num_frames)
-    : State{params, model},
+    : State{params, model, model.config_->model.decoder.run_options},
       model_{model},
       kv_cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
       num_frames_{num_frames} {
@@ -109,9 +106,6 @@ DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_
     }
   }
 
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
   State::Run(*model_.session_decoder_);
   return logits_.Get();
 }
@@ -171,7 +165,7 @@ void WhisperDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, 
 }
 
 WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths_unk)
-    : State{params, model},
+    : State{params, model, std::nullopt},
       model_{model} {
   encoder_state_ = std::make_unique<AudioEncoderState>(model, params);
   decoder_state_ = std::make_unique<WhisperDecoderState>(model, params, encoder_state_->GetNumFrames());

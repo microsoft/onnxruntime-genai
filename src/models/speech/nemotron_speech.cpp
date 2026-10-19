@@ -246,7 +246,7 @@ std::unique_ptr<State> NemotronSpeechModel::CreateState(DeviceSpan<int32_t> /*se
 }
 
 NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.encoder.run_options},
       model_{model} {
   auto& cfg = model_.nemotron_config_;
   auto& cpu_dev = *GetDeviceInterface(DeviceType::CPU);
@@ -323,9 +323,6 @@ NemotronEncoderSubState::NemotronEncoderSubState(const NemotronSpeechModel& mode
   outputs_.push_back(nullptr);
 
   // Set run options from config
-  if (model_.config_->model.encoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
-  }
 }
 
 void NemotronEncoderSubState::SetMelInput(OrtValue* mel_tensor, int64_t total_mel_frames) {
@@ -352,7 +349,7 @@ DeviceSpan<float> NemotronEncoderSubState::Run(int /*total_length*/, DeviceSpan<
 }
 
 NemotronPredictionSubState::NemotronPredictionSubState(const NemotronSpeechModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.decoder.run_options},
       model_{model} {
   auto& cfg = model_.nemotron_config_;
   auto& cpu_dev = *GetDeviceInterface(DeviceType::CPU);
@@ -388,9 +385,6 @@ NemotronPredictionSubState::NemotronPredictionSubState(const NemotronSpeechModel
   outputs_.push_back(nullptr);
 
   // Set run options from config
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
 }
 
 void NemotronPredictionSubState::UpdateInputs() {
@@ -405,7 +399,7 @@ DeviceSpan<float> NemotronPredictionSubState::Run(int /*total_length*/, DeviceSp
 }
 
 NemotronJoinerSubState::NemotronJoinerSubState(const NemotronSpeechModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.joiner.run_options},
       model_{model} {
   auto& cfg = model_.nemotron_config_;
 
@@ -423,9 +417,6 @@ NemotronJoinerSubState::NemotronJoinerSubState(const NemotronSpeechModel& model,
   outputs_.push_back(nullptr);
 
   // Set run options from config
-  if (model_.config_->model.joiner.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.joiner.run_options.value());
-  }
 }
 
 void NemotronJoinerSubState::SetInputFrames(OrtValue* encoder_frame, OrtValue* decoder_frame) {
@@ -440,7 +431,7 @@ DeviceSpan<float> NemotronJoinerSubState::Run(int /*total_length*/, DeviceSpan<i
 
 NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
                                          const GeneratorParams& params)
-    : TransducerState{params, model},
+    : TransducerState{params, model, std::nullopt},
       nemotron_model_{model} {
   nemotron_config_ = model.nemotron_config_;
   // Until audio is fed via SetExtraInputs/SetInputs, the stream is idle.

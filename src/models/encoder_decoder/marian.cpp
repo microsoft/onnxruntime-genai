@@ -113,11 +113,12 @@ std::unique_ptr<State> MarianModel::CreateState(DeviceSpan<int32_t> sequence_len
 }
 
 MarianState::MarianState(const MarianModel& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.decoder.run_options},
       model_{model},
       encoder_attention_mask_{model, *this, sequence_lengths_unk, model_.config_->model.encoder.inputs.attention_mask},
       cached_source_projections_(model.cached_source_projections_.size()),
       attention_mask_{model, *this, sequence_lengths_unk, model_.config_->model.decoder.inputs.encoder_attention_mask} {
+  RegisterSessionRunOptions(*model_.session_encoder_, model_.config_->model.encoder.run_options);
 }
 
 DeviceSpan<float> MarianLogits::Get() {
@@ -279,9 +280,6 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
       outputs_.push_back(cached_source_projections_[i].get());
     }
 
-    if (model_.config_->model.encoder.run_options.has_value()) {
-      State::SetRunOptions(model_.config_->model.encoder.run_options.value());
-    }
     State::Run(*model_.session_encoder_);
 
     // Clear inputs and outputs for the decoder
@@ -346,9 +344,6 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     logits_.Update(next_tokens.subspan(next_tokens.size() - 1, 1), 1);
 
-    if (model_.config_->model.decoder.run_options.has_value()) {
-      State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-    }
     State::Run(*model_.session_decoder_);
     first_run_ = false;
     return logits_.Get();
@@ -364,9 +359,6 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
   logits_.Update(next_tokens, 1);
 
   // Run the decoder
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
   State::Run(*model_.session_decoder_);
   return logits_.Get();
 }

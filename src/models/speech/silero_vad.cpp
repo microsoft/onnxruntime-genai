@@ -14,7 +14,7 @@ namespace Generators {
 SileroVadState::SileroVadState(const Model& model, const GeneratorParams& params, OrtSession& session,
                                float* input_data, int64_t input_size,
                                float* state_data, int64_t* sample_rate)
-    : State{params, model},
+    : State{params, model, model.config_->model.vad.run_options},
       vad_session_{session} {
   auto& allocator = model.p_device_inputs_->GetAllocator();
   const auto& memory_info = allocator.GetInfo();
@@ -43,11 +43,6 @@ SileroVadState::SileroVadState(const Model& model, const GeneratorParams& params
   outputs_.push_back(nullptr);
   output_names_.push_back("stateN");
   outputs_.push_back(nullptr);
-
-  // Apply run options from config if specified
-  if (model.config_->model.vad.run_options.has_value()) {
-    State::SetRunOptions(model.config_->model.vad.run_options.value());
-  }
 }
 
 DeviceSpan<float> SileroVadState::Run(int /*total_length*/, DeviceSpan<int32_t>& /*next_tokens*/,

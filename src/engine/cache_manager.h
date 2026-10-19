@@ -42,7 +42,7 @@ struct CacheStepReservation {
 
 struct KeyValueCacheState : State {
   KeyValueCacheState(const GeneratorParams& params, const Model& model)
-      : State(params, model) {}
+      : State(params, model, std::nullopt) {}
 
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override {

@@ -25,7 +25,7 @@ struct PlacementTestModel : Generators::Model {
 struct PlacementTestState : Generators::State {
   PlacementTestState(const Generators::GeneratorParams& params, const Generators::Model& model,
                      Generators::DeviceInterface* session_device)
-      : State{params, model, session_device} {}
+      : State{params, model, std::nullopt, session_device} {}
 
   Generators::DeviceSpan<float> Run(int, Generators::DeviceSpan<int32_t>&,
                                     Generators::DeviceSpan<int32_t>) override {

@@ -150,7 +150,7 @@ std::unique_ptr<State> SpeculativeDecodingModel::CreateState(DeviceSpan<int32_t>
 SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingModel& model,
                                                    DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)
-    : State{ValidateSpeculativeGeneratorParams(params), model},
+    : State{ValidateSpeculativeGeneratorParams(params), model, std::nullopt},
       model_{model},
       target_state_{model.target_model().CreateState(sequence_lengths, params)},
       draft_state_{model.draft_model().CreateState(sequence_lengths, params)} {}

@@ -118,7 +118,7 @@ std::unique_ptr<State> ParakeetTdtModel::CreateState(DeviceSpan<int32_t> /*seque
 
 ParakeetEncoderSubState::ParakeetEncoderSubState(const ParakeetTdtModel& model,
                                                  const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.encoder.run_options},
       model_{model},
       cfg_{model.parakeet_config_} {
   auto& cpu_allocator = model_.allocator_cpu_;
@@ -139,10 +139,6 @@ ParakeetEncoderSubState::ParakeetEncoderSubState(const ParakeetTdtModel& model,
   outputs_.push_back(nullptr);
   output_names_.push_back(cfg_.enc_out_length.c_str());
   outputs_.push_back(nullptr);
-
-  if (model_.config_->model.encoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
-  }
 }
 
 void ParakeetEncoderSubState::SetInputs(OrtValue* mel_tensor, int64_t num_mel_frames) {
@@ -159,7 +155,7 @@ DeviceSpan<float> ParakeetEncoderSubState::Run(int /*total_length*/,
 
 ParakeetDecoderSubState::ParakeetDecoderSubState(const ParakeetTdtModel& model,
                                                  const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.decoder.run_options},
       model_{model},
       cfg_{model.parakeet_config_} {
   auto& cpu_allocator = model_.allocator_cpu_;
@@ -198,10 +194,6 @@ ParakeetDecoderSubState::ParakeetDecoderSubState(const ParakeetTdtModel& model,
   outputs_.push_back(nullptr);
   output_names_.push_back(cfg_.dec_out_lstm_cell_state.c_str());
   outputs_.push_back(nullptr);
-
-  if (model_.config_->model.decoder.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-  }
 }
 
 void ParakeetDecoderSubState::ResetLstmState() {
@@ -253,7 +245,7 @@ DeviceSpan<float> ParakeetDecoderSubState::Run(int /*total_length*/,
 
 ParakeetJoinerSubState::ParakeetJoinerSubState(const ParakeetTdtModel& model,
                                                const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.config_->model.joiner.run_options},
       model_{model},
       cfg_{model.parakeet_config_} {
   encoder_input_idx_ = inputs_.size();
@@ -266,10 +258,6 @@ ParakeetJoinerSubState::ParakeetJoinerSubState(const ParakeetTdtModel& model,
 
   output_names_.push_back(cfg_.join_out_logits.c_str());
   outputs_.push_back(nullptr);
-
-  if (model_.config_->model.joiner.run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.joiner.run_options.value());
-  }
 }
 
 void ParakeetJoinerSubState::SetInputFrames(OrtValue* encoder_frame, OrtValue* decoder_frame) {
@@ -285,7 +273,7 @@ DeviceSpan<float> ParakeetJoinerSubState::Run(int /*total_length*/,
 }
 
 ParakeetTdtState::ParakeetTdtState(const ParakeetTdtModel& model, const GeneratorParams& params)
-    : TransducerState{params, model},
+    : TransducerState{params, model, std::nullopt},
       model_{model},
       cfg_{model.parakeet_config_} {
   encoder_state_ = std::make_unique<ParakeetEncoderSubState>(model, params);

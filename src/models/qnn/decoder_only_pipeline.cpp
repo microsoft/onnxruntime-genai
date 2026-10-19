@@ -30,7 +30,7 @@ std::unique_ptr<State> DecoderOnlyPipelineModel::CreateState(DeviceSpan<int32_t>
 
 IntermediatePipelineState::IntermediatePipelineState(const DecoderOnlyPipelineModel& model, const GeneratorParams& params,
                                                      size_t pipeline_state_index)
-    : State{params, model},
+    : State{params, model, model.config_->model.decoder.pipeline[pipeline_state_index].run_options},
       id_{pipeline_state_index},
       model_{model} {}
 
@@ -78,9 +78,6 @@ DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<in
                            model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
   }
 
-  if (model_.config_->model.decoder.pipeline[id_].run_options.has_value()) {
-    State::SetRunOptions(model_.config_->model.decoder.pipeline[id_].run_options.value());
-  }
   State::Run(*model_.sessions_[id_]);
   return {};
 }
@@ -115,8 +112,9 @@ static std::vector<size_t> GetLayerIndicesSetFromPastKeyNameInputs(
 
 DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineModel& model,
                                                    DeviceSpan<int32_t> sequence_lengths,
-                                                   const GeneratorParams& params)
-    : State{params, model},
+                                                   const GeneratorParams& params,
+                                                   const std::optional<Config::RunOptions>& configured_run_options)
+    : State{params, model, configured_run_options},
       input_ids_{CreateInputIDs(*this)},
       model_{model},
       key_value_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
