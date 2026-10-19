@@ -797,6 +797,21 @@ void ApplySessionOptionsFromConfig(
     if (custom_library_path.is_relative()) {
       for (const auto& dir : allowed_dirs) {
         std::filesystem::path candidate = dir / custom_library_path;
+#if defined(_WIN32)
+        if (candidate.extension() == ".so") {
+          auto dll_candidate = candidate;
+          dll_candidate.replace_extension(".dll");
+          if (std::filesystem::exists(dll_candidate, ec)) {
+            candidate = dll_candidate;
+          } else {
+            std::string stem = candidate.stem().string();
+            if (stem.rfind("lib", 0) == 0) {
+              auto stripped = candidate.parent_path() / (stem.substr(3) + ".dll");
+              if (std::filesystem::exists(stripped, ec)) candidate = stripped;
+            }
+          }
+        }
+#endif
         if (std::filesystem::exists(candidate, ec)) {
           custom_library_file_prefix = std::filesystem::canonical(candidate).string();
           resolved = true;

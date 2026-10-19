@@ -88,7 +88,9 @@ TEST(Qwen38WeightPoolManifestTest, ParsesEntriesAndSessions) {
                               "host_pool 2 16 4096 512 2 16 16 target/embed.safetensors\n"
                               "session target model.embed.weight 2\n"
                               "session target experts.w 1\n"
-                              "session dense model.embed.weight 2\n");
+                              "session dense model.embed.weight 2\n"
+                              "session mtp head.w 0\n"
+                              "session drafter head.w 0\n");
   const auto manifest = ParseQwen38WeightPoolManifest(path);
   ASSERT_EQ(manifest.entries.size(), 3u);
   EXPECT_EQ(manifest.entries[0].dtype, 16);
@@ -106,6 +108,8 @@ TEST(Qwen38WeightPoolManifestTest, ParsesEntriesAndSessions) {
   ASSERT_EQ(manifest.sessions.at("target").size(), 2u);
   EXPECT_EQ(manifest.sessions.at("target")[1], (std::pair<std::string, int>{"experts.w", 1}));
   EXPECT_EQ(manifest.sessions.at("dense").size(), 1u);
+  EXPECT_EQ(manifest.sessions.at("mtp").size(), 1u);
+  EXPECT_EQ(manifest.sessions.at("drafter").size(), 1u);
   EXPECT_EQ(manifest.sessions.count("head_kv"), 0u);
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
@@ -313,6 +317,10 @@ TEST(Qwen38PlaneTest, PlaneKernelsHandleEmptyAndNonMultipleOf32Dimensions) {
   plane.ple_rows(stream, nullptr, nullptr, -1, nullptr, nullptr, nullptr);
   plane.transpose_f32(stream, nullptr, nullptr, 0, 1);
   plane.transpose_f32(stream, nullptr, nullptr, 16, 0);
+  if (plane.embed_rows) {
+    plane.embed_rows(stream, nullptr, nullptr, nullptr, 0, 128);
+    plane.embed_rows(stream, nullptr, nullptr, nullptr, 2, 0);
+  }
   plane.Check(plane.stream_sync(stream), "stream_sync(empty launches)");
 
   // Non-multiple-of-32 transpose_f32 (n = 35, batch = 2).
