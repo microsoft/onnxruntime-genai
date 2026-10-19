@@ -1091,6 +1091,31 @@ def test_runtime_batching_validation_is_shared_with_profiles(in_profile, engine,
 
 
 @pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize("value", [0, 1, 3, 2_147_483_647, -1, 1.5, 2**31, True, "3", None])
+def test_dflash2_snapshot_limits_in_runtime_config_and_profiles(in_profile, value):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"num_blocks": 32}}}
+    baseline = copy.deepcopy(generated)
+    runtime = {"engine": {"dynamic_batching": {"dflash2_max_snapshots": value}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "snapshots", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2_147_483_647:
+        result = apply_runtime_config(generated, runtime)
+        if in_profile:
+            assert result["runtime_profiles"] == runtime["runtime_profiles"]
+            assert result["engine"] == generated["engine"]
+        else:
+            assert result["engine"]["dynamic_batching"]["dflash2_max_snapshots"] == value
+    else:
+        with pytest.raises(ValueError, match="dflash2_max_snapshots must be an integer between"):
+            apply_runtime_config(generated, runtime)
+    assert generated == baseline
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
 @pytest.mark.parametrize(
     "model,max_draft_tokens,error",
     [

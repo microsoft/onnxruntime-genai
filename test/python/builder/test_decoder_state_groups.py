@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
@@ -850,6 +851,7 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
 
 def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.context_length_attrs = {"state_update_capacity": 0}
     model.use_paged_attention = False
     model.io_dtype = base_module.ir.DataType.FLOAT16
     model.linear_key_dim = 8
@@ -868,7 +870,7 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     calls = []
     monkeypatch.setattr(Model, "make_gated_delta_net", lambda self, name, **kwargs: calls.append((name, kwargs)))
 
-    a_log = qwen_module.torch.tensor([0.25, -0.5, 0.0])
+    a_log = torch.tensor([0.25, -0.5, 0.0])
     output = model.make_gated_delta_net_layer(
         1,
         SimpleNamespace(A_log=a_log, dt_bias="dt_bias_value"),
@@ -886,5 +888,5 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     assert gdn["gate_shape"] == ["batch_size", "sequence_length", 3]
     assert "state_update_capacity" not in gdn
     exported_a_log = next(args[0] for args, _ in initializers if args[1] == gdn["a_log"])
-    qwen_module.torch.testing.assert_close(exported_a_log, a_log)
+    torch.testing.assert_close(exported_a_log, a_log)
     assert output.endswith("/gdn_out/Reshape/output_0")

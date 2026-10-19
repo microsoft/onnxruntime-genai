@@ -369,6 +369,10 @@ struct DeviceInterface {
   // after an upload never waits for the device, so a caller can take a fresh mirror per upload
   // instead of synchronizing before it reuses one. Keep last for vtable ABI stability.
   virtual bool RecyclesHostMirrorsAfterUpload(size_t /*bytes*/) const { return false; }
+  // Default false: no effect — encoder / control-flow graph capture follows the normal per-EP config
+  // default. An EP overrides to true to defensively force encoder capture off (see the AMDGPU
+  // override for rationale). Keep last for vtable ABI stability.
+  virtual bool DisablesEncoderGraphCapture() const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

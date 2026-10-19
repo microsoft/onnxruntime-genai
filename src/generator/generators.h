@@ -218,6 +218,11 @@ struct OrtGlobals {
 
   std::unique_ptr<OrtEnv> env_;
 
+  // True when genai (not a host) registered the AMDGPU umbrella EP library on env_. Scoped to this
+  // OrtGlobals so it is cleared whenever the env is torn down (Shutdown / re-init), keeping ownership
+  // tied to the registration's lifetime. Read/written by the AMDGPU session-options teardown gate.
+  bool amdgpu_owns_ep_registration_ = false;
+
   // Get-or-create the DeviceInterface for a device type. The interface is owned by this
   // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every
   // interface is rebuilt on re-initialization after a shutdown. Thread-safe.
