@@ -92,11 +92,12 @@ State::State(const GeneratorParams& params, const Model& model,
       // p_device_inputs_ was picked for the model's device (e.g. CPU for WebGPU without graph
       // capture), so only a state on that device may use it.
       p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
-      run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
-  if (configured_run_options.has_value()) {
-    SetRunOptions(configured_run_options.value());
+  run_options_ = CreateRunOptions(configured_run_options);
+  if (!run_options_) {
+    run_options_ = OrtRunOptions::Create();
   }
+
   // Generate a random id for graph capture of the default (1-token) decode shape.
   if (params_->use_graph_capture) {
     GraphIdForLength(1, 0);
@@ -231,23 +232,24 @@ void State::SetRunOption(OrtRunOptions& run_options, const char* key, const char
   run_options.AddConfigEntry(key, value);
 }
 
-/*
- * Set all run options that are key-value pairs of strings.
- * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_run_options_config_keys.h
- */
-void State::SetRunOptions(const Config::RunOptions& config_run_options) {
-  for (auto& config_entry : config_run_options) {
-    SetRunOption(config_entry.first.c_str(), config_entry.second.c_str());
+std::unique_ptr<OrtRunOptions> State::CreateRunOptions(
+    const std::optional<Config::RunOptions>& configured_run_options) {
+  if (!configured_run_options.has_value()) {
+    return {};
   }
+
+  auto run_options = OrtRunOptions::Create();
+  for (const auto& [key, value] : configured_run_options.value()) {
+    SetRunOption(*run_options, key.c_str(), value.c_str());
+  }
+  return run_options;
 }
 
 void State::RegisterSessionRunOptions(
     OrtSession& session, const std::optional<Config::RunOptions>& configured_run_options) {
-  auto options = OrtRunOptions::Create();
-  if (configured_run_options.has_value()) {
-    for (const auto& [key, value] : configured_run_options.value()) {
-      SetRunOption(*options, key.c_str(), value.c_str());
-    }
+  auto options = CreateRunOptions(configured_run_options);
+  if (!options) {
+    options = OrtRunOptions::Create();
   }
   session_run_options_.emplace(&session, std::move(options));
 }

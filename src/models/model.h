@@ -107,8 +107,9 @@ struct State {
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
+  std::unique_ptr<OrtRunOptions> CreateRunOptions(
+      const std::optional<Config::RunOptions>& configured_run_options);
   void SetRunOption(OrtRunOptions& run_options, const char* key, const char* value);
-  void SetRunOptions(const Config::RunOptions& config_run_options);
   OrtRunOptions& GetRunOptions(OrtSession& session);
   std::unordered_map<OrtSession*, std::unique_ptr<OrtRunOptions>> session_run_options_;
 
