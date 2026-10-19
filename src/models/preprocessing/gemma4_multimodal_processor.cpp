@@ -244,10 +244,6 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
     } else if (pixel_values_shape.size() == 2 && pixel_values_shape[0] > 0) {
       vision_fixed_num_patches_ = pixel_values_shape[0];
     }
-    if (vision_fixed_num_patches_ > 0 &&
-        vision_fixed_num_patches_ % (kGemma4PoolingKernelSize * kGemma4PoolingKernelSize) != 0) {
-      throw std::runtime_error("Gemma4 vision model's fixed num_patches dimension must be divisible by 9");
-    }
   }
 
   // Query pixel_position_ids type (int32 or int64) if the vision model has this input
@@ -262,10 +258,16 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
         position_ids_shape.size() == 3   ? position_ids_shape[1]
         : position_ids_shape.size() == 2 ? position_ids_shape[0]
                                          : -1;
-    if (vision_fixed_num_patches_ > 0 && position_ids_num_patches > 0 &&
-        position_ids_num_patches != vision_fixed_num_patches_) {
-      throw std::runtime_error("Gemma4 vision model's pixel_values and pixel_position_ids inputs must have the same num_patches dimension");
+    if (!unified_ && position_ids_num_patches > 0) {
+      if (vision_fixed_num_patches_ > 0 && position_ids_num_patches != vision_fixed_num_patches_) {
+        throw std::runtime_error("Gemma4 vision model's pixel_values and pixel_position_ids inputs must have the same num_patches dimension");
+      }
+      vision_fixed_num_patches_ = position_ids_num_patches;
     }
+  }
+  if (!unified_ && vision_fixed_num_patches_ > 0 &&
+      vision_fixed_num_patches_ % (kGemma4PoolingKernelSize * kGemma4PoolingKernelSize) != 0) {
+    throw std::runtime_error("Gemma4 vision model's fixed num_patches dimension must be divisible by 9");
   }
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));

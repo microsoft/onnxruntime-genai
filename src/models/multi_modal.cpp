@@ -146,10 +146,11 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
     session_info_.Add(*speech_session_);
   }
   if (vision) {
-    session_info_.Add(*vision_session_);
     if (vision_projector_session_) {
+      // SessionInfo keeps the first shape for shared inputs; the projector may require fixed positions.
       session_info_.Add(*vision_projector_session_);
     }
+    session_info_.Add(*vision_session_);
   }
 }
 

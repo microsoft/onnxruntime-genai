@@ -112,8 +112,9 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
     vision_session_ = create_stage(stages[0], vision_session_options_, vision_encoder_device_);
     vision_projector_session_ = create_stage(stages[1], vision_projector_session_options_,
                                              vision_projector_device_);
-    session_info_.Add(*vision_session_);
+    // SessionInfo keeps the first shape for shared inputs; the projector may require fixed positions.
     session_info_.Add(*vision_projector_session_);
+    session_info_.Add(*vision_session_);
     return;
   }
 
