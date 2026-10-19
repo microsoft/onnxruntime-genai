@@ -276,6 +276,14 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   else()
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
   endif()
+
+  # The graph model loads the CUDA data plane dynamically from its package.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_library(qwen38_plane SHARED "${GENERATORS_ROOT}/qwen38_plane/qwen38_plane.cu")
+    target_link_libraries(qwen38_plane PRIVATE cudart)
+    set_target_properties(qwen38_plane PROPERTIES FOLDER "GenAI")
+    add_dependencies(onnxruntime-genai qwen38_plane)
+  endif()
 endif()
 
 
