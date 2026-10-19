@@ -24,6 +24,27 @@ import onnxruntime_genai as og
 from qwen38_engine_util import Prompts, add_prompt_arguments, load_model, run_turn, token_hash
 
 
+def host_memory_stats():
+    """Collect Linux host accounting outside timed decode; cgroup peak includes charged file cache."""
+    stats = {"expert_cache_mib": os.environ.get("ORT_QMOE_HOST_CACHE_MIB", "0")}
+    try:
+        stats["process_status"] = {
+            line.split(":", 1)[0]: line.split(":", 1)[1].strip()
+            for line in Path("/proc/self/status").read_text().splitlines()
+            if line.startswith(("VmRSS:", "VmHWM:", "VmLck:", "RssAnon:", "RssFile:", "RssShmem:"))
+        }
+        stats["io"] = dict(line.split(": ", 1) for line in Path("/proc/self/io").read_text().splitlines())
+        for line in Path("/proc/self/cgroup").read_text().splitlines():
+            if line.startswith("0::"):
+                group = Path("/sys/fs/cgroup") / line[3:].lstrip("/")
+                stats["cgroup"] = str(group)
+                for name in ("memory.max", "memory.peak", "memory.current", "memory.events", "memory.swap.max"):
+                    stats[name] = (group / name).read_text().strip()
+    except OSError:
+        pass
+    return stats
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model")
@@ -33,6 +54,12 @@ def main():
     parser.add_argument("--new", type=int, default=256)
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--no-mtp", action="store_true")
+    parser.add_argument(
+        "--stop-token-id",
+        type=int,
+        default=248319,
+        help="benchmark stop token (default: unused token 248319, for fixed-length runs)",
+    )
     parser.add_argument("--no-head-prefill", action="store_true")
     parser.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
     add_prompt_arguments(parser)
@@ -41,7 +68,10 @@ def main():
         raise FileExistsError(args.out)
 
     overlay = {
-        "model": {"qwen38_graph": {"mtp": {"enabled": not args.no_mtp, "prefill_head": not args.no_head_prefill}}}
+        "model": {
+            "eos_token_id": args.stop_token_id,
+            "qwen38_graph": {"mtp": {"enabled": not args.no_mtp, "prefill_head": not args.no_head_prefill}},
+        }
     }
     model = load_model(args.model, args.provider, overlay)
     prompts = Prompts.from_args(model, args)
@@ -60,9 +90,32 @@ def main():
             request.close()
             after = engine.get_speculative_stats()
             count = len(turn.tokens)
+            if count != args.new:
+                raise RuntimeError(f"Benchmark expected {args.new} tokens, got {count}: {turn.finish_reason}")
             decode_s = turn.times[-1] - turn.times[0]
             rounds = after["rounds"] - before["rounds"]
             accepted = after["draft_tokens_accepted"] - before["draft_tokens_accepted"]
+            proposed = after["draft_tokens_proposed"] - before["draft_tokens_proposed"]
+            head_calls = after["draft_forward_passes"] - before["draft_forward_passes"]
+            before_hist = before.get("acceptance_length_histogram", [])
+            after_hist = after.get("acceptance_length_histogram", [])
+            hist_len = min(4, len(after_hist), len(before_hist))
+            accept_hist = [after_hist[i] - before_hist[i] for i in range(hist_len)]
+            while len(accept_hist) < 4:
+                accept_hist.append(0)
+            ge1 = sum(accept_hist[1:])
+            ge2 = sum(accept_hist[2:])
+            ge3 = accept_hist[3]
+            pos_accept_rates = [
+                ge1 / rounds if rounds else 0.0,
+                ge2 / rounds if rounds else 0.0,
+                ge3 / rounds if rounds else 0.0,
+            ]
+            cond_accept_rates = [
+                ge1 / rounds if rounds else 0.0,
+                ge2 / ge1 if ge1 else 0.0,
+                ge3 / ge2 if ge2 else 0.0,
+            ]
             record = {
                 "label": "warmup" if index == 0 else f"run{index}",
                 "seed": seed,
@@ -73,8 +126,15 @@ def main():
                 "decode_s": decode_s,
                 "tps": (count - 1) / decode_s,
                 "cycles": rounds,
+                "proposed": proposed,
                 "accepted": accepted,
                 "accept_rate": accepted / rounds if rounds else None,
+                "accepted_per_proposed": accepted / proposed if proposed else None,
+                "head_calls": head_calls,
+                "accept_hist": accept_hist,
+                "pos_accept_rates": pos_accept_rates,
+                "cond_accept_rates": cond_accept_rates,
+                "tokens_per_cycle": (count - 1) / rounds if rounds else None,
                 "ms_per_cycle": decode_s / rounds * 1e3 if rounds else None,
                 "engine_runs": turn.runs,
             }
@@ -87,6 +147,7 @@ def main():
             f"ctx {n}: decode {median['tps']:.2f} tps (median of {len(measured)}), accept {median['accept_rate']}",
             flush=True,
         )
+        result["host_memory"] = host_memory_stats()
         args.out.write_text(json.dumps(result, indent=1))
 
 
