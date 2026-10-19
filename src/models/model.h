@@ -11,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include "models/io/adapters.h"
 #include "models/io/extra_outputs.h"
 
@@ -128,6 +129,7 @@ struct SessionInfo : ModelStateMetadata {
   SessionInfo() = default;
 
   void Add(OrtSession& session);
+  void Add(OrtSession& session, std::string_view reconcile_input_name);
 
   bool HasInput(const std::string& name) const override;
   bool HasOutput(const std::string& name) const override;
@@ -145,6 +147,7 @@ struct SessionInfo : ModelStateMetadata {
 
  private:
   std::unordered_map<std::string, std::unique_ptr<OrtTypeInfo>> inputs_, outputs_;
+  std::unordered_map<std::string, std::vector<int64_t>> reconciled_input_shapes_;
 };
 
 struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {

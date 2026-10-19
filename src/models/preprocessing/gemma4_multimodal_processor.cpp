@@ -239,11 +239,10 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
   unified_ = config.model.type == "gemma4_unified";
   if (!unified_) {
     const auto pixel_values_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_values);
-    if (pixel_values_shape.size() == 3 && pixel_values_shape[1] > 0) {
-      vision_fixed_num_patches_ = pixel_values_shape[1];
-    } else if (pixel_values_shape.size() == 2 && pixel_values_shape[0] > 0) {
-      vision_fixed_num_patches_ = pixel_values_shape[0];
+    if (pixel_values_shape.size() != 2 && pixel_values_shape.size() != 3) {
+      throw std::runtime_error("Gemma4 vision model's pixel_values input must have rank 2 or 3");
     }
+    vision_fixed_num_patches_ = pixel_values_shape[pixel_values_shape.size() - 2];
   }
 
   // Query pixel_position_ids type (int32 or int64) if the vision model has this input
@@ -253,16 +252,19 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
         pixel_position_ids_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
       throw std::runtime_error("Gemma4 pixel_position_ids input must have type INT32 or INT64");
     }
-    const auto position_ids_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_position_ids);
-    const int64_t position_ids_num_patches =
-        position_ids_shape.size() == 3   ? position_ids_shape[1]
-        : position_ids_shape.size() == 2 ? position_ids_shape[0]
-                                         : -1;
-    if (!unified_ && position_ids_num_patches > 0) {
-      if (vision_fixed_num_patches_ > 0 && position_ids_num_patches != vision_fixed_num_patches_) {
-        throw std::runtime_error("Gemma4 vision model's pixel_values and pixel_position_ids inputs must have the same num_patches dimension");
+    if (!unified_) {
+      const auto position_ids_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_position_ids);
+      const auto pixel_values_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_values);
+      if (position_ids_shape.size() != pixel_values_shape.size()) {
+        throw std::runtime_error("Gemma4 vision model's pixel_values and pixel_position_ids inputs must have matching ranks");
       }
-      vision_fixed_num_patches_ = position_ids_num_patches;
+      const int64_t position_ids_num_patches = position_ids_shape[position_ids_shape.size() - 2];
+      if (position_ids_num_patches > 0) {
+        if (vision_fixed_num_patches_ > 0 && position_ids_num_patches != vision_fixed_num_patches_) {
+          throw std::runtime_error("Gemma4 vision model's pixel_values and pixel_position_ids inputs must have the same num_patches dimension");
+        }
+        vision_fixed_num_patches_ = position_ids_num_patches;
+      }
     }
   }
   if (!unified_ && vision_fixed_num_patches_ > 0 &&

@@ -183,6 +183,9 @@ def _create_static_batch_vision_pipeline(
     rank_two=False,
     projector_num_patches=None,
     encoder_position_input=False,
+    encoder_position_num_patches=None,
+    encoder_position_rank_two=None,
+    encoder_position_batch=1,
 ):
     """Split the static-B=1 or rank-two vision fixture at a vision_features boundary."""
     helper = onnx.helper
@@ -190,7 +193,14 @@ def _create_static_batch_vision_pipeline(
     position_type = position_type or tensor_proto.INT64
 
     pixel_shape = [num_patches, 768] if rank_two else [1, num_patches, 768]
-    position_shape = [num_patches, 2] if rank_two else [1, num_patches, 2]
+    encoder_position_patches = num_patches if encoder_position_num_patches is None else encoder_position_num_patches
+    if encoder_position_rank_two is None:
+        encoder_position_rank_two = rank_two
+    encoder_position_shape = (
+        [encoder_position_patches, 2]
+        if encoder_position_rank_two
+        else [encoder_position_batch, encoder_position_patches, 2]
+    )
     projector_patches = num_patches if projector_num_patches is None else projector_num_patches
     projector_position_shape = [projector_patches, 2] if rank_two else [1, projector_patches, 2]
     pixel_values = helper.make_tensor_value_info(pixel_name, tensor_proto.FLOAT, pixel_shape)
@@ -198,7 +208,7 @@ def _create_static_batch_vision_pipeline(
     vision_features = helper.make_tensor_value_info("vision_features", tensor_proto.FLOAT, pixel_shape)
     encoder_inputs = [pixel_values]
     if encoder_position_input:
-        encoder_inputs.append(helper.make_tensor_value_info("pixel_position_ids", position_type, position_shape))
+        encoder_inputs.append(helper.make_tensor_value_info("pixel_position_ids", position_type, encoder_position_shape))
     encoder_graph = helper.make_graph(
         [helper.make_node("Identity", [pixel_name], ["vision_features"])],
         "gemma4_vision_encoder",
@@ -1004,11 +1014,14 @@ def test_gemma4_flat_decoder_runs_split_vision(
 
 
 @pytest.mark.parametrize("decoder_layout", ["flat", "pipeline"])
-@pytest.mark.parametrize("encoder_patches,projector_patches", [("num_patches", 2520), (2520, "num_patches")])
+@pytest.mark.parametrize(
+    "encoder_patches,encoder_position_patches,projector_patches",
+    itertools.product(("num_patches", 2520), repeat=3),
+)
 def test_gemma4_split_vision_pads_for_fixed_stage(
-    test_data_path, tmp_path, decoder_layout, encoder_patches, projector_patches
+    test_data_path, tmp_path, decoder_layout, encoder_patches, encoder_position_patches, projector_patches
 ):
-    """A fixed patch count in either stage pads pixel and position tensors."""
+    """A fixed patch count on any of the three vision inputs pads both tensors."""
     onnx = pytest.importorskip("onnx")
     source_model_path = Path(_get_gemma4_model_path(test_data_path))
     model_path = tmp_path / "gemma4-fixed-stage"
@@ -1025,6 +1038,7 @@ def test_gemma4_split_vision_pads_for_fixed_stage(
         position_type=onnx.TensorProto.INT32,
         projector_num_patches=projector_patches,
         encoder_position_input=True,
+        encoder_position_num_patches=encoder_position_patches,
     )
     config_path = model_path / "genai_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1052,8 +1066,14 @@ def test_gemma4_split_vision_pads_for_fixed_stage(
     pixels = _to_numpy(inputs["pixel_values"])
     positions = _to_numpy(inputs["pixel_position_ids"])
     counts = _to_numpy(inputs["num_image_tokens"])
-    assert pixels.shape == (2, 2520, 768)
-    assert positions.shape == (2, 2520, 2)
+    expected_patches = 2520 if 2520 in (encoder_patches, encoder_position_patches, projector_patches) else pixels.shape[1]
+    assert pixels.shape == (2, expected_patches, 768)
+    assert positions.shape == (2, expected_patches, 2)
+    if expected_patches == 2520:
+        assert np.all(pixels[:, -9:, :] == 0)
+        assert np.all(positions[:, -9:, :] == -1)
+    else:
+        assert expected_patches < 2520
     assert int(counts.max()) * 9 < 2520
     expected_features = np.concatenate(
         [
@@ -1073,27 +1093,107 @@ def test_gemma4_split_vision_pads_for_fixed_stage(
     assert generator.get_next_tokens() == [2]
 
 
-def test_gemma4_split_vision_rejects_conflicting_fixed_patches(test_data_path, tmp_path):
-    """Do not hide a projector position shape that conflicts with the fixed encoder."""
+@pytest.mark.parametrize("decoder_layout", ["flat", "pipeline"])
+@pytest.mark.parametrize(
+    "encoder_patches,encoder_position_patches,projector_patches",
+    [
+        (2511, 2511, 2520),
+        ("num_patches", 2511, 2520),
+        (2511, 2520, "num_patches"),
+        (2511, "num_patches", 2520),
+    ],
+)
+def test_gemma4_split_vision_rejects_conflicting_fixed_patches(
+    test_data_path, tmp_path, decoder_layout, encoder_patches, encoder_position_patches, projector_patches
+):
+    """Reject mismatches among all three patch dimensions regardless of registration order."""
     onnx = pytest.importorskip("onnx")
     model_path = tmp_path / "gemma4-mismatched-patches"
-    shutil.copytree(_get_gemma4_model_path(test_data_path), model_path)
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    if decoder_layout == "pipeline":
+        _write_pipelined_gemma4(onnx, source_model_path, model_path)
+    else:
+        shutil.copytree(source_model_path, model_path)
     _create_static_batch_vision_pipeline(
         onnx,
         model_path / "dummy_vision_encoder.onnx",
         model_path / "dummy_vision_projector.onnx",
-        num_patches=2511,
-        projector_num_patches=2520,
+        num_patches=encoder_patches,
+        projector_num_patches=projector_patches,
         encoder_position_input=True,
+        encoder_position_num_patches=encoder_position_patches,
     )
     config_path = model_path / "genai_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     _configure_split_vision(config)
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    model = og.Model(os.fspath(model_path))
-    with pytest.raises(RuntimeError, match="same num_patches dimension"):
-        model.create_multimodal_processor()
+    if isinstance(encoder_position_patches, int) and isinstance(projector_patches, int):
+        with pytest.raises(RuntimeError, match="Model input shape mismatch for pixel_position_ids at dimension 1"):
+            og.Model(os.fspath(model_path))
+    else:
+        model = og.Model(os.fspath(model_path))
+        with pytest.raises(RuntimeError, match="same num_patches dimension"):
+            model.create_multimodal_processor()
+
+
+@pytest.mark.parametrize("decoder_layout", ["flat", "pipeline"])
+@pytest.mark.parametrize("encoder_position_rank_two,encoder_position_batch", [(True, 1), (False, 2)])
+def test_gemma4_split_vision_rejects_incompatible_position_shapes(
+    test_data_path, tmp_path, decoder_layout, encoder_position_rank_two, encoder_position_batch
+):
+    """A rank or batch mismatch between the position inputs cannot be reconciled."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4-position-rank-mismatch"
+    if decoder_layout == "pipeline":
+        _write_pipelined_gemma4(onnx, source_model_path, model_path)
+    else:
+        shutil.copytree(source_model_path, model_path)
+    _create_static_batch_vision_pipeline(
+        onnx,
+        model_path / "dummy_vision_encoder.onnx",
+        model_path / "dummy_vision_projector.onnx",
+        num_patches=2520,
+        encoder_position_input=True,
+        encoder_position_rank_two=encoder_position_rank_two,
+        encoder_position_batch=encoder_position_batch,
+    )
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    _configure_split_vision(config)
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    message = "ranks differ" if encoder_position_rank_two else "at dimension 0"
+    with pytest.raises(RuntimeError, match="Model input shape mismatch for pixel_position_ids.*" + message):
+        og.Model(os.fspath(model_path))
+
+
+@pytest.mark.parametrize("decoder_layout", ["flat", "pipeline"])
+def test_gemma4_split_vision_requires_projector_positions(test_data_path, tmp_path, decoder_layout):
+    """The opt-in shape reconciliation must find the configured projector position input."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4-missing-projector-position"
+    if decoder_layout == "pipeline":
+        _write_pipelined_gemma4(onnx, source_model_path, model_path)
+    else:
+        shutil.copytree(source_model_path, model_path)
+    _create_static_batch_vision_pipeline(
+        onnx,
+        model_path / "dummy_vision_encoder.onnx",
+        model_path / "dummy_vision_projector.onnx",
+        num_patches=2520,
+        encoder_position_input=True,
+    )
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    _configure_split_vision(config)
+    config["model"]["vision"]["inputs"]["pixel_position_ids"] = "missing_pixel_position_ids"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Model input to reconcile was not found: missing_pixel_position_ids"):
+        og.Model(os.fspath(model_path))
 
 
 @pytest.mark.parametrize("pixel_name", ["pixel_values", "pixels"])

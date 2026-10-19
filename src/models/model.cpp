@@ -414,7 +414,15 @@ static void InheritParentProviderOptions(const std::vector<Config::ProviderOptio
 }
 
 void SessionInfo::Add(OrtSession& session) {
+  Add(session, {});
+}
+
+void SessionInfo::Add(OrtSession& session, std::string_view reconcile_input_name) {
   auto input_names = session.GetInputNames();
+  if (!reconcile_input_name.empty() &&
+      std::find(input_names.begin(), input_names.end(), reconcile_input_name) == input_names.end()) {
+    throw std::runtime_error("Model input to reconcile was not found: " + std::string(reconcile_input_name));
+  }
   for (size_t i = 0; i < input_names.size(); i++) {
     auto type_info = session.GetInputTypeInfo(i);
     auto input_type = type_info->GetTensorTypeAndShapeInfo().GetElementType();
@@ -423,6 +431,24 @@ void SessionInfo::Add(OrtSession& session) {
       throw std::runtime_error("Model input type mismatch: " + input_names[i] + " expected " +
                                std::to_string(found_input->second->GetTensorTypeAndShapeInfo().GetElementType()) +
                                " got " + std::to_string(input_type));
+    if (found_input != inputs_.end() && !reconcile_input_name.empty() && input_names[i] == reconcile_input_name) {
+      auto shape = GetInputShape(input_names[i]);
+      const auto new_shape = type_info->GetTensorTypeAndShapeInfo().GetShape();
+      if (shape.size() != new_shape.size()) {
+        throw std::runtime_error("Model input shape mismatch for " + input_names[i] + ": ranks differ");
+      }
+      for (size_t axis = 0; axis < shape.size(); ++axis) {
+        if (shape[axis] > 0 && new_shape[axis] > 0 && shape[axis] != new_shape[axis]) {
+          throw std::runtime_error("Model input shape mismatch for " + input_names[i] +
+                                   " at dimension " + std::to_string(axis) + ": " +
+                                   std::to_string(shape[axis]) + " vs " + std::to_string(new_shape[axis]));
+        }
+        if (shape[axis] <= 0 && new_shape[axis] > 0) {
+          shape[axis] = new_shape[axis];
+        }
+      }
+      reconciled_input_shapes_.insert_or_assign(input_names[i], std::move(shape));
+    }
     inputs_.emplace(std::make_pair(std::move(input_names[i]), std::move(type_info)));
   }
 
@@ -467,6 +493,8 @@ std::vector<int64_t> SessionInfo::GetInputShape(const std::string& name) const {
   auto type_info = inputs_.find(name);
   if (type_info == inputs_.end())
     throw std::runtime_error("Model input was not found: " + name);
+  if (auto merged_shape = reconciled_input_shapes_.find(name); merged_shape != reconciled_input_shapes_.end())
+    return merged_shape->second;
   return type_info->second->GetTensorTypeAndShapeInfo().GetShape();
 }
 
@@ -481,7 +509,14 @@ std::vector<const char*> SessionInfo::GetInputSymbolicShape(const std::string& n
   auto type_info = inputs_.find(name);
   if (type_info == inputs_.end())
     throw std::runtime_error("Model input was not found: " + name);
-  return type_info->second->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
+  auto symbols = type_info->second->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
+  if (auto merged_shape = reconciled_input_shapes_.find(name); merged_shape != reconciled_input_shapes_.end()) {
+    for (size_t i = 0; i < symbols.size(); ++i) {
+      if (merged_shape->second[i] > 0)
+        symbols[i] = "";
+    }
+  }
+  return symbols;
 }
 
 std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& name) const {
