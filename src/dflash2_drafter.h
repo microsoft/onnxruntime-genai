@@ -134,7 +134,7 @@ struct Dflash2Drafter {
    *        request, so both are only sufficient while at most that many requests are tracked.
    */
   Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size, size_t num_blocks,
-                 size_t max_requests);
+                 size_t max_requests, bool fixed_single_request = false);
   ~Dflash2Drafter();
 
   // Binds the shared Engine policy once, before tracking requests.
@@ -202,6 +202,8 @@ struct Dflash2Drafter {
   void ReleaseAll();
 
  private:
+  // Native fixed-R8 targets can pad 1..8 committed rows to one replayable proposal shape.
+  bool fixed_single_request_{};
   struct RequestState {
     std::vector<int32_t> blocks;
     size_t cached_positions{};  // Logical committed cursor; a windowed ring retains only its live tail.
