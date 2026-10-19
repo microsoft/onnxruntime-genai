@@ -731,21 +731,8 @@ are checked before publishing the chain.
 External expert tensors retain their original storage without changing their
 checkpoint bytes or quantized formats.
 
-To convert an existing engine package without overwriting it:
-
-```bash
-python tools/export_indexshare_mtp.py --input path_to_engine \
-  --output path_to_new_engine --max-draft-tokens 7
-```
-
-The output directory must not exist. The new package's `mtp.onnx` gains the
-selection inputs/outputs and the single-body refresh/reuse interface; other ONNX graph
-headers are copied. External data and other file assets are hard-linked
-without copying bytes, so source and output must share a filesystem. Treat
-shared files as immutable; directory assets remain symlinks and require their
-source directories. IndexShare defaults to enabled for the new MTP model;
-`model.mtp.index_share.enabled=false` runs refresh on every draft forward through
-the same graph. Use the dynamic `Engine`, not the separate legacy
+To enable IndexShare for an older export, re-export the checkpoint with Model
+Builder and `use_paged_attention=true`. Use the dynamic `Engine`, not the separate legacy
 `MtpGenerator` API. Full native-model greedy parity and H200/GB10 performance
 gates remain unverified on the available hardware.
 

@@ -1,11 +1,8 @@
-import importlib.util
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import onnx
-import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer
@@ -261,55 +258,3 @@ def test_qwen_indexshare_config_and_session_options(mtp_graph, ep, paged, cuda_g
             assert provider["validationMode"] == "disabled"
             assert provider.get(capture_option) == cuda_graph
             assert not any(name.startswith("ep.cuda.") for name in session_options)
-
-
-def test_side_by_side_package_does_not_touch_source(mtp_graph):
-    tool_path = Path(__file__).resolve().parents[3] / "tools/export_indexshare_mtp.py"
-    spec = importlib.util.spec_from_file_location("export_indexshare_mtp", tool_path)
-    tool = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(tool)
-    source_config = {"model": {"mtp": {"filename": "mtp.onnx"}}}
-    (mtp_graph / "genai_config.json").write_text(json.dumps(source_config))
-    source_bytes = {path.name: path.read_bytes() for path in mtp_graph.iterdir()}
-    output = mtp_graph.parent / "indexshare"
-    metadata = tool.export_package(mtp_graph, output, 3)
-    assert metadata["enabled"] is True
-    assert not (output / "mtp.onnx.data").is_symlink()
-    assert (output / "mtp.onnx.data").samefile(mtp_graph / "mtp.onnx.data")
-    source = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
-    expert = next(value for value in source.graph.initializer if value.name == "expert.weight")
-    probe = helper.make_model(
-        helper.make_graph(
-            [helper.make_node("Identity", [expert.name], ["native_bytes"])],
-            "external_data_probe",
-            [],
-            [helper.make_tensor_value_info("native_bytes", TensorProto.UINT8, [2, 2])],
-            [expert],
-        ),
-        opset_imports=[helper.make_opsetid("", 17)],
-    )
-    probe.ir_version = 10
-    onnx.save_model(probe, output / "probe.onnx")
-    session = ort.InferenceSession(str(output / "probe.onnx"), providers=["CPUExecutionProvider"])
-    np.testing.assert_array_equal(session.run(None, {})[0], [[0x12, 0xAB], [0xFF, 0x00]])
-    config = json.loads((output / "genai_config.json").read_text())
-    mtp_config = config["model"]["mtp"]
-    assert "index_share" not in mtp_config
-    assert mtp_config["base_capacity"] == metadata["base_capacity"]
-    assert "max_draft_tokens" not in mtp_config
-    assert config["speculative"]["max_draft_tokens"] == 3
-    assert mtp_config["inputs"]["past_indices"] == "past_indices"
-    assert mtp_config["inputs"]["past_counts"] == "past_counts"
-    assert mtp_config["outputs"]["present_indices"] == "present_indices"
-    assert mtp_config["outputs"]["present_counts"] == "present_counts"
-    assert mtp_config["outputs"]["indexer_status"] == "indexer_status"
-    for path in mtp_graph.iterdir():
-        assert path.read_bytes() == source_bytes[path.name]
-    with pytest.raises(ValueError, match="must not exist"):
-        tool.export_package(mtp_graph, output, 3)
-    source_config["model"]["mtp"]["filename"] = "../mtp.onnx"
-    (mtp_graph / "genai_config.json").write_text(json.dumps(source_config))
-    rejected_output = mtp_graph.parent / "rejected"
-    with pytest.raises(ValueError, match="top-level"):
-        tool.export_package(mtp_graph, rejected_output, 3)
-    assert not rejected_output.exists()
