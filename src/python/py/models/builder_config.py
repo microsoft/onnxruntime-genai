@@ -394,7 +394,11 @@ def flatten_target_options(
             flattened[legacy_key] = kv_cache[field_name]
 
     optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "target_options.optimizations")
+    check_fields(
+        optimizations,
+        {"fuse_mlp_gate_up", "fuse_qkv", "merge_shared_input_projections"},
+        "target_options.optimizations",
+    )
     if "fuse_mlp_gate_up" in optimizations:
         warn_structured_override(legacy_options, "fuse_mlp_gate_up", "target_options.optimizations.fuse_mlp_gate_up")
         flattened["fuse_mlp_gate_up"] = optimizations["fuse_mlp_gate_up"]
@@ -402,6 +406,13 @@ def flatten_target_options(
         warn_structured_override(legacy_options, "fuse_qkv", "target_options.optimizations.fuse_qkv")
         warn_structured_override(legacy_options, "disable_qkv_fusion", "target_options.optimizations.fuse_qkv")
         flattened["fuse_qkv"] = optimizations["fuse_qkv"]
+    if "merge_shared_input_projections" in optimizations:
+        warn_structured_override(
+            legacy_options,
+            "merge_shared_input_projections",
+            "target_options.optimizations.merge_shared_input_projections",
+        )
+        flattened["merge_shared_input_projections"] = optimizations["merge_shared_input_projections"]
 
     return flattened, quant_config, effective_precision
 
