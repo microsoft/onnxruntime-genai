@@ -30,6 +30,9 @@ Gpt_State::Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_length
 DeviceSpan<float> Gpt_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
   State::Run(*model_.session_decoder_);
 
   return logits_.Get();

@@ -7,7 +7,8 @@
 #include "models/model_type.h"
 #include "models/speech/gemma4_speech_state.h"
 #include "models/speech/lfm2_audio_speech_state.h"
-#include "models/speech/phi4_multimodal_speech_state.h"
+
+#include <numeric>
 
 namespace Generators {
 
@@ -34,6 +35,20 @@ DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next
 }
 
 int64_t SpeechState::GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs) const {
+  const auto& audio_sizes_name = model_.config_->model.speech.inputs.audio_sizes;
+  for (const auto& input : extra_inputs) {
+    if (input.name == audio_sizes_name) {
+      assert(input.tensor->ort_tensor_);
+      const auto info = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+      if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+        throw std::runtime_error("Unsupported data type " +
+                                 std::to_string(static_cast<int64_t>(info->GetElementType())) +
+                                 " for audio_sizes tensor. Only int64 is supported.");
+      }
+      const int64_t* data = input.tensor->ort_tensor_->GetTensorData<int64_t>();
+      return std::accumulate(data, data + info->GetElementCount(), 0LL);
+    }
+  }
   return 0;
 }
 
@@ -45,9 +60,6 @@ std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& mo
   if (model.config_->model.type == "gemma4" ||
       model.config_->model.type == "gemma4_unified") {
     return std::make_unique<Gemma4SpeechState>(model, params);
-  }
-  if (model.config_->model.type == "phi4mm") {
-    return std::make_unique<Phi4MultimodalSpeechState>(model, params);
   }
   if (ModelType::IsLfm2Audio(model.config_->model.type)) {
     return std::make_unique<Lfm2AudioSpeechState>(model, params);

@@ -325,6 +325,9 @@ void MoonshineFrontendSubState::Reset() {
 DeviceSpan<float> MoonshineFrontendSubState::Run(int /*total_length*/,
                                                  DeviceSpan<int32_t>& /*next_tokens*/,
                                                  DeviceSpan<int32_t> /*next_indices*/) {
+  if (model_.config_->model.encoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
+  }
   State::Run(*model_.session_frontend_);
   return {};
 }
@@ -349,6 +352,9 @@ void MoonshineEncoderSubState::SetFeaturesInput(OrtValue* features) {
 DeviceSpan<float> MoonshineEncoderSubState::Run(int /*total_length*/,
                                                 DeviceSpan<int32_t>& /*next_tokens*/,
                                                 DeviceSpan<int32_t> /*next_indices*/) {
+  if (model_.config_->model.encoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
+  }
   State::Run(*model_.session_encoder_);
   return {};
 }
@@ -386,6 +392,9 @@ void MoonshineAdapterSubState::SetInputs(OrtValue* encoded, int64_t pos_offset) 
 DeviceSpan<float> MoonshineAdapterSubState::Run(int /*total_length*/,
                                                 DeviceSpan<int32_t>& /*next_tokens*/,
                                                 DeviceSpan<int32_t> /*next_indices*/) {
+  if (model_.config_->model.encoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
+  }
   State::Run(*model_.session_adapter_);
   return {};
 }
@@ -412,6 +421,9 @@ void MoonshineCrossKvSubState::SetMemoryInput(OrtValue* memory) {
 DeviceSpan<float> MoonshineCrossKvSubState::Run(int /*total_length*/,
                                                 DeviceSpan<int32_t>& /*next_tokens*/,
                                                 DeviceSpan<int32_t> /*next_indices*/) {
+  if (model_.config_->model.encoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
+  }
   State::Run(*model_.session_cross_kv_);
   return {};
 }
@@ -467,6 +479,9 @@ void MoonshineDecoderKvSubState::SetInputs(OrtValue* token, OrtValue* k_self, Or
 DeviceSpan<float> MoonshineDecoderKvSubState::Run(int /*total_length*/,
                                                   DeviceSpan<int32_t>& /*next_tokens*/,
                                                   DeviceSpan<int32_t> /*next_indices*/) {
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
   State::Run(*model_.session_decoder_kv_);
   return {};
 }

@@ -101,7 +101,22 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
   if (patch_embed_path.empty() || vision_attn_path.empty() || patch_merger_path.empty()) return;
 
   OrtSessionOptions* vision_attn_so = nullptr;
+  const Config::RunOptions* patch_embed_run_options = nullptr;
+  const Config::RunOptions* vision_attn_run_options = nullptr;
+  const Config::RunOptions* patch_merger_run_options = nullptr;
   for (auto& stage : config_->model.vision.pipeline) {
+    const Config::RunOptions** run_options = nullptr;
+    if (stage.model_id == "patch_embed") {
+      run_options = &patch_embed_run_options;
+    } else if (stage.model_id == "vision_attn") {
+      run_options = &vision_attn_run_options;
+    } else if (stage.model_id == "patch_merger") {
+      run_options = &patch_merger_run_options;
+    }
+    if (run_options && stage.run_options.has_value()) {
+      *run_options = &stage.run_options.value();
+    }
+
     if (stage.model_id == "vision_attn" && !stage.run_on_cpu) {
       if (stage.session_options.has_value()) {
         auto emplaced = pipeline_session_options_.emplace("vision_attn", OrtSessionOptions::Create());
@@ -121,7 +136,8 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
 
   vision_pipeline_ = std::make_unique<QwenVisionPipeline>(
       ort_env, patch_embed_path, vision_attn_path, patch_merger_path,
-      spatial_merge, patch_size, window_size, vision_attn_so);
+      spatial_merge, patch_size, window_size, vision_attn_so,
+      patch_embed_run_options, vision_attn_run_options, patch_merger_run_options);
 }
 
 std::unique_ptr<State> Qwen2_5_VL_PipelineModel::CreateState(DeviceSpan<int32_t> sequence_lengths,

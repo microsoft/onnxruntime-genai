@@ -10,7 +10,6 @@ namespace Generators {
 struct Gemma4SpeechState : SpeechState {
   using SpeechState::SpeechState;
 
-  int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs) const override;
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, int64_t num_audio_tokens) override;
   void ReuseFeaturesBuffer(MultiModalFeatures& embedding_features) override;
 };

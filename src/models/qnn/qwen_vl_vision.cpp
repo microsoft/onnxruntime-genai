@@ -13,6 +13,21 @@
 
 namespace Generators {
 
+namespace {
+
+std::unique_ptr<OrtRunOptions> CreateRunOptions(const Config::RunOptions* config_run_options) {
+  if (!config_run_options) {
+    return {};
+  }
+  auto run_options = OrtRunOptions::Create();
+  for (const auto& [key, value] : *config_run_options) {
+    run_options->AddConfigEntry(key.c_str(), value.c_str());
+  }
+  return run_options;
+}
+
+}  // namespace
+
 QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
                                        const std::string& patch_embed_model,
                                        const std::string& vision_attn_model,
@@ -20,13 +35,20 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
                                        int64_t spatial_merge_size,
                                        int64_t patch_size,
                                        int64_t window_size,
-                                       const OrtSessionOptions* vision_attn_session_options)
+                                       const OrtSessionOptions* vision_attn_session_options,
+                                       const Config::RunOptions* patch_embed_run_options,
+                                       const Config::RunOptions* vision_attn_run_options,
+                                       const Config::RunOptions* patch_merger_run_options)
     // Match declaration order to avoid MSVC C5038 warning-as-error
     : vision_attn_session_options_(vision_attn_session_options),
       spatial_merge_size_(spatial_merge_size),
       patch_size_(patch_size),
       window_size_(0),
       env_(env) {
+  patch_embed_run_options_ = CreateRunOptions(patch_embed_run_options);
+  vision_attn_run_options_ = CreateRunOptions(vision_attn_run_options);
+  patch_merger_run_options_ = CreateRunOptions(patch_merger_run_options);
+
   if (spatial_merge_size_ <= 0)
     throw std::runtime_error("spatial_merge_size must be > 0, got " + std::to_string(spatial_merge_size_));
   if (patch_size_ <= 0)
@@ -134,7 +156,7 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   const char* pe_output_names[] = {pe_out_name.c_str()};
   OrtValue* pe_outputs[] = {pe_out_tensor.get()};
 
-  patch_embed_session_->Run(nullptr, pe_input_names, pe_inputs, 1, pe_output_names, pe_outputs, 1);
+  patch_embed_session_->Run(patch_embed_run_options_.get(), pe_input_names, pe_inputs, 1, pe_output_names, pe_outputs, 1);
 
   const int64_t seq_len = num_patches;
   const int64_t window_area = spatial_merge_size_ * spatial_merge_size_;
@@ -198,7 +220,7 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   const char* attn_output_names[] = {attn_out_name.c_str()};
   OrtValue* attn_outputs[] = {attn_out_tensor.get()};
 
-  vision_attn_session_->Run(nullptr, attn_input_names, attn_inputs, 1, attn_output_names, attn_outputs, 1);
+  vision_attn_session_->Run(vision_attn_run_options_.get(), attn_input_names, attn_inputs, 1, attn_output_names, attn_outputs, 1);
 
   auto merger_in_tensor = CreateTensor(attn_out_buf_.data(), attn_out_buf_.size(), attn_shape);
   auto merger_in_name = patch_merger_session_->GetInputName(0);
@@ -224,7 +246,7 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   const char* merger_output_names[] = {merger_out_name.c_str()};
   OrtValue* merger_outputs[] = {merger_out_tensor.get()};
 
-  patch_merger_session_->Run(nullptr, merger_input_names, merger_inputs, 1, merger_output_names, merger_outputs, 1);
+  patch_merger_session_->Run(patch_merger_run_options_.get(), merger_input_names, merger_inputs, 1, merger_output_names, merger_outputs, 1);
 
   final_embeddings_buf_.resize(merger_out_buf_.size());
 

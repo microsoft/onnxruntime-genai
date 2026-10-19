@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <stdexcept>
 
+#include "config.h"
 #include "models/onnxruntime_api.h"
 
 namespace Generators {
@@ -55,7 +56,10 @@ struct QwenVisionPipeline {
                      int64_t spatial_merge_size,
                      int64_t patch_size = 14,
                      int64_t window_size = 0,
-                     const OrtSessionOptions* vision_attn_session_options = nullptr);
+                     const OrtSessionOptions* vision_attn_session_options = nullptr,
+                     const Config::RunOptions* patch_embed_run_options = nullptr,
+                     const Config::RunOptions* vision_attn_run_options = nullptr,
+                     const Config::RunOptions* patch_merger_run_options = nullptr);
   const OrtSessionOptions* vision_attn_session_options_{};
 
   QwenVisionPipeline(const QwenVisionPipeline&) = delete;
@@ -86,6 +90,9 @@ struct QwenVisionPipeline {
   std::unique_ptr<OrtSession> patch_embed_session_;
   std::unique_ptr<OrtSession> vision_attn_session_;
   std::unique_ptr<OrtSession> patch_merger_session_;
+  std::unique_ptr<OrtRunOptions> patch_embed_run_options_;
+  std::unique_ptr<OrtRunOptions> vision_attn_run_options_;
+  std::unique_ptr<OrtRunOptions> patch_merger_run_options_;
 
   // Hidden dimension sizes read from the ONNX model output shapes at construction time.
   // Populated in the constructor; -1 means the dimension is dynamic/unknown.
