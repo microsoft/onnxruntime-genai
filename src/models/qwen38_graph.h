@@ -9,6 +9,7 @@
 // (src/engine/qwen38_graph_executor.h). The model is served by the Engine API only; there is no Generator state.
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <deque>
@@ -49,6 +50,7 @@ struct Qwen38WeightPool {
   // Adds the shared initializers of one session label ("target", "head_r2", "dense", "head_kv", ...) to its options.
   size_t AddTo(OrtSessionOptions& options, const std::string& label) const;
   size_t bytes{};
+  size_t cpu_bytes{};
   size_t host_mapped_bytes{};
   double seconds{};
 
@@ -65,10 +67,13 @@ struct Qwen38WeightPool {
     bool owns_device_ptr{false};
     uint8_t* ptr{};
     std::unique_ptr<OrtValue> value;
+    std::unique_ptr<OrtValue> gpu_mapped_value;
   };
   Qwen38Plane& plane_;
+  std::unique_ptr<OrtMemoryInfo> cpu_memory_info_;
+  std::map<std::pair<std::filesystem::path, bool>, std::unique_ptr<Qwen38FileMapping>> file_mappings_;
+  std::vector<void*> registered_ranges_;
   std::vector<Entry> entries_;
-  std::map<std::filesystem::path, std::unique_ptr<Qwen38FileMapping>> file_mappings_;
   std::map<std::string, std::vector<std::pair<std::string, int>>> sessions_;
 };
 
@@ -99,6 +104,92 @@ struct Qwen38QsaConstants {
 
  private:
   PlaneBuffer buffer_;
+};
+
+// Prompt & output n-gram suffix lookup drafter for multi-draft / hybrid MTP+lookup speculation.
+struct Qwen38SuffixDrafter {
+  static constexpr size_t kTableSize = 8192;
+  static constexpr size_t kTableMask = kTableSize - 1;
+
+  Qwen38SuffixDrafter() { Reset(); }
+
+  void Reset() noexcept {
+    tokens_.clear();
+    ngram3_pos_.fill(-1);
+    ngram3_key_.fill(0);
+    ngram2_pos_.fill(-1);
+    ngram2_key_.fill(0);
+  }
+
+  void AppendToken(int32_t tok) {
+    const int32_t next_pos = static_cast<int32_t>(tokens_.size());
+    if (tokens_.size() >= 2) {
+      const uint64_t k2 = Pack2(tokens_[tokens_.size() - 2], tokens_[tokens_.size() - 1]);
+      const size_t slot2 = Hash64(k2) & kTableMask;
+      ngram2_key_[slot2] = k2;
+      ngram2_pos_[slot2] = next_pos;
+    }
+    if (tokens_.size() >= 3) {
+      const uint64_t k3 = Pack3(tokens_[tokens_.size() - 3], tokens_[tokens_.size() - 2], tokens_[tokens_.size() - 1]);
+      const size_t slot3 = Hash64(k3) & kTableMask;
+      ngram3_key_[slot3] = k3;
+      ngram3_pos_[slot3] = next_pos;
+    }
+    tokens_.push_back(tok);
+  }
+
+  void AppendSpan(std::span<const int32_t> span) {
+    tokens_.reserve(tokens_.size() + span.size());
+    for (int32_t t : span) AppendToken(t);
+  }
+
+  int ProposeDrafts(int32_t pending_token, int max_drafts, int32_t* out_drafts, int min_ngram = 3) const noexcept {
+    if (max_drafts <= 0 || out_drafts == nullptr || tokens_.empty()) return 0;
+    int32_t match_pos = -1;
+    if (tokens_.size() >= 2) {
+      const uint64_t k3 = Pack3(tokens_[tokens_.size() - 2], tokens_[tokens_.size() - 1], pending_token);
+      const size_t slot3 = Hash64(k3) & kTableMask;
+      if (ngram3_pos_[slot3] >= 0 && ngram3_key_[slot3] == k3) {
+        match_pos = ngram3_pos_[slot3];
+      }
+    }
+    if (match_pos < 0 && min_ngram <= 2 && !tokens_.empty()) {
+      const uint64_t k2 = Pack2(tokens_[tokens_.size() - 1], pending_token);
+      const size_t slot2 = Hash64(k2) & kTableMask;
+      if (ngram2_pos_[slot2] >= 0 && ngram2_key_[slot2] == k2) {
+        match_pos = ngram2_pos_[slot2];
+      }
+    }
+    if (match_pos < 0 || static_cast<size_t>(match_pos) >= tokens_.size()) return 0;
+    int count = 0;
+    while (count < max_drafts && static_cast<size_t>(match_pos + count) < tokens_.size()) {
+      out_drafts[count] = tokens_[match_pos + count];
+      ++count;
+    }
+    return count;
+  }
+
+ private:
+  static uint64_t Pack2(int32_t a, int32_t b) noexcept {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) | static_cast<uint32_t>(b);
+  }
+  static uint64_t Pack3(int32_t a, int32_t b, int32_t c) noexcept {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(a) & 0x1FFFFFu) << 42) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(b) & 0x1FFFFFu) << 21) |
+           static_cast<uint64_t>(static_cast<uint32_t>(c) & 0x1FFFFFu);
+  }
+  static size_t Hash64(uint64_t x) noexcept {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return static_cast<size_t>(x);
+  }
+
+  std::vector<int32_t> tokens_;
+  std::array<int32_t, kTableSize> ngram3_pos_{};
+  std::array<uint64_t, kTableSize> ngram3_key_{};
+  std::array<int32_t, kTableSize> ngram2_pos_{};
+  std::array<uint64_t, kTableSize> ngram2_key_{};
 };
 
 // Owns every device-side object of one model. Graphs stay captured across Engines (see Qwen38GraphModel::AcquireDevice).
@@ -145,6 +236,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   struct RowInputs {  // fixed-address per-row-count inputs of the target
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
     uint8_t* input_ids{};
+    uint8_t* inputs_embeds{};
     uint8_t* position_ids{};
     uint8_t* committed{};
     uint8_t* ple{};
@@ -215,16 +307,20 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   bool skip_refeed_{};
   bool fold_{};
   bool force_reject_{};  // test hook (fold.force_reject): every draft is replaced before its verify
+  int verify_rows_{2};   // rows verified per target forward pass (2 = 1 draft, 3 = 2 drafts, 4 = 3 drafts)
+  int num_banks_{Qwen38DecodeLedger::kBanks};
   static constexpr int kBanks = Qwen38DecodeLedger::kBanks;
+  static constexpr int kMaxBanks = 5;
+  static constexpr int kMaxVerifyRows = 4;
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
   // target state
   std::map<std::string, std::unique_ptr<DevTensor>> store_;   // in-place KV / positions
   std::map<std::string, std::unique_ptr<DevTensor>> shared_;  // index_key buffers
-  Bank banks_[kBanks + 1];                                    // last = scratch sink for S=1 present_mid
-  RowInputs inputs_[2];
-  Direction dirs_[2][kBanks];  // [rows-1][phase]
+  Bank banks_[kMaxBanks + 1];                                 // last = scratch sink for S=1 present_mid
+  RowInputs inputs_[kMaxVerifyRows];
+  Direction dirs_[kMaxVerifyRows][kMaxBanks];  // [rows-1][phase]
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
   std::vector<std::unique_ptr<DevTensor>> head_views_;
   std::deque<PlaneBuffer> owned_;  // individually allocated tensors
@@ -246,7 +342,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   struct HeadBank {
     PlaneBuffer arena;
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
-  } head_banks_[3];  // two ping-pong banks (S=1/S=2 head sessions) or the three ring phases (fold)
+  } head_banks_[kMaxBanks];  // two ping-pong banks (S=1/S=2 head sessions) or the ring phases (fold)
   int head_length_{};
   int head_turn_{};
   int head_cur_{};  // fold: head ring phase
@@ -264,13 +360,14 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     uint8_t* next_token{};
     uint8_t* status{};
     size_t status_count{};
-    Direction dirs[3];
+    Direction dirs[kMaxBanks];
   } head_r2_;
   std::map<std::string, std::unique_ptr<DevTensor>> fold_tensors_;  // fold.* inputs (the device control block)
   PlaneBuffer fold_ptrs_;
 
-  // fast prefill (dense session + hand-off + batched head KV prefill); null when not configured
+  // fast prefill (dense session + hand-off + batched head KV prefill, or unified target/head_r2 prefill); null when not configured
   struct FastPrefillState {
+    bool unified{};
     OrtSession* dense{};
     SessionInfo dense_info;
     std::vector<std::string> dense_inputs, dense_outputs;
@@ -280,6 +377,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     Qwen38QsaConstants* consts{};
 
     PlaneBuffer ones, idx, ples, raw_keys, scratch;  // ones: attention mask; idx: logits_indices; ples: PLE rows of a chunk
+    PlaneBuffer embeds;                              // device buffer for CPU embedding.onnx output [1, m, hidden_width_]
+    PlaneHostBuffer embeds_host;                     // pinned host staging buffer for CPU embedding.onnx output [m, hidden_width_]
     std::deque<PlaneBuffer> zero_buffers;
     std::map<std::string, std::unique_ptr<OrtValue>> initial;  // zero-length / zero initial states of the dense model
     std::map<std::string, std::unique_ptr<OrtValue>> states;   // dense `past` inputs (outputs of the previous chunk)
@@ -291,6 +390,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
 
   // host state
   Qwen38DecodeLedger ledger_;
+  Qwen38SuffixDrafter suffix_drafter_;
+  int suffix_lookup_mode_{0};  // 0=off, 1=always prefer 3-gram suffix match, 2=fallback on prior draft reject
   uint64_t seq_{};
   bool inflight_{};
   bool decode_started_{};
@@ -315,6 +416,11 @@ struct Qwen38GraphModel : Model {
   // they were given, then the plane library.
   std::unique_ptr<Qwen38Plane> plane_;
   std::unique_ptr<Qwen38WeightPool> pool_;
+  std::unique_ptr<Qwen38FileMapping> embed_mapping_;
+  std::vector<std::unique_ptr<OrtValue>> embed_values_;
+  std::unique_ptr<OrtSessionOptions> embedding_session_options_;
+  std::unique_ptr<OrtSession> session_embedding_;
+  std::unique_ptr<OrtRunOptions> embedding_run_options_;
   std::unique_ptr<Qwen38QsaConstants> qsa_constants_;
   std::unique_ptr<OrtSession> session_target_;
   std::unique_ptr<OrtSessionOptions> head_session_options_;
@@ -322,6 +428,8 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<OrtSessionOptions> head_r2_session_options_, dense_session_options_, head_kv_session_options_;
   std::unique_ptr<OrtSession> session_head_r2_, session_dense_, session_head_kv_;
   std::unique_ptr<Qwen38GraphEngine> engine_;
+
+  void RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const;
 
  private:
   std::atomic<bool> leased_{false};
