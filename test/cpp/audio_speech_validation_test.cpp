@@ -431,10 +431,10 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
   Generators::TokenPostProcessor processor{*model, *generator};
   const auto repeated = tokenizer->Encode(" Hello");
   source->SetStep(repeated, 2);
-  for (auto& interval : source->last_token_intervals_) interval.stop = 7;
+  for (auto& token_interval : source->last_token_intervals_) token_interval.stop = 7;
   processor.ProcessNextTokens();
   source->SetStep(repeated, 20);
-  for (auto& interval : source->last_token_intervals_) interval.stop = 23;
+  for (auto& token_interval : source->last_token_intervals_) token_interval.stop = 23;
   processor.ProcessNextTokens();
   std::vector<Generators::TimestampRecord> words;
   for (const auto& result : processor.GetNextTokenResults())
