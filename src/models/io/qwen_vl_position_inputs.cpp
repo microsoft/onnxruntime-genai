@@ -54,6 +54,24 @@ struct FillMaskFunctor {
   }
 };
 
+struct UpdateCapturedMaskFunctor {
+  OrtValue* attention_mask;
+  const std::array<int64_t, 2>& shape;
+  int64_t previous_length;
+  int64_t total_length;
+
+  template <typename T>
+  void operator()() {
+    auto* mask = attention_mask->GetTensorMutableData<T>();
+    const int64_t begin = std::min(previous_length, total_length);
+    const int64_t end = std::max(previous_length, total_length);
+    const T value = total_length > previous_length ? T{1} : T{0};
+    for (int64_t b = 0; b < shape[0]; ++b) {
+      std::fill(mask + b * shape[1] + begin, mask + b * shape[1] + end, value);
+    }
+  }
+};
+
 struct InitPositionIdsFunctor {
   Qwen2VLPositionInputs* self;
   DeviceSpan<int32_t> next_tokens;
@@ -450,15 +468,8 @@ void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length) {
   if (state_.params_->use_graph_capture) {
     if (total_length < 0 || total_length > attention_mask_shape_[1])
       throw std::runtime_error("Qwen2VLPositionInputs: attention mask length exceeds max_length");
-    DispatchOnType(type_, [&]<typename T>() {
-      auto* mask = captured_attention_mask_cpu_->GetTensorMutableData<T>();
-      const int64_t begin = std::min<int64_t>(captured_attention_mask_length_, total_length);
-      const int64_t end = std::max<int64_t>(captured_attention_mask_length_, total_length);
-      const T value = total_length > captured_attention_mask_length_ ? T{1} : T{0};
-      for (int64_t b = 0; b < attention_mask_shape_[0]; ++b) {
-        std::fill(mask + b * attention_mask_shape_[1] + begin, mask + b * attention_mask_shape_[1] + end, value);
-      }
-    });
+    DispatchOnType(type_, UpdateCapturedMaskFunctor{captured_attention_mask_cpu_.get(), attention_mask_shape_,
+                                                    captured_attention_mask_length_, total_length});
     captured_attention_mask_length_ = total_length;
     attention_mask_->GetByteSpan().CopyFrom(
         ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *captured_attention_mask_cpu_));
