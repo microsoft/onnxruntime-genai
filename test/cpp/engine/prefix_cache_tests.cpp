@@ -127,6 +127,39 @@ TEST(PrefixCacheTest, ExactPrefixMatchAdoptsEveryFullBlock) {
   EXPECT_EQ(cache.Metrics().matched_tokens, 2 * kBlockSize);
 }
 
+TEST(PrefixCacheTest, PagedIdentityStoresTokensWithoutLogicalMetadata) {
+  BlockPool pool{kBlockSize, 2};
+  PrefixCache cache{pool, MakeOptions(2)};
+  const std::array<int32_t, kBlockSize> tokens{1, 2, 3, 4};
+  std::shared_ptr<const BlockIdentity> parent;
+  auto block = SealBlock(pool, cache, tokens, parent);
+
+  ASSERT_NE(parent, nullptr);
+  EXPECT_EQ(parent->logical, nullptr);
+  EXPECT_EQ(parent->Tokens().data(), parent->tokens.data());
+  EXPECT_EQ(parent->Tokens().size(), tokens.size());
+  EXPECT_EQ(cache.Match(tokens, tokens.size()).blocks, std::vector<std::shared_ptr<Block>>{block});
+  pool.Release(block);
+}
+
+TEST(PrefixCacheTest, CheckpointPublicationWithoutCapacityKeepsPagedHistory) {
+  BlockPool pool{kBlockSize, 2};
+  PrefixCache cache{pool, MakeOptions(2)};
+  const std::array<int32_t, kBlockSize> tokens{1, 2, 3, 4};
+  std::shared_ptr<const BlockIdentity> parent;
+  auto retained = SealBlock(pool, cache, tokens, parent);
+  auto suffix = pool.AllocateBlocks(kBlockSize);
+
+  EXPECT_EQ(cache.CheckCheckpointedPrefix(suffix, tokens, {}),
+            PrefixCacheRegistrationStatus::CapacityRefused);
+  EXPECT_EQ(cache.CheckpointCount(), 0u);
+  EXPECT_FALSE(suffix.front()->HasIdentity());
+  EXPECT_EQ(cache.Match(tokens, tokens.size()).blocks,
+            std::vector<std::shared_ptr<Block>>{retained});
+  pool.Release(retained);
+  pool.Free(suffix);
+}
+
 TEST(PrefixCacheTest, PartialPrefixMatchStopsAtTheFirstDivergingBlock) {
   BlockPool pool{kBlockSize, 8};
   PrefixCache cache{pool, MakeOptions(8)};

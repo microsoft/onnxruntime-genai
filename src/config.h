@@ -138,8 +138,13 @@ struct Config {
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
+    // Custom-op library or libraries registered on the session options: custom_ops_library is registered first,
+    // followed by custom_ops_libraries in order, with duplicate resolved paths registered once. Every entry must
+    // resolve to an existing file in the model folder, a registered EP library directory, or the current working
+    // directory (entries are not searched via LD_LIBRARY_PATH / PATH). OverlayConfig appends to custom_ops_libraries
+    // (an empty [] overlay leaves existing entries unchanged).
     std::optional<std::string> custom_ops_library;
-    std::vector<std::string> custom_ops_libraries;  // Additional custom-op libraries, registered after custom_ops_library
+    std::vector<std::string> custom_ops_libraries;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
@@ -245,6 +250,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      bool prefault{true};
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
@@ -754,9 +760,9 @@ struct Config {
       bool warmup{true};  // Run the graph warm-up (captures every graph id) when the engine is created
 
       struct Mtp {
-        bool enabled{true};        // false: plain S=1 graph decode (no draft/verify)
-        bool prefill_head{true};   // feed the prompt hidden rows to the head (vLLM does the same)
-        bool skip_refeed{false};   // experiment: on accept feed only the last row to the head (lower acceptance)
+        bool enabled{true};       // false: plain S=1 graph decode (no draft/verify)
+        bool prefill_head{true};  // feed the prompt hidden rows to the head (vLLM does the same)
+        bool skip_refeed{false};  // experiment: on accept feed only the last row to the head (lower acceptance)
       } mtp;
 
       // Folded decode cycle (v12 stack): the MTP head lives inside the verify graph, one graph launch per cycle.
@@ -764,7 +770,7 @@ struct Config {
       // head_r2 is the standalone R=2 head session used for the prompt context (pair calls) and the first draft.
       struct Fold {
         bool enabled{false};
-        int target_graph_id{71};  // 3 ids (ring phases)
+        int target_graph_id{71};   // 3 ids (ring phases)
         bool force_reject{false};  // test hook: every draft is replaced by a different token before the verify (each cycle commits the greedy token only)
         struct HeadR2 {
           std::string filename;
@@ -811,6 +817,14 @@ struct Config {
       int selector_top_k{};
       int mask_token_id{};
       int sliding_window{-1};
+      // How a sampled (non-greedy) turn drafts. Greedy turns always walk the lattice greedily.
+      enum class SampledProposal {
+        None,         // Sampled turns decode without block drafts.
+        GreedyPath,   // Greedy lattice path, verified by sampling the target and matching.
+        Independent,  // Each slot sampled from its own proposal; ratio-verified.
+        Lattice,      // Path sampled through the lattice at the turn's policy; ratio-verified.
+      };
+      SampledProposal sampled_proposal{SampledProposal::Lattice};
       bool independent_sampling{};
       float sampling_temperature{0.1f};
       float sampling_top_p{0.95f};
@@ -900,6 +914,7 @@ struct Config {
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       bool prefix_caching{true};
       bool prefix_caching_explicitly_set{};
+      size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -923,6 +938,9 @@ struct Config {
     struct Eligibility {
       std::optional<uint64_t> minimum_total_device_memory_bytes;
       std::optional<uint64_t> maximum_total_device_memory_bytes;
+      std::optional<uint64_t> minimum_free_device_memory_bytes;
+      std::optional<uint64_t> maximum_free_device_memory_bytes;
+      std::optional<bool> is_integrated;
     } eligibility;
 
     struct Overlay {
@@ -934,6 +952,7 @@ struct Config {
         std::optional<size_t> num_blocks;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
+        std::optional<size_t> dflash2_max_snapshots;
       } dynamic_batching;
 
       struct Search {
@@ -965,10 +984,19 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
 // Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
+// custom_ops_library and custom_ops_libraries are inherited together only when the child sets neither; because
+// custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.
 void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+struct RuntimeProfileDeviceFacts {
+  uint64_t total_device_memory_bytes{};
+  std::optional<bool> is_integrated;
+  // Unset means unknown: profiles with free-memory bounds do not match.
+  std::optional<uint64_t> free_device_memory_bytes;
+};
+void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
 

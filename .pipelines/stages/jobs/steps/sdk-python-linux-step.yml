@@ -109,6 +109,11 @@ steps:
 
           if [ "${{ parameters.ep }}" = "cuda" ]; then
             echo "$WHL" | grep -q "cuda" || { echo "ASSERT FAIL: CUDA wheel name missing cuda"; exit 1; }
+            if [ "${{ parameters.arch }}" = "arm64" ]; then
+              echo "$WHL" | grep -Eq "manylinux[^/]*_aarch64\.whl$" || {
+                echo "ASSERT FAIL: ARM64 CUDA wheel is not tagged aarch64: $WHL"; exit 1; }
+              $PY -c "import struct,sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); libs=[n for n in z.namelist() if n.endswith(\".so\")]; assert any(n.endswith(\"libonnxruntime-genai-cuda.so\") for n in libs), \"CUDA shim missing\"; assert any(n.endswith(\"libonnxruntime-genai.so\") for n in libs), \"GenAI core missing\"; is_arm64=lambda n: (lambda h: h[:4]==b\"\x7fELF\" and struct.unpack(\"<H\", h[18:20])[0]==183)(z.open(n).read(20)); assert all(map(is_arm64, libs)), \"non-AArch64 ELF in wheel\"" "$WHL"
+            fi
             echo "ASSERT OK: CUDA wheel produced for ${v}"
           else
             # The wheel declares onnxruntime>=<python_dependency_version>; install

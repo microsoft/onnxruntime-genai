@@ -194,6 +194,32 @@ def test_moe_rejects_bad_prepacked():
         MoEConfig.from_dict({"type": "int4", "weights_prepacked": 2})
 
 
+def test_moe_mixed_width_round_trip():
+    config = MoEConfig.from_dict({"type": "int4", "fc1_type": "int2", "fc2_type": "int4", "block_size": 64})
+
+    assert config.fc1_type == "int2"
+    assert config.fc2_type == "int4"
+    assert MoEConfig.from_dict(config.to_dict()) == config
+
+
+def test_moe_mixed_width_rejects_non_integer_type():
+    with pytest.raises(ValueError, match="only supported for integer QMoE"):
+        MoEConfig.from_dict({"type": "mxfp4", "fc1_type": "int2"})
+
+
+@pytest.mark.parametrize("projection_type", ["uint4", "uint8"])
+def test_moe_mixed_width_rejects_unsigned_integer_type(projection_type):
+    with pytest.raises(ValueError, match="must be int2, int4, or int8"):
+        MoEConfig.from_dict({"type": "int4", "fc1_type": projection_type})
+
+
+def test_dense_weights_accept_int2_for_component_validation():
+    config = QuantConfig.from_dict({"weights": {"type": "int2"}})
+
+    assert config.weights.type == "int2"
+    assert QuantConfig.from_dict(config.to_dict()) == config
+
+
 def test_runtime_rejects_bad_prepacked():
     with pytest.raises(ValueError, match="matmulnbits_weights_prepacked must be"):
         RuntimeConfig.from_dict({"matmulnbits_weights_prepacked": 3})
@@ -251,27 +277,12 @@ def test_structured_op_types_accepts_supported_arrays(op_types):
 
 def test_extra_options_accepts_legacy_integer_strings():
     config = QuantConfig.from_extra_options(
-        {"accuracy_level": "4"},
+        {"accuracy_level": "4", "qmoe_weights_prepacked": "-1", "matmulnbits_weights_prepacked": "2"},
         precision="int4",
     )
     assert config.weights.accuracy_level == 4
-    assert config.moe.weights_prepacked == 0
-    assert config.runtime.matmulnbits_weights_prepacked == 0
-
-
-@pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "trt-rtx"])
-def test_weight_packing_intent_is_unresolved_before_model_initialization(provider):
-    config = QuantConfig.from_extra_options({}, precision="int4", execution_provider=provider)
-
-    assert config.moe.weights_prepacked == 0
-    assert config.runtime.matmulnbits_weights_prepacked == 0
-
-
-@pytest.mark.parametrize("option", ["qmoe_weights_prepacked", "matmulnbits_weights_prepacked"])
-@pytest.mark.parametrize("value", [0, 1, 2, "0", "1", "2"])
-def test_weight_packing_extra_options_are_removed(option, value):
-    with pytest.raises(ValueError, match="weight packing is determined by the execution provider"):
-        QuantConfig.from_extra_options({option: value})
+    assert config.moe.weights_prepacked == -1
+    assert config.runtime.matmulnbits_weights_prepacked == 2
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +371,7 @@ def test_extra_options_precision_int4_defaults():
     assert cfg.moe.type == "int4"
     # CUDA default QMoE block size is 32 (128 is TRT-RTX only).
     assert cfg.moe.block_size == 32
-    assert cfg.moe.weights_prepacked == 0
+    assert cfg.moe.weights_prepacked == -1
     assert cfg.runtime.matmulnbits_weights_prepacked == 0
 
 
@@ -449,16 +460,18 @@ def test_extra_options_int8_precision_defaults_moe_to_int8():
     assert QuantConfig.from_extra_options({"moe_quant_type": "int4"}, precision="int8").moe.type == "int4"
 
 
-def test_extra_options_qdq_and_block_size_preserve_provider_packing():
+def test_extra_options_runtime_and_prepack_knobs():
     cfg = QuantConfig.from_extra_options(
         {
             "use_qdq": True,
+            "matmulnbits_weights_prepacked": 2,
+            "qmoe_weights_prepacked": 1,
             "qmoe_block_size": 64,
         },
         precision="int4",
         execution_provider="cuda",
     )
     assert cfg.runtime.use_qdq is True
-    assert cfg.runtime.matmulnbits_weights_prepacked == 0
-    assert cfg.moe.weights_prepacked == 0
+    assert cfg.runtime.matmulnbits_weights_prepacked == 2
+    assert cfg.moe.weights_prepacked == 1
     assert cfg.moe.block_size == 64

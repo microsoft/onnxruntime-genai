@@ -120,5 +120,3 @@ jobs:
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
         core_artifact: $(coreArtifact)
-
-  - template: steps/compliant-and-cleanup-step.yml

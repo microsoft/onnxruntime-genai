@@ -41,6 +41,12 @@ class MTPModel:
             if isinstance(mtp_quant_config_value, QuantConfig)
             else QuantConfig.from_json(mtp_quant_config_value)
         )
+        if (
+            quant_config.weights.type == "int2"
+            or quant_config.moe.type == "int2"
+            or any(override.type == "int2" for override in quant_config.weights.overrides)
+        ):
+            raise ValueError("MTP quant_config does not support int2; use DFlash2")
         self.mtp_attrs["io_dtype"], self.mtp_attrs["onnx_dtype"] = quant_config.to_onnx_dtypes()
         inherited_options["_quant_config"] = quant_config
         self.mtp_attrs["extra_options"] = inherited_options

@@ -774,6 +774,10 @@ def test_qwen3_5_hybrid_text_generation_webgpu(test_data_path):
 
 
 @pytest.mark.graph_capture
+@pytest.mark.skipif(
+    _webgpu_plugin_registered and sys.platform == "win32",
+    reason="Qwen3.5 fixture is not fully partitioned to Windows WebGPU; graph capture requires all nodes on the EP",
+)
 @pytest.mark.skipif(not _webgpu_plugin_registered, reason="onnxruntime-ep-webgpu plugin not installed")
 def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(tmp_path):
     """Graph capture must preserve both directions of WebGPU recurrent-state double buffering."""
@@ -781,7 +785,9 @@ def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(tmp_path):
     if os.environ.get(_QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD) != "1":
         # validationMode is a process-wide WebGPU setting. Isolate this regression from earlier
         # WebGPU tests that may already have initialized the context with the default mode.
-        test_node = f"{Path(__file__).resolve()}::{test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu.__name__}"
+        test_node = (
+            f"{Path(__file__).resolve()}::{test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu.__name__}"
+        )
         run_subprocess(
             [sys.executable, "-m", "pytest", "-sv", test_node],
             env={_QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD: "1"},

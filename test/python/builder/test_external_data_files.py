@@ -21,10 +21,7 @@ def test_save_model_places_mapped_initializer_in_separate_external_data(tmp_path
         "model.layers.1.ple.ngram_embedding.weight_scale": np.array([0.5], dtype=np.float16),
         "model.layers.0.mlp.weight": np.arange(6, dtype=np.float16).reshape(2, 3),
     }
-    initializers = [
-        ir.Value(name=name, const_value=ir.tensor(value, name=name))
-        for name, value in values.items()
-    ]
+    initializers = [ir.Value(name=name, const_value=ir.tensor(value, name=name)) for name, value in values.items()]
     graph = ir.Graph(inputs=(), outputs=(), nodes=(), initializers=initializers, opset_imports={"": 22})
 
     builder = Model.__new__(Model)
@@ -33,9 +30,7 @@ def test_save_model_places_mapped_initializer_in_separate_external_data(tmp_path
     builder.cache_dir = os.fspath(tmp_path / "cache")
     builder.quant_type = None
     builder.onnx_dtype = ir.DataType.FLOAT16
-    builder.external_data_files = {
-        "model.layers.1.ple.ngram_embedding.weight": "engram.onnx.data"
-    }
+    builder.external_data_files = {"model.layers.1.ple.ngram_embedding.weight": "engram.onnx.data"}
 
     builder.save_model(tmp_path)
 
@@ -59,20 +54,28 @@ def test_save_model_references_existing_engram_data_without_rewriting_it(tmp_pat
     table_name = "model.ple.ngram_embedding.weight"
     table = np.arange(12, dtype=np.uint8).reshape(3, 4)
     engram_graph = ir.Graph(
-        inputs=(), outputs=(), nodes=(),
+        inputs=(),
+        outputs=(),
+        nodes=(),
         initializers=[
             ir.Value(name="small", const_value=ir.tensor(np.array([1], dtype=np.int64), name="small")),
             ir.Value(name=table_name, const_value=ir.tensor(table, name=table_name)),
         ],
         opset_imports={"": 22},
     )
-    ir.save(ir.Model(engram_graph, ir_version=10), tmp_path / "engram.onnx",
-            external_data="engram.onnx.data", size_threshold_bytes=0)
+    ir.save(
+        ir.Model(engram_graph, ir_version=10),
+        tmp_path / "engram.onnx",
+        external_data="engram.onnx.data",
+        size_threshold_bytes=0,
+    )
     data_path = tmp_path / "engram.onnx.data"
     original_data = data_path.read_bytes()
 
     decoder_graph = ir.Graph(
-        inputs=(), outputs=(), nodes=(),
+        inputs=(),
+        outputs=(),
+        nodes=(),
         initializers=[ir.Value(name=table_name, const_value=ir.tensor(table, name=table_name))],
         opset_imports={"": 22},
     )
@@ -83,7 +86,9 @@ def test_save_model_references_existing_engram_data_without_rewriting_it(tmp_pat
     builder.quant_type = None
     builder.onnx_dtype = ir.DataType.FLOAT16
     builder.external_data_files = {table_name: "engram.onnx.data"}
-    builder.external_data_tensors = {table_name: ir.load(tmp_path / "engram.onnx").graph.initializers[table_name].const_value}
+    builder.external_data_tensors = {
+        table_name: ir.load(tmp_path / "engram.onnx").graph.initializers[table_name].const_value
+    }
 
     builder.save_model(tmp_path)
 

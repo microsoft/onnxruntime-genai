@@ -10,6 +10,7 @@ the chunked append), acceptance rate of the decode that follows.
 
 usage: test_prompts.py <package> --out <json> [--long]
 """
+
 import argparse
 import json
 import os
@@ -41,8 +42,13 @@ def run(model, prompt_chunks, new=48):
     stats = generator.get_speculative_stats()
     seq = [int(x) for x in generator.get_sequence(0)]
     del generator
-    return {"tokens": tokens, "logits": logits, "seconds": time.perf_counter() - t0, "seq_ok": seq == prompt + tokens[: len(seq) - len(prompt)],
-            "accept": stats["draft_tokens_accepted"] / max(1, stats["rounds"])}
+    return {
+        "tokens": tokens,
+        "logits": logits,
+        "seconds": time.perf_counter() - t0,
+        "seq_ok": seq == prompt + tokens[: len(seq) - len(prompt)],
+        "accept": stats["draft_tokens_accepted"] / max(1, stats["rounds"]),
+    }
 
 
 def rel_l2(a, b):
@@ -53,7 +59,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--long", action="store_true", help="also 8191/8192/8193/16385-token prompts and a 12000-token chunked append")
+    parser.add_argument(
+        "--long", action="store_true", help="also 8191/8192/8193/16385-token prompts and a 12000-token chunked append"
+    )
     parser.add_argument("--provider", default=os.environ.get("QWEN_PROVIDER"))
     args = parser.parse_args()
     og.register_execution_provider_library("CUDAExecutionProvider", args.provider)
@@ -73,8 +81,10 @@ def main():
     # state leakage: a longer prompt in between, then the 5-token prompt again
     run(fast, [pool[:4097]])
     again = run(fast, [pool[:5]])
-    results["leakage_5_after_4097"] = {"first_equal": again["tokens"][0] == fast_runs[5]["tokens"][0],
-                                       "logits_rel_l2": rel_l2(fast_runs[5]["logits"], again["logits"])}
+    results["leakage_5_after_4097"] = {
+        "first_equal": again["tokens"][0] == fast_runs[5]["tokens"][0],
+        "logits_rel_l2": rel_l2(fast_runs[5]["logits"], again["logits"]),
+    }
     long_results = {}
     if args.long:
         for n in (8191, 8192, 8193, 16385):
@@ -84,10 +94,14 @@ def main():
         single = run(fast, [pool[:12000]])
         chunked = run(fast, [pool[:5000], pool[5000:10000], pool[10000:12000]])
         single2 = run(fast, [pool[:12000]])
-        results["chunked_12000"] = {"first_equal": single["tokens"][0] == chunked["tokens"][0],
-                                    "logits_rel_l2_chunked_vs_single": rel_l2(single["logits"], chunked["logits"]),
-                                    "logits_rel_l2_single_vs_single": rel_l2(single["logits"], single2["logits"]),
-                                    "seq_ok": chunked["seq_ok"], "accept_chunked": chunked["accept"], "accept_single": single["accept"]}
+        results["chunked_12000"] = {
+            "first_equal": single["tokens"][0] == chunked["tokens"][0],
+            "logits_rel_l2_chunked_vs_single": rel_l2(single["logits"], chunked["logits"]),
+            "logits_rel_l2_single_vs_single": rel_l2(single["logits"], single2["logits"]),
+            "seq_ok": chunked["seq_ok"],
+            "accept_chunked": chunked["accept"],
+            "accept_single": single["accept"],
+        }
         ok &= chunked["seq_ok"]
     del fast
     steps = load(False)
@@ -95,8 +109,14 @@ def main():
     for n in short:
         r = run(steps, [pool[:n]])
         f = fast_runs[n]
-        per_length[n] = {"first_equal_steps": r["tokens"][0] == f["tokens"][0], "logits_rel_l2_vs_steps": rel_l2(r["logits"], f["logits"]),
-                         "accept_fast": f["accept"], "accept_steps": r["accept"], "tokens": len(f["tokens"]), "seq_ok": f["seq_ok"]}
+        per_length[n] = {
+            "first_equal_steps": r["tokens"][0] == f["tokens"][0],
+            "logits_rel_l2_vs_steps": rel_l2(r["logits"], f["logits"]),
+            "accept_fast": f["accept"],
+            "accept_steps": r["accept"],
+            "tokens": len(f["tokens"]),
+            "seq_ok": f["seq_ok"],
+        }
         ok &= f["seq_ok"] and len(f["tokens"]) == 48
     results["lengths"] = per_length
     results["long"] = long_results

@@ -77,6 +77,15 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
       config.engine.dynamic_batching->prefix_caching_explicitly_set);
 }
 
+TEST(CpuEmbeddingConfigTest, PrefaultDefaultsOnAndCanBeDisabled) {
+  const fs::path model_path{std::string{MODEL_PATH "engine/dummy-decoder"}};
+  const Config default_config{model_path, "{}"};
+  EXPECT_TRUE(default_config.model.embedding.prefault);
+
+  const Config cold_start_config{model_path, R"({ "model": { "embedding": { "prefault": false } } })"};
+  EXPECT_FALSE(cold_start_config.model.embedding.prefault);
+}
+
 class InvalidScheduledTokenBudgetTest
     : public ::testing::TestWithParam<const char*> {};
 

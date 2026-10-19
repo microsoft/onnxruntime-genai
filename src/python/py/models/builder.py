@@ -29,6 +29,8 @@ from builders import (
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
+    Gemma4MoEModel,
+    Gemma4Model,
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
@@ -55,14 +57,13 @@ from builders import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen4ExpModel,
-    Qwen4ExpTextModel,
     Qwen25VLTextModel,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from builders.qwen3_5 import Qwen35Model, Qwen35MoEModel
+from builders.qwen import Qwen35Model, Qwen35MoEModel
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
@@ -140,6 +141,16 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     return hf_details
 
 
+def validate_paged_cache_config(dynamic_batching, execution_provider):
+    # An explicit capacity and a utilization factor select incompatible cache-sizing policies.
+    if "num_blocks" in dynamic_batching and "gpu_utilization_factor" in dynamic_batching:
+        raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+    if execution_provider == "webgpu":
+        num_blocks = dynamic_batching.get("num_blocks")
+        if isinstance(num_blocks, bool) or not isinstance(num_blocks, int) or num_blocks <= 0:
+            raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
+
+
 def check_extra_options(
     model_name,
     input_path,
@@ -166,13 +177,16 @@ def check_extra_options(
         "use_cuda_bf16",
         "shared_embeddings",
         "hf_remote",
+        "fuse_qkv",
         "disable_qkv_fusion",
         "fuse_qk_norm_gqa",
         "prune_lm_head",
         "use_paged_attention",
         "windowed_kv_cache",
+        "use_device_allocator_for_initializers",
         "text_only",
         "enable_cuda_fpa_intb_gemm",
+        "fuse_mlp_gate_up",
         "exclude_mtp",
     ]
 
@@ -186,6 +200,11 @@ def check_extra_options(
                 extra_options[key] = True
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
+
+    if "disable_qkv_fusion" in extra_options:
+        print("WARNING: 'disable_qkv_fusion' is deprecated. Use 'fuse_qkv=false' instead.")
+        if "fuse_qkv" not in extra_options:
+            extra_options["fuse_qkv"] = not extra_options["disable_qkv_fusion"]
 
     if "state_window" in extra_options:
         try:
@@ -210,6 +229,8 @@ def check_extra_options(
             raise ValueError(message)
         if state_update_capacity and not extra_options.get("use_paged_attention", False):
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
+        if state_update_capacity and execution_provider == "webgpu":
+            raise ValueError("state_update_capacity > 0 is not supported on WebGPU: Engine compact state replay is not implemented.")
         extra_options["state_update_capacity"] = state_update_capacity
 
     if "max_draft_tokens" in extra_options:
@@ -273,7 +294,6 @@ def check_extra_options(
             raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
-
         if "gpu_utilization_factor" in extra_options:
             try:
                 gpu_utilization_factor = float(extra_options["gpu_utilization_factor"])
@@ -283,10 +303,12 @@ def check_extra_options(
                 raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.")
             extra_options["gpu_utilization_factor"] = gpu_utilization_factor
 
-        # `num_blocks` pins the cache instead of deriving it from free memory, so a
-        # utilization factor would be silently ignored.
-        if "num_blocks" in extra_options and "gpu_utilization_factor" in extra_options:
-            raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+        runtime_batching = extra_options.get("_runtime_config", {}).get("engine", {}).get("dynamic_batching", {})
+        cache_config = {
+            key: extra_options[key] for key in ("num_blocks", "gpu_utilization_factor") if key in extra_options
+        }
+        cache_config.update(runtime_batching)
+        validate_paged_cache_config(cache_config, execution_provider)
     else:
         engine_only_options = [
             key for key in ("max_scheduled_tokens", "num_blocks") if key in extra_options
@@ -311,11 +333,19 @@ def check_extra_options(
 
     for key in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
         if key in extra_options:
-            raise ValueError(f"{key} has been removed; weight packing is determined by the execution provider and GPU SM.")
+            extra_options[key] = int(extra_options[key])
+
+    if extra_options.get("qmoe_weights_prepacked", -1) not in (-1, 0, 1):
+        raise ValueError(f"qmoe_weights_prepacked must be -1, 0, or 1, got {extra_options['qmoe_weights_prepacked']}.")
+
+    if extra_options.get("matmulnbits_weights_prepacked", 0) not in (0, 1, 2):
+        raise ValueError(
+            f"matmulnbits_weights_prepacked must be 0, 1, or 2, got {extra_options['matmulnbits_weights_prepacked']}."
+        )
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
-    supported_moe_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
+    supported_moe_quant_types = {"int2", "int4", "int8", "mxfp4", "nvfp4"}
 
     # Backward compatibility: `use_8bits_moe` is deprecated in favor of `moe_quant_type`.
     if "use_8bits_moe" in extra_options:
@@ -335,12 +365,19 @@ def check_extra_options(
                     f"moe_quant_type={moe_quant_type} is only supported on the CUDA EP, got ep='{execution_provider}'."
                 )
         if moe_quant_type == "mxfp4":
-            if not (precision == "int4" and extra_options.get("is_symmetric", True)):
+            if not (precision in ("int4", "int8") and extra_options.get("is_symmetric", True)):
                 raise ValueError(
-                    "moe_quant_type=mxfp4 requires building with precision=int4 (symmetric int4): the "
-                    "int4 build precision is what exports the quantized QMoE op, and the FP4 scheme only sets the "
-                    "MoE expert weights to the FP4 encoding."
+                    "moe_quant_type=mxfp4 requires building with symmetric int4 or int8 precision: the integer "
+                    "build precision exports the quantized QMoE op, and the FP4 scheme sets only the MoE expert "
+                    "weights to the FP4 encoding."
                 )
+
+    if extra_options.get("moe_quant_type") == "int2":
+        if execution_provider != "cuda":
+            raise ValueError("INT2 QMoE is only supported on the CUDA EP.")
+        qmoe_block_size = int(extra_options.get("qmoe_block_size", 32))
+        if qmoe_block_size not in (64, 128):
+            raise ValueError("INT2 CUDA QMoE requires qmoe_block_size=64 or 128.")
 
     if extra_options.get("exclude_lm_head", False) and extra_options.get("include_hidden_states", False):
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -380,6 +417,13 @@ def check_extra_options(
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
+
+    if (
+        execution_provider == "webgpu"
+        and extra_options.get("use_paged_attention", False)
+        and getattr(config, "attn_logit_softcapping", 0.0) not in (None, 0.0)
+    ):
+        raise ValueError("WebGPU paged attention does not support non-zero attention softcap.")
 
     if "num_hidden_layers" in extra_options:
         num_hidden_layers = int(extra_options["num_hidden_layers"])
@@ -425,10 +469,6 @@ def check_extra_options(
                 "shared_embeddings=true from --extra_options for this model."
             )
 
-    embedding_quant_type = extra_options.get("embedding_quant_type")
-    if embedding_quant_type is not None and embedding_quant_type not in {"int4", "int8"}:
-        raise ValueError("embedding_quant_type must be one of: int4, int8")
-
         op_types_to_quantize = extra_options.get("op_types_to_quantize", ())
 
         if "MatMul" not in op_types_to_quantize:
@@ -438,6 +478,10 @@ def check_extra_options(
             op_types_to_quantize += ("Gather",)
 
         extra_options["op_types_to_quantize"] = op_types_to_quantize
+
+    embedding_quant_type = extra_options.get("embedding_quant_type")
+    if embedding_quant_type is not None and embedding_quant_type not in {"int4", "int8"}:
+        raise ValueError("embedding_quant_type must be one of: int4, int8")
 
 
 def parse_extra_options(
@@ -677,6 +721,16 @@ def create_model(
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "gemma3_vl_text"
+    elif config.architectures[0] == "Gemma4ForConditionalGeneration":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
+    elif config.architectures[0] == "Gemma4UnifiedForConditionalGeneration":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
@@ -802,6 +856,10 @@ def create_model(
         with open(config_path, encoding="utf-8") as config_file:
             genai_config = json.load(config_file)
         genai_config = apply_runtime_config(genai_config, runtime_config)
+        if extra_options.get("use_paged_attention", False):
+            validate_paged_cache_config(
+                genai_config.get("engine", {}).get("dynamic_batching", {}), execution_provider
+            )
         with open(config_path, "w", encoding="utf-8") as config_file:
             json.dump(genai_config, config_file, indent=4)
 
@@ -888,11 +946,13 @@ def get_args():
                     WebGPU requires hidden_size and moe_intermediate_size to be divisible by qmoe_block_size.
                     Raw block-wise INT4 QMoE requires both dimensions to be even.
                     Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
-                CUDA weight packing is automatic from the active NVIDIA GPU: MatMulNBits uses
-                    mode 1 on SM80-class GPUs and mode 2 on SM90-class GPUs. Integer QMoE uses
-                    mode 1 on both because its CUDA kernel uses the SM80 layout even on SM90.
-                    Other EPs, unavailable NVIDIA GPUs, and pre-SM80 GPUs use mode 0 (raw).
-                    Ineligible MatMulNBits projections stay raw. Packing is not configurable.
+                qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
+                    -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.
+                    Default is -1.
+                matmulnbits_weights_prepacked = 0/1/2: Specify the CUDA MatMulNBits (int4/int8) weight layout.
+                    0 exports raw blockwise weights, 1 exports the SM80/Ampere fpA_intB prepacked layout, and 2 exports the SM90/Hopper fpA_intB prepacked layout.
+                    Only applies to the CUDA EP. Eligible prepacked nodes select fpA_intB automatically; the builder enables it for any ineligible nodes left in raw layout.
+                    Default is 0.
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
                 op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
@@ -929,8 +989,6 @@ def get_args():
                     For models with multiple components, each component is exported to its own ONNX model.
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
-                text_only = Export only the standalone text model for Qwen4-Exp conditional-generation checkpoints.
-                    Includes token embeddings in model.onnx and omits the vision and multimodal embedding graphs.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.
                     Default behavior is to use the authentication token stored by `huggingface-cli login`.
                     If false, authentication with Hugging Face will be disabled.
@@ -955,9 +1013,12 @@ def get_args():
                     exclude_lm_head. A block drafter (dflash2_path/dspark_path) already supersedes the head
                     and does not need this option.
                 prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
-                    When enabled for standard models, inserts Gather+Unsqueeze so the MatMul input is [B,1,H] instead
-                    of [B,S,H]. For paged-attention models, gathers the final packed hidden state for each sequence so
-                    the MatMul input is [B,H] instead of [num_tokens,H].
+                    When enabled for standard models, takes each row's last real token (the last 1 in
+                    attention_mask), so padded batches work, and the MatMul input is [B,1,H] instead of [B,S,H].
+                    Pruned models exported by older builders take the last column instead, which is wrong for
+                    the shorter rows of a right-padded batch, so export them again if you run padded batches.
+                    For paged-attention models, gathers the final packed hidden state for each sequence so the
+                    MatMul input is [B,H] instead of [num_tokens,H].
                     Ignored when exclude_lm_head is true.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
@@ -979,12 +1040,28 @@ def get_args():
                     dflash2_num_draft_tokens this does not change the exported drafter, so a model built
                     once can be re-tuned by editing the config. Default is unset, which leaves the runtime
                     default of 4 in effect.
+                dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
+                    Accepts true or false (default). Requires dflash2_path. Combines gate/up
+                    weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
+                    activations and body quantization; does not change the target or LM head.
+                    Requires re-export and workload-specific performance/quality validation.
+                dflash2_fuse_qkv = Experimental DFlash 2 attention Q/K/V projection fusion.
+                    Accepts true or false (default). Requires dflash2_path. Stacks each layer's
+                    query-block rows over the shared context rows and projects both with one
+                    MatMul or MatMulNBits, feeding PagedAttention a packed QKV stream. Replaces
+                    five projections per layer with one; the Q computed for context rows is dropped.
+                    The fused drafter omits the q_row_map input, so it requires a runtime that
+                    treats q_row_map as optional; older runtimes reject the exported package.
+                fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
+                    MatMul or MatMulNBits followed by Split. Default is false. Applies before
+                    target weight quantization and requires unpacked, unadapted gate/up
+                    floating-point projections.
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
                     small dynamic-convolution and candidate-selector projections dense. The body
-                    uses the target's automatic hardware-specific packing policy. CUDA emits
-                    the corresponding fpA-intB layout for
+                    uses the raw blockwise layout by default. On CUDA, a drafter quantization
+                    format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
                     projections the kernel supports (N % 64 for int4, N % 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
                     Body activations and KV caches remain bf16; this option does not quantize the
@@ -1005,12 +1082,18 @@ def get_args():
                     quadratically with this value, so larger values should be benchmarked carefully.
                 mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
                     structured QuantConfig schema independently from the main model.
+                linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
+                    Qwen3.5/3.8 exports. Default is linear_attention. Paged exports always use GatedDeltaNet and
+                    ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and supports fp16
+                    or bf16 I/O.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
-                    Must be an integer from 0 through 8 and requires use_paged_attention=true. This experimental
+                    Must be an integer from 0 through 8 and requires use_paged_attention=true. Positive capacities
+                    are not supported on WebGPU because Engine compact state replay is not implemented. This experimental
                     contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
-                    Qwen3.5/3.8 exports use GatedDeltaNet and require state_window=0.
+                    Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require
+                    state_window=0.
                     Requires ONNX Runtime kernels that implement this attribute.
                 enable_cuda_fpa_intb_gemm = Select the CUDA fpA_intB MatMulNBits kernel family
                     for weights exported in the default raw blockwise layout. Default is false.
@@ -1026,8 +1109,10 @@ def get_args():
                     prune_lm_head=true, adds a logits_indices input that selects the packed hidden states consumed
                     by generation or draft verification, so the model outputs [num_logits, vocab_size] logits.
                     By default, the model outputs [num_tokens, vocab_size] logits.
-                    Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
-                    combined with exclude_embeds or exclude_lm_head.
+                    Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
+                    attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
+                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
+                    exclude_lm_head.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
                     accepts. Default is 256. Also written to the `engine.dynamic_batching` section of
@@ -1070,8 +1155,6 @@ def get_args():
                     Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
                     Only valid for models that tie their input and output embeddings (tie_word_embeddings=true in
                     config.json). Setting shared_embeddings=true for a model with tie_word_embeddings=false raises a ValueError.
-                embedding_quant_type = Quantization type for an independent token embedding: int4 or int8.
-                    This does not tie the token embedding to the LM head. Defaults to the model precision.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
@@ -1081,15 +1164,20 @@ def get_args():
                 enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
                     If enabled, the model structure will be optimized for WebGPU graph execution.
                     This affects attention mask reformatting and position IDs handling.
+                use_device_allocator_for_initializers = Write `session.use_device_allocator_for_initializers=1` into
+                    the decoder's session options. Default is false. Initializers then bypass the arena, so the
+                    originals a kernel replaces during PrePack (notably the fpA_intB MatMulNBits layout conversion)
+                    are returned to the driver instead of being retained as free arena blocks.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
-                moe_quant_type = int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                moe_quant_type = int2/int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                    int2 = 2-bit integer QMoE weights on CUDA. Requires qmoe_block_size=64 or 128.
                     int4 = 4-bit integer QMoE weights (expert_weight_bits=4, quant_type="int").
                     int8 = 8-bit integer QMoE weights (expert_weight_bits=8, quant_type="int").
                     mxfp4 = MXFP4 QMoE weights on the CUDA EP (quant_type="fp4", expert_weight_bits=4, block_size=32):
                         4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale.
-                        Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON, precision=int4 with symmetric
-                        INT4 quantization, and is only supported on the CUDA EP.
+                        Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON, precision=int4 or int8 with
+                        symmetric integer quantization, and is only supported on the CUDA EP.
                     nvfp4 = NVFP4 QMoE weights on the CUDA EP (quant_type="nvfp4", expert_weight_bits=4, block_size=16):
                         4-bit e2m1 weights with FP8-E4M3 block scales and a per-expert float32 global scale.
                         Requires an ONNX Runtime build with NVFP4 QMoE support. The graph precision controls
@@ -1110,8 +1198,11 @@ def get_args():
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
                     An optional "qmax" records the divisor the file was calibrated with (128 for int8, 8 for int4, 448 for fp8);
                     the builder then rescales to the requested scheme, so one file can serve several bit widths.
-                disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
-                    If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
+                fuse_qkv = Fuse the model's Q, K, and V projections. Default is true.
+                    Set to false to keep separate projections. Fusion is automatically disabled for unsupported EPs
+                    and incompatible projection or quantization configurations.
+                disable_qkv_fusion = [DEPRECATED] Use 'fuse_qkv=false' instead.
+                    This inverse alias remains supported for compatibility. Default is false.
                 fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.
                     Set to false to keep explicit Q/K normalization nodes instead of passing Q/K norm weights into GroupQueryAttention.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.

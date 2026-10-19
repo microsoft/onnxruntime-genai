@@ -1,5 +1,17 @@
 # ONNX Runtime GenAI Model Builder
 
+Qwen3.8 (`Qwen4ExpForConditionalGeneration`) exports additionally support the
+Qwen4 experimental decoder, embedding, Engram, vision, and MTP components.
+Sparse paged layers expose per-layer `sparse_attention.%d.selected_indices`
+(`int32`, `[num_tokens, indexer_budget + indexer_compress_ratio - 1]`) and
+`sparse_attention.%d.selected_counts` (`int32`, `[num_tokens]`) inputs. Their name
+templates are recorded in `qwen4_exp.selected_index_names` and
+`qwen4_exp.selected_count_names` ONNX metadata. A packed-aware selector must
+populate these inputs before `SparsePagedAttention`; the standard GenAI Engine
+does not produce them. Non-paged exports compute selections internally with
+`SparseAttentionIndexer`. The dedicated graph runtime is documented in
+[`tools/qwen38_graph/README.md`](../../../../../tools/qwen38_graph/README.md).
+
 This folder contains the model builder for quickly creating optimized and quantized ONNX models within a few minutes that run with ONNX Runtime GenAI.
 
 # Contents
@@ -32,11 +44,11 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
     - [Export a ModelOpt or compressed-tensors NVFP4/FP8 Checkpoint](#export-a-modelopt-or-compressed-tensors-nvfp4fp8-checkpoint)
-    - [MTP Head (Qwen3.6/Qwen3.8)](#mtp-head-qwen3638)
+    - [MTP Head (Qwen3.6)](#mtp-head-qwen36)
     - [Compact State Updates (Qwen3.5/3.8)](#compact-state-updates-qwen3538)
     - [Select the Qwen3.5/3.8 Recurrent Operator](#select-the-qwen3538-recurrent-operator)
     - [Enable WebGPU Graph Capture](#enable-webgpu-graph-capture)
-    - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
+    - [Configure QKV Projections Fusion](#configure-qkv-projections-fusion)
     - [Disable QK Norm GQA Fusion in CUDA or WebGPU](#disable-qk-norm-gqa-fusion-in-cuda-or-webgpu)
     - [Quantization Options](#quantization-options)
       - [Accuracy Level](#accuracy-level)
@@ -75,7 +87,7 @@ The tool currently supports the following model architectures.
 - Granite MoE Hybrid
 - HunYuan Dense V1
 - InternLM2
-- LFM2 (text and the decoders of LFM2-VL / LFM2.5-VL and LFM2-Audio / LFM2.5-Audio)
+- LFM2 (text and the decoders of LFM2-VL / LFM2.5-VL / d1-3B and LFM2-Audio / LFM2.5-Audio)
 - LFM2 MoE
 - Llama
 - Mistral
@@ -137,13 +149,17 @@ python src/python/py/models/builder.py -i path_to_dense_checkpoint -o output -e 
   --runtime_config '{"search":{"max_length":128}}'
 ```
 
-`target_options` routes `quant_config` and `attention` to the existing exporter. `quant_config.format`
-is the canonical graph-layout key; `runtime` remains a parsing alias. The
-target rejects an explicit checkpoint policy until its loaders implement both
-paths. Root CLI `precision` is optional when target weight type is explicit.
+`target_options` routes `quant_config`, `attention`,
+`optimizations.fuse_mlp_gate_up`, and `optimizations.fuse_qkv` to the existing
+exporter. `quant_config.format` is the canonical graph-layout key; `runtime`
+remains a parsing alias. The target rejects an explicit checkpoint policy until
+its loaders implement both paths. Root CLI `precision` is optional when target
+weight type is explicit.
 
-DFlash2 and DSpark selection requires a local checkpoint `path`, paged target
-attention, and BF16 body I/O. Omitted target taps are inferred from checkpoint
+DFlash2 and DSpark selection requires a local checkpoint `path` and paged target
+attention. DSpark uses BF16 body I/O; DFlash2 defaults to BF16 but also supports
+FP16 through `drafter_options.quant_config.io_dtype`. Omitted target taps are
+inferred from checkpoint
 `target_layer_ids + 1` before construction. DFlash2 parses `auto`, `required`,
 and `off` sharing modes and validates adopted quantized-head node attributes.
 MTP/DSpark currently accept only `auto`. Structured drafter selections that
@@ -153,6 +169,29 @@ Runtime fragments are applied after composite configuration generation. Objects
 merge recursively; arrays replace whole. The validator rejects absent engine or
 speculative capabilities, invalid allocation and draft limits, provider changes,
 and changes to graph-required session options.
+
+`runtime_config.engine.dynamic_batching.dflash2_max_snapshots` limits retained
+windowed DFlash 2 prefix snapshots for a hybrid target with fixed state and prefix
+caching enabled. It defaults to `1`, accepts integers from `0`
+through `2147483647`, and uses `0` to disable drafter snapshots without disabling
+target prefix caching. The runtime caps the count by the shared cache memory
+budget and target checkpoint capacity (`max_batch_size`). The same field is
+accepted in `runtime_profiles[].overlay.engine.dynamic_batching`. For a supported
+paged DFlash 2 export, use either form in the structured builder invocation:
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i target_checkpoint -o output -p int4 -e cuda \
+  --builder_config_version 2 --extra_options use_paged_attention=true \
+  --drafter_options '{"drafter_type":"dflash2","path":"drafter_checkpoint"}' \
+  --runtime_config '{"engine":{"dynamic_batching":{"dflash2_max_snapshots":4}}}'
+
+# From source, at the repository root:
+python src/python/py/models/builder.py -i target_checkpoint -o output -p int4 -e cuda \
+  --builder_config_version 2 --extra_options use_paged_attention=true \
+  --drafter_options '{"drafter_type":"dflash2","path":"drafter_checkpoint"}' \
+  --runtime_config '{"runtime_profiles":[{"id":"larger-snapshot-pool","eligibility":{"minimum_total_device_memory_bytes":34359738368},"overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":4}}}}]}'
+```
 
 For memory-dependent INT4/INT8 KV-cache graphs that share external weights, use
 the [KV-cache variant authoring workflow](../../../../docs/ModelBuilderConfiguration.md#authoring-kv-cache-variants).
@@ -327,7 +366,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 #### Prune Language Modeling Head
 
-LM-head pruning is disabled by default. Set `prune_lm_head=true` to compute only the logits needed for generation. Standard models then project the final hidden state and output `[batch_size, 1, vocab_size]` logits. Paged-attention models add a `logits_indices` input and output `[num_logits, vocab_size]`: the Engine selects one final packed row per request and every row needed for speculative verification, without projecting discarded prompt rows.
+LM-head pruning is disabled by default. Set `prune_lm_head=true` to compute only the logits needed for generation. Standard models then project the hidden state of each row's last real token and output `[batch_size, 1, vocab_size]` logits. The graph takes each row's last real token (the last 1 in `attention_mask`), so padded batches work. Pruned models exported by older builders take the last column instead, which is wrong for the shorter rows of a right-padded batch, so export them again if you run padded batches. Such an export has a `/lm_head/prune/Gather` node and no `/lm_head/prune/GatherElements` node. Paged-attention models add a `logits_indices` input and output `[num_logits, vocab_size]`: the Engine selects one final packed row per request and every row needed for speculative verification, without projecting discarded prompt rows.
 
 ```bash
 # From wheel:
@@ -387,14 +426,29 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 
 Paged builds can describe non-legacy decoder state in `model.decoder.state_groups`. The Qwen hybrid builder emits exact logical layer IDs for sparse paged KV, fixed convolution state, and fixed recurrent state. Tensor name templates are emitted once under the decoder's `inputs` and `outputs`. Legacy models whose every decoder layer uses paged KV omit the manifest and preserve the existing implicit contract. The hybrid state manifest is experimental and its schema is not yet stable. It requires coordinated Engine runtime work beyond the current onnxruntime-genai#2454 head and is not compatible with the merged runtime on its own. In particular, the runtime must supply packed multimodal position IDs with shape `[3, num_tokens]`; the current `VarlenDecoderIO` does not create that input.
 
-Qwen3.8 sparse paged layers also expose per-layer `sparse_attention.%d.selected_indices` (`int32`, `[num_tokens, indexer_budget + indexer_compress_ratio - 1]`) and `sparse_attention.%d.selected_counts` (`int32`, `[num_tokens]`) inputs. Their name templates are recorded in the ONNX metadata as `qwen4_exp.selected_index_names` and `qwen4_exp.selected_count_names`. A packed-aware selector must populate these inputs before `SparsePagedAttention`; the current GenAI runtime does not produce them. Non-paged exports compute selections internally with `SparseAttentionIndexer` and do not have this external contract.
-
 ```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true prune_lm_head=true
 
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true prune_lm_head=true
+```
+
+WebGPU requires a fixed cache capacity. Set `num_blocks` through legacy extra
+options or `runtime_config.engine.dynamic_batching.num_blocks`. Structured
+runtime settings take precedence, and the final configuration must retain a
+positive integer block count.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true num_blocks=1024
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true num_blocks=1024
+```
+
+```bash
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu --runtime_config '{"engine":{"dynamic_batching":{"num_blocks":1024}}}' --extra_options use_paged_attention=true
 ```
 
 #### Build a DFlash 2 Block Drafter
@@ -405,7 +459,11 @@ Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx
 
 `max_draft_tokens` writes `speculative.max_draft_tokens` into `genai_config.json`, capping how many drafted tokens the engine verifies each step. It must be between 1 and 16, and defaults to unset, which leaves the runtime default of 4 in effect. This differs from `dflash2_num_draft_tokens`: the drafter's exported block costs the same to run no matter how many of its tokens are verified, so raising this value buys extra accepted tokens for free until the wider verification step costs more than it saves. The best value is workload-specific and must be measured; it can be retuned on an already-exported model by editing the config.
 
-`dflash2_precision` accepts `bf16` (default), `int4`, or `int8`. Integer modes quantize the attention and MLP weights at the target's block size while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches remain BF16; this option does not quantize the drafter's KV cache. The body uses the target's automatic hardware-specific packing policy: CUDA SM80-class GPUs select mode `1`, SM90-class GPUs select mode `2`, and other EPs or unavailable/older NVIDIA GPUs select raw mode `0`. Only projections the kernel supports are prepacked (output width divisible by 64 for INT4 or 32 for INT8, with a supported block size); the rest stay in the raw layout. Normally the LM head is not quantized separately: the drafter adopts the target's saved head, bytes and layout alike, so the two always agree and are deduplicated into one copy on disk. When the target's head uses a format the drafter cannot address by name, such as asymmetric, `use_qdq`, or `rtn`/`k_quant` layouts, the drafter's head stays dense. A head the checkpoint supplies already quantized (FP8) overrides `--precision` for the target and for the drafter alike. The embedding table works the same way: `op_types_to_quantize=MatMul/Gather` turns the target's `Gather` into `GatherBlockQuantized`, and the drafter adopts that table rather than keeping a dense copy. It has to, because the two graphs are deduplicated by initializer name — a target that renames the table while the drafter keeps a dense `Gather` costs more than the target saved. Under `shared_embeddings` the target gathers from its LM-head weight instead of a table of its own, so the drafter's embedding stays dense.
+The legacy `dflash2_precision` option accepts `bf16` (default), `int4`, or `int8`. With builder configuration version 2, `drafter_options.quant_config` independently controls the DFlash 2 body and additionally supports `weights.type=int2`. Integer modes quantize the attention and MLP weights while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches default to BF16 for legacy exports; structured `drafter_options.quant_config.io_dtype` can select FP16 instead. This option does not quantize the drafter's KV cache. INT2 requires an ONNX Runtime build with 2-bit `MatMulNBits` support.
+
+The body uses portable raw blockwise weights by default. On CUDA, set `runtime_config.model.dflash2.session_options["ep.cuda.fpa_intb_gemm"]` to `"1"` to let the runtime prepack eligible raw weights, or set `drafter_options.quant_config.format.matmulnbits_weights_prepacked` to `1` (SM80) or `2` (SM90) to prepack eligible INT4/INT8 weights during export. INT2 offline prepacking supports only mode `1` with block size 64 or 128 and output width divisible by 128. Unsupported projections stay raw. BF16 x INT2 requires a full fpA-intB kernel build.
+
+Normally the LM head is not quantized separately: the drafter adopts the target's saved head, bytes and layout alike, so the two always agree and are deduplicated into one copy on disk. Its precision and block size remain the target's. If a BF16 target uses offline-prepacked weights, the drafter instead keeps a private raw INT4 head because the prepacked kernel requires FP16 activations. When the target's head uses a format the drafter cannot address by name, such as asymmetric, `use_qdq`, or `rtn`/`k_quant` layouts, the drafter's head stays dense. A head the checkpoint supplies already quantized (FP8) overrides `--precision` for the target and for the drafter alike. The embedding table works the same way: `op_types_to_quantize=MatMul/Gather` turns the target's `Gather` into `GatherBlockQuantized`, and the drafter adopts that table rather than keeping a dense copy. It has to, because the two graphs are deduplicated by initializer name — a target that renames the table while the drafter keeps a dense `Gather` costs more than the target saved. Under `shared_embeddings` the target gathers from its LM-head weight instead of a table of its own, so the drafter's embedding stays dense.
 
 ```bash
 python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 max_draft_tokens=7
@@ -419,30 +477,82 @@ python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_ou
 python builder.py -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_num_draft_tokens=4 dflash2_precision=int4 max_draft_tokens=4
 ```
 
-Each DFlash 2 MLP's gate and up projections are always combined into one `MatMul` or
-`MatMulNBits`, followed by `Split`; this is not configurable. Fusion supports all three
-`dflash2_precision` values. It preserves BF16 body activations and the existing quantization scheme; the target,
+For a BF16 x INT2 DFlash 2 body using CUDA runtime prepacking, use builder configuration
+version 2 and an ONNX Runtime build with the full fpA-intB kernel set:
+
+```json
+{
+  "builder_config_version": 2,
+  "target_options": {
+    "attention": {"implementation": "paged"}
+  },
+  "drafter_options": {
+    "drafter_type": "dflash2",
+    "path": "path_to_dflash2_checkpoint",
+    "num_draft_tokens": 7,
+    "quant_config": {
+      "io_dtype": "bf16",
+      "weights": {"type": "int2", "block_size": 64}
+    }
+  },
+  "runtime_config": {
+    "model": {
+      "dflash2": {
+        "session_options": {"ep.cuda.fpa_intb_gemm": "1"}
+      }
+    },
+    "speculative": {"max_draft_tokens": 7}
+  }
+}
+```
+
+Set `dflash2_fuse_gate_up=true` to experimentally combine each DFlash 2 MLP's gate and up
+projections into one `MatMul` or `MatMulNBits`, followed by `Split`. The default is `false`.
+This export-time option requires `dflash2_path` and supports all four `dflash2_precision`
+values. It preserves the selected body activation dtype and the existing quantization scheme; the target,
 attention projections, and LM head are unchanged. Re-export the drafter to apply it and
-validate latency and quality on the deployment workload.
+validate latency and quality on the deployment workload before enabling it in production.
+
+Set `dflash2_fuse_qkv=true` to experimentally replace each DFlash 2 layer's five attention
+projections (query-block Q/K/V plus context K/V) with one `MatMul` or `MatMulNBits` over the
+query-block rows stacked on the context rows. Its gathered output feeds `PagedAttention` as packed
+QKV. The default is `false`. The Q computed for context rows is discarded, so this trades a little
+extra prefill work for fewer launches at decode. A fused drafter has no `q_row_map` input, so it
+requires an ONNX Runtime GenAI release that treats `q_row_map` as optional; older runtimes reject
+the exported package. Both fusions can be combined:
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 dflash2_fuse_gate_up=true dflash2_fuse_qkv=true
 
 # From source:
-python builder.py -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4
+python builder.py -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 dflash2_fuse_gate_up=true dflash2_fuse_qkv=true
 ```
 
 #### Fuse Target MLP Gate/Up Projections
 
-Target model MLP gate and up projections are always combined into one `MatMul` or `MatMulNBits` followed by `Split`; this is not configurable. Fusion happens before target weight quantization and requires unpacked, unadapted floating-point projections. Re-export the target to apply fusion and validate latency and quality on the deployment workload.
+Set `fuse_mlp_gate_up=true` to combine each target model MLP's gate and up projections into one `MatMul` or `MatMulNBits` followed by `Split`. The default is `false`. Fusion happens before target weight quantization and requires unpacked, unadapted floating-point projections. Re-export the target to apply the setting and validate latency and quality on the deployment workload.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options fuse_mlp_gate_up=true
 
 # From source:
-python builder.py -i path_to_target_model -o path_to_output_folder -p int4 -e cuda
+python builder.py -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options fuse_mlp_gate_up=true
+```
+
+#### Qwen3.5/3.8 Q/K/V Projection Fusion
+
+Qwen3.5-family full-attention layers emit one packed Q/K/V `MatMul` or `MatMulNBits` followed by `Split`, including with paged attention, even though their Q projection is twice as wide because it carries a per-head output gate. The weights are concatenated before quantization, so the quantized values are unchanged. Projections that a checkpoint already quantized (FP8/NVFP4) stay separate. QKV fusion defaults to `true`; set `fuse_qkv=false` to keep three projections. The deprecated `disable_qkv_fusion=true` spelling remains supported for compatibility.
+
+A layer also keeps its three projections when `nodes_to_exclude` or an exact-name weight override names one of its `q_proj`, `k_proj`, or `v_proj` MatMuls, when pre-quantized projections differ in group size or GPTQ `g_idx`, or, for Qwen3.5/3.8, when the `mixed_layers` preset upgrades its `v_proj` alone.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true fuse_qkv=false
+
+# From source:
+python builder.py -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true fuse_qkv=false
 ```
 
 #### Build a DSpark Block Drafter
@@ -542,27 +652,9 @@ When `config.json` declares `quant_method=modelopt` or `quant_method=compressed-
 
 The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt and compressed-tensors export require the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops. For CPU, CUDA, and WebGPU, the builder replaces each shared-expert output `Mul` and routed/shared `Add` pair with `com.microsoft::GatedAdd`; other execution providers retain the portable `Mul` + `Add` graph.
 
-NVIDIA's `nvidia/Qwen3.8-Flash-Next-NVFP4` checkpoint is also supported. Its routed main-model experts remain native NVFP4, attention/shared experts/hyper-connections follow `--precision`, and the sharded PLE table retains its FP8 bytes and per-tensor scale. The loader concatenates PLE shards in numeric order without loading the checkpoint through Hugging Face's eager ModelOpt quantizer. Vision weights are loaded only when exporting the multimodal components.
-
-Qwen3.8 Flash exports always include `engram.onnx` and `engram.onnx.data`, including paged exports with `text_only=true` or `exclude_mtp=true`. The main decoder consumes embeddings from the standalone Engram session instead of repeating the table lookup internally. CUDA exports run Engram with the CUDA provider and assign its `cpu_embedding`-annotated `GatherBlockQuantized` lookup to CPU using `session.layer_assignment_settings="cpu(=cpu_embedding)"`. Engram retains the native FP8 table without duplicating or dequantizing its stored weights. Text-only export does not require vision or embedding companion graphs.
-
-Engram token history follows the decoder's `past.%d.ple_tokens` / `present.%d.ple_tokens` naming convention, using the zero-based PLE layer ID. Its config uses `inputs.past_ple_token_names` and `outputs.present_ple_token_names` with concrete bindings such as `past.1.ple_tokens` and `present.1.ple_tokens`. The runtime also accepts the legacy `past_tokens` and `present_tokens` keys for older exports.
-
-For paged decoding, the runtime packs Engram's `[batch_size, sequence_length, ple_embed_dim]` output into the decoder's `[num_tokens, ple_embed_dim]` `engram_embeddings` input. The decoder does not consume or forward Engram's token-history output. Its small token-history operation supplies the final PLE history directly and, with compact speculative-state capture enabled, records per-token rollback snapshots; it does not perform another embedding lookup.
-
-```bash
-python builder.py -i /home/kvaishnavi/Qwen3.8-Flash-Next-NVFP4 \
-  -o /home/kvaishnavi/qwen38_nvfp4_onnx -p fp16 -e cuda \
-  -c /home/kvaishnavi/cache_dir
-```
-
-Use `--extra_options text_only=true` to omit the vision and embedding components, or `exclude_mtp=true` to omit MTP. NVIDIA's MTP experts retain their original E4M3 FP8 weights and 128x128 `weight_scale_inv` block multipliers in ONNX, without export-time dequantization or requantization. Gate, up, and down projections are separate `QMoE` inputs with `quant_type="fp8"`, `block_size=128`, `activation_type="silu"`, and `swiglu_fusion=0`. This requires the CUDA block-scaled FP8 support from [ORT PR #32887](https://github.com/microsoft/onnxruntime/pull/32887). That implementation dequantizes only routed experts into scratch memory at runtime; native FP8 storage does not imply FP8 tensor-core computation.
-
-#### MTP Head (Qwen3.6/Qwen3.8)
+#### MTP Head (Qwen3.6)
 
 When a Qwen3.5 MoE configuration declares one or more MTP layers with `mtp_num_hidden_layers`, the builder exports the multi-token-prediction head for self-speculative decoding. An auxiliary `mtp.onnx` (plus its `mtp.onnx.data`) is generated alongside the main model, and the main model automatically exposes the hidden states consumed by the MTP head. Models without declared MTP layers do not produce this file or an MTP section in `genai_config.json`.
-
-Qwen3.8 Flash Next checkpoints (`Qwen4ExpForConditionalGeneration`) use their native one-layer MTP head automatically. The exporter preserves the target's hyper-connection streams, applies the checkpoint's separate `mtp.fc_embedding` and `mtp.fc_hidden` projections, and exports the QSA indexer cache bindings required by the draft layer. Identical `model.embed_tokens.weight` and LM-head tensors share external storage and are declared as shared initializers for runtime reuse. Both the original floating-point checkpoint and NVIDIA's mixed NVFP4 checkpoint are supported, with the FP8 MTP reconstruction described above.
 
 ```bash
 # From wheel:
@@ -598,7 +690,7 @@ A multi-token verify forward can additionally carry a window of recurrent/conv s
 
 #### Compact State Updates (Qwen3.5/3.8)
 
-Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled) and requires `use_paged_attention=true`. It must be an integer from `0` through `8`, matching the kernel and runtime-parser bound, because the kernel packs every captured transition for a layer into a single fixed-width capsule output. Qwen3.5/3.8 hybrid layers use GatedDeltaNet and support CUDA with `fp16` or `bf16` model I/O. When enabled, `genai_config.json` records the capacity, the `state_update_capture_count` and `state_update_active` input bindings, and the per-layer convolution-value and recurrent-capsule output templates. All compact state-update inputs and outputs are omitted when `state_update_capacity=0`.
+Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled) and requires `use_paged_attention=true`. It must be an integer from `0` through `8`, matching the kernel and runtime-parser bound, because the kernel packs every captured transition for a layer into a single fixed-width capsule output. Compact state updates support CUDA with `fp16` or `bf16` model I/O. The builder rejects `state_update_capacity > 0` on WebGPU because the GenAI Engine does not yet implement compact state replay on that provider; regular paged WebGPU exports remain supported with `state_update_capacity=0`. Paged Qwen3.5/3.8 exports use GatedDeltaNet regardless of `linear_attn_op`. When enabled, `genai_config.json` records the capacity, the `state_update_capture_count` and `state_update_active` input bindings, and the per-layer convolution-value and recurrent-capsule output templates. All compact state-update inputs and outputs are omitted when `state_update_capacity=0`.
 
 ```bash
 # From wheel:
@@ -608,9 +700,25 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 python builder.py -m model_name -o path_to_output_folder -p bf16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true state_update_capacity=3
 ```
 
-#### Qwen3.5/3.8 Recurrent Operator
+#### Select the Qwen3.5/3.8 Recurrent Operator
 
-Qwen3.5/3.8 hybrid layers emit `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. GatedDeltaNet is CUDA-only, requires `state_window=0`, and supports `fp16` or `bf16` model I/O. The equivalent `LinearAttention` + `LinearAttentionGate` decomposition is retained internally with the Qwen3.8 builder expansions rather than exposed as a model export option.
+This scenario is for when you want to choose which contrib operator implements the linear-attention layers of a non-paged Qwen3.5/3.8 export. `linear_attn_op` accepts `linear_attention` (the default), which emits `CausalConvWithState` + `LinearAttention`, or `gated_delta_net`, which emits `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. `gated_delta_net` supports CUDA or WebGPU and requires `state_window=0`; CUDA supports `fp16` or `bf16` model I/O, while WebGPU supports `fp16` or `fp32`. Paged exports (`use_paged_attention=true`) always use GatedDeltaNet and ignore this option. They support CUDA with `fp16` or `bf16`, or WebGPU with `fp16` and a fixed `num_blocks` cache capacity. The default `linear_attention` path requires an ONNX Runtime kernel that implements the selected contrib operator.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p bf16 -e cuda -c cache_dir_for_hf_files --extra_options linear_attn_op=gated_delta_net
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p bf16 -e cuda -c cache_dir_for_hf_files --extra_options linear_attn_op=gated_delta_net
+```
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p fp16 -e webgpu --extra_options use_paged_attention=true num_blocks=128
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p fp16 -e webgpu --extra_options use_paged_attention=true num_blocks=128
+```
 
 #### Enable WebGPU Graph Capture
 
@@ -624,16 +732,16 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_webgpu_graph=true
 ```
 
-#### Disable QKV Projections Fusion
+#### Configure QKV Projections Fusion
 
-This scenario is for when you want to keep Q/K/V projections in the attention layer separate instead of fusing them into a single packed MatMul operation.
+Set `fuse_qkv=false` to keep Q/K/V projections in the attention layer separate instead of fusing them into a single packed MatMul operation. The default is `true`, although fusion is automatically disabled for unsupported execution providers and incompatible projection or quantization configurations. `disable_qkv_fusion=true` is a deprecated inverse alias for `fuse_qkv=false`.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options fuse_qkv=false
 
 # From source:
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options fuse_qkv=false
 ```
 
 #### Disable QK Norm GQA Fusion in CUDA or WebGPU
@@ -686,7 +794,7 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_pr
 ##### QMoE Block Size
 
 This scenario is for when you want to set the block size for QMoE expert weights.
-Set `qmoe_block_size` to `0` or a negative value for per-channel quantization. Block-wise QMoE on CPU, CUDA, and WebGPU supports only `32`, `64`, or `128`; TRT-RTX also accepts `16` and `256`. The default is `32` except for TRT-RTX, which defaults to `128`.
+Set `qmoe_block_size` to `0` or a negative value for per-channel quantization. Block-wise QMoE on CPU, CUDA, and WebGPU supports only `32`, `64`, or `128`; TRT-RTX also accepts `16` and `256`. The default is `32` except for TRT-RTX, which defaults to `128`. INT2 and mixed-width CUDA QMoE require block size 64 or 128 and both `hidden_size` and `moe_intermediate_size` to be divisible by it.
 WebGPU block-wise QMoE requires both `hidden_size` and `moe_intermediate_size` to be divisible by `qmoe_block_size`. Raw block-wise INT4 QMoE requires both dimensions to be even.
 
 ```bash
@@ -705,31 +813,31 @@ ONNX Runtime builds that include [microsoft/onnxruntime#32644](https://github.co
 
 ##### QMoE Weights Prepacked
 
-Integer QMoE weight packing is automatic. With the CUDA EP and an active NVIDIA GPU of SM80 or newer, the builder exports CUTLASS-prepacked weights (mode `1`). Other EPs, unavailable NVIDIA GPUs, and pre-SM80 GPUs use raw weights (mode `0`). Integer QMoE uses the SM80 layout even on SM90 because its CUDA kernel does not accept mode `2`. Native NVFP4/FP8 checkpoint layouts remain governed by their loader metadata. The `qmoe_weights_prepacked` option has been removed.
+This scenario is for when you want to control the CUDA QMoE expert weight layout. The default value is `-1`, which lets the builder choose the layout automatically. Use `0` to export raw weights and let CUDA prepack them at runtime, or `1` to export CUTLASS-prepacked weights.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
 ```
 
 ##### MatMulNBits Weights Prepacked
 
-MatMulNBits (int4/int8) weight packing is automatic from the active NVIDIA GPU when exporting for CUDA: SM80-class GPUs select mode `1` (Ampere), and SM90-class GPUs select mode `2` (Hopper). Other EPs, unavailable NVIDIA GPUs, and pre-SM80 GPUs select mode `0` (raw). The `matmulnbits_weights_prepacked` option has been removed. Eligible nodes select the `fpA_intB` path automatically. Ineligible nodes remain raw; in particular, SM90 packing supports block sizes `64` and `128`, not the default `32`. An export with no eligible nodes still succeeds with raw weights.
+This scenario is for when you want to control the CUDA MatMulNBits (int4/int8) weight layout. The default value is `0`, which exports raw blockwise weights. Use `1` to export the SM80/Ampere `fpA_intB` prepacked layout, or `2` to export the SM90/Hopper `fpA_intB` prepacked layout. This only applies to the CUDA EP. Eligible prepacked nodes select the `fpA_intB` path automatically, so `ORT_FPA_INTB_GEMM` or `ep.cuda.fpa_intb_gemm=1` is not required to run them.
 
 The builder writes `ep.cuda.fpa_intb_gemm=1` automatically for prepacked exports so that nodes the prepack pass skipped because their `N`, `K`, or `block_size` is unsupported use the same kernel family. This setting is optional for the eligible nodes that were prepacked.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
 ```
 
-Set `enable_cuda_fpa_intb_gemm=true` to select the same CUDA kernel family independently of offline weight packing. This does not override the automatic packing policy. The default is `false`; the option writes `ep.cuda.fpa_intb_gemm=1` to the decoder session options and only applies to the CUDA EP.
+Set `enable_cuda_fpa_intb_gemm=true` to select the same CUDA kernel family while retaining the default raw blockwise weight layout. The default is `false`; the option writes `ep.cuda.fpa_intb_gemm=1` to the decoder session options and only applies to the CUDA EP.
 
 ```bash
 # From wheel:
@@ -741,14 +849,14 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra
 
 ##### Device Allocator for Initializers
 
-The builder always writes `session.use_device_allocator_for_initializers=1` into the decoder's session options; this is not configurable through extra options. Initializers then bypass the ONNX Runtime arena. This matters whenever a kernel replaces an initializer during `PrePack`, as the `fpA_intB` MatMulNBits conversion does: with the arena, the original weight stays resident as a free block that the arena never returns, so a large int4 model can hold roughly twice its weights.
+Set `use_device_allocator_for_initializers=true` to write `session.use_device_allocator_for_initializers=1` into the decoder's session options. Initializers then bypass the ONNX Runtime arena. This matters whenever a kernel replaces an initializer during `PrePack`, as the `fpA_intB` MatMulNBits conversion does: with the arena, the original weight stays resident as a free block that the arena never returns, so a large int4 model can hold roughly twice its weights.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options use_device_allocator_for_initializers=true
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options use_device_allocator_for_initializers=true
 ```
 
 ##### Is Symmetric
@@ -839,11 +947,12 @@ This option is not supported with `-p int8` because 8-bit `MatMulNBits` is QOper
 
 ##### Choose the MoE Quantization Type in QMoE
 
-This scenario is for when you want to select the quantization scheme for MoE (QMoE) layers via the single `moe_quant_type` option. Supported values are `int4` (default), `int8`, and `mxfp4`:
+This scenario is for when you want to select the quantization scheme for MoE (QMoE) layers via the single `moe_quant_type` option. Supported values include:
 
+- `int2`: 2-bit integer QMoE weights on CUDA (`expert_weight_bits=2`, `quant_type="int"`). Requires block size 64 or 128 that divides both `hidden_size` and `moe_intermediate_size`.
 - `int4`: 4-bit integer QMoE weights (`expert_weight_bits=4`, `quant_type="int"`).
 - `int8`: 8-bit integer QMoE weights (`expert_weight_bits=8`, `quant_type="int"`).
-- `mxfp4`: MXFP4 QMoE weights on the CUDA EP (`quant_type="fp4"`, `expert_weight_bits=4`, `block_size=32`): 4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale. Requires an ONNX Runtime build with `onnxruntime_USE_FP4_QMOE=ON`, `precision=int4` with symmetric INT4 quantization, and is only supported on the CUDA EP.
+- `mxfp4`: MXFP4 QMoE weights on the CUDA EP (`quant_type="fp4"`, `expert_weight_bits=4`, `block_size=32`): 4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale. Requires an ONNX Runtime build with `onnxruntime_USE_FP4_QMOE=ON`, `precision=int4` or `precision=int8` with symmetric integer quantization, and is only supported on the CUDA EP.
 
 This single option replaces the older per-type flags so new quantization schemes can be added without introducing a new flag each time. The `use_8bits_moe` flag is deprecated (use `moe_quant_type=int8`).
 
@@ -857,10 +966,10 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 ```bash
 # From wheel (MXFP4 QMoE on CUDA):
-python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int8 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
 
 # From source (MXFP4 QMoE on CUDA):
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int8 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
 ```
 
 ##### Quantize the KV Cache

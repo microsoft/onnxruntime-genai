@@ -189,9 +189,12 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::string& in
     std::istringstream fields(line);
     std::string key;
     fields >> key;
-    if (key == "file") fields >> file;
-    else if (key == "epsilon") fields >> epsilon;
-    else if (key == "width") fields >> target.width, head.width = target.width;
+    if (key == "file")
+      fields >> file;
+    else if (key == "epsilon")
+      fields >> epsilon;
+    else if (key == "width")
+      fields >> target.width, head.width = target.width;
     else if (key == "tensor") {
       Item item;
       fields >> item.set >> item.name >> item.offset >> item.bytes;
@@ -210,9 +213,12 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::string& in
   for (const Item& item : items) {
     Set& set = item.set == "head" ? head : target;
     const uint8_t* ptr = buffer_.data() + item.offset;
-    if (item.name == "cos") set.cos = ptr;
-    else if (item.name == "sin") set.sin = ptr;
-    else if (item.name.rfind("knorm.", 0) == 0) set.knorm[std::stoi(item.name.substr(6))] = ptr;
+    if (item.name == "cos")
+      set.cos = ptr;
+    else if (item.name == "sin")
+      set.sin = ptr;
+    else if (item.name.rfind("knorm.", 0) == 0)
+      set.knorm[std::stoi(item.name.substr(6))] = ptr;
   }
   if (!target.cos || !head.cos || target.knorm.empty() || head.knorm.empty())
     throw std::runtime_error("qwen38_graph: incomplete QSA constants " + index_path);
@@ -278,9 +284,12 @@ void Qwen38GraphEngine::BuildFastPrefill() {
     const std::string tail = name == "past_position_ids" ? "positions" : TailOf(name);
     for (int64_t& d : shape)
       if (d <= 0) d = 1;
-    if (tail == "positions") shape = {1, 0};
-    else if (tail == "key" || tail == "value") shape[2] = 0;
-    else if (tail == "index_key") shape[1] = 0;
+    if (tail == "positions")
+      shape = {1, 0};
+    else if (tail == "key" || tail == "value")
+      shape[2] = 0;
+    else if (tail == "index_key")
+      shape[1] = 0;
     const auto type = info.GetInputDataType(name);
     size_t elements = 1;
     for (int64_t d : shape) elements *= static_cast<size_t>(d);
@@ -341,11 +350,16 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       return *views.back();
     };
     for (const auto& name : f.dense_inputs) {
-      if (name == "input_ids") binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * pos, {1, int64_t(m)}, i64));
-      else if (name == "attention_mask") binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(pos + m)}, i64));
-      else if (name == "position_ids") binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * pos, {1, int64_t(m)}, i64));
-      else if (name == "logits_indices") binding->BindInput(name.c_str(), view(f.idx.data(), {1}, i64));
-      else if (name == ple_name) binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
+      if (name == "input_ids")
+        binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * pos, {1, int64_t(m)}, i64));
+      else if (name == "attention_mask")
+        binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(pos + m)}, i64));
+      else if (name == "position_ids")
+        binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * pos, {1, int64_t(m)}, i64));
+      else if (name == "logits_indices")
+        binding->BindInput(name.c_str(), view(f.idx.data(), {1}, i64));
+      else if (name == ple_name)
+        binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
       else {
         auto it = f.states.find(name);
         OrtValue* value = it != f.states.end() ? it->second.get() : f.initial.at(name).get();
@@ -365,9 +379,12 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
     auto values = binding->GetOutputValues();
     std::map<std::string, std::unique_ptr<OrtValue>> next;
     for (size_t i = 0; i < names.size(); ++i) {
-      if (names[i] == "present_position_ids") next["past_position_ids"] = std::move(values[i]);
-      else if (names[i].rfind("present.", 0) == 0) next["past_key_values." + names[i].substr(8)] = std::move(values[i]);
-      else if (names[i] == "logits") f.logits = std::move(values[i]);
+      if (names[i] == "present_position_ids")
+        next["past_position_ids"] = std::move(values[i]);
+      else if (names[i].rfind("present.", 0) == 0)
+        next["past_key_values." + names[i].substr(8)] = std::move(values[i]);
+      else if (names[i] == "logits")
+        f.logits = std::move(values[i]);
     }
     f.states = std::move(next);
     f.dense_length += m;
@@ -381,8 +398,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   for (size_t d = 0; d + 1 < shape.size(); ++d) rows *= static_cast<size_t>(shape[d]);
   if (shape.back() != vocab_) throw std::runtime_error("qwen38_graph: unexpected dense logits shape");
   std::vector<uint16_t> raw(static_cast<size_t>(vocab_));
-  plane_.Check(plane_.memcpy_d2h(raw.data(), static_cast<uint8_t*>(f.logits->GetTensorMutableRawData()) +
-                                                   (rows - 1) * static_cast<size_t>(vocab_) * 2,
+  plane_.Check(plane_.memcpy_d2h(raw.data(), static_cast<uint8_t*>(f.logits->GetTensorMutableRawData()) + (rows - 1) * static_cast<size_t>(vocab_) * 2,
                                  raw.size() * 2, stream_),
                "read logits");
   plane_.Check(plane_.memcpy_d2d(d_last_hidden_.data(), d_prompt_hidden_.data() + (length_ - 1) * row_bytes, row_bytes, stream_),
@@ -501,14 +517,20 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
       return *views.back();
     };
     for (const auto& name : f.head_kv->GetInputNames()) {
-      if (name == "input_ids") binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
-      else if (name == "attention_mask") binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(m)}, i64));
-      else if (name == "position_ids") binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
-      else if (name == "past_position_ids") binding->BindInput(name.c_str(), view(f.scratch.data(), {1, 0}, i64));
-      else if (name == "past_key_values.0.index_key") binding->BindInput(name.c_str(), view(f.scratch.data(), {1, 0, 128}, bf16));
+      if (name == "input_ids")
+        binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
+      else if (name == "attention_mask")
+        binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(m)}, i64));
+      else if (name == "position_ids")
+        binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
+      else if (name == "past_position_ids")
+        binding->BindInput(name.c_str(), view(f.scratch.data(), {1, 0}, i64));
+      else if (name == "past_key_values.0.index_key")
+        binding->BindInput(name.c_str(), view(f.scratch.data(), {1, 0, 128}, bf16));
       else if (name == "hidden_states")
         binding->BindInput(name.c_str(), view(d_prompt_hidden_.data() + lo * row_bytes, {1, int64_t(m), hidden_width_}, bf16));
-      else throw std::runtime_error("qwen38_graph: unsupported head_kv input " + name);
+      else
+        throw std::runtime_error("qwen38_graph: unsupported head_kv input " + name);
     }
     for (const char* name : {"key", "value", "index_key"}) binding->BindOutput(name, *memory_info_);
     f.head_kv->Run(f.run_options.get(), *binding);
@@ -525,12 +547,14 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
           // [1, 2, m, 256]
           for (int h = 0; h < 2; ++h)
             plane_.Check(plane_.memcpy_d2d(key + h * head_stride + lo * row_size, src + h * m * row_size,
-                                         m * row_size, stream_), "head key");
+                                           m * row_size, stream_),
+                         "head key");
         } else if (shape.size() == 3 && shape[1] == int64_t(m) && shape[2] == 512) {
           // [1, m, 512] -> per head h columns [256 h, 256 (h+1))
           for (int h = 0; h < 2; ++h)
             plane_.Check(plane_.memcpy2d_d2d(key + h * head_stride + lo * row_size, row_size, src + h * row_size,
-                                           2 * row_size, row_size, m, stream_), "head key");
+                                             2 * row_size, row_size, m, stream_),
+                         "head key");
         } else {
           std::ostringstream message;
           message << "qwen38_graph: unexpected head_kv key shape [";
@@ -543,7 +567,8 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
           throw std::runtime_error("qwen38_graph: unexpected head_kv value shape");
         for (int h = 0; h < 2; ++h)
           plane_.Check(plane_.memcpy2d_d2d(value + h * head_stride + lo * row_size, row_size, src + h * row_size,
-                                         2 * row_size, row_size, m, stream_), "head value");
+                                           2 * row_size, row_size, m, stream_),
+                       "head value");
       } else if (names[i] == "index_key") {
         if (shape.size() != 3 || shape[1] != int64_t(m) || shape[2] != 128)
           throw std::runtime_error("qwen38_graph: unexpected head_kv index_key shape");

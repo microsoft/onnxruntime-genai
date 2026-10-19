@@ -163,8 +163,10 @@ def test_qwen35_moe_loads_moe_transformers_model(monkeypatch):
     class FakeDenseModel(FakeMoEModel):
         pass
 
-    monkeypatch.setattr(base_module, "Qwen3_5MoeForConditionalGeneration", FakeMoEModel)
-    monkeypatch.setattr(base_module, "Qwen3_5ForConditionalGeneration", FakeDenseModel)
+    transformers_stub = types.ModuleType("transformers")
+    transformers_stub.Qwen3_5MoeForConditionalGeneration = FakeMoEModel
+    transformers_stub.Qwen3_5ForConditionalGeneration = FakeDenseModel
+    monkeypatch.setattr(base_module, "transformers", transformers_stub)
 
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
     model.model_type = "qwen3_5_moe_text"
@@ -1016,6 +1018,7 @@ def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
 
 def test_qwen35_native_nvfp4_moe_uses_global_scales(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.use_paged_attention = False
     model.hidden_size = 16
     model.moe_attrs = {
         "op_type": "QMoE",
@@ -1046,6 +1049,7 @@ def test_qwen35_native_nvfp4_moe_uses_global_scales(monkeypatch):
 
 def test_qwen35_shared_expert_reuses_mlp_builder(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
     model.intermediate_size = 2048
     model.shared_expert_intermediate_size = 512
@@ -1079,6 +1083,7 @@ def test_qwen35_shared_expert_reuses_mlp_builder(monkeypatch):
 
 def test_qwen35_shared_expert_uses_fused_mlp_builder(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
     model.intermediate_size = 2048
     model.shared_expert_intermediate_size = 512

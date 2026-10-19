@@ -95,13 +95,15 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
     engram_state_->UpdateInputsOutputs(next_tokens);
     engram_state_->Run(total_length, next_tokens, next_indices);
     auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.engram_embeddings);
-    if (shape.size() == 2) shape[0] = static_cast<int64_t>(num_tokens);
+    if (shape.size() == 2)
+      shape[0] = static_cast<int64_t>(num_tokens);
     else if (shape.size() == 3) {
       shape[0] = params_->BatchBeamSize();
       shape[1] = static_cast<int64_t>(num_tokens / params_->BatchBeamSize());
-    } else throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
+    } else
+      throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
     engram_embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape,
-        model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
+                                                model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
     inputs_[engram_input_index_] = engram_embeddings_.get();
     engram_state_->CopyEmbeddingsTo(*engram_embeddings_);
   }
@@ -162,13 +164,15 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
       engram_state_->UpdateInputsOutputs(chunk_tokens);
       engram_state_->Run(length, chunk_tokens, next_indices);
       auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.engram_embeddings);
-      if (shape.size() == 2) shape[0] = static_cast<int64_t>(current_chunk_size);
+      if (shape.size() == 2)
+        shape[0] = static_cast<int64_t>(current_chunk_size);
       else if (shape.size() == 3) {
         shape[0] = params_->BatchBeamSize();
         shape[1] = static_cast<int64_t>(current_chunk_size / params_->BatchBeamSize());
-      } else throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
+      } else
+        throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
       engram_embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape,
-          model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
+                                                  model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
       inputs_[engram_input_index_] = engram_embeddings_.get();
       engram_state_->CopyEmbeddingsTo(*engram_embeddings_);
     }

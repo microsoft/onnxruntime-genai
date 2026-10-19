@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include "telemetry.h"
+#include "telemetry_string.h"
 
 namespace Generators {
 
@@ -72,7 +73,7 @@ void GenerationTelemetry::CompleteAppend(size_t input_token_count, int num_beams
 
   if (prompt_tokens_ == 0 && !first_token_logged_) start_time_ = append_start_time_;
   prompt_tokens_ += static_cast<int64_t>(input_token_count) * num_beams;
-  input_modality_ = input_modality;
+  input_modality_ = BoundTelemetryString(input_modality);
 }
 
 void GenerationTelemetry::OnTokenGenerated(int64_t active_token_count) {
