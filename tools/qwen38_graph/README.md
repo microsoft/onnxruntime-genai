@@ -52,3 +52,45 @@ they do not establish compatibility with every other model.
 
 Benchmark runners, profiling utilities, evaluation drivers, model weights,
 and local task metadata are intentionally excluded from this PR stack.
+
+## Package construction and graph optimization
+
+The package tools are:
+
+- `build_package.py`: separate verify/head graph package.
+- `build_package_v12.py`: fold-decode package with optional dense prefill.
+- `build_package_v12b.py`: shared-weight fold package.
+- `optimize_ported_package.py`: convert supported exported graph chains into
+  generic ORT contrib operators and construct an isolated optimized package.
+
+Pass explicit source bundles, tokenizer/checkpoint paths, data-plane library,
+and runtime/provider library paths for your environment. Legacy research
+defaults are not portable. Run each tool with `--help` to inspect its arguments.
+
+The optimizer performs guarded graph rewrites for normalization, rotary
+embedding, GDN preparation, gates, hyper-connections, FP8 projections, MoE
+residuals, and sparse-attention cache handoff. It preserves external weight
+sharing, writes package metadata, and does not mutate a qualified input
+package's hard-linked files in place. Runtime schemas must match those used
+by the companion ORT operator stack.
+
+## Tests
+
+Run the graph-rewrite unit tests without downloading model weights:
+
+```bash
+python -m unittest discover -s tools/qwen38_graph -p test_optimize_ported_package.py
+```
+
+`test_api.py` checks the Generator API against a supplied compatible model
+package. `test_plane_kernels.py` checks the CUDA data-plane library.
+`test_prompts.py` checks supplied prompt/reference cases. `smoke.py` and
+`smoke_cpp.cpp` provide minimal integration examples. These integration checks
+require compatible model artifacts and runtime libraries; they are not
+standalone CPU unit tests.
+
+The local qualified v26 runtime retained exact reference token IDs and showed
+small decode gains at 8K, 16K, and 32K context lengths. Those measurements came
+from the combined local operator stack, not from independent builds of every
+draft PR against upstream main. Each draft remains subject to its own CI,
+dependency resolution, and base-specific validation before review.
