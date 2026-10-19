@@ -199,6 +199,57 @@ Reversed admission and the pinned-slot control help separate batching from
 state-slot effects. Preserve seed/profile/prompt hashes and minimize failures
 into named regressions; never waive them as numerical noise.
 
+## Measuring checkpoint protection in scheduler planning
+
+`PagedKeyValueCache::PlanStepResources()` queries reclaimable prefix capacity
+on every planned step. The opt-in component benchmark measures that exact
+`PrefixCache::ReclaimableBlocks()` query with real fixed-state checkpoints from
+the checked-in hybrid test model:
+
+```powershell
+.\engine_unit_tests.exe --gtest_also_run_disabled_tests `
+  --gtest_filter=PrefixCacheBenchmark.DISABLED_HybridCheckpointReclamationScaling:PrefixCacheBenchmark.DISABLED_SparseHybridCheckpointReclamation:PrefixCacheBenchmark.DISABLED_SharedEvictedCheckpointAncestry
+```
+
+On Linux, use `./engine_unit_tests` with the same arguments. This benchmark is
+disabled in ordinary test runs because timings are diagnostic, not portable
+pass/fail thresholds; the lease-safety regressions run normally.
+
+The benchmarks cover dense indexed ancestry, large pools with few cached
+blocks, and leased endpoints sharing evicted ancestors. The shared-evicted case
+reuses every ancestor's physical block ID for an unrelated chain and checks
+both reclaimable counts and actual reclamation: stale identities must not
+protect replacements.
+
+Each row checks the exact reclaimable count, then calibrates batched calls,
+warms up, and collects repeated samples. The accumulated result is checked
+across all calls. Output reports per-call mean/p50/p95 microseconds and the
+batch/sample/call counts. The `batch` column counts checkpoint histories, not
+model execution batches; `matched_blocks` counts indexed blocks. These are
+metadata benchmarks, not long-context model execution or context-length
+qualification.
+
+Compare the same benchmark source and Release compiler settings against the
+baseline and candidate. Checkpoint protection uses one preallocated CPU byte
+per physical pool block, no additional GPU storage, and no query-time
+allocation. Unleased queries inspect checkpoint endpoints without scanning
+blocks. Leased queries clear that bounded scratch buffer and walk each
+retained physical ancestor once, deduplicating shared ancestry. Scratch is
+rebuilt for each query because fixed/draft leases can change without a cache
+mutation.
+
+Two costs remain: leased queries clear pool-sized scratch even in a sparse
+cache, and missing physical ancestors can be revisited by each leased
+endpoint. The sparse and shared-evicted cases expose these limits. Do not
+replace exact identity validation with a block-ID-only check to avoid them.
+
+Component timings isolate the scheduler scan, not end-to-end token latency.
+Also run the operator matrix on an available GPU with fixed pool sizing,
+long prompts, multiple requests, retained owners, and repeated uncached
+controls. Compare host RSS and per-process GPU high-water marks through
+alternation/churn; neither the microbenchmark nor a single peak snapshot
+establishes a memory plateau or deployment-device fit.
+
 ## Testing the runner
 
 ```bash

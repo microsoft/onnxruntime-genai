@@ -119,7 +119,47 @@ FetchContent_Declare(
   URL_HASH SHA1=${DEP_SHA1_cpp_client_telemetry}
   EXCLUDE_FROM_ALL
 )
+# Release archives lack the Git metadata used to derive the SDK's fourth version component.
+if(DEFINED BUILD_VERSION)
+  set(_ortgenai_saved_mat_build_version "${BUILD_VERSION}")
+endif()
+set(BUILD_VERSION "3.10.281.1")
 FetchContent_MakeAvailable(cpp_client_telemetry)
+# The SDK's lazy version string can otherwise be destroyed before GenAI joins the upload worker.
+# Compile a patched copy, leaving the downloaded source intact. Like the SDK PAL itself, this
+# immutable value uses process-lifetime storage; normal shutdown still releases SDK workers.
+set(_ortgenai_pal_source "${cpp_client_telemetry_SOURCE_DIR}/lib/pal/PAL.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ortgenai_pal_source}")
+file(READ "${_ortgenai_pal_source}" _ortgenai_pal)
+set(_ortgenai_version_original [=[        static const std::string sdkVersion(EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR);
+        return sdkVersion;]=])
+set(_ortgenai_version_fixed [=[        using SdkVersion = std::string;
+        alignas(SdkVersion) static unsigned char storage[sizeof(SdkVersion)];
+        static const SdkVersion* sdkVersion = ::new (storage)
+            SdkVersion(EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR);
+        return *sdkVersion;]=])
+string(FIND "${_ortgenai_pal}" "${_ortgenai_version_original}" _ortgenai_version_position)
+if(_ortgenai_version_position EQUAL -1)
+  message(FATAL_ERROR "Update the 1DS SDK version-lifetime patch for the selected SDK source")
+endif()
+string(REPLACE "${_ortgenai_version_original}" "${_ortgenai_version_fixed}"
+  _ortgenai_pal "${_ortgenai_pal}")
+set(ORTGENAI_TELEMETRY_PAL_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/telemetry-sdk/PAL.cpp")
+file(CONFIGURE OUTPUT "${ORTGENAI_TELEMETRY_PAL_SOURCE}" CONTENT "${_ortgenai_pal}" @ONLY)
+get_target_property(_ortgenai_mat_sources mat SOURCES)
+list(FIND _ortgenai_mat_sources "pal/PAL.cpp" _ortgenai_pal_position)
+if(_ortgenai_pal_position EQUAL -1)
+  message(FATAL_ERROR "Update the 1DS SDK PAL source replacement for the selected SDK target")
+endif()
+list(REMOVE_ITEM _ortgenai_mat_sources "pal/PAL.cpp")
+set_property(TARGET mat PROPERTY SOURCES "${_ortgenai_mat_sources}")
+target_sources(mat PRIVATE "${ORTGENAI_TELEMETRY_PAL_SOURCE}")
+if(DEFINED _ortgenai_saved_mat_build_version)
+  set(BUILD_VERSION "${_ortgenai_saved_mat_build_version}")
+  unset(_ortgenai_saved_mat_build_version)
+else()
+  unset(BUILD_VERSION)
+endif()
 if(ANDROID)
   target_compile_definitions(mat PRIVATE ANDROID_SUPPRESS_LOGCAT)
 endif()
