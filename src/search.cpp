@@ -436,11 +436,12 @@ void Search_Cpu::ApplyNoRepeatNgram(int ngram_size) {
     return;
 
   const int sequence_length = sequences_.GetSequenceLength();
-  // For encoder-decoder models (such as marian-ssru and whisper), sequences_
-  // begins with the encoder's input prompt tokens. Only generated decoder
-  // tokens after prompt_length should be scanned for repeated n-grams.
+  // For marian-ssru encoder-decoder models, sequences_ begins with the
+  // encoder's source prompt tokens (whereas Whisper stores decoder prompt
+  // tokens in sequences_). Only generated decoder tokens after prompt_length
+  // should be scanned for repeated n-grams.
   const int start_offset =
-      !params_->config.model.encoder.filename.empty() ? sequences_.GetPromptLength() : 0;
+      params_->config.model.type == "marian-ssru" ? sequences_.GetPromptLength() : 0;
   const int active_length = sequence_length - start_offset;
   // Need at least one complete n-gram in history before anything can be banned.
   if (active_length < ngram_size)

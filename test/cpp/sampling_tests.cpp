@@ -602,6 +602,39 @@ TEST(SamplingTests, NoRepeatNgramEncoderDecoderIgnoresPromptTokensCpu) {
   generator->GenerateNextToken();
   EXPECT_NE(generator->GetNextTokens()[1], 3);
   EXPECT_EQ(generator->GetNextTokens()[1], 0);
+
+  // Also verify that a subsequent AppendTokens call (decoder continuation)
+  // preserves the initial source boundary rather than resetting it and erasing
+  // prior decoder n-gram history.
+  auto dynamic_model = OgaModel::Create(MODEL_PATH "marian-cache/dynamic");
+  auto single_params = OgaGeneratorParams::Create(*dynamic_model);
+  single_params->SetSearchOption("max_length", 16);
+  single_params->SetSearchOptionBool("do_sample", false);
+  single_params->SetSearchOption("batch_size", 1);
+  single_params->SetSearchOption("repetition_penalty", 1.0);
+  single_params->SetSearchOption("no_repeat_ngram_size", 2.0);
+
+  const int vocab_size = 128;
+  std::array<int64_t, 2> logits_shape{1, vocab_size};
+  std::vector<float> logits_cpu(vocab_size, 1.0f);
+  logits_cpu[3] = 10.0f;
+  logits_cpu[42] = 8.0f;
+
+  auto single_generator = OgaGenerator::Create(*dynamic_model, *single_params);
+  single_generator->AppendTokens(second.data(), second.size());
+  ASSERT_EQ(single_generator->TokenCount(), 2U);
+
+  // Generate first decoder token (3), then append a second decoder token (3)
+  // via AppendTokens; the next generated token must still ban (3, 3) and
+  // select 42.
+  single_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
+  single_generator->GenerateNextToken();
+  EXPECT_EQ(single_generator->GetNextTokens()[0], 3);
+  const std::array<int32_t, 1> continuation{3};
+  single_generator->AppendTokens(continuation.data(), continuation.size());
+  single_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
+  single_generator->GenerateNextToken();
+  EXPECT_EQ(single_generator->GetNextTokens()[0], 42);
 }
 
 #if USE_CUDA
