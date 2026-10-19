@@ -83,7 +83,7 @@ void ValidateNemotronBoltSearch(const GeneratorParams& params) {
               params.speculative.min_adaptive_k == 0 && !params.speculative.cooldown &&
               params.speculative.max_draft_tokens == 7,
           "speculative.max_draft_tokens must be 7; external/adaptive speculative strategies are unsupported");
-  Require(!s.chunk_size && !s.adaptive_chunking, "external prefill chunking is unsupported");
+  Require(!s.chunk_size, "external prefill chunking is unsupported");
   Require(params.use_graph_capture, "CUDA graph capture must be enabled");
 }
 
@@ -313,7 +313,14 @@ std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens) 
 }
 
 void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int32_t anchor) {
-  Dflash2Drafter::Feed feed{request_.get(), 0, context_rows, first_position, anchor, true, true, false};
+  Dflash2Drafter::Feed feed{
+      .request = request_.get(),
+      .aux_row_begin = 0,
+      .aux_row_count = context_rows,
+      .first_position = first_position,
+      .anchor_token = anchor,
+      .draft_eligible = true,
+      .wants_drafts = true};
   std::vector<std::vector<int32_t>> proposals;
   Require(drafter_->Propose(*aux_view_, {&feed, 1}, proposals) &&
               proposals.size() == 1 && proposals[0].size() == 7,
