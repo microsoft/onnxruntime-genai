@@ -42,7 +42,7 @@ or either inference cache. Recreate/reset recording inference state separately.
 If either model fails, generation fails rather than publishing incomplete combined
 outputs; do not blindly retry after one branch may have advanced state.
 
-`TokenPostProcessor(model, generator)` owns a tokenizer, an ordinary tokenizer
+`TokenPostProcessor(generator)` owns a tokenizer, an ordinary tokenizer
 stream, `MetadataCoreState`, word grouping, acoustic interval buffers, and the
 results completed by the latest processing call. Configuration comes from the
 model's `genai_config.json`. Callers do not create or pass token metadata records.
@@ -54,7 +54,7 @@ model's timestamp level. The generator must outlive the processor. Only
 `batch_size=1` and `num_beams=1` are supported; other values are rejected.
 
 ```cpp
-auto postprocessor = OgaTokenPostProcessor::Create(*model, *generator);
+auto postprocessor = OgaTokenPostProcessor::Create(*generator);
 while (!generator->IsDone()) {
   generator->GenerateNextToken();
   postprocessor->ProcessNextTokens();
@@ -231,14 +231,14 @@ must be externally serialized. Independent processors have independent state.
 is no intermediate metadata output or conversion to a second result model. The
 processor owns one immutable configuration; metadata state reads that same object.
 
-Python uses `TokenPostProcessor(model, generator)`, `process_next_tokens()`,
+Python uses `TokenPostProcessor(generator)`, `process_next_tokens()`,
 `get_next_token_results()`, `finalize()`, and `reset()`. Borrowed
 `TokenPostProcessorResult` objects expose `get_text()` and nullable
 `get_timestamps()`. Timestamp objects expose `get_words()` and `get_segments()`;
 records expose `get_text()`, `get_start_frame()`, `get_stop_frame()`,
 `get_start_time()`, and `get_stop_time()`.
 
-C# uses `TokenPostProcessor(model, generator)`, `ProcessNextTokens()`,
+C# uses `TokenPostProcessor(generator)`, `ProcessNextTokens()`,
 `GetNextTokenResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
 `TokenPostProcessorResult` objects expose `GetText()` and nullable `GetTimestamps()`.
 Timestamp objects expose `GetWords()` and `GetSegments()`; records expose

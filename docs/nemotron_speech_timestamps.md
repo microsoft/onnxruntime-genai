@@ -87,7 +87,7 @@ For a locally installed Nemotron model outside the test fixtures, set
 `AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
 That test uses CPU session options, even when the model package specifies CUDA.
 
-For the timed path, create `TokenPostProcessor(model, generator)` after configuring
+For the timed path, create `TokenPostProcessor(generator)` after configuring
 the model. The generator supplies *when* each token occurred; Extensions supplies
 vocabulary-derived lexical facts and ordinary decoded text. GenAI groups the words.
 Each processor result also contains the ordinary incremental text fragment. Use it for live text, or collect

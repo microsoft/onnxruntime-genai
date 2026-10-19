@@ -5,14 +5,13 @@
 
 namespace Generators {
 
-TokenPostProcessor::TokenPostProcessor(const Model& model, const Generator& generator)
+TokenPostProcessor::TokenPostProcessor(const Generator& generator)
     : generator_{generator},
-      config_{{model.config_->model.timestamp_level, model.config_->model.segment_separators,
-               model.config_->model.segment_gap_threshold_seconds, model.config_->model.sample_rate,
-               model.config_->model.hop_length, model.config_->model.subsampling_factor},
-              model.config_->model.diarization.Enabled()} {
-  if (generator.model_.get() != &model)
-    throw std::runtime_error("TokenPostProcessor model must match the generator model");
+      config_{{generator.model_->config_->model.timestamp_level, generator.model_->config_->model.segment_separators,
+               generator.model_->config_->model.segment_gap_threshold_seconds, generator.model_->config_->model.sample_rate,
+               generator.model_->config_->model.hop_length, generator.model_->config_->model.subsampling_factor},
+              generator.model_->config_->model.diarization.Enabled()} {
+  const auto& model = *generator.model_;
   const auto& search = generator.state_->params_->search;
   if (search.batch_size != 1 || search.num_beams != 1)
     throw std::runtime_error("TokenPostProcessor requires batch_size=1 and num_beams=1");

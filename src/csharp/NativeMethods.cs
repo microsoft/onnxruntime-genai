@@ -378,7 +378,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                               out IntPtr /* const char** */ outStr);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaCreateTokenPostProcessor(IntPtr model, IntPtr generator, out IntPtr processor);
+        public static extern IntPtr OgaCreateTokenPostProcessor(IntPtr generator, out IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyTokenPostProcessor(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

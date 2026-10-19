@@ -60,7 +60,7 @@ def test_real_audio_metadata_modes(tmp_path, streaming_models, speech_audio, dia
     parameters = og.GeneratorParams(model)
     parameters.set_search_options(max_length=512)
     generator = og.Generator(model, parameters)
-    postprocessor = og.TokenPostProcessor(model, generator)
+    postprocessor = og.TokenPostProcessor(generator)
     fragments = []
     records = []
     metadata = diarization or level != "off"

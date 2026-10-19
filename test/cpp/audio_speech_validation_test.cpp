@@ -219,7 +219,7 @@ TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
   generator.SetInputs(*tail);
   ASSERT_FALSE(generator.IsDone());
   generator.GenerateNextToken();
-  Generators::TokenPostProcessor postprocessor{*model, generator};
+  Generators::TokenPostProcessor postprocessor{generator};
   postprocessor.ProcessNextTokens();
   auto results = postprocessor.GetNextTokenResults();
   postprocessor.Finalize();
@@ -360,7 +360,7 @@ TEST_F(MetadataCoreStateTests, ChunkStartSampleSurvivesGeneratorInputHandoff) {
 }
 
 TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions) {
-  Generators::TokenPostProcessor processor{*model, *generator};
+  Generators::TokenPostProcessor processor{*generator};
   processor.ProcessNextTokens();
   const auto& results = processor.GetNextTokenResults();
   ASSERT_EQ(results.size(), tokens.size());
@@ -389,7 +389,7 @@ TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions)
 }
 
 TEST_F(MetadataCoreStateTests, InvalidIntervalsDoNotAdvanceDecoding) {
-  Generators::TokenPostProcessor processor{*model, *generator};
+  Generators::TokenPostProcessor processor{*generator};
   source->last_token_intervals_.clear();
   EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
   source->SetStep(tokens, 4);
@@ -408,7 +408,7 @@ TEST_F(MetadataCoreStateTests, InvalidIntervalsDoNotAdvanceDecoding) {
 
 TEST_F(MetadataCoreStateTests, GeneratorOutputSelectionUsesModelConfig) {
   source->SetTimestampsEnabled(false);
-  Generators::TokenPostProcessor timed_processor{*model, *generator};
+  Generators::TokenPostProcessor timed_processor{*generator};
   EXPECT_NO_THROW(timed_processor.ProcessNextTokens());
   ASSERT_EQ(timed_processor.GetNextTokenResults().size(), tokens.size());
   for (const auto& result : timed_processor.GetNextTokenResults())
@@ -417,7 +417,7 @@ TEST_F(MetadataCoreStateTests, GeneratorOutputSelectionUsesModelConfig) {
   model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Off;
   source->SetTimestampsEnabled(true);
   source->last_token_intervals_.clear();
-  Generators::TokenPostProcessor plain_processor{*model, *generator};
+  Generators::TokenPostProcessor plain_processor{*generator};
   EXPECT_NO_THROW(plain_processor.ProcessNextTokens());
   std::string text;
   for (const auto& result : plain_processor.GetNextTokenResults()) {
@@ -428,13 +428,13 @@ TEST_F(MetadataCoreStateTests, GeneratorOutputSelectionUsesModelConfig) {
 }
 
 TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificIntervals) {
-  Generators::TokenPostProcessor processor{*model, *generator};
+  Generators::TokenPostProcessor processor{*generator};
   const auto repeated = tokenizer->Encode(" Hello");
   source->SetStep(repeated, 2);
-  for (auto& interval : source->last_token_intervals_) interval.stop = 7;
+  for (auto& token_interval : source->last_token_intervals_) token_interval.stop = 7;
   processor.ProcessNextTokens();
   source->SetStep(repeated, 20);
-  for (auto& interval : source->last_token_intervals_) interval.stop = 23;
+  for (auto& token_interval : source->last_token_intervals_) token_interval.stop = 23;
   processor.ProcessNextTokens();
   std::vector<Generators::TimestampRecord> words;
   for (const auto& result : processor.GetNextTokenResults())
@@ -457,7 +457,7 @@ TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
   model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Segment;
   for (double threshold : {0.0, 0.01, 1.0}) {
     model->config_->model.segment_gap_threshold_seconds = threshold;
-    Generators::TokenPostProcessor processor{*model, *generator};
+    Generators::TokenPostProcessor processor{*generator};
     std::vector<Generators::TimestampRecord> segments;
     const auto collect = [&] {
       for (const auto& result : processor.GetNextTokenResults())
@@ -484,7 +484,7 @@ TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
   for (auto level : {Level::Off, Level::Word, Level::Segment}) {
     model->config_->model.timestamp_level = level;
     source->SetTimestampsEnabled(level != Level::Off);
-    Generators::TokenPostProcessor processor{*model, *generator};
+    Generators::TokenPostProcessor processor{*generator};
     processor.ProcessNextTokens();
     size_t words = 0;
     size_t segments = 0;
@@ -504,7 +504,7 @@ TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
 }
 
 TEST_F(MetadataCoreStateTests, ResetClearsPendingStateAndResultsAreReadOnly) {
-  Generators::TokenPostProcessor processor{*model, *generator};
+  Generators::TokenPostProcessor processor{*generator};
   processor.ProcessNextTokens();
   const auto owned = processor.GetNextTokenResults();
   source->SetStep({}, 99);
@@ -526,14 +526,12 @@ TEST_F(MetadataCoreStateTests, ResetClearsPendingStateAndResultsAreReadOnly) {
   EXPECT_EQ(owned.size(), tokens.size());
 }
 
-TEST_F(MetadataCoreStateTests, RejectsMismatchedModelsAndMultipleSequences) {
-  auto different_model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  EXPECT_THROW((Generators::TokenPostProcessor{*different_model, *generator}), std::runtime_error);
+TEST_F(MetadataCoreStateTests, RejectsMultipleSequences) {
   params->search.batch_size = 2;
-  EXPECT_THROW((Generators::TokenPostProcessor{*model, *generator}), std::runtime_error);
+  EXPECT_THROW((Generators::TokenPostProcessor{*generator}), std::runtime_error);
   params->search.batch_size = 1;
   params->search.num_beams = 2;
-  EXPECT_THROW((Generators::TokenPostProcessor{*model, *generator}), std::runtime_error);
+  EXPECT_THROW((Generators::TokenPostProcessor{*generator}), std::runtime_error);
 }
 
 TEST(AudioSpeechValidationTests, ParakeetEncoderChannelDimensionValidation) {
