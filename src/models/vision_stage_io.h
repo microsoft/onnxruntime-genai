@@ -6,7 +6,7 @@
 
 namespace Generators {
 
-void ApplyVisionRunOption(OrtRunOptions& options, const char* key, const char* value);
+void ApplyVisionRunOption(OrtRunOptions& options, const char* key, const char* value, size_t stage_index);
 std::unique_ptr<OrtRunOptions> CreateVisionStageRunOptions(const Config::Model::Vision& vision, size_t stage_index);
 
 // Preallocate concrete outputs on the encoder device; let ORT allocate dynamic outputs.

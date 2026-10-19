@@ -38,7 +38,9 @@ In contrast, `enable_profiling` in runtime option provides dynamic control:
 - Useful for profiling specific portions of the generation process
 
 For a Gemma 4 decoder pipeline with split vision, generator runtime options also reach both the
-vision encoder and projector. Each stage retains its configured run options.
+vision encoder and projector. Each stage retains its configured run options. Profiling uses
+`<prefix>_encoder` and `<prefix>_projector` for the two vision stages, so their traces cannot
+overwrite each other even when they start within the same millisecond.
 
 ## Language ID (Nemotron Speech)
 

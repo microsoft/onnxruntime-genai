@@ -175,8 +175,8 @@ Qwen2_5_VL_PipelineState::Qwen2_5_VL_PipelineState(const Qwen2_5_VL_PipelineMode
 void Qwen2_5_VL_PipelineState::SetRunOption(const char* key, const char* value) {
   State::SetRunOption(key, value);
   if (encoder_run_options_) {
-    ApplyVisionRunOption(*encoder_run_options_, key, value);
-    ApplyVisionRunOption(*projector_run_options_, key, value);
+    ApplyVisionRunOption(*encoder_run_options_, key, value, 0);
+    ApplyVisionRunOption(*projector_run_options_, key, value, 1);
   }
 }
 

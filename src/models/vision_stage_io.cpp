@@ -8,7 +8,7 @@
 
 namespace Generators {
 
-void ApplyVisionRunOption(OrtRunOptions& options, const char* key, const char* value) {
+void ApplyVisionRunOption(OrtRunOptions& options, const char* key, const char* value, size_t stage_index) {
   if (strcmp(key, "terminate_session") == 0) {
     if (strcmp(value, "0") == 0) {
       options.UnsetTerminate();
@@ -24,9 +24,14 @@ void ApplyVisionRunOption(OrtRunOptions& options, const char* key, const char* v
     } else {
       constexpr const char* default_profile_prefix = "onnxruntime_run_profile";
       const char* prefix = strcmp(value, "1") == 0 ? default_profile_prefix : value;
-      options.EnableProfiling(fs::path(prefix).c_str());
+      if (stage_index > 1) {
+        throw std::runtime_error("Vision profiling requires an encoder or projector stage");
+      }
+      const auto stage_prefix = fs::path(std::string(prefix) + (stage_index == 0 ? "_encoder" : "_projector"));
+      options.EnableProfiling(stage_prefix.c_str());
     }
 #else
+    (void)stage_index;
     throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
 #endif
   } else {
@@ -41,7 +46,7 @@ std::unique_ptr<OrtRunOptions> CreateVisionStageRunOptions(const Config::Model::
                                : vision.run_options;
   if (configured) {
     for (const auto& [key, value] : *configured) {
-      ApplyVisionRunOption(*options, key.c_str(), value.c_str());
+      ApplyVisionRunOption(*options, key.c_str(), value.c_str(), stage_index);
     }
   }
   return options;

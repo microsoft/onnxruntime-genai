@@ -1937,17 +1937,23 @@ def test_gemma4_pipelined_decoder_runs_split_vision(
             profile_enabled = True
     generator.set_inputs(inputs)
     if profile_enabled:
-        profiles = list(tmp_path.glob("pipeline_vision_profile*.json"))
-        assert profiles
-        node_names = {
+        encoder_profiles = list(tmp_path.glob("pipeline_vision_profile_encoder*.json"))
+        projector_profiles = list(tmp_path.glob("pipeline_vision_profile_projector*.json"))
+        assert encoder_profiles and projector_profiles
+        encoder_nodes = {
             event["name"]
-            for path in profiles
+            for path in encoder_profiles
             for event in json.loads(path.read_text(encoding="utf-8"))
             if event.get("cat") == "Node"
         }
-        # Both stages share this runtime prefix; ORT may overwrite one profile
-        # when their filenames receive the same timestamp.
-        assert any("Identity" in name or "GatherND" in name for name in node_names)
+        projector_nodes = {
+            event["name"]
+            for path in projector_profiles
+            for event in json.loads(path.read_text(encoding="utf-8"))
+            if event.get("cat") == "Node"
+        }
+        assert any("Identity" in name for name in encoder_nodes)
+        assert any("GatherND" in name for name in projector_nodes)
     pixel_values = _to_numpy(inputs["pixel_values"])
     positions = _to_numpy(inputs["pixel_position_ids"])
     _assert_split_position_ids(source_model_path, prompt, images, positions, position_dtype)
@@ -1971,7 +1977,7 @@ def test_gemma4_pipelined_decoder_runs_split_vision(
 
 
 @pytest.mark.parametrize("decoder_layout", ["flat", "pipeline"])
-@pytest.mark.parametrize("option_scope", ["vision", "encoder", "projector"])
+@pytest.mark.parametrize("option_scope", ["vision", "vision_shared", "encoder", "projector"])
 @pytest.mark.parametrize("option_name", ["terminate_session", "enable_profiling"])
 def test_gemma4_split_vision_configured_run_options(
     test_data_path, tmp_path, decoder_layout, option_scope, option_name
@@ -2003,9 +2009,9 @@ def test_gemma4_split_vision_configured_run_options(
 
     profile_prefix = tmp_path / "configured_vision_profile"
     configured_value = "1" if option_name == "terminate_session" else os.fspath(profile_prefix)
-    if option_scope == "vision":
+    if option_scope in ("vision", "vision_shared"):
         config["model"]["vision"]["run_options"] = {option_name: configured_value}
-        if option_name == "enable_profiling":
+        if option_scope == "vision" and option_name == "enable_profiling":
             config["model"]["vision"]["pipeline"][0]["encoder"]["run_options"] = {
                 option_name: os.fspath(tmp_path / "configured_encoder_profile")
             }
@@ -2042,7 +2048,8 @@ def test_gemma4_split_vision_configured_run_options(
             if str(exc) == "enable_profiling requires ONNX Runtime 1.25 or later":
                 pytest.skip(str(exc))
             raise
-        profiles = list(tmp_path.glob("configured_vision_profile*.json"))
+        stage_name = "encoder" if option_scope == "encoder" else "projector"
+        profiles = list(tmp_path.glob(f"configured_vision_profile_{stage_name}*.json"))
         assert profiles
         node_names = {
             event["name"]
@@ -2052,8 +2059,9 @@ def test_gemma4_split_vision_configured_run_options(
         }
         expected_node = "Identity" if option_scope == "encoder" else "GatherND"
         assert any(expected_node in name for name in node_names)
-        if option_scope == "vision":
-            encoder_profiles = list(tmp_path.glob("configured_encoder_profile*.json"))
+        if option_scope in ("vision", "vision_shared"):
+            encoder_prefix = "configured_encoder_profile" if option_scope == "vision" else "configured_vision_profile"
+            encoder_profiles = list(tmp_path.glob(f"{encoder_prefix}_encoder*.json"))
             assert encoder_profiles
             assert any(
                 "Identity" in event["name"]
