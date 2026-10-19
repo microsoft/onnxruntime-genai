@@ -167,7 +167,7 @@ def main() -> None:
         "cuda": {
             "enable_cuda_graph": "1",
             "min_num_runs_before_cuda_graph_capture": "4",
-            "arena_extend_strategy": "kSameAsRequested",
+            "arena_extend_strategy": "1",
         }
     }
     config = {

@@ -19,6 +19,9 @@ Each script supports `--help`. PLE table construction additionally requires
 the external `mobius` research package and checkpoint configuration; no
 inherited Qwen4 model builder or model export changes are included here.
 These tools package existing compatible graphs, not arbitrary checkpoints.
+Generated CUDA provider options use the numeric arena strategy (`1`, meaning
+`kSameAsRequested`) accepted by upstream GenAI; no symbolic-option parser
+extension is required.
 
 The optimizer rewrites supported normalization, rotary, GDN preparation,
 gates, hyper-connections, FP8 projection, MoE residual, and sparse-attention
