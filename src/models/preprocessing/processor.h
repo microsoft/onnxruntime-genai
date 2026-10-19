@@ -49,6 +49,7 @@ struct Config;
 struct SessionInfo;
 class ThreadPool;
 
+// A null pool keeps same-type copies on the direct sequential path.
 template <typename T>
 std::unique_ptr<OrtValue> ProcessTensor(ThreadPool* thread_pool, OrtxTensor* tensor,
                                         Ort::Allocator& allocator);

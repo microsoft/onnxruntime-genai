@@ -209,7 +209,15 @@ set_target_properties(parallel_preprocessing_tests PROPERTIES
 if(NOT MSVC)
   target_compile_options(parallel_preprocessing_tests PRIVATE "-fvisibility=hidden")
 endif()
-add_test(NAME ParallelPreprocessingTests COMMAND parallel_preprocessing_tests)
+add_test(NAME ParallelPreprocessingTests
+  COMMAND parallel_preprocessing_tests --gtest_filter=-ParallelPerformanceTests.*)
+option(ENABLE_PREPROCESSING_PERFORMANCE_TESTS
+  "Register preprocessing timing checks; requires an idle, known CPU setup" OFF)
+if(ENABLE_PREPROCESSING_PERFORMANCE_TESTS)
+  add_test(NAME ParallelPreprocessingPerformanceTests
+    COMMAND parallel_preprocessing_tests --gtest_filter=ParallelPerformanceTests.*)
+  set_tests_properties(ParallelPreprocessingPerformanceTests PROPERTIES LABELS "performance")
+endif()
 
 add_executable(kv_cache_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 target_include_directories(kv_cache_unit_tests PRIVATE

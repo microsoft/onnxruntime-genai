@@ -26,50 +26,30 @@ void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float
       total_patches > std::numeric_limits<std::ptrdiff_t>::max() / spatial_patch_dim) {
     throw std::overflow_error("Image patch element count exceeds ptrdiff_t range");
   }
-  const auto total_spatial_elements =
-      static_cast<std::ptrdiff_t>(total_patches * spatial_patch_dim);
-
   ThreadPool::TryParallelFor(
-      thread_pool, total_spatial_elements, static_cast<double>(temporal_patch_size),
-      [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-        for (auto output_idx = first; output_idx < last; ++output_idx) {
-          const int64_t patch_idx = static_cast<int64_t>(output_idx) / spatial_patch_dim;
-          const int64_t patch_offset = static_cast<int64_t>(output_idx) % spatial_patch_dim;
-          const int64_t channel = patch_offset / (patch_size * patch_size);
-          const int64_t patch_pixel = patch_offset % (patch_size * patch_size);
-          const int64_t patch_h = patch_pixel / patch_size;
-          const int64_t patch_w = patch_pixel % patch_size;
-          const int64_t patch_row = patch_idx / width_patches;
-          const int64_t patch_col = patch_idx % width_patches;
-          const int64_t source_idx =
-              (patch_row * patch_size + patch_h) * width * channels +
-              (patch_col * patch_size + patch_w) * channels + channel;
-          destination[patch_idx * patch_dim + channel * patch_size * patch_size +
-                      patch_h * patch_size + patch_w] = source[source_idx];
-        }
-      });
-
-  if (temporal_patch_size > 1) {
-    if (total_patches >
-        std::numeric_limits<std::ptrdiff_t>::max() / (temporal_patch_size - 1)) {
-      throw std::overflow_error("Image patch replication count exceeds ptrdiff_t range");
-    }
-    const int64_t replication_count = total_patches * (temporal_patch_size - 1);
-    ThreadPool::TryParallelFor(
-        thread_pool, static_cast<std::ptrdiff_t>(replication_count),
-        static_cast<double>(spatial_patch_dim),
-        [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-          for (auto replication_idx = first; replication_idx < last; ++replication_idx) {
-            const int64_t patch_idx =
-                static_cast<int64_t>(replication_idx) / (temporal_patch_size - 1);
-            const int64_t temporal_idx =
-                static_cast<int64_t>(replication_idx) % (temporal_patch_size - 1) + 1;
-            float* patch_output = destination + patch_idx * patch_dim;
-            std::memcpy(patch_output + temporal_idx * spatial_patch_dim, patch_output,
+      thread_pool, static_cast<std::ptrdiff_t>(total_patches), static_cast<double>(patch_dim),
+      [=](std::ptrdiff_t first, std::ptrdiff_t last) {
+        for (auto patch_idx = first; patch_idx < last; ++patch_idx) {
+          const int64_t patch_row = static_cast<int64_t>(patch_idx) / width_patches;
+          const int64_t patch_col = static_cast<int64_t>(patch_idx) % width_patches;
+          const int64_t h_start = patch_row * patch_size;
+          const int64_t w_start = patch_col * patch_size;
+          float* patch_output = destination + patch_idx * patch_dim;
+          int64_t write_idx = 0;
+          for (int64_t c = 0; c < channels; ++c) {
+            for (int64_t h = 0; h < patch_size; ++h) {
+              const float* source_row = source + (h_start + h) * width * channels + w_start * channels + c;
+              for (int64_t w = 0; w < patch_size; ++w) {
+                patch_output[write_idx++] = source_row[w * channels];
+              }
+            }
+          }
+          for (int64_t t = 1; t < temporal_patch_size; ++t) {
+            std::memcpy(patch_output + t * spatial_patch_dim, patch_output,
                         static_cast<size_t>(spatial_patch_dim) * sizeof(float));
           }
-        });
-  }
+        }
+      });
 }
 
 namespace {

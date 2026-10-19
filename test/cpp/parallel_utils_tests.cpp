@@ -4,8 +4,11 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <atomic>
+#include <chrono>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "models/parallel_utils.h"
@@ -16,7 +19,7 @@ namespace {
 TEST(ParallelCopyTests, HandlesEmptySmallLargeNullAndWorkerCounts) {
   for (size_t workers : {0U, 1U, 3U}) {
     ThreadPool pool{workers};
-    for (size_t size : {0U, 1U, 16U, 200000U}) {
+    for (size_t size : {0U, 1U, 16U, 200000U, 1048576U}) {
       std::vector<int32_t> source(size);
       std::iota(source.begin(), source.end(), 1);
       std::vector<int32_t> destination(size);
@@ -39,18 +42,47 @@ TEST(ParallelCopyTests, RejectsSizeMismatch) {
 }
 
 TEST(ParallelTransformTests, ConvertsTypesWithImmutableCapture) {
-  std::vector<int64_t> source(100000);
+  std::vector<int64_t> source(1048576);
   std::iota(source.begin(), source.end(), -50000);
   std::vector<float> destination(source.size());
   ThreadPool pool{3};
   constexpr float scale = 0.25f;
+  const auto caller = std::this_thread::get_id();
+  std::atomic<bool> worker_seen{};
   ParallelTransform(&pool, std::span<const int64_t>{source},
                     std::span<float>{destination}, 2.0,
-                    [scale](int64_t value) {
+                    [&](int64_t value) {
+                      if (std::this_thread::get_id() != caller)
+                        worker_seen = true;
                       return static_cast<float>(value) * scale;
                     });
   for (size_t i = 0; i < source.size(); ++i)
     EXPECT_EQ(destination[i], static_cast<float>(source[i]) * scale);
+  EXPECT_TRUE(worker_seen.load());
+}
+
+TEST(ParallelTransformTests, WorkerExceptionReachesCallerAndPoolRemainsReusable) {
+  ThreadPool pool{3};
+  std::vector<int> source(1048576, 7), destination(source.size());
+  const auto caller = std::this_thread::get_id();
+  std::atomic<bool> worker_threw{};
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  EXPECT_THROW(
+      ParallelTransform(&pool, std::span<const int>{source}, std::span<int>{destination}, 128.0,
+                        [&](int value) {
+                          if (std::this_thread::get_id() != caller) {
+                            worker_threw = true;
+                            throw std::runtime_error("worker transform");
+                          }
+                          while (!worker_threw.load() && std::chrono::steady_clock::now() < deadline)
+                            std::this_thread::yield();
+                          return value;
+                        }),
+      std::runtime_error);
+  EXPECT_TRUE(worker_threw.load());
+  ParallelTransform(&pool, std::span<const int>{source}, std::span<int>{destination}, 128.0,
+                    [](int value) { return value + 1; });
+  EXPECT_EQ(destination, std::vector<int>(source.size(), 8));
 }
 
 TEST(ParallelTransformTests, HandlesEmptyMismatchAndExceptions) {
@@ -77,7 +109,7 @@ TEST(ParallelTransformTests, HandlesEmptyMismatchAndExceptions) {
 }
 
 TEST(ParallelTransformInPlaceTests, MatchesScalarAndPropagatesExceptions) {
-  std::vector<int> values(100000);
+  std::vector<int> values(1048576);
   std::iota(values.begin(), values.end(), 0);
   auto expected = values;
   std::transform(expected.begin(), expected.end(), expected.begin(),
@@ -101,7 +133,7 @@ TEST(ParallelTransformInPlaceTests, MatchesScalarAndPropagatesExceptions) {
 TEST(ParallelFillTests, HandlesEmptySmallLargeAndWorkerCounts) {
   for (size_t workers : {0U, 1U, 3U}) {
     ThreadPool pool{workers};
-    for (size_t size : {0U, 8U, 100000U}) {
+    for (size_t size : {0U, 8U, 100000U, 1048576U}) {
       std::vector<uint64_t> values(size);
       ParallelFill(&pool, std::span<uint64_t>{values}, uint64_t{42});
       EXPECT_EQ(values, std::vector<uint64_t>(size, 42));

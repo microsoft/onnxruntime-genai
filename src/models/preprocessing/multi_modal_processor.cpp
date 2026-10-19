@@ -4,6 +4,7 @@
 #include "multi_modal_processor.h"
 
 #include "models/model.h"
+#include "models/env_utils.h"
 #include "models/preprocessing/gemma4_multimodal_processor.h"
 #include "models/preprocessing/gemma_image_processor.h"
 #include "models/preprocessing/genai_tokenizer.h"
@@ -19,28 +20,35 @@
 #include "models/threadpool.h"
 
 #include <algorithm>
+#include <charconv>
 #include <stdexcept>
 #include <thread>
 
 namespace Generators {
 
+size_t GetPreprocessingWorkerCount(size_t hardware_threads) {
+  const auto setting = GetEnv("ORTGENAI_PREPROCESSING_THREADS");
+  if (setting.empty())
+    return hardware_threads > 1 ? std::min<size_t>(3, hardware_threads / 2) : 0;
+  unsigned int workers{};
+  const auto result = std::from_chars(setting.data(), setting.data() + setting.size(), workers);
+  if (result.ec != std::errc{} || result.ptr != setting.data() + setting.size() || workers > 3)
+    throw std::invalid_argument("ORTGENAI_PREPROCESSING_THREADS must be an integer from 0 to 3");
+  return workers;
+}
+
 std::shared_ptr<ThreadPool> Model::GetOrCreatePreprocessingThreadPool() const {
   std::call_once(preprocessing_thread_pool_once_, [&] {
-    const size_t hardware_threads = std::thread::hardware_concurrency();
-    const size_t preprocessing_workers =
-        hardware_threads > 1 ? std::min<size_t>(3, hardware_threads / 2) : 0;
-    preprocessing_thread_pool_ = std::make_shared<ThreadPool>(preprocessing_workers);
+    const size_t preprocessing_workers = GetPreprocessingWorkerCount(std::thread::hardware_concurrency());
+    if (preprocessing_workers != 0)
+      preprocessing_thread_pool_ = std::make_shared<ThreadPool>(preprocessing_workers);
   });
   return preprocessing_thread_pool_;
 }
 
-ThreadPool* Model::GetPreprocessingThreadPool() const {
-  return GetOrCreatePreprocessingThreadPool().get();
-}
-
 std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
   return std::make_shared<MultiModalProcessor>(*config_, session_info_,
-                                               GetOrCreatePreprocessingThreadPool());
+                                               config_->model.type == "whisper" ? nullptr : GetOrCreatePreprocessingThreadPool());
 }
 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info,

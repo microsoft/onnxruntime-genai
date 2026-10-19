@@ -21,6 +21,8 @@ struct SessionInfo;
 struct Tokenizer;
 class ThreadPool;
 
+size_t GetPreprocessingWorkerCount(size_t hardware_threads);
+
 struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, ExternalRefCounted<MultiModalProcessor> {
   MultiModalProcessor(Config& config, const SessionInfo& session_info,
                       std::shared_ptr<ThreadPool> thread_pool);

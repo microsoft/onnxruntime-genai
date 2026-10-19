@@ -10,7 +10,6 @@
 namespace Generators {
 namespace {
 
-constexpr double kMinimumParallelCost = 65536.0;
 thread_local bool is_thread_pool_callback = false;
 
 struct CallbackScope {
@@ -87,8 +86,8 @@ void ThreadPool::Run(std::ptrdiff_t total, double cost_per_unit, const RangeFunc
     return;
   }
 
-  // Concurrent top-level submissions are intentionally serialized. This keeps
-  // one reusable worker set while nested submissions remain synchronous.
+  // Only worker-backed submissions are serialized; synchronous small jobs may
+  // overlap them. Nested submissions also remain synchronous.
   std::unique_lock submission_lock{submission_mutex_};
   const auto desired_chunks = static_cast<std::ptrdiff_t>((threads_.size() + 1) * 4);
   const auto chunk_size =

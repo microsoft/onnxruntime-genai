@@ -135,6 +135,35 @@ TEST(Lfm2VlImagePatchesTest, ParallelWorkersMatchSequentialOutput) {
   }
 }
 
+TEST(Lfm2VlImagePatchesTest, ParallelPaddedPatchesMatchScalarReference) {
+  constexpr int64_t height = 272, width = 496, padded_height = 288, padded_width = 512, patch = 16;
+  const auto geometry = ComputeLfm2VlImageGeometry(height, width, patch, kDownsampleFactor);
+  for (int64_t channels : {1, 3, 4}) {
+    std::vector<float> image(static_cast<size_t>(channels * padded_height * padded_width));
+    for (size_t i = 0; i < image.size(); ++i) image[i] = static_cast<float>(i);
+    std::vector<float> expected;
+    expected.reserve(static_cast<size_t>(channels * height * width));
+    for (int64_t row = 0; row < geometry.patch_rows; ++row)
+      for (int64_t col = 0; col < geometry.patch_cols; ++col)
+        for (int64_t y = 0; y < patch; ++y)
+          for (int64_t x = 0; x < patch; ++x)
+            for (int64_t c = 0; c < channels; ++c)
+              expected.push_back(image[c * padded_height * padded_width +
+                                       (row * patch + y) * padded_width + col * patch + x]);
+    std::vector<float> actual(expected.size(), -1.0f);
+    WriteLfm2VlImagePatches(nullptr, image.data(), channels, padded_height, padded_width,
+                            geometry, patch, actual.data());
+    EXPECT_EQ(actual, expected);
+    for (size_t workers : {0U, 1U, 3U}) {
+      ThreadPool pool{workers};
+      std::vector<float> parallel(expected.size(), -1.0f);
+      WriteLfm2VlImagePatches(&pool, image.data(), channels, padded_height, padded_width,
+                              geometry, patch, parallel.data());
+      EXPECT_EQ(parallel, expected);
+    }
+  }
+}
+
 TEST(Lfm2VlImageTokensTest, PlaceholderWrapsImageTokensInStartAndEndMarkers) {
   EXPECT_EQ(BuildLfm2VlImagePlaceholder(3), "<|image_start|><image><image><image><|image_end|>");
 }

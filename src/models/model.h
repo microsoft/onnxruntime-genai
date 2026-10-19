@@ -153,7 +153,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::shared_ptr<Tokenizer> CreateTokenizer() const;
 
   std::shared_ptr<MultiModalProcessor> CreateMultiModalProcessor() const;
-  ThreadPool* GetPreprocessingThreadPool() const;
 
   virtual std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
 

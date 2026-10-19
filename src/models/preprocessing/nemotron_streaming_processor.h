@@ -10,9 +10,7 @@
 
 namespace Generators {
 
-class ThreadPool;
-
-void PopulateMelTensor(ThreadPool* thread_pool, OrtValue& output, std::span<const float> cache,
+void PopulateMelTensor(OrtValue& output, std::span<const float> cache,
                        int cache_pos, std::span<const float> mel,
                        int num_frames, int num_mels);
 

@@ -32,22 +32,30 @@ void TransposeVideoChatFlashHwcToChw(ThreadPool* thread_pool, const float* sourc
   if (width > 0 && total_rows > std::numeric_limits<std::ptrdiff_t>::max() / width) {
     throw std::overflow_error("VideoChatFlash element count exceeds ptrdiff_t range");
   }
-  const auto total_elements = total_rows * width;
-  ThreadPool::TryParallelFor(
-      thread_pool, total_elements, 1.0,
-      [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-        for (auto output_idx = first; output_idx < last; ++output_idx) {
-          const int64_t plane = static_cast<int64_t>(output_idx) / plane_size;
-          const int64_t plane_offset = static_cast<int64_t>(output_idx) % plane_size;
-          const int64_t h = plane_offset / width;
-          const int64_t w = plane_offset % width;
-          const int64_t image = plane / channels;
-          const int64_t channel = plane % channels;
-          const float* src_image = source + image * plane_size * channels;
-          destination[output_idx] =
-              src_image[(h * width + w) * channels + channel];
+  if (plane_size == 0) {
+    return;
+  }
+  const auto transpose_planes = [=](std::ptrdiff_t first, std::ptrdiff_t last) {
+    for (auto plane = first; plane < last; ++plane) {
+      const int64_t image = plane / channels;
+      const int64_t channel = plane % channels;
+      const float* src_image = source + image * plane_size * channels;
+      float* dst_plane = destination + plane * plane_size;
+      for (int64_t h = 0; h < height; ++h) {
+        const float* src_row = src_image + h * width * channels + channel;
+        float* dst_row = dst_plane + h * width;
+        for (int64_t w = 0; w < width; ++w) {
+          dst_row[w] = src_row[w * channels];
         }
-      });
+      }
+    }
+  };
+  if (!thread_pool ||
+      static_cast<double>(total_planes) * static_cast<double>(plane_size) <= ThreadPool::kMinimumParallelCost) {
+    transpose_planes(0, total_planes);
+    return;
+  }
+  ThreadPool::TryParallelFor(thread_pool, total_planes, static_cast<double>(plane_size), transpose_planes);
 }
 
 namespace {

@@ -85,8 +85,12 @@ std::unique_ptr<OrtValue> ProcessTensor(ThreadPool* thread_pool, OrtxTensor* ten
                                                       tensor_shape + tensor_num_dims,
                                                       1LL, std::multiplies<int64_t>());
   auto tensor_value = OrtValue::CreateTensor<T>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
-  ParallelCopy(thread_pool, tensor_data, tensor_value->template GetTensorMutableData<T>(),
-               static_cast<size_t>(tensor_num_elements));
+  if (thread_pool) {
+    ParallelCopy(thread_pool, tensor_data, tensor_value->template GetTensorMutableData<T>(),
+                 static_cast<size_t>(tensor_num_elements));
+  } else {
+    std::copy_n(tensor_data, tensor_num_elements, tensor_value->template GetTensorMutableData<T>());
+  }
   return tensor_value;
 }
 

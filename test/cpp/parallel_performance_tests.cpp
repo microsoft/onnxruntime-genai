@@ -15,9 +15,11 @@
 #include <vector>
 
 #include "models/parallel_utils.h"
+#include "models/preprocessing/lfm2_vl_image_processor.h"
 #include "models/preprocessing/nemotron_streaming_processor.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
 #include "models/preprocessing/videochat_flash_processor.h"
+#include "preprocessing_reference_kernels.h"
 
 namespace Generators {
 namespace {
@@ -68,7 +70,8 @@ std::pair<double, double> MeasurePair(const std::function<void()>& sequential,
 }
 
 void ExpectNoRegression(const char* operation, const std::function<void()>& sequential,
-                        const std::function<void()>& parallel) {
+                        const std::function<void()>& parallel,
+                        const std::function<void()>& caller_only = {}) {
 #ifdef NDEBUG
   if (std::thread::hardware_concurrency() < 4) {
     GTEST_SKIP() << operation << " requires at least four hardware threads";
@@ -82,100 +85,114 @@ void ExpectNoRegression(const char* operation, const std::function<void()>& sequ
   EXPECT_LE(parallel_us, sequential_us * kNoiseTolerance)
       << operation << " regressed: sequential=" << sequential_us
       << " us, parallel=" << parallel_us << " us";
+  if (caller_only) {
+    const auto [old_us, caller_us] = MeasurePair(sequential, caller_only);
+    std::cout << "[ CALLER CONTROL ] " << operation << ": pre-PR=" << old_us
+              << " us, current-null-pool=" << caller_us << " us\n";
+  }
 #else
   GTEST_SKIP() << operation << " performance is measured only in Release builds";
 #endif
 }
 
 TEST(ParallelPerformanceTests, QwenPatchExtractionDoesNotRegress) {
-  constexpr int64_t height = 896;
-  constexpr int64_t width = 896;
-  constexpr int64_t channels = 3;
-  constexpr int64_t patch = 14;
-  constexpr int64_t temporal = 2;
-  const size_t element_count = static_cast<size_t>(height * width * channels);
-  std::vector<float> source(element_count, 1.0f);
-  std::vector<float> sequential_output(element_count * temporal);
-  std::vector<float> parallel_output(sequential_output.size());
+  constexpr int64_t channels = 3, patch = 14, temporal = 2;
   ThreadPool pool{3};
-
-  ExpectNoRegression(
-      "Qwen patch extraction",
-      [&] {
-        ExtractQwenImagePatches(nullptr, source.data(), sequential_output.data(), height,
-                                width, channels, patch, temporal);
-        Consume(sequential_output.data());
-      },
-      [&] {
-        ExtractQwenImagePatches(&pool, source.data(), parallel_output.data(), height,
-                                width, channels, patch, temporal);
-        Consume(parallel_output.data());
-      });
+  for (int64_t side : {56, 448, 896}) {
+    SCOPED_TRACE(side);
+    const size_t element_count = static_cast<size_t>(side * side * channels);
+    std::vector<float> source(element_count);
+    std::iota(source.begin(), source.end(), 0.0f);
+    std::vector<float> sequential_output(element_count * temporal);
+    std::vector<float> parallel_output(sequential_output.size());
+    std::vector<float> caller_output(sequential_output.size());
+    ExpectNoRegression(
+        "Qwen patch extraction",
+        [&] {
+          ExtractQwenPatchesSequential(source.data(), sequential_output.data(),
+                                       side, side, channels, patch);
+          Consume(sequential_output.data());
+        },
+        [&] {
+          ExtractQwenImagePatches(&pool, source.data(), parallel_output.data(), side,
+                                  side, channels, patch, temporal);
+          Consume(parallel_output.data());
+        },
+        [&] {
+          ExtractQwenImagePatches(nullptr, source.data(), caller_output.data(), side,
+                                  side, channels, patch, temporal);
+          Consume(caller_output.data());
+        });
+    EXPECT_EQ(parallel_output, sequential_output);
+    EXPECT_EQ(caller_output, sequential_output);
+  }
 }
 
 TEST(ParallelPerformanceTests, VideoTransposeDoesNotRegress) {
-  constexpr int64_t images = 8;
   constexpr int64_t channels = 3;
-  constexpr int64_t height = 448;
-  constexpr int64_t width = 448;
-  const size_t element_count = static_cast<size_t>(images * channels * height * width);
-  std::vector<float> source(element_count, 1.0f);
-  std::vector<float> sequential_output(element_count);
-  std::vector<float> parallel_output(element_count);
   ThreadPool pool{3};
-
-  ExpectNoRegression(
-      "VideoChatFlash transpose",
-      [&] {
-        TransposeVideoChatFlashHwcToChw(nullptr, source.data(), sequential_output.data(),
-                                        images, channels, height, width);
-        Consume(sequential_output.data());
-      },
-      [&] {
-        TransposeVideoChatFlashHwcToChw(&pool, source.data(), parallel_output.data(),
-                                        images, channels, height, width);
-        Consume(parallel_output.data());
-      });
+  for (const auto& [images, side] : {std::pair{1, 56}, std::pair{1, 112}, std::pair{8, 448}}) {
+    SCOPED_TRACE(side);
+    const size_t element_count = static_cast<size_t>(images * channels * side * side);
+    std::vector<float> source(element_count);
+    std::iota(source.begin(), source.end(), 0.0f);
+    std::vector<float> sequential_output(element_count);
+    std::vector<float> parallel_output(element_count);
+    std::vector<float> caller_output(element_count);
+    ExpectNoRegression(
+        "VideoChatFlash transpose",
+        [&] {
+          TransposeVideoSequential(source.data(), sequential_output.data(),
+                                   images, channels, side, side);
+          Consume(sequential_output.data());
+        },
+        [&] {
+          TransposeVideoChatFlashHwcToChw(&pool, source.data(), parallel_output.data(),
+                                          images, channels, side, side);
+          Consume(parallel_output.data());
+        },
+        [&] {
+          TransposeVideoChatFlashHwcToChw(nullptr, source.data(), caller_output.data(),
+                                          images, channels, side, side);
+          Consume(caller_output.data());
+        });
+    EXPECT_EQ(parallel_output, sequential_output);
+    EXPECT_EQ(caller_output, sequential_output);
+  }
 }
 
-TEST(ParallelPerformanceTests, NemotronMelPopulationDoesNotRegress) {
-  constexpr int frames = 6000;
-  constexpr int mels = 128;
-  constexpr int cache_frames = 16;
-  std::vector<float> cache(static_cast<size_t>(cache_frames * mels), 1.0f);
-  std::vector<float> mel(static_cast<size_t>(frames * mels), 2.0f);
-  auto& allocator = Ort::Allocator::GetWithDefaultOptions();
-  auto sequential_output = OrtValue::CreateTensor<float>(
-      allocator, std::array<int64_t, 3>{1, cache_frames + frames, mels});
-  auto parallel_output = OrtValue::CreateTensor<float>(
-      allocator, std::array<int64_t, 3>{1, cache_frames + frames, mels});
+TEST(ParallelPerformanceTests, Lfm2PatchExtractionDoesNotRegress) {
+  constexpr int64_t channels = 3, patch = 16;
   ThreadPool pool{3};
-
-  ExpectNoRegression(
-      "Nemotron mel population",
-      [&] {
-        PopulateMelTensor(nullptr, *sequential_output, cache, 13, mel, frames, mels);
-        Consume(sequential_output->GetTensorRawData());
-      },
-      [&] {
-        PopulateMelTensor(&pool, *parallel_output, cache, 13, mel, frames, mels);
-        Consume(parallel_output->GetTensorRawData());
-      });
-
-  auto sequential_fp16 = OrtValue::CreateTensor<Ort::Float16_t>(
-      allocator, std::array<int64_t, 3>{1, cache_frames + frames, mels});
-  auto parallel_fp16 = OrtValue::CreateTensor<Ort::Float16_t>(
-      allocator, std::array<int64_t, 3>{1, cache_frames + frames, mels});
-  ExpectNoRegression(
-      "Nemotron FP16 mel population",
-      [&] {
-        PopulateMelTensor(nullptr, *sequential_fp16, cache, 13, mel, frames, mels);
-        Consume(sequential_fp16->GetTensorRawData());
-      },
-      [&] {
-        PopulateMelTensor(&pool, *parallel_fp16, cache, 13, mel, frames, mels);
-        Consume(parallel_fp16->GetTensorRawData());
-      });
+  for (int64_t side : {64, 128, 512}) {
+    SCOPED_TRACE(side);
+    const auto geometry = ComputeLfm2VlImageGeometry(side, side, patch, 2);
+    const size_t element_count = static_cast<size_t>(channels * side * side);
+    std::vector<float> source(element_count);
+    std::iota(source.begin(), source.end(), 0.0f);
+    std::vector<float> sequential_output(element_count);
+    std::vector<float> parallel_output(element_count);
+    std::vector<float> caller_output(element_count);
+    ExpectNoRegression(
+        "LFM2 patch extraction",
+        [&] {
+          WriteLfm2PatchesSequential(source.data(), sequential_output.data(),
+                                     channels, side, side, patch);
+          Consume(sequential_output.data());
+        },
+        [&] {
+          WriteLfm2VlImagePatches(&pool, source.data(), channels, side, side,
+                                  geometry, patch, parallel_output.data());
+          Consume(parallel_output.data());
+        },
+        [&] {
+          WriteLfm2VlImagePatches(nullptr, source.data(), channels, side, side,
+                                  geometry, patch, caller_output.data());
+          Consume(caller_output.data());
+        });
+    EXPECT_EQ(parallel_output, sequential_output);
+    EXPECT_EQ(caller_output, sequential_output);
+  }
 }
 
 TEST(ParallelPerformanceTests, GenericTransformAndCopyDoNotRegress) {

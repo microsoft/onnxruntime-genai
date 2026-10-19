@@ -16,6 +16,7 @@ namespace Generators {
 class ThreadPool {
  public:
   using RangeFunction = std::function<void(std::ptrdiff_t first, std::ptrdiff_t last)>;
+  static constexpr double kMinimumParallelCost = 65536.0;
 
   explicit ThreadPool(size_t num_threads);
   ~ThreadPool();
@@ -23,6 +24,7 @@ class ThreadPool {
   ThreadPool(const ThreadPool&) = delete;
   ThreadPool& operator=(const ThreadPool&) = delete;
 
+  // Worker-backed jobs are serialized. Small/null-pool jobs can overlap other submissions.
   static void TryParallelFor(ThreadPool* thread_pool,
                              std::ptrdiff_t total,
                              double cost_per_unit,

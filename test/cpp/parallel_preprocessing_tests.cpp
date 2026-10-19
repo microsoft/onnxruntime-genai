@@ -17,9 +17,73 @@
 #include "models/preprocessing/nemotron_streaming_processor.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
 #include "models/preprocessing/videochat_flash_processor.h"
+#include "models/preprocessing/processor.h"
+#include "models/preprocessing/multi_modal_processor.h"
 #include "models/threadpool.h"
+#include "c_api_utils.hpp"
+#include "preprocessing_reference_kernels.h"
+#include "scoped-environment-variable.h"
 
 namespace Generators {
+
+// Keep the pre-pool loops independent of the new implementation and in a
+// separate translation unit from timing call sites to retain runtime dimensions.
+void ExtractQwenPatchesSequential(const float* source, float* destination,
+                                  int64_t height, int64_t width, int64_t channels,
+                                  int64_t patch_size) {
+  constexpr int64_t temporal = 2;
+  const int64_t patch_dim = channels * temporal * patch_size * patch_size;
+  int64_t patch_idx = 0;
+  for (int64_t ph = 0; ph < height / patch_size; ++ph) {
+    for (int64_t pw = 0; pw < width / patch_size; ++pw) {
+      const int64_t h_start = ph * patch_size;
+      const int64_t w_start = pw * patch_size;
+      int64_t write_idx = patch_idx * patch_dim;
+      for (int64_t t = 0; t < temporal; ++t)
+        for (int64_t c = 0; c < channels; ++c)
+          for (int64_t h = 0; h < patch_size; ++h)
+            for (int64_t w = 0; w < patch_size; ++w)
+              destination[write_idx++] =
+                  source[(h_start + h) * width * channels + (w_start + w) * channels + c];
+      ++patch_idx;
+    }
+  }
+}
+
+void TransposeVideoSequential(const float* source, float* destination,
+                              int64_t images, int64_t channels, int64_t height, int64_t width) {
+  for (int64_t n = 0; n < images; ++n) {
+    const float* src_image = source + n * height * width * channels;
+    float* dst_image = destination + n * channels * height * width;
+    for (int64_t c = 0; c < channels; ++c)
+      for (int64_t h = 0; h < height; ++h)
+        for (int64_t w = 0; w < width; ++w)
+          dst_image[c * height * width + h * width + w] =
+              src_image[h * width * channels + w * channels + c];
+  }
+}
+
+void WriteLfm2PatchesSequential(const float* image, float* destination, int64_t channels,
+                                int64_t height, int64_t width, int64_t patch_size) {
+  const int64_t patch_cols = width / patch_size;
+  const int64_t patch_dim = patch_size * patch_size * channels;
+  const int64_t channel_stride = height * width;
+  for (int64_t row = 0; row < height / patch_size; ++row) {
+    for (int64_t col = 0; col < patch_cols; ++col) {
+      float* patch = destination + (row * patch_cols + col) * patch_dim;
+      for (int64_t y = 0; y < patch_size; ++y) {
+        const int64_t source_row = row * patch_size + y;
+        for (int64_t x = 0; x < patch_size; ++x) {
+          const int64_t source_col = col * patch_size + x;
+          for (int64_t c = 0; c < channels; ++c)
+            patch[(y * patch_size + x) * channels + c] =
+                image[c * channel_stride + source_row * width + source_col];
+        }
+      }
+    }
+  }
+}
+
 namespace {
 
 TEST(ThreadPoolTests, NullPoolRunsSynchronously) {
@@ -135,24 +199,72 @@ TEST(ThreadPoolTests, SerializesConcurrentTopLevelSubmissions) {
   std::atomic<int> first_count{};
   std::atomic<int> second_count{};
   std::atomic<bool> start{};
+  std::atomic<int> first_active{};
+  std::atomic<int> second_active{};
+  std::atomic<bool> overlap{};
 
-  auto submit = [&](std::atomic<int>& count) {
+  auto submit = [&](std::atomic<int>& count, std::atomic<int>& active, std::atomic<int>& other_active) {
     while (!start.load(std::memory_order_acquire))
       std::this_thread::yield();
     ThreadPool::TryParallelFor(&pool, 1000, 100.0, [&](auto first, auto last) {
+      ++active;
+      if (other_active.load() != 0)
+        overlap = true;
       std::this_thread::sleep_for(std::chrono::microseconds(50));
       count.fetch_add(static_cast<int>(last - first));
+      --active;
     });
   };
 
-  std::thread first{submit, std::ref(first_count)};
-  std::thread second{submit, std::ref(second_count)};
+  std::thread first{submit, std::ref(first_count), std::ref(first_active), std::ref(second_active)};
+  std::thread second{submit, std::ref(second_count), std::ref(second_active), std::ref(first_active)};
   start.store(true, std::memory_order_release);
   first.join();
   second.join();
 
   EXPECT_EQ(first_count.load(), 1000);
   EXPECT_EQ(second_count.load(), 1000);
+  EXPECT_FALSE(overlap.load());
+}
+
+TEST(ThreadPoolTests, SmallSubmissionCanOverlapWorkerBackedJob) {
+  ThreadPool pool{3};
+  std::atomic<bool> entered{}, release{}, small_done{};
+  std::thread large{[&] {
+    ThreadPool::TryParallelFor(&pool, 1000, 100.0, [&](auto, auto) {
+      entered = true;
+      while (!release.load())
+        std::this_thread::yield();
+    });
+  }};
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!entered.load() && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  std::thread small{[&] {
+    ThreadPool::TryParallelFor(&pool, 1, 1.0, [&](auto, auto) { small_done = true; });
+  }};
+  while (!small_done.load() && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  const bool overlapped = entered.load() && small_done.load();
+  release = true;
+  small.join();
+  large.join();
+  EXPECT_TRUE(overlapped);
+}
+
+TEST(ParallelPreprocessingTests, WorkerCountCanBeConfiguredOrDisabled) {
+  test::ScopedEnvironmentVariable setting{"ORTGENAI_PREPROCESSING_THREADS", std::nullopt};
+  EXPECT_EQ(GetPreprocessingWorkerCount(1), 0U);
+  EXPECT_EQ(GetPreprocessingWorkerCount(2), 1U);
+  EXPECT_EQ(GetPreprocessingWorkerCount(96), 3U);
+  for (const auto& [value, expected] : {std::pair{"0", 0U}, std::pair{"1", 1U}, std::pair{"3", 3U}}) {
+    setting.Set(value);
+    EXPECT_EQ(GetPreprocessingWorkerCount(96), expected);
+  }
+  for (const char* value : {"-1", "4", "1x", " 1", "999999999999999999999"}) {
+    setting.Set(value);
+    EXPECT_THROW(GetPreprocessingWorkerCount(96), std::invalid_argument);
+  }
 }
 
 TEST(ThreadPoolTests, ComputeCompatibility) {
@@ -237,6 +349,30 @@ TEST(ParallelPreprocessingTests, QwenLargeParallelExtractionMatchesScalarReferen
   EXPECT_EQ(actual, expected);
 }
 
+TEST(ParallelPreprocessingTests, QwenNonSquareTemporalReplicationMatchesScalarReference) {
+  for (int64_t patch : {14, 16}) {
+    const int64_t height = patch * 17 + 5;
+    const int64_t width = patch * 31 + 3;
+    constexpr int64_t channels = 3;
+    std::vector<float> source(static_cast<size_t>(height * width * channels));
+    std::iota(source.begin(), source.end(), 0.0f);
+    for (int64_t temporal : {1, 2, 3}) {
+      const auto expected = ScalarQwenPatches(source, height, width, channels, patch, temporal);
+      std::vector<float> actual(expected.size(), -1.0f);
+      ExtractQwenImagePatches(nullptr, source.data(), actual.data(), height, width,
+                              channels, patch, temporal);
+      EXPECT_EQ(actual, expected);
+      for (size_t workers : {0U, 1U, 3U}) {
+        ThreadPool pool{workers};
+        std::fill(actual.begin(), actual.end(), -1.0f);
+        ExtractQwenImagePatches(&pool, source.data(), actual.data(), height, width,
+                                channels, patch, temporal);
+        EXPECT_EQ(actual, expected);
+      }
+    }
+  }
+}
+
 std::vector<float> ScalarHwcToChw(const std::vector<float>& source, int64_t images,
                                   int64_t channels, int64_t height, int64_t width) {
   std::vector<float> output(source.size());
@@ -271,6 +407,34 @@ TEST(ParallelPreprocessingTests, VideoTransposeMatchesScalarReference) {
   }
 }
 
+TEST(ParallelPreprocessingTests, VideoNonSquareRowsMatchScalarReference) {
+  constexpr int64_t images = 5, channels = 3, height = 127, width = 193;
+  std::vector<float> source(images * channels * height * width);
+  std::iota(source.begin(), source.end(), 0.0f);
+  const auto expected = ScalarHwcToChw(source, images, channels, height, width);
+  std::vector<float> actual(source.size(), -1.0f);
+  TransposeVideoChatFlashHwcToChw(nullptr, source.data(), actual.data(),
+                                  images, channels, height, width);
+  EXPECT_EQ(actual, expected);
+  for (size_t workers : {0U, 1U, 3U}) {
+    ThreadPool pool{workers};
+    std::fill(actual.begin(), actual.end(), -1.0f);
+    TransposeVideoChatFlashHwcToChw(&pool, source.data(), actual.data(),
+                                    images, channels, height, width);
+    EXPECT_EQ(actual, expected);
+  }
+}
+
+TEST(ParallelPreprocessingTests, VideoEmptyInputsDoNotAccessBuffers) {
+  ThreadPool pool{3};
+  for (ThreadPool* thread_pool : {static_cast<ThreadPool*>(nullptr), &pool}) {
+    EXPECT_NO_THROW(TransposeVideoChatFlashHwcToChw(thread_pool, nullptr, nullptr, 0, 3, 4, 4));
+    EXPECT_NO_THROW(TransposeVideoChatFlashHwcToChw(thread_pool, nullptr, nullptr, 1, 0, 4, 4));
+    EXPECT_NO_THROW(TransposeVideoChatFlashHwcToChw(thread_pool, nullptr, nullptr, 1, 3, 0, 4));
+    EXPECT_NO_THROW(TransposeVideoChatFlashHwcToChw(thread_pool, nullptr, nullptr, 1, 3, 4, 0));
+  }
+}
+
 template <typename T>
 std::vector<T> ScalarMel(const std::vector<float>& cache, int cache_pos,
                          const std::vector<float>& mel, int frames, int mels,
@@ -287,28 +451,43 @@ std::vector<T> ScalarMel(const std::vector<float>& cache, int cache_pos,
   return output;
 }
 
+TEST(ParallelPreprocessingTests, ProcessTensorSequentialAndPooledCopiesMatch) {
+  auto& allocator = Ort::Allocator::GetWithDefaultOptions();
+  ThreadPool pool{3};
+  for (int64_t count : {0, 1, 128, 524288}) {
+    std::vector<float> source(static_cast<size_t>(count));
+    std::iota(source.begin(), source.end(), -64.0f);
+    ortc::Tensor<float> input(std::vector<int64_t>{count}, source.data());
+    ort_extensions::TensorObject object;
+    object.SetTensor(&input);
+    for (ThreadPool* selected : {static_cast<ThreadPool*>(nullptr), &pool}) {
+      auto output = ProcessTensor<float>(selected, &object, allocator);
+      EXPECT_EQ(output->GetTensorTypeAndShapeInfo()->GetElementCount(), source.size());
+      EXPECT_TRUE(std::equal(source.begin(), source.end(), output->GetTensorData<float>()));
+    }
+  }
+}
+
 TEST(ParallelPreprocessingTests, NemotronFloatAndFloat16MatchScalarReference) {
-  constexpr int frames = 600;
   constexpr int mels = 128;
   std::vector<float> cache(7 * mels);
-  std::vector<float> mel(frames * mels);
   std::iota(cache.begin(), cache.end(), -100.0f);
-  std::iota(mel.begin(), mel.end(), 1.0f);
   auto& allocator = Ort::Allocator::GetWithDefaultOptions();
 
-  for (size_t workers : {0U, 1U, 2U, 3U}) {
-    ThreadPool pool{workers};
+  for (int frames : {0, 1, 16, 64, 160, 600, 1600}) {
+    std::vector<float> mel(frames * mels);
+    std::iota(mel.begin(), mel.end(), 1.0f);
     auto fp32 = OrtValue::CreateTensor<float>(
-        allocator, std::array<int64_t, 3>{1, 607, mels});
-    PopulateMelTensor(&pool, *fp32, cache, 5, mel, frames, mels);
+        allocator, std::array<int64_t, 3>{1, 7 + frames, mels});
+    PopulateMelTensor(*fp32, cache, 5, mel, frames, mels);
     const auto expected_fp32 =
         ScalarMel<float>(cache, 5, mel, frames, mels, [](float value) { return value; });
     EXPECT_TRUE(std::equal(expected_fp32.begin(), expected_fp32.end(),
                            fp32->GetTensorData<float>()));
 
     auto fp16 = OrtValue::CreateTensor<Ort::Float16_t>(
-        allocator, std::array<int64_t, 3>{1, 607, mels});
-    PopulateMelTensor(&pool, *fp16, cache, 5, mel, frames, mels);
+        allocator, std::array<int64_t, 3>{1, 7 + frames, mels});
+    PopulateMelTensor(*fp16, cache, 5, mel, frames, mels);
     const auto expected_fp16 = ScalarMel<Ort::Float16_t>(
         cache, 5, mel, frames, mels,
         [](float value) { return Ort::Float16_t{FastFloat32ToFloat16(value)}; });
@@ -331,7 +510,7 @@ TEST(ParallelPreprocessingTests, NemotronCacheUpdateWrapsAcrossChunks) {
   auto& allocator = Ort::Allocator::GetWithDefaultOptions();
   auto output = OrtValue::CreateTensor<float>(
       allocator, std::array<int64_t, 3>{1, 6, mels});
-  PopulateMelTensor(nullptr, *output, cache, cache_pos, second, 2, mels);
+  PopulateMelTensor(*output, cache, cache_pos, second, 2, mels);
   const auto expected =
       ScalarMel<float>(cache, cache_pos, second, 2, mels, [](float value) { return value; });
   EXPECT_TRUE(std::equal(expected.begin(), expected.end(), output->GetTensorData<float>()));
