@@ -44,6 +44,12 @@ python model-mm.py -m {path to model folder} -e {execution provider} --image_pat
 python qwen-3.6-mtp.py -m {path to main model folder} -d {path to MTP head folder}
 ```
 
+```bash
+# The `d1-decisions` script answers typed questions about a state with LiquidAI/d1-3B, in one forward
+# pass per question. See d1-tutorial.md for how to build the model and for the request format.
+python d1-decisions.py -m {path to model folder} -r {path to request json}
+```
+
 ## Streaming ASR with speaker attribution
 
 Use a Python package and native binaries built from the corresponding diarization
