@@ -62,11 +62,14 @@ def link_tree(src: Path, dst: Path, copy: bool) -> None:
 
 def validate_bundle_destinations(bundles: list[tuple[Path, Path]]) -> None:
     """Reject mixed-package rebuilds before any package files are written."""
+    sources = [src.resolve() for src, _ in bundles]
     for src, dst in bundles:
         if not src.is_dir():
             raise SystemExit(f"missing source bundle: {src}")
         if os.path.lexists(dst):
             raise SystemExit(f"bundle destination already exists: {dst}; choose a fresh output directory")
+        if any(dst.resolve().is_relative_to(source) for source in sources):
+            raise SystemExit(f"bundle destination is inside a source bundle: {dst}")
 
 
 def link_file(src: Path, dst: Path, copy: bool) -> None:

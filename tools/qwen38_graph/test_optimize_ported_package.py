@@ -86,6 +86,97 @@ def capture_value(model, value, dtype=TensorProto.FLOAT):
 
 
 class OptimizePortedPackageTest(unittest.TestCase):
+    def fp8_model(self, scale_dtype=np.float32, output="output", missing_shape=False):
+        return helper.make_model(
+            helper.make_graph(
+                [
+                    helper.make_node("DequantizeLinear", ["weights", "scales"], ["float_weights"], axis=1),
+                    helper.make_node("Cast", ["float_weights"], ["bf16_weights"], to=TensorProto.BFLOAT16),
+                    helper.make_node("MatMul", ["input", "bf16_weights"], [output]),
+                ],
+                "fp8",
+                [helper.make_tensor_value_info("input", TensorProto.BFLOAT16, [1, 2, 16])],
+                [helper.make_tensor_value_info(output, TensorProto.BFLOAT16, None if missing_shape else [1, 2, 512])],
+                [
+                    numpy_helper.from_array(np.ones((16, 512), dtype=ml_dtypes.float8_e4m3fn), "weights"),
+                    numpy_helper.from_array(np.ones(512, dtype=scale_dtype), "scales"),
+                ],
+            ),
+            opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
+        )
+
+    def test_fp8_scale_types_and_external_length(self):
+        for dtype in (np.float32, np.float16, ml_dtypes.bfloat16):
+            with self.subTest(dtype=dtype), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "model.onnx"
+                model = self.fp8_model(scale_dtype=dtype)
+                tensor = model.graph.initializer[0]
+                (path.parent / "weights.bin").write_bytes(b"pad" + tensor.raw_data)
+                onnx.external_data_helper.set_external_data(tensor, location="weights.bin", offset=3)
+                tensor.ClearField("raw_data")
+                onnx.save(model, path)
+                result = optimize_model(path)
+                self.assertEqual(result, {"fused_fp8_matmuls": 1} if dtype is np.float32 else {})
+                loaded = onnx.load(path)
+                if dtype is np.float32:
+                    weights = numpy_helper.to_array(loaded.graph.initializer[0])
+                    self.assertEqual(weights.shape, (512, 16))
+                    np.testing.assert_array_equal(weights.view(np.uint8), np.full((512, 16), 0x38, np.uint8))
+                else:
+                    self.assertEqual(
+                        [node.op_type for node in loaded.graph.node], ["DequantizeLinear", "Cast", "MatMul"]
+                    )
+
+    def test_fp8_generated_names_preserve_existing_values_and_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "model.onnx"
+            model = self.fp8_model()
+            for name in ("weights.performance_nk", "weights.performance_nk_1"):
+                model.graph.initializer.append(numpy_helper.from_array(np.array([7], np.float32), name))
+                model.graph.node.append(helper.make_node("Identity", [name], [name + ".observed"]))
+            model.graph.node.append(helper.make_node("Identity", ["input"], ["scales.performance_n1"]))
+            capture_value(model, "scales.performance_n1_1", TensorProto.BFLOAT16)
+            model.graph.initializer.append(
+                numpy_helper.from_array(np.ones((1,), dtype=ml_dtypes.bfloat16), "scales.performance_n1_1")
+            )
+            onnx.save(model, path)
+            provenance = {}
+            self.assertEqual(optimize_model(path, provenance), {"fused_fp8_matmuls": 1})
+            optimized = onnx.load(path)
+            node = next(n for n in optimized.graph.node if n.op_type == "MatMulBlockQuantizedFp8Weight")
+            self.assertEqual(list(node.input[1:]), ["weights.performance_nk_2", "scales.performance_n1_2"])
+            self.assertEqual(set(provenance), set(node.input[1:]))
+            tensors = {t.name: numpy_helper.to_array(t) for t in optimized.graph.initializer}
+            for name in ("weights.performance_nk", "weights.performance_nk_1"):
+                np.testing.assert_array_equal(tensors[name], [7])
+            names = [t.name for t in optimized.graph.initializer] + [
+                out for n in optimized.graph.node for out in n.output
+            ]
+            self.assertEqual(len(names), len(set(names)))
+
+    def test_head_quantization_after_fp8_fusion_without_output_shape(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "model.onnx"
+            onnx.save(self.fp8_model(output="value", missing_shape=True), path)
+            self.assertEqual(optimize_model(path), {"fused_fp8_matmuls": 1})
+            self.assertEqual(quantize_prefill_outputs(path, {"value": np.ones(512, np.float32)}, head=True), 1)
+            model = onnx.load(path)
+            onnx.checker.check_model(model)
+            self.assertEqual(model.graph.output[0].type.tensor_type.elem_type, TensorProto.INT8)
+            self.assertEqual(model.graph.node[0].output[0], "value.performance_unquantized")
+
+    def test_head_output_capture_rejects_quantization_without_modifying_model(self):
+        for name in ("key", "value"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "model.onnx"
+                model = self.fp8_model(output=name)
+                capture_value(model, name, TensorProto.BFLOAT16)
+                onnx.save(model, path)
+                before = path.read_bytes()
+                with self.assertRaisesRegex(ValueError, "captured head output"):
+                    quantize_prefill_outputs(path, {name: np.ones(512, np.float32)}, head=True)
+                self.assertEqual(path.read_bytes(), before)
+
     def test_rms_input_slice_fusion_numerics_and_guards(self):
         class BranchwiseRMSNorm(OpRun):
             op_domain = "com.microsoft"
@@ -1625,6 +1716,21 @@ class OptimizePortedPackageTest(unittest.TestCase):
             self.assertEqual(fuse_causal_conv_projection(path), 0)
             onnx.save(graph(malformed=True), path)
             self.assertEqual(fuse_causal_conv_projection(path), 0)
+            for name in ("present", "present_mid"):
+                for captured in (False, True):
+                    with self.subTest(early_output=name, captured=captured):
+                        model = graph()
+                        if captured:
+                            capture_value(model, name)
+                        else:
+                            model.graph.node.append(helper.make_node("Identity", [name], ["early"]))
+                        nodes = list(model.graph.node)
+                        del model.graph.node[:]
+                        model.graph.node.extend(nodes[:2] + nodes[5:] + nodes[2:5])
+                        onnx.save(model, path)
+                        before = path.read_bytes()
+                        self.assertEqual(fuse_causal_conv_projection(path), 0)
+                        self.assertEqual(path.read_bytes(), before)
 
     def test_postmix_preserves_residual_users_and_graph_output(self):
         for extra_mix in (False, True):
@@ -1878,6 +1984,50 @@ class OptimizePortedPackageTest(unittest.TestCase):
             model = helper.make_model(
                 graph, opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)]
             )
+            for dtype in (np.float32, ml_dtypes.bfloat16):
+                variant = copy.deepcopy(model)
+                variant.graph.input[0].type.tensor_type.elem_type = (
+                    TensorProto.FLOAT if dtype is np.float32 else TensorProto.BFLOAT16
+                )
+                for tensor in variant.graph.initializer:
+                    if tensor.name not in ("divisor", "multiplier"):
+                        tensor.CopyFrom(
+                            numpy_helper.from_array(numpy_helper.to_array(tensor).astype(dtype), tensor.name)
+                        )
+                norm = variant.graph.node[0]
+                attrs = [attr for attr in norm.attribute if attr.name != "epsilon"]
+                del norm.attribute[:]
+                norm.attribute.extend(attrs)
+                onnx.save(variant, path)
+                self.assertEqual(fuse_hyper_connections(path), 1)
+                fused = onnx.load(path).graph.node[0]
+                epsilon = next(a.f for a in fused.attribute if a.name == "epsilon")
+                self.assertAlmostEqual(epsilon, 1e-5)
+                for mismatch in ("shared", "dtype", "layout", "unknown", "produced"):
+                    with self.subTest(dtype=dtype, mismatch=mismatch):
+                        rejected = copy.deepcopy(variant)
+                        scale = rejected.graph.initializer[0]
+                        if mismatch == "shared":
+                            scale.CopyFrom(numpy_helper.from_array(np.ones(2, dtype=dtype), scale.name))
+                        elif mismatch == "dtype":
+                            other_dtype = ml_dtypes.bfloat16 if dtype is np.float32 else np.float32
+                            scale.CopyFrom(numpy_helper.from_array(np.ones(8, dtype=other_dtype), scale.name))
+                        elif mismatch == "layout":
+                            scale.dims[:] = [4, 2]
+                        elif mismatch == "unknown":
+                            rejected.graph.input[0].type.tensor_type.shape.dim[-1].ClearField("dim_value")
+                        else:
+                            weight = rejected.graph.initializer[1]
+                            weight.name = "down_source"
+                            rejected.graph.node.insert(
+                                1, helper.make_node("Identity", ["down_source"], ["input_mix_weight_down"])
+                            )
+                        onnx.save(rejected, path)
+                        self.assertEqual(fuse_hyper_connections(path), 0)
+                        self.assertEqual(
+                            [node.op_type for node in onnx.load(path).graph.node],
+                            [node.op_type for node in rejected.graph.node],
+                        )
             onnx.save(model, path)
             self.assertEqual(fuse_hyper_connections(path), 1)
             optimized = onnx.load(path)

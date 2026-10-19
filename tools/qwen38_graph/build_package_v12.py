@@ -22,6 +22,7 @@ import argparse
 import importlib.util
 import json
 import os
+import struct
 from collections import defaultdict
 from pathlib import Path
 
@@ -123,8 +124,10 @@ def _tensor_bytes(tensor, base: Path) -> bytes:
         info = {e.key: e.value for e in tensor.external_data}
         with open(base / info["location"], "rb") as f:
             f.seek(int(info.get("offset", 0)))
-            return f.read(int(info["length"]))
-    return bytes(tensor.raw_data)
+            return f.read(int(info["length"]) if "length" in info else -1)
+    if tensor.HasField("raw_data"):
+        return bytes(tensor.raw_data)
+    return struct.pack(f"<{len(tensor.int32_data)}H", *tensor.int32_data)
 
 
 def qsa_nodes(model_path: Path, head: bool):

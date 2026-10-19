@@ -25,7 +25,8 @@ extension is required.
 
 Use a fresh output bundle directory. Builders reject existing bundle destinations
 (including dangling symlinks) before copying any graphs, libraries, or configuration;
-they do not support in-place refresh of a prior package. File and directory symlinks
+they also reject destinations inside any resolved source bundle to avoid recursive
+self-copying. They do not support in-place refresh of a prior package. File and directory symlinks
 are preserved without walking external directory targets. Relative symlink targets
 must remain reachable from the new package location.
 
@@ -35,6 +36,8 @@ therefore preserves shared source initializers even with `--copy` or a
 cross-filesystem hard-link fallback; unrelated tensors are not merged merely because
 their names match. QSA normalization and rotary constants come only from the
 packaged target/head graphs, never an implicit research reference graph.
+BF16 constants support both inline raw/typed storage and external data; omitted
+external-data lengths mean the bytes from the specified offset through EOF.
 Optimizer-created weights retain sharing only when both the original pool
 identity and the applied transformation match, not merely the generated name.
 
@@ -42,6 +45,12 @@ The optimizer rewrites supported normalization, rotary, GDN preparation,
 gates, hyper-connections, FP8 projection, MoE residual, and sparse-attention
 cache handoff chains. It preserves external weight sharing and avoids
 mutating qualified input packages through hard-linked graph files.
+FP8 weight fusion requires FP32 scales and allocates collision-free weight names.
+Low-rank hyper-connection fusion requires a proven flat per-branch scale matching
+the stream dtype and inputs available at the insertion point. Convolution fusion
+preserves carry-output consumer ordering, including nested graph captures.
+Head cache quantization rejects captured head outputs before rewriting; it does
+not silently leave an incompatible unquantized cache handoff.
 Generated graph schemas must match the companion ORT operators:
 normalization/rotary, GDN/convolution, quantized MoE/FP8, hyper-connections,
 packed sparse-attention/indexer, and speculative fold/state operations.

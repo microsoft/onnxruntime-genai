@@ -58,6 +58,7 @@ def optimize_model(path, transformed_provenance=None):
     removed = set()
     replacements = {}
     new_initializers = {}
+    names = graph_value_names(model.graph)
     transformed_weights = {}
     counts = Counter()
     data_path = path.with_name("performance_weights.bin")
@@ -73,7 +74,7 @@ def optimize_model(path, transformed_provenance=None):
                 raise ValueError(f"External data escapes package: {data_file}")
             with data_file.open("rb") as stream:
                 stream.seek(int(external.get("offset", 0)))
-                tensor.raw_data = stream.read(int(external["length"]))
+                tensor.raw_data = stream.read(int(external["length"]) if "length" in external else -1)
             tensor.ClearField("external_data")
             tensor.data_location = TensorProto.DEFAULT
         return numpy_helper.to_array(tensor)
@@ -151,14 +152,17 @@ def optimize_model(path, transformed_provenance=None):
             if axis not in (1, -1):
                 continue
             k, n = weight.dims
+            if scale_name not in initializers or initializers[scale_name].data_type != TensorProto.FLOAT:
+                continue
             scales = array(scale_name)
             if scales.shape != (n,) or k % 16:
                 continue
             key = (weight_name, scale_name)
             if key not in transformed_weights:
-                transposed = add_weight(weight_name + ".performance_nk", array(weight_name).T, data)
-                scale = scale_name + ".performance_n1"
-                add_weight(scale, scales.reshape(n, 1), data)
+                transposed = add_weight(
+                    unique_value_name(weight_name + ".performance_nk", names), array(weight_name).T, data
+                )
+                scale = add_weight(unique_value_name(scale_name + ".performance_n1", names), scales.reshape(n, 1), data)
                 transformed_weights[key] = (transposed, scale)
                 if transformed_provenance is not None:
                     transformed_provenance[transposed] = (
@@ -206,6 +210,10 @@ def optimize_model(path, transformed_provenance=None):
 
 def quantize_prefill_outputs(path, scales, head=False):
     model = onnx.load(path, load_external_data=False)
+    if head:
+        captured = captured_values(model.graph)
+        if any(output.name in scales and output.name in captured for output in model.graph.output):
+            raise ValueError("Cannot quantize captured head output")
     changed = 0
     for output in list(model.graph.output):
         name = output.name
@@ -215,8 +223,8 @@ def quantize_prefill_outputs(path, scales, head=False):
         rank = len(shape.dim)
         if head and rank == 0:
             producer = next(n for n in model.graph.node if name in n.output)
-            expected_op = {"key": "RotaryEmbedding", "value": "MatMul"}[name]
-            if producer.op_type != expected_op:
+            expected_ops = {"key": {"RotaryEmbedding"}, "value": {"MatMul", "MatMulBlockQuantizedFp8Weight"}}[name]
+            if producer.op_type not in expected_ops:
                 raise ValueError(f"Unexpected head prefill producer: {producer.op_type}")
             rank = 3
             dimensions = [1, "prompt_length", 512]
@@ -294,6 +302,8 @@ def refresh_weight_pool(source, destination, transformed_provenance=None):
     source_pool_indices = {}
     for line in lines[1:]:
         fields = line.split()
+        if not fields:
+            continue
         if fields[0] == "pool":
             pools[int(fields[1])] = fields
         elif fields[0] == "session":
@@ -370,6 +380,9 @@ def fuse_hyper_connections(path):
     outputs = externally_observed_values(model.graph)
     removed = set()
     replacements = {}
+    types = infer_value_types(model)
+    shapes = {value.name: value.type.tensor_type.shape for value in (*model.graph.input, *model.graph.value_info)}
+    available = {value.name for value in model.graph.input} | set(initializers) | {""}
 
     def successor(node, op):
         candidates = users[node.output[0]]
@@ -385,7 +398,10 @@ def fuse_hyper_connections(path):
 
     for norm in model.graph.node:
         if norm.op_type != "BranchwiseRMSNorm":
+            available.update(norm.output)
             continue
+        inputs_available = available.copy()
+        available.update(norm.output)
         candidates = users[norm.output[0]]
         premix = next((n for n in candidates if n.op_type == "HyperConnectionPreMix"), None)
         if premix is None:
@@ -416,14 +432,32 @@ def fuse_hyper_connections(path):
         silu_attrs = {a.name: helper.get_attribute_value(a) for a in silu.attribute}
         if attrs["num_branches"] != mix_attrs["num_branches"]:
             raise ValueError("Inconsistent hyper-connection branch counts")
+        branches = attrs["num_branches"]
+        scale = initializers.get(norm.input[1])
+        shape = shapes.get(norm.input[0])
+        if (
+            branches <= 0
+            or shape is None
+            or not shape.dim
+            or not shape.dim[-1].HasField("dim_value")
+            or shape.dim[-1].dim_value <= 0
+            or shape.dim[-1].dim_value % branches
+            or scale is None
+            or scale.data_type != types.get(norm.input[0])
+            or list(scale.dims) != [shape.dim[-1].dim_value]
+        ):
+            continue
+        fused_inputs = [norm.input[0], norm.input[1], down.input[1], up.input[1], inject.input[1]]
+        if not all(name in inputs_available for name in fused_inputs):
+            continue
         fused = helper.make_node(
             "HyperConnectionLowRankMix",
-            [norm.input[0], norm.input[1], down.input[1], up.input[1], inject.input[1]],
+            fused_inputs,
             [premix.output[0], multiply.output[0]],
             name=norm.name + "_FusedLowRank",
             domain="com.microsoft",
             num_branches=attrs["num_branches"],
-            epsilon=attrs["epsilon"],
+            epsilon=attrs.get("epsilon", 1e-5),
             silu_alpha=silu_attrs["alpha"],
             reduction_scale=mix_attrs["reduction_scale"],
             gate_div=scalar(divide.input[1]),
@@ -760,8 +794,33 @@ def fuse_fp8_projection_slices(path):
     return count
 
 
-def externally_observed_values(graph):
-    protected = {value.name for value in graph.output}
+def graph_value_names(graph):
+    names = {value.name for value in (*graph.input, *graph.output, *graph.value_info)}
+    names.update(tensor.name for tensor in graph.initializer)
+    for node in graph.node:
+        names.update((*node.input, *node.output))
+        names.add(node.name)
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                names.update(graph_value_names(attribute.g))
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for nested in attribute.graphs:
+                    names.update(graph_value_names(nested))
+    return names
+
+
+def unique_value_name(base, names):
+    name = base
+    suffix = 1
+    while name in names:
+        name = f"{base}_{suffix}"
+        suffix += 1
+    names.add(name)
+    return name
+
+
+def captured_values(graph):
+    protected = set()
 
     def protect_captures(nested):
         protected.update(name for node in nested.node for name in node.input)
@@ -779,6 +838,10 @@ def externally_observed_values(graph):
 
     visit(graph)
     return protected
+
+
+def externally_observed_values(graph):
+    return {value.name for value in graph.output} | captured_values(graph)
 
 
 def fuse_standard_rms_norm(path):
@@ -1707,21 +1770,7 @@ def fuse_shared_expert_residual(path):
 def fuse_attention_rotary(path):
     """Reuse FP32 rotary kernels while preserving normalization and BF16 rounding boundaries."""
     model = onnx.load(path, load_external_data=False)
-    graph_names = set()
-
-    def collect_names(graph):
-        for node in graph.node:
-            graph_names.update(name for name in (*node.input, *node.output, node.name) if name)
-            for attribute in node.attribute:
-                if attribute.type == onnx.AttributeProto.GRAPH:
-                    collect_names(attribute.g)
-                elif attribute.type == onnx.AttributeProto.GRAPHS:
-                    for nested in attribute.graphs:
-                        collect_names(nested)
-        graph_names.update(value.name for value in (*graph.input, *graph.output, *graph.value_info) if value.name)
-        graph_names.update(tensor.name for tensor in graph.initializer if tensor.name)
-
-    collect_names(model.graph)
+    graph_names = graph_value_names(model.graph)
     constants = {
         t.name: numpy_helper.to_array(t) for t in model.graph.initializer if t.data_location != TensorProto.EXTERNAL
     }
@@ -2071,6 +2120,16 @@ def fuse_causal_conv_projection(path):
             for node in nodes
             for name in node.output
         ):
+            continue
+        earlier = []
+        for node in model.graph.node:
+            if id(node) == id(conv):
+                break
+            if id(node) not in ids:
+                earlier.append(node)
+        early_graph = helper.make_graph(earlier, "earlier_consumers", [], [])
+        early_inputs = {name for node in earlier for name in node.input} | captured_values(early_graph)
+        if retained_outputs & early_inputs:
             continue
         attributes = {a.name: helper.get_attribute_value(a) for a in conv.attribute}
         attributes.update(

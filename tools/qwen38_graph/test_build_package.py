@@ -8,6 +8,7 @@ import errno
 import importlib.util
 import io
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -104,6 +105,78 @@ class PackageAssemblyTests(unittest.TestCase):
             bp.link_tree(source, target, False)
         self.assertEqual(os.readlink(target), "missing")
 
+    def test_rejects_nested_destinations_before_any_writes(self):
+        source = self.bundle("source")
+        alias = self.root / "alias"
+        alias.symlink_to(source, target_is_directory=True)
+        for base in (source, alias):
+            for copy in (False, True):
+                destination = base / "out/target"
+                with self.subTest(base=base, copy=copy), self.assertRaisesRegex(SystemExit, "inside a source"):
+                    bp.link_tree(source, destination, copy)
+                self.assertFalse((source / "out").exists())
+        other = self.bundle("other")
+        with self.assertRaisesRegex(SystemExit, "inside a source"):
+            bp.validate_bundle_destinations([(other, source / "out/target"), (source, self.root / "head")])
+        self.assertFalse((source / "out").exists())
+        for builder, flag in ((bp, "--target-bundle"), (v12, "--fold-bundle")):
+            head_flag = "--head-bundle" if builder is bp else "--head-r2-bundle"
+            argv = ["builder", "--out", str(source / "out"), flag, str(source), head_flag, str(other)]
+            with patch.object(sys, "argv", argv), self.assertRaisesRegex(SystemExit, "inside a source"):
+                builder.main()
+            self.assertFalse((source / "out").exists())
+
+    def test_bf16_constants_support_typed_inline_and_external_without_length(self):
+        values = [1.0, -2.0, 0.5, 0.0]
+        expected = struct.pack("<4H", 0x3F80, 0xC000, 0x3F00, 0)
+        tensor = helper.make_tensor("constant", TensorProto.BFLOAT16, [2, 2], values)
+        self.assertTrue(tensor.int32_data)
+        self.assertEqual(v12._tensor_bytes(tensor, self.root), expected)
+        tensor.ClearField("int32_data")
+        tensor.raw_data = expected
+        self.assertEqual(v12._tensor_bytes(tensor, self.root), expected)
+        tensor.ClearField("raw_data")
+        tensor.data_location = TensorProto.EXTERNAL
+        for key, value in {"location": "constant.bin", "offset": "3"}.items():
+            entry = tensor.external_data.add()
+            entry.key, entry.value = key, value
+        (self.root / "constant.bin").write_bytes(b"pad" + expected)
+        self.assertEqual(v12._tensor_bytes(tensor, self.root), expected)
+        entry = tensor.external_data.add()
+        entry.key, entry.value = "length", str(len(expected))
+        (self.root / "constant.bin").write_bytes(b"pad" + expected + b"suffix")
+        self.assertEqual(v12._tensor_bytes(tensor, self.root), expected)
+
+    def test_qsa_constants_extract_typed_inline_bf16_weights_and_rotary_tables(self):
+        paths = []
+        for label, prefix in (("target", ""), ("head", "head.")):
+            constants = [
+                helper.make_tensor(prefix + "layers.0.norm", TensorProto.BFLOAT16, [2], [1.0, -2.0]),
+                helper.make_tensor("cos", TensorProto.BFLOAT16, [33028, 1], [1.0] * 33028),
+                helper.make_tensor("sin", TensorProto.BFLOAT16, [33028, 1], [0.5] * 33028),
+            ]
+            node = helper.make_node(
+                "PackedQSAIndexer", ["x", "y", "z", *(t.name for t in constants)], ["out"], epsilon=1e-5
+            )
+            model = helper.make_model(helper.make_graph([node], label, [], [], constants))
+            path = self.root / f"{label}.onnx"
+            onnx.save(model, path)
+            paths.append(path)
+        summary = v12.write_qsa_constants(self.root, *paths)
+        self.assertEqual(summary["width"], 1)
+        self.assertTrue(summary["head_tables_equal_target"])
+        blob = (self.root / "qsa_consts.bin").read_bytes()
+        expected = {
+            "knorm.0": struct.pack("<2H", 0x3F80, 0xC000),
+            "cos": struct.pack("<H", 0x3F80) * 33028,
+            "sin": struct.pack("<H", 0x3F00) * 33028,
+        }
+        entries = (self.root / "qsa_consts.txt").read_text().splitlines()[4:]
+        self.assertEqual(len(entries), 6)
+        for line in entries:
+            _, _, name, offset, length = line.split()
+            self.assertEqual(blob[int(offset) : int(offset) + int(length)], expected[name])
+
     def test_shared_pool_survives_copy_and_cross_device_fallback(self):
         first = self.bundle("first")
         second = self.bundle("second")
@@ -148,6 +221,22 @@ class PackageAssemblyTests(unittest.TestCase):
             {"target": first / "model.onnx", "head": second / "model.onnx"},
         )
         self.assertEqual(summary["initializers"], 0)
+
+    def test_empty_pool_round_trip_through_optimizer(self):
+        optimizer = load_builder("optimize_ported_package")
+        output = self.root / "empty_pool"
+        output.mkdir()
+        models = {}
+        for label in ("target", "dense", "head_r2", "head_kv"):
+            directory = output / label
+            directory.mkdir()
+            path = directory / "model.onnx"
+            onnx.save(helper.make_model(helper.make_graph([], label, [], [])), path)
+            models[label] = path
+        self.assertEqual(v12.write_pool(output, models)["initializers"], 0)
+        self.assertEqual((output / "weights_pool.txt").read_text(), "qwen38_weights_pool 1\n\n")
+        self.assertEqual(optimizer.refresh_weight_pool(output, output), {"initializers": 0, "gib": 0})
+        self.assertEqual((output / "weights_pool.txt").read_text(), "qwen38_weights_pool 1\n")
 
     def test_constants_use_packaged_target(self):
         source = self.bundle("source")
