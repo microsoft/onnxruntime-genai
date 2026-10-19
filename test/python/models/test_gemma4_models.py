@@ -1009,6 +1009,7 @@ def test_gemma4_flat_decoder_runs_rank_two_split_vision(test_data_path, tmp_path
         model_path / "dummy_vision_encoder.onnx",
         model_path / "dummy_vision_projector.onnx",
         2520,
+        position_type=onnx.TensorProto.INT32,
         pixel_name=pixel_name,
         rank_two=True,
     )
@@ -1039,7 +1040,7 @@ def test_gemma4_flat_decoder_runs_rank_two_split_vision(test_data_path, tmp_path
     assert pixels.shape == (2520, 768)
     assert positions.shape == (2520, 2)
     inputs["pixel_values"] = np.ascontiguousarray(pixels)
-    inputs["pixel_position_ids"] = np.ascontiguousarray(positions)
+    inputs["pixel_position_ids"] = np.ascontiguousarray(positions, dtype=np.int32)
     features = np.pad(pixels[positions[:, 0] > -1][::9], ((0, 0), (0, 1280)))
     assert np.any(features)
 
