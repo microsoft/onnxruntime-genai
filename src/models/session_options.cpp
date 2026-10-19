@@ -115,9 +115,32 @@ bool AppendExecutionProviderV2(
   }
 
   auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);
-  if (device_type == DeviceType::WEBGPU ||
-      device_type == DeviceType::CUDA) {
-    // WebGPU EP factory and CUDA EP factory currently only support one device at a time.
+  if (device_type == DeviceType::CUDA) {
+    // Match the requested CUDA device_id (default "0") against EpMetadata["cuda_device_id"]
+    // because GetEpDevices() enumerates multi-GPU cards in sysfs order rather than CUDA device_id order.
+    std::string target_cuda_id = "0";
+    if (auto it = options.find("device_id"); it != options.end() && !it->second.empty()) {
+      target_cuda_id = it->second;
+    }
+    const OrtEpDevice* matched = filtered_ep_device_ptrs.front();
+    for (const auto* dev : filtered_ep_device_ptrs) {
+      if (const OrtKeyValuePairs* kv = Ort::GetEpDeviceMetadata(dev)) {
+        const char* const* keys = nullptr;
+        const char* const* vals = nullptr;
+        size_t n = 0;
+        Ort::GetKeyValuePairs(kv, &keys, &vals, &n);
+        for (size_t i = 0; i < n; ++i) {
+          if (keys[i] && vals[i] && std::string_view(keys[i]) == "cuda_device_id" &&
+              std::string_view(vals[i]) == target_cuda_id) {
+            matched = dev;
+            break;
+          }
+        }
+      }
+    }
+    filtered_ep_device_ptrs = {matched};
+  } else if (device_type == DeviceType::WEBGPU) {
+    // WebGPU EP factory currently only supports one device at a time.
     filtered_ep_device_ptrs = {filtered_ep_device_ptrs.front()};
   }
 

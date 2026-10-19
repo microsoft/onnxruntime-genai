@@ -38,7 +38,14 @@ void AppendProviderBridgeExecutionProvider(
       values.emplace_back(option.second.c_str());
     } else {
       const size_t idx = std::distance(std::begin(arena_keys), it);
-      long long parsed_value = std::stoll(option.second);
+      long long parsed_value = 0;
+      if (option.second == "kNextPowerOfTwo") {
+        parsed_value = 0;
+      } else if (option.second == "kSameAsRequested") {
+        parsed_value = 1;
+      } else {
+        parsed_value = std::stoll(option.second);
+      }
       if (parsed_value < -1) {
         throw std::out_of_range("Arena configuration option value is out of range");
       }
