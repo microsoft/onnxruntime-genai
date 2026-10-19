@@ -7,9 +7,11 @@
 #include "telemetry_environment.h"
 #include "telemetry_redaction.h"
 #include "telemetry_sampling.h"
+#include "telemetry-windows-shutdown.h"
 #include "../logging.h"
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
+#include "DebugEvents.hpp"
 #include "Enums.hpp"
 #include "ILogConfiguration.hpp"
 #include "LogManager.hpp"
@@ -178,12 +180,38 @@ struct GenAiTelemetry::Impl {};
 // Guard against access after static destruction
 static std::atomic<bool> s_instance_destroyed{false};
 
+GenAiTelemetry::GenAiTelemetry() {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  // Initialize the SDK diagnostic mutex before this singleton's destructor is registered.
+  // An empty source starts no uploader and sends no telemetry, including when fully suppressed.
+  try {
+    MAT::DebugEventSource source;
+    source.DispatchEvent({});
+  } catch (const std::exception& error) {
+    // Retrying after construction could register the SDK mutex after its owner.
+    telemetry_disabled_.store(true);
+    enabled_.store(false);
+    if (g_log.enabled && g_log.warning) {
+      try {
+        Log("warning", "Telemetry disabled because SDK lifetime initialization failed: %s", error.what());
+      } catch (const std::exception&) {
+        std::fputs("WARNING: telemetry SDK lifetime initialization and diagnostic logging failed\n", stderr);
+      }
+    }
+  }
+#endif
+}
+
 GenAiTelemetry& GenAiTelemetry::Instance() {
   static GenAiTelemetry instance;
   return instance;
 }
 
 bool GenAiTelemetry::IsDestroyed() {
+#if defined(_WIN32)
+  // OgaShutdown must not construct the singleton for the first time during DLL process detach.
+  if (TelemetryInternal::IsDllShutdownInProgress()) return true;
+#endif
   return s_instance_destroyed.load();
 }
 
@@ -277,8 +305,8 @@ void GenAiTelemetry::Initialize() {
     }
 #endif
 
-    // Do not block process teardown to upload: persisted events are sent on the next
-    // run. 0 keeps Shutdown non-blocking and avoids adding exit latency to host apps.
+    // Do not wait for delivery at exit: persisted events can be sent on a later run.
+    // Normal SDK cleanup still joins workers; Windows process termination skips that cleanup.
     config[MAT::CFG_INT_MAX_TEARDOWN_TIME] = 0;
 
 #if !defined(__ANDROID__)
@@ -347,6 +375,11 @@ void GenAiTelemetry::Initialize() {
 
 void GenAiTelemetry::Shutdown() {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
+#if defined(_WIN32)
+  // ExitProcess has terminated other threads, possibly while they owned this mutex or an SDK lock.
+  // Explicit Shutdown and FreeLibrary with a live process still drain and release the uploader.
+  if (TelemetryInternal::IsDllShutdownInProgress()) return;
+#endif
   std::unique_lock<std::shared_mutex> lock(mutex_);
   if (!initialized_.load()) return;
 
@@ -377,6 +410,14 @@ void GenAiTelemetry::Shutdown() {
 }
 GenAiTelemetry::~GenAiTelemetry() {
   s_instance_destroyed.store(true);
+#if defined(_WIN32) && defined(ORTGENAI_ENABLE_TELEMETRY)
+  if (TelemetryInternal::IsDllShutdownInProgress()) {
+    // Returning alone would still destroy config and its SDK-owned values. Abandon the entire
+    // process-lifetime state; Windows reclaims it without running SDK teardown under the loader lock.
+    (void)impl_.release();
+    return;
+  }
+#endif
   Shutdown();
 }
 

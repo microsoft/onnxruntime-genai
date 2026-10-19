@@ -40,7 +40,6 @@ class ModeloptModel(QuantizedModel):
             load_weights=False,
             lm_head=TensorModule(),
         )
-        self.quant_attrs = quant_attrs
         self.input_path = input_path
         self.handles = {}
         self.handle_keys = {}
@@ -196,8 +195,13 @@ class ModeloptModel(QuantizedModel):
         module.weight = self.get_tensor(name)
         return module
 
+    def make_gate_module(self, base, dense=False):
+        module = self.make_dense_linear_module(base) if dense else self.make_tensor_module(f"{base}.weight")
+        module.exclude_from_quantization = True
+        return module
+
     def prepare_qmoe_experts(self, experts):
-        weights_prepacked = self.quant_attrs.get("qmoe_weights_prepacked", 0)
+        weights_prepacked = int(self.quant_attrs.get("qmoe_weights_prepacked", 0) == 1)
 
         def pack_weight(weight):
             if weights_prepacked == 1:
@@ -270,8 +274,8 @@ class ModeloptModel(QuantizedModel):
             la = SimpleNamespace()
             la.in_proj_qkv = self.make_linear_module(f"{prefix}.linear_attn.in_proj_qkv")
             la.in_proj_z = self.make_linear_module(f"{prefix}.linear_attn.in_proj_z")
-            la.in_proj_a = self.make_dense_linear_module(f"{prefix}.linear_attn.in_proj_a")
-            la.in_proj_b = self.make_dense_linear_module(f"{prefix}.linear_attn.in_proj_b")
+            la.in_proj_a = self.make_gate_module(f"{prefix}.linear_attn.in_proj_a", dense=True)
+            la.in_proj_b = self.make_gate_module(f"{prefix}.linear_attn.in_proj_b", dense=True)
             la.out_proj = self.make_linear_module(f"{prefix}.linear_attn.out_proj")
             la.conv1d = self.make_tensor_module(f"{prefix}.linear_attn.conv1d.weight")
             la.A_log = self.get_tensor(f"{prefix}.linear_attn.A_log")
@@ -296,13 +300,13 @@ class ModeloptModel(QuantizedModel):
 
         mlp = SimpleNamespace()
         if self.get_tensor(f"{prefix}.mlp.gate.weight") is not None:
-            mlp.gate = self.make_tensor_module(f"{prefix}.mlp.gate.weight")
+            mlp.gate = self.make_gate_module(f"{prefix}.mlp.gate")
             shared = SimpleNamespace()
             shared.gate_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.gate_proj")
             shared.up_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.up_proj")
             shared.down_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.down_proj")
             mlp.shared_expert = shared
-            mlp.shared_expert_gate = self.make_tensor_module(f"{prefix}.mlp.shared_expert_gate.weight")
+            mlp.shared_expert_gate = self.make_gate_module(f"{prefix}.mlp.shared_expert_gate")
             mlp.experts = []
             for expert_id in range(self.num_experts):
                 expert_prefix = f"{prefix}.mlp.experts.{expert_id}"

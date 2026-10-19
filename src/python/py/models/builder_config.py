@@ -240,12 +240,6 @@ def canonical_quant_data(data: dict[str, Any]) -> dict[str, Any]:
     if runtime_data is not None:
         result["format"] = runtime_data
         del result["runtime"]
-    for section, field in (("moe", "weights_prepacked"), ("format", "matmulnbits_weights_prepacked")):
-        if field in result.get(section, {}):
-            raise ValueError(
-                f"quant_config.{section}.{field} has been removed; "
-                "weight packing is determined by the execution provider and GPU SM"
-            )
     return result
 
 
@@ -660,15 +654,6 @@ def normalize_builder_config(
     here, although block-drafter config.json is read to resolve auxiliary taps.
     """
     legacy_options = copy.deepcopy(extra_options or {})
-    for option in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
-        if option in legacy_options:
-            raise ValueError(
-                f"extra_options.{option} has been removed; "
-                "weight packing is determined by the execution provider and GPU SM"
-            )
-    for removed_option in ("use_device_allocator_for_initializers",):
-        if removed_option in legacy_options:
-            raise ValueError(f"extra_options.{removed_option} has been removed; this behavior is always enabled")
     structured_present = any(
         value is not None for value in (target_options, drafter_options, speculative_options, runtime_config)
     )
@@ -937,7 +922,7 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         raise ValueError("runtime_config.engine.dynamic_batching must be an object")
     check_fields(
         dynamic_batching,
-        {"max_batch_size", "max_scheduled_tokens", "num_blocks", "gpu_utilization_factor"},
+        {"max_batch_size", "max_scheduled_tokens", "num_blocks", "gpu_utilization_factor", "dflash2_max_snapshots"},
         "runtime_config.engine.dynamic_batching",
     )
     if "engine" in runtime_config and "engine" not in generated_config:
@@ -956,6 +941,13 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             raise ValueError(f"runtime_config.engine.dynamic_batching.{field_name} must be at most 2147483647")
     if dynamic_batching.get("max_batch_size", 1) > 256:
         raise ValueError("runtime_config.engine.dynamic_batching.max_batch_size must be at most 256")
+    if "dflash2_max_snapshots" in dynamic_batching:
+        value = dynamic_batching["dflash2_max_snapshots"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2_147_483_647:
+            raise ValueError(
+                "runtime_config.engine.dynamic_batching.dflash2_max_snapshots "
+                "must be an integer between 0 and 2147483647"
+            )
     if "gpu_utilization_factor" in dynamic_batching:
         value = dynamic_batching["gpu_utilization_factor"]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
@@ -1152,7 +1144,7 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
             raise ValueError(f"{path}.overlay.engine.dynamic_batching must be an object")
         check_fields(
             dynamic_batching,
-            {"num_blocks", "max_batch_size", "max_scheduled_tokens"},
+            {"num_blocks", "max_batch_size", "max_scheduled_tokens", "dflash2_max_snapshots"},
             f"{path}.overlay.engine.dynamic_batching",
         )
         search = overlay.get("search", {})

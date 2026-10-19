@@ -53,11 +53,11 @@ class MTPModel:
         input_types = {value.name: value.type.tensor_type.elem_type for value in source.graph.input}
         if input_types.get(past_lengths) != TensorProto.INT32:
             raise ValueError("IndexShare requires packed int32 past sequence lengths.")
-        return self._export_packed_indexshare_graph(
+        return self.export_packed_indexshare_graph(
             source, indexer, capacity, output_dir, source_file, max_draft_tokens
         )
 
-    def _export_packed_indexshare_graph(self, source, indexer, capacity, output_dir, source_file, max_draft_tokens):
+    def export_packed_indexshare_graph(self, source, indexer, capacity, output_dir, source_file, max_draft_tokens):
         producers = {name: node for node in source.graph.node for name in node.output if name}
         existing_names = set(producers)
         existing_names.update(value.name for value in source.graph.input)
@@ -184,8 +184,7 @@ class MTPModel:
             "status_output": "indexer_status",
         }
 
-    @staticmethod
-    def remove_unused_constants(graph):
+    def remove_unused_constants(self, graph):
         used_names = {name for node in graph.node for name in node.input if name}
         used_names.update(value.name for value in graph.output)
         nodes = [

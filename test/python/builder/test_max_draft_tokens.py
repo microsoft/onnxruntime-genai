@@ -29,6 +29,8 @@ sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
+    if f"models.builders.{module_name}" in sys.modules:
+        return sys.modules[f"models.builders.{module_name}"]
     spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"models.builders.{module_name}"] = module
@@ -37,13 +39,6 @@ def _load_builder_module(module_name):
 
 
 def _load_builder_entrypoint_module():
-    # `builder.py` imports every concrete model class via `from builders import (...)`. Stub that
-    # package out so the CLI-level option validation can be imported on its own.
-    builders_stub = types.ModuleType("builders")
-    builders_stub.__getattr__ = lambda name: type(name, (), {})  # PEP 562
-    builders_stub.__path__ = [str(BUILDERS_DIR)]
-    sys.modules["builders"] = builders_stub
-
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -147,15 +142,15 @@ def test_check_extra_options_normalizes_max_draft_tokens_to_an_int(monkeypatch):
 
 
 @pytest.mark.parametrize("value", ["false", "False", "0", False])
-def test_check_extra_options_normalizes_indexshare_opt_out(monkeypatch, value):
-    options = _check_extra_options(monkeypatch, {"indexshare_mtp": value})
-    assert options["indexshare_mtp"] is False
+def test_check_extra_options_rejects_indexshare_opt_out(monkeypatch, value):
+    with pytest.raises(ValueError, match="share indices by default"):
+        _check_extra_options(monkeypatch, {"indexshare_mtp": value})
 
 
 @pytest.mark.parametrize("value", range(1, 8))
-def test_check_extra_options_normalizes_indexshare_width(monkeypatch, value):
-    options = _check_extra_options(monkeypatch, {"indexshare_max_draft_tokens": str(value)})
-    assert options["indexshare_max_draft_tokens"] == value
+def test_check_extra_options_rejects_separate_indexshare_width(monkeypatch, value):
+    with pytest.raises(ValueError, match="Use max_draft_tokens"):
+        _check_extra_options(monkeypatch, {"indexshare_max_draft_tokens": str(value)})
 
 
 @pytest.mark.parametrize("value", [0, -1, 8, 6.5, "6.5", ""])

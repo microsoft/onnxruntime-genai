@@ -44,8 +44,9 @@ class FakeComponent:
 
 
 class FakeQwen4ExpComponent(FakeComponent):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options, multimodal_rotary=False):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.multimodal_rotary = multimodal_rotary
         self.model_type = "qwen4_exp"
         self.hc_hidden_size = 8
         self.output_shapes = {"hidden_states": ["batch_size", "sequence_length", 2]}
@@ -184,7 +185,7 @@ def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):
 
 
 def test_qwen4_exp_text_only_dispatches_composite_builder(monkeypatch, tmp_path):
-    from models import builder as builder_module
+    from models import builder as builder_module  # noqa: PLC0415
 
     captured = {}
 

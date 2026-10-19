@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import types
@@ -14,6 +13,7 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from _builder_test_utils import load_builder_module
 from transformers import LlamaConfig
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
@@ -21,11 +21,7 @@ sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_builder_module(module_name)
 
 
 sys.modules.setdefault("models", types.ModuleType("models"))
@@ -41,7 +37,7 @@ Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen35MoETextModel = qwen_module.Qwen35MoETextModel
 
 
-def test_base_mlp_fusion_is_always_enabled():
+def test_base_mlp_fusion_remains_opt_in():
     config = LlamaConfig(
         hidden_size=8,
         intermediate_size=16,
@@ -55,12 +51,12 @@ def test_base_mlp_fusion_is_always_enabled():
 
     model = Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", "", {})
 
-    assert model.mlp_attrs["fuse_gate_up"] is True
+    assert model.mlp_attrs["fuse_gate_up"] is False
 
 
 @pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "trt-rtx"])
-@pytest.mark.parametrize("capability,mode", [((7, 5), 0), ((8, 0), 1), ((8, 6), 1), ((8, 9), 1), ((9, 0), 2)])
-def test_base_weight_packing_uses_selected_gpu(monkeypatch, provider, capability, mode):
+@pytest.mark.parametrize("mode", [0, 1, 2])
+def test_base_weight_packing_uses_explicit_target(monkeypatch, provider, mode):
     monkeypatch.setattr(torch.version, "hip", None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
@@ -68,10 +64,12 @@ def test_base_weight_packing_uses_selected_gpu(monkeypatch, provider, capability
 
     def get_capability(device):
         queried_devices.append(device)
-        return capability
+        raise AssertionError("Export must not inspect the host GPU")
 
     monkeypatch.setattr(torch.cuda, "get_device_capability", get_capability)
-    source_config = base_module.QuantConfig.from_dict({})
+    source_config = base_module.QuantConfig.from_dict(
+        {"moe": {"weights_prepacked": 1}, "format": {"matmulnbits_weights_prepacked": mode}}
+    )
     model = Model.__new__(Model)
     model.ep = provider
     model.onnx_dtype = ir.DataType.INT4
@@ -80,11 +78,11 @@ def test_base_weight_packing_uses_selected_gpu(monkeypatch, provider, capability
     model.make_quant_config_init()
 
     expected_mode = mode if provider == "cuda" else 0
-    assert queried_devices == ([3] if provider == "cuda" else [])
+    assert queried_devices == []
     assert model.quant_config.runtime.matmulnbits_weights_prepacked == expected_mode
-    assert model.quant_config.moe.weights_prepacked == int(expected_mode > 0)
-    assert source_config.moe.weights_prepacked == -1
-    assert source_config.runtime.matmulnbits_weights_prepacked == 0
+    assert model.quant_config.moe.weights_prepacked == int(provider == "cuda")
+    assert source_config.moe.weights_prepacked == 1
+    assert source_config.runtime.matmulnbits_weights_prepacked == mode
 
 
 @pytest.mark.parametrize("available,hip", [(False, None), (True, "6.0")])
@@ -98,7 +96,7 @@ def test_base_weight_packing_requires_nvidia_cuda(monkeypatch, available, hip):
     model.make_weight_packing_init()
 
     assert model.quant_config.runtime.matmulnbits_weights_prepacked == 0
-    assert model.quant_config.moe.weights_prepacked == 0
+    assert model.quant_config.moe.weights_prepacked == (0 if hip else -1)
 
 
 def test_base_weight_packing_handles_detection_failure(monkeypatch):
@@ -117,7 +115,7 @@ def test_base_weight_packing_handles_detection_failure(monkeypatch):
     model.make_weight_packing_init()
 
     assert model.quant_config.runtime.matmulnbits_weights_prepacked == 0
-    assert model.quant_config.moe.weights_prepacked == 0
+    assert model.quant_config.moe.weights_prepacked == -1
 
 
 def test_base_matmul_honors_module_quantization_exclusion(monkeypatch):
@@ -163,8 +161,10 @@ def test_qwen35_moe_loads_moe_transformers_model(monkeypatch):
     class FakeDenseModel(FakeMoEModel):
         pass
 
-    monkeypatch.setattr(base_module, "Qwen3_5MoeForConditionalGeneration", FakeMoEModel)
-    monkeypatch.setattr(base_module, "Qwen3_5ForConditionalGeneration", FakeDenseModel)
+    transformers_stub = types.ModuleType("transformers")
+    transformers_stub.Qwen3_5MoeForConditionalGeneration = FakeMoEModel
+    transformers_stub.Qwen3_5ForConditionalGeneration = FakeDenseModel
+    monkeypatch.setattr(base_module, "transformers", transformers_stub)
 
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
     model.model_type = "qwen3_5_moe_text"
@@ -510,7 +510,7 @@ def test_qwen35_genai_config_includes_recurrent_cache_names(monkeypatch, tmp_pat
 
     assert decoder["inputs"]["past_conv_names"] == "past.%d.conv"
     assert decoder["inputs"]["past_recurrent_names"] == "past.%d.recurrent"
-    assert decoder["session_options"]["session.use_device_allocator_for_initializers"] == "1"
+    assert "session.use_device_allocator_for_initializers" not in decoder["session_options"]
     assert decoder["outputs"]["present_conv_names"] == "present.%d.conv"
     assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"
     assert model_config["bot_token_id"] == 10

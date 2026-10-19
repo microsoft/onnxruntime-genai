@@ -281,23 +281,30 @@ def test_extra_options_accepts_legacy_integer_strings():
         precision="int4",
     )
     assert config.weights.accuracy_level == 4
-    assert config.moe.weights_prepacked == 0
+    assert config.moe.weights_prepacked == -1
     assert config.runtime.matmulnbits_weights_prepacked == 0
 
 
 @pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "trt-rtx"])
-def test_weight_packing_intent_is_unresolved_before_model_initialization(provider):
+def test_weight_packing_defaults_are_host_independent(provider):
     config = QuantConfig.from_extra_options({}, precision="int4", execution_provider=provider)
 
-    assert config.moe.weights_prepacked == 0
+    assert config.moe.weights_prepacked == -1
     assert config.runtime.matmulnbits_weights_prepacked == 0
 
 
 @pytest.mark.parametrize("option", ["qmoe_weights_prepacked", "matmulnbits_weights_prepacked"])
 @pytest.mark.parametrize("value", [0, 1, 2, "0", "1", "2"])
-def test_weight_packing_extra_options_are_removed(option, value):
-    with pytest.raises(ValueError, match="weight packing is determined by the execution provider"):
-        QuantConfig.from_extra_options({option: value})
+def test_weight_packing_extra_options_are_preserved(option, value):
+    if option == "qmoe_weights_prepacked" and int(value) == 2:
+        with pytest.raises(ValueError, match="weights_prepacked"):
+            QuantConfig.from_extra_options({option: value})
+    else:
+        config = QuantConfig.from_extra_options({option: value})
+        actual = (
+            config.moe.weights_prepacked if option.startswith("qmoe") else config.runtime.matmulnbits_weights_prepacked
+        )
+        assert actual == int(value)
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +393,7 @@ def test_extra_options_precision_int4_defaults():
     assert cfg.moe.type == "int4"
     # CUDA default QMoE block size is 32 (128 is TRT-RTX only).
     assert cfg.moe.block_size == 32
-    assert cfg.moe.weights_prepacked == 0
+    assert cfg.moe.weights_prepacked == -1
     assert cfg.runtime.matmulnbits_weights_prepacked == 0
 
 
@@ -486,5 +493,5 @@ def test_extra_options_qdq_and_block_size_preserve_provider_packing():
     )
     assert cfg.runtime.use_qdq is True
     assert cfg.runtime.matmulnbits_weights_prepacked == 0
-    assert cfg.moe.weights_prepacked == 0
+    assert cfg.moe.weights_prepacked == -1
     assert cfg.moe.block_size == 64
