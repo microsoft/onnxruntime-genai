@@ -10,6 +10,7 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from _builder_test_utils import ort_runs_engram_op
 
 from models.builders.base import Model
 from models.builders.qwen3_5 import Qwen35MoETextModel
@@ -1433,6 +1434,8 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path, ple_layer_id
         if initializer.name == "model.ple.ngram_embedding.weight"
     )
     assert next(entry.value for entry in table.external_data if entry.key == "location") == "engram.onnx.data"
+    if not ort_runs_engram_op("NGramHashMapping"):
+        pytest.skip("Installed ORT wheel lacks NGramHashMapping; graph construction and serialization passed")
     session = ort.InferenceSession(str(tmp_path / "engram.onnx"), providers=["CPUExecutionProvider"])
     inputs = {
         "input_ids": np.array([[1, 2, 3]], dtype=np.int64),

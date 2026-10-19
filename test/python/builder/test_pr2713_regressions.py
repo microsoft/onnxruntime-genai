@@ -9,12 +9,33 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
-from _builder_test_utils import load_builder_module
+from _builder_test_utils import load_builder_module, ort_runs_causal_conv_with_state, ort_runs_engram_op
 from transformers import LlamaConfig
 
 base = load_builder_module("base")
 qwen = load_builder_module("qwen3_8")
 graph_module = load_builder_module("qwen3_8_graph")
+
+
+@pytest.mark.parametrize("op_type", ["EngramGate", "NGramHashMapping"])
+@pytest.mark.parametrize("missing_operator", [True, False])
+def test_engram_capability_probe_only_skips_unregistered_operators(monkeypatch, op_type, missing_operator):
+    message = (
+        f"Fatal error: com.microsoft:{op_type}(-1) is not a registered function/op"
+        if missing_operator
+        else f"Node ({op_type}) [ShapeInferenceError] invalid shape"
+    )
+    error = ort.capi.onnxruntime_pybind11_state.Fail(message)
+
+    def fail_session(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(ort, "InferenceSession", fail_session)
+    if missing_operator:
+        assert not ort_runs_engram_op.__wrapped__(op_type)
+    else:
+        with pytest.raises(ort.capi.onnxruntime_pybind11_state.Fail, match="invalid shape"):
+            ort_runs_engram_op.__wrapped__(op_type)
 
 
 @pytest.mark.parametrize("reason", ["zero_points", "g_idx", "shared", "fp32"])
@@ -210,6 +231,10 @@ def test_int8_embedding_request_does_not_reuse_int4_lm_head():
     assert gather.inputs[0].name == "model.embed_tokens.weight_Q8"
 
 
+@pytest.mark.skipif(
+    not ort_runs_engram_op("EngramGate") or not ort_runs_causal_conv_with_state(),
+    reason="Installed ORT wheel lacks EngramGate or the required CausalConvWithState schema",
+)
 def test_dense_engram_clears_padding_before_convolution_and_residual():
     config = LlamaConfig(
         hidden_size=8,

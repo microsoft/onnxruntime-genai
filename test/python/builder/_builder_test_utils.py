@@ -148,3 +148,61 @@ def ort_runs_causal_conv_with_state():
             return False
         raise
     return True
+
+
+@functools.cache
+def ort_runs_engram_op(op_type):
+    """Probe Engram operators missing from the older ORT wheel pinned by DirectML CI."""
+    import onnx  # noqa: PLC0415
+    import onnxruntime  # noqa: PLC0415
+
+    def value(name, dtype, shape):
+        return onnx.helper.make_tensor_value_info(name, dtype, shape)
+
+    if op_type == "EngramGate":
+        inputs = [
+            value("key", onnx.TensorProto.FLOAT, [1, 2, 2, 4]),
+            value("query", onnx.TensorProto.FLOAT, [1, 2, 2, 4]),
+            value("value", onnx.TensorProto.FLOAT, [1, 2, 4]),
+            value("key_scale", onnx.TensorProto.FLOAT, [2, 4]),
+            value("query_scale", onnx.TensorProto.FLOAT, [2, 4]),
+        ]
+        outputs = [value("gated", onnx.TensorProto.FLOAT, [1, 2, 2, 4])]
+        attributes = {"epsilon": 1e-5}
+    elif op_type == "NGramHashMapping":
+        inputs = [
+            value("tokens", onnx.TensorProto.INT64, [1, 2]),
+            value("multipliers", onnx.TensorProto.INT64, [2]),
+            value("vocab_sizes", onnx.TensorProto.INT64, [1]),
+            value("past_tokens", onnx.TensorProto.INT64, [1, 1]),
+            value("offsets", onnx.TensorProto.INT64, [1]),
+            value("eos", onnx.TensorProto.INT64, []),
+        ]
+        outputs = [
+            value("hashes", onnx.TensorProto.INT64, [1, 2, 1]),
+            value("present_tokens", onnx.TensorProto.INT64, [1, 1]),
+        ]
+        attributes = {"max_ngram_size": 2, "n_head_per_ngram": 1, "pad_id": 0, "reset_on_eos": 1}
+    else:
+        raise ValueError(f"Unsupported Engram operator probe: {op_type}")
+
+    node = onnx.helper.make_node(
+        op_type,
+        [item.name for item in inputs],
+        [item.name for item in outputs],
+        domain="com.microsoft",
+        **attributes,
+    )
+    graph = onnx.helper.make_graph([node], f"{op_type}_probe", inputs, outputs)
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[onnx.helper.make_opsetid("", 21), onnx.helper.make_opsetid("com.microsoft", 1)],
+        ir_version=10,
+    )
+    try:
+        onnxruntime.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    except onnxruntime.capi.onnxruntime_pybind11_state.Fail as error:
+        if f"com.microsoft:{op_type}" in str(error) and "is not a registered function/op" in str(error):
+            return False
+        raise
+    return True
