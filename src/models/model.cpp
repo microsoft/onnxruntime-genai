@@ -31,6 +31,7 @@
 #include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
+#include "qwen38_graph.h"
 #include "speculative_decoding.h"
 #include "whisper.h"
 #include "parakeet.h"
@@ -350,14 +351,21 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
-  const auto trivial_model = GetTrivialModel();
-  allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
-
   // Bind the allocator to the selected device rather than assuming device 0.
   allocator.device_id_ = device.GetDeviceId(user_provider_options);
   try {
     auto memory_info = device.GetMemoryInfo();
-    allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
+    OrtAllocator* shared_allocator = nullptr;
+    Ort::ThrowOnError(Ort::api->GetSharedAllocator(&GetOrtEnv(), memory_info.get(), &shared_allocator));
+    if (shared_allocator != nullptr) {
+      allocator.allocator_ = static_cast<Ort::Allocator*>(shared_allocator);
+    } else {
+      const auto trivial_model = GetTrivialModel();
+      allocator.session_ =
+          OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
+      allocator.owned_allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
+      allocator.allocator_ = allocator.owned_allocator_.get();
+    }
   } catch (const Ort::Exception& e) {
     throw std::runtime_error("Failed to create allocator for " + to_string(type) + ": " + std::string(e.what()));
   }
@@ -681,11 +689,17 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   }
 
   // Register custom ops libraries only if explicitly configured
+  std::vector<std::string> custom_ops_libraries;
   if (config_session_options.custom_ops_library.has_value()) {
+    custom_ops_libraries.push_back(config_session_options.custom_ops_library.value());
+  }
+  custom_ops_libraries.insert(custom_ops_libraries.end(), config_session_options.custom_ops_libraries.begin(),
+                              config_session_options.custom_ops_libraries.end());
+  for (const std::string& configured_library : custom_ops_libraries) {
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
 
-    std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
+    std::string custom_library_file_prefix = configured_library;
 
     std::filesystem::path custom_library_path{custom_library_file_prefix};
 
@@ -948,6 +962,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
+  if (config->model.type == "qwen38_flash_graph")
+    return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))

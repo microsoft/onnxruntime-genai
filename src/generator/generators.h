@@ -204,6 +204,7 @@ struct Generator : LeakChecked<Generator> {
   friend struct TransducerDecodingStrategy;
   friend struct SpeculativeDecodingStrategy;
   friend struct BaseSpeculativeStrategy;
+  friend struct Qwen38GraphStrategy;
   friend void RunStandardDecodingStep(Generator& g);
 };
 
@@ -223,14 +224,10 @@ struct OrtGlobals {
   DeviceInterface* GetDeviceInterface(DeviceType type);
 
   struct Allocator {
-    // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via
-    // Ort::Allocator::Create) "wraps the internal allocator from the OrtSession and becomes invalid when the session
-    // does" -- see
-    // https://github.com/microsoft/onnxruntime/blob/3c8c46029735a89c8d1ea0aa6c1812db5b78ad72/include/onnxruntime/core/session/onnxruntime_c_api.h#L2852-L2862
-    // Members are destroyed in reverse declaration order, so session_ must be declared BEFORE allocator_ so that
-    // ~allocator_ runs first.
+    // Session-created allocators depend on their session, while shared EP allocators depend on OrtEnv.
     std::unique_ptr<OrtSession> session_;
-    std::unique_ptr<Ort::Allocator> allocator_;
+    std::unique_ptr<Ort::Allocator> owned_allocator_;
+    Ort::Allocator* allocator_{};
     // Optional host-accessible allocator for decode inputs, owned by the OrtEnv (do not free).
     // Null if unavailable, in which case inputs stay on the default device allocator.
     Ort::Allocator* host_accessible_allocator_{};

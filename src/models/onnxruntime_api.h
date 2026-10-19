@@ -65,6 +65,9 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 */
 
 #pragma once
+#ifndef ORT_GENAI_MODELS_ONNXRUNTIME_API_H
+#define ORT_GENAI_MODELS_ONNXRUNTIME_API_H
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -1546,39 +1549,9 @@ struct OrtModelPackageComponentContext;
 
 namespace Ort {
 
-/// Typed function-pointer cache for the OrtModelPackageApi experimental entries genai uses.
-/// Each pointer is resolved once by name; null means the loaded ORT build lacks that entry.
-struct ModelPackageApi {
-  OrtExperimental_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn
-      CreateModelPackageOptionsFromSessionOptions{nullptr};
-  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageOptions_SinceV28_Fn
-      ReleaseModelPackageOptions{nullptr};
-  OrtExperimental_OrtModelPackageApi_CreateModelPackageContext_SinceV28_Fn
-      CreateModelPackageContext{nullptr};
-  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageContext_SinceV28_Fn
-      ReleaseModelPackageContext{nullptr};
-  OrtExperimental_OrtModelPackageApi_ModelPackage_GetComponentCount_SinceV28_Fn
-      ModelPackage_GetComponentCount{nullptr};
-  OrtExperimental_OrtModelPackageApi_ModelPackage_GetComponentNames_SinceV28_Fn
-      ModelPackage_GetComponentNames{nullptr};
-  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantCount_SinceV28_Fn
-      ModelPackage_GetVariantCount{nullptr};
-  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn
-      ModelPackage_GetVariantNames{nullptr};
-  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn
-      ModelPackage_GetVariantEpName{nullptr};
-  OrtExperimental_OrtModelPackageApi_ModelPackage_ResolveStringRef_SinceV28_Fn
-      ModelPackage_ResolveStringRef{nullptr};
-  OrtExperimental_OrtModelPackageApi_SelectComponent_SinceV28_Fn
-      SelectComponent{nullptr};
-  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn
-      ReleaseModelPackageComponentContext{nullptr};
-  OrtExperimental_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn
-      ModelPackageComponent_GetSelectedVariantFolderPath{nullptr};
-};
+using ModelPackageApi = ::OrtModelPackageApi;
 
-/// Returns the lazily-resolved model package API function pointers. Throws if the loaded
-/// ONNX Runtime build does not expose the experimental functions genai requires.
+/// Returns the model package API table exposed by the loaded ONNX Runtime build.
 const ModelPackageApi& GetModelPackageApi();
 
 }  // namespace Ort
@@ -1646,3 +1619,5 @@ struct OrtModelPackageComponentContext {
 #endif  // ORT_GENAI_HAS_MODEL_PACKAGE
 
 #include "onnxruntime_inline.h"
+
+#endif  // ORT_GENAI_MODELS_ONNXRUNTIME_API_H

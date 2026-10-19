@@ -440,10 +440,17 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
-    return OrtMemoryInfo::Create("Cuda",
-                                 OrtAllocatorType::OrtDeviceAllocator,
-                                 0,
-                                 OrtMemType::OrtMemTypeDefault);
+    OrtMemoryInfo* memory_info = nullptr;
+    Ort::ThrowOnError(Ort::api->CreateMemoryInfo_V2(
+        "Cuda",
+        OrtMemoryInfoDeviceType_GPU,
+        0x10DE,
+        0,
+        OrtDeviceMemoryType_DEFAULT,
+        0,
+        OrtAllocatorType::OrtDeviceAllocator,
+        &memory_info));
+    return std::unique_ptr<OrtMemoryInfo>{memory_info};
   }
 
   std::string GetExecutionProviderName() const override { return "cuda"; }

@@ -1553,45 +1553,13 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
 namespace Ort {
 
 inline const ModelPackageApi& GetModelPackageApi() {
-  static const ModelPackageApi fns = []() {
-    ModelPackageApi f;
-    if (api == nullptr) {
-      return f;
-    }
-    // Resolve OrtModelPackageApi entries via the C API to avoid including
-    // onnxruntime_experimental_cxx_api.h. That header defines the
-    // Ort::Experimental::Get_OrtModelPackageApi_*_SinceV28_Fn accessors but transitively
-    // pulls in onnxruntime_cxx_api.h, which redefines the Ort:: types that genai has
-    // vendored in onnxruntime_api.h.
-#define GENAI_MP_V28_FN(NAME)                                                \
-  reinterpret_cast<OrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_Fn>( \
-      api->GetExperimentalFunction(                                          \
-          kOrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_FnName))
-
-    f.CreateModelPackageOptionsFromSessionOptions = GENAI_MP_V28_FN(CreateModelPackageOptionsFromSessionOptions);
-    f.ReleaseModelPackageOptions = GENAI_MP_V28_FN(ReleaseModelPackageOptions);
-    f.CreateModelPackageContext = GENAI_MP_V28_FN(CreateModelPackageContext);
-    f.ReleaseModelPackageContext = GENAI_MP_V28_FN(ReleaseModelPackageContext);
-    f.ModelPackage_GetComponentCount = GENAI_MP_V28_FN(ModelPackage_GetComponentCount);
-    f.ModelPackage_GetComponentNames = GENAI_MP_V28_FN(ModelPackage_GetComponentNames);
-    f.ModelPackage_GetVariantCount = GENAI_MP_V28_FN(ModelPackage_GetVariantCount);
-    f.ModelPackage_GetVariantNames = GENAI_MP_V28_FN(ModelPackage_GetVariantNames);
-    f.ModelPackage_GetVariantEpName = GENAI_MP_V28_FN(ModelPackage_GetVariantEpName);
-    f.ModelPackage_ResolveStringRef = GENAI_MP_V28_FN(ModelPackage_ResolveStringRef);
-    f.SelectComponent = GENAI_MP_V28_FN(SelectComponent);
-    f.ReleaseModelPackageComponentContext = GENAI_MP_V28_FN(ReleaseModelPackageComponentContext);
-    f.ModelPackageComponent_GetSelectedVariantFolderPath =
-        GENAI_MP_V28_FN(ModelPackageComponent_GetSelectedVariantFolderPath);
-
-#undef GENAI_MP_V28_FN
-    return f;
-  }();
-  if (fns.CreateModelPackageContext == nullptr) {
+  static const ModelPackageApi* api_table = api == nullptr ? nullptr : api->GetModelPackageApi();
+  if (api_table == nullptr) {
     throw std::runtime_error(
         "Model package API is not available in this ONNX Runtime build. "
-        "Model packages require ONNX Runtime with the OrtModelPackageApi experimental functions.");
+        "Model packages require an ONNX Runtime build exposing OrtModelPackageApi.");
   }
-  return fns;
+  return *api_table;
 }
 
 }  // namespace Ort
