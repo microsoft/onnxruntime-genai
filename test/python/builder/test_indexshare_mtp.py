@@ -17,15 +17,24 @@ def mtp_graph(tmp_path):
     counts = "/model/layers.0/attn/PackedSparseAttentionIndexer/output_1"
     nodes = [
         helper.make_node(
-            "Constant", [], ["split_sizes"], name="split_sizes",
+            "Constant",
+            [],
+            ["split_sizes"],
+            name="split_sizes",
             value=numpy_helper.from_array(np.array([4, 2], dtype=np.int64)),
         ),
         helper.make_node(
-            "Constant", [], ["constant_output"], name="constant_output",
+            "Constant",
+            [],
+            ["constant_output"],
+            name="constant_output",
             value=numpy_helper.from_array(np.ones((1, 2), dtype=np.float32)),
         ),
         helper.make_node(
-            "Constant", [], ["unused_constant"], name="unused_constant",
+            "Constant",
+            [],
+            ["unused_constant"],
+            name="unused_constant",
             value=numpy_helper.from_array(np.ones(2, dtype=np.float32)),
         ),
         helper.make_node(
@@ -106,7 +115,10 @@ def test_rejects_non_qsa_policy(mtp_graph, policy):
 def test_single_model_selection_io(mtp_graph, draft_count, quantized_projection):
     if quantized_projection:
         quantizer = MatMulNBitsQuantizer(
-            onnx.load(mtp_graph / "mtp.onnx"), bits=4, block_size=16, is_symmetric=True,
+            onnx.load(mtp_graph / "mtp.onnx"),
+            bits=4,
+            block_size=16,
+            is_symmetric=True,
             op_types_to_quantize=("MatMul",),
         )
         quantizer.process()
@@ -118,7 +130,12 @@ def test_single_model_selection_io(mtp_graph, draft_count, quantized_projection)
     onnx.checker.check_model(str(mtp_graph / "mtp.onnx"), check_custom_domain=False)
     assert metadata["enabled"] is True
     assert set(metadata) == {
-        "enabled", "base_capacity", "max_draft_tokens", "indices_output", "counts_output", "status_output",
+        "enabled",
+        "base_capacity",
+        "max_draft_tokens",
+        "indices_output",
+        "counts_output",
+        "status_output",
     }
     assert {path.name for path in mtp_graph.glob("*.onnx")} == {"mtp.onnx"}
     assert not any(node.op_type == "If" for node in model.graph.node)
@@ -149,7 +166,9 @@ def test_single_model_selection_io(mtp_graph, draft_count, quantized_projection)
     assert metadata["status_output"] == "indexer_status"
     attention = next(node for node in model.graph.node if node.op_type == "SparsePagedAttention")
     assert list(attention.input[9:11]) == list(indexer.output[:2])
-    assert not any(node.op_type == "Identity" and set(node.output).intersection(indexer.output[:2]) for node in model.graph.node)
+    assert not any(
+        node.op_type == "Identity" and set(node.output).intersection(indexer.output[:2]) for node in model.graph.node
+    )
     unused = {"split_sizes", "unused_constant", "unused.initializer"}
     assert not any(unused.intersection(node.output) for node in model.graph.node)
     assert not any(value.name in unused for value in model.graph.initializer)
@@ -177,10 +196,21 @@ def test_rejects_already_converted_graph(mtp_graph):
     assert (mtp_graph / "mtp.onnx").read_bytes() == source_bytes
 
 
-@pytest.mark.parametrize("reserved_name", [
-    "past_indices", "past_counts", "present_indices", "present_counts", "indexer_status",
-    "mode", "projection_rows", "base_row_indices", "range_starts", "range_ends",
-])
+@pytest.mark.parametrize(
+    "reserved_name",
+    [
+        "past_indices",
+        "past_counts",
+        "present_indices",
+        "present_counts",
+        "indexer_status",
+        "mode",
+        "projection_rows",
+        "base_row_indices",
+        "range_starts",
+        "range_ends",
+    ],
+)
 def test_rejects_indexshare_name_collision(mtp_graph, reserved_name):
     model = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
     model.graph.node.append(helper.make_node("Identity", ["hidden"], [reserved_name]))
@@ -201,7 +231,29 @@ def test_rejects_projection_with_other_consumers(mtp_graph):
     assert (mtp_graph / "mtp.onnx").read_bytes() == source_bytes
 
 
-@pytest.mark.parametrize("ep,paged", [("cuda", True), ("cuda", False), ("cpu", True), ("webgpu", True), ("webgpu", False)])
+@pytest.mark.parametrize("budget", [8, 16])
+def test_qwen_indexshare_rejects_budget_beyond_exported_capacity(mtp_graph, budget):
+    metadata = MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 7)
+    config_path = mtp_graph / "genai_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"decoder": {}},
+                "speculative": {"max_draft_tokens": budget},
+            }
+        )
+    )
+    model = object.__new__(Qwen4ExpModel)
+    model.decoder = SimpleNamespace(ep="cuda", use_paged_attention=True, num_kv_heads=2, head_size=256)
+    model.mtp = SimpleNamespace(use_paged_attention=True, prune_lm_head=False)
+    model.mtp_attrs = {"shared_initializers": [], "index_share": metadata}
+    with pytest.raises(ValueError, match="exceeds the exported IndexShare capacity"):
+        model.add_mtp_to_genai_config(str(mtp_graph))
+
+
+@pytest.mark.parametrize(
+    "ep,paged", [("cuda", True), ("cuda", False), ("cpu", True), ("webgpu", True), ("webgpu", False)]
+)
 @pytest.mark.parametrize("cuda_graph", [None, "0", "1"])
 def test_qwen_indexshare_config_and_session_options(mtp_graph, ep, paged, cuda_graph):
     metadata = MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 7)
@@ -215,6 +267,7 @@ def test_qwen_indexshare_config_and_session_options(mtp_graph, ep, paged, cuda_g
     config_path.write_text(json.dumps({"model": {"decoder": {"session_options": options}, "eos_token_id": [11, 12]}}))
     model = object.__new__(Qwen4ExpModel)
     model.decoder = SimpleNamespace(ep=ep, use_paged_attention=paged, num_kv_heads=2, head_size=256)
+    model.mtp = SimpleNamespace(use_paged_attention=paged, prune_lm_head=False)
     model.mtp_attrs = {"shared_initializers": [], "index_share": metadata}
 
     model.add_mtp_to_genai_config(str(mtp_graph))
@@ -235,22 +288,29 @@ def test_qwen_indexshare_config_and_session_options(mtp_graph, ep, paged, cuda_g
         "ep.cuda.fpa_intb_gemm": "1",
         "ep.cuda.qmoe_skip_nvfp4_gemv_profiling": "1",
         "ep.cuda.sparse_paged_attention_grouped": "1",
-        "ep.cuda.sparse_paged_attention_grouped_decode": "0",
-        "ep.cuda.sparse_paged_attention_grouped_decode_splits": "0",
         "ep.cuda.sparse_paged_attention_grouped_tile_size": "8",
         "ep.cuda.sparse_paged_attention_grouped_vectorized": "1",
-        "ep.cuda.sparse_paged_attention_warp_reduction": "0",
         "session.use_device_allocator_for_initializers": "1",
     }
     for section in ("decoder", "mtp"):
         session_options = config["model"][section]["session_options"]
+        assert not {
+            "ep.cuda.sparse_paged_attention_grouped_decode",
+            "ep.cuda.sparse_paged_attention_grouped_decode_splits",
+            "ep.cuda.sparse_paged_attention_warp_reduction",
+        }.intersection(session_options)
         if ep == "cuda" and paged:
             assert all(session_options.get(name) == value for name, value in expected_options.items())
             if cuda_graph is not None:
-                provider = next(provider["cuda"] for provider in session_options["provider_options"] if "cuda" in provider)
+                provider = next(
+                    provider["cuda"] for provider in session_options["provider_options"] if "cuda" in provider
+                )
                 assert provider["enable_cuda_graph"] == cuda_graph
             else:
-                assert not any("enable_cuda_graph" in provider.get("cuda", {}) for provider in session_options.get("provider_options", []))
+                assert not any(
+                    "enable_cuda_graph" in provider.get("cuda", {})
+                    for provider in session_options.get("provider_options", [])
+                )
         else:
             assert "ep.cuda.sparse_paged_attention_grouped" not in session_options
         if ep == "webgpu" and paged:

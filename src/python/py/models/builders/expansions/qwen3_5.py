@@ -3,8 +3,11 @@ import math
 import onnx_ir as ir
 import torch
 
+from .standard import Standard
+
 
 class Qwen35:
+    make_l2_normalize_expansion = Standard.make_l2_normalize_expansion
     """Shared Qwen3.5 attention gate and normalization expansions."""
 
     def split_attention_query_gate(self, layer_id):
@@ -159,40 +162,6 @@ class Qwen35:
             f"{gate_name}/output_1",
         )
 
-    def make_l2_normalize_expansion(self, basename, root_input):
-        """Expand per-head L2 normalization without runtime Shape operators."""
-        total_dim = self.linear_num_key_heads * self.linear_key_head_dim
-        grouped_shape = [
-            "batch_size",
-            "sequence_length",
-            self.linear_num_key_heads,
-            self.linear_key_head_dim,
-        ]
-        flat_name = f"{basename}/flat/Reshape"
-        self.make_reshape(
-            flat_name,
-            [root_input, f"/model/constants/INT64/[0, 0, {self.linear_num_key_heads}, {self.linear_key_head_dim}]"],
-            self.io_dtype,
-            grouped_shape,
-        )
-        norm_name = f"{basename}/LpNormalization"
-        self.make_lp_normalization(
-            norm_name,
-            f"{flat_name}/output_0",
-            self.io_dtype,
-            grouped_shape,
-            axis=-1,
-            p=2,
-        )
-        unflat_name = f"{basename}/unflat/Reshape"
-        self.make_reshape(
-            unflat_name,
-            [f"{norm_name}/output_0", f"/model/constants/INT64/[0, 0, {total_dim}]"],
-            self.io_dtype,
-            ["batch_size", "sequence_length", total_dim],
-        )
-        return f"{unflat_name}/output_0"
-
     def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
         """Split Qwen3.5's doubled, per-head Q projection into Q and gate."""
         super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
@@ -296,6 +265,8 @@ class Qwen35:
 
     def make_gated_delta_net_layer(self, layer_id, linear_attn, conv_output, b_name, a_name):
         """Run GatedDeltaNet directly from the packed convolution QKV output."""
+        if not self.use_paged_attention and self.ep not in {"cuda", "webgpu"}:
+            return self.make_gated_delta_net_expansion(layer_id, linear_attn, conv_output, b_name, a_name)
         basename = f"/model/layers.{layer_id}/linear_attn"
         packed = self.use_paged_attention
         token_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
@@ -531,57 +502,3 @@ class Qwen35MoE:
         )
 
         return shared_output, f"{gate_sigmoid_name}/output_0"
-
-
-class Qwen35MTP:
-    """Qwen3.5 MTP normalization, embedding, and projection expansions."""
-
-    def make_offset_rmsnorm(self, name, root_input, weight_tensor):
-        weight_name = f"{name[1:].replace('/', '.')}.weight"
-        self.make_initializer(weight_tensor + self.layernorm_attrs["add_offset"], weight_name, to=self.io_dtype)
-        output = f"{name}/output_0"
-        self.make_node(
-            "SimplifiedLayerNormalization",
-            inputs=[root_input, weight_name],
-            outputs=[output],
-            name=name,
-            epsilon=self.layernorm_attrs["epsilon"],
-            axis=-1,
-            stash_type=1,
-        )
-        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape())
-        return output
-
-    def make_mtp_input_projection(self):
-        basename = "/model/mtp"
-
-        embed_output = self.make_mtp_embedding(basename)
-        self.make_value(embed_output, self.io_dtype, shape=self.make_hidden_state_shape())
-
-        embedding_norm = self.make_offset_rmsnorm(
-            f"{basename}/pre_fc_norm_embedding", embed_output, self.mtp_weights.pre_fc_norm_embedding.weight
-        )
-        hidden_states_norm = self.make_offset_rmsnorm(
-            f"{basename}/pre_fc_norm_hidden",
-            self.input_names["hidden_states"],
-            self.mtp_weights.pre_fc_norm_hidden.weight,
-        )
-
-        concat_name = f"{basename}/fc/Concat"
-        self.make_concat(
-            concat_name,
-            [embedding_norm, hidden_states_norm],
-            self.io_dtype,
-            self.make_hidden_state_shape(last_dim=2 * self.hidden_size),
-            axis=-1,
-        )
-
-        fc_name = self.make_matmul(self.mtp_weights.fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
-        return f"{fc_name}/output_0"
-
-    def make_mtp_embedding(self, basename):
-        return self.make_embedding_lookup(
-            self.mtp_weights.embedding.weight,
-            f"{basename}/embed_tokens",
-            self.mtp_weights.lm_head,
-        )

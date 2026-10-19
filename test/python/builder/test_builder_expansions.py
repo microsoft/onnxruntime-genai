@@ -4,9 +4,12 @@
 import pytest
 
 from models.builders.base import Model
+from models.builders.expansions.graph import Qwen38Graph
+from models.builders.expansions.mtp import Qwen35MTP, Qwen38MTP
 from models.builders.expansions.paged_attention import PagedAttention
-from models.builders.expansions.qwen3_5 import Qwen35, Qwen35MoE, Qwen35MTP
-from models.builders.expansions.qwen3_8 import Qwen38, Qwen38Graph, Qwen38MTP, Qwen38Vision
+from models.builders.expansions.qwen3_5 import Qwen35, Qwen35MoE
+from models.builders.expansions.qwen3_8 import Qwen38
+from models.builders.expansions.vision import Qwen38Vision
 from models.builders.qwen3_5 import Qwen35MoETextModel, Qwen35MTPModel, Qwen35TextModel
 from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel
 

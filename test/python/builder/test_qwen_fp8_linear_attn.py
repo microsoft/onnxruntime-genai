@@ -18,6 +18,7 @@ def _make_model(tensors, quant_type="modelopt"):
     model.weight_map = tensors
     model.get_tensor = MethodType(lambda self, key: tensors.get(key), model)
     model.quant_type = quant_type
+    model.quant_attrs = {}
     return model
 
 

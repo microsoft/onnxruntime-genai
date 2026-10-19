@@ -6,18 +6,27 @@ import onnx_ir as ir
 from builder_config import serialize_genai_config
 
 from .base import Model
-from .expansions.qwen3_5 import Qwen35, Qwen35MoE, Qwen35MTP
+from .expansions.qwen3_5 import Qwen35, Qwen35MoE
+from .expansions.mtp import Qwen35MTP
 from .mtp import MTPModel
 
 
 class Qwen35TextModel(Qwen35, Model):
     def validate_gated_delta_net_options(self, state_window, ep):
-        if ep not in {"cuda", "webgpu"}:
-            raise ValueError("GatedDeltaNet exports require the CUDA or WebGPU execution provider")
+        if self.use_paged_attention and ep not in {"cuda", "webgpu"}:
+            raise ValueError("Paged GatedDeltaNet exports require the CUDA or WebGPU execution provider")
         if state_window == 1:
             raise ValueError("GatedDeltaNet state_window must be 0 or at least 2")
+        if state_window > 9:
+            raise ValueError("GatedDeltaNet state_window must not exceed 9 (state_update_capacity <= 8)")
+        if state_window and self.context_length_attrs["state_update_capacity"] not in (0, state_window - 1):
+            raise ValueError("state_update_capacity must equal state_window - 1 when both are specified")
+        if ep not in {"cuda", "webgpu"} and self.context_length_attrs["state_update_capacity"]:
+            raise ValueError("Compact recurrent state capture requires the CUDA or WebGPU execution provider")
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        if "linear_attn_op" in extra_options:
+            raise ValueError("linear_attn_op is selected automatically by execution provider; remove this option. Dense CPU/DML/TRT-RTX exports retain LinearAttention.")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         self.configure_gated_delta_net_io()
@@ -47,7 +56,7 @@ class Qwen35TextModel(Qwen35, Model):
             self.context_length_attrs["state_window"],
             self.ep,
         )
-        if self.context_length_attrs["state_window"]:
+        if self.context_length_attrs["state_window"] and self.ep in {"cuda", "webgpu"}:
             self.context_length_attrs["state_update_capacity"] = self.context_length_attrs["state_window"] - 1
 
         if self.use_paged_attention:
@@ -61,10 +70,11 @@ class Qwen35TextModel(Qwen35, Model):
             self.linear_value_head_dim,
             self.linear_key_head_dim,
         ]
-        self.input_types["past.recurrent"] = ir.DataType.FLOAT
-        self.input_shapes["past.recurrent"] = recurrent_shape
-        self.output_types["present.recurrent"] = ir.DataType.FLOAT
-        self.output_shapes["present.recurrent"] = recurrent_shape
+        if self.ep in {"cuda", "webgpu"}:
+            self.input_types["past.recurrent"] = ir.DataType.FLOAT
+            self.input_shapes["past.recurrent"] = recurrent_shape
+            self.output_types["present.recurrent"] = ir.DataType.FLOAT
+            self.output_shapes["present.recurrent"] = recurrent_shape
 
         capacity = self.context_length_attrs["state_update_capacity"]
         if not capacity:

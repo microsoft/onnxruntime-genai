@@ -187,7 +187,7 @@ def check_extra_options(
         "text_only",
         "enable_cuda_fpa_intb_gemm",
         "exclude_mtp",
-        "indexshare_mtp",
+        "use_device_allocator_for_initializers",
     ]
 
     for key in bools:
@@ -328,9 +328,14 @@ def check_extra_options(
         excluded = extra_options["nodes_to_exclude"]
         extra_options["nodes_to_exclude"] = excluded.split(",") if isinstance(excluded, str) else list(excluded)
 
-    for key in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
+    for key, allowed in (("qmoe_weights_prepacked", (-1, 0, 1)), ("matmulnbits_weights_prepacked", (0, 1, 2))):
         if key in extra_options:
-            raise ValueError(f"{key} has been removed; weight packing is determined by the execution provider and GPU SM.")
+            extra_options[key] = int(extra_options[key])
+            if extra_options[key] not in allowed:
+                raise ValueError(f"{key} must be one of {allowed}.")
+    for key in ("indexshare_mtp", "indexshare_max_draft_tokens"):
+        if key in extra_options:
+            raise ValueError(f"{key} is no longer configurable; paged main/MTP graphs share indices by default. Use max_draft_tokens to set the draft budget.")
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
@@ -467,6 +472,7 @@ def check_extra_options(
     if embedding_quant_type is not None and embedding_quant_type not in {"int4", "int8"}:
         raise ValueError("embedding_quant_type must be one of: int4, int8")
 
+    if extra_options["shared_embeddings"] or embedding_quant_type is not None:
         op_types_to_quantize = extra_options.get("op_types_to_quantize", ())
 
         if "MatMul" not in op_types_to_quantize:
@@ -940,11 +946,14 @@ def get_args():
                     WebGPU requires hidden_size and moe_intermediate_size to be divisible by qmoe_block_size.
                     Raw block-wise INT4 QMoE requires both dimensions to be even.
                     Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
-                CUDA weight packing is automatic from the active NVIDIA GPU: MatMulNBits uses
-                    mode 1 on SM80-class GPUs and mode 2 on SM90-class GPUs. Integer QMoE uses
-                    mode 1 on both because its CUDA kernel uses the SM80 layout even on SM90.
-                    Other EPs, unavailable NVIDIA GPUs, and pre-SM80 GPUs use mode 0 (raw).
-                    Ineligible MatMulNBits projections stay raw. Packing is not configurable.
+                qmoe_weights_prepacked = -1/0/1: CUDA integer QMoE defaults to -1 (offline CUTLASS layout).
+                    0 selects raw integer weights; 1 selects packed weights. Other EPs keep their original layouts.
+                    NVFP4: -1/0 selects legacy N-packed bytes; explicit 1 selects K-packed bytes and requires newer ORT.
+                matmulnbits_weights_prepacked = 0/1/2: Default 0 (raw). CUDA-only target layout:
+                    1 for SM80, 2 for exact SM90 (not Blackwell). Requires FP16/BF16 inputs without g_idx.
+                    Unsupported shapes, non-default zero points, and shared weight buffers stay raw.
+                use_device_allocator_for_initializers = true/false: Default false; opt into device allocation.
+                    Paged Qwen3.8 sessions enable this automatically.
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
                 op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
@@ -1082,7 +1091,8 @@ def get_args():
                     contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
-                    Qwen3.5/3.8 exports use GatedDeltaNet and require state_window=0.
+                    GatedDeltaNet accepts 0 or 2..9. A nonzero window sets state_update_capacity=W-1;
+                    an explicit capacity must agree. Dense CPU/DML/TRT-RTX retain LinearAttention.
                     Requires ONNX Runtime kernels that implement this attribute.
                 enable_cuda_fpa_intb_gemm = Select the CUDA fpA_intB MatMulNBits kernel family
                     for weights exported in the default raw blockwise layout. Default is false.
@@ -1145,6 +1155,8 @@ def get_args():
                     Only valid for models that tie their input and output embeddings (tie_word_embeddings=true in
                     config.json). Setting shared_embeddings=true for a model with tie_word_embeddings=false raises a ValueError.
                 embedding_quant_type = Quantization type for an independent token embedding: int4 or int8.
+                    Defaults to model precision. int4 currently requires int4 model precision; int8 requires symmetric weights.
+                    Explicit precision conflicts with embedding exclusions are rejected, not silently ignored.
                     This does not tie the token embedding to the LM head. Defaults to the model precision.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.

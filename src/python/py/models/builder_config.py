@@ -240,12 +240,6 @@ def canonical_quant_data(data: dict[str, Any]) -> dict[str, Any]:
     if runtime_data is not None:
         result["format"] = runtime_data
         del result["runtime"]
-    for section, field in (("moe", "weights_prepacked"), ("format", "matmulnbits_weights_prepacked")):
-        if field in result.get(section, {}):
-            raise ValueError(
-                f"quant_config.{section}.{field} has been removed; "
-                "weight packing is determined by the execution provider and GPU SM"
-            )
     return result
 
 
@@ -660,15 +654,6 @@ def normalize_builder_config(
     here, although block-drafter config.json is read to resolve auxiliary taps.
     """
     legacy_options = copy.deepcopy(extra_options or {})
-    for option in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
-        if option in legacy_options:
-            raise ValueError(
-                f"extra_options.{option} has been removed; "
-                "weight packing is determined by the execution provider and GPU SM"
-            )
-    for removed_option in ("use_device_allocator_for_initializers",):
-        if removed_option in legacy_options:
-            raise ValueError(f"extra_options.{removed_option} has been removed; this behavior is always enabled")
     structured_present = any(
         value is not None for value in (target_options, drafter_options, speculative_options, runtime_config)
     )

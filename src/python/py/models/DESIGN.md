@@ -39,6 +39,14 @@ Excluding the time it may take to download the original model, the model builder
 
 Model architectures are defined in classes. By defining model architectures in this way, future models can leverage class inheritance to greatly reduce the amount of time and effort needed to onboard new model architectures. Optimizations and quantizations are also inherited from the base classes so there is no additional work needed to add those opportunities per model.
 
+Qwen3.8 text, vision, embedding, Engram, and MTP builders live in separate
+`builders/qwen3_8_*.py` modules; `builders/qwen3_8.py` coordinates the package.
+Vision, Engram, and MTP loading and expansion code likewise have their own
+`loaders/` and `builders/expansions/` modules. Reusable standard-ONNX-only
+expansions live in `builders/expansions/standard.py`; provider adapters select
+only the methods they need, so importing a portable expansion does not override
+unrelated CUDA or WebGPU contrib-op paths.
+
 ### Compatibility
 
 The models produced by the model builder should directly work in ONNX Runtime GenAI and other solutions that use ONNX Runtime such as Hugging Face's Optimum. There should be no additional model modifications needed.

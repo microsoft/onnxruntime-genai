@@ -32,6 +32,8 @@ def _load_base_module():
     builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
     builders_package.__path__ = [str(BUILDERS_DIR)]
 
+    if "models.builders.base" in sys.modules:
+        return sys.modules["models.builders.base"]
     spec = importlib.util.spec_from_file_location("models.builders.base", BUILDERS_DIR / "base.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules["models.builders.base"] = module
@@ -427,6 +429,7 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
 def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mode, block_size, expected):
     model = Model.__new__(Model)
     model.ep = "cuda"
+    model.io_dtype = ir.DataType.FLOAT16
     model.matmul_attrs = {"weights_prepacked": mode}
     model.quant_attrs = {"is_symmetric": True}
 
@@ -448,7 +451,7 @@ def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mod
         [],
         [
             onnx.numpy_helper.from_array(weight, "weight"),
-            onnx.numpy_helper.from_array(np.full((64, 1), 8, dtype=np.uint8), "zero_point"),
+            onnx.numpy_helper.from_array(np.full((64, 1), 0x88, dtype=np.uint8), "zero_point"),
         ],
     )
     model_proto = onnx.helper.make_model(graph)

@@ -6,7 +6,7 @@ import importlib
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -49,6 +49,7 @@ def weight_loader(monkeypatch, request):
     model.quant_type = None
     model.num_layers = 2
     model.extra_options = {"num_hidden_layers": 2}
+    model.hf_load_config = SimpleNamespace()
     transformers = ModuleType("transformers")
     monkeypatch.setattr(importlib.import_module("builders.base"), "transformers", transformers)
     return model, transformers

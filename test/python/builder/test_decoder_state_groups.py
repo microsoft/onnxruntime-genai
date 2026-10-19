@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import types
@@ -12,17 +11,14 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from _builder_test_utils import load_builder_module
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_builder_module(module_name)
 
 
 sys.modules.setdefault("models", types.ModuleType("models"))
@@ -742,6 +738,8 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 )
 def test_qwen35_gated_delta_net_validation(state_window, ep, message):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = True
+    model.context_length_attrs = {"state_update_capacity": 0}
     with pytest.raises(ValueError, match=message):
         model.validate_gated_delta_net_options(state_window, ep)
 
@@ -749,6 +747,8 @@ def test_qwen35_gated_delta_net_validation(state_window, ep, message):
 @pytest.mark.parametrize("ep", ["cuda", "webgpu"])
 def test_qwen35_gated_delta_net_supported_providers(ep):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = True
+    model.context_length_attrs = {"state_update_capacity": 0}
     model.validate_gated_delta_net_options(0, ep)
 
 
@@ -851,6 +851,7 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
 
 def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.ep = "cuda"
     model.context_length_attrs = {"state_update_capacity": 0}
     model.use_paged_attention = False
     model.io_dtype = base_module.ir.DataType.FLOAT16

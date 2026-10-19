@@ -17,4 +17,3 @@ class Qwen:
         self.values[self.attention_attrs["k_path"]].dtype = ir.DataType.FLOAT
 
         self.layernorm_attrs["cast"]["output_0"] = True
-

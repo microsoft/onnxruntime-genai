@@ -75,7 +75,7 @@ compatibility defaults are provider-dependent today:
 | `moe.block_size` | `128` on TRT-RTX, else `32` |
 | `moe.type` | `int2`/`mxfp4`/`nvfp4` accepted only on CUDA |
 | `moe.fc1_type`, `moe.fc2_type` | Projection overrides require integer QMoE on CUDA; INT2 and mixed widths require block size 64 or 128 that divides both hidden and intermediate sizes |
-| Automatic weight packing | CUDA SM80-class GPUs use MatMulNBits mode `1`, SM90-class GPUs use `2`; integer QMoE uses `1` on both. Other EPs and unavailable/older NVIDIA GPUs use `0`. INT2 drafter bodies retain portable raw weights. |
+| Explicit weight packing | `moe.weights_prepacked` and `format.matmulnbits_weights_prepacked` select independent target layouts without querying the export host GPU. NVFP4 K-packed storage is opt-in. |
 | `format.use_qdq` | Required `true` for TRT-RTX integer dense weights |
 
 So the resolver signature is (envelope, execution provider), and rule 1 in
@@ -102,19 +102,20 @@ full quantization configuration from PR #2588:
 | `checkpoint_policy` | Reserved for loaders that implement both paths. Target options currently reject it; MTP supports `preserve` and `requantize`. |
 | `weights` | `type`, `block_size`, `symmetric`, `method`, `accuracy_level`, `op_types`, and ordered `overrides`. |
 | `moe` | Expert quantization type, optional `fc1_type`/`fc2_type` projection overrides, block size, and packing. |
-| `format` | `use_qdq`; weight packing is resolved automatically. |
+| `format` | `use_qdq` and explicit `matmulnbits_weights_prepacked` target layout. |
 
 `format` is the proposed replacement name for `quant_config.runtime`: QDQ changes
 the exported graph and is not a runtime-profile override. Weight packing is
-automatic rather than a configurable format field. Keep `quant_config.runtime` as a compatibility alias;
+explicitly configurable per operator. Keep `quant_config.runtime` as a compatibility alias;
 conflicting values supplied through both names are errors.
 
 Structured `weights.accuracy_level` must be a JSON integer from `0` to `4`.
 Booleans, floating-point values, and numeric strings are rejected for this field;
-legacy adapters retain their string conversion. Weight packing is resolved by
-the model builder from the execution provider and active NVIDIA GPU SM, not from
-user configuration. Supplying `moe.weights_prepacked` or
-`format.matmulnbits_weights_prepacked` (including the `runtime` alias) is rejected.
+legacy adapters retain their string conversion. `moe.weights_prepacked`
+accepts `-1` (default), `0`, or `1`; `format.matmulnbits_weights_prepacked`
+accepts `0` (default), `1` (SM80 layout), or `2` (exact SM90 layout).
+These target choices do not inspect the export host GPU. NVFP4 uses legacy raw
+storage by default and requires explicit mode `1` for its newer K-packed layout.
 Ineligible projections stay raw, including SM90 MatMulNBits with block size `32`.
 `weights.op_types` must be a
 non-empty JSON array containing only `"MatMul"` and/or `"Gather"`, not a single
@@ -182,11 +183,12 @@ runtime behavior even though they are not graph-construction options.
 
 ### Projection Fusion
 
-Target MLP gate/up projections are always fused before weight quantization,
-producing a single projection (`MatMulNBits` for the INT4 example) followed by
-`Split`. DFlash2 drafter MLP gate/up projections are also always fused. Neither
-component exposes a fusion option or an `optimizations` group. This does not
-apply fusion to future vision components.
+Target MLP gate/up fusion is configurable through
+`target_options.optimizations.fuse_mlp_gate_up` (default `false`), corresponding
+to `fuse_mlp_gate_up`. DFlash2 fusion is independently configurable through
+`drafter_options.optimizations.fuse_mlp_gate_up` (default `false`), corresponding to
+`dflash2_fuse_gate_up`. When enabled, fusion produces a single projection
+(`MatMulNBits` for INT4) followed by `Split`. This does not apply fusion to vision components.
 
 Fusion requires a supported exporter and compatible projection shapes, biases,
 and quantization policy. Current target fusion requires unpacked floating-point
@@ -665,7 +667,7 @@ The two `auto` sharing settings request adoption when compatible, not guaranteed
 sharing. In particular, the INT8 embedding adoption path is an additional
 capability gate; this example must not be advertised as a one-copy package merely
 because it exports successfully. Use `required` below to enforce a memory budget.
-Target and DFlash2 gate/up fusion are always enabled and require numerical
+Target and DFlash2 gate/up fusion are configurable, default off, and require numerical
 validation for their respective quantization policies.
 
 ### Runtime Profile
@@ -741,7 +743,7 @@ leaving the base profile's `provider_options` array and `engine`, `search`, and
 }
 ```
 
-Offline packing follows the active GPU automatically; runtime flags do not force
+Offline packing follows the explicit per-op target settings; runtime flags do not force
 raw initializer storage. Sharing is checked against the actual saved head layout,
 boundary dtype, target tying, and INT8 embedding adoption. Keep the target's INT8
 embedding requirement; fail rather than downgrade it to satisfy sharing.
@@ -869,7 +871,7 @@ target/drafter/runtime envelope.
 | `is_symmetric`, `accuracy_level` | Target `quant_config.weights.symmetric` and `weights.accuracy_level` |
 | `algo_config`, `nodes_to_exclude` | Target `quant_config.weights.method` plus generated `weights.overrides` entries; exclusions precede generated preset rules so they stay unconditional |
 | `use_qdq` | Target `quant_config.format.use_qdq` |
-| `matmulnbits_weights_prepacked`, `qmoe_weights_prepacked` | Removed; packing is automatic from the execution provider and GPU SM |
+| `matmulnbits_weights_prepacked`, `qmoe_weights_prepacked` | Preserved; map to `format.matmulnbits_weights_prepacked` and `moe.weights_prepacked` |
 | `enable_cuda_fpa_intb_gemm` | `runtime_config.model.decoder.session_options["ep.cuda.fpa_intb_gemm"]` |
 | `moe_quant_type`, `qmoe_block_size` | Target `quant_config.moe` fields |
 | `use_8bits_moe` | Deprecated `moe_quant_type` alias; unchanged |
@@ -893,14 +895,14 @@ target/drafter/runtime envelope.
 | `max_batch_size`, `max_scheduled_tokens`, `num_blocks`, `gpu_utilization_factor` | Runtime `engine.dynamic_batching` fields |
 | `paged_chunk_size` | Runtime `search.chunk_size` |
 | `enable_cuda_graph` | Runtime decoder session/provider settings |
-| `use_device_allocator_for_initializers` | Removed; initializer device allocation is always enabled |
+| `use_device_allocator_for_initializers` | Preserved, default `false`; paged Qwen3.8 sessions enable it automatically |
 | Olive `search` | Runtime `search` |
 | Any other `extra_options` key | No canonical destination yet; see rule 8 |
 
 Target gate/up fusion defaults to enabled; DFlash2 fusion defaults to disabled.
 Both support upstream fusion controls. Device allocation for initializers remains mandatory.
 The removed `use_device_allocator_for_initializers` extra option is rejected, including
-when set to `true`. Explicit packing fields remain rejected; packing is automatic.
+when set to `true`. Explicit per-op packing fields select the target layout independently.
 
 Normalization rules:
 

@@ -451,7 +451,13 @@ Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx
 
 The legacy `dflash2_precision` option accepts `bf16` (default), `int4`, or `int8`. With builder configuration version 2, `drafter_options.quant_config` independently controls the DFlash 2 body and additionally supports `weights.type=int2`. Integer modes quantize the attention and MLP weights while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches default to BF16 for legacy exports; structured `drafter_options.quant_config.io_dtype` can select FP16 instead. This option does not quantize the drafter's KV cache. INT2 requires an ONNX Runtime build with 2-bit `MatMulNBits` support.
 
-INT4/INT8 body weights retain the target's automatically selected hardware packing policy. Explicit packing fields are not configurable in this branch. INT2 body weights use portable raw blockwise storage; set `runtime_config.model.dflash2.session_options["ep.cuda.fpa_intb_gemm"]` to `"1"` to let the runtime prepack eligible raw weights. INT2 requires block size 64 or 128 and output width divisible by 128 for that kernel path. Unsupported projections stay raw. BF16 x INT2 requires a full fpA-intB kernel build.
+INT4/INT8 body weights honor the drafter's explicit
+`quant_config.format.matmulnbits_weights_prepacked` target setting. INT2 body
+weights retain portable raw blockwise storage in the generic packing pass; set
+`runtime_config.model.dflash2.session_options["ep.cuda.fpa_intb_gemm"]` to `"1"`
+to let the runtime prepack eligible raw weights. INT2 requires block size 64 or
+128 and output width divisible by 128 for that kernel path. Unsupported
+projections stay raw. BF16 x INT2 requires a full fpA-intB kernel build.
 
 Normally the LM head is not quantized separately: the drafter adopts the target's saved head, bytes and layout alike, so the two always agree and are deduplicated into one copy on disk. Its precision and block size remain the target's. If a BF16 target uses offline-prepacked weights, the drafter instead keeps a private raw INT4 head because the prepacked kernel requires FP16 activations. When the target's head uses a format the drafter cannot address by name, such as asymmetric, `use_qdq`, or `rtn`/`k_quant` layouts, the drafter's head stays dense. A head the checkpoint supplies already quantized (FP8) overrides `--precision` for the target and for the drafter alike. The embedding table works the same way: `op_types_to_quantize=MatMul/Gather` turns the target's `Gather` into `GatherBlockQuantized`, and the drafter adopts that table rather than keeping a dense copy. It has to, because the two graphs are deduplicated by initializer name — a target that renames the table while the drafter keeps a dense `Gather` costs more than the target saved. Under `shared_embeddings` the target gathers from its LM-head weight instead of a table of its own, so the drafter's embedding stays dense.
 
@@ -648,39 +654,68 @@ The official [`Qwen/Qwen3.8-Flash-Next-FP8`](https://huggingface.co/Qwen/Qwen3.8
 checkpoint is supported on CUDA and WebGPU through the native loader, without Hugging Face's eager FP8 quantizer.
 Decoder and MTP experts retain their E4M3 weight bytes and 128x128
 `weight_scale_inv` block multipliers. CUDA preserves BF16 expert scales; WebGPU widens them
-exactly to FP32 to match its QMoE kernel. Engram retains its E4M3 table and preserves its
-scalar scale on CUDA; WebGPU widens that scale to FP32 for its CPU Engram companion.
+exactly to FP32 to match its QMoE kernel. Engram retains its E4M3 table and widens its
+scalar scale exactly to FP32 for the annotated CPU lookup, on both CUDA and WebGPU exports.
 No export-time weight dequantization, reciprocal-scale conversion, or requantization is performed.
 Use `bf16` to retain the source precision of unquantized tensors as well.
 The existing FP8 `QMoE` path is weight-only, not the official checkpoint's dynamic-A8 arithmetic.
-Full-model export and generation have not been validated.
+Multimodal decoder export is currently rejected: the sparse indexer needs
+historical temporal/height/width rotary positions that the current runtime
+interface does not provide. Use `text_only=true` with text inputs. Standalone
+vision construction is tested, including isolation between video frames, but
+does not yet enable end-to-end image/video decoder export.
 
 ```bash
 # From source; repository downloads reuse the specified cache:
 python builder.py -m Qwen/Qwen3.8-Flash-Next-FP8 \
-  -o /home/kvaishnavi/qwen38_fp8_onnx -p bf16 -e cuda \
-  -c /home/kvaishnavi/cache_dir --extra_options text_only=true
+  -o path_to_output_folder -p bf16 -e cuda \
+  -c path_to_cache_dir --extra_options text_only=true
 ```
 
 An already-downloaded checkpoint directory can instead be supplied with `-i`.
-Omit `text_only=true` to include vision and embedding companion graphs;
-MTP and the standalone Engram graph are included by default.
+MTP and the standalone Engram graph are included by default. Do not omit
+`text_only=true` until the historical multimodal rotary contract is implemented.
 
-Native NVFP4 expert exports automatically use the same packing policy as integer QMoE: the CUDA EP with an available, active NVIDIA SM80-or-newer GPU (not HIP) selects `weights_prepacked=1`. In this mode, exports preserve the checkpoint's K-packed row-major bytes and retain the logical QMoE weight dimensions. Otherwise, the loader rearranges only the nibble codes into legacy N-packed raw storage with mode `0`; it does not dequantize or requantize weights. For `quant_type="nvfp4"` on CUDA, omitted/default `weights_prepacked=-1` and explicit `0` select legacy N-packed raw storage; `1` selects K-packed row-major storage, and `2` is not supported. Integer QMoE keeps its existing meanings: `-1`/`1` are provider-specific packed layouts and `0` is raw. Gate/up rows are interleaved without dequantization; FP8 block scales and FP32 global scales are unchanged. This requires an ONNX Runtime build supporting the NVFP4 meanings of `weights_prepacked`. CUDA GEMV on SM90 and native NVFP4 GEMM on SM120/SM121 consume the same weight payload, with a layout-aware dense fallback for unsupported shapes. Runtime prepacking prepares native GEMM scales, not another full weight copy. Qwen3.8 exports with mode `1` do not disable prepacking by default. Legacy raw-layout exports retain `session.disable_prepacking=1` as a memory-safety default; the MTP session does not inherit it. Existing exported artifacts must be re-exported to change their weight layout; changing only the node attribute is not sufficient.
+Native NVFP4 expert layout is explicit and independent of the export host GPU.
+For `quant_type="nvfp4"` on CUDA, omitted/default `qmoe_weights_prepacked=-1` and
+explicit `0` select legacy N-packed raw storage; `1` opts into K-packed row-major
+storage and requires an ONNX Runtime build supporting the NVFP4 meaning of
+`weights_prepacked`. Mode `2` is not supported. Integer QMoE has different meanings:
+`-1`/`1` select its CUTLASS layout and `0` is raw. These distinct contracts are why
+the two original per-op packing options are retained instead of one ambiguous
+`prepack_layout` flag. Gate/up rows are interleaved without dequantization; FP8
+block scales and FP32 global scales are unchanged. Legacy raw-layout Qwen3.8
+exports retain `session.disable_prepacking=1` as a memory-safety default; the MTP
+session does not inherit it. Re-export to change layouts: changing only an ONNX
+attribute does not rearrange the stored bytes.
 
-Qwen3.8 Flash exports always include `engram.onnx` and `engram.onnx.data`, including paged exports with `text_only=true` or `exclude_mtp=true`. The main decoder consumes embeddings from the standalone Engram session instead of repeating the table lookup internally. CUDA exports run Engram with the CUDA provider without forcing the lookup onto CPU. Both native NVFP4 and FP8 checkpoints retain the original BF16 Engram scale bytes and require BF16 `GatherBlockQuantized` support on the execution provider. Only gathered activations are cast when model I/O differs from BF16. Engram retains the native FP8 table without duplicating or dequantizing its stored weights. Text-only export does not require vision or embedding companion graphs.
+Qwen3.8 Flash exports always include `engram.onnx` and `engram.onnx.data`, including
+paged exports with `text_only=true` or `exclude_mtp=true`. The main decoder consumes
+embeddings from the standalone Engram session instead of repeating the table
+lookup internally. Non-CPU exports annotate the `GatherBlockQuantized` lookup for
+CPU execution and widen its scalar scale exactly to FP32. Only gathered
+activations are cast to model I/O precision. Engram retains the native FP8 table
+without duplicating or dequantizing its stored weights. Text-only export does not
+require vision or embedding companion graphs.
 
 Engram token history follows the decoder's `past.%d.ple_tokens` / `present.%d.ple_tokens` naming convention, using the zero-based PLE layer ID. Its config uses `inputs.past_ple_token_names` and `outputs.present_ple_token_names` with concrete bindings such as `past.1.ple_tokens` and `present.1.ple_tokens`. The runtime also accepts the legacy `past_tokens` and `present_tokens` keys for older exports.
 
 For paged decoding, the runtime packs Engram's `[batch_size, sequence_length, ple_embed_dim]` output into the decoder's `[num_tokens, ple_embed_dim]` `engram_embeddings` input. The decoder does not consume or forward Engram's token-history output. Its small token-history operation supplies the final PLE history directly and, with compact speculative-state capture enabled, records per-token rollback snapshots; it does not perform another embedding lookup.
 
 ```bash
-python builder.py -i /home/kvaishnavi/Qwen3.8-Flash-Next-NVFP4 \
-  -o /home/kvaishnavi/qwen38_nvfp4_onnx -p fp16 -e cuda \
-  -c /home/kvaishnavi/cache_dir
+python builder.py -i path_to_local_checkpoint \
+  -o path_to_output_folder -p fp16 -e cuda \
+  -c path_to_cache_dir --extra_options text_only=true
 ```
 
-Use `--extra_options text_only=true` to omit the vision and embedding components, or `exclude_mtp=true` to omit MTP. NVIDIA's MTP experts retain their original E4M3 FP8 weights and 128x128 `weight_scale_inv` block multipliers in ONNX, without export-time dequantization or requantization. Gate, up, and down projections are separate `QMoE` inputs with `quant_type="fp8"`, `block_size=128`, `activation_type="silu"`, and `swiglu_fusion=0`. This requires the CUDA block-scaled FP8 support from [ORT PR #32887](https://github.com/microsoft/onnxruntime/pull/32887). That implementation dequantizes only routed experts into scratch memory at runtime; native FP8 storage does not imply FP8 tensor-core computation.
+Use `--extra_options text_only=true` for supported text exports, or additionally
+`exclude_mtp=true` to omit MTP. Qwen3.8 MTP `checkpoint_policy=requantize` is
+explicitly rejected until conversion is supported. NVIDIA's MTP experts retain
+their original E4M3 FP8 weights and 128x128 `weight_scale_inv` block multipliers
+without export-time dequantization or requantization. Gate, up, and down
+projections are separate `QMoE` inputs with `quant_type="fp8"`, `block_size=128`,
+`activation_type="silu"`, and `swiglu_fusion=0`. This requires the CUDA
+block-scaled FP8 support from [ORT PR #32887](https://github.com/microsoft/onnxruntime/pull/32887).
 
 #### MTP Head (Qwen3.6/Qwen3.8)
 
@@ -692,10 +727,13 @@ scalar scale is widened exactly to FP32 for the CPU lookup kernel.
 
 Paged Qwen3.8 QSA MTP exports include IndexShare in `mtp.onnx` by default.
 There are no separate extend/decode model files and no ONNX `If` node.
-`indexshare_max_draft_tokens` defaults to `7` and must be between `1` and `7`. Runtime
-budgets `1` through the exported limit all use the same IndexShare-enabled MTP
-session. `indexshare_mtp=false` explicitly exports the older non-IndexShare
-model instead. Existing older exports are unchanged.
+Index sharing is an inherent property of the paged main/MTP graphs, not a
+separate feature flag or conversion tool. `max_draft_tokens` controls the draft
+budget (default `7` for this contract, exported capacity at most `7`). Runtime
+budgets `1` through the exported limit all use the same MTP session; larger
+budgets are rejected. The former `indexshare_mtp` and
+`indexshare_max_draft_tokens` options are rejected with migration guidance.
+Existing older exports are unchanged.
 
 The unversioned IndexShare contract adds CPU `mode`, GPU int64
 `projection_rows`, frozen `past_indices`/`past_counts`,
@@ -896,31 +934,40 @@ ONNX Runtime builds that include [microsoft/onnxruntime#32644](https://github.co
 
 ##### QMoE Weights Prepacked
 
-Integer QMoE weight packing is automatic. With the CUDA EP and an active NVIDIA GPU of SM80 or newer, the builder exports CUTLASS-prepacked weights (mode `1`). Other EPs, unavailable NVIDIA GPUs, and pre-SM80 GPUs use raw weights (mode `0`). Integer QMoE uses the SM80 layout even on SM90 because its CUDA kernel does not accept mode `2`. Native NVFP4/FP8 checkpoint layouts remain governed by their loader metadata. The `qmoe_weights_prepacked` option has been removed.
+`qmoe_weights_prepacked` accepts `-1` (default), `0`, or `1`. For integer CUDA
+QMoE, `-1`/`1` export the CUTLASS layout and `0` exports raw weights. Other EPs
+retain their existing raw encodings. NVFP4 uses legacy raw storage for `-1`/`0`
+and requires explicit `1` for its newer K-packed layout. FP8 block weights retain
+their native loader layout. This option never queries the export host GPU.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
 ```
 
 ##### MatMulNBits Weights Prepacked
 
-MatMulNBits (int4/int8) weight packing is automatic from the active NVIDIA GPU when exporting for CUDA: SM80-class GPUs select mode `1` (Ampere), and SM90-class GPUs select mode `2` (Hopper). Other EPs, unavailable NVIDIA GPUs, and pre-SM80 GPUs select mode `0` (raw). The `matmulnbits_weights_prepacked` option has been removed. Eligible nodes select the `fpA_intB` path automatically. Ineligible nodes remain raw; in particular, SM90 packing supports block sizes `64` and `128`, not the default `32`. An export with no eligible nodes still succeeds with raw weights.
+`matmulnbits_weights_prepacked` accepts `0` (default, raw), `1` (SM80 layout),
+or `2` (exact SM90 layout). It applies only to CUDA FP16/BF16 inputs without
+`g_idx`, and does not depend on the export host GPU. Select the layout for the
+deployment GPU: mode `2` is Hopper SM90-only, not Blackwell SM100/SM120/SM121.
+Ineligible nodes remain raw, including non-default zero points, shared weight
+buffers, and SM90 block size `32` (SM90 supports `64`/`128`).
 
 The builder writes `ep.cuda.fpa_intb_gemm=1` automatically for prepacked exports so that nodes the prepack pass skipped because their `N`, `K`, or `block_size` is unsupported use the same kernel family. This setting is optional for the eligible nodes that were prepacked.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
 ```
 
-Set `enable_cuda_fpa_intb_gemm=true` to select the same CUDA kernel family independently of offline weight packing. This does not override the automatic packing policy. The default is `false`; the option writes `ep.cuda.fpa_intb_gemm=1` to the decoder session options and only applies to the CUDA EP.
+Set `enable_cuda_fpa_intb_gemm=true` to select the same CUDA kernel family independently of offline weight packing. The default is `false`; the option writes `ep.cuda.fpa_intb_gemm=1` to the decoder session options and only applies to the CUDA EP.
 
 ```bash
 # From wheel:
@@ -932,14 +979,34 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra
 
 ##### Device Allocator for Initializers
 
-The builder always writes `session.use_device_allocator_for_initializers=1` into the decoder's session options; this is not configurable through extra options. Initializers then bypass the ONNX Runtime arena. This matters whenever a kernel replaces an initializer during `PrePack`, as the `fpA_intB` MatMulNBits conversion does: with the arena, the original weight stays resident as a free block that the arena never returns, so a large int4 model can hold roughly twice its weights.
+`use_device_allocator_for_initializers=true` opts into
+`session.use_device_allocator_for_initializers=1` (default `false`). Paged Qwen3.8
+sessions enable it automatically. Initializers then bypass the ONNX Runtime
+arena, avoiding retention of the original allocation when a kernel replaces a
+weight during `PrePack`.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options use_device_allocator_for_initializers=true
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options use_device_allocator_for_initializers=true
+```
+
+##### Independent Token Embedding Precision
+
+`embedding_quant_type=int4|int8` requests independent token-embedding precision,
+defaulting to the model precision. INT4 currently requires INT4 model precision;
+INT8 requires symmetric quantization. An explicit request enables Gather
+quantization and is rejected if it conflicts with an embedding exclusion.
+An INT8 request does not reuse an INT4 shared LM-head buffer.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options embedding_quant_type=int8
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options embedding_quant_type=int8
 ```
 
 ##### Is Symmetric

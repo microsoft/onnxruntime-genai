@@ -380,7 +380,7 @@ class Model(PagedAttention):
         self.make_kv_cache_init()
 
         # MLP-specific variables
-        fuse_gate_up = str(extra_options.get("fuse_mlp_gate_up", True)).lower()
+        fuse_gate_up = str(extra_options.get("fuse_mlp_gate_up", False)).lower()
         if fuse_gate_up not in ("true", "false"):
             raise ValueError("fuse_mlp_gate_up must be true or false.")
         self.mlp_attrs = {
@@ -953,17 +953,10 @@ class Model(PagedAttention):
         self.make_weight_packing_init()
 
     def make_weight_packing_init(self):
-        """Resolve CUDA layouts from the active GPU; integer QMoE uses SM80 packing on SM90 too."""
-        packing_mode = 0
-        if self.ep == "cuda" and torch.version.hip is None:
-            try:
-                if torch.cuda.is_available():
-                    major = torch.cuda.get_device_capability(torch.cuda.current_device())[0]
-                    packing_mode = 2 if major >= 9 else int(major >= 8)
-            except (RuntimeError, AssertionError):
-                packing_mode = 0
-        self.quant_config.moe.weights_prepacked = int(packing_mode > 0)
-        self.quant_config.runtime.matmulnbits_weights_prepacked = packing_mode
+        """Honor explicit target layouts without depending on the export host's GPU."""
+        if self.ep != "cuda" or torch.version.hip is not None:
+            self.quant_config.moe.weights_prepacked = 0
+            self.quant_config.runtime.matmulnbits_weights_prepacked = 0
 
     def make_moe_attrs_init(self, config):
         num_experts = (
@@ -1041,8 +1034,10 @@ class Model(PagedAttention):
 
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
-        # with CPU/WebGPU/TRT-RTX. The execution provider and active NVIDIA GPU SM determine the mode.
+        # with CPU/WebGPU/TRT-RTX. The configured mode describes the deployment target, not the build host.
         self.moe_attrs["weights_prepacked"] = self.quant_config.moe.weights_prepacked
+        if moe_descriptor.name in {"nvfp4", "fp8"} and self.moe_attrs["weights_prepacked"] == -1:
+            self.moe_attrs["weights_prepacked"] = 0
         if mixed_width or uses_int2:
             self.moe_attrs["weights_prepacked"] = 0
 
@@ -1385,7 +1380,8 @@ class Model(PagedAttention):
             # Prepacked nodes take the fpA_intB path unconditionally. This flag also selects that
             # kernel family for raw-layout nodes and prepack-pass skips.
             session_options["ep.cuda.fpa_intb_gemm"] = "1"
-        session_options["session.use_device_allocator_for_initializers"] = "1"
+        if self.extra_options.get("use_device_allocator_for_initializers", False):
+            session_options["session.use_device_allocator_for_initializers"] = "1"
         if self.ep == "cuda" and self.matmul_attrs["weights_prepacked"] > 0:
             # MatMulNBitsFusion folds a following Add into optional bias input 5, but offline-
             # prepacked weights force the fpA_intB path, which does not support bias. Keep the
@@ -1805,12 +1801,26 @@ class Model(PagedAttention):
                 and k % block_size == 0
                 and n % (32 if bits == 8 else 64) == 0
             )
-            if not fpa_intb_eligible:
+            if not fpa_intb_eligible or self.io_dtype not in (ir.DataType.FLOAT16, ir.DataType.BFLOAT16):
+                continue
+            if len(node.input) > 4 and node.input[4]:
                 continue
 
             init = initializers.get(node.input[1])
             if init is None:
                 continue
+            # Shared embedding lookups must continue to read the original blockwise bytes.
+            if any(
+                other is not node and init.name in other.input
+                for other in model_proto.graph.node
+            ):
+                continue
+            if len(node.input) > 3 and node.input[3]:
+                zero_points = initializers.get(node.input[3])
+                if zero_points is None or not np.all(
+                    numpy_helper.to_array(zero_points) == (0x88 if bits == 4 else 0x80)
+                ):
+                    continue
 
             packed = CudaQuantizer.prepack_matmulnbits_weight(numpy_helper.to_array(init), n, k, bits, force_arch)
             init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
@@ -1890,6 +1900,10 @@ class Model(PagedAttention):
             model = self.to_nbits()
         else:
             model = self.model
+
+        if hasattr(self, "quant_config"):
+            model.metadata_props["onnxruntime_genai.qmoe_weights_prepacked"] = str(self.moe_attrs["weights_prepacked"])
+            model.metadata_props["onnxruntime_genai.matmulnbits_weights_prepacked"] = str(self.matmul_attrs["weights_prepacked"])
 
         # Make sure all nodes are topologically sorted
         model.graph.sort()
@@ -2498,40 +2512,6 @@ class Model(PagedAttention):
             output=kwargs["present_conv_state"],
         )
 
-    def make_varlen_causal_conv_with_state(self, name, **kwargs):
-        """Emit packed causal convolution with optional compact state updates."""
-        inputs = [
-            kwargs["root_input"],
-            kwargs["weight"],
-            kwargs["cumulative_sequence_length"],
-            kwargs["bias"],
-            kwargs["past_conv_state"],
-        ]
-        state_update_capacity = kwargs.get("state_update_capacity", 0)
-        if state_update_capacity:
-            inputs.append(kwargs["state_update_capture_count"])
-
-        output = f"{name}/output_0"
-        present_conv = kwargs["present_conv_state"]
-        outputs = [output, present_conv]
-        if state_update_capacity:
-            outputs.append(kwargs["state_update_value"])
-
-        attributes = {"activation": kwargs.get("activation", "silu")}
-        if state_update_capacity:
-            attributes["state_update_capacity"] = state_update_capacity
-        self.make_node(
-            "VarlenCausalConvWithState",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            **attributes,
-        )
-        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
-        self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
-        if state_update_capacity:
-            self.make_value(kwargs["state_update_value"], self.io_dtype, shape=kwargs["state_update_value_shape"])
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
@@ -3006,6 +2986,18 @@ class Model(PagedAttention):
         # Tied float:     lm_head weight -> Transpose -> Gather
         # Separate:       embedding weight -------------> Gather
         can_reuse_lm_head = getattr(lm_head, "can_reuse_as_embedding", True)
+        requested_bits = (
+            self.quant_attrs.get("embedding_bits")
+            if getattr(self, "extra_options", {}).get("embedding_quant_type") is not None
+            else None
+        )
+        if requested_bits is not None:
+            if "Gather" not in self.quant_attrs["op_types_to_quantize"] or f"{basename}/Gather" in self.quant_attrs["nodes_to_exclude"]:
+                raise ValueError("embedding_quant_type conflicts with the token embedding's quantization exclusion.")
+            if requested_bits == 4 and self.onnx_dtype not in (ir.DataType.INT4, ir.DataType.UINT4):
+                raise ValueError("embedding_quant_type=int4 currently requires int4 model precision.")
+            if requested_bits != self.quant_attrs["bits"]:
+                can_reuse_lm_head = False
 
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and the export model
         # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
@@ -5814,25 +5806,6 @@ class Model(PagedAttention):
         # The hidden_states output is the final norm's output, so it pins every row before the LM head.
         return self.use_paged_attention and self.prune_lm_head and not self.include_hidden_states
 
-    def make_selected_hidden_rows(self):
-        """Gather the residual-stream rows the LM head reads, so every later op runs on those rows only."""
-        if self.hidden_rows_dim == "num_logits":
-            return
-        selected = {}
-        for key in ("root_input", "skip_input"):
-            name = self.layernorm_attrs[key]
-            if name not in selected:
-                gather_name = f"/model/selected_rows/{key}/Gather"
-                self.make_gather(
-                    gather_name,
-                    [name, self.input_names["logits_indices"]],
-                    dtype=self.values[name].dtype,
-                    shape=["num_logits", self.hidden_size],
-                    axis=0,
-                )
-                selected[name] = f"{gather_name}/output_0"
-            self.layernorm_attrs[key] = selected[name]
-        self.hidden_rows_dim = "num_logits"
 
     def make_last_real_token_position(self, root_input):
         """Find where each row's real tokens end in this step and return the [B, 1] int32 output name.

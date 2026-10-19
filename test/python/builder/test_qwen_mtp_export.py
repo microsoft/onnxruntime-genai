@@ -172,10 +172,11 @@ def test_add_qwen4_exp_mtp_to_genai_config(tmp_path, fpa_intb_gemm):
     }
     config_path.write_text(json.dumps({"model": {"decoder": {"session_options": decoder_session_options}}}))
     model = object.__new__(Qwen4ExpModel)
+    model.mtp = type("MTP", (), {"use_paged_attention": False, "prune_lm_head": False})()
     model.decoder = type(
         "Decoder",
         (),
-        {"num_kv_heads": 2, "head_size": 256, "hc_hidden_size": 10240},
+        {"num_kv_heads": 2, "head_size": 256, "hc_hidden_size": 10240, "ep": "cuda", "use_paged_attention": False},
     )()
     model.mtp_attrs = {"shared_initializers": []}
 
