@@ -239,7 +239,7 @@ def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=10)
     generator = og.Generator(model, params)
-    processor = og.TokenPostProcessor(model, generator)
+    processor = og.TokenPostProcessor(generator)
     assert processor.get_next_token_results() == []
     processor.finalize()
     initial = processor.get_next_token_results()[0]
@@ -298,17 +298,28 @@ def test_token_postprocessor_rejects_multiple_sequences(test_data_path, search):
     params.set_search_options(max_length=10, **search)
     generator = og.Generator(model, params)
     with pytest.raises(RuntimeError, match="batch_size=1 and num_beams=1"):
-        og.TokenPostProcessor(model, generator)
+        og.TokenPostProcessor(generator)
 
 
-def test_token_postprocessor_rejects_mismatched_model(test_data_path):
+def test_token_postprocessor_uses_generators_model(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
-    other_model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    plain = tokenizer.create_stream()
     params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10)
     generator = og.Generator(model, params)
-    with pytest.raises(RuntimeError, match="model must match"):
-        og.TokenPostProcessor(other_model, generator)
+    del model
+    processor = og.TokenPostProcessor(generator)
+    generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
+    generator.generate_next_token()
+    processor.process_next_tokens()
+    assert processor.get_next_token_results()[0].get_text() == plain.decode(int(generator.get_next_tokens()[0]))
+
+
+def test_token_postprocessor_rejects_null_generator():
+    with pytest.raises(TypeError):
+        og.TokenPostProcessor(None)
 
 
 def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):

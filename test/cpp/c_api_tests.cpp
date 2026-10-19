@@ -207,7 +207,10 @@ TEST(CAPITests, TokenPostProcessorOpaqueResults) {
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 10);
   auto generator = OgaGenerator::Create(*model, *params);
-  auto processor = OgaTokenPostProcessor::Create(*model, *generator);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto plain = OgaTokenizerStream::Create(*tokenizer);
+  model.reset();
+  auto processor = OgaTokenPostProcessor::Create(*generator);
   EXPECT_TRUE(processor->GetNextTokenResults().empty());
   const std::array<int32_t, 4> prompt{0, 0, 0, 52};
   generator->AppendTokens(prompt.data(), prompt.size());
@@ -217,8 +220,6 @@ TEST(CAPITests, TokenPostProcessorOpaqueResults) {
   ASSERT_EQ(results.size(), 1U);
   const auto* result = results[0];
   EXPECT_EQ(processor->GetNextTokenResults()[0], result);
-  auto tokenizer = OgaTokenizer::Create(*model);
-  auto plain = OgaTokenizerStream::Create(*tokenizer);
   const std::string expected = plain->Decode(generator->GetNextTokens()[0]);
   EXPECT_EQ(result->GetText(), expected);
   EXPECT_EQ(result->GetTimestamps(), nullptr);
@@ -242,13 +243,11 @@ TEST(CAPITests, TokenPostProcessorOpaqueResults) {
 
 TEST(CAPITests, TokenPostProcessorRejectsInvalidCreation) {
   OgaTokenPostProcessor* processor = nullptr;
-  EXPECT_THROW(OgaCheckResult(OgaCreateTokenPostProcessor(nullptr, nullptr, &processor)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaCreateTokenPostProcessor(nullptr, &processor)), std::runtime_error);
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  auto other_model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
-  EXPECT_THROW(OgaTokenPostProcessor::Create(*other_model, *generator), std::runtime_error);
-  EXPECT_THROW(OgaCheckResult(OgaCreateTokenPostProcessor(model.get(), generator.get(), nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaCreateTokenPostProcessor(generator.get(), nullptr)), std::runtime_error);
   EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorProcessNextTokens(nullptr)), std::runtime_error);
   EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorFinalize(nullptr)), std::runtime_error);
   EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorReset(nullptr)), std::runtime_error);
@@ -903,7 +902,7 @@ TEST(CAPITests, MarianBatchWithBeamsIOContract) {
   ASSERT_EQ(next_tokens.size(), expected_tokens.size());
   for (size_t beam = 0; beam < expected_tokens.size(); ++beam)
     EXPECT_EQ(next_tokens[beam], expected_tokens[beam]) << "beam " << beam;
-  EXPECT_THROW(OgaTokenPostProcessor::Create(*model, *generator), std::runtime_error);
+  EXPECT_THROW(OgaTokenPostProcessor::Create(*generator), std::runtime_error);
 }
 
 TEST(CAPITests, EndToEndPhi) {

@@ -7,7 +7,7 @@ namespace Generators {
 
 class TokenPostProcessor : public LeakChecked<TokenPostProcessor> {
  public:
-  TokenPostProcessor(const Model& model, const Generator& generator);
+  explicit TokenPostProcessor(const Generator& generator);
   void ProcessNextTokens();
   const std::vector<PostProcessorResult>& GetNextTokenResults() const { return results_; }
   void Finalize();

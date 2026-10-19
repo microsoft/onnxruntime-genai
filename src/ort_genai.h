@@ -706,9 +706,9 @@ struct OgaTokenPostProcessorResult : OgaAbstract {
 };
 
 struct OgaTokenPostProcessor : OgaAbstract {
-  static std::unique_ptr<OgaTokenPostProcessor> Create(const OgaModel& model, const OgaGenerator& generator) {
+  static std::unique_ptr<OgaTokenPostProcessor> Create(const OgaGenerator& generator) {
     OgaTokenPostProcessor* processor;
-    OgaCheckResult(OgaCreateTokenPostProcessor(&model, &generator, &processor));
+    OgaCheckResult(OgaCreateTokenPostProcessor(&generator, &processor));
     return std::unique_ptr<OgaTokenPostProcessor>(processor);
   }
   void ProcessNextTokens() { OgaCheckResult(OgaTokenPostProcessorProcessNextTokens(this)); }
