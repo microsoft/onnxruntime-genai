@@ -22,6 +22,8 @@ void Sequences::AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t b
 
 void Sequences::RewindTo(size_t index) {
   current_length_ = static_cast<int>(index);
+  if (prompt_length_ > current_length_)
+    prompt_length_ = current_length_;
   assert(current_length_ >= 0);
 }
 

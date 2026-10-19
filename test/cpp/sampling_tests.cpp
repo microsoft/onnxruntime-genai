@@ -558,6 +558,52 @@ TEST(SamplingTests, NoRepeatNgramCorrectnessCpu) {
       << "Token 7 should be banned (repeats 3-gram 5,6,7); expected fallback to token 42.";
 }
 
+// For encoder-decoder models (e.g. marian-ssru), AppendTokenSequences supplies
+// the encoder's source prompt tokens. ApplyNoRepeatNgram must only scan
+// generated decoder tokens and must not ban n-grams that appeared in the
+// encoder prompt.
+TEST(SamplingTests, NoRepeatNgramEncoderDecoderIgnoresPromptTokensCpu) {
+  auto model = OgaModel::Create(MODEL_PATH "marian-batch-values");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  params->SetSearchOptionBool("do_sample", false);
+  params->SetSearchOption("batch_size", 2);
+  params->SetSearchOption("repetition_penalty", 1.0);
+  params->SetSearchOption("no_repeat_ngram_size", 2.0);
+
+  // In marian-batch-values, the decoder always scores token 3 highest for a
+  // 2-token prompt row. Putting {3, 3} in the encoder prompt creates the
+  // 2-gram (3, 3) in the encoder input.
+  const std::array<int32_t, 1> first{5};
+  const std::array<int32_t, 2> second{3, 3};
+  auto sequences = OgaSequences::Create();
+  sequences->Append(first.data(), first.size());
+  sequences->Append(second.data(), second.size());
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*sequences);
+  const size_t generated_start = generator->TokenCount();
+  ASSERT_EQ(generated_start, 2U);
+
+  // Step 1: first generated decoder token for row 1 is 3.
+  generator->GenerateNextToken();
+  ASSERT_EQ(generator->GetSequenceCount(1), generated_start + 1);
+  EXPECT_EQ(generator->GetSequenceData(1)[generated_start], 3);
+
+  // Step 2: decoder output so far is [3] (length 1 < ngram_size 2), so token 3
+  // must NOT be banned by the encoder prompt's (3, 3).
+  generator->GenerateNextToken();
+  ASSERT_EQ(generator->GetSequenceCount(1), generated_start + 2);
+  EXPECT_EQ(generator->GetSequenceData(1)[generated_start + 1], 3);
+
+  // Step 3: decoder output is now [3, 3], so repeating (3, 3) in the decoder
+  // output IS banned by no_repeat_ngram_size=2 and selects the next-highest
+  // token (0 / EOS) instead of 3.
+  generator->GenerateNextToken();
+  EXPECT_NE(generator->GetNextTokens()[1], 3);
+  EXPECT_EQ(generator->GetNextTokens()[1], 0);
+}
+
 #if USE_CUDA
 TEST(SamplingTests, BatchedSamplingTopPCuda) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
