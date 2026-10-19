@@ -4,6 +4,7 @@
 # license information.
 # -------------------------------------------------------------------------
 from .dml import DML
+from .paged_attention import PagedAttention
 from .qwen import Qwen
 from .qwen3_5 import Qwen35
 from .qwen3_8 import Qwen38
@@ -13,6 +14,7 @@ from .webgpu import WebGPU
 __all__ = [
     "DML",
     "TRT_RTX",
+    "PagedAttention",
     "Qwen",
     "Qwen35",
     "Qwen38",

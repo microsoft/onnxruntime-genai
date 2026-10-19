@@ -33,8 +33,10 @@ from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, 
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 
+from .expansions.paged_attention import PagedAttention
 
-class Model:
+
+class Model(PagedAttention):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.extra_options = extra_options
         self.hf_load_config = (
@@ -165,12 +167,6 @@ class Model:
             "past_key_values.value": self.make_cache_names(["full_attention", "sliding_attention"], "past_key_values.value"),        # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
             "past.conv": self.make_cache_names(["conv", "linear_attention"], "past.conv"),                                           # For causal convolution models
             "past.recurrent": self.make_cache_names(["linear_attention"], "past.recurrent"),                                         # For linear attention models
-            "block_table": "block_table",                                                                                            # For paged attention models
-            "block_table_windowed": "block_table_windowed",                                                                          # For paged attention models with sliding-window layers
-            "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                                            # For paged attention models
-            "past_sequence_lengths": "past_sequence_lengths",                                                                        # For paged attention models
-            "attention_metadata": "attention_metadata",                                                                              # For paged attention models
-            "logits_indices": "logits_indices",                                                                                      # For paged attention models with a pruned LM head
         }
         self.input_types = {
             "input_ids": ir.DataType.INT64,                                                                                          # For standard models
@@ -181,12 +177,6 @@ class Model:
             "past_key_values.value": self.io_dtype,                                                                                  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
             "past.conv": self.io_dtype,                                                                                              # For causal convolution models
             "past.recurrent": self.io_dtype,                                                                                         # For linear attention models
-            "block_table": ir.DataType.INT32,                                                                                        # For paged attention models
-            "block_table_windowed": ir.DataType.INT32,                                                                               # For paged attention models with sliding-window layers
-            "cumulative_sequence_lengths": ir.DataType.INT32,                                                                        # For paged attention models
-            "past_sequence_lengths": ir.DataType.INT32,                                                                              # For paged attention models
-            "attention_metadata": ir.DataType.INT32,                                                                                 # For paged attention models
-            "logits_indices": ir.DataType.INT32,                                                                                     # For paged attention models with a pruned LM head
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                                          # For standard models
@@ -208,13 +198,8 @@ class Model:
                 self.linear_key_head_dim,
                 self.linear_value_head_dim
             ],
-            "block_table": ["batch_size", "max_num_blocks"],                                                                         # For paged attention models
-            "block_table_windowed": ["batch_size", "max_num_blocks"],                                                                # Same column count as `block_table`: the op indexes it by true position, only the block ids repeat
-            "cumulative_sequence_lengths": ["batch_size + 1"],                                                                       # For paged attention models
-            "past_sequence_lengths": ["batch_size"],                                                                                 # For paged attention models
-            "attention_metadata": [3],                                                                                               # For paged attention models. Static shape: a tuple of scalars, not a per-sequence tensor.
-            "logits_indices": ["num_logits"],                                                                                        # For paged attention models with a pruned LM head
         }
+        self.make_paged_bindings_init()
         self.make_inputs_init()
 
         # Map all output names, types, and shapes
@@ -585,26 +570,7 @@ class Model:
             del self.input_names["past.recurrent"]
 
         # Manage the inputs for paged attention
-        if self.use_paged_attention:
-            self.input_shapes["input_ids"] = ["num_tokens"]
-            self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            if "attention_mask" in self.input_names:
-                del self.input_names["attention_mask"]
-            if not self.has_windowed_paged_layers():
-                del self.input_names["block_table_windowed"]
-            if not self.extra_options.get("prune_lm_head", False):
-                del self.input_names["logits_indices"]
-        else:
-            for name in [
-                "block_table",
-                "block_table_windowed",
-                "cumulative_sequence_lengths",
-                "past_sequence_lengths",
-                "attention_metadata",
-                "logits_indices",
-            ]:
-                del self.input_names[name]
+        self.make_paged_inputs_init()
 
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
@@ -642,12 +608,7 @@ class Model:
             self.prune_lm_head = False
 
         # Manage the outputs for paged attention
-        if self.use_paged_attention:
-            self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
-            logits_first_dim = "num_logits" if self.prune_lm_head else "num_tokens"
-            self.output_shapes["logits"] = [logits_first_dim, self.vocab_size]
+        self.make_paged_outputs_init()
 
         if not (self.include_hidden_states or self.exclude_lm_head):
             del self.output_names["hidden_states"]
@@ -764,40 +725,8 @@ class Model:
         self.kv_size = self.num_kv_heads * self.head_size
 
         if self.use_paged_attention:
-            valid_paged_configurations = {
-                ("cuda", ir.DataType.FLOAT16),
-                ("cuda", ir.DataType.BFLOAT16),
-                ("webgpu", ir.DataType.FLOAT16),
-            }
-            if (self.ep, self.io_dtype) not in valid_paged_configurations:
-                raise NotImplementedError(
-                    "PagedAttention (use_paged_attention=true) requires CUDA with FP16/BF16 or WebGPU "
-                    f"with FP16, not ({self.ep}, {self.io_dtype})."
-                )
-            block_size = int(self.extra_options.get("paged_block_size", 256))
-            self.attention_attrs["paged_block_size"] = block_size
-            if "multi_cache" in self.rope_attrs and self.original_context_length % block_size != 0:
-                raise ValueError(
-                    "paged_block_size must evenly divide original_max_position_embeddings "
-                    "for models that use short and long rotary caches."
-                )
-            self.attention_attrs["op_type"] = "PagedAttention"
-            print("PagedAttention (PA) is used in this model.")
+            self.make_paged_attention_init()
 
-            # Packed Q/K/V MatMul is used unless disabled by LoRA/QLoRA or Q/K norm.
-            self.attention_attrs["use_packed_matmul"] = (
-                not self.matmul_attrs["use_lora"]
-                and not self.attention_attrs["q_norm"]
-                and not self.attention_attrs["k_norm"]
-                and self.extra_options.get(
-                    "fuse_qkv", not self.extra_options.get("disable_qkv_fusion", False)
-                )
-            )
-
-            # Some architectures require a separate RoPE op before PagedAttention.
-            self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
-            if self.attention_attrs["use_rope_in_attn"] and "position_ids" in self.input_names:
-                del self.input_names["position_ids"]
 
         elif self.is_gqa_supported():
             # Change model settings for GroupQueryAttention
@@ -1340,16 +1269,7 @@ class Model:
             inputs["attention_mask"] = self.input_names["attention_mask"]
         if "position_ids" in self.input_names:
             inputs["position_ids"] = self.input_names["position_ids"]
-        if self.use_paged_attention:
-            inputs["block_table"] = self.input_names["block_table"]
-            if self.has_windowed_paged_layers():
-                inputs["block_table_windowed"] = self.input_names["block_table_windowed"]
-            inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
-            inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
-            if "attention_metadata" in self.input_names:
-                inputs["attention_metadata"] = self.input_names["attention_metadata"]
-            if "logits_indices" in self.input_names:
-                inputs["logits_indices"] = self.input_names["logits_indices"]
+        self.make_paged_config_inputs(inputs)
         if "past_key_values.key" in self.input_names:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
@@ -1451,30 +1371,7 @@ class Model:
                 "cache_slack": self.context_length_attrs["window_kv_cache_slack"],
             }
 
-        if self.has_windowed_paged_layers():
-            # The runtime sizes the ring from `window_size` and the prefill chunk size, and
-            # builds `block_table_windowed` by repeating each request's ring across the columns.
-            # Only these layers read that table and the smaller `num_blocks_windowed` cache.
-            genai_config["model"]["decoder"]["sliding_window"] = {
-                "window_size": self.window_size,
-                "slide_key_value_cache": False,
-                "slide_inputs": False,
-                "layers": [
-                    layer_id for layer_id in range(self.num_layers) if self.is_windowed_paged_layer(layer_id)
-                ],
-                "cache_slack": 0,  # ring capacity comes from chunk_size, not from slack
-            }
-            # The ring only holds `chunk_size + window_size - 1` positions, so a prefill that
-            # ran in one shot would overwrite positions it still had to attend to. Chunking is
-            # not optional for this model, hence a default rather than an opt-in.
-            genai_config["search"]["chunk_size"] = int(
-                self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
-            )
-        elif self.use_paged_attention and "paged_chunk_size" in self.extra_options:
-            # Nothing forces chunking without a ring, but this caps one request where
-            # max_scheduled_tokens only caps the step, so concurrent prefills interleave
-            # instead of running one at a time.
-            genai_config["search"]["chunk_size"] = int(self.extra_options["paged_chunk_size"])
+        self.make_paged_window_config(genai_config)
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -1495,22 +1392,7 @@ class Model:
             # builder's separate Add nodes intact.
             session_options["optimization.disable_specified_optimizers"] = "MatMulNBitsFusion"
 
-        if self.use_paged_attention:
-            dynamic_batching = {
-                "block_size": self.attention_attrs["paged_block_size"],
-                "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
-            }
-            if self.has_windowed_paged_layers():
-                dynamic_batching["prefix_caching"] = False
-            if "num_blocks" in self.extra_options:
-                dynamic_batching["num_blocks"] = int(self.extra_options["num_blocks"])
-            else:
-                dynamic_batching["gpu_utilization_factor"] = float(
-                    self.extra_options.get("gpu_utilization_factor", 0.6)
-                )
-            if "max_scheduled_tokens" in self.extra_options:
-                dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
-            genai_config["engine"] = {"dynamic_batching": dynamic_batching}
+        self.make_paged_engine_config(genai_config)
 
         if "max_draft_tokens" in self.extra_options:
             # Caps how many drafted tokens the engine verifies per step. This is independent of
@@ -1559,49 +1441,6 @@ class Model:
             and self.ep in {"cpu", "cuda", "trt-rtx"}
         )
 
-    def make_decoder_state_groups(self, inputs, outputs):
-        """Group paged decoder layers by the runtime state they maintain."""
-        if not self.use_paged_attention:
-            return []
-
-        full_attention_layers = [
-            layer_id
-            for layer_id, layer_type in enumerate(self.layer_types)
-            if layer_type in {"full_attention", "sliding_attention"}
-        ]
-        conv_layers = [
-            layer_id
-            for layer_id, layer_type in enumerate(self.layer_types)
-            if layer_type in {"conv", "linear_attention"}
-        ]
-        recurrent_layers = [
-            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
-        ]
-
-        state_groups = []
-        if full_attention_layers:
-            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
-        if conv_layers:
-            state_groups.append(
-                {
-                    "kind": "fixed_conv",
-                    "layer_ids": conv_layers,
-                }
-            )
-        if recurrent_layers:
-            state_groups.append(
-                {
-                    "kind": "fixed_recurrent",
-                    "layer_ids": recurrent_layers,
-                }
-            )
-        return state_groups
-
-    def make_paged_key_value_state_group(self, layer_ids):
-        return {
-            "kind": "paged_kv",
-            "layer_ids": layer_ids,
-        }
 
     def make_key_value_cache_names(self, layer_id):
         """
@@ -1613,28 +1452,6 @@ class Model:
         present_v = self.output_names["present.value"][layer_id]
         return past_k, past_v, present_k, present_v
 
-    def is_windowed_paged_layer(self, layer_id):
-        """True when this layer's paged KV cache is a ring sized to the window rather than to the
-        full context. Such layers read a different block table and a differently sized cache."""
-        return self.has_windowed_paged_layers() and self.is_local(layer_id)
-
-    def has_windowed_paged_layers(self):
-        """True when at least one layer is actually served from the ring.
-
-        A model can carry `sliding_window` in its config without the builder knowing which layers
-        it applies to, in which case no layer reads the ring and nothing extra must be emitted.
-        The runtime also needs at least one full-context layer to size the shared paged cache, so
-        an all-local export falls back to full paged caches.
-        """
-        if (
-            not self.context_length_attrs["window_kv_cache"]
-            or not self.use_paged_attention
-            or self.window_size is None
-            or self.window_size <= 0
-        ):
-            return False
-        local_layers = [self.is_local(layer_id) for layer_id in range(self.num_layers)]
-        return any(local_layers) and not all(local_layers)
 
     def make_key_value_cache_shape(self, layer_id, shape):
         """
@@ -2612,44 +2429,6 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
 
-    def make_varlen_causal_conv_with_state(self, name, **kwargs):
-        """Emit packed causal convolution with optional compact state updates."""
-        inputs = [
-            kwargs["root_input"],
-            kwargs["weight"],
-            kwargs["cumulative_sequence_length"],
-            kwargs["bias"],
-            kwargs["past_conv_state"],
-        ]
-        state_update_capacity = kwargs.get("state_update_capacity", 0)
-        if state_update_capacity:
-            inputs.append(kwargs["state_update_capture_count"])
-            inputs.append(kwargs.get("state_update_active", ""))
-
-        output = f"{name}/output_0"
-        present_conv = kwargs["present_conv_state"]
-        outputs = [output, present_conv]
-        if state_update_capacity:
-            outputs.append(kwargs["state_update_value"])
-
-        attributes = {
-            "activation": kwargs.get("activation", "silu"),
-            "dilation": kwargs.get("dilation", 1),
-        }
-        if state_update_capacity:
-            attributes["state_update_capacity"] = state_update_capacity
-        self.make_node(
-            "VarlenCausalConvWithState",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            **attributes,
-        )
-        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
-        self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
-        if state_update_capacity:
-            self.make_value(kwargs["state_update_value"], self.io_dtype, shape=kwargs["state_update_value_shape"])
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
@@ -3680,23 +3459,9 @@ class Model:
         mrope_output = output
 
         if self.use_paged_attention:
-            input_unsqueeze_name = f"{name}/input/Unsqueeze"
-            self.make_unsqueeze(
-                input_unsqueeze_name,
-                [root_input, "/model/constants/INT64/[0]"],
-                dtype,
-                [1, "num_tokens", self.head_size * num_heads],
+            mrope_input, mrope_position_ids, mrope_output = self.make_paged_mrope_inputs(
+                name, root_input, position_ids, dtype, num_heads
             )
-            position_ids_unsqueeze_name = f"{name}/position_ids/Unsqueeze"
-            self.make_unsqueeze(
-                position_ids_unsqueeze_name,
-                [position_ids, "/model/constants/INT64/[1]"],
-                ir.DataType.INT64,
-                [3, 1, "num_tokens"],
-            )
-            mrope_input = f"{input_unsqueeze_name}/output_0"
-            mrope_position_ids = f"{position_ids_unsqueeze_name}/output_0"
-            mrope_output = f"{name}/rank3_output_0"
 
         inputs = [mrope_input, mrope_position_ids, kwargs.pop("cos_cache_name"), kwargs.pop("sin_cache_name")]
 
@@ -3722,13 +3487,7 @@ class Model:
         )
 
         if self.use_paged_attention:
-            self.make_node(
-                "Squeeze",
-                inputs=[mrope_output, "/model/constants/INT64/[0]"],
-                outputs=[output],
-                name=f"{name}/output/Squeeze",
-            )
-            self.make_value(output, dtype, shape=["num_tokens", self.head_size * num_heads])
+            self.make_paged_mrope_output(name, mrope_output, output, dtype, num_heads)
 
     def make_rotary_embedding_multi_cache(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
@@ -3884,28 +3643,6 @@ class Model:
         self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
-    def make_paged_rotary_multi_cache_subgraph(self):
-        # PagedAttention has no `attention_mask` input to derive the current sequence length from,
-        # so approximate the effective context length from the block table:
-        #
-        #   block_table --> Shape --> Gather(idx=1) --> Multiply(x block_size) --> (context length)
-        #
-        # The result feeds the Greater node that selects the short vs. long rotary cache.
-        basename = "/model/context_length_subgraph"
-        shape_name = f"{basename}/Shape"
-        shape_output = f"{shape_name}/output_0"
-        self.make_shape(shape_name, "block_table", shape=[2])
-
-        gather_name = f"{basename}/Gather"
-        gather_output = f"{gather_name}/output_0"
-        self.make_gather(gather_name, [shape_output, "/model/constants/INT64/1"], dtype=ir.DataType.INT64, shape=None, axis=0)
-
-        # max_num_blocks (block_table dim 1) x block_size approximates the max representable
-        # context length. block_size is a build-time constant (matches the engine's block_size).
-        block_size = self.attention_attrs["paged_block_size"]
-        mul_name = f"{basename}/Mul"
-        mul_inputs = [gather_output, f"/model/constants/INT64/{block_size}"]
-        self.make_mul(mul_name, mul_inputs, dtype=ir.DataType.INT64, shape=None)
 
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
@@ -4583,61 +4320,6 @@ class Model:
                 shape=kwargs["state_update_capsule_shape"],
             )
 
-    def make_varlen_gated_delta_net(self, name, **kwargs):
-        """Emit packed GatedDeltaNet with optional compact transition capsules."""
-        decay, beta = self.make_gated_delta_net_gates(name, kwargs)
-        inputs = [
-            kwargs["q_path"],
-            kwargs["k_path"],
-            kwargs["v_path"],
-            kwargs["cumulative_sequence_length"],
-            decay,
-            beta,
-            kwargs["past_recurrent_state"],
-        ]
-        a_log = kwargs.get("a_log", "")
-        dt_bias = kwargs.get("dt_bias", "")
-        if bool(a_log) != bool(dt_bias):
-            raise ValueError("a_log and dt_bias must be set together")
-        state_update_capacity = kwargs.get("state_update_capacity", 0)
-        if a_log or state_update_capacity:
-            inputs.extend([a_log, dt_bias])
-        state_update_capture_count = kwargs.get("state_update_capture_count", "")
-        state_update_active = kwargs.get("state_update_active", "")
-        if bool(state_update_capture_count) != bool(state_update_active):
-            raise ValueError("state_update_capture_count and state_update_active must be provided together")
-        if state_update_capacity:
-            if not state_update_capture_count:
-                raise ValueError(
-                    "state_update_capture_count and state_update_active are required when state_update_capacity is set"
-                )
-            inputs.extend([state_update_capture_count, state_update_active])
-
-        output = f"{name}/output_0"
-        present_recurrent = kwargs["present_recurrent_state"]
-        outputs = [output, present_recurrent]
-        if state_update_capacity:
-            outputs.append(kwargs["state_update_capsule"])
-
-        attributes = self.make_gated_delta_net_attributes(kwargs)
-        if state_update_capacity:
-            attributes["state_update_capacity"] = state_update_capacity
-        self.make_node(
-            "GatedDeltaNet",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            **attributes,
-        )
-        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
-        self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
-        if state_update_capacity:
-            self.make_value(
-                kwargs["state_update_capsule"],
-                ir.DataType.FLOAT,
-                shape=kwargs["state_update_capsule_shape"],
-            )
 
     def make_linear_attention_gate(self, name, a, dt_bias, decay_scale, b, shape):
         decay = f"{name}/output_0"
@@ -4682,69 +4364,6 @@ class Model:
             rotary_interleaved=self.rope_attrs["interleaved"],
         )
 
-    def make_paged_attention(self, name, **kwargs):
-        inputs = [
-            kwargs["q_path"],
-            kwargs["k_path"],
-            kwargs["v_path"],
-            kwargs.get("past_k", ""),
-            kwargs.get("past_v", ""),
-            kwargs["cumulative_sequence_lengths"],
-            kwargs["past_sequence_lengths"],
-            kwargs["block_table"],
-            kwargs.get("cos_cache", ""),
-            kwargs.get("sin_cache", ""),
-        ]
-
-        q_norm_weight, k_norm_weight = self.get_qk_norm_weight_inputs(**kwargs)
-        k_scale_name, v_scale_name = self.get_kv_cache_scale_inputs(**kwargs)
-
-        # Optional trailing inputs of PagedAttention, in schema order:
-        #   10: slot_mapping, 11: head_sink, 12: q_norm_weight, 13: k_norm_weight, 14: k_scale, 15: v_scale,
-        #   16: attention_metadata
-        # The scheduler-provided slot_mapping is not used here; slots are derived from
-        # past_seqlens / cumulative_sequence_length / block_table by the op.
-        # attention_metadata carries [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]
-        # in CPU memory so the op can select a backend and size its launch without a device-to-host
-        # readback of the sequence lengths. Feeding it is what removes the per-node stream
-        # synchronization on the decode path.
-        self.extend_with_optional_inputs(
-            inputs,
-            [
-                "",  # slot_mapping
-                kwargs.get("sinks", ""),  # head_sink
-                q_norm_weight,
-                k_norm_weight,
-                k_scale_name,
-                v_scale_name,
-                kwargs.get("attention_metadata", ""),
-            ],
-        )
-
-        output = f"{name}/output_0"
-        outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        # PagedAttention derives the cache element type from the tensor itself, so unlike
-        # GroupQueryAttention it has no `kv_cache_bit_width` attribute.
-        attributes = self.get_attention_op_attributes(**kwargs)
-        if self.kv_cache_attrs.get("bit_width", 0) == 4:
-            attributes.update(k_cache_dtype="int4", v_cache_dtype="int4")
-        rotation = self.kv_cache_attrs.get("rotation", "NONE")
-        if rotation != "NONE":
-            attributes.update(qk_rotation=rotation, v_rotation=rotation)
-        if self.kv_cache_attrs.get("quant_mode") == "PER_TOKEN":
-            layer_id = kwargs["layer_id"]
-            inputs.extend([""] * (17 - len(inputs)))
-            inputs.extend(self.input_names[f"past_key_values.{side}_scale"][layer_id] for side in ("key", "value"))
-            outputs.extend(self.output_names[f"present.{side}_scale"][layer_id] for side in ("key", "value"))
-        self.make_node(
-            "PagedAttention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            **attributes,
-        )
-        self.make_value(output, self.io_dtype, shape=["num_tokens", self.head_size * self.num_attn_heads])
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph
@@ -6088,30 +5707,6 @@ class Model:
             raise NotImplementedError(f"The {self.activation} activation function is not currently supported.")
         return output_name
 
-    def prunes_hidden_rows(self):
-        # The hidden_states output is the final norm's output, so it pins every row before the LM head.
-        return self.use_paged_attention and self.prune_lm_head and not self.include_hidden_states
-
-    def make_selected_hidden_rows(self):
-        """Gather the residual-stream rows the LM head reads, so every later op runs on those rows only."""
-        if self.hidden_rows_dim == "num_logits":
-            return
-        selected = {}
-        for key in ("root_input", "skip_input"):
-            name = self.layernorm_attrs[key]
-            if name not in selected:
-                gather_name = f"/model/selected_rows/{key}/Gather"
-                self.make_gather(
-                    gather_name,
-                    [name, self.input_names["logits_indices"]],
-                    dtype=self.values[name].dtype,
-                    shape=["num_logits", self.hidden_size],
-                    axis=0,
-                )
-                selected[name] = f"{gather_name}/output_0"
-            self.layernorm_attrs[key] = selected[name]
-        self.hidden_rows_dim = "num_logits"
-
     def make_lm_head(self, lm_head):
         basename = "/lm_head"
 
@@ -6136,21 +5731,8 @@ class Model:
             # The runtime selects one final row per prefill request and every row required for
             # speculative verification. Rows are usually selected earlier, in the last decoder layer;
             # gather here only when the final norm's output must keep every row.
-            seq_dim = "num_logits"
-            if self.hidden_rows_dim != "num_logits":
-                gather_name = f"{basename}/selected_hidden_states/Gather"
-                gather_inputs = [root_input, self.input_names["logits_indices"]]
-                self.make_gather(
-                    gather_name,
-                    gather_inputs,
-                    dtype=self.io_dtype,
-                    shape=["num_logits", self.hidden_size],
-                    axis=0,
-                )
-                root_input = f"{gather_name}/output_0"
-            # Outputs built after the LM head, such as aux_hidden_states, keep every row.
-            self.hidden_rows_dim = "num_tokens"
-            self.output_shapes["logits"] = ["num_logits", self.vocab_size]
+            root_input, seq_dim = self.make_paged_lm_head(basename, root_input)
+
 
         elif self.prune_lm_head:
             # Insert Gather(axis=1, idx=-1) + Unsqueeze(axis=1) to select only the last token's
