@@ -41,12 +41,20 @@ def untile_weights(values, kind):
     return output.reshape(shape)
 
 
-def optimize_model(path):
+def ensure_opset_import(model, domain="com.microsoft", version=1):
+    opset = next((item for item in model.opset_import if item.domain == domain), None)
+    if opset is None:
+        model.opset_import.append(helper.make_opsetid(domain, version))
+    elif opset.version < version:
+        opset.version = version
+
+
+def optimize_model(path, transformed_provenance=None):
     model = onnx.load(path, load_external_data=False)
     initializers = {t.name: t for t in model.graph.initializer}
     producers = {out: n for n in model.graph.node for out in n.output}
     consumers = Counter(x for n in model.graph.node for x in n.input)
-    outputs = {v.name for v in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     removed = set()
     replacements = {}
     new_initializers = {}
@@ -105,15 +113,25 @@ def optimize_model(path):
                         ]
                         if output not in preserved_outputs and (output in outputs or external_users):
                             raise ValueError(f"Cannot remove externally consumed cache conversion: {output}")
-                    removed.add(discarded_node.name)
-                replacements[node.name] = fused
+                    removed.add(id(discarded_node))
+                replacements[id(node)] = fused
                 counts["direct_int8_attention"] += 1
             if node.op_type == "UntileHyperConnectionWeights":
                 if node.input[0] not in initializers:
                     continue
                 kind = next(a.i for a in node.attribute if a.name == "kind")
                 add_weight(node.output[0], untile_weights(array(node.input[0]), kind), data)
-                removed.add(node.name)
+                if transformed_provenance is not None:
+                    transformed_provenance[node.output[0]] = (
+                        node.input[0],
+                        (
+                            "untile",
+                            kind,
+                            tuple(new_initializers[node.output[0]].dims),
+                            new_initializers[node.output[0]].data_type,
+                        ),
+                    )
+                removed.add(id(node))
                 counts["constant_untiles"] += 1
             if node.op_type != "MatMul":
                 continue
@@ -140,10 +158,24 @@ def optimize_model(path):
             if key not in transformed_weights:
                 transposed = add_weight(weight_name + ".performance_nk", array(weight_name).T, data)
                 scale = scale_name + ".performance_n1"
-                new_initializers[scale] = numpy_helper.from_array(scales.reshape(n, 1), scale)
+                add_weight(scale, scales.reshape(n, 1), data)
                 transformed_weights[key] = (transposed, scale)
+                if transformed_provenance is not None:
+                    transformed_provenance[transposed] = (
+                        weight_name,
+                        (
+                            "transpose",
+                            1,
+                            tuple(new_initializers[transposed].dims),
+                            new_initializers[transposed].data_type,
+                        ),
+                    )
+                    transformed_provenance[scale] = (
+                        scale_name,
+                        ("reshape", (n, 1), new_initializers[scale].data_type),
+                    )
             transposed, scale = transformed_weights[key]
-            replacements[node.name] = helper.make_node(
+            replacements[id(node)] = helper.make_node(
                 "MatMulBlockQuantizedFp8Weight",
                 [node.input[0], transposed, scale],
                 list(node.output),
@@ -153,10 +185,10 @@ def optimize_model(path):
             )
             counts["fused_fp8_matmuls"] += 1
             if consumers[cast.output[0]] == 1 and cast.output[0] not in outputs:
-                removed.add(cast.name)
+                removed.add(id(cast))
                 if consumers[dq.output[0]] == 1 and dq.output[0] not in outputs:
-                    removed.add(dq.name)
-    nodes = [replacements.get(n.name, n) for n in model.graph.node if n.name not in removed]
+                    removed.add(id(dq))
+    nodes = [replacements.get(id(n), n) for n in model.graph.node if id(n) not in removed]
     del model.graph.node[:]
     model.graph.node.extend(nodes)
     used = {x for n in nodes for x in n.input} | outputs
@@ -164,6 +196,8 @@ def optimize_model(path):
     del model.graph.initializer[:]
     model.graph.initializer.extend(t for name, t in initializers.items() if name in used)
     del model.graph.value_info[:]
+    if counts["fused_fp8_matmuls"]:
+        ensure_opset_import(model)
     temporary = path.with_suffix(".optimized.onnx")
     onnx.save(model, temporary)
     os.replace(temporary, path)
@@ -245,10 +279,10 @@ def quantize_prefill_outputs(path, scales, head=False):
     return changed
 
 
-def refresh_weight_pool(source, destination):
-    models = {
+def refresh_weight_pool(source, destination, transformed_provenance=None):
+    model_initializers = {
         label: {
-            t.name for t in onnx.load(destination / label / "model.onnx", load_external_data=False).graph.initializer
+            t.name: t for t in onnx.load(destination / label / "model.onnx", load_external_data=False).graph.initializer
         }
         for label in ("target", "dense", "head_r2", "head_kv")
     }
@@ -257,14 +291,17 @@ def refresh_weight_pool(source, destination):
         raise ValueError("Unsupported weight pool manifest")
     pools = {}
     sessions = defaultdict(list)
+    source_pool_indices = {}
     for line in lines[1:]:
         fields = line.split()
         if fields[0] == "pool":
             pools[int(fields[1])] = fields
         elif fields[0] == "session":
             _, label, name, index = fields
-            if name in models[label]:
-                sessions[int(index)].append((label, name))
+            index = int(index)
+            source_pool_indices[label, name] = index
+            if name in model_initializers[label]:
+                sessions[index].append((label, name))
         else:
             raise ValueError(f"Unsupported weight pool entry: {fields[0]}")
     output = [lines[0]]
@@ -280,6 +317,43 @@ def refresh_weight_pool(source, destination):
         references.extend(f"session {label} {name} {count}" for label, name in users)
         total += int(fields[4])
         count += 1
+
+    transformed_sessions = defaultdict(list)
+    for label, provenance in (transformed_provenance or {}).items():
+        for name, (source_name, transformation) in provenance.items():
+            if name not in model_initializers[label]:
+                continue
+            source_index = source_pool_indices.get((label, source_name))
+            if source_index is not None:
+                transformed_sessions[source_index, transformation].append((label, name))
+
+    for users in transformed_sessions.values():
+        if len({label for label, _ in users}) < 2:
+            continue
+        label, name = users[0]
+        tensor = model_initializers[label][name]
+        external = {item.key: item.value for item in tensor.external_data}
+        if tensor.data_location != TensorProto.EXTERNAL or "location" not in external:
+            raise ValueError(f"Transformed pooled initializer is not external: {label}:{name}")
+        offset = int(external.get("offset", 0))
+        length = int(external.get("length", 0))
+        if not length:
+            length = (destination / label / external["location"]).stat().st_size - offset
+        dims = list(tensor.dims)
+        fields = [
+            "pool",
+            str(count),
+            str(tensor.data_type),
+            str(offset),
+            str(length),
+            str(len(dims)),
+            *(str(dimension) for dimension in dims),
+            str(Path(label) / external["location"]),
+        ]
+        output.append(" ".join(fields))
+        references.extend(f"session {session_label} {session_name} {count}" for session_label, session_name in users)
+        total += length
+        count += 1
     temporary = destination / "weights_pool.optimized.txt"
     temporary.write_text("\n".join(output + references) + "\n")
     os.replace(temporary, destination / "weights_pool.txt")
@@ -293,7 +367,7 @@ def fuse_hyper_connections(path):
     for node in model.graph.node:
         for name in node.input:
             users[name].append(node)
-    outputs = {o.name for o in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     removed = set()
     replacements = {}
 
@@ -323,17 +397,19 @@ def fuse_hyper_connections(path):
         silu = successor(down, "ScaledSiLU")
         up = successor(silu, "MatMul")
         sigmoid = successor(up, "Sigmoid")
-        if successor(sigmoid, "HyperConnectionPreMix").name != premix.name:
+        if successor(sigmoid, "HyperConnectionPreMix") is not premix:
             raise ValueError("Inconsistent hyper-connection premix")
         divide = successor(inject, "Div")
         gate_sigmoid = successor(divide, "Sigmoid")
         multiply = successor(gate_sigmoid, "Mul")
         region = [norm, down, silu, up, sigmoid, premix, inject, divide, gate_sigmoid, multiply]
-        names = {n.name for n in region}
+        region_ids = {id(n) for n in region}
         preserved = {premix.output[0], multiply.output[0]}
         for node in region:
             for name in node.output:
-                if name not in preserved and (name in outputs or any(n.name not in names for n in users[name])):
+                if name not in preserved and (
+                    name in outputs or any(id(user) not in region_ids for user in users[name])
+                ):
                     raise ValueError(f"Cannot fuse externally consumed hyper-connection value: {name}")
         attrs = {a.name: helper.get_attribute_value(a) for a in norm.attribute}
         mix_attrs = {a.name: helper.get_attribute_value(a) for a in premix.attribute}
@@ -353,9 +429,9 @@ def fuse_hyper_connections(path):
             gate_div=scalar(divide.input[1]),
             gate_mul=scalar(multiply.input[1]),
         )
-        replacements[norm.name] = fused
-        removed.update(names - {norm.name})
-    nodes = [replacements.get(n.name, n) for n in model.graph.node if n.name not in removed]
+        replacements[id(norm)] = fused
+        removed.update(region_ids - {id(norm)})
+    nodes = [replacements.get(id(n), n) for n in model.graph.node if id(n) not in removed]
     del model.graph.node[:]
     model.graph.node.extend(nodes)
     used = {x for n in nodes for x in n.input} | outputs
@@ -370,14 +446,22 @@ def fuse_hyper_connections(path):
 
 def fuse_hyper_connection_postmix(path):
     model = onnx.load(path, load_external_data=False)
+    top_level_outputs = {value.name for value in model.graph.output}
+    nested_observations = externally_observed_values(model.graph) - top_level_outputs
     producers = {name: node for node in model.graph.node for name in node.output}
     users = defaultdict(list)
     for node in model.graph.node:
         for name in node.input:
             users[name].append(node)
+    indices = {id(node): index for index, node in enumerate(model.graph.node)}
     removed = set()
     for node in model.graph.node:
-        if node.domain != "com.microsoft" or node.op_type != "HyperConnectionLowRankMix" or len(node.input) != 5:
+        if (
+            node.domain != "com.microsoft"
+            or node.op_type != "HyperConnectionLowRankMix"
+            or len(node.input) != 5
+            or len(node.output) != 2
+        ):
             continue
         postmix = producers.get(node.input[0])
         if (
@@ -389,16 +473,23 @@ def fuse_hyper_connection_postmix(path):
             continue
         if sum(user.op_type == "HyperConnectionLowRankMix" for user in users[postmix.output[0]]) != 1:
             continue
+        streams = postmix.output[0]
+        if streams in nested_observations:
+            continue
+        if any(
+            (user is not node and indices[id(user)] < indices[id(node)]) or (user is node and streams in node.input[1:])
+            for user in users[streams]
+        ):
+            continue
         branches = next(a.i for a in node.attribute if a.name == "num_branches")
         if next(a.i for a in postmix.attribute if a.name == "num_branches") != branches:
             raise ValueError("Inconsistent post-mix branch counts")
-        streams = node.input[0]
         node.input[0] = postmix.input[0]
         node.input.extend(postmix.input[1:3])
         node.output.append(streams)
-        removed.add(postmix.name)
+        removed.add(id(postmix))
     if removed:
-        nodes = [node for node in model.graph.node if node.name not in removed]
+        nodes = [node for node in model.graph.node if id(node) not in removed]
         del model.graph.node[:]
         model.graph.node.extend(nodes)
         del model.graph.value_info[:]
@@ -414,7 +505,7 @@ def fuse_fp8_projection_split(path):
     initializers = {tensor.name: tensor for tensor in model.graph.initializer}
     producers = {name: node for node in model.graph.node for name in node.output}
     users = Counter(name for node in model.graph.node for name in node.input)
-    outputs = {value.name for value in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     ranks = {
         value.name: len(value.type.tensor_type.shape.dim)
         for value in (*model.graph.input, *model.graph.value_info)
@@ -531,7 +622,7 @@ def fuse_fp8_projection_slices(path):
     for node in model.graph.node:
         for name in node.input:
             consumers[name].append(node)
-    graph_outputs = {value.name for value in model.graph.output}
+    graph_outputs = externally_observed_values(model.graph)
     names = {name for node in model.graph.node for name in (*node.input, *node.output)}
     removed, replacements = set(), {}
     count = 0
@@ -796,6 +887,7 @@ def fuse_standard_rms_norm(path):
         del model.graph.node[:]
         model.graph.node.extend(nodes)
         del model.graph.value_info[:]
+        ensure_opset_import(model, version=2)
         temporary = path.with_suffix(".standard_rms.onnx")
         onnx.save(model, temporary)
         os.replace(temporary, path)
@@ -1402,7 +1494,7 @@ def fuse_gdn_gate_casts(path):
     types = infer_value_types(model)
     producers = {name: node for node in model.graph.node for name in node.output}
     users = Counter(name for node in model.graph.node for name in node.input)
-    outputs = {value.name for value in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     removed, replacements = set(), {}
     for node in model.graph.node:
         if node.domain != "com.microsoft" or node.op_type != "GatedDeltaNet":
@@ -1454,7 +1546,7 @@ def fuse_silu_gate(path):
     types = infer_value_types(model)
     producers = {out: n for n in model.graph.node for out in n.output}
     users = Counter(name for n in model.graph.node for name in n.input)
-    outputs = {v.name for v in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     removed, replacements = set(), {}
     for node in model.graph.node:
         if node.domain or node.op_type != "Mul":
@@ -1511,6 +1603,7 @@ def fuse_silu_gate(path):
         nodes = [replacements.get(id(n), n) for n in model.graph.node if id(n) not in removed or id(n) in replacements]
         model.graph.ClearField("node")
         model.graph.node.extend(nodes)
+        ensure_opset_import(model)
         temporary = path.with_suffix(".optimized.onnx")
         onnx.save(model, temporary)
         os.replace(temporary, path)
@@ -1523,7 +1616,7 @@ def fuse_shared_expert_residual(path):
     tensors = {t.name: t for t in model.graph.initializer}
     producers = {out: n for n in model.graph.node for out in n.output}
     users = Counter(name for n in model.graph.node for name in n.input)
-    outputs = {v.name for v in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     removed, replacements = set(), {}
 
     def prefix_root(name):
@@ -1614,6 +1707,21 @@ def fuse_shared_expert_residual(path):
 def fuse_attention_rotary(path):
     """Reuse FP32 rotary kernels while preserving normalization and BF16 rounding boundaries."""
     model = onnx.load(path, load_external_data=False)
+    graph_names = set()
+
+    def collect_names(graph):
+        for node in graph.node:
+            graph_names.update(name for name in (*node.input, *node.output, node.name) if name)
+            for attribute in node.attribute:
+                if attribute.type == onnx.AttributeProto.GRAPH:
+                    collect_names(attribute.g)
+                elif attribute.type == onnx.AttributeProto.GRAPHS:
+                    for nested in attribute.graphs:
+                        collect_names(nested)
+        graph_names.update(value.name for value in (*graph.input, *graph.output, *graph.value_info) if value.name)
+        graph_names.update(tensor.name for tensor in graph.initializer if tensor.name)
+
+    collect_names(model.graph)
     constants = {
         t.name: numpy_helper.to_array(t) for t in model.graph.initializer if t.data_location != TensorProto.EXTERNAL
     }
@@ -1793,7 +1901,27 @@ def fuse_attention_rotary(path):
             or not internal(nodes, node.output[0])
         ):
             continue
-        prefix = node.name + "_Rotary"
+        prefix = f"{node.name or 'Concat'}_{index}_Rotary"
+        generated_suffixes = (
+            "_flat_shape",
+            "_cache_shape",
+            "_position",
+            "_token_axes",
+            "_cache_width",
+            "_shape",
+            "_token_shape",
+            "_expanded_shape",
+            "_input",
+            "_expanded_cos",
+            "_expanded_sin",
+            "_cos",
+            "_sin",
+            "_output",
+        )
+        while prefix in graph_names or any(prefix + suffix in graph_names for suffix in generated_suffixes):
+            prefix += "_"
+        graph_names.add(prefix)
+        graph_names.update(prefix + suffix for suffix in generated_suffixes)
         names = [
             prefix + suffix for suffix in ("_flat_shape", "_cache_shape", "_position", "_token_axes", "_cache_width")
         ]
@@ -1835,6 +1963,7 @@ def fuse_attention_rotary(path):
         nodes = [node for node in nodes if not node.output or node.output[0] not in dead_views]
         model.graph.ClearField("node")
         model.graph.node.extend(nodes)
+        ensure_opset_import(model)
         temporary = path.with_suffix(".optimized.onnx")
         onnx.save(model, temporary)
         os.replace(temporary, path)
@@ -1851,7 +1980,7 @@ def fuse_causal_conv_projection(path):
             consumers[name].append(node)
     constants = {t.name: numpy_helper.to_array(t) for t in model.graph.initializer if not t.external_data}
     shapes = {v.name: v.type.tensor_type.shape for v in list(model.graph.input) + list(model.graph.value_info)}
-    graph_outputs = {v.name for v in model.graph.output}
+    graph_outputs = externally_observed_values(model.graph)
     removed, replacements = set(), {}
 
     def attr(node, name, default=None):
@@ -2177,8 +2306,11 @@ def main():
                 scales[output_name] = numpy_helper.to_array(initializers[scale_name])
         scale_sets[label] = scales
     results = {}
+    transformed_provenance = {}
     for relative in ("target/model.onnx", "dense/model.onnx", "head_r2/model.onnx", "head_kv/model.onnx"):
-        results[relative] = optimize_model(destination / relative)
+        label = relative.split("/", 1)[0]
+        transformed_provenance[label] = {}
+        results[relative] = optimize_model(destination / relative, transformed_provenance[label])
         results[relative]["fused_hyper_connections"] = fuse_hyper_connections(destination / relative)
         results[relative]["fused_hyper_connection_postmix"] = fuse_hyper_connection_postmix(destination / relative)
         results[relative]["fused_causal_conv_projection"] = fuse_causal_conv_projection(destination / relative)
@@ -2202,7 +2334,7 @@ def main():
         result["shared_rotary_cache_shapes"] = share_rotary_cache_expands(destination / relative)
         result["deduplicated_standard_expressions"] = deduplicate_standard_expressions(destination / relative)
         result["fused_rotary_casts"] = fuse_rotary_casts(destination / relative)
-    pool = refresh_weight_pool(source, destination)
+    pool = refresh_weight_pool(source, destination, transformed_provenance)
     write_performance_metadata(destination, source, results, pool, provider, runtime, genai_library)
     print(json.dumps(results, indent=2))
 

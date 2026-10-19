@@ -22,7 +22,6 @@ import argparse
 import importlib.util
 import json
 import os
-import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -40,9 +39,6 @@ DENSE_BUNDLE = Path(
     "/home/tianlei/git/eval_runs/qwen38_mobius_nvfp4_mtp_20261005/models_v6_native_sparse_20261007_01/target"
 )
 HEAD_KV_BUNDLE = CG / "mtp_runner/prefill/bundle/head_kv"
-DECODE_REF_MODEL = (
-    CG / "models_capture_v12all_s2_bundle/target/model.onnx"
-)  # same verify body, no head nodes (constants check)
 
 # name -> default path; the order is the registration order (op domains do not overlap)
 LIBS = {
@@ -70,7 +66,7 @@ def inventory(model_path: Path) -> dict:
         offset = int(ext.get("offset", 0))
         length = int(ext.get("length", 0)) or st.st_size - offset
         out[t.name] = {
-            "key": (st.st_ino, offset, length, t.data_type, tuple(t.dims)),
+            "key": (st.st_dev, st.st_ino, offset, length, t.data_type, tuple(t.dims)),
             "file": str(Path(ext["location"])),
             "dtype": t.data_type,
             "dims": list(t.dims),
@@ -81,9 +77,17 @@ def inventory(model_path: Path) -> dict:
     return out
 
 
-def write_pool(out: Path, models: dict[str, Path]) -> dict:
+def write_pool(out: Path, models: dict[str, Path], source_models: dict[str, Path] | None = None) -> dict:
     """weights_pool.txt: initializers used (same inode / offset / length / dtype / dims) by >= 2 of the sessions."""
     inv = {label: inventory(path) for label, path in models.items()}
+    if source_models is not None:
+        for label, items in inv.items():
+            source = inventory(source_models[label])
+            for name, item in items.items():
+                original = source[name]
+                if any(item[field] != original[field] for field in ("dtype", "dims", "offset", "length")):
+                    raise ValueError(f"copied initializer metadata differs from source: {label}:{name}")
+                item["key"] = original["key"]
     users = defaultdict(set)
     for label, items in inv.items():
         for item in items.values():
@@ -218,6 +222,10 @@ def main() -> None:
         parser.add_argument(f"--lib-{name.replace('_', '-')}", type=Path, default=default)
     args = parser.parse_args()
     out: Path = args.out.resolve()
+    bundles = {"target": args.fold_bundle, "head_r2": args.head_r2_bundle}
+    if not args.no_prefill:
+        bundles.update(dense=args.dense_bundle, head_kv=args.head_kv_bundle)
+    bp.validate_bundle_destinations([(source, out / label) for label, source in bundles.items()])
     out.mkdir(parents=True, exist_ok=True)
 
     libs = {name: getattr(args, f"lib_{name}") for name in LIBS}
@@ -251,12 +259,12 @@ def main() -> None:
 
     pool = None
     if not args.no_pool:
-        pool = write_pool(out, models)
+        pool = write_pool(out, models, {label: source / "model.onnx" for label, source in bundles.items()})
     consts = None
     if not args.no_prefill:
         consts = write_qsa_constants(
             out,
-            DECODE_REF_MODEL if DECODE_REF_MODEL.exists() else out / "target/model.onnx",
+            out / "target/model.onnx",
             out / "head_r2/model.onnx",
         )
 
@@ -348,4 +356,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

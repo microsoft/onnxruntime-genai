@@ -51,10 +51,10 @@ def main() -> None:
     ):
         v12.LIBS[name] = v12b_dir / rel
     out = Path(_pop(list(argv), "--out", "")).resolve()
+    if not any(flag in argv for flag in ("-h", "--help")) and not provider.is_file():
+        raise SystemExit(f"missing provider: {provider}")
     sys.argv = [sys.argv[0], *argv]
     v12.main()
-    if not provider.exists():
-        raise SystemExit(f"missing provider: {provider}")
     bp.link_file(provider, out / "provider/libonnxruntime_providers_cuda.so", "--copy" in argv)
     manifest = out / "package_manifest.json"
     data = json.loads(manifest.read_text())
@@ -65,4 +65,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

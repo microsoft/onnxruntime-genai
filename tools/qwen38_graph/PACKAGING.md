@@ -23,6 +23,21 @@ Generated CUDA provider options use the numeric arena strategy (`1`, meaning
 `kSameAsRequested`) accepted by upstream GenAI; no symbolic-option parser
 extension is required.
 
+Use a fresh output bundle directory. Builders reject existing bundle destinations
+(including dangling symlinks) before copying any graphs, libraries, or configuration;
+they do not support in-place refresh of a prior package. File and directory symlinks
+are preserved without walking external directory targets. Relative symlink targets
+must remain reachable from the new package location.
+
+The folded builder inventories sharing from the source models, including the source
+filesystem/device, inode, byte range, element type, and shape. The destination pool
+therefore preserves shared source initializers even with `--copy` or a
+cross-filesystem hard-link fallback; unrelated tensors are not merged merely because
+their names match. QSA normalization and rotary constants come only from the
+packaged target/head graphs, never an implicit research reference graph.
+Optimizer-created weights retain sharing only when both the original pool
+identity and the applied transformation match, not merely the generated name.
+
 The optimizer rewrites supported normalization, rotary, GDN preparation,
 gates, hyper-connections, FP8 projection, MoE residual, and sparse-attention
 cache handoff chains. It preserves external weight sharing and avoids
@@ -36,10 +51,12 @@ packed sparse-attention/indexer, and speculative fold/state operations.
 With ONNX, NumPy, and ml-dtypes available, run:
 
 ```bash
-python -m unittest discover -s tools/qwen38_graph -p test_optimize_ported_package.py
+python -m unittest discover -s tools/qwen38_graph -p 'test_*.py'
 ```
 
 Tests construct synthetic graphs and need no model weights or GPU.
+Builder regressions also use temporary bundle directories to check safe destination
+handling, symlink preservation, and sharing through hard links, copies, and fallback.
 Unit tests and Python static/lint checks do not qualify complete generated
 packages, native runtime compatibility, model accuracy, or GPU performance.
 No benchmark/profiling/evaluation drivers, weights, or task metadata are

@@ -19,7 +19,6 @@ import argparse
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 
 CG = Path("/home/tianlei/git/eval_runs/qwen38_cuda_graph_20261010_01")
@@ -43,17 +42,31 @@ HEAD_EXTRA_LIBS = {"mtp_head": CG / "mtp_head/build/libqwen_mtp_head.so"}  # qwe
 
 def link_tree(src: Path, dst: Path, copy: bool) -> None:
     """Replicate a directory tree with hard links (symlinks kept, copies when linking is impossible)."""
-    for root, _dirs, files in os.walk(src, followlinks=False):
+    validate_bundle_destinations([(src, dst)])
+    dst.mkdir(parents=True)
+    for root, dirs, files in os.walk(src, followlinks=False):
         rel = Path(root).relative_to(src)
         (dst / rel).mkdir(parents=True, exist_ok=True)
+        for name in list(dirs):
+            source = Path(root) / name
+            if source.is_symlink():
+                (dst / rel / name).symlink_to(os.readlink(source), target_is_directory=True)
+                dirs.remove(name)
         for name in files:
             s, d = Path(root) / name, dst / rel / name
-            if d.exists():
-                continue
             if s.is_symlink():
                 d.symlink_to(os.readlink(s))
             else:
                 link_file(s, d, copy)
+
+
+def validate_bundle_destinations(bundles: list[tuple[Path, Path]]) -> None:
+    """Reject mixed-package rebuilds before any package files are written."""
+    for src, dst in bundles:
+        if not src.is_dir():
+            raise SystemExit(f"missing source bundle: {src}")
+        if os.path.lexists(dst):
+            raise SystemExit(f"bundle destination already exists: {dst}; choose a fresh output directory")
 
 
 def link_file(src: Path, dst: Path, copy: bool) -> None:
@@ -133,6 +146,7 @@ def main() -> None:
         parser.add_argument(f"--lib-{name.replace('_', '-')}", type=Path, default=default)
     args = parser.parse_args()
     out: Path = args.out
+    validate_bundle_destinations([(args.target_bundle, out / "target"), (args.head_bundle, out / "mtp_head")])
     out.mkdir(parents=True, exist_ok=True)
 
     libs = {name: getattr(args, f"lib_{name}") for name in {**TARGET_LIBS, **HEAD_EXTRA_LIBS}}
@@ -230,4 +244,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

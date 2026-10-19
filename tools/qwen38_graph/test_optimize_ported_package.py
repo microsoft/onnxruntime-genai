@@ -2,6 +2,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+import copy
 import json
 import os
 import tempfile
@@ -67,6 +68,21 @@ class RotaryEmbedding(OpRun):
         result[..., :half] = heads[..., :half] * cos - heads[..., half : 2 * half] * sin
         result[..., half : 2 * half] = heads[..., half : 2 * half] * cos + heads[..., :half] * sin
         return (result.reshape(x.shape).astype(dtype),)
+
+
+def capture_value(model, value, dtype=TensorProto.FLOAT):
+    branch = helper.make_graph(
+        [helper.make_node("Identity", [value], ["branch_capture"])],
+        "capture",
+        [],
+        [helper.make_tensor_value_info("branch_capture", dtype, None)],
+    )
+    condition = "__capture_condition"
+    output = "__capture_output"
+    model.graph.initializer.append(numpy_helper.from_array(np.array(True), condition))
+    model.graph.node.append(helper.make_node("If", [condition], [output], then_branch=branch, else_branch=branch))
+    model.graph.output.append(helper.make_tensor_value_info(output, dtype, None))
+    return model
 
 
 class OptimizePortedPackageTest(unittest.TestCase):
@@ -572,6 +588,16 @@ class OptimizePortedPackageTest(unittest.TestCase):
             for dtype in (TensorProto.FLOAT16, TensorProto.BFLOAT16):
                 onnx.save(graph(dtype=dtype), path)
                 self.assertEqual(fuse_standard_rms_norm(path), 1)
+            standard_only = graph()
+            standard_only.ClearField("opset_import")
+            standard_only.opset_import.append(helper.make_opsetid("", 21))
+            onnx.save(standard_only, path)
+            self.assertEqual(fuse_standard_rms_norm(path), 1)
+            optimized = onnx.load(path)
+            self.assertEqual(
+                next(opset.version for opset in optimized.opset_import if opset.domain == "com.microsoft"),
+                2,
+            )
 
     def test_gdn_qkv_split_requires_complete_private_compatible_views(self):
         def graph(
@@ -801,6 +827,9 @@ class OptimizePortedPackageTest(unittest.TestCase):
             onnx.save(graph(external=True), path)
             self.assertEqual(fuse_gdn_gate_casts(path), 1)
             self.assertEqual([node.op_type for node in onnx.load(path).graph.node], ["Cast", "GatedDeltaNet"])
+            onnx.save(capture_value(graph(), "decay_float", TensorProto.FLOAT), path)
+            self.assertEqual(fuse_gdn_gate_casts(path), 1)
+            self.assertIn("decay_float", {name for node in onnx.load(path).graph.node for name in node.output})
             for options in (
                 {"query_type": TensorProto.FLOAT16},
                 {"gate_type": TensorProto.FLOAT},
@@ -941,7 +970,7 @@ class OptimizePortedPackageTest(unittest.TestCase):
                             np.testing.assert_array_equal(left, right)
 
     def test_fp8_attention_slices_rebase_and_rank_guards(self):
-        def graph(*, rank=3, offset=1, stride=8, external=False, axis=2, end=5):
+        def graph(*, rank=3, offset=1, stride=8, external=False, captured=False, axis=2, end=5):
             nodes = [
                 helper.make_node(
                     "MatMulBlockQuantizedFp8Weight",
@@ -987,7 +1016,7 @@ class OptimizePortedPackageTest(unittest.TestCase):
             if external:
                 outputs.append(helper.make_tensor_value_info("projected", TensorProto.BFLOAT16, None))
             shape = None if rank is None else [1] * (rank - 1) + [16]
-            return helper.make_model(
+            model = helper.make_model(
                 helper.make_graph(
                     nodes,
                     "attention_slices",
@@ -1000,6 +1029,7 @@ class OptimizePortedPackageTest(unittest.TestCase):
                 ),
                 opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
             )
+            return capture_value(model, "projected", TensorProto.BFLOAT16) if captured else model
 
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "model.onnx"
@@ -1017,6 +1047,7 @@ class OptimizePortedPackageTest(unittest.TestCase):
                 {"offset": 0},
                 {"stride": 7},
                 {"external": True},
+                {"captured": True},
                 {"axis": 1},
                 {"end": 4},
             ):
@@ -1105,7 +1136,7 @@ class OptimizePortedPackageTest(unittest.TestCase):
             self.assertEqual(fuse_fp8_projection_slices(path), 1)
 
     def test_fp8_projection_split_guards_and_atomic_save(self):
-        def graph(*, axis=-1, widths=(1, 7, 9), external=False, rank=None):
+        def graph(*, axis=-1, widths=(1, 7, 9), external=False, rank=None, captured=False):
             nodes = [
                 helper.make_node(
                     "MatMulBlockQuantizedFp8Weight",
@@ -1126,7 +1157,7 @@ class OptimizePortedPackageTest(unittest.TestCase):
             if external:
                 outputs.append(helper.make_tensor_value_info("projected", TensorProto.BFLOAT16, None))
             shape = None if rank is None else [1] * (rank - 1) + [256]
-            return helper.make_model(
+            model = helper.make_model(
                 helper.make_graph(
                     nodes,
                     "split",
@@ -1136,6 +1167,7 @@ class OptimizePortedPackageTest(unittest.TestCase):
                 ),
                 opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
             )
+            return capture_value(model, "projected", TensorProto.BFLOAT16) if captured else model
 
         with tempfile.TemporaryDirectory() as temporary:
             source, path = Path(temporary) / "source.onnx", Path(temporary) / "model.onnx"
@@ -1160,6 +1192,7 @@ class OptimizePortedPackageTest(unittest.TestCase):
                 {"widths": (0, 8, 9)},
                 {"widths": (8, 9)},
                 {"external": True},
+                {"captured": True},
             ):
                 with self.subTest(options=options):
                     onnx.save(graph(**options), path)
@@ -1213,6 +1246,17 @@ class OptimizePortedPackageTest(unittest.TestCase):
                     self.assertEqual(fuse_silu_gate(path), 0)
             onnx.save(graph(external="gate"), path)
             self.assertEqual(fuse_silu_gate(path), 1)
+            onnx.save(capture_value(graph(), "silu", TensorProto.BFLOAT16), path)
+            self.assertEqual(fuse_silu_gate(path), 0)
+            standard_only = graph()
+            standard_only.ClearField("opset_import")
+            standard_only.opset_import.append(helper.make_opsetid("", 21))
+            onnx.save(standard_only, path)
+            self.assertEqual(fuse_silu_gate(path), 1)
+            self.assertIn(
+                ("com.microsoft", 1),
+                {(opset.domain, opset.version) for opset in onnx.load(path).opset_import},
+            )
 
     def test_shared_expert_residual_fusion_guards_and_rounding_mode(self):
         def graph(*, external=None, different_root=False, bad_gate_width=False):
@@ -1288,6 +1332,8 @@ class OptimizePortedPackageTest(unittest.TestCase):
                     self.assertEqual(fuse_shared_expert_residual(path), 0)
             onnx.save(graph(external="down"), path)
             self.assertEqual(fuse_shared_expert_residual(path), 1)
+            onnx.save(capture_value(graph(), "contribution", TensorProto.BFLOAT16), path)
+            self.assertEqual(fuse_shared_expert_residual(path), 0)
 
     def test_attention_rotary_fusion_rounding_broadcast_and_guards(self):
         def graph(*, external=False, malformed=False, shared=False, captured=False, folded=False):
@@ -1455,8 +1501,50 @@ class OptimizePortedPackageTest(unittest.TestCase):
                     fuse_attention_rotary(path)
                 self.assertEqual(path.read_bytes(), before)
 
+            model = graph()
+            model.ClearField("opset_import")
+            model.opset_import.append(helper.make_opsetid("", 21))
+            first_concat = next(node for node in model.graph.node if node.op_type == "Concat")
+            concat_index = list(model.graph.node).index(first_concat)
+            collision = f"Concat_{concat_index}_Rotary_shape"
+            model.graph.initializer.append(numpy_helper.from_array(np.array([1], np.int64), collision))
+            second = copy.deepcopy(model.graph)
+            remapped = {name: name + "_second" for node in second.node for name in node.output}
+            remapped.update({tensor.name: tensor.name + "_second" for tensor in second.initializer})
+            for node in second.node:
+                node.input[:] = [remapped.get(name, name) for name in node.input]
+                node.output[:] = [remapped[name] for name in node.output]
+                if node.name:
+                    node.name += "_second"
+            for tensor in second.initializer:
+                tensor.name = remapped[tensor.name]
+            second_output = copy.deepcopy(second.output[0])
+            second_output.name = remapped[second_output.name]
+            for node in model.graph.node:
+                if node.op_type == "Concat":
+                    node.name = ""
+            for node in second.node:
+                if node.op_type == "Concat":
+                    node.name = ""
+            model.graph.node.extend(second.node)
+            model.graph.initializer.extend(second.initializer)
+            model.graph.output.append(second_output)
+            onnx.save(model, path)
+            self.assertEqual(fuse_attention_rotary(path), 2)
+            optimized = onnx.load(path)
+            rotary_nodes = [node for node in optimized.graph.node if node.op_type == "RotaryEmbedding"]
+            self.assertEqual(len(rotary_nodes), 2)
+            self.assertEqual(len({node.name for node in rotary_nodes}), 2)
+            all_values = [name for node in optimized.graph.node for name in node.output]
+            all_values.extend(tensor.name for tensor in optimized.graph.initializer)
+            self.assertEqual(len(all_values), len(set(all_values)))
+            self.assertIn(
+                ("com.microsoft", 1),
+                {(opset.domain, opset.version) for opset in optimized.opset_import},
+            )
+
     def test_conv_projection_fusion_guards_and_shared_source(self):
-        def graph(extra_output=None, malformed=False):
+        def graph(extra_output=None, malformed=False, captured=False):
             constants = []
             nodes = []
 
@@ -1499,10 +1587,11 @@ class OptimizePortedPackageTest(unittest.TestCase):
             if extra_output:
                 nodes.append(helper.make_node("Identity", [extra_output], ["external"]))
                 outputs.append(helper.make_tensor_value_info("external", TensorProto.FLOAT, None))
-            return helper.make_model(
+            model = helper.make_model(
                 helper.make_graph(nodes, "conv", inputs, outputs, constants),
                 opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
             )
+            return capture_value(model, "cf") if captured else model
 
         with tempfile.TemporaryDirectory() as temporary:
             source, path = Path(temporary) / "source.onnx", Path(temporary) / "model.onnx"
@@ -1532,6 +1621,8 @@ class OptimizePortedPackageTest(unittest.TestCase):
                 with self.subTest(external_user=name):
                     onnx.save(graph(extra_output=name), path)
                     self.assertEqual(fuse_causal_conv_projection(path), 0)
+            onnx.save(graph(captured=True), path)
+            self.assertEqual(fuse_causal_conv_projection(path), 0)
             onnx.save(graph(malformed=True), path)
             self.assertEqual(fuse_causal_conv_projection(path), 0)
 
@@ -1580,6 +1671,155 @@ class OptimizePortedPackageTest(unittest.TestCase):
                     )
                     self.assertEqual(list(fused.output), ["pre", "gate", "mixed"])
                     self.assertEqual(fuse_hyper_connection_postmix(path), 0)
+
+        for early_consumer, has_streams_out in ((True, False), (False, True)):
+            with (
+                self.subTest(early_consumer=early_consumer, has_streams_out=has_streams_out),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                path = Path(temporary) / "model.onnx"
+                nodes = [
+                    helper.make_node(
+                        "HyperConnectionPostMix",
+                        ["streams", "previous", "previous_gate"],
+                        ["mixed"],
+                        domain="com.microsoft",
+                        num_branches=4,
+                    )
+                ]
+                if early_consumer:
+                    nodes.append(helper.make_node("Identity", ["mixed"], ["residual"]))
+                nodes.append(
+                    helper.make_node(
+                        "HyperConnectionLowRankMix",
+                        ["mixed", "norm", "down", "up", "inject"],
+                        ["pre", "gate", "streams_out"] if has_streams_out else ["pre", "gate"],
+                        domain="com.microsoft",
+                        num_branches=4,
+                    )
+                )
+                outputs = [
+                    helper.make_tensor_value_info(name, TensorProto.FLOAT, None)
+                    for name in (
+                        "pre",
+                        "gate",
+                        *(("residual",) if early_consumer else ()),
+                        *(("streams_out",) if has_streams_out else ()),
+                    )
+                ]
+                model = helper.make_model(
+                    helper.make_graph(
+                        nodes,
+                        "postmix_safety",
+                        [
+                            helper.make_tensor_value_info(name, TensorProto.FLOAT, None)
+                            for name in (
+                                "streams",
+                                "previous",
+                                "previous_gate",
+                                "norm",
+                                "down",
+                                "up",
+                                "inject",
+                            )
+                        ],
+                        outputs,
+                    ),
+                    opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
+                )
+                for node in model.graph.node:
+                    node.name = ""
+                onnx.save(model, path)
+                self.assertEqual(fuse_hyper_connection_postmix(path), 0)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "captured.onnx"
+            nodes = [
+                helper.make_node(
+                    "HyperConnectionPostMix",
+                    ["streams", "previous", "previous_gate"],
+                    ["mixed"],
+                    domain="com.microsoft",
+                    num_branches=4,
+                ),
+                helper.make_node(
+                    "HyperConnectionLowRankMix",
+                    ["mixed", "norm", "down", "up", "inject"],
+                    ["pre", "gate"],
+                    domain="com.microsoft",
+                    num_branches=4,
+                ),
+            ]
+            inputs = [
+                helper.make_tensor_value_info(name, TensorProto.FLOAT, None)
+                for name in ("streams", "previous", "previous_gate", "norm", "down", "up", "inject")
+            ]
+            model = helper.make_model(
+                helper.make_graph(
+                    nodes,
+                    "postmix_capture",
+                    inputs,
+                    [
+                        helper.make_tensor_value_info("pre", TensorProto.FLOAT, None),
+                        helper.make_tensor_value_info("gate", TensorProto.FLOAT, None),
+                    ],
+                ),
+                opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
+            )
+            capture_value(model, "mixed")
+            model.graph.node.insert(1, model.graph.node.pop())
+            onnx.save(model, path)
+            self.assertEqual(fuse_hyper_connection_postmix(path), 0)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "unnamed.onnx"
+            nodes = [
+                helper.make_node(
+                    "HyperConnectionPostMix",
+                    ["streams", "previous", "previous_gate"],
+                    ["mixed"],
+                    domain="com.microsoft",
+                    num_branches=4,
+                ),
+                helper.make_node(
+                    "HyperConnectionLowRankMix",
+                    ["mixed", "norm", "down", "up", "inject"],
+                    ["pre", "gate"],
+                    domain="com.microsoft",
+                    num_branches=4,
+                ),
+                helper.make_node("Identity", ["mixed"], ["residual"]),
+            ]
+            for node in nodes:
+                node.name = ""
+            model = helper.make_model(
+                helper.make_graph(
+                    nodes,
+                    "postmix_unnamed",
+                    [
+                        helper.make_tensor_value_info(name, TensorProto.FLOAT, None)
+                        for name in (
+                            "streams",
+                            "previous",
+                            "previous_gate",
+                            "norm",
+                            "down",
+                            "up",
+                            "inject",
+                        )
+                    ],
+                    [
+                        helper.make_tensor_value_info(name, TensorProto.FLOAT, None)
+                        for name in ("pre", "gate", "residual")
+                    ],
+                ),
+                opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
+            )
+            onnx.save(model, path)
+            self.assertEqual(fuse_hyper_connection_postmix(path), 1)
+            optimized = onnx.load(path).graph.node
+            self.assertEqual([node.op_type for node in optimized], ["HyperConnectionLowRankMix", "Identity"])
+            self.assertEqual(list(optimized[0].output), ["pre", "gate", "mixed"])
 
     def test_hyper_connection_reuses_fused_operator(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1635,12 +1875,10 @@ class OptimizePortedPackageTest(unittest.TestCase):
                 ],
                 constants,
             )
-            onnx.save(
-                helper.make_model(
-                    graph, opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)]
-                ),
-                path,
+            model = helper.make_model(
+                graph, opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)]
             )
+            onnx.save(model, path)
             self.assertEqual(fuse_hyper_connections(path), 1)
             optimized = onnx.load(path)
             self.assertEqual(len(optimized.graph.node), 1)
@@ -1651,6 +1889,16 @@ class OptimizePortedPackageTest(unittest.TestCase):
                 list(fused.input), ["input", "norm_weight", "input_mix_weight_down", "up_weight", "block_inject_weight"]
             )
             self.assertEqual(helper.get_attribute_value(next(a for a in fused.attribute if a.name == "gate_div")), 1.0)
+
+            unnamed_path = Path(temporary) / "unnamed.onnx"
+            for node in model.graph.node:
+                node.name = ""
+            model.graph.node.append(helper.make_node("Identity", ["input"], ["unrelated"]))
+            onnx.save(model, unnamed_path)
+            self.assertEqual(fuse_hyper_connections(unnamed_path), 1)
+            unnamed_nodes = onnx.load(unnamed_path).graph.node
+            self.assertEqual([node.op_type for node in unnamed_nodes], ["HyperConnectionLowRankMix", "Identity"])
+            self.assertEqual(list(unnamed_nodes[0].output), ["output", "post"])
 
     def test_metadata_does_not_overwrite_hardlinked_source(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1761,6 +2009,121 @@ class OptimizePortedPackageTest(unittest.TestCase):
             constants = {t.name: numpy_helper.to_array(t) for t in optimized.graph.initializer}
             np.testing.assert_array_equal(constants["weights.performance_nk"].view(np.uint8), weights.T.view(np.uint8))
             np.testing.assert_array_equal(constants["scales.performance_n1"], scales.reshape(8, 1))
+
+    def test_optimizer_handles_unnamed_fp8_nodes_captures_and_missing_opset(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "model.onnx"
+            weights = np.ones((16, 8), dtype=ml_dtypes.float8_e4m3fn)
+            graph = helper.make_graph(
+                [
+                    helper.make_node("DequantizeLinear", ["weights", "scales"], ["float_weights"], axis=1),
+                    helper.make_node("Cast", ["float_weights"], ["bf16_weights"], to=TensorProto.BFLOAT16),
+                    helper.make_node("MatMul", ["input", "bf16_weights"], ["output"]),
+                    helper.make_node("Identity", ["input"], ["unrelated"]),
+                ],
+                "unnamed_fp8",
+                [helper.make_tensor_value_info("input", TensorProto.BFLOAT16, [1, 16])],
+                [helper.make_tensor_value_info("output", TensorProto.BFLOAT16, [1, 8])],
+                [
+                    numpy_helper.from_array(weights, "weights"),
+                    numpy_helper.from_array(np.ones(8, np.float32), "scales"),
+                ],
+            )
+            model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+            capture_value(model, "bf16_weights", TensorProto.BFLOAT16)
+            onnx.save(model, path)
+            self.assertEqual(optimize_model(path), {"fused_fp8_matmuls": 1})
+            optimized = onnx.load(path)
+            self.assertEqual(
+                [node.op_type for node in optimized.graph.node],
+                ["DequantizeLinear", "Cast", "MatMulBlockQuantizedFp8Weight", "Identity", "If"],
+            )
+            self.assertIn(
+                ("com.microsoft", 1),
+                {(opset.domain, opset.version) for opset in optimized.opset_import},
+            )
+
+    def test_optimizer_and_hyper_connections_keep_branch_only_initializers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "model.onnx"
+            model = helper.make_model(
+                helper.make_graph(
+                    [],
+                    "captured_initializer",
+                    [],
+                    [],
+                    [numpy_helper.from_array(np.array([3.0], np.float32), "branch_only")],
+                ),
+                opset_imports=[helper.make_opsetid("", 21)],
+            )
+            capture_value(model, "branch_only")
+            onnx.save(model, path)
+            self.assertEqual(optimize_model(path), {})
+            self.assertIn("branch_only", {tensor.name for tensor in onnx.load(path).graph.initializer})
+            self.assertEqual(fuse_hyper_connections(path), 0)
+            self.assertIn("branch_only", {tensor.name for tensor in onnx.load(path).graph.initializer})
+
+    def test_pool_rebuild_shares_equivalent_transformed_weights_by_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, destination = Path(temporary) / "source", Path(temporary) / "destination"
+            source.mkdir()
+            destination.mkdir()
+            (source / "weights_pool.txt").write_text(
+                "qwen38_weights_pool 1\n"
+                "pool 0 17 0 128 2 16 8 target/weights.bin\n"
+                "pool 1 1 128 32 1 8 target/scales.bin\n"
+                "session target weights 0\nsession dense weights 0\n"
+                "session target scales 1\nsession dense scales 1\n"
+            )
+            provenance = {}
+            for label in ("target", "dense"):
+                folder = destination / label
+                folder.mkdir()
+                model = helper.make_model(
+                    helper.make_graph(
+                        [
+                            helper.make_node("DequantizeLinear", ["weights", "scales"], ["float_weights"], axis=1),
+                            helper.make_node("Cast", ["float_weights"], ["bf16_weights"], to=TensorProto.BFLOAT16),
+                            helper.make_node("MatMul", ["input", "bf16_weights"], ["output"]),
+                        ],
+                        label,
+                        [helper.make_tensor_value_info("input", TensorProto.BFLOAT16, [1, 16])],
+                        [helper.make_tensor_value_info("output", TensorProto.BFLOAT16, [1, 8])],
+                        [
+                            numpy_helper.from_array(np.ones((16, 8), dtype=ml_dtypes.float8_e4m3fn), "weights"),
+                            numpy_helper.from_array(np.ones(8, np.float32), "scales"),
+                        ],
+                    ),
+                    opset_imports=[helper.make_opsetid("", 21)],
+                )
+                onnx.save(model, folder / "model.onnx")
+                provenance[label] = {}
+                self.assertEqual(
+                    optimize_model(folder / "model.onnx", provenance[label]),
+                    {"fused_fp8_matmuls": 1},
+                )
+            for label in ("head_r2", "head_kv"):
+                folder = destination / label
+                folder.mkdir()
+                onnx.save(helper.make_model(helper.make_graph([], label, [], [])), folder / "model.onnx")
+
+            result = refresh_weight_pool(source, destination, provenance)
+            manifest = (destination / "weights_pool.txt").read_text()
+            self.assertEqual(result["initializers"], 2)
+            self.assertIn("session target weights.performance_nk", manifest)
+            self.assertIn("session dense weights.performance_nk", manifest)
+            self.assertIn("session target scales.performance_n1", manifest)
+            self.assertIn("session dense scales.performance_n1", manifest)
+
+            dense_weight = provenance["dense"]["weights.performance_nk"]
+            provenance["dense"]["weights.performance_nk"] = (
+                dense_weight[0],
+                ("different_transform", *dense_weight[1][1:]),
+            )
+            refresh_weight_pool(source, destination, provenance)
+            manifest = (destination / "weights_pool.txt").read_text()
+            self.assertNotIn("session target weights.performance_nk", manifest)
+            self.assertNotIn("session dense weights.performance_nk", manifest)
 
     def test_pool_uses_declared_sharing_not_inode_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
