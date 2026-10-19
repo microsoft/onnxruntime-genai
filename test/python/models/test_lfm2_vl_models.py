@@ -15,6 +15,7 @@ Run with:
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import math
@@ -461,6 +462,59 @@ def test_lfm2_vl_decoder_on_another_provider_matches_cpu(test_data_path, tmp_pat
     tokens, features = _generate_on(model_dir, provider, image_path, num_tokens=8)
     np.testing.assert_array_equal(tokens, expected_tokens)
     np.testing.assert_array_equal(features, expected_features)
+
+
+def test_lfm2_vl_embedding_tool_builds_a_working_pipeline(test_data_path, tmp_path):
+    # models/lfm2_vl_embedding.py replaces the stub embedding with a real one built from a checkpoint's
+    # table: the decoder must see the table rows, with the vision features at the image positions.
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("onnx")
+    safetensors_torch = pytest.importorskip("safetensors.torch")
+    path = Path(__file__).resolve().parents[3] / "src" / "python" / "py" / "models" / "lfm2_vl_embedding.py"
+    spec = importlib.util.spec_from_file_location("lfm2_vl_embedding", path)
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+
+    model_dir = _copy_model(test_data_path, tmp_path)
+    (model_dir / "dummy_embedding.onnx").unlink()
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(json.dumps({"image_token_id": 396}))
+    image_processor = {
+        "resample": 2,
+        "size": {"height": 512, "width": 512},
+        "rescale_factor": 1 / 255,
+        "image_mean": [0.5, 0.5, 0.5],
+        "image_std": [0.5, 0.5, 0.5],
+        "min_image_tokens": 64,
+        "max_image_tokens": 256,
+        "max_num_patches": MAX_NUM_PATCHES,
+        "encoder_patch_size": ENCODER_PATCH_SIZE,
+        "downsample_factor": DOWNSAMPLE_FACTOR,
+    }
+    (checkpoint / "processor_config.json").write_text(json.dumps({"image_processor": image_processor}))
+    table = torch.randn(65536, 32, generator=torch.Generator().manual_seed(0)).to(torch.bfloat16)
+    safetensors_torch.save_file({tool.EMBEDDING_WEIGHT: table}, checkpoint / "model.safetensors")
+    tool.convert(checkpoint, model_dir, "dummy_vision.onnx")
+
+    model = og.Model(os.fspath(model_dir))
+    tokenizer = og.Tokenizer(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=2048)
+    generator = og.Generator(model, params)
+    images = og.Images.open(_image_path(test_data_path, "australia.jpg"))
+    inputs = model.create_multimodal_processor()("<image>Describe this image.", images=images)
+    generator.set_inputs(inputs)
+
+    input_ids = inputs["input_ids"].as_numpy()[0]
+    is_image = input_ids == tokenizer.to_token_id(IMAGE_TOKEN)
+    embeds = generator.get_input("inputs_embeds")[0]
+    features = generator.get_input("image_features")
+    assert is_image.sum() == len(features) > 0
+    np.testing.assert_array_equal(embeds[~is_image], table.float().numpy()[input_ids[~is_image]])
+    np.testing.assert_array_equal(embeds[is_image], features)
+    generator.generate_next_token()  # one token, no image features
+    assert generator.get_sequence(0).shape[0] == len(input_ids) + 1
 
 
 def test_lfm2_vl_rejects_rewind(test_data_path):
