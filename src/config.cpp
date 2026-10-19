@@ -2510,7 +2510,7 @@ struct Qwen38GraphFold_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
-    if (name == "head_r2") return head_r2_;
+    if (name == "head_r2" || name == "mtp" || name == "drafter") return head_r2_;
     throw JSON::unknown_value_error{};
   }
 

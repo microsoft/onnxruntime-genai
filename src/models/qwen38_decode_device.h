@@ -15,17 +15,23 @@
 
 namespace Generators {
 
-// What one draft -> verify -> commit cycle published. The verify step ran the target on [pending token, draft token]:
-// pred0 is the target's token after the pending token, pred1 its token after the draft. When pred0 equals the draft the
-// draft is accepted and both predictions are committed (2 tokens, the bank ring advances by 2); otherwise only pred0 is.
+// What one draft -> verify -> commit cycle published. The verify step ran the target on [pending token, draft0, (draft1, draft2)]:
+// pred0..pred3 are the target's greedy predictions at each verify row. The longest matching prefix of drafts is accepted
+// (accepted_count in 0..3; 1 + accepted_count tokens are committed, and the bank ring advances by 1 + accepted_count).
 struct Qwen38CycleRecord {
   int64_t pred0{};
   int64_t pred1{};
+  int64_t pred2{};
+  int64_t pred3{};
   bool accepted{};
+  int accepted_count{};
+  int proposed_count{1};
   int64_t new_pending{};  // device view after the commit (checked against the host ledger)
   int64_t new_length{};
 
-  size_t TokenCount() const { return accepted ? 2 : 1; }
+  size_t TokenCount() const {
+    return accepted_count > 0 ? static_cast<size_t>(1 + accepted_count) : (accepted ? 2 : 1);
+  }
 };
 
 struct Qwen38DecodeStats {
@@ -78,7 +84,11 @@ class Qwen38DecodeLedger {
  public:
   static constexpr int kBanks = 3;
 
-  explicit Qwen38DecodeLedger(int capacity) : capacity_{capacity} {}
+  explicit Qwen38DecodeLedger(int capacity, int num_banks = kBanks)
+      : capacity_{capacity}, num_banks_{num_banks} {}
+
+  void SetNumBanks(int num_banks) { num_banks_ = num_banks; }
+  int NumBanks() const { return num_banks_; }
 
   void Reset() {
     bank_ = 0;
@@ -88,10 +98,12 @@ class Qwen38DecodeLedger {
   int Bank() const { return bank_; }
   size_t Length() const { return length_; }
 
-  // Commits `step` rows (1 or 2).
+  // Commits `step` rows (1 .. num_banks_ - 1).
   void Advance(size_t step) {
-    if (step != 1 && step != 2) throw std::logic_error("qwen38_graph: a step commits 1 or 2 rows, not " + std::to_string(step));
-    bank_ = static_cast<int>((static_cast<size_t>(bank_) + step) % kBanks);
+    const size_t max_step = static_cast<size_t>(num_banks_ - 1);
+    if (step < 1 || step > max_step)
+      throw std::logic_error("qwen38_graph: a step commits 1 or 2 rows, not " + std::to_string(step));
+    bank_ = static_cast<int>((static_cast<size_t>(bank_) + step) % static_cast<size_t>(num_banks_));
     length_ += step;
   }
 
@@ -116,6 +128,7 @@ class Qwen38DecodeLedger {
 
  private:
   int capacity_;
+  int num_banks_{kBanks};
   int bank_{};
   size_t length_{};
 };
