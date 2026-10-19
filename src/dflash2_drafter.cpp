@@ -626,8 +626,9 @@ size_t Dflash2Drafter::EmbeddingReservedBytes(size_t max_batch_size, size_t quer
 }
 
 Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size,
-                               size_t num_blocks, size_t max_requests)
-    : model_{std::move(model)},
+                               size_t num_blocks, size_t max_requests, bool fixed_single_request)
+    : fixed_single_request_{fixed_single_request},
+      model_{std::move(model)},
       config_{model_->config_->model.dflash2},
       paged_block_size_{paged_block_size},
       num_blocks_{num_blocks},
@@ -1135,6 +1136,17 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     layout.min_kv_len = std::min(layout.min_kv_len, kv_length);
   }
 
+  if (fixed_single_request_) {
+    if (served.size() != 1 || block_feed_indices.size() != 1 || num_ctx_rows == 0 ||
+        num_ctx_rows > block_size) {
+      throw std::runtime_error("Fixed DFlash2 proposals require one request with 1..block_size context rows.");
+    }
+    // Padded rows are outside cumulative_sequence_lengths and therefore never update the cache.
+    // Keep the real block-row and anchor-row maps: the last context row need not be row seven.
+    layout.q_row_map.resize(2 * block_size, 0);
+    layout.qkv_row_map.resize(2 * block_size, static_cast<int32_t>(block_size));
+    num_ctx_rows = block_size;
+  }
   const size_t num_tokens = layout.q_row_map.size();
   auto device = model_->p_device_inputs_;
   // Bucketing the width lets a growing context keep replaying one captured graph instead of
@@ -1143,6 +1155,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   const bool graph_eligible = Dflash2GraphCaptureAllowed(
       graph_capture_enabled_, uniform_ingest, max_blocks, max_block_table_columns_);
   const size_t block_table_columns =
+      fixed_single_request_ ? max_block_table_columns_ :
       graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
                      : max_blocks;
   auto fill_int32 = [](Tensor& tensor, const std::vector<int32_t>& values) {
@@ -1276,7 +1289,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       graph_eligible
           ? graph_ids_.Id(GraphAnnotationIds::Key{
                 served.size(), batch, num_ctx_rows, block_table_columns,
-                static_cast<size_t>(layout.max_query_len), buffer_generation_})
+                fixed_single_request_ ? 2 * block_size : static_cast<size_t>(layout.max_query_len), buffer_generation_})
           : -1;
   const bool capture = annotation_id > 0;
   if (capture && graph_ids_.size() != known_graph_shapes && g_log.enabled && g_log.graph_capture) {
@@ -1298,7 +1311,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     // the exact per-sequence lengths from device memory, which is what keeps replay correct as the
     // sequences grow.
     const AttentionMetadataValues exact_values{
-        layout.max_query_len, layout.max_kv_len, layout.min_kv_len};
+        fixed_single_request_ ? static_cast<int32_t>(2 * block_size) : layout.max_query_len,
+        layout.max_kv_len, layout.min_kv_len};
     const AttentionMetadataValues values =
         capture ? GetAttentionMetadataForGraphStep(
                       exact_values, block_table_columns, paged_block_size_)
