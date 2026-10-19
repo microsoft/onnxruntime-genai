@@ -4,6 +4,7 @@
 #include "qwen38_graph_executor.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 
 #include "../models/qwen38_graph.h"
@@ -108,6 +109,14 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   if (!decoding_) {
     const size_t remaining = request.tokens.size() - prefilled_;
     const size_t chunk = std::min(options_.prefill_chunk_tokens, remaining);
+    if (prefilled_ == 0) {
+      const std::string total_str = std::to_string(request.tokens.size());
+#if defined(_WIN32)
+      _putenv_s("ORT_QMOE_PREFILL_TOTAL_TOKENS", total_str.c_str());
+#else
+      setenv("ORT_QMOE_PREFILL_TOTAL_TOKENS", total_str.c_str(), 1);
+#endif
+    }
     device_dirty_ = true;
     device_->PrefillChunk(request.tokens.subspan(prefilled_, chunk));
     prefilled_ += chunk;
@@ -125,12 +134,18 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
     decoding_ = true;
     result.tokens[0] = first;
     result.count = 1;
-    pending_step_ = PendingStep{/*active=*/true, /*is_decode_cycle=*/false, /*mtp=*/false, /*accepted=*/false, /*produced=*/1};
+    pending_step_ = PendingStep{/*active=*/true, /*is_decode_cycle=*/false, /*mtp=*/false,
+                                /*proposed=*/0, /*accepted=*/0, /*produced=*/1};
     return result;
   }
 
   const Qwen38CycleRecord record = device_->WaitCycle();
-  const std::array<int32_t, 2> predictions{static_cast<int32_t>(record.pred0), static_cast<int32_t>(record.pred1)};
+  const std::array<int32_t, 4> predictions{
+      static_cast<int32_t>(record.pred0),
+      static_cast<int32_t>(record.pred1),
+      static_cast<int32_t>(record.pred2),
+      static_cast<int32_t>(record.pred3),
+  };
   const size_t produced = record.TokenCount();
   size_t count = produced;
   bool stop_in_cycle = false;
@@ -156,8 +171,11 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
     result.tokens[i] = predictions[i];
   }
   result.count = committed;
+  const size_t n_prop = record.proposed_count > 1 ? static_cast<size_t>(record.proposed_count) : 1;
+  const size_t n_acc =
+      record.accepted_count > 0 ? static_cast<size_t>(record.accepted_count) : (record.accepted ? 1 : 0);
   pending_step_ = PendingStep{/*active=*/true, /*is_decode_cycle=*/true, /*mtp=*/device_->MtpEnabled(),
-                              /*accepted=*/record.accepted, /*produced=*/produced};
+                              /*proposed=*/n_prop, /*accepted=*/n_acc, /*produced=*/produced};
   return result;
 }
 
@@ -177,26 +195,29 @@ void Qwen38GraphSession::OnStepCommitted(const RequestStepResult& result) {
   ++stats_.completed_rounds;
   ++stats_.target_forward_passes;
   if (step.mtp) {
+    const size_t n_prop = step.proposed > 0 ? step.proposed : 1;
+    const size_t effective_accepted = std::min(step.accepted, emitted);
+    const size_t n_eval = std::min(n_prop, effective_accepted + 1);
     ++stats_.target_verify_forward_passes;
-    ++stats_.draft_forward_passes;
-    ++stats_.draft_tokens_proposed;
-    ++stats_.draft_tokens_evaluated;
-    // Row 0 verifies the draft token; row 1 produces the bonus token when accepted. If row 0 ended the turn (e.g., EOS
-    // on row 0 so 0 tokens emitted, or a stop string / limit on row 0 so only 1 token emitted out of an accepted 2-token
-    // cycle), do not count tokens past the stop condition on row 0.
-    const bool draft_accepted = step.accepted && emitted > 0;
-    ++stats_.acceptance_length_histogram[draft_accepted ? 1 : 0];
-    if (draft_accepted) {
-      ++stats_.draft_tokens_accepted;
+    stats_.draft_forward_passes += n_prop;
+    stats_.draft_tokens_proposed += n_prop;
+    stats_.draft_tokens_evaluated += n_eval;
+    if (effective_accepted < stats_.acceptance_length_histogram.size()) {
+      ++stats_.acceptance_length_histogram[effective_accepted];
+    }
+    stats_.draft_tokens_accepted += effective_accepted;
+    if (effective_accepted == n_prop) {
       ++stats_.full_accept_rounds;
-      if (emitted >= 2) {
+      if (emitted > n_prop) {
         ++stats_.bonus_tokens;
       }
-    } else {
+    } else if (effective_accepted == 0) {
       ++stats_.zero_accept_rounds;
       if (emitted > 0) {
         ++stats_.correction_tokens;
       }
+    } else if (emitted > effective_accepted) {
+      ++stats_.correction_tokens;
     }
   }
   if (step.produced >= emitted) {
