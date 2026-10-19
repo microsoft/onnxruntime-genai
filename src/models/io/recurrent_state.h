@@ -78,8 +78,8 @@ struct RecurrentState {
   std::unique_ptr<OrtValue> state_update_active_;
   std::vector<size_t> state_update_key_head_counts_;
   size_t state_update_capacity_{};
-  bool snapshot_valid_{false};                       // Whether snapshot_ holds a valid captured state.
-  size_t snapshot_position_{};                       // Sequence length represented by snapshot_.
+  bool snapshot_valid_{false};  // Whether snapshot_ holds a valid captured state.
+  size_t snapshot_position_{};  // Sequence length represented by snapshot_.
 
   // Per-position state window. When the model declares a rank-4 conv_state / rank-5
   // recurrent_state, axis 1 is a static window of W per-token states (see IsWindowed above).

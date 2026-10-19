@@ -453,6 +453,140 @@ std::shared_ptr<const GuidanceGrammarAsset> GetGrammarAsset(
 
 }  // namespace
 
+#endif
+
+DelimitedGuidanceLogitsProcessor::DelimitedGuidanceLogitsProcessor(
+    std::unique_ptr<ConstrainedLogitsProcessor> body, DeviceInterface& device,
+    size_t vocab_size, std::vector<int32_t> eos_tokens, int32_t opening_token, int32_t closing_token)
+    : body_(std::move(body)), device_(&device), vocab_size_(vocab_size), eos_tokens_(std::move(eos_tokens)) {
+  opening_token_ = opening_token;
+  closing_token_ = closing_token;
+  const auto invalid_eos = [this](int32_t eos) {
+    return eos < 0 || static_cast<size_t>(eos) >= vocab_size_ ||
+           eos == opening_token_ || eos == closing_token_;
+  };
+  if (!body_ || opening_token_ < 0 || closing_token_ < 0 ||
+      opening_token_ == closing_token_ ||
+      static_cast<size_t>(opening_token_) >= vocab_size_ ||
+      static_cast<size_t>(closing_token_) >= vocab_size_ ||
+      eos_tokens_.empty() ||
+      std::any_of(eos_tokens_.begin(), eos_tokens_.end(), invalid_eos)) {
+    throw std::invalid_argument("Delimited guidance requires distinct in-vocabulary non-EOS markers.");
+  }
+}
+
+void DelimitedGuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
+  for (int32_t token : tokens) {
+    if (!active_) {
+      if (token == opening_token_) {
+        body_->Reset();
+        active_ = true;
+      }
+      continue;
+    }
+
+    if (token == closing_token_) {
+      const auto mask = GetReadyMask();
+      if (!(mask[static_cast<size_t>(token) / 32] &
+            (uint32_t{1} << (static_cast<size_t>(token) % 32)))) {
+        throw std::runtime_error("Delimited guidance closing marker is premature.");
+      }
+      active_ = false;
+      mask_.clear();
+      continue;
+    }
+
+    int32_t selected = token;
+    body_->CommitTokens(std::span<int32_t>{&selected, 1});
+    mask_.clear();
+  }
+}
+
+std::span<const uint32_t> DelimitedGuidanceLogitsProcessor::GetReadyMask() {
+  if (!active_) {
+    return {};
+  }
+  const auto body_mask = body_->GetReadyMask();
+  if (body_mask.size() != (vocab_size_ + 31) / 32) {
+    throw std::runtime_error("Delimited guidance body has no ready token mask.");
+  }
+  mask_.assign(body_mask.begin(), body_mask.end());
+  // The grammar signals acceptance through its primary EOS; no model EOS may end an open region.
+  const auto eos = static_cast<size_t>(eos_tokens_.front());
+  const bool accepting = (mask_[eos / 32] & (uint32_t{1} << (eos % 32))) != 0;
+  for (int32_t eos_token : eos_tokens_) {
+    const auto index = static_cast<size_t>(eos_token);
+    mask_[index / 32] &= ~(uint32_t{1} << (index % 32));
+  }
+  const auto close = static_cast<size_t>(closing_token_);
+  mask_[close / 32] &= ~(uint32_t{1} << (close % 32));
+  if (accepting) {
+    mask_[close / 32] |= uint32_t{1} << (close % 32);
+  }
+  // A marker token is structural, not a body token, even if its decoded bytes could match.
+  const auto open = static_cast<size_t>(opening_token_);
+  mask_[open / 32] &= ~(uint32_t{1} << (open % 32));
+  return mask_;
+}
+
+void DelimitedGuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
+  const auto mask = GetReadyMask();
+  if (mask.empty()) {
+    return;
+  }
+  if (device_->GetType() == DeviceType::CUDA ||
+      device_->GetType() == DeviceType::NvTensorRtRtx) {
+    if (device_mask_.size() != mask.size()) {
+      device_mask_ = device_->Allocate<uint32_t>(mask.size());
+    }
+    copy(std::span<const uint32_t>{mask}, device_mask_.CpuSpan());
+    device_mask_.CopyCpuToDevice();
+    device_->LaunchAddLogitsMask(logits.Span().data(), 1, static_cast<int>(vocab_size_),
+                                 device_mask_.Span().data());
+    return;
+  }
+
+  auto values = logits.CpuSpan();
+  for (size_t i = 0; i < vocab_size_; ++i) {
+    if (!(mask[i / 32] & (uint32_t{1} << (i % 32)))) {
+      values[i] = std::numeric_limits<float>::lowest();
+    }
+  }
+}
+
+bool DelimitedGuidanceLogitsProcessor::AllowsOnlyTokens(
+    size_t index, std::span<const int> tokens) {
+  if (!active_ || index != 0) {
+    return false;
+  }
+  const auto mask = GetReadyMask();
+  bool any = false;
+  for (size_t i = 0; i < vocab_size_; ++i) {
+    if (!(mask[i / 32] & (uint32_t{1} << (i % 32)))) {
+      continue;
+    }
+    if (std::find(tokens.begin(), tokens.end(), static_cast<int>(i)) == tokens.end()) {
+      return false;
+    }
+    any = true;
+  }
+  return any;
+}
+
+void DelimitedGuidanceLogitsProcessor::Reset() {
+  active_ = false;
+  mask_.clear();
+  body_->Reset();
+}
+
+std::unique_ptr<ConstrainedLogitsProcessor> DelimitedGuidanceLogitsProcessor::Clone() const {
+  auto result = std::make_unique<DelimitedGuidanceLogitsProcessor>(
+      body_->Clone(), *device_, vocab_size_, eos_tokens_, opening_token_, closing_token_);
+  result->active_ = active_;
+  return result;
+}
+
+#if USE_GUIDANCE
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     : GuidanceLogitsProcessor(state.model_, *state.params_) {}
 
@@ -716,6 +850,9 @@ void ScheduleGuidanceMaskComputation(
   candidates.reserve(processors.size());
   for (auto* processor : processors) {
     auto* guidance = dynamic_cast<GuidanceLogitsProcessor*>(processor);
+    if (auto* delimited = dynamic_cast<DelimitedGuidanceLogitsProcessor*>(processor)) {
+      guidance = dynamic_cast<GuidanceLogitsProcessor*>(delimited->ActiveBody());
+    }
     if (!guidance || !guidance->mask_dirty_) {
       continue;
     }

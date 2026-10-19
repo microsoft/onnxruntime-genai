@@ -75,7 +75,7 @@ generation, simultaneous and staggered request isolation, stop conditions,
 request removal, and engine reuse. It does **not** measure performance,
 memory, capacity, scaling, or longevity.
 
-See [Engine test selection](../../engine/README.md) for guidance on choosing
+See [Engine test selection](../../cpp/engine/README.md) for guidance on choosing
 between C++ unit tests, synthetic-model tests, and real-model integration
 tests.
 

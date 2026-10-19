@@ -15,6 +15,7 @@
 #include "models/session_options.h"
 #include "models/io/kv_cache.h"
 #include "interface.h"
+#include "session_options.h"  // AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp (teardown ownership gate)
 
 #include <stdexcept>
 
@@ -185,12 +186,41 @@ struct PinnedMemory final : DeviceBuffer {
 struct InterfaceImpl : DeviceInterface {
   DeviceType GetType() const override { return DeviceType::AMDGPU; }
 
+  // Defensively force encoder capture off by default on AMDGPU: captured-graph replay of the
+  // encoder's control-flow graph is unproven on this backend, so err on the safe side rather than
+  // assume it works. Not a confirmed limitation. The decoder's default-on capture is unaffected.
+  bool DisablesEncoderGraphCapture() const override { return true; }
+
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     Ort::api = &api;
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
     // Cache the memory info so tensors wrapping p_device_ carry the allocator's device attributes.
     ort_memory_info_ = &ort_allocator_->GetInfo();
+  }
+
+  // Drop all allocator-derived state so a subsequent InitOrt can re-bind cleanly: nulling
+  // ort_allocator_ satisfies InitOrt's assert(!ort_allocator_), and clearing ort_pinned_allocator_
+  // makes InitDeviceAllocators re-fetch the host-accessible allocator.
+  void ResetOrt() {
+    ort_allocator_ = nullptr;
+    ort_memory_info_ = nullptr;
+    ort_pinned_allocator_ = nullptr;
+    device_id_ = 0;
+  }
+
+  // Forward the caller's provider options to the trivial init session created by
+  // EnsureDeviceOrtInit. That session is used only to construct the device allocator that is then
+  // cached and reused for the model, so it must be configured the same way as the model session.
+  // The init session otherwise starts from an empty option set, which can cause it to build a
+  // different allocator than the one the model actually uses.
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (user_options) {
+      for (const auto& opt : user_options->options) {
+        init_options.options.emplace_back(opt);
+      }
+    }
   }
 
   Ort::Allocator& GetAllocator() override {
@@ -211,9 +241,8 @@ struct InterfaceImpl : DeviceInterface {
     if (user_options)
       ep_devices = ApplyDeviceFiltering(*user_options, ep_devices);
     if (!ep_devices.empty()) {
-      if (const OrtMemoryInfo* mi =
-              Ort::api->EpDevice_MemoryInfo(ep_devices.front(), OrtDeviceMemoryType_DEFAULT))
-        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &device_id_));
+      if (const OrtMemoryInfo* mi = ep_devices.front()->GetMemoryInfo(OrtDeviceMemoryType_DEFAULT))
+        device_id_ = mi->GetDeviceId();
     }
     return device_id_;
   }
@@ -226,12 +255,10 @@ struct InterfaceImpl : DeviceInterface {
       return;
     try {
       for (const OrtEpDevice* ep_device : FindRegisteredEpDevices(kAMDGPUExecutionProviderName)) {
-        const OrtMemoryInfo* mi =
-            Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE);
+        const OrtMemoryInfo* mi = ep_device->GetMemoryInfo(OrtDeviceMemoryType_HOST_ACCESSIBLE);
         if (!mi)
           continue;
-        int host_device_id = 0;
-        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &host_device_id));
+        int host_device_id = mi->GetDeviceId();
         if (host_device_id == device_id) {
           ort_pinned_allocator_ = GetOrtEnv().GetSharedAllocator(*mi);
           break;
@@ -296,6 +323,10 @@ struct PinnedInputsImpl : DeviceInterface {
   Ort::Allocator* GetHostAccessibleAllocator() override { return base_.PinnedAllocator(); }
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override { return base_.GetMemoryInfo(); }
   std::string GetExecutionProviderName() const override { return base_.GetExecutionProviderName(); }
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    base_.ShapeInitSessionProviderOptions(init_options, user_options);
+  }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<PinnedMemory>(size, base_.PinnedAllocator());
@@ -339,10 +370,65 @@ struct PinnedInputsImpl : DeviceInterface {
 static std::unique_ptr<AMDGPU::InterfaceImpl> g_amdgpu_device;
 static std::unique_ptr<AMDGPU::PinnedInputsImpl> g_amdgpu_pinned_inputs;
 
+// Live Models sharing the process-global AMDGPU interface singleton. Several can be alive at once
+// (e.g. a target + draft decoder pair), so the full teardown must run only when the last one goes away.
+//
+// Unsynchronized, mirroring the DML interface (g_dml_device) and its assumption of a serialized Model
+// lifecycle; it shares the same limitation, where overlapping lifetimes (e.g. the C# GC finalizer
+// thread) can race this counter.
+static int g_amdgpu_model_refcount = 0;
+
+void AcquireAMDGPUInterface() {
+  ++g_amdgpu_model_refcount;
+}
+
+bool HasLiveAMDGPUModel() {
+  return g_amdgpu_model_refcount > 0;
+}
+
 DeviceInterface* GetAMDGPUInterface() {
   if (!g_amdgpu_device)
     g_amdgpu_device = std::make_unique<AMDGPU::InterfaceImpl>();
   return g_amdgpu_device.get();
+}
+
+void ResetAMDGPUInterfaceAllocatorState() {
+  // Null the cached allocator pointers in place without destroying the singleton (it is p_device_ for
+  // the model's lifetime). Called per session, in lockstep with the per-session device_allocators_
+  // reset, so the next InitOrt (which asserts !ort_allocator_) and InitDeviceAllocators rebind cleanly.
+  if (g_amdgpu_device)
+    g_amdgpu_device->ResetOrt();
+}
+
+void CloseAMDGPUInterface() {
+  // Release this model's hold; only the last model standing runs the real teardown. Freeing the shared
+  // singleton while another AMDGPU model is alive would dangle its p_device_.
+  if (g_amdgpu_model_refcount > 0)
+    --g_amdgpu_model_refcount;
+  if (g_amdgpu_model_refcount > 0)
+    return;
+
+  // Full per-model teardown, mirroring the DML path's CloseDmlInterface(). The plugin caches a
+  // process-global device + OrtEnv-shared allocators; leaving them alive after a GPU hang lets the
+  // next model dereference a stale handle on a dead device.
+
+  // Step 1: drop genai's references to the device allocator + init session.
+  auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::AMDGPU)];
+  allocator.allocator_.reset();
+  allocator.session_.reset();
+  allocator.host_accessible_allocator_ = nullptr;
+  allocator.device_id_ = 0;
+
+  // Step 2: destroy the interface singletons.
+  g_amdgpu_pinned_inputs.reset();
+  g_amdgpu_device.reset();
+
+  // Step 3: release the OrtEnv-shared allocators and unregister the EP library, but only when genai
+  // owns the registration (a host that pre-registered it keeps both). Both live behind one ownership
+  // gate in ReleaseOwnedUmbrellaEp. Steps 1-2 are unconditional — they reset genai's own state.
+  // Live context here (called from ~Model, not shutdown), so resolving env + flag via the global
+  // accessors is safe.
+  AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp(GetOrtEnv(), GetOrtGlobals()->amdgpu_owns_ep_registration_);
 }
 
 namespace AMDGPU {

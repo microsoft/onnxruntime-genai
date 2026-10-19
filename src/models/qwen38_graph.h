@@ -196,29 +196,29 @@ struct Qwen38GraphEngine {
   void Release() { leased_.store(false); }
 
   // --- prompt ingestion (pluggable: the single entry point a faster prefill replaces) ---
-  void Reset();                                          // zero all state, length 0
+  void Reset();  // zero all state, length 0
   // Ingests prompt tokens by S=2 graph steps (odd tail commits one row). Contract for a replacement (faster) prefill, per
   // chunk: advance the committed recurrent bank (cur_), the in-place KV/index/position store and the PLE context
   // (ctx_commit_) to length_ + n; append the prompt tokens to d_tokens_ / prompt_tokens_; if keep_hidden_, write the target
   // hidden row of every token to d_prompt_hidden_ (the head is prefilled from it); leave the hidden row of the last token in
   // d_last_hidden_, its argmax in PendingToken() and its logits row reachable through LastLogits().
   void PrefillChunk(std::span<const int32_t> tokens);
-  void LastLogits(std::span<float> out) const;           // fp32 copy of the logits row of the last prompt token
+  void LastLogits(std::span<float> out) const;  // fp32 copy of the logits row of the last prompt token
   size_t Length() const { return length_; }
   int32_t PendingToken() const { return pending_; }
   bool DecodeStarted() const { return decode_started_; }
   bool Fold() const { return fold_; }
   bool FastPrefill() const { return fast_ != nullptr; }
-  void CheckErrorBits();                                 // fold: device error bits of the whole decode (ctl[5])
+  void CheckErrorBits();  // fold: device error bits of the whole decode (ctl[5])
 
   // --- decode ---
   bool mtp_enabled() const { return mtp_enabled_; }
   // Prepares the loop after the prompt (head prefill, first draft) and enqueues the first cycle unless `run_cycles` is false.
   void BeginDecode(bool run_cycles);
-  Qwen38CycleResult WaitCycle();                         // spin on the pinned record of the cycle in flight
+  Qwen38CycleResult WaitCycle();  // spin on the pinned record of the cycle in flight
   // Commits the cycle on the host and, if `want_more`, enqueues head + next cycle (look-ahead).
   void Advance(const Qwen38CycleResult& result, bool want_more);
-  void Drain();                                          // wait for all enqueued work
+  void Drain();  // wait for all enqueued work
   bool CycleInFlight() const { return inflight_; }
   int Capacity() const { return capacity_; }
   const Qwen38GraphStats& Stats() const { return stats_; }
@@ -318,13 +318,13 @@ struct Qwen38GraphEngine {
 
   // target state
   std::map<std::string, std::unique_ptr<DevTensor>> store_;   // in-place KV / positions
-  std::map<std::string, std::unique_ptr<DevTensor>> shared_;   // index_key buffers
-  Bank banks_[kBanks + 1];                                     // last = scratch sink for S=1 present_mid
+  std::map<std::string, std::unique_ptr<DevTensor>> shared_;  // index_key buffers
+  Bank banks_[kBanks + 1];                                    // last = scratch sink for S=1 present_mid
   RowInputs inputs_[2];
-  Direction dirs_[2][kBanks];                                  // [rows-1][phase]
+  Direction dirs_[2][kBanks];  // [rows-1][phase]
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
   std::vector<std::unique_ptr<DevTensor>> head_views_;
-  std::deque<PlaneBuffer> owned_;                              // individually allocated tensors
+  std::deque<PlaneBuffer> owned_;  // individually allocated tensors
   const Direction* inflight_dir_{};
 
   // control block / plane buffers

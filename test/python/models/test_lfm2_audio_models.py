@@ -597,27 +597,17 @@ def test_lfm2_audio_requires_audio_token_id_inside_the_vocabulary(test_data_path
         og.Model(os.fspath(model_path)).create_multimodal_processor()
 
 
-@pytest.mark.skipif(not og.is_cuda_available(), reason="needs a CUDA decoder next to the CPU sub-models")
-def test_lfm2_audio_rejects_cpu_sub_models_next_to_a_cuda_decoder(test_data_path, tmp_path):
-    # The fixture's speech and embedding entries have session_options of their own, as a CPU export
-    # writes them, so only the decoder moves to CUDA: the embedding session would be handed its inputs
-    # in CUDA memory and write host bytes over them.
-    config = og.Config(os.fspath(_copy_model(test_data_path, tmp_path)))
-    config.clear_providers()
-    config.append_provider("cuda")
-    with pytest.raises(RuntimeError, match="embedding.session_options run the embedding model on CPU"):
-        og.Model(config)
-
-
 def _run_prompt(model, prompt, audios, num_tokens):
+    """The generated sequence, and the embeddings the decoder was given for the prompt."""
     inputs = model.create_multimodal_processor()(prompt, audios=audios)
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=inputs["input_ids"].as_numpy().shape[1] + num_tokens)
     generator = og.Generator(model, params)
     generator.set_inputs(inputs)
+    prompt_embeds = generator.get_output("inputs_embeds")
     while not generator.is_done():
         generator.generate_next_token()
-    return generator.get_sequence(0)
+    return generator.get_sequence(0), prompt_embeds
 
 
 def _model_on(model_path, provider):
@@ -627,38 +617,50 @@ def _model_on(model_path, provider):
     return og.Model(config)
 
 
-@pytest.mark.skipif(not og.is_cuda_available(), reason="needs a CUDA decoder next to a CPU encoder")
-def test_lfm2_audio_refuses_audio_for_a_cpu_encoder_next_to_a_cuda_decoder(test_data_path, tmp_path):
-    # With the embedding following the decoder only the encoder is left on CPU. Text-only prompts never
-    # run it; a prompt with audio is refused before it writes its features into CUDA memory.
+def _skip_unless_available(provider):
+    if provider == "cuda" and not og.is_cuda_available():
+        pytest.skip("CUDA is not available in this build")
+    if provider == "webgpu" and not is_webgpu_ep_available():
+        pytest.skip("needs the WebGPU plug-in EP")
+
+
+def _follow_decoder(model_path, graphs):
+    """Drops the named entries' session_options, so that those graphs run on the decoder's provider."""
+
+    def edit(config):
+        for graph in graphs:
+            config["model"][graph].pop("session_options")
+
+    _edit_json(model_path / "genai_config.json", edit)
+
+
+@pytest.mark.parametrize("provider", ["cuda", "webgpu"])
+@pytest.mark.parametrize(
+    "follows_decoder", [(), ("embedding",), ("speech",)], ids=["cpu-sub-models", "cpu-encoder", "cpu-embedding"]
+)
+@pytest.mark.parametrize("num_clips", [0, 1, 2], ids=["text", "one-clip", "two-clips"])
+def test_lfm2_audio_decoder_on_another_provider_matches_cpu(
+    test_data_path, tmp_path, provider, follows_decoder, num_clips
+):
+    # append_provider moves only the decoder: the fixture's speech and embedding entries have
+    # session_options of their own, as a CPU export writes them, so each stays on CPU unless
+    # follows_decoder drops them. Two clips run the encoder once per clip. The fixture decoder's
+    # tokens depend on the last clip alone, so the prompt's embeddings are compared as well.
+    _skip_unless_available(provider)
     model_path = _copy_model(test_data_path, tmp_path)
-    _edit_json(model_path / "genai_config.json", lambda config: config["model"]["embedding"].pop("session_options"))
-    model = _model_on(model_path, "cuda")
+    _follow_decoder(model_path, follows_decoder)
+    clips = [
+        _write_wav(tmp_path / f"clip{i}.wav", _synthetic_signal(0.4 + 0.2 * i, seed=72 + i)) for i in range(num_clips)
+    ]
+    prompt = "<|startoftext|>Transcribe. " + AUDIO_MARKER * num_clips
 
-    prompt = "<|startoftext|>Transcribe. "
-    assert len(_run_prompt(model, prompt, None, 4)) > 0
-    clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5, seed=72))
-    with pytest.raises(
-        RuntimeError,
-        match="speech.session_options run the speech model on CPU, but the audio features are passed in CUDA memory",
-    ):
-        _run_prompt(model, prompt + AUDIO_MARKER, og.Audios.open(clip), 4)
+    def run(model):
+        return _run_prompt(model, prompt, og.Audios.open(*clips) if clips else None, 8)
 
-
-@pytest.mark.skipif(not is_webgpu_ep_available(), reason="needs the WebGPU plug-in EP")
-def test_lfm2_audio_keeps_text_prompts_on_webgpu_with_cpu_sub_models(test_data_path, tmp_path):
-    # WebGPU without graph capture keeps the decoder's inputs on the host, so a CPU export's config still
-    # runs text-only prompts. Only a prompt with audio, whose features are in WebGPU memory, is refused.
-    model = _model_on(_copy_model(test_data_path, tmp_path), "webgpu")
-
-    prompt = "<|startoftext|>Transcribe. "
-    assert len(_run_prompt(model, prompt, None, 4)) > 0
-    clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5, seed=73))
-    with pytest.raises(
-        RuntimeError,
-        match="speech.session_options run the speech model on CPU, but the audio features are passed in WebGPU memory",
-    ):
-        _run_prompt(model, prompt + AUDIO_MARKER, og.Audios.open(clip), 4)
+    sequence, embeds = run(_model_on(model_path, provider))
+    expected_sequence, expected_embeds = run(og.Model(os.fspath(model_path)))
+    np.testing.assert_allclose(embeds, expected_embeds, rtol=0, atol=1e-4)
+    np.testing.assert_array_equal(sequence, expected_sequence)
 
 
 def _generate(model_path: str, prompt: str, audios, num_tokens: int, chunk_size: int | None = None):
@@ -873,8 +875,8 @@ def _speech_model(test_data_path, tmp_path, **audio_output) -> Path:
     return model_path
 
 
-def _generate_speech(model_path, prompt, audios, num_items, **search):
-    model = og.Model(os.fspath(model_path))
+def _generate_speech(model_path, prompt, audios, num_items, provider=None, **search):
+    model = _model_on(model_path, provider) if provider else og.Model(os.fspath(model_path))
     inputs = model.create_multimodal_processor()(prompt, audios=audios)
     prompt_length = inputs["input_ids"].as_numpy().shape[1]
     params = og.GeneratorParams(model)
@@ -1003,6 +1005,35 @@ def test_lfm2_audio_interleaved_speech_matches_reference(test_data_path, tmp_pat
     assert sequence == expected_sequence
     np.testing.assert_array_equal(codes, expected_codes)
     assert codes.shape == (layout.count("A"), NUM_CODEBOOKS)
+
+
+@pytest.mark.parametrize("provider", ["cuda", "webgpu"])
+@pytest.mark.parametrize("num_clips", [0, 1], ids=["typed", "spoken"])
+def test_lfm2_audio_speech_output_with_the_decoder_on_another_provider_matches_cpu(
+    test_data_path, tmp_path, provider, num_clips
+):
+    # Everything but the decoder stays on CPU, as WebGPU needs for the depthformer (onnxruntime#32716):
+    # text steps go through the CPU embedding, audio frames straight into the decoder's inputs_embeds.
+    _skip_unless_available(provider)
+    on_cpu = {"session_options": {"log_id": "onnxruntime-genai", "provider_options": []}}
+    model_path = _speech_model(
+        test_data_path,
+        tmp_path,
+        depthformer={"filename": "dummy_depthformer.onnx", **on_cpu},
+        embedding={"filename": "dummy_audio_embedding.onnx", **on_cpu},
+    )
+    clips = [_write_wav(tmp_path / "question.wav", _synthetic_signal(0.9, seed=70))] * num_clips
+    prompt = "<|startoftext|>Answer aloud. " + AUDIO_MARKER * num_clips
+
+    def run(on):
+        audios = og.Audios.open(*clips) if clips else None
+        return _generate_speech(model_path, prompt, audios, 45, on, audio_interleaved=True, audio_top_k=1)[1:]
+
+    sequence, codes = run(provider)
+    expected_sequence, expected_codes = run(None)
+    assert AUDIO_TOKEN_ID in sequence, "the run must reach audio frames"
+    assert sequence == expected_sequence
+    np.testing.assert_array_equal(codes, expected_codes)
 
 
 def _text_stream(test_data_path, tmp_path, num_tokens):

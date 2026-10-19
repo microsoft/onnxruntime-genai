@@ -98,6 +98,7 @@ struct EngineDependencies {
   std::shared_ptr<CacheManager> mtp_cache_manager;
   std::unique_ptr<ModelExecutor> mtp_model_executor;
   std::unique_ptr<Dflash2Drafter> dflash2_drafter;
+  bool dflash2_prefix_checkpoints_enabled{};
   // Test-only fault injection for allocation-sensitive durable error construction.
   EngineStepErrorFactory make_step_error{};
 };
@@ -268,6 +269,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   // feeds are captured before Request::CommitStep clears the accepted-draft counts they depend on.
   void PrepareDflash2Feeds(const StepPlan& plan, const std::vector<RequestStepResult>& results);
   void PublishDflash2Drafts(ScheduledRequests& scheduled_requests);
+  void ReleaseConsumedDflash2Checkpoints() noexcept;
   void PublishDflash2DraftResults();
   // Accounts for a recoverable DFlash 2 failure and decides whether the drafter stays enabled.
   void RecordDflash2Failure(std::exception_ptr error, bool contract_error);
@@ -301,9 +303,11 @@ struct Engine : std::enable_shared_from_this<Engine>,
   bool mtp_disabled_{};
   // Present only when model.dflash2 names a block drafter. Owns its own session and paged cache.
   std::unique_ptr<Dflash2Drafter> dflash2_drafter_;
+  bool dflash2_prefix_checkpoints_enabled_{};
   std::vector<Dflash2Drafter::Feed> dflash2_feeds_;
   std::vector<std::vector<int32_t>> dflash2_drafts_;
   std::vector<std::vector<TargetTokenSelection>> dflash2_draft_distributions_;
+  std::vector<Dflash2Lattice> dflash2_lattices_;
   std::vector<size_t> dflash2_draft_widths_;
   std::vector<std::pair<Request*, std::mt19937>> dflash2_rng_checkpoints_;
   size_t dflash2_consecutive_failures_{};

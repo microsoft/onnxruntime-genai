@@ -25,10 +25,24 @@ struct BlockReferenceObserver {
   virtual void OnBlockBecameReclaimable(Block& block, void* cookie) noexcept = 0;
 };
 
-struct BlockIdentity {
+struct LogicalPrefixIdentity {
   uint64_t hash{};
+  std::shared_ptr<const LogicalPrefixIdentity> parent;
+  std::vector<int32_t> tokens;
+};
+
+struct BlockIdentity {
+  // `parent` is the exact physical history whose KV values precede this block. `logical` describes
+  // token history shared by hybrid physical variants. Paged-only blocks store tokens directly.
+  uint64_t hash{};
+  size_t block_id{};
   std::shared_ptr<const BlockIdentity> parent;
   std::vector<int32_t> tokens;
+  std::shared_ptr<const LogicalPrefixIdentity> logical;
+
+  std::span<const int32_t> Tokens() const noexcept {
+    return logical ? std::span<const int32_t>{logical->tokens} : std::span<const int32_t>{tokens};
+  }
 };
 
 /*

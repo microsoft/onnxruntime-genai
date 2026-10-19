@@ -32,6 +32,7 @@ base_module = _load_builder_module("base")
 qwen_module = _load_builder_module("qwen")
 Model = base_module.Model
 Qwen35TextModel = qwen_module.Qwen35TextModel
+Qwen38LinearTextModel = _load_builder_module("qwen3_5").Qwen35TextModel
 Qwen4ExpTextModel = qwen_module.Qwen4ExpTextModel
 
 
@@ -109,9 +110,7 @@ def _write_config(monkeypatch, tmp_path, model):
 
 
 def test_composite_config_resolves_nested_and_tokenizer_special_token_ids(monkeypatch, tmp_path):
-    hf_config = SimpleNamespace(
-        text_config=SimpleNamespace(bos_token_id=None, eos_token_id=248044, pad_token_id=None)
-    )
+    hf_config = SimpleNamespace(text_config=SimpleNamespace(bos_token_id=None, eos_token_id=248044, pad_token_id=None))
     tokenizer = SimpleNamespace(
         bos_token_id=None,
         eos_token="<|im_end|>",
@@ -210,6 +209,27 @@ def test_fpa_intb_session_option_selection(monkeypatch, tmp_path, ep, enabled, p
 
     session_options = config["model"]["decoder"]["session_options"]
     assert ("ep.cuda.fpa_intb_gemm" in session_options) is expected
+
+
+@pytest.mark.parametrize(
+    "ep,prepacked,expected",
+    [
+        ("cuda", 0, False),
+        ("cuda", 1, True),
+        ("cuda", 2, True),
+        ("cpu", 1, False),
+    ],
+)
+def test_prepacked_matmulnbits_disables_bias_fusion(monkeypatch, tmp_path, ep, prepacked, expected):
+    model = _make_config_model(Model)
+    model.ep = ep
+    model.ep_attrs = {ep: {}}
+    model.matmul_attrs["weights_prepacked"] = prepacked
+
+    config = _write_config(monkeypatch, tmp_path, model)
+
+    session_options = config["model"]["decoder"]["session_options"]
+    assert (session_options.get("optimization.disable_specified_optimizers") == "MatMulNBitsFusion") is expected
 
 
 def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
@@ -714,16 +734,24 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 
 
 @pytest.mark.parametrize(
-    ("state_window", "ep", "message"),
+    ("use_paged_attention", "linear_attn_op", "state_window", "ep", "message"),
     [
-        (0, "webgpu", "CUDA execution provider"),
-        (1, "cuda", "require state_window=0"),
+        (True, "linear_attention", 0, "cpu", "CUDA or WebGPU execution provider"),
+        (False, "gated_delta_net", 0, "cpu", "CUDA or WebGPU execution provider"),
+        (True, "linear_attention", 1, "cuda", "require state_window=0"),
+        (False, "gated_delta_net", 1, "cuda", "require state_window=0"),
     ],
 )
-def test_qwen35_gated_delta_net_validation(state_window, ep, message):
+def test_qwen35_gated_delta_net_validation(use_paged_attention, linear_attn_op, state_window, ep, message):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     with pytest.raises(ValueError, match=message):
-        model.validate_gated_delta_net_options(state_window, ep)
+        model.validate_gated_delta_net_options(use_paged_attention, linear_attn_op, state_window, ep)
+
+
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_qwen35_gated_delta_net_supported_providers(ep):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.validate_gated_delta_net_options(True, "linear_attention", 0, ep)
 
 
 def _packed_gated_delta_net_model(
@@ -731,7 +759,7 @@ def _packed_gated_delta_net_model(
     layer_types=("linear_attention", "full_attention"),
     io_dtype=base_module.ir.DataType.FLOAT16,
 ):
-    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model = Qwen38LinearTextModel.__new__(Qwen38LinearTextModel)
     model.use_paged_attention = True
     model.ep = "cuda"
     model.context_length_attrs = {"state_window": 0, "state_update_capacity": capacity}
@@ -824,7 +852,8 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
 
 
 def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
-    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model = Qwen38LinearTextModel.__new__(Qwen38LinearTextModel)
+    model.context_length_attrs = {"state_update_capacity": 0}
     model.use_paged_attention = False
     model.io_dtype = base_module.ir.DataType.FLOAT16
     model.linear_key_dim = 8

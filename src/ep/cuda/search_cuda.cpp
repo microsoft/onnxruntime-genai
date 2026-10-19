@@ -6,9 +6,11 @@
 #include "search.h"
 #include "search_cuda.h"
 #include "cuda_common.h"
+#include "kernels.h"
 #include "beam_search_scorer_cuda.cuh"
 #include "beam_search_scorer_cuda.h"
 #include "beam_search_topk.h"
+#include <algorithm>
 #include <queue>
 #include <random>
 
@@ -76,7 +78,7 @@ BeamSearch_Cuda::~BeamSearch_Cuda() = default;
 void Search_Cuda::ResetDone() {
   *done_cpu_ = false;
   done_pending_ = false;
-  CUDA_CHECK(cudaMemsetAsync(eos_seen_.data(), 0, eos_seen_.size_bytes(), GetStream()));
+  cuda::LaunchZeroBytes(eos_seen_.data(), eos_seen_.size_bytes(), GetStream());
 }
 
 DeviceSpan<float> Search_Cuda::GetLogits() const {
@@ -94,22 +96,22 @@ void Search_Cuda::SaveStateForTransactionImpl(bool checkpoint_local_state) {
   if (checkpoint_local_state) {
     if (!transaction_sequence_lengths_)
       transaction_sequence_lengths_ = CudaMallocArray<int32_t>(sequence_lengths_.size());
-    CUDA_CHECK(cudaMemcpyAsync(transaction_sequence_lengths_.get(), sequence_lengths_.Span().data(),
-                               sequence_lengths_.size() * sizeof(int32_t), cudaMemcpyDeviceToDevice, GetStream()));
+    cuda::LaunchCopyBytes(transaction_sequence_lengths_.get(), sequence_lengths_.Span().data(),
+                          sequence_lengths_.size() * sizeof(int32_t), GetStream());
   }
   transaction_saved_sequence_lengths_ = checkpoint_local_state;
-  CUDA_CHECK(cudaMemcpyAsync(transaction_eos_seen_.get(), eos_seen_.data(),
-                             eos_seen_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
+  cuda::LaunchCopyBytes(transaction_eos_seen_.get(), eos_seen_.data(),
+                        eos_seen_.size_bytes(), GetStream());
   transaction_done_ = *done_cpu_;
 }
 
 void Search_Cuda::RestoreStateForTransactionImpl() {
   if (transaction_saved_sequence_lengths_) {
-    CUDA_CHECK(cudaMemcpyAsync(sequence_lengths_.Span().data(), transaction_sequence_lengths_.get(),
-                               sequence_lengths_.size() * sizeof(int32_t), cudaMemcpyDeviceToDevice, GetStream()));
+    cuda::LaunchCopyBytes(sequence_lengths_.Span().data(), transaction_sequence_lengths_.get(),
+                          sequence_lengths_.size() * sizeof(int32_t), GetStream());
   }
-  CUDA_CHECK(cudaMemcpyAsync(eos_seen_.data(), transaction_eos_seen_.get(),
-                             eos_seen_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
+  cuda::LaunchCopyBytes(eos_seen_.data(), transaction_eos_seen_.get(),
+                        eos_seen_.size_bytes(), GetStream());
   transaction_saved_sequence_lengths_ = false;
 }
 
@@ -131,10 +133,10 @@ void GreedySearch_Cuda::SaveStateForTransactionImpl(bool checkpoint_local_state)
     if (!transaction_curand_states_)
       transaction_curand_states_ = CudaMallocArray<curandState>(params_->search.batch_size);
 
-    CUDA_CHECK(cudaMemcpyAsync(transaction_next_tokens_.get(), next_tokens_.data(),
-                               next_tokens_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
-    CUDA_CHECK(cudaMemcpyAsync(transaction_curand_states_.get(), sampling_data_->curand_states,
-                               params_->search.batch_size * sizeof(curandState), cudaMemcpyDeviceToDevice, GetStream()));
+    cuda::LaunchCopyBytes(transaction_next_tokens_.get(), next_tokens_.data(),
+                          next_tokens_.size_bytes(), GetStream());
+    cuda::LaunchCopyBytes(transaction_curand_states_.get(), sampling_data_->curand_states,
+                          params_->search.batch_size * sizeof(curandState), GetStream());
   }
   transaction_saved_sampling_state_ = checkpoint_local_state;
 }
@@ -142,10 +144,10 @@ void GreedySearch_Cuda::SaveStateForTransactionImpl(bool checkpoint_local_state)
 void GreedySearch_Cuda::RestoreStateForTransactionImpl() {
   Search_Cuda::RestoreStateForTransactionImpl();
   if (transaction_saved_sampling_state_) {
-    CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), transaction_next_tokens_.get(),
-                               next_tokens_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
-    CUDA_CHECK(cudaMemcpyAsync(sampling_data_->curand_states, transaction_curand_states_.get(),
-                               params_->search.batch_size * sizeof(curandState), cudaMemcpyDeviceToDevice, GetStream()));
+    cuda::LaunchCopyBytes(next_tokens_.data(), transaction_next_tokens_.get(),
+                          next_tokens_.size_bytes(), GetStream());
+    cuda::LaunchCopyBytes(sampling_data_->curand_states, transaction_curand_states_.get(),
+                          params_->search.batch_size * sizeof(curandState), GetStream());
   }
   transaction_saved_sampling_state_ = false;
 }
@@ -325,7 +327,24 @@ void GreedySearch_Cuda::MarkDoneAtMaxLength() {
 void GreedySearch_Cuda::CommitToken(int32_t token) {
   // The caller already selected this generated token, so skip sampling but retain generated-token
   // EOS, padding, and max-length behavior. Speculative decoding only calls this with batch_size 1.
-  CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), &token, sizeof(int32_t), cudaMemcpyHostToDevice, GetStream()));
+  const auto& eos_token_ids = params_->config.model.eos_token_id;
+  if (params_->BatchBeamSize() == 1 && !completion_pending_ && !IsDone() &&
+      std::find(eos_token_ids.begin(), eos_token_ids.end(), token) == eos_token_ids.end()) {
+    // The host already knows the outcome of CheckForEOSAndPad for a live sequence and a non-EOS
+    // token: nothing is padded and nothing finishes. Committing through two small stores that carry
+    // the token as a kernel argument (so `token` can go out of scope) avoids a device round trip per
+    // accepted draft token.
+    cuda::LaunchStoreBytes(next_tokens_.data(), &token, sizeof(int32_t), GetStream());
+    if (sequences_.GetSequenceLength() < sequences_.max_length_) {
+      int32_t* destination = sequences_.GetSequences().Span().data() + sequences_.GetSequenceLength();
+      cuda::LaunchStoreBytes(destination, &token, sizeof(int32_t), GetStream());
+    }
+    next_tokens_buffer_.CpuSpan()[0] = token;
+    sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
+    MarkDoneAtMaxLength();
+    return;
+  }
+  cuda::LaunchStoreBytes(next_tokens_.data(), &token, sizeof(int32_t), GetStream());
   external_host_copy_ = false;
   LaunchNextTokensTail();
   CompleteGeneration();
@@ -399,7 +418,7 @@ void GreedySearch_Cuda::RewindTo(size_t index) {
   if (index > 0)
     cuda::Launch_GetLastTokens(next_tokens_.data(), sequences_.GetSequences().Span().data(), static_cast<int>(params_->BatchBeamSize()), static_cast<int>(index + 1), sequences_.max_length_, GetStream());
   else
-    CUDA_CHECK(cudaMemsetAsync(next_tokens_.data(), 0, params_->search.batch_size * sizeof(int32_t), GetStream()));
+    cuda::LaunchZeroBytes(next_tokens_.data(), params_->search.batch_size * sizeof(int32_t), GetStream());
   sequences_.RewindTo(index);
 }
 

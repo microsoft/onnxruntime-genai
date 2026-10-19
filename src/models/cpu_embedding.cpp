@@ -3,6 +3,10 @@
 #include "generator/generators.h"
 #include "cpu_embedding.h"
 
+#include <algorithm>
+#include <array>
+#include <numeric>
+
 namespace Generators {
 
 CpuEmbedding::CpuEmbedding(Model& model, OrtEnv& env) : config_{model.config_->model.embedding} {
@@ -40,6 +44,39 @@ CpuEmbedding::CpuEmbedding(Model& model, OrtEnv& env) : config_{model.config_->m
       run_options_->AddConfigEntry(key.c_str(), value.c_str());
     }
   }
+  if (config_.prefault) Prefault(model.config_->model.vocab_size);
+}
+
+void CpuEmbedding::Prefault(int vocab_size) const {
+  // ORT maps a CPU initializer stored as external data straight from its file, so the first lookup
+  // of each token row takes page faults: hundreds of microseconds per decode step for a large
+  // vocabulary. Looking every row up once at load leaves decode reading resident memory only.
+  if (vocab_size <= 0) return;
+  constexpr int64_t kChunk = 1024;
+  std::vector<int64_t> ids(static_cast<size_t>(kChunk));
+  std::vector<uint8_t> output(static_cast<size_t>(kChunk * hidden_size_) * Ort::SizeOf(type_));
+  const auto& cpu_memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
+  const char* input_name = config_.inputs.input_ids.c_str();
+  const char* output_name = config_.outputs.embeddings.c_str();
+  try {
+    for (int64_t begin = 0; begin < vocab_size; begin += kChunk) {
+      const int64_t count = std::min<int64_t>(kChunk, vocab_size - begin);
+      std::iota(ids.begin(), ids.begin() + count, begin);
+      const std::array<int64_t, 1> id_shape{count};
+      const std::array<int64_t, 2> shape{count, hidden_size_};
+      auto input = OrtValue::CreateTensor(cpu_memory, ids.data(), static_cast<size_t>(count) * sizeof(int64_t),
+                                          id_shape, Ort::TypeToTensorType<int64_t>);
+      auto result = OrtValue::CreateTensor(cpu_memory, output.data(),
+                                           static_cast<size_t>(count * hidden_size_) * Ort::SizeOf(type_),
+                                           shape, type_);
+      OrtValue* input_value = input.get();
+      OrtValue* output_value = result.get();
+      session_->Run(run_options_.get(), &input_name, &input_value, 1, &output_name, &output_value, 1);
+    }
+  } catch (const std::exception& e) {
+    // Only a warm-up: a table smaller than the configured vocabulary just stops it early.
+    if (g_log.enabled && g_log.warning) Log("warning") << "CPU embedding prefault stopped early: " << e.what() << std::endl;
+  }
 }
 
 void CpuEmbedding::ValidateConsumer(const SessionInfo& info, const std::string& name) const {
@@ -65,8 +102,19 @@ void CpuEmbedding::Workspace::Wait() {
 }
 
 DeviceSpan<uint8_t> CpuEmbedding::Workspace::Prepare(Tensor& output) {
-  Wait();
   const size_t bytes = output.GetByteSpan().size();
+  if (output.p_device_->RecyclesHostMirrorsAfterUpload(bytes)) {
+    // Dropping the previous mirror hands it back to a pool that reuses it only once its upload has
+    // completed, so taking a fresh one never waits for the device. Reusing one mirror instead has to
+    // drain the whole stream, including any work queued after that upload.
+    pending_ = false;
+    buffer_ = output.p_device_->WrapMemoryBase(output.GetMutableRawData(), bytes);
+    buffer_->AllocateCpu();
+    capacity_ = 0;  // Never reused: the next lookup takes a fresh mirror again.
+    device_ = output.p_device_;
+    return DeviceSpan<uint8_t>{std::shared_ptr<DeviceBuffer>{buffer_}};
+  }
+  Wait();
   if (device_ != output.p_device_ || capacity_ < bytes || !buffer_ ||
       device_->GetType() != DeviceType::CUDA) {
     auto replacement = output.p_device_->WrapMemoryBase(output.GetMutableRawData(), bytes);

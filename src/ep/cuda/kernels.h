@@ -65,7 +65,34 @@ void LaunchFinalizeCrossQK(cudaStream_t stream,
 // by `descs` (device memory, {base, slot_bytes} pairs). One launch replaces `count` memcpys.
 void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_slot, cudaStream_t stream);
 
-void LaunchReplayStateUpdates(const void* descs, int count, cudaStream_t stream);
+// Replays compact state updates for `fast_count + generic_count` descriptors in `descs` (device
+// memory). The first `fast_count` are gated-delta-net descriptors eligible for the fast kernel (see
+// kMaxFastReplayTransitions and kMaxFastReplayKeyWidth; 16-byte aligned states and a key width
+// divisible by 4), launched with `fast_blocks_per_descriptor` blocks each (the largest
+// ReplayGatedDeltaNetBlocks over them). The rest take the generic kernel.
+constexpr int kMaxFastReplayTransitions = 8;
+constexpr int kMaxFastReplayKeyWidth = 256;
+void LaunchReplayStateUpdates(const void* descs, int fast_count, int generic_count,
+                              int fast_blocks_per_descriptor, cudaStream_t stream);
+int ReplayGatedDeltaNetBlocks(int heads, int value_width);
+
+// Small copies as kernels. On WDDM every switch between a copy-engine operation (cudaMemcpyAsync,
+// cudaMemsetAsync) and a kernel on the same stream costs tens of microseconds of device idle time,
+// which dominates the few bytes these moves carry. Keeping them on the compute engine avoids it.
+//
+// Largest host payload LaunchStoreBytes accepts. Kernel parameters are limited to 4 KiB below
+// Volta, and the payload shares that space with the other arguments.
+constexpr size_t kMaxStoreBytes = 4032;
+// Writes `count` bytes read from host memory `source` at launch time to device memory
+// `destination`. `source` may be reused as soon as the call returns.
+void LaunchStoreBytes(void* destination, const void* source, size_t count, cudaStream_t stream);
+// Copies `count` bytes between any two addresses the device can access, including pinned host
+// memory mapped through unified addressing.
+void LaunchCopyBytes(void* destination, const void* source, size_t count, cudaStream_t stream);
+void LaunchZeroBytes(void* destination, size_t count, cudaStream_t stream);
+// destination[i] = source[i * stride] for i < count; either side may be mapped pinned host memory.
+void LaunchGatherStridedInt32(const int32_t* source, int stride, int32_t* destination, int count,
+                              cudaStream_t stream);
 
 }  // namespace cuda
 }  // namespace Generators

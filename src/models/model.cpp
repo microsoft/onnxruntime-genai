@@ -42,6 +42,7 @@
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
+#include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
 #include "ep/openvino/interface.h"
 #include "ep/qnn/interface.h"
@@ -84,9 +85,13 @@ bool IsPathValuedSessionOption(std::string_view key) {
 
 }  // namespace
 
-State::State(const GeneratorParams& params, const Model& model)
+State::State(const GeneratorParams& params, const Model& model, DeviceInterface* session_device)
     : model_{model},
       params_{params.shared_from_this()},
+      p_session_device_{session_device ? session_device : model.p_device_},
+      // p_device_inputs_ was picked for the model's device (e.g. CPU for WebGPU without graph
+      // capture), so only a state on that device may use it.
+      p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
   // Generate a random id for graph capture of the default (1-token) decode shape.
@@ -527,6 +532,11 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
+
+  // Acquire the shared AMDGPU singleton, released in ~Model. Done last, after everything that can
+  // throw: a failed construction never runs ~Model, so acquiring earlier would pin the device forever.
+  if (p_device_->GetType() == DeviceType::AMDGPU)
+    AcquireAMDGPUInterface();
 }
 
 void Model::AddSharedInitializers() {
@@ -586,8 +596,11 @@ void Model::AddSharedInitializers() {
 }
 
 Model::~Model() {
+  // Snapshot the type before teardown: CloseDmlInterface() frees the singleton p_device_ points to,
+  // so reading p_device_->GetType() afterwards would be a use-after-free.
+  const DeviceType device_type = p_device_ ? p_device_->GetType() : DeviceType::CPU;
 #if USE_DML
-  if (p_device_->GetType() == DeviceType::DML) {
+  if (device_type == DeviceType::DML) {
     auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::DML)];
     allocator.session_.reset();
     allocator.allocator_.reset();
@@ -599,13 +612,23 @@ Model::~Model() {
     CloseDmlInterface();
   }
 #endif
+  if (device_type == DeviceType::AMDGPU) {
+    // Drop EP factory references before unregistering the library, and release device-backed
+    // initializers while the AMDGPU allocator is still alive.
+    pipeline_session_options_.clear();
+    session_options_.reset();
+    shared_initializer_entries_.clear();
+    CloseAMDGPUInterface();
+  }
 }
 
-static void AppendSessionProviders(Model& model,
-                                   const Config::SessionOptions& config_session_options,
-                                   OrtSessionOptions& session_options,
-                                   bool is_primary_session_options,
-                                   bool disable_graph_capture = false) {
+// Returns the device the session will run on: CPU when the options name no device-backed provider.
+// Non-primary options get CPU even when they name one, as SetProviderSessionOptions resolves no device for them.
+static DeviceInterface* AppendSessionProviders(Model& model,
+                                               const Config::SessionOptions& config_session_options,
+                                               OrtSessionOptions& session_options,
+                                               bool is_primary_session_options,
+                                               bool disable_graph_capture = false) {
   auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
                                                   config_session_options.provider_options, is_primary_session_options,
                                                   *model.config_, disable_graph_capture);
@@ -616,14 +639,16 @@ static void AppendSessionProviders(Model& model,
     throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
                              to_string(session_device->GetType()) + " and " + to_string(model.p_device_->GetType()));
   }
+
+  return session_device ? session_device : GetDeviceInterface(DeviceType::CPU);
 }
 
-void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
-                                           OrtSessionOptions& session_options,
-                                           bool is_primary_session_options,
-                                           bool disable_graph_capture,
-                                           bool cloned_from_parent,
-                                           bool append_providers) {
+DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
+                                                       OrtSessionOptions& session_options,
+                                                       bool is_primary_session_options,
+                                                       bool disable_graph_capture,
+                                                       bool cloned_from_parent,
+                                                       bool append_providers) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -688,29 +713,22 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     }
   }
 
-  // Register custom ops libraries only if explicitly configured
+  // Register custom ops libraries only if explicitly configured. custom_ops_library comes first, then every entry of
+  // custom_ops_libraries in order. All paths pass the allow-list checks before registration starts; registration then
+  // runs in order, so a later library load failure can still leave earlier libraries registered on session_options.
   std::vector<std::string> custom_ops_libraries;
   if (config_session_options.custom_ops_library.has_value()) {
     custom_ops_libraries.push_back(config_session_options.custom_ops_library.value());
   }
   custom_ops_libraries.insert(custom_ops_libraries.end(), config_session_options.custom_ops_libraries.begin(),
                               config_session_options.custom_ops_libraries.end());
-  for (const std::string& configured_library : custom_ops_libraries) {
+
+  // Build the set of allowed directories once. The resolved library path must fall
+  // within one of these to prevent loading arbitrary libraries from disk.
+  std::vector<std::filesystem::path> allowed_dirs;
+  if (!custom_ops_libraries.empty()) {
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
-
-    std::string custom_library_file_prefix = configured_library;
-
-    std::filesystem::path custom_library_path{custom_library_file_prefix};
-
-    // Reject path traversal components regardless of absolute/relative
-    if (custom_library_file_prefix.find("..") != std::string::npos) {
-      throw std::runtime_error("custom_ops_library must not contain path traversal (..): " + custom_library_file_prefix);
-    }
-
-    // Build the set of allowed directories. The resolved library path must fall
-    // within one of these to prevent loading arbitrary libraries from disk.
-    std::vector<std::filesystem::path> allowed_dirs;
 
     // 1. GenAI model folder
     std::error_code ec;
@@ -747,6 +765,21 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         if (!ec) allowed_dirs.push_back(cwd_canonical);
       }
     }
+  }
+
+  std::vector<fs::path> validated_custom_ops_libraries;
+  std::vector<std::string> registered_library_names;
+  for (const std::string& configured_library : custom_ops_libraries) {
+    std::string custom_library_file_prefix = configured_library;
+
+    std::filesystem::path custom_library_path{custom_library_file_prefix};
+
+    // Reject path traversal components regardless of absolute/relative
+    if (custom_library_file_prefix.find("..") != std::string::npos) {
+      throw std::runtime_error("custom ops library must not contain path traversal (..): " + custom_library_file_prefix);
+    }
+
+    std::error_code ec;
 
     // Resolve the library path. For relative paths, search allowed directories in order.
     // For absolute paths, use as-is and validate against the allowlist.
@@ -769,12 +802,21 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
     }
 
+    // Entries that cannot be resolved are rejected rather than handed to the platform loader, which would search
+    // locations (e.g. LD_LIBRARY_PATH, PATH) that are not part of the allow-list.
+    if (!resolved) {
+      throw std::runtime_error(
+          "custom ops library was not found in any allowed directory (model folder, EP library directories, "
+          "current working directory): " +
+          configured_library);
+    }
+
     // Validate that the resolved path is under one of the allowed directories
-    if (resolved) {
+    {
       std::filesystem::path resolved_canonical =
           std::filesystem::canonical(std::filesystem::path(custom_library_file_prefix), ec);
       if (ec) {
-        throw std::runtime_error("Failed to canonicalize custom_ops_library path: " + custom_library_file_prefix);
+        throw std::runtime_error("Failed to canonicalize custom ops library path: " + custom_library_file_prefix);
       }
       bool in_allowed_dir = false;
       auto resolved_str = resolved_canonical.string();
@@ -791,12 +833,21 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
       if (!in_allowed_dir) {
         throw std::runtime_error(
-            "custom_ops_library path is not within an allowed directory: " + custom_library_file_prefix);
+            "custom ops library path is not within an allowed directory: " + custom_library_file_prefix);
       }
     }
 
-    // Convert to fs::path for proper wide string handling on Windows
+    // Convert to fs::path for proper wide string handling on Windows. A library that was already listed (for
+    // example in both custom_ops_library and custom_ops_libraries) is only registered once.
     fs::path custom_ops_lib_path(custom_library_file_prefix);
+    if (std::find(registered_library_names.begin(), registered_library_names.end(), custom_library_file_prefix) ==
+        registered_library_names.end()) {
+      registered_library_names.push_back(custom_library_file_prefix);
+      validated_custom_ops_libraries.push_back(std::move(custom_ops_lib_path));
+    }
+  }
+  // Path validation is complete; load and register each library in order.
+  for (const fs::path& custom_ops_lib_path : validated_custom_ops_libraries) {
     session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
   }
 
@@ -804,9 +855,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
 
-  if (append_providers) {
-    AppendSessionProviders(*this, config_session_options, session_options, is_primary_session_options, disable_graph_capture);
+  if (!append_providers) {
+    return nullptr;
   }
+
+  return AppendSessionProviders(*this, config_session_options, session_options, is_primary_session_options,
+                                disable_graph_capture);
 }
 
 void Model::CreateSessionOptions() {
@@ -955,9 +1009,12 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
-  // Check if it's a pipeline model by checking if decoder.pipeline is configured
-  if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())
+  if (!config->model.decoder.pipeline.empty() &&
+      (ModelType::IsVLM(config->model.type) || ModelType::IsMMM(config->model.type))) {
+    if (!ModelType::IsPipe(config->model.type))
+      throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
+  }
   if (ModelType::IsLFM2(config->model.type))
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
@@ -978,8 +1035,6 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
-  if (ModelType::IsPipe(config->model.type))
-    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (ModelType::IsMMM(config->model.type)) {
     // Auto-detect speech support: require both the speech ONNX model filename
     // and the preprocessing config to be present. If only one is set, throw
@@ -998,6 +1053,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     }
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
   }
+  if (ModelType::IsPipe(config->model.type))
+    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (config->model.type == "marian-ssru")
     return std::make_shared<MarianModel>(std::move(config), ort_env);
 

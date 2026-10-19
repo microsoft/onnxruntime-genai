@@ -292,10 +292,12 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     std::vector<DeviceSpan<float>>& verify_rows,
     std::vector<std::vector<int32_t>>& selected_tokens,
     std::vector<size_t>& confirmed_draft_counts,
-    std::vector<std::vector<std::mt19937>>& rng_checkpoints) {
+    std::vector<std::vector<std::mt19937>>& rng_checkpoints,
+    std::vector<int32_t>& greedy_tokens) {
   std::vector<DeviceSpan<float>> sampled_rows;
   sampled_rows.reserve(requests_.size());
   selected_tokens.resize(requests_.size());
+  greedy_tokens.assign(requests_.size(), -1);
   confirmed_draft_counts.assign(requests_.size(), 0);
   // Left completely empty (no allocation at all) unless the pre-scan below finds at least one
   // random-sampled drafted request with an active stop controller; only then is it sized once, to
@@ -448,6 +450,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       ++accepted_count;
     }
     requests_[i]->CommitAcceptedDraftsForTransaction(accepted_count);
+    greedy_tokens[i] = row_argmax[row + accepted_count];
     sampled_rows.push_back(verify_rows[row + accepted_count]);
     row += draft_count + 1;
   }
@@ -513,7 +516,7 @@ void ScheduledRequests::ScheduleGuidanceMasks() noexcept {
     std::vector<ConstrainedLogitsProcessor*> processors;
     processors.reserve(requests_.size());
     for (const auto& request : requests_) {
-      if (request->guidance_logits_processor_ &&
+      if (request->HasGuidance() &&
           !request->IsTurnComplete()) {
         processors.push_back(request->guidance_logits_processor_.get());
       }
@@ -647,8 +650,9 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
     if (!status_is_executable ||
         !request->IsChunkComplete())
       continue;
-    if (require_transaction_support && draft_token_counts_[request_index] != 0 &&
-        !request->TurnPolicy().IsGreedy()) {
+    // Drafted requests select every committed token during verification: a sampled request draws
+    // on its host stream, and a greedy request takes the verification argmax.
+    if (require_transaction_support && draft_token_counts_[request_index] != 0) {
       continue;
     }
 
@@ -671,16 +675,35 @@ void ScheduledRequests::BeginTransaction() {
   transaction_uses_batched_sampler_ = PrepareBatchedSamplingPlan(true);
   checkpointed_sampler_states_.clear();
   try {
-    for (const auto& request : requests_) {
+    std::vector<size_t> greedy_drafted_rows;
+    for (size_t i = 0; i < requests_.size(); ++i) {
+      const auto& request = requests_[i];
       const bool uses_batched_sampler =
           transaction_uses_batched_sampler_ &&
           std::find(sampling_plan_->requests.begin(), sampling_plan_->requests.end(),
                     request.get()) != sampling_plan_->requests.end();
-      if (uses_batched_sampler)
+      // A greedy drafted request selects its tokens from the verification argmax and commits them
+      // into a slot this transaction owns (bound below), so like a batched-sampled request its
+      // Search owns no RNG or next-token scratch worth checkpointing.
+      const bool commits_external_tokens =
+          i < draft_token_counts_.size() && draft_token_counts_[i] != 0 &&
+          request->TurnPolicy().IsGreedy() && request->SupportsBatchedSampling();
+      if (uses_batched_sampler || commits_external_tokens)
         request->SaveStateForExternalSamplingTransaction();
       else
         request->SaveStateForTransaction();
       ++transaction_checkpoint_count_;
+      if (commits_external_tokens)
+        greedy_drafted_rows.push_back(i);
+    }
+    // Such a Search may still be bound to a batched-sampler slot from an earlier step, which the
+    // sampler now hands to another request. Give it a private slot before it commits any token.
+    if (!greedy_drafted_rows.empty()) {
+      auto slots = model_->p_device_->Allocate<int32_t>(greedy_drafted_rows.size());
+      for (size_t row = 0; row < greedy_drafted_rows.size(); ++row) {
+        if (!requests_[greedy_drafted_rows[row]]->BindNextTokensSlot(slots.subspan(row, 1)))
+          throw std::logic_error("A greedy drafted request lost batched-search support.");
+      }
     }
     // Drafts join the sequence only after every checkpoint exists, so an abort rewinds them for
     // free through the same restore path as a sampled token.
@@ -752,8 +775,9 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
   std::vector<std::vector<int32_t>> selected_tokens;
   std::vector<size_t> confirmed_draft_counts;
   std::vector<std::vector<std::mt19937>> rng_checkpoints;
+  std::vector<int32_t> greedy_tokens;
   auto logits = SelectSampledRows(verify_rows, selected_tokens, confirmed_draft_counts,
-                                  rng_checkpoints);
+                                  rng_checkpoints, greedy_tokens);
   const bool guidance_applied = TryApplyBatchedGuidanceMasks(logits);
   results.assign(requests_.size(), RequestStepResult{});
   std::vector<bool> sampled_by_batched_sampler(requests_.size(), false);
@@ -919,7 +943,15 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
           requests_[i]->StageDraftCompletionForTransaction();
     } else if (requests_[i]->IsChunkComplete() && selected_tokens[i].empty() &&
                !sampled_by_batched_sampler[i]) {
-      results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i], guidance_applied);
+      if (greedy_tokens[i] >= 0) {
+        // Drafted requests run without logits processors (see Request::DraftTokenValidationError),
+        // so the verification argmax of this row already is the greedy token. Committing it directly
+        // skips a second pass over the vocabulary and its device round trip.
+        requests_[i]->search_->CommitToken(greedy_tokens[i]);
+        results[i] = requests_[i]->StageGenerationForTransaction(plan.requests[i]);
+      } else {
+        results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i], guidance_applied);
+      }
     }
   }
 }

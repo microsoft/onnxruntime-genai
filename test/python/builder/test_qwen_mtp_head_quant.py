@@ -146,12 +146,12 @@ def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):
     assert model.model_type == "qwen4_exp_text"
     assert model.decoder.model_type == "qwen4_exp_text"
     assert isinstance(model.mtp, FakeQwen4ExpComponent)
-    assert model.decoder.extra_options["external_engram"] is False
+    assert model.decoder.extra_options["external_engram"] is True
     assert model.decoder.extra_options["include_hidden_states"] is True
 
 
 def test_qwen4_exp_text_only_dispatches_composite_builder(monkeypatch, tmp_path):
-    from models import builder as builder_module
+    from models import builder as builder_module  # noqa: PLC0415
 
     captured = {}
 
@@ -351,6 +351,19 @@ def test_mtp_quant_config_json_configures_targets_independently():
     quant_config = model.mtp_attrs["extra_options"]["_quant_config"]
     assert quant_config.weights.type == "int4"
     assert quant_config.moe.type == "none"
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "int2"}},
+        {"moe": {"type": "int2"}},
+        {"weights": {"type": "int4", "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int2"}]}},
+    ],
+)
+def test_legacy_mtp_quant_config_rejects_int2(quant_config):
+    with pytest.raises(ValueError, match="MTP quant_config does not support int2"):
+        _resolve({"mtp_quant_config": json.dumps(quant_config)})
 
 
 @pytest.mark.parametrize("shared_embeddings", [False, True])
@@ -865,6 +878,4 @@ def test_qwen4_exp_mtp_state_uses_residual_linear_shared_schema(monkeypatch):
     assert mtp.fc_embedding.weight is mtp_state["mtp.fc_embedding.weight"]
     assert mtp.fc_hidden.weight is mtp_state["mtp.fc_hidden.weight"]
     assert mtp.layers[0].state == {"marker": mtp_state["mtp.layers.0.marker"]}
-    assert mtp.hyper_connection_mixer.state == {
-        "marker": mtp_state["mtp.hyper_connection_mixer.marker"]
-    }
+    assert mtp.hyper_connection_mixer.state == {"marker": mtp_state["mtp.hyper_connection_mixer.marker"]}

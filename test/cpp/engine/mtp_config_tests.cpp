@@ -208,9 +208,11 @@ TEST(MtpDecoderConfigTest, ProjectsOneLayerFixedIndexerStateForTheHead) {
   decoder.outputs.state_update_indexer_names = "state_update.%d.indexer";
   decoder.state_groups = std::vector<Config::Model::Decoder::StateGroup>{
       {Config::Model::Decoder::StateGroupKind::PagedKeyValue,
-       {3, 7}, std::nullopt},
+       {3, 7},
+       std::nullopt},
       {Config::Model::Decoder::StateGroupKind::FixedIndexer,
-       {3, 7}, Config::Model::Decoder::StateUpdate{7, true, 0, 4}}};
+       {3, 7},
+       Config::Model::Decoder::StateUpdate{7, true, 0, 4}}};
 
   auto& mtp = config.model.mtp;
   mtp.filename = "mtp.onnx";

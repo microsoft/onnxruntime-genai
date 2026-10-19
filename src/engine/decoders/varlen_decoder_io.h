@@ -27,9 +27,9 @@ void ValidatePackedPositionIdsInput(
     std::span<const int64_t> shape,
     std::span<const char* const> symbolic_shape = {});
 void ValidatePackedHiddenStatesInputShape(
-  std::span<const int64_t> shape,
-  size_t scheduled_token_rows,
-  std::span<const int64_t> model_shape);
+    std::span<const int64_t> shape,
+    size_t scheduled_token_rows,
+    std::span<const int64_t> model_shape);
 
 AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan);
 // `max_query_len` is the number of new tokens every sequence contributes to steps served by this
@@ -43,7 +43,7 @@ AttentionMetadataValues GetAttentionMetadataForGraphStep(
 std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
     const AttentionMetadataValues& metadata);
 std::array<int32_t, kSparseAttentionMetadataElementCount> PackSparseAttentionMetadata(
-  const AttentionMetadataValues& metadata);
+    const AttentionMetadataValues& metadata);
 
 // Packed token rows whose logits the Engine consumes, ordered exactly as ProcessLogits returns
 // them: every draft-verification row followed by the row that produces each request's next token.

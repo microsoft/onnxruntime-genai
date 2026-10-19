@@ -5,6 +5,7 @@
 
 usage: smoke.py <package dir> [--tokens N] [--prompt TEXT] [--no-mtp] [--provider PATH]
 """
+
 import argparse
 import json
 import os
@@ -53,7 +54,9 @@ def main():
         print(stream.decode(token), end="", flush=True)
     t1 = time.perf_counter()
     print()
-    print(f"prefill+first token {t_first - t0:.3f} s; {count} tokens; decode {(count - 1) / (t1 - t_first):.1f} tokens/s")
+    print(
+        f"prefill+first token {t_first - t0:.3f} s; {count} tokens; decode {(count - 1) / (t1 - t_first):.1f} tokens/s"
+    )
     print("stats:", generator.get_speculative_stats())
 
 

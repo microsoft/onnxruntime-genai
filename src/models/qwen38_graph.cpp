@@ -179,11 +179,16 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::string& table_path
     std::istringstream fields(line);
     std::string key;
     fields >> key;
-    if (key == "n_heads") fields >> params.n_heads;
-    else if (key == "head_dim") fields >> params.head_dim;
-    else if (key == "heads_per_ngram") fields >> params.heads_per_ngram;
-    else if (key == "eos") fields >> params.eos;
-    else if (key == "scale") fields >> params.scale;
+    if (key == "n_heads")
+      fields >> params.n_heads;
+    else if (key == "head_dim")
+      fields >> params.head_dim;
+    else if (key == "heads_per_ngram")
+      fields >> params.heads_per_ngram;
+    else if (key == "eos")
+      fields >> params.eos;
+    else if (key == "scale")
+      fields >> params.scale;
     else if (key == "mult") {
       for (long long& m : params.mult) fields >> m;
     } else if (key == "vocab") {
@@ -303,8 +308,10 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     plane_.Check(plane_.memcpy_h2d(d_arange32_.data(), a32.data(), slots * 4, stream_), "arange32");
     SyncStream();  // host vectors die here
   }
-  if (fold_) BuildHeadR2();
-  else if (mtp_enabled_) BuildHead();
+  if (fold_)
+    BuildHeadR2();
+  else if (mtp_enabled_)
+    BuildHead();
   if (q.prefill.enabled) BuildFastPrefill();
   Reset();
   if (q.warmup) {
@@ -363,7 +370,12 @@ void Qwen38GraphEngine::BuildTarget() {
   const auto in_names = session.GetInputNames();
   const auto out_names = session.GetOutputNames();
 
-  enum class Kind { kStore, kShared, kBank, kRow, kFold, kHeadIn };
+  enum class Kind { kStore,
+                    kShared,
+                    kBank,
+                    kRow,
+                    kFold,
+                    kHeadIn };
   std::map<std::string, Kind> kinds;
   std::vector<std::string> bank_names;
   ple_layer_ = -1;
@@ -377,8 +389,10 @@ void Qwen38GraphEngine::BuildTarget() {
     } else if (StartsWith(name, "past_key_values.")) {
       const size_t dot = name.find('.', 16);
       const std::string suffix = name.substr(dot + 1);
-      if (suffix == "key" || suffix == "value") kinds[name] = Kind::kStore;
-      else if (suffix == "index_key") kinds[name] = Kind::kShared;
+      if (suffix == "key" || suffix == "value")
+        kinds[name] = Kind::kStore;
+      else if (suffix == "index_key")
+        kinds[name] = Kind::kShared;
       else {
         kinds[name] = Kind::kBank;
         bank_names.push_back(name);
@@ -496,10 +510,18 @@ void Qwen38GraphEngine::BuildTarget() {
       for (const auto& name : in_names) {
         DevTensor* t = nullptr;
         switch (kinds[name]) {
-          case Kind::kStore: t = store_[name].get(); break;
-          case Kind::kShared: t = shared_[name].get(); break;
-          case Kind::kBank: t = in_bank.tensors[name].get(); break;
-          case Kind::kFold: t = fold_tensors_.at(name).get(); break;
+          case Kind::kStore:
+            t = store_[name].get();
+            break;
+          case Kind::kShared:
+            t = shared_[name].get();
+            break;
+          case Kind::kBank:
+            t = in_bank.tensors[name].get();
+            break;
+          case Kind::kFold:
+            t = fold_tensors_.at(name).get();
+            break;
           case Kind::kHeadIn: {
             const std::string tail = name.substr(std::string("head.past_key_values.0.").size());
             if (tail == "index_buffer" || tail == "index_lengths")
@@ -533,21 +555,32 @@ void Qwen38GraphEngine::BuildTarget() {
             return head_banks_[bank_index % kBanks].tensors.at("past_key_values.0." + tail).get();
           return head_store_.at("past_key_values.0." + tail).get();
         };
-        if (fold_ && StartsWith(name, "head.present_mid.0.")) t = head_state_for(name.substr(19), k + 1);
-        else if (fold_ && StartsWith(name, "head.present.0.")) t = head_state_for(name.substr(15), k + rows);
+        if (fold_ && StartsWith(name, "head.present_mid.0."))
+          t = head_state_for(name.substr(19), k + 1);
+        else if (fold_ && StartsWith(name, "head.present.0."))
+          t = head_state_for(name.substr(15), k + rows);
         else if (fold_ && name == "head.validation.aggregate")
           t = add_own(name, {2}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-        else if (fold_ && name == "head.next_token") t = add_own(name, {1, 1, 1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-        else if (fold_ && name == "fold.tail_done") t = add_own(name, {1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-        else if (name == "present_position_ids") t = store_["past_position_ids"].get();
-        else if (StartsWith(name, "present_mid.")) t = state_for(name.substr(12), mid_bank);
-        else if (StartsWith(name, "present.")) t = state_for(name.substr(8), out_bank);
-        else if (name == "logits") t = add_own(name, {1, rows, vocab_}, dtype_logits);
-        else if (name == hidden_name) t = add_own(name, {1, rows, hidden_width_}, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+        else if (fold_ && name == "head.next_token")
+          t = add_own(name, {1, 1, 1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+        else if (fold_ && name == "fold.tail_done")
+          t = add_own(name, {1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+        else if (name == "present_position_ids")
+          t = store_["past_position_ids"].get();
+        else if (StartsWith(name, "present_mid."))
+          t = state_for(name.substr(12), mid_bank);
+        else if (StartsWith(name, "present."))
+          t = state_for(name.substr(8), out_bank);
+        else if (name == "logits")
+          t = add_own(name, {1, rows, vocab_}, dtype_logits);
+        else if (name == hidden_name)
+          t = add_own(name, {1, rows, hidden_width_}, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
         else if (name == "validation.aggregate")
           t = add_own(name, {static_cast<int64_t>(status_count_)}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-        else if (name == "next_tokens") t = add_own(name, {1, rows}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-        else throw std::runtime_error("qwen38_graph: unsupported target output " + name);
+        else if (name == "next_tokens")
+          t = add_own(name, {1, rows}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+        else
+          throw std::runtime_error("qwen38_graph: unsupported target output " + name);
         d.binding->BindOutput(name.c_str(), *t->value);
       }
       d.logits = own["logits"]->ptr;
@@ -621,24 +654,36 @@ void Qwen38GraphEngine::BuildHead() {
       HeadBank& bank_out = head_banks_[1 - dir];
       for (const auto& name : in_names) {
         DevTensor* t = nullptr;
-        if (views.count(name)) t = views[name].get();
-        else if (head_store_.count(name)) t = head_store_[name].get();
-        else if (bank_in.tensors.count(name)) t = bank_in.tensors[name].get();
-        else throw std::runtime_error("qwen38_graph: unsupported head input " + name);
+        if (views.count(name))
+          t = views[name].get();
+        else if (head_store_.count(name))
+          t = head_store_[name].get();
+        else if (bank_in.tensors.count(name))
+          t = bank_in.tensors[name].get();
+        else
+          throw std::runtime_error("qwen38_graph: unsupported head input " + name);
         d.binding->BindInput(name.c_str(), *t->value);
       }
       for (const auto& name : out_names) {
         DevTensor* t = nullptr;
         const std::string in_name = "past_key_values." + name.substr(name.find('.') + 1);
-        if (name == "logits") t = logits;
-        else if (name == "hidden_states_out") t = hidden_out;
-        else if (name == "next_token") t = next_token;
-        else if (name == "validation.aggregate") t = status;
-        else if (StartsWith(name, "present_mid.")) t = head_store_.at(in_name).get();
+        if (name == "logits")
+          t = logits;
+        else if (name == "hidden_states_out")
+          t = hidden_out;
+        else if (name == "next_token")
+          t = next_token;
+        else if (name == "validation.aggregate")
+          t = status;
+        else if (StartsWith(name, "present_mid."))
+          t = head_store_.at(in_name).get();
         else if (StartsWith(name, "present.")) {
-          if (head_store_.count(in_name)) t = head_store_[in_name].get();
-          else t = bank_out.tensors.at(in_name).get();
-        } else throw std::runtime_error("qwen38_graph: unsupported head output " + name);
+          if (head_store_.count(in_name))
+            t = head_store_[in_name].get();
+          else
+            t = bank_out.tensors.at(in_name).get();
+        } else
+          throw std::runtime_error("qwen38_graph: unsupported head output " + name);
         d.binding->BindOutput(name.c_str(), *t->value);
       }
       d.run_options = OrtRunOptions::Create();
@@ -755,8 +800,10 @@ void Qwen38GraphEngine::MutedPrefillEnd() {
 }
 
 void Qwen38GraphEngine::PrefillChunk(std::span<const int32_t> tokens) {
-  if (fast_) FastAppend(tokens);
-  else StepPrefill(tokens);
+  if (fast_)
+    FastAppend(tokens);
+  else
+    StepPrefill(tokens);
 }
 
 // Prompt ingestion by S=2 graph steps (the fold graph runs muted).
@@ -896,21 +943,30 @@ void Qwen38GraphEngine::BuildHeadR2() {
     HeadBank& out_bank = head_banks_[(k + 2) % 3];
     for (const auto& name : in_names) {
       DevTensor* t = nullptr;
-      if (h.tensors.count(name)) t = h.tensors[name].get();
-      else if (head_store_.count(name)) t = head_store_[name].get();
-      else if (in_bank.tensors.count(name)) t = in_bank.tensors[name].get();
-      else throw std::runtime_error("qwen38_graph: unsupported head_r2 input " + name);
+      if (h.tensors.count(name))
+        t = h.tensors[name].get();
+      else if (head_store_.count(name))
+        t = head_store_[name].get();
+      else if (in_bank.tensors.count(name))
+        t = in_bank.tensors[name].get();
+      else
+        throw std::runtime_error("qwen38_graph: unsupported head_r2 input " + name);
       d.binding->BindInput(name.c_str(), *t->value);
     }
     for (const auto& name : out_names) {
       DevTensor* t = nullptr;
       const std::string state = "past_key_values." + name.substr(name.find('.') + 1);
-      if (h.tensors.count(name)) t = h.tensors[name].get();
-      else if (StartsWith(name, "present_mid.")) t = mid_bank.tensors.at(state).get();
+      if (h.tensors.count(name))
+        t = h.tensors[name].get();
+      else if (StartsWith(name, "present_mid."))
+        t = mid_bank.tensors.at(state).get();
       else if (StartsWith(name, "present.")) {
-        if (head_store_.count(state)) t = head_store_[state].get();
-        else t = out_bank.tensors.at(state).get();
-      } else throw std::runtime_error("qwen38_graph: unsupported head_r2 output " + name);
+        if (head_store_.count(state))
+          t = head_store_[state].get();
+        else
+          t = out_bank.tensors.at(state).get();
+      } else
+        throw std::runtime_error("qwen38_graph: unsupported head_r2 output " + name);
       d.binding->BindOutput(name.c_str(), *t->value);
     }
     d.run_options = OrtRunOptions::Create();
@@ -1117,8 +1173,10 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleResult& result, bool want_more)
   if (mtp_enabled_) {
     const size_t row_bytes = static_cast<size_t>(hidden_width_) * 2;
     if (result.accepted) {
-      if (skip_refeed_) EnqueueHead(1, last_hidden_ptr_ + row_bytes);
-      else EnqueueHead(2, last_hidden_ptr_);
+      if (skip_refeed_)
+        EnqueueHead(1, last_hidden_ptr_ + row_bytes);
+      else
+        EnqueueHead(2, last_hidden_ptr_);
     } else {
       EnqueueHead(1, last_hidden_ptr_);
     }
@@ -1137,7 +1195,7 @@ void Qwen38GraphEngine::Warmup() {
   const int warm_tokens = 48;
   std::vector<int32_t> dummy(warm_tokens);
   for (int i = 0; i < warm_tokens; ++i) dummy[i] = 1000 + i;
-  StepPrefill(dummy);                       // S=2 target ids (24 steps -> 8 runs per phase); fold: muted cycle graphs
+  StepPrefill(dummy);  // S=2 target ids (24 steps -> 8 runs per phase); fold: muted cycle graphs
   if (fold_) {
     // standalone R=2 head graphs (ids 81-83): one call commits one row, so 18 calls touch every phase 6 times
     ClearHead();
@@ -1169,7 +1227,7 @@ void Qwen38GraphEngine::Warmup() {
     Reset();
     return;
   }
-  for (int i = 0; i < 24; ++i) {            // S=1 target ids
+  for (int i = 0; i < 24; ++i) {  // S=1 target ids
     const int64_t state[2] = {pending_, static_cast<int64_t>(length_)};
     WriteCtl(0, state);
     EnqueueStep();
