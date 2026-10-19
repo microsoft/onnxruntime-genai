@@ -435,6 +435,12 @@ class Qwen38(Qwen38Engram):
         self.make_initializer(attention.q_norm.weight + 1, q_norm_weight, to=self.io_dtype)
         self.make_initializer(attention.k_norm.weight + 1, k_norm_weight, to=self.io_dtype)
         cos_cache, sin_cache = self.make_rotary_embedding_caches()
+        multimodal = getattr(self, "sparse_rotary_attrs", {}).get("multimodal", False)
+        if multimodal:
+            self.make_sparse_mrope_projections(layer_id, attention, cos_cache, sin_cache)
+            indexer_cos, indexer_sin = self.make_indexer_mrope_caches(cos_cache, sin_cache)
+        else:
+            indexer_cos, indexer_sin = self.make_indexer_rope_caches(cos_cache, sin_cache)
         past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
         capacity = self.indexer_budget + self.indexer_compress_ratio - 1
         index_qk_path = self.attention_attrs.pop("indexer_qk_path", None)
@@ -475,8 +481,8 @@ class Qwen38(Qwen38Engram):
                     index_key,
                     index_q_scale,
                     index_k_scale,
-                    cos_cache,
-                    sin_cache,
+                    indexer_cos,
+                    indexer_sin,
                     self.input_names["cumulative_sequence_lengths"],
                     self.input_names["past_sequence_lengths"],
                     "",
@@ -534,8 +540,8 @@ class Qwen38(Qwen38Engram):
                     "",
                     index_q_scale,
                     index_k_scale,
-                    cos_cache,
-                    sin_cache,
+                    indexer_cos,
+                    indexer_sin,
                     "",
                     self.input_names["past.indexer"][layer_id],
                     "",
@@ -550,8 +556,8 @@ class Qwen38(Qwen38Engram):
                     "",
                     index_q_scale,
                     index_k_scale,
-                    cos_cache,
-                    sin_cache,
+                    indexer_cos,
+                    indexer_sin,
                     self.input_names["attention_mask"],
                     self.input_names["past.indexer"][layer_id],
                 ]
@@ -630,24 +636,27 @@ class Qwen38(Qwen38Engram):
                 "",
                 "",
                 "",
-                cos_cache,
-                sin_cache,
+                "" if multimodal else cos_cache,
+                "" if multimodal else sin_cache,
                 "",
-                q_norm_weight,
-                k_norm_weight,
+                "" if multimodal else q_norm_weight,
+                "" if multimodal else k_norm_weight,
                 "",
                 "",
                 self.input_names["attention_metadata"],
             ]
         else:
-            attention_position_ids = f"{name}/position_ids/Gather"
-            self.make_gather(
-                attention_position_ids,
-                [self.input_names["position_ids"], "/model/constants/INT64/0"],
-                ir.DataType.INT64,
-                ["batch_size", "sequence_length"],
-                axis=0,
-            )
+            attention_position_ids = ""
+            if not multimodal:
+                position_name = f"{name}/position_ids/Gather"
+                self.make_gather(
+                    position_name,
+                    [self.input_names["position_ids"], "/model/constants/INT64/0"],
+                    ir.DataType.INT64,
+                    ["batch_size", "sequence_length"],
+                    axis=0,
+                )
+                attention_position_ids = f"{position_name}/output_0"
             inputs = [
                 self.attention_attrs["q_path"],
                 self.attention_attrs["k_path"],
@@ -660,11 +669,11 @@ class Qwen38(Qwen38Engram):
                 selected_counts,
                 f"{self.mask_attrs['seqlens_k']}/output_0",
                 f"{self.mask_attrs['total_seq_len']}/output_0",
-                cos_cache,
-                sin_cache,
-                f"{attention_position_ids}/output_0",
-                q_norm_weight,
-                k_norm_weight,
+                "" if multimodal else cos_cache,
+                "" if multimodal else sin_cache,
+                attention_position_ids,
+                "" if multimodal else q_norm_weight,
+                "" if multimodal else k_norm_weight,
                 "",
             ]
         outputs = [
@@ -679,7 +688,7 @@ class Qwen38(Qwen38Engram):
             is_causal=1,
             attention_mode="selected_only",
             selected_kv_source="main",
-            do_rotary=1,
+            do_rotary=int(not multimodal),
             rotary_interleaved=self.rope_attrs["interleaved"],
             qk_norm_epsilon=self.attention_attrs["qk_norm_epsilon"],
         )
@@ -700,3 +709,96 @@ class Qwen38(Qwen38Engram):
         )
         self.attention_attrs["o_path"] = f"{name}/output_0"
         self.make_attention_output_proj(layer_id, attention, root_input)
+
+    def make_sparse_mrope_projections(self, layer_id, attention, cos_cache, sin_cache):
+        """Normalize and rotate current Q/K using all three coordinate streams."""
+        if not self.attention_attrs["k_path"]:
+            name = f"/model/layers.{layer_id}/attn/sparse_qkv/Split"
+            sizes = [self.q_size, self.kv_size, self.kv_size]
+            outputs = [f"{name}/output_{index}" for index in range(3)]
+            self.make_split(
+                name,
+                [self.attention_attrs["q_path"], f"/model/constants/INT64/{sizes}"],
+                outputs,
+                [self.io_dtype] * 3,
+                [self.make_hidden_state_shape(last_dim=size) for size in sizes],
+                axis=-1,
+            )
+            self.attention_attrs.update(zip(("q_path", "k_path", "v_path"), outputs, strict=True))
+        self.make_qk_norm(layer_id, attention)
+        for path, heads in (("q_path", self.num_attn_heads), ("k_path", self.num_kv_heads)):
+            name = f"/model/layers.{layer_id}/attn/{path}/MRotaryEmbedding"
+            output = f"{name}/output_0"
+            self.make_mrotary_embedding(
+                name,
+                self.attention_attrs[path],
+                output,
+                num_heads=heads,
+                dtype=self.io_dtype,
+                position_ids=self.input_names["position_ids"],
+                cos_cache_name=cos_cache,
+                sin_cache_name=sin_cache,
+            )
+            self.attention_attrs[path] = output
+
+    def make_indexer_rope_caches(self, cos_cache, sin_cache):
+        """QSA uses a full split-half rotary table, unlike attention's half-width cache."""
+        outputs = tuple(f"/model/indexer_rotary/{kind}/Concat/output_0" for kind in ("cos", "sin"))
+        if outputs[0] not in self.values:
+            length, width = self.values[cos_cache].shape
+            if 2 * width > self.indexer_head_dim:
+                raise ValueError("Qwen3.8 indexer head must cover the full rotary dimension.")
+            for kind, cache in (("cos", cos_cache), ("sin", sin_cache)):
+                self.make_concat(
+                    f"/model/indexer_rotary/{kind}/Concat",
+                    [cache, cache],
+                    self.io_dtype,
+                    [length, 2 * width],
+                    axis=-1,
+                )
+        return outputs
+
+    def make_indexer_mrope_caches(self, cos_cache, sin_cache):
+        """Recompose request-specific tables indexed by chronological key position."""
+        basename = "/model/indexer_rotary"
+        outputs = tuple(f"{basename}/{kind}/Concat/output_0" for kind in ("cos", "sin"))
+        if outputs[0] in self.values:
+            return outputs
+        rotary_dim = self.rope_attrs["rotary_embedding_dim"] or self.head_size
+        if rotary_dim > self.indexer_head_dim:
+            raise ValueError("Qwen3.8 indexer head must cover the full rotary dimension.")
+        owners = Standard.get_mrope_owners(self, rotary_dim)
+        shape = ["batch_size", "rotary_sequence_length", rotary_dim // 2]
+        positions = []
+        for dim in range(3):
+            name = f"{basename}/position_{dim}/Gather"
+            self.make_gather(
+                name,
+                [self.input_names["rotary_position_ids"], f"/model/constants/INT64/{dim}"],
+                ir.DataType.INT64,
+                shape[:-1],
+                axis=0,
+            )
+            positions.append(f"{name}/output_0")
+        for kind, cache in (("cos", cos_cache), ("sin", sin_cache)):
+            streams = []
+            for dim, position in enumerate(positions):
+                name = f"{basename}/{kind}/stream_{dim}/Gather"
+                self.make_gather(name, [cache, position], self.io_dtype, shape, axis=0)
+                streams.append(f"{name}/output_0")
+            selected = streams[0]
+            for dim in (1, 2):
+                mask = f"{basename}/mask_{dim}"
+                if mask not in self.values:
+                    self.make_initializer(torch.from_numpy(owners == dim), mask)
+                name = f"{basename}/{kind}/select_{dim}/Where"
+                self.make_where(name, [mask, streams[dim], selected], self.io_dtype, shape)
+                selected = f"{name}/output_0"
+            self.make_concat(
+                f"{basename}/{kind}/Concat",
+                [selected, selected],
+                self.io_dtype,
+                ["batch_size", "rotary_sequence_length", rotary_dim],
+                axis=-1,
+            )
+        return outputs

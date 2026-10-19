@@ -55,6 +55,7 @@ class Qwen4ExpModel(MTPModel):
         self.mtp_attrs["build"] = num_mtp_layers > 0 and not extra_options.get("exclude_mtp", False)
         self.mtp_attrs["shared_initializer_names"] = {"model.embed_tokens.weight"}
         self.mtp_attrs["shared_initializer_prefixes"] = ("lm_head.MatMul.",)
+        self.mtp_attrs["multimodal_rotary"] = not extra_options.get("text_only", False)
         if not self.mtp_attrs["build"]:
             return decoder_options
         if num_mtp_layers != 1:
@@ -108,15 +109,10 @@ class Qwen4ExpModel(MTPModel):
             ep,
             cache_dir,
             mtp_options,
+            multimodal_rotary=self.mtp_attrs.get("multimodal_rotary", False),
         )
 
     def make_model(self, input_path):
-        if not self.text_only:
-            raise ValueError(
-                "Qwen3.8 multimodal decoder export requires historical T/H/W rotary positions "
-                "for the sparse indexer, which the current runtime interface does not supply. "
-                "Use text_only=true for text inputs; image/video decoder export is not supported yet."
-            )
         if self.decoder.quant_type == "fp8" and not os.path.isdir(input_path):
             input_path = snapshot_download(
                 repo_id=self.decoder.model_name_or_path,
@@ -310,6 +306,8 @@ class Qwen4ExpModel(MTPModel):
         }
         if self.mtp.use_paged_attention and self.mtp.prune_lm_head:
             genai_config["model"]["mtp"]["inputs"]["logits_indices"] = "logits_indices"
+        if self.mtp_attrs.get("multimodal_rotary", False):
+            genai_config["model"]["mtp"]["inputs"]["rotary_position_ids"] = "rotary_position_ids"
         self.add_shared_initializers_to_genai_config(genai_config)
         if "index_share" in self.mtp_attrs:
             metadata = self.mtp_attrs["index_share"]

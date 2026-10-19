@@ -657,11 +657,12 @@ def test_incomplete_ple_shards_are_rejected(checkpoint):
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_nvfp4_mtp_unquantized_module_config_and_explicit_override(monkeypatch, explicit):
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_nvfp4_mtp_unquantized_module_config_and_explicit_override(monkeypatch, explicit, multimodal):
     config = QuantConfig.from_dict({"io_dtype": "fp16", "moe": {"type": "nvfp4"}})
     wrapper = object.__new__(Qwen4ExpModel)
     wrapper.decoder = SimpleNamespace(quant_type="modelopt", quant_config=config)
-    wrapper.mtp_attrs = {}
+    wrapper.mtp_attrs = {"multimodal_rotary": multimodal}
     runtime_options = {
         "use_paged_attention": True,
         "paged_block_size": 256,
@@ -676,8 +677,8 @@ def test_nvfp4_mtp_unquantized_module_config_and_explicit_override(monkeypatch, 
         options["mtp_quant_config"] = QuantConfig.from_dict({"io_dtype": "bf16", "moe": {"type": "int8"}})
     captured = {}
 
-    def mtp_builder(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        captured.update(io_dtype=io_dtype, options=extra_options)
+    def mtp_builder(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options, multimodal_rotary=False):
+        captured.update(io_dtype=io_dtype, options=extra_options, multimodal=multimodal_rotary)
         return SimpleNamespace()
 
     monkeypatch.setitem(Qwen4ExpModel.make_mtp_model.__globals__, "Qwen4ExpMTPTextModel", mtp_builder)
@@ -686,6 +687,7 @@ def test_nvfp4_mtp_unquantized_module_config_and_explicit_override(monkeypatch, 
     assert captured["io_dtype"] == (ir.DataType.BFLOAT16 if explicit else ir.DataType.FLOAT16)
     assert all(captured["options"][key] == value for key, value in runtime_options.items())
     assert config.moe.type == "nvfp4"
+    assert captured["multimodal"] is multimodal
 
 
 def test_fp8_blocks_validate_partial_blocks_without_conversion():

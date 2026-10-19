@@ -159,11 +159,115 @@ def test_modelopt_gate_exclusions_are_specific_to_model_family(dense):
         assert gate.exclude_from_quantization is expected
 
 
-def test_multimodal_qwen38_fails_before_emitting_incomplete_rotary_contract():
+def test_multimodal_qwen38_builds_decoder_and_mtp_without_blanket_restriction():
     model = qwen.Qwen4ExpModel.__new__(qwen.Qwen4ExpModel)
     model.text_only = False
-    with pytest.raises(ValueError, match="historical T/H/W rotary positions"):
-        model.make_model("unused")
+    calls = []
+    model.decoder = SimpleNamespace(quant_type=None, make_model=lambda path: calls.append(("decoder", path)))
+    model.mtp = SimpleNamespace(make_model=lambda path: calls.append(("mtp", path)))
+    model.make_model("checkpoint")
+    assert calls == [("decoder", "checkpoint"), ("mtp", "checkpoint")]
+
+
+@pytest.mark.parametrize("paged", [False, True])
+def test_indexer_rotary_caches_preserve_full_thw_history(paged):
+    model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
+    graph_module.Qwen4ExpGraphModel.__init__(model, ir.DataType.FLOAT, "rotary.onnx", "rotary")
+    model.use_paged_attention = paged
+    model.head_size = model.indexer_head_dim = 12
+    model.rope_attrs = {"rotary_embedding_dim": 12, "mrope_section": [2, 2, 2], "mrope_layout": 1}
+    model.input_names = {"rotary_position_ids": "rotary_position_ids"}
+    positions = np.array(
+        [
+            [[0, 1, 1, 1, 2, 3, 4], [0, 0, 1, 2, 2, 3, 4]],
+            [[0, 1, 2, 1, 2, 3, 4], [0, 1, 2, 2, 3, 3, 4]],
+            [[0, 1, 1, 2, 2, 3, 4], [0, 2, 1, 2, 4, 3, 4]],
+        ],
+        dtype=np.int64,
+    )
+    model.graph.inputs.append(model.make_value("rotary_position_ids", ir.DataType.INT64, [3, 2, 7]))
+    inv_freq = 1 / (10000 ** (np.arange(0, 12, 2, dtype=np.float32) / 12))
+    frequencies = np.arange(16, dtype=np.float32)[:, None] * inv_freq
+    for kind, values in (("cos", np.cos(frequencies)), ("sin", np.sin(frequencies))):
+        model.make_initializer(values, kind)
+    outputs = model.make_indexer_mrope_caches("cos", "sin")
+    model.graph.outputs.extend(model.values[name] for name in outputs)
+    node_count = len(model.graph)
+    assert model.make_indexer_mrope_caches("cos", "sin") == outputs
+    assert len(model.graph) == node_count
+    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    actual = session.run(None, {"rotary_position_ids": positions})
+    freqs = positions[..., None] * inv_freq
+    expected_half = freqs[0].copy()
+    expected_half[..., 1::3] = freqs[1, ..., 1::3]
+    expected_half[..., 2::3] = freqs[2, ..., 2::3]
+    expected_full = np.concatenate([expected_half, expected_half], axis=-1)
+    np.testing.assert_allclose(actual[0], np.cos(expected_full), rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(actual[1], np.sin(expected_full), rtol=1e-6, atol=1e-7)
+
+
+def test_text_indexer_uses_full_split_half_rotary_table():
+    model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
+    graph_module.Qwen4ExpGraphModel.__init__(model, ir.DataType.FLOAT, "rotary.onnx", "rotary")
+    model.indexer_head_dim = 12
+    cos = np.arange(18, dtype=np.float32).reshape(3, 6)
+    sin = cos + 20
+    model.make_initializer(cos, "cos")
+    model.make_initializer(sin, "sin")
+    outputs = model.make_indexer_rope_caches("cos", "sin")
+    model.graph.outputs.extend(model.values[name] for name in outputs)
+    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    actual_cos, actual_sin = session.run(None, {})
+    np.testing.assert_array_equal(actual_cos, np.concatenate([cos, cos], axis=-1))
+    np.testing.assert_array_equal(actual_sin, np.concatenate([sin, sin], axis=-1))
+
+
+@pytest.mark.parametrize("paged", [False, True])
+def test_sparse_attention_mrope_keeps_height_and_width(paged):
+    model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
+    graph_module.Qwen4ExpGraphModel.__init__(model, ir.DataType.FLOAT, "mrope.onnx", "mrope")
+    model.use_paged_attention = paged
+    model.hidden_rows_dim = "num_tokens" if paged else "sequence_length"
+    model.head_size, model.num_attn_heads, model.num_kv_heads = 12, 2, 1
+    model.q_size, model.kv_size, model.hidden_size = 24, 12, 24
+    model.layernorm_attrs = {"epsilon": 1e-6, "add_offset": 1, "cast": {"use_fp32": False}}
+    model.rope_attrs = {
+        "rotary_embedding_dim": 12,
+        "mrope_section": [2, 2, 2],
+        "mrope_layout": 1,
+        "interleaved": 0,
+    }
+    model.input_names = {"position_ids": "position_ids"}
+    model.attention_attrs = {"q_path": "q", "k_path": "k", "v_path": "v"}
+    tokens = [3] if paged else [1, 3]
+    for name, size in (("q", 24), ("k", 12)):
+        model.graph.inputs.append(model.make_value(name, ir.DataType.FLOAT, [*tokens, size]))
+    position_shape = [3, 3] if paged else [3, 1, 3]
+    model.graph.inputs.append(model.make_value("position_ids", ir.DataType.INT64, position_shape))
+    positions = np.array([[0, 1, 2], [0, 3, 4], [0, 5, 6]], dtype=np.int64).reshape(position_shape)
+    inv_freq = 1 / (10000 ** (np.arange(0, 12, 2, dtype=np.float32) / 12))
+    frequencies = np.arange(16, dtype=np.float32)[:, None] * inv_freq
+    for kind, values in (("cos", np.cos(frequencies)), ("sin", np.sin(frequencies))):
+        model.make_initializer(values, kind)
+    norm = SimpleNamespace(weight=torch.zeros(12))
+    model.make_sparse_mrope_projections(0, SimpleNamespace(q_norm=norm, k_norm=norm), "cos", "sin")
+    model.graph.outputs.extend(model.values[model.attention_attrs[path]] for path in ("q_path", "k_path"))
+    model.graph.opset_imports["com.microsoft"] = 1
+    model.graph.sort()
+    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    rng = np.random.default_rng(14)
+    query, key = (rng.standard_normal((*tokens, size)).astype(np.float32) for size in (24, 12))
+    actual = session.run(None, {"q": query, "k": key, "position_ids": positions})
+    freqs = positions.reshape(3, 3)[..., None] * inv_freq
+    mixed = freqs[0].copy()
+    mixed[:, 1::3], mixed[:, 2::3] = freqs[1, :, 1::3], freqs[2, :, 2::3]
+    full = np.concatenate([mixed, mixed], axis=-1)
+    for value, heads, result in zip((query, key), (2, 1), actual, strict=True):
+        grouped = value.reshape(3, heads, 12)
+        normalized = grouped / np.sqrt(np.mean(grouped**2, axis=-1, keepdims=True) + 1e-6)
+        rotated = np.concatenate([-normalized[..., 6:], normalized[..., :6]], axis=-1)
+        expected = normalized * np.cos(full)[:, None, :] + rotated * np.sin(full)[:, None, :]
+        np.testing.assert_allclose(result, expected.reshape(value.shape), rtol=2e-6, atol=2e-6)
 
 
 def test_qwen38_qkv_fusion_honors_projection_packability(monkeypatch):

@@ -106,6 +106,7 @@ def make_sparse_model(paged):
     model.make_attention_input_proj = MethodType(make_attention_input_proj, model)
     model.get_qk_norm_weight_names = MethodType(lambda self, layer_id: ("q_norm", "k_norm"), model)
     model.make_rotary_embedding_caches = MethodType(lambda self: ("cos_cache", "sin_cache"), model)
+    model.make_indexer_rope_caches = MethodType(lambda self, cos, sin: (cos, sin), model)
     model.make_key_value_cache_names = MethodType(
         lambda self, layer_id: ("past_key", "past_value", "present_key", "present_value"), model
     )
@@ -968,6 +969,26 @@ def test_gated_rms_norm_emits_configured_activation():
     assert gated_norm[1]["inputs"] == ["hidden_states", "norm_scale", "output_gate"]
     assert gated_norm[1]["epsilon"] == 1e-6
     assert gated_norm[1]["activation"] == "sigmoid"
+
+
+@pytest.mark.parametrize("paged", [False, True])
+def test_multimodal_sparse_attention_uses_history_tables_and_explicit_mrope(paged):
+    model = make_sparse_model(paged)
+    model.sparse_rotary_attrs = {"multimodal": True}
+    model.make_sparse_mrope_projections = MethodType(
+        lambda self, *args: self.attention_attrs.update(q_path="rotated_q", k_path="rotated_k", v_path="v"), model
+    )
+    model.make_indexer_mrope_caches = MethodType(lambda self, *args: ("history_cos", "history_sin"), model)
+    model.make_qwen_sparse_attention(3, make_attention(), "hidden_states")
+    nodes = dict(emitted_nodes(model))
+    indexer = nodes["PackedSparseAttentionIndexer" if paged else "SparseAttentionIndexer"]
+    assert indexer["inputs"][4:6] == ["history_cos", "history_sin"]
+    executor = nodes["SparsePagedAttention" if paged else "DynamicSparseAttention"]
+    assert executor["inputs"][:3] == ["rotated_q", "rotated_k", "v"]
+    assert executor["do_rotary"] == 0
+    rotary_start = 14 if paged else 11
+    assert executor["inputs"][rotary_start : rotary_start + 5] == [""] * 5
+    assert not any(method == "make_gather" and args[1][0] == "position_ids" for method, args, _ in model.calls)
 
 
 def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():

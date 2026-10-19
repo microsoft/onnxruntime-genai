@@ -66,6 +66,7 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
                 "Qwen3.8 sparse attention does not support quantized KV caches; use kv_cache_quant_scheme=none."
             )
         self.output_gate_type = config.output_gate_type or config.hidden_act
+        self.make_sparse_rotary_init(not text_only)
         self.tile_first_hidden_state = True
         self.emit_pre_final_hidden_states = False
         self.external_engram = extra_options.get("external_engram", False)
@@ -209,9 +210,18 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
             ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
         )
 
+    def make_sparse_rotary_init(self, multimodal):
+        self.sparse_rotary_attrs = {"multimodal": multimodal}
+        if multimodal:
+            self.input_names["rotary_position_ids"] = "rotary_position_ids"
+            self.input_types["rotary_position_ids"] = ir.DataType.INT64
+            self.input_shapes["rotary_position_ids"] = [3, "batch_size", "rotary_sequence_length"]
+
     def update_genai_config(self, genai_config):
         super().update_genai_config(genai_config)
         decoder = genai_config["model"]["decoder"]
+        if "rotary_position_ids" in self.input_names:
+            decoder["inputs"]["rotary_position_ids"] = self.input_names["rotary_position_ids"]
         decoder["inputs"]["past_ple_token_names"] = "past.%d.ple_tokens"
         decoder["inputs"]["past_ple_conv_names"] = "past.%d.ple_conv"
         decoder["inputs"]["past_indexer_names"] = "past.%d.indexer_key"

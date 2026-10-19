@@ -11,7 +11,7 @@ from .qwen3_8_text import Qwen4ExpTextModel
 class Qwen4ExpMTPTextModel(Qwen38MTP, Qwen4ExpTextModel):
     """Qwen4-Exp one-layer self-speculative MTP head builder."""
 
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options, multimodal_rotary=False):
         config = copy.deepcopy(config)
         config.text_config.num_hidden_layers = 1
         config.text_config.layer_types = ["qwen_sparse_attention"]
@@ -23,6 +23,7 @@ class Qwen4ExpMTPTextModel(Qwen38MTP, Qwen4ExpTextModel):
         extra_options["num_hidden_layers"] = 1
         extra_options["text_only"] = True
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.make_sparse_rotary_init(multimodal_rotary)
 
         self.tile_first_hidden_state = False
         self.emit_pre_final_hidden_states = True

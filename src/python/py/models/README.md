@@ -659,11 +659,10 @@ scalar scale exactly to FP32 for the annotated CPU lookup, on both CUDA and WebG
 No export-time weight dequantization, reciprocal-scale conversion, or requantization is performed.
 Use `bf16` to retain the source precision of unquantized tensors as well.
 The existing FP8 `QMoE` path is weight-only, not the official checkpoint's dynamic-A8 arithmetic.
-Multimodal decoder export is currently rejected: the sparse indexer needs
-historical temporal/height/width rotary positions that the current runtime
-interface does not provide. Use `text_only=true` with text inputs. Standalone
-vision construction is tested, including isolation between video frames, but
-does not yet enable end-to-end image/video decoder export.
+Multimodal decoder exports preserve temporal, height, and width coordinates:
+Q/K normalization and MRoPE run before sparse attention, rather than reducing
+`position_ids` to its temporal row. The sparse indexer receives request-specific
+cosine/sine tables recomposed from the complete coordinate history.
 
 ```bash
 # From source; repository downloads reuse the specified cache:
@@ -673,8 +672,20 @@ python builder.py -m Qwen/Qwen3.8-Flash-Next-FP8 \
 ```
 
 An already-downloaded checkpoint directory can instead be supplied with `-i`.
-MTP and the standalone Engram graph are included by default. Do not omit
-`text_only=true` until the historical multimodal rotary contract is implemented.
+MTP and the standalone Engram graph are included by default. Omit
+`text_only=true` to include the vision and embedding graphs.
+
+Multimodal main and MTP graphs require an int64 `rotary_position_ids` input with
+shape `[3, batch_size, rotary_sequence_length]`, mapped in their config `inputs`.
+It contains T/H/W positions for every chronological cache row, including the
+current tokens. The existing `position_ids` input remains current-step-only:
+`[3, batch_size, sequence_length]` for dense execution or `[3, num_tokens]` for
+paged execution. Paged history rows follow request order in
+`cumulative_sequence_lengths`; shorter histories can be zero-padded to the
+longest request. The runtime must retain the prompt's actual image/video
+coordinates across decode, rewind, and speculative rounds, not reconstruct
+them as ordinary token indices. Text-only exports retain their existing ABI.
+This binding requires the matching runtime support in the stacked execution PR.
 
 Native NVFP4 expert layout is explicit and independent of the export host GPU.
 For `quant_type="nvfp4"` on CUDA, omitted/default `qmoe_weights_prepacked=-1` and
