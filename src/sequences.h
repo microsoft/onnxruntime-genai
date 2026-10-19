@@ -23,9 +23,12 @@ struct Sequences {
   // Returns current sequence length.
   int GetSequenceLength() const { return current_length_; }
 
-  // Returns the sequence length recorded after the most recent prompt append.
+  // Returns the initial prompt length recorded on the first AppendTokens call.
   int GetPromptLength() const { return prompt_length_; }
-  void RecordPromptLength() { prompt_length_ = current_length_; }
+  void RecordPromptLength() {
+    if (prompt_length_ == 0)
+      prompt_length_ = current_length_;
+  }
 
   // After tokens are appended, this function must be called to update the state & log the tokens
   void AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t batch_beam_size);
