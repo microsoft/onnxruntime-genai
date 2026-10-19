@@ -17,7 +17,9 @@
 #include "dflash2_drafter.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
+#include "ep/webgpu/session_options.h"
 #include "models/io/kv_cache.h"
+#include "models/session_options.h"
 #include "ort_genai.h"
 #include "search.h"
 
@@ -472,6 +474,55 @@ TEST(Dflash2ConfigTest, PreservesTargetProviderOptions) {
             Config::NamedString("arena_extend_strategy", "kNextPowerOfTwo"));
   EXPECT_EQ(session_options.provider_options[0].options[1],
             Config::NamedString("device_id", "1"));
+}
+
+TEST(Dflash2ConfigTest, WebGpuMatmulAccumulationDefaultsAndOverrides) {
+  if (FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
+    GTEST_SKIP() << "No WebGPU EP device is registered.";
+  }
+  for (const char* model_kind : {"plain", "dflash2", "dspark"}) {
+    for (const char* batching : {"none", "dynamic", "static"}) {
+      for (int max_batch_size : {1, 2}) {
+        for (const char* explicit_value : {"", "0", "1"}) {
+          SCOPED_TRACE(::testing::Message() << model_kind << " " << batching << " batch="
+                                            << max_batch_size << " override=" << explicit_value);
+          auto config = MakeDflash2Config();
+          const std::string_view kind{model_kind}, batch{batching};
+          if (kind == "plain") config.model.dflash2.filename.clear();
+          config.model.dflash2.is_dspark = kind == "dspark";
+          if (batch == "dynamic") {
+            config.engine.dynamic_batching.emplace().max_batch_size = max_batch_size;
+          } else if (batch == "static") {
+            config.engine.static_batching.emplace().max_batch_size = max_batch_size;
+          }
+          Config::ProviderOptions provider{"WebGPU", {}};
+          if (*explicit_value) {
+            provider.options.emplace_back("enableMatmulFp32Accumulation", explicit_value);
+          }
+          // Projection must retain the same default/override for the auxiliary drafter session.
+          for (bool drafter : {false, true}) {
+            if (drafter && kind != "dflash2") continue;
+            const auto projected = drafter ? CreateDflash2Config(config) : nullptr;
+            auto options = OrtSessionOptions::Create();
+            WebGPUExecutionProvider::AppendExecutionProvider(*options, provider, projected ? *projected : config);
+            const char* key = "ep.webgpuexecutionprovider.enableMatmulFp32Accumulation";
+            const bool default_enabled = kind == "dflash2" || (batch != "none" && max_batch_size > 1);
+            const bool specified = *explicit_value || default_enabled;
+            ASSERT_EQ(options->HasConfigEntry(key), specified);
+            if (specified) {
+              size_t size{};
+              Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(options.get(), key, nullptr, &size));
+              std::string value(size, '\0');
+              Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(options.get(), key, value.data(), &size));
+              EXPECT_STREQ(value.c_str(), *explicit_value ? explicit_value : "1");
+            }
+          }
+          // Defaults must not mutate the user-provided options, including an explicit opt-out.
+          EXPECT_EQ(provider.options.size(), *explicit_value ? 1u : 0u);
+        }
+      }
+    }
+  }
 }
 
 TEST(Dflash2ConfigTest, DrafterSessionOverridesTargetConfigEntries) {

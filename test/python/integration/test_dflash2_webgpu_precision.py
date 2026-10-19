@@ -1,24 +1,31 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Output/activity and same-shape target tests for paged Qwen3.8 WebGPU DFlash2.
+"""Precision, token-equivalence and activity tests for paged Qwen3.8 WebGPU DFlash2.
 
 Run with --dflash2-webgpu-model MODEL_DIR. The runner's answer/activity smoke is
-not a token-equivalence test. Here, ordinary graph inputs/outputs compare eager
-and verification target execution from identical state without Engine hooks.
+not a token-equivalence test. Opt-in regressions compare full Engine sequences
+and ordinary target graph inputs/outputs without Engine instrumentation.
 """
 
 import json
+import multiprocessing
+import re
+from itertools import zip_longest
 from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
+import onnxruntime_genai as og
 import pytest
 from transformers import AutoTokenizer
 
 from .run_qwen38_webgpu_engine import (
     PROMPTS,
+    make_config,
+    prompt_tokens,
     register_webgpu_plugin,
+    run_engine,
     run_multi_request_activity_smoke,
     validate_dflash2_activity,
     validate_partial_replay_round,
@@ -26,34 +33,53 @@ from .run_qwen38_webgpu_engine import (
 
 
 @pytest.fixture(scope="module")
-def drafter_session(pytestconfig, tmp_path_factory):
+def webgpu_model(pytestconfig):
     model_dir = pytestconfig.getoption("--dflash2-webgpu-model")
     if model_dir is None:
         pytest.skip("Pass --dflash2-webgpu-model to test an exported WebGPU DFlash2 model")
     model_dir = Path(model_dir)
+    if not (model_dir / "genai_config.json").is_file():
+        pytest.skip(f"WebGPU DFlash2 model is unavailable at {model_dir}")
     config = json.loads((model_dir / "genai_config.json").read_text())
+    for section in ("decoder", "dflash2"):
+        if not (model_dir / config["model"][section]["filename"]).is_file():
+            pytest.skip(f"WebGPU DFlash2 {section} model is unavailable at {model_dir}")
     if "WebGpuExecutionProvider" not in ort.get_available_providers():
-        assert register_webgpu_plugin(), "WebGPU is required for this model test"
+        if not register_webgpu_plugin():
+            pytest.skip("WebGPU execution provider is unavailable")
         import onnxruntime_ep_webgpu as webgpu_ep  # noqa: PLC0415
 
         ort.register_execution_provider_library(webgpu_ep.get_ep_name(), webgpu_ep.get_library_path())
     devices = [device for device in ort.get_ep_devices() if device.ep_name == "WebGpuExecutionProvider"]
-    assert devices, "Registered WebGPU plugin exposes no devices"
+    if not devices:
+        pytest.skip("No WebGPU device is available")
+    return model_dir, config, devices[0]
+
+
+@pytest.fixture(scope="module")
+def target_session(webgpu_model):
+    model_dir, config, device = webgpu_model
     options = ort.SessionOptions()
-    options.add_provider_for_devices([devices[0]], {})
+    options.add_provider_for_devices([device], {"enableGraphCapture": "0", "enableMatmulFp32Accumulation": "1"})
+    target = ort.InferenceSession(
+        str(model_dir / config["model"]["decoder"]["filename"]), sess_options=options, providers=[]
+    )
+    assert device.ep_name in target.get_providers(), "WebGPU was not selected for the target session"
+    return target, AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+
+
+@pytest.fixture(scope="module")
+def drafter_session(webgpu_model, target_session, tmp_path_factory):
+    model_dir, config, device = webgpu_model
+    target, tokenizer = target_session
+    options = ort.SessionOptions()
+    options.add_provider_for_devices([device], {"enableMatmulFp32Accumulation": "1"})
     options.enable_profiling = True
     options.profile_file_prefix = str(tmp_path_factory.mktemp("dflash2-profile") / "profile")
     drafter = config["model"]["dflash2"]
     session = ort.InferenceSession(str(model_dir / drafter["filename"]), sess_options=options, providers=[])
-    assert devices[0].ep_name in session.get_providers(), "WebGPU was not selected for the drafter session"
-    target_options = ort.SessionOptions()
-    target_options.add_provider_for_devices([devices[0]], {"enableGraphCapture": "0"})
-    target = ort.InferenceSession(
-        str(model_dir / config["model"]["decoder"]["filename"]), sess_options=target_options, providers=[]
-    )
-    assert devices[0].ep_name in target.get_providers(), "WebGPU was not selected for the target session"
-    print(f"Selected {devices[0].ep_name}, device {devices[0].device.device_id} for drafter and target")
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    assert device.ep_name in session.get_providers(), "WebGPU was not selected for the drafter session"
+    print(f"Selected {device.ep_name}, device {device.device.device_id} for drafter and target")
     yield session, target, tokenizer, config
     events = json.loads(Path(session.end_profiling()).read_text())
     required = {"PagedAttention", "MatMulNBits", "SkipSimplifiedLayerNormalization"}
@@ -301,6 +327,180 @@ def test_target_verification_matches_same_shape_eager(drafter_session, tmp_path)
     np.testing.assert_array_equal(eager.argmax(axis=-1), verification.argmax(axis=-1), err_msg=json.dumps(report))
 
 
+def test_counting_target_query_widths_after_1144(webgpu_model, target_session, tmp_path):
+    model_dir, config, device = webgpu_model
+    target, tokenizer = target_session
+    options = ort.SessionOptions()
+    options.add_provider_for_devices([device], {"enableGraphCapture": "0", "enableMatmulFp32Accumulation": "0"})
+    fp16_target = ort.InferenceSession(
+        str(model_dir / config["model"]["decoder"]["filename"]), sess_options=options, providers=[]
+    )
+    assert device.ep_name in fp16_target.get_providers()
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": PROMPTS[2][0]}],
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+    )["input_ids"]
+    output_names = config["model"]["decoder"]["outputs"]
+    prefill = dict(
+        zip(
+            (value.name for value in fp16_target.get_outputs()),
+            fp16_target.run(None, make_target_inputs(fp16_target, config, prompt)),
+            strict=True,
+        )
+    )
+    state = {input_name: prefill[output_name] for input_name, output_name in target_state_pairs(config)}
+    first_token = int(prefill[output_names["logits"]][-1].argmax())
+    prefix = dict(
+        zip(
+            (value.name for value in fp16_target.get_outputs()),
+            fp16_target.run(
+                None, make_packed_target_inputs(fp16_target, config, [[first_token]], [len(prompt)], state)
+            ),
+            strict=True,
+        )
+    )
+    state = {input_name: prefix[output_name] for input_name, output_name in target_state_pairs(config)}
+    for kind in ("past_key_values.", ".conv", ".recurrent"):
+        assert any(np.any(value) for name, value in state.items() if kind in name), f"Empty prefill state: {kind}"
+    past_length = len(prompt) + 1
+    query = [int(prefix[output_names["logits"]][-1].argmax())]
+    assert query[0] == 1144, f"Counting regression no longer reaches the known prefix: {first_token}, {query}"
+    for _ in range(4):
+        feeds = make_packed_target_inputs(target, config, [query], [past_length], state)
+        logits = target.run([output_names["logits"]], feeds)[0]
+        query.append(int(logits[-1].argmax()))
+
+    reports, captured_logits = {}, {}
+    for accumulation, session in (("0", fp16_target), ("1", target)):
+        feeds = {
+            width: make_packed_target_inputs(session, config, [query[:width]], [past_length], state) for width in (2, 5)
+        }
+        names = config["model"]["decoder"]["inputs"]
+        for name in (names["input_ids"], names["position_ids"]):
+            np.testing.assert_array_equal(feeds[2][name], feeds[5][name][..., :2], err_msg=name)
+        for name in (
+            *state,
+            names["past_sequence_lengths"],
+            names["block_table"],
+            names["state_update_capture_count"],
+            names["state_update_active"],
+        ):
+            np.testing.assert_array_equal(feeds[2][name], feeds[5][name], err_msg=name)
+        logits = {width: session.run([output_names["logits"]], values)[0] for width, values in feeds.items()}
+        for values in feeds.values():
+            for name, value in state.items():
+                np.testing.assert_array_equal(values[name], value, err_msg=name)
+        reports[accumulation] = {
+            "common_prefix": logit_comparison(logits[2], logits[5][:2]),
+            "after_1144": logit_comparison(logits[2][:1], logits[5][:1]),
+        }
+        captured_logits.update({f"accumulation_{accumulation}_width_{width}": value for width, value in logits.items()})
+
+    report = {
+        "batch_size": 1,
+        "prompt_length": len(prompt),
+        "prefix_tokens": [first_token],
+        "past_length": past_length,
+        "prefill_accumulation": "0",
+        "input_ids": query,
+        "compared_row": 0,
+        "reference_width": 2,
+        "verification_width": 5,
+        "accumulation": reports,
+    }
+    np.savez_compressed(tmp_path / "counting-width-logits.npz", **captured_logits)
+    (tmp_path / "counting-width-comparison.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(f"Counting width comparison: {json.dumps(report, sort_keys=True)}")
+    # The FP16-only result is diagnostic: not all devices/runtimes reproduce the old shader selection.
+    narrow = captured_logits["accumulation_1_width_2"]
+    wide = captured_logits["accumulation_1_width_5"][:2]
+    np.testing.assert_array_equal(narrow.argmax(axis=-1), wide.argmax(axis=-1), err_msg=json.dumps(report))
+
+
+def token_sequence_comparison(eager, dflash2):
+    return {
+        "eager_length": len(eager),
+        "dflash2_length": len(dflash2),
+        "first_difference": next(
+            (
+                {"position": index, "eager_token": reference, "dflash2_token": actual}
+                for index, (reference, actual) in enumerate(zip_longest(eager, dflash2))
+                if reference != actual
+            ),
+            None,
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "eager,dflash2,expected",
+    [
+        ([1, 2], [1, 2], None),
+        ([1, 2], [1, 3], {"position": 1, "eager_token": 2, "dflash2_token": 3}),
+        ([1], [1, 2], {"position": 1, "eager_token": None, "dflash2_token": 2}),
+        ([1, 2], [1], {"position": 1, "eager_token": 2, "dflash2_token": None}),
+    ],
+)
+def test_token_sequence_comparison_reports_first_difference(eager, dflash2, expected):
+    assert token_sequence_comparison(eager, dflash2) == {
+        "eager_length": len(eager),
+        "dflash2_length": len(dflash2),
+        "first_difference": expected,
+    }
+
+
+def run_greedy_token_sequences(model_dir, mode, output_path):
+    if "WebGpuExecutionProvider" not in ort.get_available_providers():
+        assert register_webgpu_plugin(), "WebGPU is required in the spawned inference process"
+    config = make_config(model_dir, "webgpu")
+    config.overlay(json.dumps({"engine": {"dynamic_batching": {"max_batch_size": 1}}}))
+    config.set_provider_option("webgpu", "enableMatmulFp32Accumulation", "1")
+    if mode == "eager":
+        config.overlay(json.dumps({"model": {"dflash2": {"filename": ""}}}))
+    model = og.Model(config)
+    tokenizer = og.Tokenizer(model)
+    outputs = []
+    for (prompt, expected), budget in zip(PROMPTS, (36, 38, 112), strict=True):
+        tokens, _, stats = run_engine(model, prompt_tokens(tokenizer, prompt), budget)
+        text = tokenizer.decode(np.asarray(tokens, dtype=np.int32))
+        outputs.append({"prompt": prompt, "max_new_tokens": budget, "tokens": tokens, "text": text, "stats": stats})
+        assert 0 < len(tokens) <= budget, f"{mode}: invalid generated token count {len(tokens)} for budget {budget}"
+        assert re.search(expected, text), f"{mode}: missing answer pattern {expected!r} in {text!r}"
+        if mode == "dflash2":
+            validate_dflash2_activity(stats)
+        else:
+            assert stats["rounds"] == 0, f"Eager reference unexpectedly speculated: {stats}"
+    output_path.write_text(json.dumps(outputs, indent=2) + "\n", encoding="utf-8")
+
+
+def test_dflash2_greedy_token_sequences_match_eager(webgpu_model, tmp_path):
+    model_dir, _, _ = webgpu_model
+    outputs = {}
+    for mode in ("eager", "dflash2"):
+        output_path = tmp_path / f"{mode}-tokens.json"
+        # Release each 27B session's WebGPU allocations before loading the next model.
+        process = multiprocessing.get_context("spawn").Process(
+            target=run_greedy_token_sequences, args=(model_dir, mode, output_path)
+        )
+        process.start()
+        process.join()
+        exitcode = process.exitcode
+        process.close()
+        assert exitcode == 0, f"{mode} inference process exited with code {exitcode}"
+        outputs[mode] = json.loads(output_path.read_text(encoding="utf-8"))
+    comparisons = [
+        {"prompt": eager["prompt"], **token_sequence_comparison(eager["tokens"], dflash2["tokens"])}
+        for eager, dflash2 in zip(outputs["eager"], outputs["dflash2"], strict=True)
+    ]
+    report = {"accumulation": "1", "max_batch_size": 1, "comparisons": comparisons, "outputs": outputs}
+    (tmp_path / "greedy-token-comparison.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(f"Greedy token comparisons: {json.dumps(comparisons, sort_keys=True)}")
+    for comparison in comparisons:
+        assert comparison["first_difference"] is None, json.dumps(comparison)
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -329,13 +529,9 @@ def test_validation_rejects_inactive_or_failed_speculation(field, value):
         validate_dflash2_activity(stats)
 
 
-def test_two_request_partial_replay_activity_smoke(pytestconfig):
-    model_dir = pytestconfig.getoption("--dflash2-webgpu-model")
-    if model_dir is None:
-        pytest.skip("Pass --dflash2-webgpu-model to test an exported WebGPU DFlash2 model")
-    if "WebGpuExecutionProvider" not in ort.get_available_providers():
-        assert register_webgpu_plugin(), "WebGPU is required for this model test"
-    result = run_multi_request_activity_smoke(Path(model_dir))
+def test_two_request_partial_replay_activity_smoke(webgpu_model):
+    model_dir, _, _ = webgpu_model
+    result = run_multi_request_activity_smoke(model_dir)
     print(
         f"Two-request replay activity smoke (cross-shape equality is diagnostic): {json.dumps(result, sort_keys=True)}"
     )

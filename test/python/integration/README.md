@@ -150,6 +150,12 @@ If the staged files are intentionally regenerated, refresh the three hashes in
 
 ## Qwen3.8 WebGPU DFlash2 output/activity smoke
 
+WebGPU DFlash2 defaults `enableMatmulFp32Accumulation` to `1`, including at
+`max_batch_size=1`, to avoid the observed greedy-token divergence from FP16 INT4
+accumulation at verification query widths. Explicit `0`/`1` provider options take
+precedence. Compare eager with the same precision option; non-DFlash2 models
+retain the existing batching-based default.
+
 `run_qwen38_webgpu_engine.py --dflash2` keeps the single-request smoke runs and
 also runs two concurrent requests with `max_batch_size=2`, unequal prompt lengths,
 and unequal generation budgets. Its answer patterns, activity counters, and
@@ -216,6 +222,46 @@ transaction would minimally need a test-only snapshot at the
 `SimpleDecoder::Decode` session boundary, before aliased state is modified, plus
 the raw output logits and row-to-request mapping after the call. No such hook or
 Engine restructuring is added here.
+
+### Counting-query precision and full-token regressions
+
+```bash
+python -m pytest test/python/integration/test_dflash2_webgpu_precision.py -sv \
+    --dflash2-webgpu-model /path/to/qwen38-webgpu-dflash2 \
+    -k 'counting_target_query_widths or greedy_token_sequences'
+```
+
+The single-request counting regression compares query widths 2 and 5 immediately
+after input token `1144`, from byte-identical KV, convolution, and recurrent state
+after prefill and the first generated token. This snapshot uses FP32 accumulation
+off to preserve the original regression context; `1144` is row zero in both
+queries. Both calls share their first two input tokens and three-plane
+positions; only query lengths and derived attention metadata differ. Full logits,
+exact argmaxes, and top-two margins are recorded with FP32 MatMul accumulation
+off and on. The enabled case must choose identical tokens at both common
+positions. Cross-width logit differences remain visible diagnostics; the strict
+same-shape logit tolerance above is unchanged. The disabled case is diagnostic, not a
+requirement to reproduce a particular shader or the old divergent token IDs.
+`counting-width-logits.npz` and `counting-width-comparison.json` retain the results.
+Raw target and drafter sessions explicitly enable FP32 accumulation by default
+to match GenAI's DFlash2 precision configuration.
+
+The full-token regression runs the three existing prompts through eager and
+DFlash2 Engines at batch size one, with greedy decoding, FP32 accumulation
+explicitly enabled in both, and 36-, 38-, and 112-token generation budgets.
+Each mode runs in a spawned process so its 27B session's WebGPU allocations are
+released before the next mode.
+Complete token-ID sequences must match, including their lengths; failures report
+the first differing position and both token IDs. Answer patterns and DFlash2
+activity checks remain required. `greedy-token-comparison.json` retains full
+sequences, decoded output, activity counters, and mismatch diagnostics.
+EOS/stopping behavior is unchanged: the available export ends the arithmetic
+prompt after 22 tokens, so its complete output is compared rather than forcing
+38 tokens. A per-turn minimum is not used because it disables speculation until
+the minimum is reached.
+
+These tests skip without the opt-in model flag, model files, or a WebGPU device;
+they do not download the 27B model or add it to ordinary CI.
 
 ## Adding a new model
 
