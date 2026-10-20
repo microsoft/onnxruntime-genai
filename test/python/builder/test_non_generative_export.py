@@ -424,6 +424,20 @@ def test_kev_adapter_loads_on_text_backbone_and_rejects_missing_weights(
             types.SimpleNamespace(model=base_text), "adapter"
         )
 
+    nested_text = object()
+    outer = types.SimpleNamespace(language_model=nested_text)
+    nested_container = types.SimpleNamespace(model=outer)
+    load_result.missing_keys = []
+    assert (
+        base.load_text_backbone_adapter(
+            nested_container, "adapter"
+        )
+        is nested_container
+    )
+    assert calls["model"] is nested_text
+    assert nested_container.model is outer
+    assert outer.language_model is merged
+
 
 def test_qwen35_linear_attention_uses_adapter_aware_matmul_outputs():
     builder = object.__new__(qwen.Qwen35TextModel)

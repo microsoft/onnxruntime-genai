@@ -46,10 +46,15 @@ def load_text_backbone_adapter(
         raise ValueError(
             "model-specific adapter base must expose its text backbone as model"
         )
+    parent = base_container.model
+    attribute = "language_model" if hasattr(parent, "language_model") else None
+    text_backbone = (
+        parent.language_model if attribute is not None else parent
+    )
     config = PeftConfig.from_pretrained(
         source, cache_dir=cache_dir, token=token
     )
-    adapted = get_peft_model(base_container.model, config)
+    adapted = get_peft_model(text_backbone, config)
     weights = load_peft_weights(source, device="cpu")
     load_result = set_peft_model_state_dict(
         adapted, weights, adapter_name="default"
@@ -65,7 +70,11 @@ def load_text_backbone_adapter(
             f"missing={missing_adapter_keys}, "
             f"unexpected={load_result.unexpected_keys}"
         )
-    base_container.model = adapted.merge_and_unload()
+    merged = adapted.merge_and_unload()
+    if attribute is None:
+        base_container.model = merged
+    else:
+        parent.language_model = merged
     return base_container
 
 

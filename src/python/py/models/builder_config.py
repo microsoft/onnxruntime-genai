@@ -403,6 +403,17 @@ def plan_component_package(
         *(output_root / head.filename for head in options.heads),
         *(output_root / filename for filename in COMPONENT_EXPORTER_OWNED_FILES),
     }
+    backbone_model = load_component_model(
+        output_root / options.backbone_filename, "backbone"
+    )
+    reserved.update(
+        source
+        for _, source in find_external_data_files(
+            backbone_model,
+            output_root / options.backbone_filename,
+            "backbone",
+        )
+    )
 
     for head in options.heads:
         source = Path(head.source)
@@ -646,6 +657,31 @@ def find_external_data_files(
         if not source.is_file():
             raise ValueError(
                 f"component {component_name!r} external data file does not exist: {location}"
+            )
+        try:
+            offset = int(entries.get("offset", "0"))
+        except ValueError as error:
+            raise ValueError(
+                f"component {component_name!r} external data offset is invalid"
+            ) from error
+        element_size = onnx.helper.tensor_dtype_to_np_dtype(
+            tensor.data_type
+        ).itemsize
+        required_bytes = math.prod(tensor.dims) * element_size
+        try:
+            length = int(entries.get("length", str(required_bytes)))
+        except ValueError as error:
+            raise ValueError(
+                f"component {component_name!r} external data length is invalid"
+            ) from error
+        if offset < 0 or length < required_bytes:
+            raise ValueError(
+                f"component {component_name!r} external data range is too small"
+            )
+        if offset + length > source.stat().st_size:
+            raise ValueError(
+                f"component {component_name!r} external data range exceeds "
+                f"{location!r}"
             )
         files[location] = source
     return list(files.items())

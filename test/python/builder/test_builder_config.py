@@ -46,6 +46,47 @@ def _write_component_model(path, external_locations=()):
     path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
 
 
+def _write_external_component_model(
+    path,
+    location,
+    *,
+    offset=None,
+    length=None,
+    dims=(4,),
+    input_name="hidden_states",
+    output_name="scores",
+):
+    tensor = onnx.TensorProto(
+        name="weight",
+        data_type=onnx.TensorProto.FLOAT,
+        dims=list(dims),
+        data_location=onnx.TensorProto.EXTERNAL,
+    )
+    for key, value in (
+        ("location", location),
+        ("offset", offset),
+        ("length", length),
+    ):
+        if value is not None:
+            entry = tensor.external_data.add()
+            entry.key = key
+            entry.value = str(value)
+    hidden = onnx.helper.make_tensor_value_info(
+        input_name, onnx.TensorProto.FLOAT, [None, 4]
+    )
+    scores = onnx.helper.make_tensor_value_info(
+        output_name, onnx.TensorProto.FLOAT, [None, 4]
+    )
+    graph = onnx.helper.make_graph(
+        [onnx.helper.make_node("Identity", [input_name], [output_name])],
+        "component",
+        [hidden],
+        [scores],
+        initializer=[tensor],
+    )
+    path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
+
+
 def _write_backbone(
     output_dir, filename="model.onnx", output_name="hidden_states"
 ):
@@ -295,6 +336,67 @@ def test_component_package_rejects_backbone_external_data_collision(tmp_path):
     with pytest.raises(ValueError, match="conflicts with packaged file"):
         export_component_package(effective.component_options, str(output_dir))
     assert (output_dir / "backbone.onnx.data").read_bytes() == b"backbone weights"
+    assert not (output_dir / "head.onnx").exists()
+
+
+def test_component_package_protects_backbone_declared_external_data(tmp_path):
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    backbone = output_dir / "model.onnx"
+    _write_external_component_model(
+        backbone,
+        "weights.bin",
+        dims=(1,),
+        input_name="input_ids",
+        output_name="hidden_states",
+    )
+    (output_dir / "weights.bin").write_bytes(b"\0" * 4)
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    head = source_dir / "head.onnx"
+    _write_external_component_model(head, "weights.bin", dims=(1,))
+    (source_dir / "weights.bin").write_bytes(b"\1" * 4)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(head)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="conflicts with packaged file"):
+        export_component_package(options, str(output_dir))
+    assert (output_dir / "weights.bin").read_bytes() == b"\0" * 4
+    assert not (output_dir / "head.onnx").exists()
+
+
+@pytest.mark.parametrize(
+    ("offset", "length", "file_size", "match"),
+    [
+        (0, None, 1, "range exceeds"),
+        (32, 16, 16, "range exceeds"),
+        (0, 4, 16, "range is too small"),
+    ],
+)
+def test_component_package_rejects_invalid_external_data_ranges(
+    tmp_path, offset, length, file_size, match
+):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    _write_external_component_model(
+        graph, "weights.bin", offset=offset, length=length
+    )
+    (source_dir / "weights.bin").write_bytes(b"\0" * file_size)
+    output_dir = tmp_path / "package"
+    _write_backbone(output_dir)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match=match):
+        export_component_package(options, str(output_dir))
     assert not (output_dir / "head.onnx").exists()
 
 
