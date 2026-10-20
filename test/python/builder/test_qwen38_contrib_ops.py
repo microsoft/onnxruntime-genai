@@ -297,7 +297,8 @@ def test_qwen38_ple_conv_state_layout_tracks_packed_execution(monkeypatch):
 
 
 @pytest.mark.parametrize("linear_layers", [False, True])
-def test_paged_qwen38_resolves_compact_capacity_for_ple_and_indexer(linear_layers):
+@pytest.mark.parametrize("sparse_layer_type", ["qwen_sparse_attention", "indexed_attention"])
+def test_paged_qwen38_resolves_compact_capacity_for_ple_and_indexer(linear_layers, sparse_layer_type):
     config = LlamaConfig(
         hidden_size=8,
         intermediate_size=16,
@@ -322,10 +323,17 @@ def test_paged_qwen38_resolves_compact_capacity_for_ple_and_indexer(linear_layer
         indexer_compress_ratio=4,
         output_gate_type=None,
     )
+    if sparse_layer_type == "indexed_attention":
+        # Older Transformers releases do not yet accept the canonical name in their config validator.
+        config.layer_types = ["linear_attention" if linear_layers else sparse_layer_type, sparse_layer_type]
     options = {"use_paged_attention": True, "text_only": True}
     options.update({"state_window": 8} if linear_layers else {"state_update_capacity": 7})
     model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", "", options)
 
+    assert model.layer_types == [
+        "linear_attention" if linear_layers else "qwen_sparse_attention",
+        "qwen_sparse_attention",
+    ]
     assert model.context_length_attrs["state_update_capacity"] == 7
     assert model.output_shapes["state_update.ple_tokens"] == ["batch_size", 7, 2]
     assert model.output_shapes["state_update.ple_conv_value"] == ["batch_size", 7, 16]
