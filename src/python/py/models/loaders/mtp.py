@@ -196,7 +196,7 @@ class Qwen4ExpMTPModel(QwenMTPModel):
 
         mtp_config = copy.deepcopy(layer_config)
         mtp_config.num_hidden_layers = 1
-        mtp_config.layer_types = ["qwen_sparse_attention"]
+        mtp_config.layer_types = ["indexed_attention"]
         mtp_config.ple_layer_ids = []
 
         mtp_layer = Qwen4ExpTextDecoderLayer(mtp_config, layer_idx=0)

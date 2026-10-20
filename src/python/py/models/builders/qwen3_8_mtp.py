@@ -14,10 +14,10 @@ class Qwen4ExpMTPTextModel(Qwen38MTP, Qwen4ExpTextModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options, multimodal_rotary=False):
         config = copy.deepcopy(config)
         config.text_config.num_hidden_layers = 1
-        config.text_config.layer_types = ["qwen_sparse_attention"]
+        config.text_config.layer_types = ["indexed_attention"]
         config.text_config.ple_layer_ids = []
         config.num_hidden_layers = 1
-        config.layer_types = ["qwen_sparse_attention"]
+        config.layer_types = ["indexed_attention"]
 
         extra_options = copy.deepcopy(extra_options)
         extra_options["num_hidden_layers"] = 1

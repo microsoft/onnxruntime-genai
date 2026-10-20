@@ -320,7 +320,7 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
 def test_qwen4_exp_paged_state_groups_own_ple_and_sparse_kv():
     model = _make_config_model(
         Qwen4ExpTextModel,
-        layer_types=["linear_attention", "qwen_sparse_attention"],
+        layer_types=["linear_attention", "indexed_attention"],
     )
     model.ple_attrs = {"layer_ids": {0}}
 
@@ -337,7 +337,7 @@ def test_qwen4_exp_paged_state_groups_own_ple_and_sparse_kv():
 def test_qwen4_exp_adds_indexer_group_only_with_complete_bindings():
     model = _make_config_model(
         Qwen4ExpTextModel,
-        layer_types=["qwen_sparse_attention"],
+        layer_types=["indexed_attention"],
     )
     model.ple_attrs = {"layer_ids": set()}
     model.input_names.update(
@@ -359,7 +359,7 @@ def test_qwen4_exp_adds_indexer_group_only_with_complete_bindings():
 def test_qwen4_exp_emits_complete_compact_ple_and_indexer_manifest(monkeypatch, tmp_path):
     model = _make_config_model(
         Qwen4ExpTextModel,
-        layer_types=["linear_attention", "qwen_sparse_attention"],
+        layer_types=["linear_attention", "indexed_attention"],
     )
     model.num_layers = 2
     model.ple_attrs = {"layer_ids": {0}, "token_pad_id": 1, "external": False}
@@ -404,7 +404,7 @@ def test_qwen4_exp_emits_complete_compact_ple_and_indexer_manifest(monkeypatch, 
 def test_qwen4_exp_config_emits_packed_indexer_state_group(monkeypatch, tmp_path):
     model = _make_config_model(
         Qwen4ExpTextModel,
-        layer_types=["qwen_sparse_attention"],
+        layer_types=["indexed_attention"],
     )
     model.num_layers = 1
     model.ple_attrs = {"layer_ids": set(), "token_pad_id": 248044, "external": False}
