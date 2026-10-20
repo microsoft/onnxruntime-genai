@@ -47,17 +47,19 @@ struct NemotronBoltState : State {
   friend struct test::NemotronBoltTestAccess;
   Tensor& AddTensor(const std::string& name, bool input, DeviceInterface* device,
                     ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
-  std::vector<int64_t> Verify(std::span<const int32_t> tokens);
-  void Propose(size_t context_rows, size_t first_position, int32_t anchor);
+  std::vector<int64_t> Verify(std::span<const int32_t> tokens, bool want_predictions = true);
+  void Propose(size_t context_rows, size_t first_position, int32_t anchor, Tensor* aux_override = nullptr);
   void Reset();
 
   const NemotronBoltModel& bolt_;
   std::map<std::string, std::unique_ptr<Tensor>> tensors_;
   std::vector<std::string> input_storage_, output_storage_;
   std::vector<Tensor*> caches_;
-  std::unique_ptr<OrtIoBinding> binding_;
+  DeviceSpan<int32_t> verify_inputs_span_;
+  DeviceSpan<int64_t> pred_ids_span_;
   std::unique_ptr<Dflash2Drafter> drafter_;
   std::unique_ptr<Tensor> aux_view_;
+  std::unique_ptr<Tensor> prefill_aux_;
   std::unique_ptr<Request> request_;
   size_t length_{};
   int32_t state_row_{};

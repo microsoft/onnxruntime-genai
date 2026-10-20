@@ -227,7 +227,25 @@ Tensor& NemotronBoltState::AddTensor(const std::string& name, bool input, Device
 NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const GeneratorParams& params)
     : State{params, model}, bolt_{model}, request_{std::make_unique<Request>(model, params.search.max_length)} {
   const auto& info = model.session_info_;
+  verify_inputs_span_ = model.p_device_->Allocate<int32_t>(2 * kBoltVerifyRows + 8);
+  verify_inputs_span_.CpuSpan();
+  int32_t* verify_in_base = verify_inputs_span_.Span().data();
+  const auto& dev_mem_info = model.p_device_->GetAllocator().GetInfo();
   for (const auto& name : info.GetInputNames()) {
+    if (name == "input_ids" || name == "seqlens_k" || name == "state_row") {
+      void* ptr = name == "input_ids"   ? static_cast<void*>(verify_in_base)
+                  : name == "seqlens_k" ? static_cast<void*>(verify_in_base + 2 * kBoltVerifyRows)
+                                        : static_cast<void*>(verify_in_base + 2 * kBoltVerifyRows + 4);
+      const size_t bytes = name == "input_ids" ? kBoltVerifyRows * sizeof(int64_t) : sizeof(int32_t);
+      const auto shape = info.GetInputShape(name);
+      auto tensor = std::make_unique<Tensor>(
+          OrtValue::CreateTensor(dev_mem_info, ptr, bytes, shape, info.GetInputDataType(name)));
+      tensor->p_device_ = model.p_device_;
+      input_storage_.push_back(name);
+      inputs_.push_back(tensor->GetOrtTensor());
+      tensors_.emplace(name, std::move(tensor));
+      continue;
+    }
     auto* device = name == "total_sequence_length" ? GetDeviceInterface(DeviceType::CPU) : model.p_device_;
     auto& tensor = AddTensor(name, true, device, info.GetInputDataType(name), info.GetInputShape(name));
     if (name.rfind("past_", 0) == 0) {
@@ -238,15 +256,13 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   }
   for (const auto* name : {"logits", "pred_ids", "aux_hidden_states"})
     AddTensor(name, false, model.p_device_, info.GetOutputDataType(name), info.GetOutputShape(name));
+  pred_ids_span_ = tensors_.at("pred_ids")->GetDeviceSpan<int64_t>();
+  pred_ids_span_.CpuSpan();
   for (auto& name : input_storage_) input_names_.push_back(name.c_str());
   for (auto& name : output_storage_) output_names_.push_back(name.c_str());
-  binding_ = OrtIoBinding::Create(*model.session_);
-  for (size_t i = 0; i < input_names_.size(); ++i)
-    binding_->BindInput(input_names_[i], *inputs_[i]);
-  for (size_t i = 0; i < output_names_.size(); ++i)
-    binding_->BindOutput(output_names_[i], *outputs_[i]);
   const int32_t capacity = static_cast<int32_t>(model.capacity_);
   Upload(*tensors_.at("total_sequence_length"), std::span<const int32_t>{&capacity, 1});
+  run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
 
   // The view is zero-copy: DFlash2 packs only the committed rows, never the padded/rejected ones.
   auto& aux = *tensors_.at("aux_hidden_states");
@@ -258,11 +274,18 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   size_t blocks = Dflash2Drafter::PoolBlocks(*model.config_, 256, 1);
   if (blocks == 0) blocks = (model.capacity_ + 255) / 256 + 1;
   drafter_ = std::make_unique<Dflash2Drafter>(model.drafter_model_, 256, blocks, 1, true);
+  const size_t max_prefill_rows =
+      ((std::max(drafter_->ContextWindow(), kBoltVerifyRows) + kBoltVerifyRows - 1) / kBoltVerifyRows + 1) *
+      kBoltVerifyRows;
+  const std::array<int64_t, 2> prefill_shape{static_cast<int64_t>(max_prefill_rows),
+                                             static_cast<int64_t>(model.aux_width_)};
+  prefill_aux_ = std::make_unique<Tensor>(model.p_device_, aux.GetType());
+  prefill_aux_->CreateTensor(prefill_shape, true);
   Reset();
   std::vector<int32_t> dummy(kBoltVerifyRows, 1);
   // Initial graph-enabled executions are not trustworthy. Capture on dummy zero state and discard
   // everything, including the recurrent row selection, before any real prompt is processed.
-  for (int i = 0; i < 4; ++i) Verify(dummy);
+  for (int i = 0; i < 4; ++i) Verify(dummy, i == 3);
   for (int i = 0; i < 4; ++i) {
     drafter_->ReleaseAll();
     Propose(8, 0, 1);
@@ -298,22 +321,23 @@ void NemotronBoltState::SetExtraInputs(const std::vector<ExtraInput>& inputs) {
   Require(inputs.empty(), "extra inputs are unsupported");
 }
 
-std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens) {
+std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, bool want_predictions) {
   Require(tokens.size() == kBoltVerifyRows && length_ + kBoltVerifyRows <= bolt_.capacity_,
           "verify block exceeds fixed capacity");
-  std::vector<int64_t> ids(tokens.begin(), tokens.end());
-  Upload(*tensors_.at("input_ids"), std::span<const int64_t>{ids});
-  const int32_t seqlens = static_cast<int32_t>(length_ + kBoltVerifyRows - 1);
-  Upload(*tensors_.at("seqlens_k"), std::span<const int32_t>{&seqlens, 1});
-  Upload(*tensors_.at("state_row"), std::span<const int32_t>{&state_row_, 1});
-  State::Run(*bolt_.session_, true, 8, 0, binding_.get());
-  auto span = tensors_.at("pred_ids")->GetDeviceSpan<int64_t>();
-  auto cpu = span.CopyDeviceToCpu();
+  auto cpu_in = verify_inputs_span_.CpuSpan();
+  auto* ids_out = reinterpret_cast<int64_t*>(cpu_in.data());
+  for (size_t i = 0; i < kBoltVerifyRows; ++i) ids_out[i] = tokens[i];
+  cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + kBoltVerifyRows - 1);
+  cpu_in[2 * kBoltVerifyRows + 4] = state_row_;
+  verify_inputs_span_.CopyCpuToDevice();
+  State::Run(*bolt_.session_, true, 8, 0, nullptr);
   ++stats_.target_forward_passes;
+  if (!want_predictions) return {};
+  auto cpu = pred_ids_span_.CopyDeviceToCpu();
   return {cpu.begin(), cpu.end()};
 }
 
-void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int32_t anchor) {
+void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int32_t anchor, Tensor* aux_override) {
   Dflash2Drafter::Feed feed{
       .request = request_.get(),
       .aux_row_begin = 0,
@@ -323,7 +347,8 @@ void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int3
       .draft_eligible = true,
       .wants_drafts = true};
   std::vector<std::vector<int32_t>> proposals;
-  Require(drafter_->Propose(*aux_view_, {&feed, 1}, proposals) &&
+  Tensor& aux_source = aux_override ? *aux_override : *aux_view_;
+  Require(drafter_->Propose(aux_source, {&feed, 1}, proposals) &&
               proposals.size() == 1 && proposals[0].size() == 7,
           "LiLiCorr drafter did not produce seven tokens");
   drafts_ = std::move(proposals[0]);
@@ -334,16 +359,33 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
   Require(!prefilled_ && !tokens.empty(), "AppendTokens requires a fresh or reset generator");
   for (const auto token : tokens)
     Require(token >= 0 && token < model_.config_->model.vocab_size, "token id outside vocabulary");
+  const size_t window = drafter_->ContextWindow();
+  const size_t draft_start =
+      (window != 0 && tokens.size() > window)
+          ? ((tokens.size() - window) / kBoltVerifyRows) * kBoltVerifyRows
+          : 0;
+  const size_t draft_rows = tokens.size() - draft_start;
+  const bool single_chunk = draft_rows <= kBoltVerifyRows;
+  const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
+  auto aux_src = aux_view_->GetByteSpan();
+  auto prefill_dst = prefill_aux_->GetByteSpan();
   for (size_t pos = 0; pos < tokens.size(); pos += kBoltVerifyRows) {
     const size_t valid = std::min(kBoltVerifyRows, tokens.size() - pos);
+    const bool last_chunk = pos + kBoltVerifyRows >= tokens.size();
     std::vector<int32_t> block(kBoltVerifyRows, tokens[pos + valid - 1]);
     std::copy_n(tokens.begin() + pos, valid, block.begin());
-    const auto predictions = Verify(block);
-    anchor_ = static_cast<int32_t>(predictions[valid - 1]);
-    Propose(valid, length_, anchor_);
+    const auto predictions = Verify(block, last_chunk);
+    if (!single_chunk && pos >= draft_start) {
+      prefill_dst.subspan((pos - draft_start) * aux_row_bytes, valid * aux_row_bytes)
+          .CopyFrom(aux_src.subspan(0, valid * aux_row_bytes));
+    }
+    if (last_chunk) {
+      anchor_ = static_cast<int32_t>(predictions[valid - 1]);
+    }
     length_ += valid;
     state_row_ = static_cast<int32_t>(valid - 1);
   }
+  Propose(draft_rows, draft_start, anchor_, single_chunk ? aux_view_.get() : prefill_aux_.get());
   if (tokens.size() < static_cast<size_t>(params_->search.max_length)) {
     pending_.push_back(anchor_);
     stats_.tokens_queued = 1;
