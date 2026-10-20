@@ -202,9 +202,9 @@ def test_engine_capabilities(model):
 
 def test_engine_run_releases_gil(model):
     engine = og.Engine(model)
-    prompt = _PROMPT_LONG * 20
+    prompt = _PROMPT_LONG * 3
     request_options = og.RequestOptions()
-    request_options.set_max_session_tokens(len(prompt) + 4)
+    request_options.set_max_session_tokens(len(prompt) + 32)
     request = engine.create_request(options=request_options)
     request.begin_turn(np.asarray(prompt, dtype=np.int32))
     event_buffer = engine.create_event_buffer(1)
@@ -212,11 +212,17 @@ def test_engine_run_releases_gil(model):
     worker_ready = threading.Event()
     allow_worker = threading.Event()
     worker_progressed = threading.Event()
+    stop_worker = threading.Event()
+    native_run_active = False
 
     def worker():
         worker_ready.set()
         allow_worker.wait()
-        worker_progressed.set()
+        while not stop_worker.is_set():
+            if native_run_active:
+                worker_progressed.set()
+                return
+            time.sleep(0)
 
     thread = threading.Thread(target=worker)
     thread.start()
@@ -224,20 +230,23 @@ def test_engine_run_releases_gil(model):
 
     previous_switch_interval = sys.getswitchinterval()
     try:
-        # Prevent the interpreter's periodic thread switch from satisfying the assertion. The
-        # worker can acquire the GIL here only while the native Engine Run has explicitly released
-        # it.
+        # Only count progress during Run, not after it returns or during a periodic GIL switch.
         sys.setswitchinterval(10.0)
         deadline = time.monotonic() + 5.0
         allow_worker.set()
         # Releasing the GIL does not guarantee that the OS schedules the worker during one
         # short Run call. Keep offering native calls without a Python wait or thread switch.
         while True:
-            engine.run(event_buffer)
+            native_run_active = True
+            try:
+                engine.run(event_buffer)
+            finally:
+                native_run_active = False
             if worker_progressed.is_set() or time.monotonic() >= deadline:
                 break
         assert worker_progressed.is_set()
     finally:
+        stop_worker.set()
         sys.setswitchinterval(previous_switch_interval)
         thread.join(timeout=5)
         request.close()

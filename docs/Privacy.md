@@ -8,7 +8,7 @@ The software may collect information about you and your use of the software and 
 
 ### Official Builds
 
-ONNX Runtime GenAI collects a small number of trace events with the goal of improving product quality. Official packages on supported platforms include the cross-platform 1DS telemetry SDK. Collection is subject to user consent and handled following Microsoft's privacy practices.
+ONNX Runtime GenAI collects telemetry to help improve product quality. Collection is subject to user consent and handled following Microsoft's privacy practices.
 
 Telemetry is turned **ON** by default in official packages.
 
@@ -16,16 +16,17 @@ Telemetry is turned **ON** by default in official packages.
 
 The standard `build.sh` and `build.bat` wrappers enable telemetry. For information on how to disable telemetry, see [Disabling Telemetry](#disabling-telemetry) below.
 
-#### Technical Details
+### Collected Information
 
-ONNX Runtime GenAI uses the cross-platform 1DS SDK (cpp_client_telemetry) to send ONNX Runtime GenAI trace events to Microsoft's telemetry backend over HTTPS. Based on user consent, this data is handled following GDPR and privacy regulations for anonymity and data access controls.
-
-For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
+Telemetry may include model and build metadata, device and platform information, performance measurements, diagnostics, and a pseudonymous device identifier. Local paths and credentials are redacted.
 
 ### Disabling Telemetry
 
-Telemetry can be disabled in any of these ways:
+- Set `ORT_DISABLE_TELEMETRY=1` before first use to disable native and Python telemetry.
+- For Python tools, use the model builder's `--disable_telemetry` flag or call `onnxruntime_genai.telemetry.disable_telemetry()`.
+- For private native binaries and Python wheels, pass `--no_telemetry` to the build script or configure CMake with `-DENABLE_TELEMETRY=OFF`.
+- Native language bindings provide `disable_telemetry_events`-style controls for non-essential events. These do not disable native process information; use the environment variable for full suppression.
 
-- **Don't build it in.** Telemetry is compiled by default when using `build.py`, `build.bat`, or `build.sh` on supported platforms. Pass `--no_telemetry` to produce a binary that collects no telemetry, or configure CMake directly with `-DENABLE_TELEMETRY=OFF`.
-- **Disable all telemetry at runtime.** Set `ORT_DISABLE_TELEMETRY=1` before ONNX Runtime GenAI initializes. This prevents the uploader, events, and persistent device identifier from being created for the process lifetime.
-- **Disable non-essential events via the API.** The C API (and the C++ wrapper, C#, Python, Java, and Objective-C bindings) can suppress non-essential telemetry. A process information event may still be emitted when only API suppression is used. For the full process-lifetime opt-out, use `ORT_DISABLE_TELEMETRY` before initialization.
+Telemetry is also disabled in CI and native test harnesses.
+
+Python runtime opt-out stops new events and uploads. An upload already admitted may finish, and retained queued events may be sent by a later telemetry-enabled process. Opt out before first use to prevent all uploads.

@@ -18,15 +18,27 @@ def run_onnxruntime_genai_api_tests(
     cwd: str | bytes | os.PathLike,
     log: logging.Logger,
     test_models: str | bytes | os.PathLike,
+    telemetry_tests: str = "smoke",
 ):
     log.debug("Running: ONNX Runtime GenAI API, builder, and model tests")
 
+    telemetry_selectors = (
+        ["test_telemetry.py"]
+        if telemetry_tests == "full"
+        else [
+            "test_telemetry.py::TestOptOut::test_environment_opt_out_sends_nothing",
+            "test_telemetry.py::TestOptOut::test_enabled_records_heartbeat_and_events",
+            "test_telemetry.py::TestOptOut::test_runtime_disable_is_process_latched",
+            "test_telemetry.py::TestOfflineEventStore::test_store_and_fifo_batch",
+        ]
+    )
     command = [
         sys.executable,
         "-m",
         "pytest",
         "-sv",
         "test_onnxruntime_genai_api.py",
+        *telemetry_selectors,
         "builder",
         "models",
         "--test_models",
@@ -87,6 +99,12 @@ def parse_arguments():
         action="store_true",
     )
     parser.add_argument(
+        "--telemetry-tests",
+        choices=["smoke", "full"],
+        default="smoke",
+        help="Run telemetry smoke tests (default) or the full telemetry regression suite.",
+    )
+    parser.add_argument(
         "--eps",
         nargs="+",
         choices=["cpu", "cuda", "dml", "webgpu"],
@@ -129,10 +147,14 @@ def main():
     # Download graph-capture models for supported EPs (with device availability checks handled in is_model_excluded)
     graph_capture_model_paths = []
     for ep in eps_to_build:
-        graph_capture_model_paths += download_models(os.path.abspath(args.test_models), "int4", ep, log, enable_graph_capture=True)
+        graph_capture_model_paths += download_models(
+            os.path.abspath(args.test_models), "int4", ep, log, enable_graph_capture=True
+        )
 
     # Run ONNX Runtime GenAI tests
-    run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
+    run_onnxruntime_genai_api_tests(
+        os.path.abspath(args.cwd), log, os.path.abspath(args.test_models), args.telemetry_tests
+    )
 
     if args.e2e:
         run_onnxruntime_genai_e2e_tests(os.path.abspath(args.cwd), log, output_paths)
