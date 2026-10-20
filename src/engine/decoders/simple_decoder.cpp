@@ -17,15 +17,8 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
   const bool has_position_ids = model_->session_info_.HasInput(
       model_->config_->model.decoder.inputs.position_ids);
   if (cache_manager_->SupportsDynamicBatching() && has_position_ids) {
-    const auto& position_ids =
-        model_->config_->model.decoder.inputs.position_ids;
-    const auto position_shape =
-        model_->session_info_.GetInputShape(position_ids);
-    ValidatePackedPositionIdsInput(
-        model_->session_info_.GetInputDataType(position_ids),
-        position_shape,
-        model_->session_info_.GetInputSymbolicShape(position_ids));
-    if (position_shape.size() == 2 &&
+    position_planes_ = PackedPositionIdPlanes(*model_);
+    if (position_planes_ == 3 &&
         (!model_->config_->model.vision.filename.empty() ||
          !model_->config_->model.vision.pipeline.empty() ||
          !model_->config_->model.speech.filename.empty())) {
@@ -33,7 +26,6 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
           "Packed [3, num_tokens] position_ids support text-only models; "
           "multimodal coordinates are not supported by the Engine.");
     }
-    position_planes_ = PackedPositionIdPlanes(*model_);
   }
   if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
       cache_manager_->SupportsDynamicBatching()) {

@@ -21,10 +21,17 @@ struct AttentionMetadataValues {
 
 inline constexpr size_t kAttentionMetadataElementCount = 3;
 
-void ValidatePackedPositionIdsInput(
+size_t GetPackedPositionIdsPlaneCount(
     ONNXTensorElementDataType data_type,
     std::span<const int64_t> shape,
     std::span<const char* const> symbolic_shape = {});
+void FillPackedPositionIdsRange(
+    std::span<int64_t> position_ids,
+    size_t position_planes,
+    size_t num_tokens,
+    size_t packed_offset,
+    int64_t first_position,
+    size_t token_count);
 
 AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan);
 // `max_query_len` is the number of new tokens every sequence contributes to steps served by this
