@@ -10,9 +10,11 @@ Every path is still an argument (--lib-*, --fold-bundle, ...); --provider only d
 
 usage: build_package_v12b.py --out <pkg dir> [--v12b-dir DIR] [--provider FILE] [build_package_v12.py arguments]
 """
+
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -29,7 +31,7 @@ def _pop(argv: list[str], flag: str, default):
     for i, arg in enumerate(argv):
         if arg == flag:
             value = argv[i + 1]
-            del argv[i:i + 2]
+            del argv[i : i + 2]
             return type(default)(value)
         if arg.startswith(flag + "="):
             value = arg.split("=", 1)[1]
@@ -42,18 +44,19 @@ def main() -> None:
     argv = sys.argv[1:]
     v12b_dir = _pop(argv, "--v12b-dir", V12B)
     provider = _pop(argv, "--provider", v12b_dir / "runtime_fixed/ort_home/lib/libonnxruntime_providers_cuda.so")
-    for name, rel in (("fused_attn", "lib/libqwen_fused_attn_r5.so"), ("fused_hc", "lib/libqwen_fused_hc_r5.so"),
-                      ("fused_gemm", "lib/libqwen_fused_gemm_r5.so")):
+    for name, rel in (
+        ("fused_attn", "lib/libqwen_fused_attn_r5.so"),
+        ("fused_hc", "lib/libqwen_fused_hc_r5.so"),
+        ("fused_gemm", "lib/libqwen_fused_gemm_r5.so"),
+    ):
         v12.LIBS[name] = v12b_dir / rel
     out = Path(_pop(list(argv), "--out", "")).resolve()
-    sys.argv = [sys.argv[0]] + argv
-    v12.main()
-    if not provider.exists():
+    if not any(flag in argv for flag in ("-h", "--help")) and not provider.is_file():
         raise SystemExit(f"missing provider: {provider}")
+    sys.argv = [sys.argv[0], *argv]
+    v12.main()
     bp.link_file(provider, out / "provider/libonnxruntime_providers_cuda.so", "--copy" in argv)
     manifest = out / "package_manifest.json"
-    import json
-
     data = json.loads(manifest.read_text())
     data["stack"] = "v12b"
     data["provider"] = str(provider)
@@ -62,4 +65,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

@@ -76,24 +76,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <stdexcept>
 
 #include "onnxruntime_c_api.h"
-// Some Apple/iOS toolchains ship the core ONNX Runtime C API but no experimental header.
-// Probe with __has_include so those builds still compile; consumers of the model-package
-// types gate on ORT_GENAI_HAS_EXPERIMENTAL_C_API below.
-#if defined(__has_include)
-#if __has_include("onnxruntime_experimental_c_api.h")
-#include "onnxruntime_experimental_c_api.h"
-#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
-#else
-#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 0
-#endif
-#else
-#include "onnxruntime_experimental_c_api.h"
-#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
-#endif
-
-// Single gate for OrtModelPackageApi support: API version 28+ and the experimental header
-// available. The OrtModelPackage* wrappers below and model_package.{h,cpp} key off this.
-#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
+#if ORT_API_VERSION >= 31
 #define ORT_GENAI_HAS_MODEL_PACKAGE 1
 #else
 #define ORT_GENAI_HAS_MODEL_PACKAGE 0
@@ -149,6 +132,7 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
+inline uint32_t api_version{};
 
 /// <summary>
 /// This returns a reference to the ORT C Model Editor API. Used if building or augmenting a model at runtime.
@@ -241,6 +225,7 @@ inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
   for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
     api = ort_api_base->GetApi(i);
     if (api) {
+      api_version = i;
       LOG_INFO("ORT API Version %d was found.", i);
       break;
     }
@@ -356,6 +341,7 @@ inline void InitApi() {
   api = ort_api_base_fn()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
+  api_version = ORT_API_VERSION;
 #endif  // defined(__linux__) || defined(MACOS_USE_DLOPEN)
 
   LOG_INFO("ORT Version: %s. %s", ort_api_base_fn()->GetVersionString(), api->GetBuildInfoString());
@@ -547,6 +533,7 @@ struct OrtEpDevice {
   std::string Name() const;
   std::string Vendor() const;
   const OrtHardwareDevice* Device() const;
+  const OrtMemoryInfo* GetMemoryInfo(OrtDeviceMemoryType memory_type) const;  ///< Wraps OrtApi::EpDevice_MemoryInfo
 
   Ort::Abstract make_abstract;
 };
@@ -579,6 +566,10 @@ struct OrtEnv {
   /// nullptr if none exists. Wraps OrtApi::GetSharedAllocator. The returned allocator is owned by
   /// the OrtEnv — do NOT delete it.
   Ort::Allocator* GetSharedAllocator(const OrtMemoryInfo& mem_info) const;
+
+  /// \brief Release an EP-advertised shared allocator matching ep_device + mem_type. Wraps
+  /// OrtApi::ReleaseSharedAllocator. A no-op (success) when no matching shared allocator exists.
+  void ReleaseSharedAllocator(const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type);
 
   /// \brief Copy tensors between devices. Wraps OrtApi::CopyTensors
   /// \param src_tensors Array of source OrtValue tensors
@@ -1549,10 +1540,7 @@ struct OrtModelPackageComponentContext;
 
 namespace Ort {
 
-using ModelPackageApi = ::OrtModelPackageApi;
-
-/// Returns the model package API table exposed by the loaded ONNX Runtime build.
-const ModelPackageApi& GetModelPackageApi();
+const OrtModelPackageApi& GetModelPackageApi();
 
 }  // namespace Ort
 

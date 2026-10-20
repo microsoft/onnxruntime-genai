@@ -15,6 +15,7 @@ usage: build_package_v12.py --out <pkg dir> [--fold-bundle DIR] [--head-r2-bundl
                             [--lib-<name> FILE ...] [--plane-lib FILE] [--no-prefill] [--stop-token-ids ID,ID] [--copy]
 Needs the research Python env (onnx; mobius for the PLE table).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,9 +23,10 @@ import importlib.util
 import json
 import os
 import struct
-import sys
 from collections import defaultdict
 from pathlib import Path
+
+import onnx
 
 HERE = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("build_package", HERE / "build_package.py")
@@ -34,27 +36,26 @@ _spec.loader.exec_module(bp)
 CG = bp.CG
 FOLD_BUNDLE = CG / "mtp_runner/fold/bundle/fold_v12all/target"
 HEAD_R2_BUNDLE = CG / "mtp_runner/fold/bundle/head_r2f"
-DENSE_BUNDLE = Path("/home/tianlei/git/eval_runs/qwen38_mobius_nvfp4_mtp_20261005/models_v6_native_sparse_20261007_01/target")
+DENSE_BUNDLE = Path(
+    "/home/tianlei/git/eval_runs/qwen38_mobius_nvfp4_mtp_20261005/models_v6_native_sparse_20261007_01/target"
+)
 HEAD_KV_BUNDLE = CG / "mtp_runner/prefill/bundle/head_kv"
-DECODE_REF_MODEL = CG / "models_capture_v12all_s2_bundle/target/model.onnx"  # same verify body, no head nodes (constants check)
 
 # name -> default path; the order is the registration order (op domains do not overlap)
 LIBS = {
-    "qsa": CG / "fused_attn/r2/build/libqwen_packed_qsa_indexer_v11.so",   # qwen.capture (unchanged in v12)
-    "fused_ops": CG / "fused_ops/build/libqwen_fused_ops.so",              # qwen.fused
-    "fused_attn": CG / "v12/lib/libqwen_fused_attn_r3.so",                 # qwen.fused_attn (r3)
-    "fused_hc": CG / "fused_hc/build/libqwen_fused_hc_r3.so",              # qwen.fused_hc (r3)
-    "fused_gemm": CG / "fused_gemm/build/libqwen_fused_gemm_r4.so",        # qwen.fused_gemm (r4: trigger + M <= 8)
-    "dsa": CG / "v12/dsa/build/libqwen_guarded_dsa_r2_v12.so",             # qwen.static (GuardedDSA r2, memset -> kernel)
-    "mtp_head": CG / "mtp_head/build/libqwen_mtp_head.so",                 # qwen.mtp
-    "fold": CG / "mtp_runner/fold/build/libqwen_fold.so",                  # qwen.fold
+    "qsa": CG / "fused_attn/r2/build/libqwen_packed_qsa_indexer_v11.so",  # qwen.capture (unchanged in v12)
+    "fused_ops": CG / "fused_ops/build/libqwen_fused_ops.so",  # qwen.fused
+    "fused_attn": CG / "v12/lib/libqwen_fused_attn_r3.so",  # qwen.fused_attn (r3)
+    "fused_hc": CG / "fused_hc/build/libqwen_fused_hc_r3.so",  # qwen.fused_hc (r3)
+    "fused_gemm": CG / "fused_gemm/build/libqwen_fused_gemm_r4.so",  # qwen.fused_gemm (r4: trigger + M <= 8)
+    "dsa": CG / "v12/dsa/build/libqwen_guarded_dsa_r2_v12.so",  # qwen.static (GuardedDSA r2, memset -> kernel)
+    "mtp_head": CG / "mtp_head/build/libqwen_mtp_head.so",  # qwen.mtp
+    "fold": CG / "mtp_runner/fold/build/libqwen_fold.so",  # qwen.fold
 }
 
 
 # ---- initializer inventory / shared pool ----------------------------------------------------------------------------
 def inventory(model_path: Path) -> dict:
-    import onnx
-
     model = onnx.load(str(model_path), load_external_data=False)
     out = {}
     for t in model.graph.initializer:
@@ -65,15 +66,29 @@ def inventory(model_path: Path) -> dict:
         st = os.stat(path)
         offset = int(ext.get("offset", 0))
         length = int(ext.get("length", 0)) or st.st_size - offset
-        out[t.name] = {"key": (st.st_ino, offset, length, t.data_type, tuple(t.dims)), "file": str(Path(ext["location"])),
-                       "dtype": t.data_type, "dims": list(t.dims), "offset": offset, "length": length}
+        out[t.name] = {
+            "key": (st.st_dev, st.st_ino, offset, length, t.data_type, tuple(t.dims)),
+            "file": str(Path(ext["location"])),
+            "dtype": t.data_type,
+            "dims": list(t.dims),
+            "offset": offset,
+            "length": length,
+        }
         assert not any(c.isspace() for c in t.name), t.name
     return out
 
 
-def write_pool(out: Path, models: dict[str, Path]) -> dict:
+def write_pool(out: Path, models: dict[str, Path], source_models: dict[str, Path] | None = None) -> dict:
     """weights_pool.txt: initializers used (same inode / offset / length / dtype / dims) by >= 2 of the sessions."""
     inv = {label: inventory(path) for label, path in models.items()}
+    if source_models is not None:
+        for label, items in inv.items():
+            source = inventory(source_models[label])
+            for name, item in items.items():
+                original = source[name]
+                if any(item[field] != original[field] for field in ("dtype", "dims", "offset", "length")):
+                    raise ValueError(f"copied initializer metadata differs from source: {label}:{name}")
+                item["key"] = original["key"]
     users = defaultdict(set)
     for label, items in inv.items():
         for item in items.values():
@@ -88,12 +103,18 @@ def write_pool(out: Path, models: dict[str, Path]) -> dict:
             if item["key"] not in pool_ids:
                 pool_ids[item["key"]] = len(pool_ids)
                 dims = " ".join(str(d) for d in item["dims"])
-                lines.append(f"pool {pool_ids[item['key']]} {item['dtype']} {item['offset']} {item['length']} {len(item['dims'])} "
-                             f"{dims} {rel_dir / item['file']}".replace("  ", " "))
+                lines.append(
+                    f"pool {pool_ids[item['key']]} {item['dtype']} {item['offset']} {item['length']} {len(item['dims'])} "
+                    f"{dims} {rel_dir / item['file']}".replace("  ", " ")
+                )
                 total += item["length"]
             sessions.append(f"session {label} {name} {pool_ids[item['key']]}")
     (out / "weights_pool.txt").write_text("qwen38_weights_pool 1\n" + "\n".join(lines + sessions) + "\n")
-    return {"initializers": len(pool_ids), "gib": total / 2**30, "sessions": {l: sum(1 for s in sessions if s.split()[1] == l) for l in inv}}
+    return {
+        "initializers": len(pool_ids),
+        "gib": total / 2**30,
+        "sessions": {label: sum(1 for session in sessions if session.split()[1] == label) for label in inv},
+    }
 
 
 # ---- QSA hand-off constants -------------------------------------------------------------------------------------------
@@ -103,13 +124,13 @@ def _tensor_bytes(tensor, base: Path) -> bytes:
         info = {e.key: e.value for e in tensor.external_data}
         with open(base / info["location"], "rb") as f:
             f.seek(int(info.get("offset", 0)))
-            return f.read(int(info["length"]))
-    return bytes(tensor.raw_data)
+            return f.read(int(info["length"]) if "length" in info else -1)
+    if tensor.HasField("raw_data"):
+        return bytes(tensor.raw_data)
+    return struct.pack(f"<{len(tensor.int32_data)}H", *tensor.int32_data)
 
 
 def qsa_nodes(model_path: Path, head: bool):
-    import onnx
-
     model = onnx.load(str(model_path), load_external_data=False)
     inits = {i.name: i for i in model.graph.initializer}
     for node in model.graph.node:
@@ -120,7 +141,12 @@ def qsa_nodes(model_path: Path, head: bool):
             continue
         attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
         layer = int(node.input[3].split("layers.")[1].split(".")[0])
-        yield layer, attrs, [_tensor_bytes(inits[node.input[i]], model_path.parent) for i in (3, 4, 5)], list(inits[node.input[4]].dims)
+        yield (
+            layer,
+            attrs,
+            [_tensor_bytes(inits[node.input[i]], model_path.parent) for i in (3, 4, 5)],
+            list(inits[node.input[4]].dims),
+        )
 
 
 def write_qsa_constants(out: Path, target_model: Path, head_model: Path) -> dict:
@@ -157,10 +183,17 @@ def write_qsa_constants(out: Path, target_model: Path, head_model: Path) -> dict
         for layer, knorm in sorted(layers.items()):
             add(set_name, f"knorm.{layer}", knorm)
     (out / "qsa_consts.bin").write_bytes(bytes(blob))
-    (out / "qsa_consts.txt").write_text("\n".join(["qwen38_qsa_consts 1", "file qsa_consts.bin", f"epsilon {eps:.9g}", f"width {width}"] + index) + "\n")
+    (out / "qsa_consts.txt").write_text(
+        "\n".join(["qwen38_qsa_consts 1", "file qsa_consts.bin", f"epsilon {eps:.9g}", f"width {width}", *index]) + "\n"
+    )
     same = sets["target"][1] == sets["head"][1] and sets["target"][2] == sets["head"][2]
-    return {"layers": sorted(sets["target"][0]), "width": width, "epsilon": eps, "head_tables_equal_target": same,
-            "bytes": len(blob)}
+    return {
+        "layers": sorted(sets["target"][0]),
+        "width": width,
+        "epsilon": eps,
+        "head_tables_equal_target": same,
+        "bytes": len(blob),
+    }
 
 
 def main() -> None:
@@ -173,9 +206,17 @@ def main() -> None:
     parser.add_argument("--plane-lib", type=Path, default=bp.DEFAULT_PLANE)
     parser.add_argument("--checkpoint", type=Path, default=bp.CHECKPOINT)
     parser.add_argument("--tokenizer-from", type=Path, default=bp.TOKENIZER_FROM)
-    parser.add_argument("--no-prefill", action="store_true", help="fold decode only; the prompt runs through the muted fold graph (S=2 steps)")
+    parser.add_argument(
+        "--no-prefill",
+        action="store_true",
+        help="fold decode only; the prompt runs through the muted fold graph (S=2 steps)",
+    )
     parser.add_argument("--no-warmup", action="store_true")
-    parser.add_argument("--no-pool", action="store_true", help="do not share initializers between the sessions (does not fit one GPU with prefill)")
+    parser.add_argument(
+        "--no-pool",
+        action="store_true",
+        help="do not share initializers between the sessions (does not fit one GPU with prefill)",
+    )
     parser.add_argument("--stop-token-ids", default="248046,248044")
     parser.add_argument("--chunk", type=int, default=8192)
     parser.add_argument("--copy", action="store_true")
@@ -184,6 +225,10 @@ def main() -> None:
         parser.add_argument(f"--lib-{name.replace('_', '-')}", type=Path, default=default)
     args = parser.parse_args()
     out: Path = args.out.resolve()
+    bundles = {"target": args.fold_bundle, "head_r2": args.head_r2_bundle}
+    if not args.no_prefill:
+        bundles.update(dense=args.dense_bundle, head_kv=args.head_kv_bundle)
+    bp.validate_bundle_destinations([(source, out / label) for label, source in bundles.items()])
     out.mkdir(parents=True, exist_ok=True)
 
     libs = {name: getattr(args, f"lib_{name}") for name in LIBS}
@@ -217,63 +262,101 @@ def main() -> None:
 
     pool = None
     if not args.no_pool:
-        pool = write_pool(out, models)
+        pool = write_pool(out, models, {label: source / "model.onnx" for label, source in bundles.items()})
     consts = None
     if not args.no_prefill:
-        consts = write_qsa_constants(out, DECODE_REF_MODEL if DECODE_REF_MODEL.exists() else out / "target/model.onnx",
-                                     out / "head_r2/model.onnx")
+        consts = write_qsa_constants(
+            out,
+            out / "target/model.onnx",
+            out / "head_r2/model.onnx",
+        )
 
     custom_libs = [rel_libs[n] for n in LIBS]
-    provider = {"cuda": {"enable_cuda_graph": "1", "min_num_runs_before_cuda_graph_capture": "4",
-                         "arena_extend_strategy": "kSameAsRequested"}}
-    plain_session = {"log_id": "onnxruntime-genai", "graph_optimization_level": "ORT_DISABLE_ALL",
-                     "provider_options": [{"cuda": {}}], "session.use_device_allocator_for_initializers": "1"}
+    provider = {
+        "cuda": {
+            "enable_cuda_graph": "1",
+            "min_num_runs_before_cuda_graph_capture": "4",
+            "arena_extend_strategy": "1",
+        }
+    }
+    plain_session = {
+        "log_id": "onnxruntime-genai",
+        "graph_optimization_level": "ORT_DISABLE_ALL",
+        "provider_options": [{"cuda": {}}],
+        "session.use_device_allocator_for_initializers": "1",
+    }
     qg = {
         "plane_library": "libs/libqwen38_plane.so",
         "ple_table": "ple_table.txt",
         "kv_capacity": bp.KV_CAPACITY,
         "warmup": not args.no_warmup,
         "mtp": {"enabled": True, "prefill_head": True},
-        "fold": {"enabled": True, "target_graph_id": 71,
-                 "head_r2": {"filename": "head_r2/model.onnx", "graph_id": 81}},
+        "fold": {"enabled": True, "target_graph_id": 71, "head_r2": {"filename": "head_r2/model.onnx", "graph_id": 81}},
     }
     qg["prefill"] = {"weights_pool": "weights_pool.txt"} if pool else {}
     if not args.no_prefill:
-        qg["prefill"].update({
-            "enabled": True, "chunk": args.chunk, "constants": "qsa_consts.txt",
-            "dense": {"filename": "dense/model.onnx", "session_options": plain_session},
-            "head_kv": {"filename": "head_kv/model.onnx", "session_options": plain_session},
-            "warmup_lengths": [args.chunk, 2048, 512, 128, 37],
-        })
+        qg["prefill"].update(
+            {
+                "enabled": True,
+                "chunk": args.chunk,
+                "constants": "qsa_consts.txt",
+                "dense": {"filename": "dense/model.onnx", "session_options": plain_session},
+                "head_kv": {"filename": "head_kv/model.onnx", "session_options": plain_session},
+                "warmup_lengths": [args.chunk, 2048, 512, 128, 37],
+            }
+        )
     config = {
         "model": {
             "type": "qwen38_flash_graph",
-            "bos_token_id": 248044, "pad_token_id": 248044,
+            "bos_token_id": 248044,
+            "pad_token_id": 248044,
             "eos_token_id": [int(x) for x in args.stop_token_ids.split(",")],
             "vocab_size": 248320,
             "context_length": bp.KV_CAPACITY - 4,
             "decoder": {
-                "filename": "target/model.onnx", "head_size": 256, "hidden_size": 2560, "num_attention_heads": 24,
-                "num_hidden_layers": 48, "num_key_value_heads": 2,
+                "filename": "target/model.onnx",
+                "head_size": 256,
+                "hidden_size": 2560,
+                "num_attention_heads": 24,
+                "num_hidden_layers": 48,
+                "num_key_value_heads": 2,
                 "session_options": {
-                    "log_id": "onnxruntime-genai", "graph_optimization_level": "ORT_DISABLE_ALL",
-                    "provider_options": [provider], "session.use_device_allocator_for_initializers": "1",
+                    "log_id": "onnxruntime-genai",
+                    "graph_optimization_level": "ORT_DISABLE_ALL",
+                    "provider_options": [provider],
+                    "session.use_device_allocator_for_initializers": "1",
                     "custom_ops_libraries": custom_libs,
                 },
             },
             "qwen38_graph": qg,
         },
-        "search": {"do_sample": False, "top_k": 1, "temperature": 1.0, "num_beams": 1, "num_return_sequences": 1,
-                   "max_length": bp.KV_CAPACITY - 4, "min_length": 0, "past_present_share_buffer": False},
+        "search": {
+            "do_sample": False,
+            "top_k": 1,
+            "temperature": 1.0,
+            "num_beams": 1,
+            "num_return_sequences": 1,
+            "max_length": bp.KV_CAPACITY - 4,
+            "min_length": 0,
+            "past_present_share_buffer": False,
+        },
     }
     (out / "genai_config.json").write_text(json.dumps(config, indent=2) + "\n")
-    summary = {"out": str(out), "libs": {k: str(v) for k, v in libs.items()}, "plane": str(args.plane_lib), "ple": ple, "pool": pool,
-               "qsa_constants": consts, "fold_bundle": str(args.fold_bundle), "head_r2_bundle": str(args.head_r2_bundle),
-               "dense_bundle": None if args.no_prefill else str(args.dense_bundle),
-               "head_kv_bundle": None if args.no_prefill else str(args.head_kv_bundle)}
+    summary = {
+        "out": str(out),
+        "libs": {k: str(v) for k, v in libs.items()},
+        "plane": str(args.plane_lib),
+        "ple": ple,
+        "pool": pool,
+        "qsa_constants": consts,
+        "fold_bundle": str(args.fold_bundle),
+        "head_r2_bundle": str(args.head_r2_bundle),
+        "dense_bundle": None if args.no_prefill else str(args.dense_bundle),
+        "head_kv_bundle": None if args.no_prefill else str(args.head_kv_bundle),
+    }
     (out / "package_manifest.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

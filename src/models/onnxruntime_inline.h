@@ -365,6 +365,12 @@ inline const OrtHardwareDevice* OrtEpDevice::Device() const {
   return Ort::api->EpDevice_Device(this);
 }
 
+inline const OrtMemoryInfo* OrtEpDevice::GetMemoryInfo(OrtDeviceMemoryType memory_type) const {
+  // Returns nullptr when the EP advertises no allocator of this type — callers branch on that, so
+  // forward the pointer directly and do NOT ThrowOnError (the C API returns no status here).
+  return Ort::api->EpDevice_MemoryInfo(this, memory_type);
+}
+
 inline OrtHardwareDeviceType OrtHardwareDevice::Type() const {
   return Ort::api->HardwareDevice_Type(this);
 }
@@ -463,6 +469,10 @@ inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
     devices.emplace_back(device_ptrs[i]);
   }
   return devices;
+}
+
+inline void OrtEnv::ReleaseSharedAllocator(const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type) {
+  Ort::ThrowOnError(Ort::api->ReleaseSharedAllocator(this, ep_device, mem_type));
 }
 
 inline std::unique_ptr<OrtThreadingOptions> OrtThreadingOptions::Create() {
@@ -1552,14 +1562,16 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
 
 namespace Ort {
 
-inline const ModelPackageApi& GetModelPackageApi() {
-  static const ModelPackageApi* api_table = api == nullptr ? nullptr : api->GetModelPackageApi();
-  if (api_table == nullptr) {
-    throw std::runtime_error(
-        "Model package API is not available in this ONNX Runtime build. "
-        "Model packages require an ONNX Runtime build exposing OrtModelPackageApi.");
+inline const OrtModelPackageApi& GetModelPackageApi() {
+  if (api == nullptr || api_version < 31) {
+    throw std::runtime_error("Model packages require ONNX Runtime 1.31 or newer.");
   }
-  return *api_table;
+  const auto* model_package_api = api->GetModelPackageApi();
+  if (model_package_api == nullptr) {
+    throw std::runtime_error(
+        "Model package API is not available in this ONNX Runtime build.");
+  }
+  return *model_package_api;
 }
 
 }  // namespace Ort

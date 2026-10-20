@@ -4,7 +4,6 @@
 
 """Build an isolated ported package with fused weights, hyper-connections, and INT8 attention."""
 
-
 import argparse
 import copy
 import hashlib
@@ -12,6 +11,7 @@ import json
 import os
 import shutil
 from collections import Counter, defaultdict
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -27,29 +27,38 @@ def untile_weights(values, kind):
     if kind == 0:
         rp = index % 128
         rest = index // 128
-        destination = (((rest // 200 * 10 + rest % 10) * 128 + rp) * 20 + rest // 10 % 20)
+        destination = ((rest // 200 * 10 + rest % 10) * 128 + rp) * 20 + rest // 10 % 20
         shape = (10240, 320)
     else:
         c = index % 4
         rest = index // 4
         rp = rest % 32
         rest //= 32
-        destination = (((rest % 10 * 32 + rp) * 4 + c) * 160 + rest // 10)
+        destination = ((rest % 10 * 32 + rp) * 4 + c) * 160 + rest // 10
         shape = (320, 10240)
     output = np.empty_like(vectors)
     output[destination] = vectors
     return output.reshape(shape)
 
 
-def optimize_model(path):
+def ensure_opset_import(model, domain="com.microsoft", version=1):
+    opset = next((item for item in model.opset_import if item.domain == domain), None)
+    if opset is None:
+        model.opset_import.append(helper.make_opsetid(domain, version))
+    elif opset.version < version:
+        opset.version = version
+
+
+def optimize_model(path, transformed_provenance=None):
     model = onnx.load(path, load_external_data=False)
     initializers = {t.name: t for t in model.graph.initializer}
     producers = {out: n for n in model.graph.node for out in n.output}
     consumers = Counter(x for n in model.graph.node for x in n.input)
-    outputs = {v.name for v in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     removed = set()
     replacements = {}
     new_initializers = {}
+    names = graph_value_names(model.graph)
     transformed_weights = {}
     counts = Counter()
     data_path = path.with_name("performance_weights.bin")
@@ -65,7 +74,7 @@ def optimize_model(path):
                 raise ValueError(f"External data escapes package: {data_file}")
             with data_file.open("rb") as stream:
                 stream.seek(int(external.get("offset", 0)))
-                tensor.raw_data = stream.read(int(external["length"]))
+                tensor.raw_data = stream.read(int(external["length"]) if "length" in external else -1)
             tensor.ClearField("external_data")
             tensor.data_location = TensorProto.DEFAULT
         return numpy_helper.to_array(tensor)
@@ -88,39 +97,42 @@ def optimize_model(path):
                 wrappers = {n.name: n for n in model.graph.node if n.name.startswith(prefix)}
                 fused = copy.deepcopy(node)
                 fused.name += "_Int8Cache"
-                fused.input[:3] = [
-                    wrappers[prefix + "Cast" + kind].input[0] for kind in ("Query", "Key", "Value")
-                ]
-                fused.input[3:5] = [
-                    wrappers[prefix + kind + "_CacheToBSNH"].input[0] for kind in ("key", "value")
-                ]
+                fused.input[:3] = [wrappers[prefix + "Cast" + kind].input[0] for kind in ("Query", "Key", "Value")]
+                fused.input[3:5] = [wrappers[prefix + kind + "_CacheToBSNH"].input[0] for kind in ("key", "value")]
                 fused.input.extend([prefix + "k_scale", prefix + "v_scale"])
                 fused.output[0] = wrappers[prefix + "CastAttentionToBf16"].output[0]
                 fused.output[1:3] = [
                     wrappers[prefix + "present_" + kind + "_ToBNSH"].output[0] for kind in ("key", "value")
                 ]
-                retained = {
-                    node.name, prefix + "FlattenSelectedIndices", prefix + "FlattenSelectedCounts"
-                }
+                retained = {node.name, prefix + "FlattenSelectedIndices", prefix + "FlattenSelectedCounts"}
                 discarded = [n for name, n in wrappers.items() if name not in retained]
                 preserved_outputs = set(fused.output)
                 for discarded_node in discarded:
                     for output in discarded_node.output:
                         external_users = [
-                            n.name for n in model.graph.node
-                            if output in n.input and not n.name.startswith(prefix)
+                            n.name for n in model.graph.node if output in n.input and not n.name.startswith(prefix)
                         ]
                         if output not in preserved_outputs and (output in outputs or external_users):
                             raise ValueError(f"Cannot remove externally consumed cache conversion: {output}")
-                    removed.add(discarded_node.name)
-                replacements[node.name] = fused
+                    removed.add(id(discarded_node))
+                replacements[id(node)] = fused
                 counts["direct_int8_attention"] += 1
             if node.op_type == "UntileHyperConnectionWeights":
                 if node.input[0] not in initializers:
                     continue
                 kind = next(a.i for a in node.attribute if a.name == "kind")
                 add_weight(node.output[0], untile_weights(array(node.input[0]), kind), data)
-                removed.add(node.name)
+                if transformed_provenance is not None:
+                    transformed_provenance[node.output[0]] = (
+                        node.input[0],
+                        (
+                            "untile",
+                            kind,
+                            tuple(new_initializers[node.output[0]].dims),
+                            new_initializers[node.output[0]].data_type,
+                        ),
+                    )
+                removed.add(id(node))
                 counts["constant_untiles"] += 1
             if node.op_type != "MatMul":
                 continue
@@ -140,26 +152,47 @@ def optimize_model(path):
             if axis not in (1, -1):
                 continue
             k, n = weight.dims
+            if scale_name not in initializers or initializers[scale_name].data_type != TensorProto.FLOAT:
+                continue
             scales = array(scale_name)
             if scales.shape != (n,) or k % 16:
                 continue
             key = (weight_name, scale_name)
             if key not in transformed_weights:
-                transposed = add_weight(weight_name + ".performance_nk", array(weight_name).T, data)
-                scale = scale_name + ".performance_n1"
-                new_initializers[scale] = numpy_helper.from_array(scales.reshape(n, 1), scale)
+                transposed = add_weight(
+                    unique_value_name(weight_name + ".performance_nk", names), array(weight_name).T, data
+                )
+                scale = add_weight(unique_value_name(scale_name + ".performance_n1", names), scales.reshape(n, 1), data)
                 transformed_weights[key] = (transposed, scale)
+                if transformed_provenance is not None:
+                    transformed_provenance[transposed] = (
+                        weight_name,
+                        (
+                            "transpose",
+                            1,
+                            tuple(new_initializers[transposed].dims),
+                            new_initializers[transposed].data_type,
+                        ),
+                    )
+                    transformed_provenance[scale] = (
+                        scale_name,
+                        ("reshape", (n, 1), new_initializers[scale].data_type),
+                    )
             transposed, scale = transformed_weights[key]
-            replacements[node.name] = helper.make_node(
-                "MatMulBlockQuantizedFp8Weight", [node.input[0], transposed, scale],
-                list(node.output), name=node.name + "_FusedFp8", domain="com.microsoft", block_size=k,
+            replacements[id(node)] = helper.make_node(
+                "MatMulBlockQuantizedFp8Weight",
+                [node.input[0], transposed, scale],
+                list(node.output),
+                name=node.name + "_FusedFp8",
+                domain="com.microsoft",
+                block_size=k,
             )
             counts["fused_fp8_matmuls"] += 1
             if consumers[cast.output[0]] == 1 and cast.output[0] not in outputs:
-                removed.add(cast.name)
+                removed.add(id(cast))
                 if consumers[dq.output[0]] == 1 and dq.output[0] not in outputs:
-                    removed.add(dq.name)
-    nodes = [replacements.get(n.name, n) for n in model.graph.node if n.name not in removed]
+                    removed.add(id(dq))
+    nodes = [replacements.get(id(n), n) for n in model.graph.node if id(n) not in removed]
     del model.graph.node[:]
     model.graph.node.extend(nodes)
     used = {x for n in nodes for x in n.input} | outputs
@@ -167,6 +200,8 @@ def optimize_model(path):
     del model.graph.initializer[:]
     model.graph.initializer.extend(t for name, t in initializers.items() if name in used)
     del model.graph.value_info[:]
+    if counts["fused_fp8_matmuls"]:
+        ensure_opset_import(model)
     temporary = path.with_suffix(".optimized.onnx")
     onnx.save(model, temporary)
     os.replace(temporary, path)
@@ -175,6 +210,10 @@ def optimize_model(path):
 
 def quantize_prefill_outputs(path, scales, head=False):
     model = onnx.load(path, load_external_data=False)
+    if head:
+        captured = captured_values(model.graph)
+        if any(output.name in scales and output.name in captured for output in model.graph.output):
+            raise ValueError("Cannot quantize captured head output")
     changed = 0
     for output in list(model.graph.output):
         name = output.name
@@ -184,8 +223,8 @@ def quantize_prefill_outputs(path, scales, head=False):
         rank = len(shape.dim)
         if head and rank == 0:
             producer = next(n for n in model.graph.node if name in n.output)
-            expected_op = {"key": "RotaryEmbedding", "value": "MatMul"}[name]
-            if producer.op_type != expected_op:
+            expected_ops = {"key": {"RotaryEmbedding"}, "value": {"MatMul", "MatMulBlockQuantizedFp8Weight"}}[name]
+            if producer.op_type not in expected_ops:
                 raise ValueError(f"Unexpected head prefill producer: {producer.op_type}")
             rank = 3
             dimensions = [1, "prompt_length", 512]
@@ -208,22 +247,29 @@ def quantize_prefill_outputs(path, scales, head=False):
         flat_shape = prefix + ".flat_shape"
         full_shape = prefix + ".full_shape"
         scale_name = prefix + ".scale"
-        model.graph.initializer.extend([
-            numpy_helper.from_array(np.asarray([0, 0, -1], np.int64), flat_shape),
-            numpy_helper.from_array(np.asarray([0, 0, 2, 256], np.int64), full_shape),
-            numpy_helper.from_array(scales[name], scale_name),
-            numpy_helper.from_array(np.zeros(512, np.int8), prefix + ".zero"),
-        ])
-        nodes.extend([
-            helper.make_node("Reshape", [source, flat_shape], [prefix + ".flat"]),
-            helper.make_node("QuantizeLinear", [prefix + ".flat", scale_name, prefix + ".zero"],
-                             [prefix + ".int8"], axis=2),
-        ])
+        model.graph.initializer.extend(
+            [
+                numpy_helper.from_array(np.asarray([0, 0, -1], np.int64), flat_shape),
+                numpy_helper.from_array(np.asarray([0, 0, 2, 256], np.int64), full_shape),
+                numpy_helper.from_array(scales[name], scale_name),
+                numpy_helper.from_array(np.zeros(512, np.int8), prefix + ".zero"),
+            ]
+        )
+        nodes.extend(
+            [
+                helper.make_node("Reshape", [source, flat_shape], [prefix + ".flat"]),
+                helper.make_node(
+                    "QuantizeLinear", [prefix + ".flat", scale_name, prefix + ".zero"], [prefix + ".int8"], axis=2
+                ),
+            ]
+        )
         if rank == 4:
-            nodes.extend([
-                helper.make_node("Reshape", [prefix + ".int8", full_shape], [prefix + ".bsnh_int8"]),
-                helper.make_node("Transpose", [prefix + ".bsnh_int8"], [result], perm=[0, 2, 1, 3]),
-            ])
+            nodes.extend(
+                [
+                    helper.make_node("Reshape", [prefix + ".int8", full_shape], [prefix + ".bsnh_int8"]),
+                    helper.make_node("Transpose", [prefix + ".bsnh_int8"], [result], perm=[0, 2, 1, 3]),
+                ]
+            )
         else:
             nodes.append(helper.make_node("Identity", [prefix + ".int8"], [result]))
         model.graph.node.extend(nodes)
@@ -241,9 +287,11 @@ def quantize_prefill_outputs(path, scales, head=False):
     return changed
 
 
-def refresh_weight_pool(source, destination):
-    models = {
-        label: {t.name for t in onnx.load(destination / label / "model.onnx", load_external_data=False).graph.initializer}
+def refresh_weight_pool(source, destination, transformed_provenance=None):
+    model_initializers = {
+        label: {
+            t.name: t for t in onnx.load(destination / label / "model.onnx", load_external_data=False).graph.initializer
+        }
         for label in ("target", "dense", "head_r2", "head_kv")
     }
     lines = (source / "weights_pool.txt").read_text().splitlines()
@@ -251,14 +299,19 @@ def refresh_weight_pool(source, destination):
         raise ValueError("Unsupported weight pool manifest")
     pools = {}
     sessions = defaultdict(list)
+    source_pool_indices = {}
     for line in lines[1:]:
         fields = line.split()
+        if not fields:
+            continue
         if fields[0] == "pool":
             pools[int(fields[1])] = fields
         elif fields[0] == "session":
             _, label, name, index = fields
-            if name in models[label]:
-                sessions[int(index)].append((label, name))
+            index = int(index)
+            source_pool_indices[label, name] = index
+            if name in model_initializers[label]:
+                sessions[index].append((label, name))
         else:
             raise ValueError(f"Unsupported weight pool entry: {fields[0]}")
     output = [lines[0]]
@@ -274,6 +327,43 @@ def refresh_weight_pool(source, destination):
         references.extend(f"session {label} {name} {count}" for label, name in users)
         total += int(fields[4])
         count += 1
+
+    transformed_sessions = defaultdict(list)
+    for label, provenance in (transformed_provenance or {}).items():
+        for name, (source_name, transformation) in provenance.items():
+            if name not in model_initializers[label]:
+                continue
+            source_index = source_pool_indices.get((label, source_name))
+            if source_index is not None:
+                transformed_sessions[source_index, transformation].append((label, name))
+
+    for users in transformed_sessions.values():
+        if len({label for label, _ in users}) < 2:
+            continue
+        label, name = users[0]
+        tensor = model_initializers[label][name]
+        external = {item.key: item.value for item in tensor.external_data}
+        if tensor.data_location != TensorProto.EXTERNAL or "location" not in external:
+            raise ValueError(f"Transformed pooled initializer is not external: {label}:{name}")
+        offset = int(external.get("offset", 0))
+        length = int(external.get("length", 0))
+        if not length:
+            length = (destination / label / external["location"]).stat().st_size - offset
+        dims = list(tensor.dims)
+        fields = [
+            "pool",
+            str(count),
+            str(tensor.data_type),
+            str(offset),
+            str(length),
+            str(len(dims)),
+            *(str(dimension) for dimension in dims),
+            str(Path(label) / external["location"]),
+        ]
+        output.append(" ".join(fields))
+        references.extend(f"session {session_label} {session_name} {count}" for session_label, session_name in users)
+        total += length
+        count += 1
     temporary = destination / "weights_pool.optimized.txt"
     temporary.write_text("\n".join(output + references) + "\n")
     os.replace(temporary, destination / "weights_pool.txt")
@@ -287,9 +377,12 @@ def fuse_hyper_connections(path):
     for node in model.graph.node:
         for name in node.input:
             users[name].append(node)
-    outputs = {o.name for o in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     removed = set()
     replacements = {}
+    types = infer_value_types(model)
+    shapes = {value.name: value.type.tensor_type.shape for value in (*model.graph.input, *model.graph.value_info)}
+    available = {value.name for value in model.graph.input} | set(initializers) | {""}
 
     def successor(node, op):
         candidates = users[node.output[0]]
@@ -305,7 +398,10 @@ def fuse_hyper_connections(path):
 
     for norm in model.graph.node:
         if norm.op_type != "BranchwiseRMSNorm":
+            available.update(norm.output)
             continue
+        inputs_available = available.copy()
+        available.update(norm.output)
         candidates = users[norm.output[0]]
         premix = next((n for n in candidates if n.op_type == "HyperConnectionPreMix"), None)
         if premix is None:
@@ -317,35 +413,59 @@ def fuse_hyper_connections(path):
         silu = successor(down, "ScaledSiLU")
         up = successor(silu, "MatMul")
         sigmoid = successor(up, "Sigmoid")
-        if successor(sigmoid, "HyperConnectionPreMix").name != premix.name:
+        if successor(sigmoid, "HyperConnectionPreMix") is not premix:
             raise ValueError("Inconsistent hyper-connection premix")
         divide = successor(inject, "Div")
         gate_sigmoid = successor(divide, "Sigmoid")
         multiply = successor(gate_sigmoid, "Mul")
         region = [norm, down, silu, up, sigmoid, premix, inject, divide, gate_sigmoid, multiply]
-        names = {n.name for n in region}
+        region_ids = {id(n) for n in region}
         preserved = {premix.output[0], multiply.output[0]}
         for node in region:
             for name in node.output:
-                if name not in preserved and (name in outputs or any(n.name not in names for n in users[name])):
+                if name not in preserved and (
+                    name in outputs or any(id(user) not in region_ids for user in users[name])
+                ):
                     raise ValueError(f"Cannot fuse externally consumed hyper-connection value: {name}")
         attrs = {a.name: helper.get_attribute_value(a) for a in norm.attribute}
         mix_attrs = {a.name: helper.get_attribute_value(a) for a in premix.attribute}
         silu_attrs = {a.name: helper.get_attribute_value(a) for a in silu.attribute}
         if attrs["num_branches"] != mix_attrs["num_branches"]:
             raise ValueError("Inconsistent hyper-connection branch counts")
+        branches = attrs["num_branches"]
+        scale = initializers.get(norm.input[1])
+        shape = shapes.get(norm.input[0])
+        if (
+            branches <= 0
+            or shape is None
+            or not shape.dim
+            or not shape.dim[-1].HasField("dim_value")
+            or shape.dim[-1].dim_value <= 0
+            or shape.dim[-1].dim_value % branches
+            or scale is None
+            or scale.data_type != types.get(norm.input[0])
+            or list(scale.dims) != [shape.dim[-1].dim_value]
+        ):
+            continue
+        fused_inputs = [norm.input[0], norm.input[1], down.input[1], up.input[1], inject.input[1]]
+        if not all(name in inputs_available for name in fused_inputs):
+            continue
         fused = helper.make_node(
             "HyperConnectionLowRankMix",
-            [norm.input[0], norm.input[1], down.input[1], up.input[1], inject.input[1]],
+            fused_inputs,
             [premix.output[0], multiply.output[0]],
-            name=norm.name + "_FusedLowRank", domain="com.microsoft",
-            num_branches=attrs["num_branches"], epsilon=attrs["epsilon"],
-            silu_alpha=silu_attrs["alpha"], reduction_scale=mix_attrs["reduction_scale"],
-            gate_div=scalar(divide.input[1]), gate_mul=scalar(multiply.input[1]),
+            name=norm.name + "_FusedLowRank",
+            domain="com.microsoft",
+            num_branches=attrs["num_branches"],
+            epsilon=attrs.get("epsilon", 1e-5),
+            silu_alpha=silu_attrs["alpha"],
+            reduction_scale=mix_attrs["reduction_scale"],
+            gate_div=scalar(divide.input[1]),
+            gate_mul=scalar(multiply.input[1]),
         )
-        replacements[norm.name] = fused
-        removed.update(names - {norm.name})
-    nodes = [replacements.get(n.name, n) for n in model.graph.node if n.name not in removed]
+        replacements[id(norm)] = fused
+        removed.update(region_ids - {id(norm)})
+    nodes = [replacements.get(id(n), n) for n in model.graph.node if id(n) not in removed]
     del model.graph.node[:]
     model.graph.node.extend(nodes)
     used = {x for n in nodes for x in n.input} | outputs
@@ -360,31 +480,50 @@ def fuse_hyper_connections(path):
 
 def fuse_hyper_connection_postmix(path):
     model = onnx.load(path, load_external_data=False)
+    top_level_outputs = {value.name for value in model.graph.output}
+    nested_observations = externally_observed_values(model.graph) - top_level_outputs
     producers = {name: node for node in model.graph.node for name in node.output}
     users = defaultdict(list)
     for node in model.graph.node:
         for name in node.input:
             users[name].append(node)
+    indices = {id(node): index for index, node in enumerate(model.graph.node)}
     removed = set()
     for node in model.graph.node:
-        if node.domain != "com.microsoft" or node.op_type != "HyperConnectionLowRankMix" or len(node.input) != 5:
+        if (
+            node.domain != "com.microsoft"
+            or node.op_type != "HyperConnectionLowRankMix"
+            or len(node.input) != 5
+            or len(node.output) != 2
+        ):
             continue
         postmix = producers.get(node.input[0])
-        if (postmix is None or postmix.domain != "com.microsoft" or
-                postmix.op_type != "HyperConnectionPostMix" or len(postmix.input) != 3):
+        if (
+            postmix is None
+            or postmix.domain != "com.microsoft"
+            or postmix.op_type != "HyperConnectionPostMix"
+            or len(postmix.input) != 3
+        ):
             continue
         if sum(user.op_type == "HyperConnectionLowRankMix" for user in users[postmix.output[0]]) != 1:
+            continue
+        streams = postmix.output[0]
+        if streams in nested_observations:
+            continue
+        if any(
+            (user is not node and indices[id(user)] < indices[id(node)]) or (user is node and streams in node.input[1:])
+            for user in users[streams]
+        ):
             continue
         branches = next(a.i for a in node.attribute if a.name == "num_branches")
         if next(a.i for a in postmix.attribute if a.name == "num_branches") != branches:
             raise ValueError("Inconsistent post-mix branch counts")
-        streams = node.input[0]
         node.input[0] = postmix.input[0]
         node.input.extend(postmix.input[1:3])
         node.output.append(streams)
-        removed.add(postmix.name)
+        removed.add(id(postmix))
     if removed:
-        nodes = [node for node in model.graph.node if node.name not in removed]
+        nodes = [node for node in model.graph.node if id(node) not in removed]
         del model.graph.node[:]
         model.graph.node.extend(nodes)
         del model.graph.value_info[:]
@@ -400,33 +539,49 @@ def fuse_fp8_projection_split(path):
     initializers = {tensor.name: tensor for tensor in model.graph.initializer}
     producers = {name: node for node in model.graph.node for name in node.output}
     users = Counter(name for node in model.graph.node for name in node.input)
-    outputs = {value.name for value in model.graph.output}
-    ranks = {value.name: len(value.type.tensor_type.shape.dim)
-             for value in (*model.graph.input, *model.graph.value_info)
-             if value.type.tensor_type.HasField("shape")}
+    outputs = externally_observed_values(model.graph)
+    ranks = {
+        value.name: len(value.type.tensor_type.shape.dim)
+        for value in (*model.graph.input, *model.graph.value_info)
+        if value.type.tensor_type.HasField("shape")
+    }
     removed, replacements = set(), {}
     for split in model.graph.node:
         if split.domain or split.op_type != "Split" or len(split.input) != 2:
             continue
         projection = producers.get(split.input[0])
-        if (projection is None or projection.domain != "com.microsoft" or
-                projection.op_type != "MatMulBlockQuantizedFp8Weight" or
-                len(projection.output) != 1 or users[split.input[0]] != 1 or
-                split.input[0] in outputs or len(projection.input) < 3 or
-                any(attr.name == "split_sizes" for attr in projection.attribute)):
+        if (
+            projection is None
+            or projection.domain != "com.microsoft"
+            or projection.op_type != "MatMulBlockQuantizedFp8Weight"
+            or len(projection.output) != 1
+            or users[split.input[0]] != 1
+            or split.input[0] in outputs
+            or len(projection.input) < 3
+            or any(attr.name == "split_sizes" for attr in projection.attribute)
+        ):
             continue
         weight = initializers.get(projection.input[1])
         sizes = initializers.get(split.input[1])
-        if (weight is None or len(weight.dims) != 2 or sizes is None or
-                sizes.data_type != TensorProto.INT64 or len(sizes.dims) != 1 or
-                sizes.data_location == TensorProto.EXTERNAL):
+        if (
+            weight is None
+            or len(weight.dims) != 2
+            or sizes is None
+            or sizes.data_type != TensorProto.INT64
+            or len(sizes.dims) != 1
+            or sizes.data_location == TensorProto.EXTERNAL
+        ):
             continue
         widths = numpy_helper.to_array(sizes).tolist()
         axis = next((attr.i for attr in split.attribute if attr.name == "axis"), 0)
         rank = ranks.get(projection.input[0])
-        if (axis != -1 and (rank is None or axis != rank - 1) or
-                not 1 <= len(widths) <= 8 or len(widths) != len(split.output) or
-                not all(width > 0 for width in widths) or sum(widths) != weight.dims[0]):
+        if (
+            (axis != -1 and (rank is None or axis != rank - 1))
+            or not 1 <= len(widths) <= 8
+            or len(widths) != len(split.output)
+            or not all(width > 0 for width in widths)
+            or sum(widths) != weight.dims[0]
+        ):
             continue
         fused = copy.deepcopy(projection)
         fused.output[:] = split.output
@@ -434,8 +589,11 @@ def fuse_fp8_projection_split(path):
         replacements[projection.output[0]] = fused
         removed.add(split.output[0])
     if removed:
-        nodes = [replacements.get(node.output[0], node) if node.output else node
-                 for node in model.graph.node if not node.output or node.output[0] not in removed]
+        nodes = [
+            replacements.get(node.output[0], node) if node.output else node
+            for node in model.graph.node
+            if not node.output or node.output[0] not in removed
+        ]
         del model.graph.node[:]
         model.graph.node.extend(nodes)
         del model.graph.value_info[:]
@@ -449,12 +607,17 @@ def fuse_fp8_projection_slices(path):
     """Partition complete projection ranges and rebase eligible indexed consumers."""
     model = onnx.load(path, load_external_data=False)
     inferred = onnx.shape_inference.infer_shapes(model)
-    ranks = {value.name: len(value.type.tensor_type.shape.dim)
-             for value in (*inferred.graph.input, *inferred.graph.value_info)
-             if value.type.tensor_type.HasField("shape")}
+    ranks = {
+        value.name: len(value.type.tensor_type.shape.dim)
+        for value in (*inferred.graph.input, *inferred.graph.value_info)
+        if value.type.tensor_type.HasField("shape")
+    }
     ranks.update((tensor.name, len(tensor.dims)) for tensor in model.graph.initializer)
-    shape_lengths = {tensor.name: tensor.dims[0] for tensor in model.graph.initializer
-                     if tensor.data_type == TensorProto.INT64 and len(tensor.dims) == 1}
+    shape_lengths = {
+        tensor.name: tensor.dims[0]
+        for tensor in model.graph.initializer
+        if tensor.data_type == TensorProto.INT64 and len(tensor.dims) == 1
+    }
     for value in (*inferred.graph.input, *inferred.graph.value_info):
         shape = value.type.tensor_type.shape
         if len(shape.dim) == 1 and shape.dim[0].HasField("dim_value"):
@@ -464,8 +627,7 @@ def fuse_fp8_projection_slices(path):
             rank = None
             if node.op_type == "Reshape" and node.input[1] in shape_lengths:
                 rank = shape_lengths[node.input[1]]
-            elif (node.op_type == "Expand" and node.input[1] in shape_lengths and
-                  node.input[0] in ranks):
+            elif node.op_type == "Expand" and node.input[1] in shape_lengths and node.input[0] in ranks:
                 rank = max(ranks[node.input[0]], shape_lengths[node.input[1]])
             elif node.op_type in {"Cast", "Identity", "Sigmoid", "Slice"}:
                 rank = ranks.get(node.input[0])
@@ -486,8 +648,7 @@ def fuse_fp8_projection_slices(path):
                 ranks[name] = rank if flattened or index == 2 else rank - 1
         elif node.op_type == "CausalConvWithState":
             ranks[node.output[0]] = rank
-        elif node.op_type in {"HyperConnectionPostMix", "BranchwiseRMSNorm",
-                              "MatMulBlockQuantizedFp8Weight"}:
+        elif node.op_type in {"HyperConnectionPostMix", "BranchwiseRMSNorm", "MatMulBlockQuantizedFp8Weight"}:
             for name in node.output:
                 ranks[name] = rank
     initializers = {tensor.name: tensor for tensor in model.graph.initializer}
@@ -495,50 +656,69 @@ def fuse_fp8_projection_slices(path):
     for node in model.graph.node:
         for name in node.input:
             consumers[name].append(node)
-    graph_outputs = {value.name for value in model.graph.output}
+    graph_outputs = externally_observed_values(model.graph)
     names = {name for node in model.graph.node for name in (*node.input, *node.output)}
     removed, replacements = set(), {}
     count = 0
 
     def scalar(name):
         tensor = initializers.get(name)
-        if (tensor is None or tensor.data_type != TensorProto.INT64 or
-                list(tensor.dims) != [1] or tensor.data_location == TensorProto.EXTERNAL):
+        if (
+            tensor is None
+            or tensor.data_type != TensorProto.INT64
+            or list(tensor.dims) != [1]
+            or tensor.data_location == TensorProto.EXTERNAL
+        ):
             return None
         return int(numpy_helper.to_array(tensor)[0])
 
     for projection in model.graph.node:
-        if (projection.domain != "com.microsoft" or
-                projection.op_type != "MatMulBlockQuantizedFp8Weight" or
-                len(projection.output) != 1 or projection.output[0] in graph_outputs or
-                len(projection.input) < 3 or
-                any(attr.name == "split_sizes" for attr in projection.attribute)):
+        if (
+            projection.domain != "com.microsoft"
+            or projection.op_type != "MatMulBlockQuantizedFp8Weight"
+            or len(projection.output) != 1
+            or projection.output[0] in graph_outputs
+            or len(projection.input) < 3
+            or any(attr.name == "split_sizes" for attr in projection.attribute)
+        ):
             continue
         weight = initializers.get(projection.input[1])
         if weight is None or len(weight.dims) != 2:
             continue
         users = consumers[projection.output[0]]
-        indexed = [node for node in users if node.domain == "com.microsoft" and
-                   node.op_type in {"CausalConvWithState", "SigmoidGateMul"}]
+        indexed = [
+            node
+            for node in users
+            if node.domain == "com.microsoft" and node.op_type in {"CausalConvWithState", "SigmoidGateMul"}
+        ]
         if len(indexed) != 1:
             continue
         indexed_node = indexed[0]
         attrs = {attr.name: helper.get_attribute_value(attr) for attr in indexed_node.attribute}
         is_conv = indexed_node.op_type == "CausalConvWithState"
         if is_conv:
-            if (indexed_node.input[0] != projection.output[0] or attrs.get("ndim", 1) != 1 or
-                    attrs.get("channels_last", 0) != 1 or attrs.get("input_channels", 0) <= 0):
+            if (
+                indexed_node.input[0] != projection.output[0]
+                or attrs.get("ndim", 1) != 1
+                or attrs.get("channels_last", 0) != 1
+                or attrs.get("input_channels", 0) <= 0
+            ):
                 continue
             # A channels-last 1D convolution proves rank three even without value_info.
             start = attrs.get("input_channel_offset", 0)
             end = start + attrs["input_channels"]
         else:
-            if (len(indexed_node.input) < 2 or indexed_node.input[1] != projection.output[0] or
-                    attrs.get("broadcast_gate", 0) or attrs.get("silu_gate", 0) or
-                    ranks.get(projection.output[0]) != 3 or attrs.get("head_dim", 0) <= 0 or
-                    attrs.get("num_heads", 0) <= 0 or
-                    attrs.get("q_stride", 0) < 2 * attrs["head_dim"] or
-                    attrs.get("tok_stride", 0) != weight.dims[0]):
+            if (
+                len(indexed_node.input) < 2
+                or indexed_node.input[1] != projection.output[0]
+                or attrs.get("broadcast_gate", 0)
+                or attrs.get("silu_gate", 0)
+                or ranks.get(projection.output[0]) != 3
+                or attrs.get("head_dim", 0) <= 0
+                or attrs.get("num_heads", 0) <= 0
+                or attrs.get("q_stride", 0) < 2 * attrs["head_dim"]
+                or attrs.get("tok_stride", 0) != weight.dims[0]
+            ):
                 continue
             start = attrs.get("q_offset", 0)
             end = start + attrs["num_heads"] * attrs["q_stride"]
@@ -551,8 +731,13 @@ def fuse_fp8_projection_slices(path):
         for node in users:
             if node is indexed_node:
                 continue
-            if (node.domain or node.op_type != "Slice" or node.input[0] != projection.output[0] or
-                    len(node.input) not in (4, 5) or len(node.output) != 1):
+            if (
+                node.domain
+                or node.op_type != "Slice"
+                or node.input[0] != projection.output[0]
+                or len(node.input) not in (4, 5)
+                or len(node.output) != 1
+            ):
                 break
             begin, end, axis = (scalar(name) for name in node.input[1:4])
             step = scalar(node.input[4]) if len(node.input) == 5 else 1
@@ -562,16 +747,21 @@ def fuse_fp8_projection_slices(path):
             slices.append(node)
         else:
             if not is_conv:
-                partition = next((name for begin, stop, name in intervals
-                                  if begin == indexed_start and stop == indexed_end), None)
+                partition = next(
+                    (name for begin, stop, name in intervals if begin == indexed_start and stop == indexed_end), None
+                )
                 if partition is None:
                     continue
                 partition_name = partition
             intervals.sort()
-            if (not slices or len(intervals) > 8 or intervals[0][0] != 0 or
-                    intervals[-1][1] != weight.dims[0] or
-                    any(begin >= end for begin, end, _ in intervals) or
-                    any(left[1] != right[0] for left, right in zip(intervals, intervals[1:]))):
+            if (
+                not slices
+                or len(intervals) > 8
+                or intervals[0][0] != 0
+                or intervals[-1][1] != weight.dims[0]
+                or any(begin >= end for begin, end, _ in intervals)
+                or any(left[1] != right[0] for left, right in pairwise(intervals))
+            ):
                 continue
             fused = copy.deepcopy(projection)
             fused.output[:] = [name for _, _, name in intervals]
@@ -590,8 +780,11 @@ def fuse_fp8_projection_slices(path):
             names.add(partition_name)
             count += 1
     if count:
-        nodes = [replacements.get(node.output[0], node) if node.output else node
-                 for node in model.graph.node if not node.output or node.output[0] not in removed]
+        nodes = [
+            replacements.get(node.output[0], node) if node.output else node
+            for node in model.graph.node
+            if not node.output or node.output[0] not in removed
+        ]
         del model.graph.node[:]
         model.graph.node.extend(nodes)
         del model.graph.value_info[:]
@@ -601,8 +794,33 @@ def fuse_fp8_projection_slices(path):
     return count
 
 
-def externally_observed_values(graph):
-    protected = {value.name for value in graph.output}
+def graph_value_names(graph):
+    names = {value.name for value in (*graph.input, *graph.output, *graph.value_info)}
+    names.update(tensor.name for tensor in graph.initializer)
+    for node in graph.node:
+        names.update((*node.input, *node.output))
+        names.add(node.name)
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                names.update(graph_value_names(attribute.g))
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for nested in attribute.graphs:
+                    names.update(graph_value_names(nested))
+    return names
+
+
+def unique_value_name(base, names):
+    name = base
+    suffix = 1
+    while name in names:
+        name = f"{base}_{suffix}"
+        suffix += 1
+    names.add(name)
+    return name
+
+
+def captured_values(graph):
+    protected = set()
 
     def protect_captures(nested):
         protected.update(name for node in nested.node for name in node.input)
@@ -622,13 +840,20 @@ def externally_observed_values(graph):
     return protected
 
 
+def externally_observed_values(graph):
+    return {value.name for value in graph.output} | captured_values(graph)
+
+
 def fuse_standard_rms_norm(path):
     """Preserve standard FP32 reduction and rounding while fusing RMS chain launches."""
     model = onnx.load(path, load_external_data=False)
     types = infer_value_types(model)
     tensors = {tensor.name: tensor for tensor in model.graph.initializer}
-    constants = {name: numpy_helper.to_array(tensor) for name, tensor in tensors.items()
-                 if tensor.data_location != TensorProto.EXTERNAL}
+    constants = {
+        name: numpy_helper.to_array(tensor)
+        for name, tensor in tensors.items()
+        if tensor.data_location != TensorProto.EXTERNAL
+    }
     producers = {name: node for node in model.graph.node for name in node.output}
     users = Counter(name for node in model.graph.node for name in node.input)
     outputs = externally_observed_values(model.graph)
@@ -683,29 +908,49 @@ def fuse_standard_rms_norm(path):
         shape = layout(cast_in.input[0])
         axes = constants.get(mean.input[1]) if len(mean.input) == 2 else attribute(mean, "axes")
         epsilon = constants.get(add.input[1])
-        if (attribute(cast_in, "to") != TensorProto.FLOAT or types.get(cast_in.input[0]) != dtype or
-                shape is None or shape[1] != scale.dims[0] or
-                axes is None or not np.array_equal(axes, [-1]) or attribute(mean, "keepdims", 1) != 1 or
-                epsilon is None or epsilon.dtype != np.float32 or epsilon.size != 1 or epsilon.ndim > shape[0] or
-                not np.isfinite(epsilon).all() or epsilon.item() < 0):
+        if (
+            attribute(cast_in, "to") != TensorProto.FLOAT
+            or types.get(cast_in.input[0]) != dtype
+            or shape is None
+            or shape[1] != scale.dims[0]
+            or axes is None
+            or not np.array_equal(axes, [-1])
+            or attribute(mean, "keepdims", 1) != 1
+            or epsilon is None
+            or epsilon.dtype != np.float32
+            or epsilon.size != 1
+            or epsilon.ndim > shape[0]
+            or not np.isfinite(epsilon).all()
+            or epsilon.item() < 0
+        ):
             continue
         chain = [cast_in, square, mean, add, root, divide, multiply]
         expected_users = [3, 1, 1, 1, 1, 1, 1]
-        if any(node.output[0] in outputs or node.output[0] in removed or users[node.output[0]] != count
-               for node, count in zip(chain, expected_users)):
+        if any(
+            node.output[0] in outputs or node.output[0] in removed or users[node.output[0]] != count
+            for node, count in zip(chain, expected_users, strict=False)
+        ):
             continue
         replacements[cast_out.output[0]] = helper.make_node(
-            "BranchwiseRMSNorm", [cast_in.input[0], multiply.input[1]], list(cast_out.output),
-            name=cast_out.name + "_StandardRMS", domain="com.microsoft",
-            epsilon=float(epsilon.item()), use_onnx_arithmetic=1,
+            "BranchwiseRMSNorm",
+            [cast_in.input[0], multiply.input[1]],
+            list(cast_out.output),
+            name=cast_out.name + "_StandardRMS",
+            domain="com.microsoft",
+            epsilon=float(epsilon.item()),
+            use_onnx_arithmetic=1,
         )
         removed.update(node.output[0] for node in chain)
     if replacements:
-        nodes = [replacements.get(node.output[0], node) if node.output else node
-                 for node in model.graph.node if not node.output or node.output[0] not in removed]
+        nodes = [
+            replacements.get(node.output[0], node) if node.output else node
+            for node in model.graph.node
+            if not node.output or node.output[0] not in removed
+        ]
         del model.graph.node[:]
         model.graph.node.extend(nodes)
         del model.graph.value_info[:]
+        ensure_opset_import(model, version=2)
         temporary = path.with_suffix(".standard_rms.onnx")
         onnx.save(model, temporary)
         os.replace(temporary, path)
@@ -716,10 +961,16 @@ def fuse_rms_input_slices(path):
     """Read a private last-axis slice directly while preserving exact RMS reduction order."""
     model = onnx.load(path, load_external_data=False)
     inferred = onnx.shape_inference.infer_shapes(model)
-    shapes = {value.name: value.type.tensor_type.shape for value in
-              (*inferred.graph.input, *inferred.graph.value_info) if value.type.tensor_type.HasField("shape")}
-    constants = {tensor.name: numpy_helper.to_array(tensor) for tensor in model.graph.initializer
-                 if tensor.data_location != TensorProto.EXTERNAL}
+    shapes = {
+        value.name: value.type.tensor_type.shape
+        for value in (*inferred.graph.input, *inferred.graph.value_info)
+        if value.type.tensor_type.HasField("shape")
+    }
+    constants = {
+        tensor.name: numpy_helper.to_array(tensor)
+        for tensor in model.graph.initializer
+        if tensor.data_location != TensorProto.EXTERNAL
+    }
     producers = {name: node for node in model.graph.node for name in node.output}
     users = Counter(name for node in model.graph.node for name in node.input)
     protected = externally_observed_values(model.graph)
@@ -729,18 +980,27 @@ def fuse_rms_input_slices(path):
         return next((helper.get_attribute_value(value) for value in node.attribute if value.name == name), default)
 
     for norm in model.graph.node:
-        if (norm.domain != "com.microsoft" or norm.op_type != "BranchwiseRMSNorm" or
-                attr(norm, "use_onnx_arithmetic") != 1 or attr(norm, "num_branches") != 0 or
-                attr(norm, "input_start") != 0 or attr(norm, "input_width") != 0):
+        if (
+            norm.domain != "com.microsoft"
+            or norm.op_type != "BranchwiseRMSNorm"
+            or attr(norm, "use_onnx_arithmetic") != 1
+            or attr(norm, "num_branches") != 0
+            or attr(norm, "input_start") != 0
+            or attr(norm, "input_width") != 0
+        ):
             continue
         sliced = producers.get(norm.input[0])
-        if (sliced is None or sliced.domain or sliced.op_type != "Slice" or
-                len(sliced.input) not in (4, 5) or users[sliced.output[0]] != 1 or
-                sliced.output[0] in protected):
+        if (
+            sliced is None
+            or sliced.domain
+            or sliced.op_type != "Slice"
+            or len(sliced.input) not in (4, 5)
+            or users[sliced.output[0]] != 1
+            or sliced.output[0] in protected
+        ):
             continue
         values = [constants.get(name) for name in sliced.input[1:]]
-        if any(value is None or value.shape != (1,) or value.dtype not in (np.int32, np.int64)
-               for value in values):
+        if any(value is None or value.shape != (1,) or value.dtype not in (np.int32, np.int64) for value in values):
             continue
         start, end, axis = (int(value[0]) for value in values[:3])
         step = int(values[3][0]) if len(values) == 4 else 1
@@ -748,8 +1008,12 @@ def fuse_rms_input_slices(path):
         rank, width = (len(shape.dim), shape.dim[-1].dim_value) if shape is not None and shape.dim else (0, 0)
         if not width:
             reshape = producers.get(sliced.input[0])
-            if (reshape is not None and not reshape.domain and reshape.op_type == "Reshape" and
-                    attr(reshape, "allowzero") == 0):
+            if (
+                reshape is not None
+                and not reshape.domain
+                and reshape.op_type == "Reshape"
+                and attr(reshape, "allowzero") == 0
+            ):
                 dimensions = constants.get(reshape.input[1])
                 if dimensions is not None and dimensions.ndim == 1 and len(dimensions) >= 2:
                     rank, width = len(dimensions), int(dimensions[-1])
@@ -760,13 +1024,17 @@ def fuse_rms_input_slices(path):
         kept = [value for value in fused.attribute if value.name not in ("input_start", "input_width")]
         del fused.attribute[:]
         fused.attribute.extend(kept)
-        fused.attribute.extend([helper.make_attribute("input_start", start),
-                                helper.make_attribute("input_width", end - start)])
+        fused.attribute.extend(
+            [helper.make_attribute("input_start", start), helper.make_attribute("input_width", end - start)]
+        )
         replacements[norm.output[0]] = fused
         removed.add(sliced.output[0])
     if replacements:
-        nodes = [replacements.get(node.output[0], node) if node.output else node
-                 for node in model.graph.node if not removed.intersection(node.output)]
+        nodes = [
+            replacements.get(node.output[0], node) if node.output else node
+            for node in model.graph.node
+            if not removed.intersection(node.output)
+        ]
         del model.graph.node[:]
         model.graph.node.extend(nodes)
         del model.graph.value_info[:]
@@ -788,12 +1056,20 @@ def fuse_rms_output_casts(path):
             users[name].append(node)
     replacements, removed = {}, set()
     for norm in model.graph.node:
-        if (norm.domain != "com.microsoft" or norm.op_type != "BranchwiseRMSNorm" or
-                len(norm.output) != 1 or
-                not any(attr.name == "use_onnx_arithmetic" and attr.i == 1 for attr in norm.attribute)):
+        if (
+            norm.domain != "com.microsoft"
+            or norm.op_type != "BranchwiseRMSNorm"
+            or len(norm.output) != 1
+            or not any(attr.name == "use_onnx_arithmetic" and attr.i == 1 for attr in norm.attribute)
+        ):
             continue
-        casts = [node for node in users[norm.output[0]] if not node.domain and node.op_type == "Cast" and
-                 any(attr.name == "to" and attr.i == TensorProto.FLOAT for attr in node.attribute)]
+        casts = [
+            node
+            for node in users[norm.output[0]]
+            if not node.domain
+            and node.op_type == "Cast"
+            and any(attr.name == "to" and attr.i == TensorProto.FLOAT for attr in node.attribute)
+        ]
         if len(casts) != 1:
             continue
         fused = copy.deepcopy(norm)
@@ -801,8 +1077,11 @@ def fuse_rms_output_casts(path):
         replacements[norm.output[0]] = fused
         removed.add(casts[0].output[0])
     if replacements:
-        nodes = [replacements.get(node.output[0], node) if node.output else node
-                 for node in model.graph.node if not node.output or node.output[0] not in removed]
+        nodes = [
+            replacements.get(node.output[0], node) if node.output else node
+            for node in model.graph.node
+            if not node.output or node.output[0] not in removed
+        ]
         del model.graph.node[:]
         model.graph.node.extend(nodes)
         del model.graph.value_info[:]
@@ -818,54 +1097,91 @@ def fuse_gdn_qkv_split(path):
     producers = {name: node for node in model.graph.node for name in node.output}
     users = Counter(name for node in model.graph.node for name in node.input)
     outputs = externally_observed_values(model.graph)
-    constants = {tensor.name: numpy_helper.to_array(tensor) for tensor in model.graph.initializer
-                 if tensor.data_location != TensorProto.EXTERNAL}
-    shapes_by_name = {value.name: value.type.tensor_type.shape for value in
-                      (*model.graph.input, *model.graph.value_info)}
+    constants = {
+        tensor.name: numpy_helper.to_array(tensor)
+        for tensor in model.graph.initializer
+        if tensor.data_location != TensorProto.EXTERNAL
+    }
+    shapes_by_name = {
+        value.name: value.type.tensor_type.shape for value in (*model.graph.input, *model.graph.value_info)
+    }
     removed, replacements = set(), {}
     for gdn in model.graph.node:
-        if (gdn.domain != "com.microsoft" or gdn.op_type != "GatedDeltaNet" or
-                len(gdn.input) < 7 or not all(gdn.input[index] for index in (0, 1, 2, 6))):
+        if (
+            gdn.domain != "com.microsoft"
+            or gdn.op_type != "GatedDeltaNet"
+            or len(gdn.input) < 7
+            or not all(gdn.input[index] for index in (0, 1, 2, 6))
+        ):
             continue
         views = [producers.get(name) for name in gdn.input[:3]]
-        if any(node is None or node.domain or node.op_type != "Reshape" or
-               any(attr.name == "allowzero" and attr.i != 0 for attr in node.attribute) or
-               users[node.output[0]] != 1 or node.output[0] in outputs for node in views):
+        if any(
+            node is None
+            or node.domain
+            or node.op_type != "Reshape"
+            or any(attr.name == "allowzero" and attr.i != 0 for attr in node.attribute)
+            or users[node.output[0]] != 1
+            or node.output[0] in outputs
+            for node in views
+        ):
             continue
         split = producers.get(views[0].input[0])
-        if (split is None or split.domain or split.op_type != "Split" or len(split.output) != 3 or
-                len(split.input) != 2 or [node.input[0] for node in views] != list(split.output) or
-                any(users[name] != 1 or name in outputs for name in split.output)):
+        if (
+            split is None
+            or split.domain
+            or split.op_type != "Split"
+            or len(split.output) != 3
+            or len(split.input) != 2
+            or [node.input[0] for node in views] != list(split.output)
+            or any(users[name] != 1 or name in outputs for name in split.output)
+        ):
             continue
         axis = next((attr.i for attr in split.attribute if attr.name == "axis"), 0)
         shapes = [constants.get(node.input[1]) for node in views]
         sizes = constants.get(split.input[1])
-        if (axis not in (2, -1) or sizes is None or sizes.shape != (3,) or
-                any(shape is None or shape.shape != (4,) or list(shape[:2]) != [0, 0] or
-                    min(shape[2:]) <= 0 for shape in shapes) or
-                shapes[0][2] != shapes[1][2] or
-                shapes[0][3] != shapes[1][3] or
-                any(int(shape[2]) * int(shape[3]) != int(size) for shape, size in zip(shapes, sizes))):
+        if (
+            axis not in (2, -1)
+            or sizes is None
+            or sizes.shape != (3,)
+            or any(
+                shape is None or shape.shape != (4,) or list(shape[:2]) != [0, 0] or min(shape[2:]) <= 0
+                for shape in shapes
+            )
+            or shapes[0][2] != shapes[1][2]
+            or shapes[0][3] != shapes[1][3]
+            or any(int(shape[2]) * int(shape[3]) != int(size) for shape, size in zip(shapes, sizes, strict=False))
+        ):
             continue
         state_shape = shapes_by_name.get(gdn.input[6])
-        if (state_shape is None or len(state_shape.dim) != 4 or
-                [dim.dim_value for dim in state_shape.dim[1:]] !=
-                [int(shapes[2][2]), int(shapes[2][3]), int(shapes[0][3])]):
+        if (
+            state_shape is None
+            or len(state_shape.dim) != 4
+            or [dim.dim_value for dim in state_shape.dim[1:]]
+            != [int(shapes[2][2]), int(shapes[2][3]), int(shapes[0][3])]
+        ):
             continue
         # A channels-last 1D convolution proves the packed input rank and row layout.
         conv = producers.get(split.input[0])
         attrs = {attr.name: helper.get_attribute_value(attr) for attr in conv.attribute} if conv else {}
-        if (conv is None or conv.domain != "com.microsoft" or conv.op_type != "CausalConvWithState" or
-                conv.output[0] != split.input[0] or attrs.get("channels_last", 0) != 1 or
-                attrs.get("ndim", 1) != 1):
+        if (
+            conv is None
+            or conv.domain != "com.microsoft"
+            or conv.op_type != "CausalConvWithState"
+            or conv.output[0] != split.input[0]
+            or attrs.get("channels_last", 0) != 1
+            or attrs.get("ndim", 1) != 1
+        ):
             continue
         fused = copy.deepcopy(gdn)
         fused.input[:3] = [split.input[0], "", ""]
         replacements[gdn.output[0]] = fused
         removed.update(node.output[0] for node in [split, *views])
     if replacements:
-        nodes = [replacements.get(node.output[0], node) if node.output else node
-                 for node in model.graph.node if not node.output or node.output[0] not in removed]
+        nodes = [
+            replacements.get(node.output[0], node) if node.output else node
+            for node in model.graph.node
+            if not node.output or node.output[0] not in removed
+        ]
         del model.graph.node[:]
         model.graph.node.extend(nodes)
         del model.graph.value_info[:]
@@ -896,12 +1212,21 @@ def fuse_rotary_casts(path):
         node = producers.get(name)
         if node is None:
             return None
-        if (not node.domain and node.op_type == "Cast" and attr(node, "to") == TensorProto.FLOAT and
-                types.get(node.input[0]) == dtype):
+        if (
+            not node.domain
+            and node.op_type == "Cast"
+            and attr(node, "to") == TensorProto.FLOAT
+            and types.get(node.input[0]) == dtype
+        ):
             result = node.input[0]
-        elif (node.domain == "com.microsoft" and node.op_type == "BranchwiseRMSNorm" and
-              len(node.output) == 2 and name == node.output[1] and
-              attr(node, "use_onnx_arithmetic", 0) == 1 and types.get(node.output[0]) == dtype):
+        elif (
+            node.domain == "com.microsoft"
+            and node.op_type == "BranchwiseRMSNorm"
+            and len(node.output) == 2
+            and name == node.output[1]
+            and attr(node, "use_onnx_arithmetic", 0) == 1
+            and types.get(node.output[0]) == dtype
+        ):
             return node.output[0]
         elif not node.domain and node.op_type in {"Reshape", "Expand"}:
             source = unwiden(node.input[0], dtype, additions, pending)
@@ -931,12 +1256,19 @@ def fuse_rotary_casts(path):
             continue
         view = producers.get(cast.input[0])
         rotary = producers.get(view.input[0]) if view is not None and view.input else None
-        if (view is None or view.domain or view.op_type != "Reshape" or
-                rotary is None or rotary.domain != "com.microsoft" or rotary.op_type != "RotaryEmbedding" or
-                attr(rotary, "use_fp32_arithmetic", 0) != 0 or len(rotary.input) != 4 or
-                cast.output[0] + "_RotaryActivationStorage" in producers or
-                cast.output[0] + "_RotaryActivationStorage" in types or
-                any(users[node.output[0]] != 1 or node.output[0] in protected for node in (rotary, view))):
+        if (
+            view is None
+            or view.domain
+            or view.op_type != "Reshape"
+            or rotary is None
+            or rotary.domain != "com.microsoft"
+            or rotary.op_type != "RotaryEmbedding"
+            or attr(rotary, "use_fp32_arithmetic", 0) != 0
+            or len(rotary.input) != 4
+            or cast.output[0] + "_RotaryActivationStorage" in producers
+            or cast.output[0] + "_RotaryActivationStorage" in types
+            or any(users[node.output[0]] != 1 or node.output[0] in protected for node in (rotary, view))
+        ):
             continue
         additions, pending = [], {}
         inputs = [unwiden(rotary.input[index], dtype, additions, pending) for index in (0, 2, 3)]
@@ -959,19 +1291,32 @@ def fuse_rotary_casts(path):
         removed.update((rotary.output[0], view.output[0]))
     if not replacements:
         return 0
-    nodes = [new for node in model.graph.node
-             for new in replacements.get(node.output[0], [node]) if node.output[0] not in removed]
+    nodes = [
+        new
+        for node in model.graph.node
+        for new in replacements.get(node.output[0], [node])
+        if node.output[0] not in removed
+    ]
     while True:
         live = {name for node in nodes for name in node.input} | protected
-        unused = {name for node in nodes if all(name not in live for name in node.output)
-                  for name in node.output if name in retired}
+        unused = {
+            name
+            for node in nodes
+            if all(name not in live for name in node.output)
+            for name in node.output
+            if name in retired
+        }
         if not unused:
             break
         nodes = [node for node in nodes if not unused.intersection(node.output)]
     live = {name for node in nodes for name in node.input} | protected
     for node in nodes:
-        if (node.domain == "com.microsoft" and node.op_type == "BranchwiseRMSNorm" and len(node.output) == 2 and
-                node.output[1] not in live):
+        if (
+            node.domain == "com.microsoft"
+            and node.op_type == "BranchwiseRMSNorm"
+            and len(node.output) == 2
+            and node.output[1] not in live
+        ):
             del node.output[1:]
     del model.graph.node[:]
     model.graph.node.extend(nodes)
@@ -1000,8 +1345,11 @@ def share_rotary_cache_expands(path):
             dims = tuple(dim.dim_value if dim.HasField("dim_value") else dim.dim_param for dim in shape.dim[:2])
             if all(dim != "" and not (isinstance(dim, str) and dim.startswith("unk__")) for dim in dims):
                 prefixes[value.name] = dims
-    constants = {tensor.name: numpy_helper.to_array(tensor) for tensor in model.graph.initializer
-                 if tensor.data_location != TensorProto.EXTERNAL}
+    constants = {
+        tensor.name: numpy_helper.to_array(tensor)
+        for tensor in model.graph.initializer
+        if tensor.data_location != TensorProto.EXTERNAL
+    }
     ranks.update((tensor.name, len(tensor.dims)) for tensor in model.graph.initializer)
     producers = {name: node for node in model.graph.node for name in node.output}
     protected = externally_observed_values(model.graph)
@@ -1021,10 +1369,16 @@ def share_rotary_cache_expands(path):
             if prefix is not None:
                 prefixes[node.output[0]] = prefix
         if prefix is not None and node.domain == "com.microsoft":
-            preserve = ((node.op_type in {"HyperConnectionLowRankMix", "MatMulBlockQuantizedFp8Weight"} and rank == 3) or
-                        node.op_type in {"HyperConnectionPostMix", "BranchwiseRMSNorm"} or
-                        (node.op_type == "CausalConvWithState" and rank == 3 and
-                         attr(node, "channels_last", 0) == 1 and attr(node, "ndim", 1) == 1))
+            preserve = (
+                (node.op_type in {"HyperConnectionLowRankMix", "MatMulBlockQuantizedFp8Weight"} and rank == 3)
+                or node.op_type in {"HyperConnectionPostMix", "BranchwiseRMSNorm"}
+                or (
+                    node.op_type == "CausalConvWithState"
+                    and rank == 3
+                    and attr(node, "channels_last", 0) == 1
+                    and attr(node, "ndim", 1) == 1
+                )
+            )
         elif prefix is not None and not node.domain:
             if node.op_type in {"Cast", "Identity", "Sigmoid", "Sign", "Abs", "Sqrt"}:
                 preserve = True
@@ -1035,26 +1389,38 @@ def share_rotary_cache_expands(path):
                     output_rank = len(shape)
             elif node.op_type == "Slice" and len(node.input) >= 4:
                 axes = constants.get(node.input[3])
-                preserve = (axes is not None and rank is not None and
-                            all(-rank <= int(axis) < rank and 2 <= int(axis) % rank for axis in axes))
+                preserve = (
+                    axes is not None
+                    and rank is not None
+                    and all(-rank <= int(axis) < rank and int(axis) % rank >= 2 for axis in axes)
+                )
             elif node.op_type in {"ReduceSum", "ReduceMean"} and len(node.input) == 2:
                 axes = constants.get(node.input[1])
-                preserve = (axes is not None and axes.size > 0 and rank is not None and
-                            attr(node, "keepdims", 1) == 1 and
-                            all(-rank <= int(axis) < rank and 2 <= int(axis) % rank for axis in axes))
+                preserve = (
+                    axes is not None
+                    and axes.size > 0
+                    and rank is not None
+                    and attr(node, "keepdims", 1) == 1
+                    and all(-rank <= int(axis) < rank and int(axis) % rank >= 2 for axis in axes)
+                )
             elif node.op_type == "Unsqueeze" and len(node.input) == 2:
                 axes = constants.get(node.input[1])
                 if axes is not None and axes.ndim == 1 and rank is not None:
                     output_rank = rank + len(axes)
-                    preserve = all(-output_rank <= int(axis) < output_rank and
-                                   2 <= int(axis) % output_rank for axis in axes)
+                    preserve = all(
+                        -output_rank <= int(axis) < output_rank and int(axis) % output_rank >= 2 for axis in axes
+                    )
             elif node.op_type in {"Add", "Mul", "Div", "Max"} and len(node.input) == 2:
                 other = node.input[1]
-                preserve = (ranks.get(other) == 0 or (ranks.get(other) == 1 and rank >= 3) or
-                            (ranks.get(other) == rank and prefixes.get(other) == prefix))
+                preserve = (
+                    ranks.get(other) == 0
+                    or (ranks.get(other) == 1 and rank >= 3)
+                    or (ranks.get(other) == rank and prefixes.get(other) == prefix)
+                )
             elif node.op_type == "Concat" and rank is not None:
-                preserve = (attr(node, "axis", 0) % rank >= 2 and
-                            all(ranks.get(name) == rank and prefixes.get(name) == prefix for name in node.input))
+                preserve = attr(node, "axis", 0) % rank >= 2 and all(
+                    ranks.get(name) == rank and prefixes.get(name) == prefix for name in node.input
+                )
         if preserve:
             names = node.output[:1] if node.op_type == "CausalConvWithState" else node.output
             for name in names:
@@ -1064,11 +1430,23 @@ def share_rotary_cache_expands(path):
         gather = producers.get(node.input[0])
         shape = producers.get(gather.input[0]) if gather is not None and gather.input else None
         width = constants.get(node.input[1])
-        if (gather is None or gather.domain or gather.op_type != "Gather" or attr(gather, "axis", 0) != 0 or
-                len(gather.input) != 2 or not np.array_equal(constants.get(gather.input[1]), [0, 1]) or
-                shape is None or shape.domain or shape.op_type != "Shape" or shape.attribute or
-                shape.input[0] not in prefixes or width is None or width.shape != (1,) or
-                width.dtype != np.int64 or width[0] <= 0):
+        if (
+            gather is None
+            or gather.domain
+            or gather.op_type != "Gather"
+            or attr(gather, "axis", 0) != 0
+            or len(gather.input) != 2
+            or not np.array_equal(constants.get(gather.input[1]), [0, 1])
+            or shape is None
+            or shape.domain
+            or shape.op_type != "Shape"
+            or shape.attribute
+            or shape.input[0] not in prefixes
+            or width is None
+            or width.shape != (1,)
+            or width.dtype != np.int64
+            or width[0] <= 0
+        ):
             continue
         key = (prefixes[shape.input[0]], int(width[0]))
         if key in seen and not protected.intersection(node.output):
@@ -1089,24 +1467,29 @@ def share_rotary_cache_expands(path):
 def deduplicate_standard_expressions(path):
     """Reuse exact deterministic cast/layout expressions without changing arithmetic."""
     model = onnx.load(path, load_external_data=False)
-    reusable = {"Cast", "Shape", "Gather", "Concat", "Reshape", "Expand",
-                "Unsqueeze", "Squeeze", "Slice", "Constant"}
+    reusable = {"Cast", "Shape", "Gather", "Concat", "Reshape", "Expand", "Unsqueeze", "Squeeze", "Slice", "Constant"}
     protected = externally_observed_values(model.graph)
 
     aliases, seen, counts = {}, {}, Counter()
     nodes = []
     for node in model.graph.node:
         node.input[:] = [aliases.get(name, name) for name in node.input]
-        if (node.domain or node.op_type not in reusable or not node.output or
-                any(not name for name in node.output)):
+        if node.domain or node.op_type not in reusable or not node.output or any(not name for name in node.output):
             nodes.append(node)
             continue
-        key = (node.op_type, tuple(node.input), len(node.output),
-               tuple(sorted((attribute.name, attribute.SerializeToString(deterministic=True))
-                            for attribute in node.attribute)))
+        key = (
+            node.op_type,
+            tuple(node.input),
+            len(node.output),
+            tuple(
+                sorted(
+                    (attribute.name, attribute.SerializeToString(deterministic=True)) for attribute in node.attribute
+                )
+            ),
+        )
         previous = seen.get(key)
         if previous is not None and not protected.intersection(node.output):
-            aliases.update(zip(node.output, previous))
+            aliases.update(zip(node.output, previous, strict=False))
             counts[node.op_type] += 1
         else:
             seen.setdefault(key, tuple(node.output))
@@ -1125,8 +1508,7 @@ def deduplicate_standard_expressions(path):
 
 def infer_value_types(model):
     inferred = onnx.shape_inference.infer_shapes(model)
-    types = {v.name: v.type.tensor_type.elem_type for v in
-             (*inferred.graph.input, *inferred.graph.value_info)}
+    types = {v.name: v.type.tensor_type.elem_type for v in (*inferred.graph.input, *inferred.graph.value_info)}
     types.update((t.name, t.data_type) for t in model.graph.initializer)
     for node in model.graph.node:
         if node.domain == "com.microsoft" and node.op_type == "FoldMid2" and len(node.output) == 7:
@@ -1143,13 +1525,22 @@ def infer_value_types(model):
                 types[name] = TensorProto.BFLOAT16
     preserving = {
         "": {"Gather", "Concat", "Split", "Reshape", "Slice", "Mul", "Sigmoid"},
-        "com.microsoft": {"MatMulBlockQuantizedFp8Weight", "HyperConnectionLowRankMix",
-                          "HyperConnectionPostMix", "BranchwiseRMSNorm", "SigmoidGateMul",
-                          "CausalConvWithState"},
+        "com.microsoft": {
+            "MatMulBlockQuantizedFp8Weight",
+            "HyperConnectionLowRankMix",
+            "HyperConnectionPostMix",
+            "BranchwiseRMSNorm",
+            "SigmoidGateMul",
+            "CausalConvWithState",
+        },
     }
     for node in model.graph.node:
-        if (node.domain == "com.microsoft" and node.op_type == "HyperConnectionLowRankMix" and
-                len(node.input) > 2 and types.get(node.input[2])):
+        if (
+            node.domain == "com.microsoft"
+            and node.op_type == "HyperConnectionLowRankMix"
+            and len(node.input) > 2
+            and types.get(node.input[2])
+        ):
             for output in node.output:
                 types[output] = types[node.input[2]]
         if node.op_type in preserving.get(node.domain, set()) and types.get(node.input[0]):
@@ -1166,7 +1557,7 @@ def fuse_gdn_gate_casts(path):
     types = infer_value_types(model)
     producers = {name: node for node in model.graph.node for name in node.output}
     users = Counter(name for node in model.graph.node for name in node.input)
-    outputs = {value.name for value in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     removed, replacements = set(), {}
     for node in model.graph.node:
         if node.domain != "com.microsoft" or node.op_type != "GatedDeltaNet":
@@ -1179,9 +1570,13 @@ def fuse_gdn_gate_casts(path):
             if len(node.input) <= index or not node.input[index]:
                 continue
             cast = producers.get(node.input[index])
-            if (cast is None or cast.domain or cast.op_type != "Cast" or
-                    next((attr.i for attr in cast.attribute if attr.name == "to"), None) != TensorProto.FLOAT or
-                    types.get(cast.input[0]) != dtype):
+            if (
+                cast is None
+                or cast.domain
+                or cast.op_type != "Cast"
+                or next((attr.i for attr in cast.attribute if attr.name == "to"), None) != TensorProto.FLOAT
+                or types.get(cast.input[0]) != dtype
+            ):
                 break
             casts.append((index, cast))
         else:
@@ -1194,8 +1589,11 @@ def fuse_gdn_gate_casts(path):
                     removed.add(cast.output[0])
             replacements[node.output[0]] = fused
     if replacements:
-        nodes = [replacements.get(node.output[0], node) if node.output else node
-                 for node in model.graph.node if not node.output or node.output[0] not in removed]
+        nodes = [
+            replacements.get(node.output[0], node) if node.output else node
+            for node in model.graph.node
+            if not node.output or node.output[0] not in removed
+        ]
         del model.graph.node[:]
         model.graph.node.extend(nodes)
         del model.graph.value_info[:]
@@ -1211,7 +1609,7 @@ def fuse_silu_gate(path):
     types = infer_value_types(model)
     producers = {out: n for n in model.graph.node for out in n.output}
     users = Counter(name for n in model.graph.node for name in n.input)
-    outputs = {v.name for v in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     removed, replacements = set(), {}
     for node in model.graph.node:
         if node.domain or node.op_type != "Mul":
@@ -1221,18 +1619,29 @@ def fuse_silu_gate(path):
             if silu is None or silu.domain or silu.op_type != "Mul":
                 continue
             sigmoid = producers.get(silu.input[1])
-            if (sigmoid is None or sigmoid.domain or sigmoid.op_type != "Sigmoid" or
-                    sigmoid.input[0] != silu.input[0] or types.get(silu.input[0]) != TensorProto.BFLOAT16 or
-                    types.get(node.input[1 - side]) != TensorProto.BFLOAT16):
+            if (
+                sigmoid is None
+                or sigmoid.domain
+                or sigmoid.op_type != "Sigmoid"
+                or sigmoid.input[0] != silu.input[0]
+                or types.get(silu.input[0]) != TensorProto.BFLOAT16
+                or types.get(node.input[1 - side]) != TensorProto.BFLOAT16
+            ):
                 continue
             gate_source = producers.get(silu.input[0])
             up_source = producers.get(node.input[1 - side])
             # A shared Split proves identical token axes. Equal constant split sizes prove equal widths.
-            if (gate_source is None or gate_source is not up_source or gate_source.op_type != "Split" or
-                    gate_source.domain):
+            if (
+                gate_source is None
+                or gate_source is not up_source
+                or gate_source.op_type != "Split"
+                or gate_source.domain
+            ):
                 continue
-            sizes = next((t for t in model.graph.initializer
-                          if len(gate_source.input) == 2 and t.name == gate_source.input[1]), None)
+            sizes = next(
+                (t for t in model.graph.initializer if len(gate_source.input) == 2 and t.name == gate_source.input[1]),
+                None,
+            )
             if sizes is None or sizes.data_location == TensorProto.EXTERNAL:
                 continue
             values = numpy_helper.to_array(sizes)
@@ -1240,19 +1649,24 @@ def fuse_silu_gate(path):
             up_index = list(gate_source.output).index(node.input[1 - side])
             if len(values) != len(gate_source.output) or values[gate_index] != values[up_index]:
                 continue
-            if any(id(n) in removed or users[n.output[0]] != 1 or n.output[0] in outputs
-                   for n in (silu, sigmoid)):
+            if any(id(n) in removed or users[n.output[0]] != 1 or n.output[0] in outputs for n in (silu, sigmoid)):
                 continue
             replacements[id(node)] = helper.make_node(
-                "SigmoidGateMul", [node.input[1 - side], silu.input[0]], list(node.output),
-                name=node.name + "_SiluGate", domain="com.microsoft", silu_gate=1, sigmoid_in_fp32=0)
+                "SigmoidGateMul",
+                [node.input[1 - side], silu.input[0]],
+                list(node.output),
+                name=node.name + "_SiluGate",
+                domain="com.microsoft",
+                silu_gate=1,
+                sigmoid_in_fp32=0,
+            )
             removed.update(id(n) for n in (sigmoid, silu, node))
             break
     if replacements:
-        nodes = [replacements[id(n)] if id(n) in replacements else n for n in model.graph.node
-                 if id(n) not in removed or id(n) in replacements]
+        nodes = [replacements.get(id(n), n) for n in model.graph.node if id(n) not in removed or id(n) in replacements]
         model.graph.ClearField("node")
         model.graph.node.extend(nodes)
+        ensure_opset_import(model)
         temporary = path.with_suffix(".optimized.onnx")
         onnx.save(model, temporary)
         os.replace(temporary, path)
@@ -1265,16 +1679,17 @@ def fuse_shared_expert_residual(path):
     tensors = {t.name: t for t in model.graph.initializer}
     producers = {out: n for n in model.graph.node for out in n.output}
     users = Counter(name for n in model.graph.node for name in n.input)
-    outputs = {v.name for v in model.graph.output}
+    outputs = externally_observed_values(model.graph)
     removed, replacements = set(), {}
 
     def prefix_root(name):
         node = producers.get(name)
         if node is None:
             return name
-        if (((node.op_type == "MatMul" and node.domain == "") or
-             (node.op_type == "MatMulBlockQuantizedFp8Weight" and node.domain == "com.microsoft")) and
-                len(node.input) >= 2):
+        if (
+            (node.op_type == "MatMul" and node.domain == "")
+            or (node.op_type == "MatMulBlockQuantizedFp8Weight" and node.domain == "com.microsoft")
+        ) and len(node.input) >= 2:
             weight = tensors.get(node.input[1])
             if weight is not None and len(weight.dims) == 2:
                 return prefix_root(node.input[0])
@@ -1294,33 +1709,56 @@ def fuse_shared_expert_residual(path):
         if node.op_type != "Add" or node.domain or len(node.input) != 2:
             continue
         routed, contribution = (producers.get(x) for x in node.input)
-        if (routed is None or routed.op_type != "QMoE" or routed.domain != "com.microsoft" or
-                contribution is None or contribution.op_type != "Mul" or contribution.domain):
+        if (
+            routed is None
+            or routed.op_type != "QMoE"
+            or routed.domain != "com.microsoft"
+            or contribution is None
+            or contribution.op_type != "Mul"
+            or contribution.domain
+        ):
             continue
         down, sigmoid = (producers.get(x) for x in contribution.input)
-        if (down is None or down.op_type != "MatMulBlockQuantizedFp8Weight" or down.domain != "com.microsoft" or
-                sigmoid is None or sigmoid.op_type != "Sigmoid" or sigmoid.domain):
+        if (
+            down is None
+            or down.op_type != "MatMulBlockQuantizedFp8Weight"
+            or down.domain != "com.microsoft"
+            or sigmoid is None
+            or sigmoid.op_type != "Sigmoid"
+            or sigmoid.domain
+        ):
             continue
         gate = producers.get(sigmoid.input[0])
         if gate is None or gate.op_type != "MatMul" or gate.domain or gate.input[0] != routed.input[0]:
             continue
         gate_weight, down_weight = tensors.get(gate.input[1]), tensors.get(down.input[1])
-        if (gate_weight is None or down_weight is None or len(gate_weight.dims) != 2 or len(down_weight.dims) != 2 or
-                gate_weight.data_type != TensorProto.BFLOAT16 or gate_weight.dims[1] != 1 or
-                gate_weight.dims[0] != down_weight.dims[0] or
-                prefix_root(down.input[0]) != prefix_root(gate.input[0])):
+        if (
+            gate_weight is None
+            or down_weight is None
+            or len(gate_weight.dims) != 2
+            or len(down_weight.dims) != 2
+            or gate_weight.data_type != TensorProto.BFLOAT16
+            or gate_weight.dims[1] != 1
+            or gate_weight.dims[0] != down_weight.dims[0]
+            or prefix_root(down.input[0]) != prefix_root(gate.input[0])
+        ):
             continue
         internals = (sigmoid, contribution)
         if any(users[n.output[0]] != 1 or n.output[0] in outputs or id(n) in removed for n in internals):
             continue
-        fused = helper.make_node("SigmoidGateMul", [down.output[0], gate.output[0], routed.output[0]],
-                                 list(node.output), name=node.name + "_SigmoidGateMul",
-                                 domain="com.microsoft", broadcast_gate=1, sigmoid_in_fp32=0)
+        fused = helper.make_node(
+            "SigmoidGateMul",
+            [down.output[0], gate.output[0], routed.output[0]],
+            list(node.output),
+            name=node.name + "_SigmoidGateMul",
+            domain="com.microsoft",
+            broadcast_gate=1,
+            sigmoid_in_fp32=0,
+        )
         replacements[id(node)] = fused
         removed.update(id(n) for n in (*internals, node))
     if replacements:
-        nodes = [replacements[id(n)] if id(n) in replacements else n for n in model.graph.node
-                 if id(n) not in removed or id(n) in replacements]
+        nodes = [replacements.get(id(n), n) for n in model.graph.node if id(n) not in removed or id(n) in replacements]
         model.graph.ClearField("node")
         model.graph.node.extend(nodes)
         temporary = path.with_suffix(".optimized.onnx")
@@ -1332,32 +1770,41 @@ def fuse_shared_expert_residual(path):
 def fuse_attention_rotary(path):
     """Reuse FP32 rotary kernels while preserving normalization and BF16 rounding boundaries."""
     model = onnx.load(path, load_external_data=False)
-    constants = {t.name: numpy_helper.to_array(t) for t in model.graph.initializer
-                 if t.data_location != TensorProto.EXTERNAL}
+    graph_names = graph_value_names(model.graph)
+    constants = {
+        t.name: numpy_helper.to_array(t) for t in model.graph.initializer if t.data_location != TensorProto.EXTERNAL
+    }
     inference_model = copy.deepcopy(model)
     for node in inference_model.graph.node:
         if node.domain == "com.microsoft" and node.op_type == "FoldMid2" and len(node.output) == 7:
             # FoldMid2's CUDA output contract is fixed, independently of its mutable control state.
             for name in node.output[4:6]:
-                for info in (*inference_model.graph.input, *inference_model.graph.value_info,
-                             *inference_model.graph.output):
+                for info in (
+                    *inference_model.graph.input,
+                    *inference_model.graph.value_info,
+                    *inference_model.graph.output,
+                ):
                     if info.name != name:
                         continue
                     tensor = info.type.tensor_type
                     if tensor.elem_type not in (0, TensorProto.BFLOAT16):
                         raise ValueError(f"FoldMid2 rotary outputs require BF16: {name}")
-                    if tensor.HasField("shape") and (len(tensor.shape.dim) != 3 or any(
+                    if tensor.HasField("shape") and (
+                        len(tensor.shape.dim) != 3
+                        or any(
                             dim.HasField("dim_value") and dim.dim_value != expected
-                            for dim, expected in zip(tensor.shape.dim, (1, 2, 32)))):
+                            for dim, expected in zip(tensor.shape.dim, (1, 2, 32), strict=False)
+                        )
+                    ):
                         raise ValueError(f"FoldMid2 rotary outputs require shape [1, 2, 32]: {name}")
                 existing = [info for info in inference_model.graph.value_info if info.name != name]
                 inference_model.graph.ClearField("value_info")
                 inference_model.graph.value_info.extend(existing)
                 inference_model.graph.value_info.append(
-                    helper.make_tensor_value_info(name, TensorProto.BFLOAT16, [1, 2, 32]))
+                    helper.make_tensor_value_info(name, TensorProto.BFLOAT16, [1, 2, 32])
+                )
     inferred = onnx.shape_inference.infer_shapes(inference_model)
-    shapes = {v.name: v.type.tensor_type.shape for v in
-              (*inferred.graph.input, *inferred.graph.value_info)}
+    shapes = {v.name: v.type.tensor_type.shape for v in (*inferred.graph.input, *inferred.graph.value_info)}
     tensors = {t.name: t for t in model.graph.initializer}
     producers = {out: n for n in model.graph.node for out in n.output}
     users = defaultdict(set)
@@ -1384,7 +1831,8 @@ def fuse_attention_rotary(path):
         selected = {indices[id(n)] for n in nodes}
         return not selected.intersection(removed) and all(
             out == boundary or (out not in graph_outputs and users[out].issubset(selected))
-            for n in nodes for out in n.output
+            for n in nodes
+            for out in n.output
         )
 
     def input_layout(name):
@@ -1407,12 +1855,17 @@ def fuse_attention_rotary(path):
         return int(shape[2]), width
 
     def slice_spec(node, source, start, end):
-        return (node is not None and len(node.input) in (4, 5) and node.input[0] == source and
-                constant(node.input[1], [start]) and constant(node.input[2], [end]) and
-                constant(node.input[3], [3]) and
-                (len(node.input) == 4 or constant(node.input[4], [1])))
+        return (
+            node is not None
+            and len(node.input) in (4, 5)
+            and node.input[0] == source
+            and constant(node.input[1], [start])
+            and constant(node.input[2], [end])
+            and constant(node.input[3], [3])
+            and (len(node.input) == 4 or constant(node.input[4], [1]))
+        )
 
-    for index, node in enumerate(model.graph.node):
+    for _index, node in enumerate(model.graph.node):
         if node.op_type != "Mul" or node.domain or len(node.input) != 2:
             continue
         divide = producer(node.input[0], "Div")
@@ -1430,9 +1883,16 @@ def fuse_attention_rotary(path):
         epsilon = constants.get(add.input[1])
         cast = producer(divide.input[0], "Cast")
         layout = input_layout(divide.input[0])
-        if (epsilon is None or epsilon.size != 1 or not np.isfinite(epsilon).all() or
-                float(epsilon.item()) < 0 or cast is None or attr(cast, "to") != TensorProto.FLOAT or
-                layout is None or gamma.dims[0] != layout[1]):
+        if (
+            epsilon is None
+            or epsilon.size != 1
+            or not np.isfinite(epsilon).all()
+            or float(epsilon.item()) < 0
+            or cast is None
+            or attr(cast, "to") != TensorProto.FLOAT
+            or layout is None
+            or gamma.dims[0] != layout[1]
+        ):
             continue
         norm_layouts[node.output[0]] = layout
 
@@ -1440,8 +1900,11 @@ def fuse_attention_rotary(path):
         cast_float = producer(source, "Cast")
         cast_bf16 = producer(cast_float.input[0], "Cast") if cast_float is not None else None
         layout = norm_layouts.get(cast_bf16.input[0]) if cast_bf16 is not None else None
-        if (layout is None or
-                attr(cast_float, "to") != TensorProto.FLOAT or attr(cast_bf16, "to") != TensorProto.BFLOAT16):
+        if (
+            layout is None
+            or attr(cast_float, "to") != TensorProto.FLOAT
+            or attr(cast_bf16, "to") != TensorProto.BFLOAT16
+        ):
             return None
         return layout[0] if layout[1] == width else None
 
@@ -1466,24 +1929,53 @@ def fuse_attention_rotary(path):
             continue
         half, width = int(ends[0]), int(tail_ends[0])
         source = a.input[0]
-        if (half <= 0 or width < 2 * half or not slice_spec(a, source, 0, half) or
-                not slice_spec(b, source, half, 2 * half) or not slice_spec(tail, source, 2 * half, width) or
-                list(bc.input) != [b.output[0], cosine.output[0]] or
-                list(ass.input) != [a.output[0], sine.output[0]] or
-                not constant(cosine.input[1], [2]) or not constant(sine.input[1], [2])):
+        if (
+            half <= 0
+            or width < 2 * half
+            or not slice_spec(a, source, 0, half)
+            or not slice_spec(b, source, half, 2 * half)
+            or not slice_spec(tail, source, 2 * half, width)
+            or list(bc.input) != [b.output[0], cosine.output[0]]
+            or list(ass.input) != [a.output[0], sine.output[0]]
+            or not constant(cosine.input[1], [2])
+            or not constant(sine.input[1], [2])
+        ):
             continue
         heads = head_count(source, width)
         caches = [shapes.get(n.input[0]) for n in (cosine, sine)]
         nodes = [a, b, tail, ac, bs, bc, ass, first, second, node]
-        if (heads is None or
-                any(s is None or len(s.dim) != 3 or s.dim[2].dim_value != half for s in caches) or
-                not internal(nodes, node.output[0])):
+        if (
+            heads is None
+            or any(s is None or len(s.dim) != 3 or s.dim[2].dim_value != half for s in caches)
+            or not internal(nodes, node.output[0])
+        ):
             continue
-        prefix = node.name + "_Rotary"
-        names = [prefix + suffix for suffix in
-                 ("_flat_shape", "_cache_shape", "_position", "_token_axes", "_cache_width")]
+        prefix = f"{node.name or 'Concat'}_{index}_Rotary"
+        generated_suffixes = (
+            "_flat_shape",
+            "_cache_shape",
+            "_position",
+            "_token_axes",
+            "_cache_width",
+            "_shape",
+            "_token_shape",
+            "_expanded_shape",
+            "_input",
+            "_expanded_cos",
+            "_expanded_sin",
+            "_cos",
+            "_sin",
+            "_output",
+        )
+        while prefix in graph_names or any(prefix + suffix in graph_names for suffix in generated_suffixes):
+            prefix += "_"
+        graph_names.add(prefix)
+        graph_names.update(prefix + suffix for suffix in generated_suffixes)
+        names = [
+            prefix + suffix for suffix in ("_flat_shape", "_cache_shape", "_position", "_token_axes", "_cache_width")
+        ]
         values = ([1, -1, heads * width], [-1, half], [0], [0, 1], [half])
-        for name, value in zip(names, values):
+        for name, value in zip(names, values, strict=False):
             model.graph.initializer.append(numpy_helper.from_array(np.array(value, dtype=np.int64), name))
         replacements[index] = [
             helper.make_node("Shape", [source], [prefix + "_shape"]),
@@ -1494,23 +1986,33 @@ def fuse_attention_rotary(path):
             helper.make_node("Expand", [sine.input[0], prefix + "_expanded_shape"], [prefix + "_expanded_sin"]),
             helper.make_node("Reshape", [prefix + "_expanded_cos", names[1]], [prefix + "_cos"]),
             helper.make_node("Reshape", [prefix + "_expanded_sin", names[1]], [prefix + "_sin"]),
-            helper.make_node("RotaryEmbedding", [prefix + "_input", names[2], prefix + "_cos", prefix + "_sin"],
-                             [prefix + "_output"], name=prefix, domain="com.microsoft",
-                             num_heads=heads, rotary_embedding_dim=2 * half, interleaved=0),
+            helper.make_node(
+                "RotaryEmbedding",
+                [prefix + "_input", names[2], prefix + "_cos", prefix + "_sin"],
+                [prefix + "_output"],
+                name=prefix,
+                domain="com.microsoft",
+                num_heads=heads,
+                rotary_embedding_dim=2 * half,
+                interleaved=0,
+            ),
             helper.make_node("Reshape", [prefix + "_output", prefix + "_shape"], list(node.output)),
         ]
         removed.update(indices[id(n)] for n in nodes)
         cache_views.update(indices[id(n)] for n in (cosine, sine))
         fused_count += 1
     if fused_count:
-        nodes = [replacement for i, node in enumerate(model.graph.node)
-                 for replacement in (replacements[i] if i in replacements else ([] if i in removed else [node]))]
+        nodes = [
+            replacement
+            for i, node in enumerate(model.graph.node)
+            for replacement in replacements.get(i, [] if i in removed else [node])
+        ]
         live = {name for node in nodes for name in node.input} | graph_outputs
-        dead_views = {model.graph.node[i].output[0] for i in cache_views
-                      if model.graph.node[i].output[0] not in live}
+        dead_views = {model.graph.node[i].output[0] for i in cache_views if model.graph.node[i].output[0] not in live}
         nodes = [node for node in nodes if not node.output or node.output[0] not in dead_views]
         model.graph.ClearField("node")
         model.graph.node.extend(nodes)
+        ensure_opset_import(model)
         temporary = path.with_suffix(".optimized.onnx")
         onnx.save(model, temporary)
         os.replace(temporary, path)
@@ -1526,9 +2028,8 @@ def fuse_causal_conv_projection(path):
         for name in node.input:
             consumers[name].append(node)
     constants = {t.name: numpy_helper.to_array(t) for t in model.graph.initializer if not t.external_data}
-    shapes = {v.name: v.type.tensor_type.shape for v in
-              list(model.graph.input) + list(model.graph.value_info)}
-    graph_outputs = {v.name for v in model.graph.output}
+    shapes = {v.name: v.type.tensor_type.shape for v in list(model.graph.input) + list(model.graph.value_info)}
+    graph_outputs = externally_observed_values(model.graph)
     removed, replacements = set(), {}
 
     def attr(node, name, default=None):
@@ -1553,11 +2054,20 @@ def fuse_causal_conv_projection(path):
     for conv in model.graph.node:
         if conv.domain != "com.microsoft" or conv.op_type != "CausalConvWithState" or len(conv.input) != 4:
             continue
-        if (attr(conv, "channels_last", 0) != 0 or attr(conv, "ndim", 1) != 1 or
-                attr(conv, "state_window", 0) != 0 or
-                any(attr(conv, name, default) != default for name, default in
-                    (("input_channels", 0), ("input_channel_offset", 0), ("state_length", 0),
-                     ("state_channels_last", -1)))):
+        if (
+            attr(conv, "channels_last", 0) != 0
+            or attr(conv, "ndim", 1) != 1
+            or attr(conv, "state_window", 0) != 0
+            or any(
+                attr(conv, name, default) != default
+                for name, default in (
+                    ("input_channels", 0),
+                    ("input_channel_offset", 0),
+                    ("state_length", 0),
+                    ("state_channels_last", -1),
+                )
+            )
+        ):
             continue
         transpose = producers.get(conv.input[0])
         tail = producers.get(conv.input[3])
@@ -1586,8 +2096,11 @@ def fuse_causal_conv_projection(path):
         output_transpose = sole_user(conv.output[0], "Transpose")
         if output_transpose is None or attr(output_transpose, "perm") != [0, 2, 1]:
             continue
-        histories = [n for n in consumers[transpose.output[0]] if
-                     standard(n, "Concat") and list(n.input) == [past, transpose.output[0]] and attr(n, "axis") == 2]
+        histories = [
+            n
+            for n in consumers[transpose.output[0]]
+            if standard(n, "Concat") and list(n.input) == [past, transpose.output[0]] and attr(n, "axis") == 2
+        ]
         first_slices = [n for n in consumers[transpose.output[0]] if slice_spec(n) == (0, 1, 2, 1)]
         if len(histories) != 1 or len(first_slices) != 1:
             continue
@@ -1601,22 +2114,43 @@ def fuse_causal_conv_projection(path):
         nodes = [selection, transpose, tail, conv, output_transpose, full, first, mid, final_slice, mid_slice]
         ids = {id(n) for n in nodes}
         retained_outputs = {output_transpose.output[0], final_slice.output[0], mid_slice.output[0]}
-        if any(name not in retained_outputs and
-               (name in graph_outputs or any(id(user) not in ids for user in consumers[name]))
-               for node in nodes for name in node.output):
+        if any(
+            name not in retained_outputs
+            and (name in graph_outputs or any(id(user) not in ids for user in consumers[name]))
+            for node in nodes
+            for name in node.output
+        ):
+            continue
+        earlier = []
+        for node in model.graph.node:
+            if id(node) == id(conv):
+                break
+            if id(node) not in ids:
+                earlier.append(node)
+        early_graph = helper.make_graph(earlier, "earlier_consumers", [], [])
+        early_inputs = {name for node in earlier for name in node.input} | captured_values(early_graph)
+        if retained_outputs & early_inputs:
             continue
         attributes = {a.name: helper.get_attribute_value(a) for a in conv.attribute}
-        attributes.update(channels_last=1, input_channels=channels, input_channel_offset=spec[0],
-                          state_length=history, state_channels_last=0)
-        fused = helper.make_node("CausalConvWithState",
-                                 [selection.input[0], conv.input[1], conv.input[2], past],
-                                 [output_transpose.output[0], final_slice.output[0], mid_slice.output[0]],
-                                 domain="com.microsoft", name=conv.name + "_projection", **attributes)
+        attributes.update(
+            channels_last=1,
+            input_channels=channels,
+            input_channel_offset=spec[0],
+            state_length=history,
+            state_channels_last=0,
+        )
+        fused = helper.make_node(
+            "CausalConvWithState",
+            [selection.input[0], conv.input[1], conv.input[2], past],
+            [output_transpose.output[0], final_slice.output[0], mid_slice.output[0]],
+            domain="com.microsoft",
+            name=conv.name + "_projection",
+            **attributes,
+        )
         replacements[id(conv)] = fused
         removed.update(ids)
     if replacements:
-        nodes = [replacements[id(n)] if id(n) in replacements else n
-                 for n in model.graph.node if id(n) not in removed or id(n) in replacements]
+        nodes = [replacements.get(id(n), n) for n in model.graph.node if id(n) not in removed or id(n) in replacements]
         retained_names = {name for n in nodes for name in (*n.input, *n.output)} | graph_outputs
         value_info = [v for v in model.graph.value_info if v.name in retained_names]
         del model.graph.node[:]
@@ -1631,9 +2165,11 @@ def fuse_causal_conv_projection(path):
 
 def write_performance_metadata(destination, source, results, pool, provider, runtime, genai_library, benchmark=None):
     artifacts = {}
-    for binary, relative in ((provider, "provider/libonnxruntime_providers_cuda.so"),
-                              (runtime, "runtime/libonnxruntime.so"),
-                              (genai_library, "runtime/libonnxruntime-genai.so")):
+    for binary, relative in (
+        (provider, "provider/libonnxruntime_providers_cuda.so"),
+        (runtime, "runtime/libonnxruntime.so"),
+        (genai_library, "runtime/libonnxruntime-genai.so"),
+    ):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(".optimized.so")
@@ -1744,7 +2280,9 @@ def write_performance_metadata(destination, source, results, pool, provider, run
     manifest["runtime_validation_blocker"] = None
     findings = manifest["unported_operator_findings"]
     findings["GuardedDSA"] = "Generic DynamicSparseAttention directly consumes INT8 BNSH caches and per-channel scales."
-    findings["end_to_end_model_run"] = "See performance benchmark status; full-model numerical parity remains unverified."
+    findings["end_to_end_model_run"] = (
+        "See performance benchmark status; full-model numerical parity remains unverified."
+    )
     findings["PackedQSAIndexer"] = (
         "Generic PackedSparseAttentionIndexer is retained; warmup safely captures folded graphs with state updates muted."
     )
@@ -1757,19 +2295,24 @@ def write_performance_metadata(destination, source, results, pool, provider, run
     manifest["benchmark_status"] = "Experimental: benchmark pending; full-model numerical parity is not established."
     if benchmark is not None:
         measured = json.loads(benchmark.read_text())
-        if (Path(measured["model"]).resolve() != destination.resolve() or
-                measured["provider_sha256"] != artifacts["provider/libonnxruntime_providers_cuda.so"] or
-                measured["ort_sha256"] != artifacts["runtime/libonnxruntime.so"] or
-                not measured["cuda_graph"] or not measured["fast_prefill"]):
+        if (
+            Path(measured["model"]).resolve() != destination.resolve()
+            or measured["provider_sha256"] != artifacts["provider/libonnxruntime_providers_cuda.so"]
+            or measured["ort_sha256"] != artifacts["runtime/libonnxruntime.so"]
+            or not measured["cuda_graph"]
+            or not measured["fast_prefill"]
+        ):
             raise ValueError("Benchmark does not describe this package and runtime")
         if not measured["rows"] or any(
-            not row["runs"] or any(
-                run["output_tokens"] != measured["output_tokens"] or
-                len(run["generated_token_ids"]) != measured["output_tokens"] or
-                run["speculative_stats"]["mtp_failures"] != 0 or
-                run["speculative_stats"]["standard_fallback_steps"] != 0
+            not row["runs"]
+            or any(
+                run["output_tokens"] != measured["output_tokens"]
+                or len(run["generated_token_ids"]) != measured["output_tokens"]
+                or run["speculative_stats"]["mtp_failures"] != 0
+                or run["speculative_stats"]["standard_fallback_steps"] != 0
                 for run in row["runs"]
-            ) for row in measured["rows"]
+            )
+            for row in measured["rows"]
         ):
             raise ValueError("Benchmark contains incomplete generation or MTP failures")
         benchmark_path = destination / "performance_benchmark.json"
@@ -1789,9 +2332,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
-    parser.add_argument("--provider", type=Path, required=True, help="CUDA plugin built with INT8 DynamicSparseAttention")
+    parser.add_argument(
+        "--provider", type=Path, required=True, help="CUDA plugin built with INT8 DynamicSparseAttention"
+    )
     parser.add_argument("--runtime", type=Path, required=True, help="Matching libonnxruntime.so with updated schemas")
-    parser.add_argument("--genai-library", type=Path, required=True, help="GenAI library with INT8 fast-prefill handoff")
+    parser.add_argument(
+        "--genai-library", type=Path, required=True, help="GenAI library with INT8 fast-prefill handoff"
+    )
     args = parser.parse_args()
     source = args.source.resolve(strict=True)
     provider = args.provider.resolve(strict=True)
@@ -1818,8 +2365,11 @@ def main():
                 scales[output_name] = numpy_helper.to_array(initializers[scale_name])
         scale_sets[label] = scales
     results = {}
+    transformed_provenance = {}
     for relative in ("target/model.onnx", "dense/model.onnx", "head_r2/model.onnx", "head_kv/model.onnx"):
-        results[relative] = optimize_model(destination / relative)
+        label = relative.split("/", 1)[0]
+        transformed_provenance[label] = {}
+        results[relative] = optimize_model(destination / relative, transformed_provenance[label])
         results[relative]["fused_hyper_connections"] = fuse_hyper_connections(destination / relative)
         results[relative]["fused_hyper_connection_postmix"] = fuse_hyper_connection_postmix(destination / relative)
         results[relative]["fused_causal_conv_projection"] = fuse_causal_conv_projection(destination / relative)
@@ -1843,7 +2393,7 @@ def main():
         result["shared_rotary_cache_shapes"] = share_rotary_cache_expands(destination / relative)
         result["deduplicated_standard_expressions"] = deduplicate_standard_expressions(destination / relative)
         result["fused_rotary_casts"] = fuse_rotary_casts(destination / relative)
-    pool = refresh_weight_pool(source, destination)
+    pool = refresh_weight_pool(source, destination, transformed_provenance)
     write_performance_metadata(destination, source, results, pool, provider, runtime, genai_library)
     print(json.dumps(results, indent=2))
 
