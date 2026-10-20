@@ -232,8 +232,8 @@ TEST_P(WebGpuStateReplayTest, ReplaysEveryPrefixOnGpuWithoutCpuStaging) {
     const auto actual = Read(destination_);
     for (size_t i = 0; i < actual.size(); ++i) {
       if (i >= kStateElements && i < 2 * kStateElements) {
-        const float reference = expected[i - kStateElements];
-        EXPECT_NEAR(actual[i], reference, 2e-6f + 5e-6f * std::abs(reference));
+        const float expected_value = expected[i - kStateElements];
+        EXPECT_NEAR(actual[i], expected_value, 2e-6f + 5e-6f * std::abs(expected_value));
       } else {
         EXPECT_EQ(actual[i], kSentinel);
       }
