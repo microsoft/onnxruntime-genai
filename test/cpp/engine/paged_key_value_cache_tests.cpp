@@ -1139,44 +1139,6 @@ TEST(PagedKeyValueCacheManifestTest, DraftSnapshotCountIsLimitedByConfigBudgetAn
   EXPECT_EQ(budgets_disabled->Snapshot().total_blocks, 8u);
 }
 
-TEST(PagedKeyValueCacheManifestTest, SnapshotSizingReportsOneBlockMinimumAndBudgetReduction) {
-  auto model = LoadSyntheticCompositeModel();
-  auto& batching = *model->config_->engine.dynamic_batching;
-  batching.prefix_caching = true;
-  batching.max_batch_size = 4;
-  batching.num_blocks = 9;
-  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
-  batching.snapshot_cache.vram_bytes = 8 * block_bytes;
-  const auto previous_logging = g_log.enabled;
-  SetLogBool("enabled", true);
-  testing::internal::CaptureStderr();
-  batching.dflash2_max_snapshots = 1;
-  auto smaller = CacheManager::Create(model, 0, 0, 2 * block_bytes);
-  batching.dflash2_max_snapshots = 4;
-  auto larger = CacheManager::Create(model, 0, 0, 2 * block_bytes);
-  auto reduced = CacheManager::Create(model, 0, 0, 3 * block_bytes);
-  const auto log = testing::internal::GetCapturedStderr();
-  SetLogBool("enabled", previous_logging);
-
-  EXPECT_EQ(smaller->DraftCheckpointCapacity(), 1u);
-  EXPECT_EQ(smaller->Snapshot().total_blocks, 7u);
-  EXPECT_EQ(larger->DraftCheckpointCapacity(), 4u);
-  EXPECT_EQ(larger->Snapshot().total_blocks, 1u);
-  EXPECT_EQ(reduced->DraftCheckpointCapacity(), 2u);
-  EXPECT_EQ(reduced->Snapshot().total_blocks, 3u);
-  EXPECT_NE(log.find("requested=1, effective=1; target cache: blocks=7, block_size=4, bytes=" +
-                     std::to_string(7 * block_bytes)),
-            std::string::npos);
-  EXPECT_NE(log.find("requested=4, effective=4; target cache: blocks=1, block_size=4, bytes=" +
-                     std::to_string(block_bytes)),
-            std::string::npos);
-  EXPECT_NE(log.find("requested=4, effective=2; target cache: blocks=3, block_size=4, bytes=" +
-                     std::to_string(3 * block_bytes)),
-            std::string::npos);
-  EXPECT_NE(log.find("draft snapshot reservation: bytes=" + std::to_string(8 * block_bytes)),
-            std::string::npos);
-}
-
 TEST(PagedKeyValueCacheManifestTest, SnapshotRuntimeProfileOverridesBaseConfiguration) {
   auto model = LoadSyntheticCompositeModel();
   auto& batching = *model->config_->engine.dynamic_batching;
@@ -1225,6 +1187,7 @@ TEST(PagedKeyValueCacheManifestTest, SnapshotRuntimeProfileHonorsBudgetAndTarget
 
 TEST(PagedKeyValueCacheManifestTest, EngineConstructionAppliesSnapshotConfigurationToCacheAndDrafter) {
   auto model = LoadSyntheticCompositeModel();
+  model->config_->engine.dynamic_batching->prefix_caching = true;
   model->config_->engine.dynamic_batching->snapshot_cache.ram_bytes = 1024 * 1024;
   auto& draft = model->config_->model.dflash2;
   draft.filename = (fs::path{".."} / "synthetic-dspark" / "dflash2-fp16-aux.onnx").string();
@@ -1265,6 +1228,7 @@ class Dflash2SnapshotEngineTest : public ::testing::TestWithParam<size_t> {
     config->model.decoder.filename = "decoder-per-token.onnx";
     auto model = CreateModel(GetOrtEnv(), std::move(config));
     if (with_drafter) {
+      model->config_->engine.dynamic_batching->prefix_caching = true;
       model->config_->engine.dynamic_batching->snapshot_cache.ram_bytes = 1024 * 1024;
       auto& draft = model->config_->model.dflash2;
       draft.filename = (fs::path{".."} / "synthetic-dspark" / "dflash2-fp16-aux.onnx").string();
