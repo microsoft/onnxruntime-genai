@@ -737,6 +737,7 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 def test_qwen35_gated_delta_net_validation(state_window, ep, message):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.use_paged_attention = True
+    model.io_dtype = base_module.ir.DataType.FLOAT16
     model.context_length_attrs = {"state_update_capacity": 0}
     with pytest.raises(ValueError, match=message):
         model.validate_gated_delta_net_options(state_window, ep)
@@ -746,8 +747,39 @@ def test_qwen35_gated_delta_net_validation(state_window, ep, message):
 def test_qwen35_gated_delta_net_supported_providers(ep):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.use_paged_attention = True
+    model.io_dtype = base_module.ir.DataType.FLOAT16
     model.context_length_attrs = {"state_update_capacity": 0}
     model.validate_gated_delta_net_options(0, ep)
+
+
+@pytest.mark.parametrize("use_paged_attention", [False, True])
+def test_qwen35_gated_delta_net_accepts_webgpu(use_paged_attention):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = use_paged_attention
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.context_length_attrs = {"state_update_capacity": 0}
+    model.validate_gated_delta_net_options(0, "webgpu")
+
+
+def test_qwen35_non_paged_gated_delta_net_accepts_webgpu_fp32():
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = False
+    model.io_dtype = base_module.ir.DataType.FLOAT
+    model.context_length_attrs = {"state_update_capacity": 0}
+    model.validate_gated_delta_net_options(0, "webgpu")
+
+
+@pytest.mark.parametrize(
+    "use_paged_attention,io_dtype",
+    [(True, base_module.ir.DataType.FLOAT), (False, base_module.ir.DataType.BFLOAT16)],
+)
+def test_qwen35_gated_delta_net_rejects_unsupported_webgpu_dtype(use_paged_attention, io_dtype):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = use_paged_attention
+    model.io_dtype = io_dtype
+    model.context_length_attrs = {"state_update_capacity": 0}
+    with pytest.raises(ValueError, match="WebGPU require FP16"):
+        model.validate_gated_delta_net_options(0, "webgpu")
 
 
 def _packed_gated_delta_net_model(
