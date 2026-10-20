@@ -1644,18 +1644,24 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineMaxDraftTokensPerProposal(const OgaE
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetSpeculativeStats(
     const OgaEngine* engine, OgaSpeculativeStats** out);
 
-/** Cumulative prefix-cache counters. Disabled caches return enabled=false and zero counts. */
-typedef struct OgaPrefixCacheStats {
-  bool enabled;
-  uint64_t lookups;
-  uint64_t hits;
-  uint64_t matched_tokens;
-  uint64_t evictions;
-} OgaPrefixCacheStats;
+typedef struct OgaPrefixCacheStats OgaPrefixCacheStats;
 
-/** Writes a snapshot into caller-owned storage. */
+/** Allocates a cumulative snapshot. Disabled caches report enabled=false and zero counts.
+ * Must be called from the Engine owner thread. Destroy the snapshot with OgaDestroyPrefixCacheStats.
+ * The snapshot remains valid after the Engine is destroyed. On failure, a non-null out is set to null.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetPrefixCacheStats(
-    const OgaEngine* engine, OgaPrefixCacheStats* out);
+    const OgaEngine* engine, OgaPrefixCacheStats** out);
+
+OGA_EXPORT void OGA_API_CALL OgaDestroyPrefixCacheStats(OgaPrefixCacheStats* stats);
+
+/** Reads one of: lookups, hits, matched_tokens, evictions. Unknown names or null arguments return an error. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaPrefixCacheStatsGetCount(
+    const OgaPrefixCacheStats* stats, const char* name, uint64_t* value);
+
+/** Reads the enabled flag. Unknown names or null arguments return an error. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaPrefixCacheStatsGetBool(
+    const OgaPrefixCacheStats* stats, const char* name, bool* value);
 
 /**
  * \brief Destroys the given request.

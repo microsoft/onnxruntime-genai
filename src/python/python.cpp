@@ -1038,11 +1038,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_prefix_cache_stats", [](const OgaEngine& engine) {
         const auto stats = engine.GetPrefixCacheStats();
         pybind11::dict result;
-        result["enabled"] = stats.enabled;
-        result["lookups"] = stats.lookups;
-        result["hits"] = stats.hits;
-        result["matched_tokens"] = stats.matched_tokens;
-        result["evictions"] = stats.evictions;
+        result["enabled"] = stats->GetBool("enabled");
+        result["lookups"] = stats->GetCount("lookups");
+        result["hits"] = stats->GetCount("hits");
+        result["matched_tokens"] = stats->GetCount("matched_tokens");
+        result["evictions"] = stats->GetCount("evictions");
         return result; }, "Return cumulative prefix-cache adoption telemetry.");
 
   pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")
