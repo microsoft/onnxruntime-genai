@@ -761,6 +761,53 @@ TEST_F(FixedStatePoolTest, LeasedOrphanAncestryDoesNotProtectAReusedPhysicalBloc
   EXPECT_EQ(index.Reclaim(1), 1u);
 }
 
+TEST_F(FixedStatePoolTest, ReclaimableBlockQueryRefreshesAfterLeaseAndCheckpointRelease) {
+  BlockPool blocks{4, 1};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 1;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  FixedStatePool pool{model_, 1, 1};
+  PrefixCache index{blocks, options};
+  MakeResident(pool, kRequestA, 7.0f, 4);
+  const std::array<int32_t, 4> tokens{1, 2, 3, 4};
+  auto history = blocks.AllocateBlocks(4);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     history, tokens, {}, pool.CapturePrefixCheckpoint(kRequestA))
+                .identity,
+            nullptr);
+  blocks.Free(history);
+
+  auto lease = index.Match(tokens, tokens.size());
+  ASSERT_EQ(lease.blocks.size(), 1u);
+  const auto retained = lease.blocks;
+  const auto retained_id = retained.front()->Id();
+  const auto* checkpoint = lease.fixed_state_checkpoint.get();
+  EXPECT_TRUE(index.ReclaimableBlockIds(retained).empty());
+
+  lease = {};
+  EXPECT_EQ(index.ReclaimableBlocks(), 1u);
+  EXPECT_EQ(index.ReclaimableBlockIds(retained),
+            std::vector<size_t>{retained_id});
+  ASSERT_TRUE(index.ReclaimCheckpoint(checkpoint));
+  EXPECT_EQ(index.ReclaimableBlockIds(retained),
+            std::vector<size_t>{retained_id});
+
+  ASSERT_EQ(index.Reclaim(1), 1u);
+  auto unrelated = blocks.AllocateBlocks(4);
+  ASSERT_EQ(unrelated.front()->Id(), retained_id);
+  const std::array<int32_t, 4> unrelated_tokens{20, 21, 22, 23};
+  ASSERT_NE(index.Register(unrelated.front(), unrelated_tokens, {}).identity,
+            nullptr);
+  blocks.Free(unrelated);
+  EXPECT_TRUE(index.ReclaimableBlockIds(retained).empty());
+  EXPECT_EQ(index.ReclaimableBlockIds(unrelated),
+            std::vector<size_t>{retained_id});
+  EXPECT_TRUE(index.Match(tokens, tokens.size()).Empty());
+  EXPECT_TRUE(index.Match(unrelated_tokens, unrelated_tokens.size()).Empty());
+}
+
 TEST_F(FixedStatePoolTest, ManyLongHistoriesProtectOnlyTheirCurrentFixedOrDraftLeases) {
   constexpr size_t histories = 32;
   constexpr size_t history_blocks = 128;

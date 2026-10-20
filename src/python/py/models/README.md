@@ -55,6 +55,7 @@ This folder contains the model builder for quickly creating optimized and quanti
       - [Quantize the KV Cache](#quantize-the-kv-cache)
     - [FP32 I/O for WebGPU EP](#fp32-io-for-webgpu-ep)
     - [BF16 I/O for CUDA EP](#bf16-io-for-cuda-ep)
+    - [GPT-OSS Precision Advisory](#gpt-oss-precision-advisory)
     - [LoRA Models](#lora-models)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
@@ -75,7 +76,7 @@ The tool currently supports the following model architectures.
 - Granite MoE Hybrid
 - HunYuan Dense V1
 - InternLM2
-- LFM2 (text and the decoders of LFM2-VL / LFM2.5-VL and LFM2-Audio / LFM2.5-Audio)
+- LFM2 (text and the decoders of LFM2-VL / LFM2.5-VL / d1-3B and LFM2-Audio / LFM2.5-Audio)
 - LFM2 MoE
 - Llama
 - Mistral
@@ -360,7 +361,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 #### Prune Language Modeling Head
 
-LM-head pruning is disabled by default. Set `prune_lm_head=true` to compute only the logits needed for generation. Standard models then project the final hidden state and output `[batch_size, 1, vocab_size]` logits. Paged-attention models add a `logits_indices` input and output `[num_logits, vocab_size]`: the Engine selects one final packed row per request and every row needed for speculative verification, without projecting discarded prompt rows.
+LM-head pruning is disabled by default. Set `prune_lm_head=true` to compute only the logits needed for generation. Standard models then project the hidden state of each row's last real token and output `[batch_size, 1, vocab_size]` logits. The graph takes each row's last real token (the last 1 in `attention_mask`), so padded batches work. Pruned models exported by older builders take the last column instead, which is wrong for the shorter rows of a right-padded batch, so export them again if you run padded batches. Such an export has a `/lm_head/prune/Gather` node and no `/lm_head/prune/GatherElements` node. Paged-attention models add a `logits_indices` input and output `[num_logits, vocab_size]`: the Engine selects one final packed row per request and every row needed for speculative verification, without projecting discarded prompt rows.
 
 ```bash
 # From wheel:
@@ -1063,6 +1064,24 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options use_cuda_bf16=true
 ```
+
+#### GPT-OSS Precision Advisory
+
+The builder emits a precautionary FP16 I/O warning for exports with 36 decoder layers and 128 experts per layer, matching the [published GPT-OSS-120B configuration](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json). The [original overflow report](https://github.com/microsoft/onnxruntime-genai/pull/2444) describes NaN logits after activation growth through layer 35, but does not identify the checkpoint revision or complete reproduction settings. It does not establish that every 120B checkpoint or FP16 export overflows.
+
+The [published GPT-OSS-20B configuration](https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json) has 24 layers and 32 experts per layer and does not receive this warning. The advisory also excludes BF16/FP32 I/O and exports truncated with `num_hidden_layers` to fewer than 36 layers. It neither rejects FP16 nor changes the requested precision or existing defaults. Absence of this warning is not a guarantee of numerical accuracy.
+
+On CUDA / TRT-RTX, explicitly select the wider BF16 range with `--precision bf16` or, for INT4 weights, `--precision int4 --extra_options use_cuda_bf16=true`:
+
+```bash
+# From wheel (INT4 weights and BF16 I/O on CUDA):
+python -m onnxruntime_genai.models.builder -m openai/gpt-oss-120b -o path_to_output_folder -p int4 -e cuda --extra_options use_cuda_bf16=true
+
+# From source:
+python builder.py -m openai/gpt-oss-120b -o path_to_output_folder -p int4 -e cuda --extra_options use_cuda_bf16=true
+```
+
+`use_cuda_bf16` does not change I/O precision on other providers. Consider FP32 I/O where supported, or a provider with BF16 support. Check finite logits and output quality using the actual checkpoint, quantization settings, provider, and representative inputs; configuration-only regression tests do not qualify full-model numerical behavior.
 
 #### LoRA Models
 

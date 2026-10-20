@@ -224,6 +224,11 @@ class PrefixCache final : private BlockReferenceObserver {
   // Indexed blocks no request currently references, which is the capacity Reclaim can hand back.
   size_t ReclaimableBlocks() const;
 
+  // The supplied retained blocks that are included in ReclaimableBlocks(). Checkpoint and draft
+  // leases protect their complete physical ancestry, even when the cache is the block's only owner.
+  std::vector<size_t> ReclaimableBlockIds(
+      std::span<const std::shared_ptr<Block>> blocks) const;
+
   size_t IndexedBlocks() const { return entries_.size(); }
 
   const PrefixCacheMetrics& Metrics() const { return metrics_; }

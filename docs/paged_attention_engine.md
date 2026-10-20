@@ -201,6 +201,14 @@ capture remain disabled until that ring holds a complete attention window.
 Full-attention drafters still require their entire prefix; their admission behavior
 is unchanged.
 
+Admission charges an adopted retained block against reclaimable capacity only when
+that block is actually in the prefix cache's reclaimable set. Fixed-state and draft
+checkpoint leases protect their complete physical ancestry from reclamation. Such a
+protected block already occupies committed pool capacity and is not charged again;
+an exact-fit request may therefore adopt it and reserve the remaining free blocks.
+Unleased retained blocks remain charged so selecting one request cannot let a later
+request plan against capacity that the first request's adoption has protected.
+
 The implementation applies only to newly admitted requests and does not splice
 a prefix into resident continuation turns. It still rejects target
 sliding-window KV rings and auxiliary caches that mirror every target block when
