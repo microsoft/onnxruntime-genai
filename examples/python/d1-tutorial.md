@@ -147,51 +147,31 @@ model's context, or images for a model without a vision model. The command line 
 
 ## 6. Images
 
-To answer questions about images, run d1-3B as an `lfm2_vl` pipeline; the
-[LFM2-VL tutorial](lfm2-vl-tutorial.md) explains the parts.
+To answer questions about images, build d1-3B with `exclude_embeds=true`. The builder then also writes
+the vision model, the embedding model and their configs; the [LFM2-VL tutorial](lfm2-vl-tutorial.md)
+explains the parts. This is newer than onnxruntime-genai 0.18.0, so until the next release run the
+builder from a clone of this repository (with a newer wheel, run `python -m onnxruntime_genai.models.builder`
+with the same arguments):
 
-1. Build the decoder without the embeddings, then fix its tokenizer as in [step 3](#3-fix-the-tokenizer):
+```bash
+git clone --depth 1 https://github.com/microsoft/onnxruntime-genai
 
-   ```bash
-   # CPU
-   python -m onnxruntime_genai.models.builder -i ./d1-3b/pytorch -o ./d1-3b/cpu-vl -p int8 -e cpu \
-       --extra_options exclude_embeds=true prune_lm_head=true
+# CPU
+python onnxruntime-genai/src/python/py/models/builder.py -i ./d1-3b/pytorch -o ./d1-3b/cpu-vl -p int8 -e cpu \
+    --extra_options exclude_embeds=true prune_lm_head=true
 
-   # NVIDIA GPU
-   python -m onnxruntime_genai.models.builder -i ./d1-3b/pytorch -o ./d1-3b/cuda-vl -p fp16 -e cuda \
-       --extra_options exclude_embeds=true prune_lm_head=true
-   ```
+# NVIDIA GPU
+python onnxruntime-genai/src/python/py/models/builder.py -i ./d1-3b/pytorch -o ./d1-3b/cuda-vl -p fp16 -e cuda \
+    --extra_options exclude_embeds=true prune_lm_head=true
+```
 
-2. Reuse the vision model of LFM2.5-VL-3B: d1-3B's vision tower and projector are bit-identical to it.
-   Copy the files into the export folder rather than symlink them (hard links are fine): ONNX Runtime
-   refuses an external data file that resolves outside the model folder.
+Then fix the tokenizer of each export as in [step 3](#3-fix-the-tokenizer).
 
-   ```bash
-   hf download LiquidAI/LFM2.5-VL-3B-ONNX --revision 020f9311343b8f3c6d9789b4dd300e749ec52cd1 \
-       --include "onnx/vision_encoder.onnx*" --local-dir ./lfm2.5-vl-3b-onnx
-   cp ./lfm2.5-vl-3b-onnx/onnx/vision_encoder.onnx* ./d1-3b/cpu-vl/
-   cp ./lfm2.5-vl-3b-onnx/onnx/vision_encoder.onnx* ./d1-3b/cuda-vl/
-   ```
-
-3. Add the embedding model and the configs. The tool is newer than onnxruntime-genai 0.18.0, so the
-   first line downloads it; with a newer wheel, run `python -m onnxruntime_genai.models.lfm2_vl_embedding`
-   with the same arguments instead.
-
-   ```bash
-   curl -O https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/src/python/py/models/lfm2_vl_embedding.py
-   python lfm2_vl_embedding.py -i ./d1-3b/pytorch -o ./d1-3b/cpu-vl
-   python lfm2_vl_embedding.py -i ./d1-3b/pytorch -o ./d1-3b/cuda-vl
-   ```
-
-   The tool builds `embeddings.onnx` from d1-3B's own embedding table (d1-3B retrained it), in the
-   decoder's precision. It looks up `input_ids` and puts `image_features` where the image token
-   (id 124907) is. It also adds the `embedding` and `vision` sections to `genai_config.json` and
-   writes `processor_config.json` with d1-3B's bicubic resize. The vision and embedding models run
-   on the decoder's execution provider (checked on CPU, CUDA and WebGPU); on CUDA the vision model
-   stays float32. Run the tool again after you rebuild the decoder, which rewrites
-   `genai_config.json`.
-
-The same steps work for a WebGPU export (`-p fp32 -e webgpu`, with `onnxruntime-ep-webgpu` installed).
+The embedding model uses d1-3B's own embedding table (d1-3B retrained it) and puts the image features
+where the image token (id 124907) is. `processor_config.json` uses d1-3B's bicubic resize. The vision
+and embedding models are not quantized: they are float32 in the CPU export and float16 in the CUDA one,
+and they run on the decoder's execution provider. The same steps work for a WebGPU export
+(`-p fp32 -e webgpu`, with `onnxruntime-ep-webgpu` installed).
 
 Then pass images with `--image`. Use `"state": null` when the images are the whole state. For example,
 with the two-cats picture from the model card and a `cats.json` that asks one `choice`, "How many cats
@@ -202,7 +182,7 @@ curl -o cats.jpg http://images.cocodataset.org/val2017/000000039769.jpg
 python d1-decisions.py -m ./d1-3b/cpu-vl -r cats.json --image cats.jpg
 ```
 
-The answer is `two` with a probability of about 0.986 on both exports (0.985 in transformers).
+The answer is `two` (transformers gives it a probability of 0.985).
 
 ## 7. Limitations
 
