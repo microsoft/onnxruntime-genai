@@ -655,6 +655,8 @@ struct RecordingModelExecutor : ModelExecutor {
 
 struct CountingCudaDeviceState {
   size_t device_to_host_copies{};
+  size_t host_to_device_copies{};
+  bool separate_host_mirror{};
   size_t synchronize_calls{};
   size_t memory_queries{};
   size_t integrated_queries{};
@@ -682,9 +684,21 @@ struct CountingCudaMemory final : DeviceBuffer {
   }
 
   const char* GetType() const override { return "test_cuda"; }
-  void AllocateCpu() override {}
-  void CopyDeviceToCpu() override { ++state_->device_to_host_copies; }
-  void CopyCpuToDevice() override {}
+  void AllocateCpu() override {
+    if (state_->separate_host_mirror && !host_storage_) {
+      host_storage_ = std::make_unique<uint8_t[]>(size_in_bytes_);
+      p_cpu_ = host_storage_.get();
+    }
+  }
+  void CopyDeviceToCpu() override {
+    ++state_->device_to_host_copies;
+    AllocateCpu();
+    if (host_storage_) std::memcpy(p_cpu_, p_device_, size_in_bytes_);
+  }
+  void CopyCpuToDevice() override {
+    ++state_->host_to_device_copies;
+    if (host_storage_) std::memcpy(p_device_, p_cpu_, size_in_bytes_);
+  }
   void CopyFrom(size_t begin_dest, DeviceBuffer& source,
                 size_t begin_source, size_t size_in_bytes) override {
     std::memmove(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes);
@@ -693,6 +707,7 @@ struct CountingCudaMemory final : DeviceBuffer {
 
  private:
   std::unique_ptr<uint8_t[]> storage_;
+  std::unique_ptr<uint8_t[]> host_storage_;
   std::shared_ptr<CountingCudaDeviceState> state_;
 };
 

@@ -159,6 +159,44 @@ TEST_F(StandardPositionInputsTest, MtpCoordinatesComeFromMainHistoryNotTextOnlyT
   EXPECT_EQ(current[2], 4);
 }
 
+TEST_F(StandardPositionInputsTest, CapturedMtpPositionsKeepPerLengthBuffersAcrossUpdates) {
+  UseRotaryPositionHistory();
+  params_->use_graph_capture = true;
+  params_->max_graph_capture_length = 3;
+  auto positions = CreatePositionInputs();
+  positions->Add();
+  auto source = OrtValue::CreateTensor<int64_t>(model_->allocator_cpu_, std::array<int64_t, 3>{3, 1, 16});
+  for (size_t index = 0; index < 48; ++index)
+    source->GetTensorMutableData<int64_t>()[index] = index % 16;
+  positions->SetRotaryPositionIds(source.get());
+  std::array<void*, 3> buffers{};
+  int length = 0;
+  for (int count = 1; count <= 3; ++count) {
+    length += count;
+    auto tokens = Tokens(std::vector<int32_t>(count, 5));
+    positions->Update(tokens, length, count);
+    buffers[count - 1] = state_->GetInput("position_ids")->GetTensorMutableRawData();
+  }
+  auto prefill = Tokens(std::array<int32_t, 4>{5, 5, 5, 5});
+  positions->Update(prefill, 10, 4);
+  length = 10;
+  for (int count = 1; count <= 3; ++count) {
+    length += count;
+    auto tokens = Tokens(std::vector<int32_t>(count, 5));
+    positions->Update(tokens, length, count);
+    auto* current = state_->GetInput("position_ids");
+    EXPECT_EQ(current->GetTensorMutableRawData(), buffers[count - 1]);
+    EXPECT_EQ(current->GetTensorData<int64_t>()[0], length - count);
+  }
+}
+
+TEST(Qwen2VLProcessorTest, CreatesProcessorForQwen4ExpThroughThePublicModelApi) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-vl");
+  config->model.type = "qwen4_exp";
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  EXPECT_NE(model->CreateMultiModalProcessor(), nullptr);
+}
+
 TEST_F(StandardPositionInputsTest, QwenVLWith2DPositionIdsUsesDefault) {
   ASSERT_EQ(model_->session_info_.GetInputShape("position_ids").size(), 2u);
   for (const auto* model_type : qwen_model_types_) {

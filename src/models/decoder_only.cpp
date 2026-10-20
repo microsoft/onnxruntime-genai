@@ -216,7 +216,15 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   return logits_.Get();
 }
 
+void DecoderOnly_State::ValidateRewindTo(size_t index) const {
+  if (indexer_cache_) indexer_cache_->ValidateRewindTo(index);
+  if (recurrent_state_) recurrent_state_->ValidateRewindTo(index);
+  if (ple_state_) ple_state_->ValidateRewindTo(index);
+  if (engram_state_) engram_state_->ValidateRewindTo(index);
+}
+
 void DecoderOnly_State::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (engram_state_) engram_state_->RewindTo(index);
   position_inputs_->RewindTo(index);
   if (kv_cache_)

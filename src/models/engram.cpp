@@ -134,7 +134,14 @@ void EngramState::CopyEmbeddingsTo(OrtValue& destination) {
   ByteWrapTensor(*model_.p_device_inputs_, destination).CopyFrom(ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *embeddings_output_));
 }
 
+void EngramState::ValidateRewindTo(size_t index) const {
+  if (index != 0 && (!snapshot_valid_ || snapshot_position_ != index))
+    throw std::runtime_error("EngramState cannot rewind to position " + std::to_string(index) +
+                             " without a matching snapshot");
+}
+
 void EngramState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (index == 0) {
     InitializeTokens(*past_tokens_);
     InitializeTokens(*present_tokens_);
@@ -143,10 +150,6 @@ void EngramState::RewindTo(size_t index) {
     inputs_[past_input_index_] = past_tokens_.get();
     outputs_[present_output_index_] = present_tokens_.get();
     return;
-  }
-  if (!snapshot_valid_ || snapshot_position_ != index) {
-    throw std::runtime_error("EngramState cannot rewind to position " + std::to_string(index) +
-                             " without a matching snapshot");
   }
   CopyTokens(*snapshot_tokens_, *present_tokens_);
 }

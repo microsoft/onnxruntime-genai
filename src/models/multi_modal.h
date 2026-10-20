@@ -177,6 +177,7 @@ struct DecoderState : State {
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   void RewindTo(size_t index) override;
+  void ValidateRewindTo(size_t index) const override;
   void SnapshotState(size_t position) override;
   OrtValue* GetRotaryPositionIds() override { return position_inputs_->GetRotaryPositionIds(); }
   void SetRotaryPositionIds(OrtValue* positions) override { position_inputs_->SetRotaryPositionIds(positions); }
@@ -230,6 +231,7 @@ struct MultiModalPipelineState : State {
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
   void RewindTo(size_t index) override;
+  void ValidateRewindTo(size_t index) const override;
   void SnapshotState(size_t position) override;
   OrtValue* GetRotaryPositionIds() override { return decoder_state_->GetRotaryPositionIds(); }
   void SetRotaryPositionIds(OrtValue* positions) override { decoder_state_->SetRotaryPositionIds(positions); }

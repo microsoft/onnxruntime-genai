@@ -6,6 +6,7 @@
 #include "generator/generators.h"
 #include "generator/mtp_generator.h"
 #include "models/model.h"
+#include "search.h"
 #include "tensor.h"
 
 namespace Generators::test {
@@ -62,6 +63,10 @@ struct RecordingMtpState : State {
     ++snapshots;
     snapshot_position_ = position;
   }
+  void ValidateRewindTo(size_t position) const override {
+    if (unsupported_rewind_ && position == *unsupported_rewind_)
+      throw std::runtime_error("unsupported recording-state rewind position");
+  }
   void RewindTo(size_t position) override {
     if (position > 0) EXPECT_EQ(snapshot_position_, position);
     rewinds.push_back(position);
@@ -94,6 +99,7 @@ struct RecordingMtpState : State {
   size_t length_{};
   size_t last_forward_start_{};
   size_t snapshot_position_{};
+  std::optional<size_t> unsupported_rewind_;
   int snapshots{};
   int crops{};
   std::vector<int64_t> forwards;
@@ -245,6 +251,43 @@ TEST(MtpGeneratorReview, DirectCommitSnapshotsOnlyForCompactCropBaseline) {
       }
     }
   }
+}
+
+TEST(MtpGeneratorReview, UnsupportedRewindLeavesSearchAndStateUnchanged) {
+  auto model = std::make_shared<RecordingMtpModel>(false, false);
+  auto params = std::make_shared<GeneratorParams>(*model);
+  auto generator = CreateGenerator(*model, *params);
+  const std::array<int32_t, 1> first{0};
+  generator->AppendTokens(first);
+  generator->SnapshotState();
+  const std::array<int32_t, 2> suffix{1, 2};
+  generator->AppendTokens(suffix);
+  auto& state = *model->recording_state;
+  state.unsupported_rewind_ = 2;
+  const auto sequence = [&] {
+    auto tokens = generator->GetSequence(0).CopyDeviceToCpu();
+    return std::vector<int32_t>(tokens.begin(), tokens.end());
+  };
+
+  ASSERT_EQ(sequence(), (std::vector<int32_t>{0, 1, 2}));
+  EXPECT_THROW(generator->RewindToLength(2), std::runtime_error);
+  EXPECT_EQ(sequence(), (std::vector<int32_t>{0, 1, 2}));
+  EXPECT_EQ(generator->search_->GetSequenceLength(), 3u);
+  EXPECT_EQ(state.length_, 3u);
+  EXPECT_TRUE(state.rewinds.empty());
+  EXPECT_EQ(state.forwards, (std::vector<int64_t>{1, 2}));
+  EXPECT_NO_THROW(generator->GetLogits());
+  EXPECT_EQ(state.forwards, (std::vector<int64_t>{1, 2}));
+
+  EXPECT_NO_THROW(generator->RewindToLength(1));
+  EXPECT_EQ(sequence(), (std::vector<int32_t>{0}));
+  EXPECT_EQ(generator->search_->GetSequenceLength(), 1u);
+  EXPECT_EQ(state.length_, 1u);
+  EXPECT_EQ(state.rewinds, (std::vector<size_t>{1}));
+  const std::array<int32_t, 1> continuation{3};
+  EXPECT_NO_THROW(generator->AppendTokens(continuation));
+  EXPECT_EQ(sequence(), (std::vector<int32_t>{0, 3}));
+  EXPECT_EQ(state.length_, 2u);
 }
 
 }  // namespace

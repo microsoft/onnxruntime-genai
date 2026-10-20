@@ -100,3 +100,22 @@ indexer = helper.make_graph(
 save(
     helper.make_model(indexer, opset_imports=[helper.make_opsetid("", 21)], ir_version=10), output_dir / "indexer.onnx"
 )
+
+ple_inputs = [
+    helper.make_tensor_value_info("past.0.ple_tokens", TensorProto.INT64, [1, 2]),
+    helper.make_tensor_value_info("past.0.ple_conv", TensorProto.FLOAT, [1, 2, 4]),
+]
+ple_outputs = [
+    helper.make_tensor_value_info("present.0.ple_tokens", TensorProto.INT64, [1, 2]),
+    helper.make_tensor_value_info("present.0.ple_conv", TensorProto.FLOAT, [1, 2, 4]),
+]
+ple_graph = helper.make_graph(
+    [
+        helper.make_node("Identity", [source.name], [target.name])
+        for source, target in zip(ple_inputs, ple_outputs, strict=True)
+    ],
+    "ple_reset_review",
+    ple_inputs,
+    ple_outputs,
+)
+save(helper.make_model(ple_graph, opset_imports=[helper.make_opsetid("", 21)], ir_version=10), output_dir / "ple.onnx")

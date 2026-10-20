@@ -116,20 +116,31 @@ void PleState::Update() {
   if (!pasts_.empty()) graph_buffer_variant_ ^= 1;
 }
 
+void PleState::ValidateRewindTo(size_t index) const {
+  if (!layer_indices_.empty() && index != 0 && (!snapshot_valid_ || index != snapshot_position_))
+    throw std::runtime_error("PleState cannot rewind to position " + std::to_string(index) +
+                             " without a matching snapshot");
+}
+
 void PleState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (layer_indices_.empty()) return;
   if (index != 0) {
-    if (!snapshot_valid_ || index != snapshot_position_) {
-      throw std::runtime_error(
-          "PleState cannot rewind to position " + std::to_string(index) +
-          " without a matching snapshot");
-    }
     CopyStates(snapshot_, presents_);
     return;
   }
   snapshot_valid_ = false;
   InitializeStates(pasts_);
   InitializeStates(presents_);
+  if (graph_buffer_variant_ != 0) {
+    for (size_t state_index = 0; state_index < pasts_.size(); ++state_index)
+      std::swap(pasts_[state_index], presents_[state_index]);
+  }
+  graph_buffer_variant_ = 0;
+  for (size_t state_index = 0; state_index < pasts_.size(); ++state_index) {
+    state_.inputs_[input_index_ + state_index] = pasts_[state_index].get();
+    state_.outputs_[output_index_ + state_index] = presents_[state_index].get();
+  }
 }
 
 void PleState::Snapshot(size_t position) {

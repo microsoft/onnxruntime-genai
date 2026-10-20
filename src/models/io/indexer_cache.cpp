@@ -306,20 +306,24 @@ void IndexerCache::Snapshot(size_t position) {
   snapshot_position_ = position;
 }
 
+void IndexerCache::ValidateRewindTo(size_t index) const {
+  if (layer_indices_.empty()) return;
+  if (share_buffer_ && index > static_cast<size_t>(shape_[1]))
+    throw std::runtime_error("IndexerCache rewind exceeds the shared cache capacity");
+  if (index != 0 && (!share_buffer_ || snapshot_rows_.empty() || index != snapshot_position_))
+    throw std::runtime_error("IndexerCache can only rewind to zero or its saved snapshot position");
+}
+
 void IndexerCache::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (layer_indices_.empty()) return;
   if (share_buffer_) {
-    if (index > static_cast<size_t>(shape_[1]))
-      throw std::runtime_error("IndexerCache rewind exceeds the shared cache capacity");
     if (index == 0) {
       for (auto& cache : empty_pasts_)
         ByteWrapTensor(*model_.p_device_kvcache_, *cache).Zero();
       snapshot_rows_.clear();
       snapshot_position_ = 0;
       return;
-    }
-    if (snapshot_rows_.empty() || index != snapshot_position_) {
-      throw std::runtime_error("IndexerCache can only rewind to zero or its saved snapshot position");
     }
     if (!snapshot_rows_.empty() && index == snapshot_position_) {
       auto& device = *model_.p_device_kvcache_;
@@ -339,8 +343,6 @@ void IndexerCache::RewindTo(size_t index) {
     }
     return;
   }
-  if (index != 0)
-    throw std::runtime_error("IndexerCache only supports rewinding to zero");
   first_update_ = true;
   for (size_t cache_index = 0; cache_index < layer_indices_.size(); ++cache_index) {
     pasts_[cache_index].reset();

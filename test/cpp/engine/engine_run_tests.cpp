@@ -2856,6 +2856,66 @@ TEST_F(EngineRunTest, SpeculativeMinimumMasksEosPerVerificationRow) {
   }
 }
 
+TEST_F(EngineRunTest, SpeculativeMinimumPersistsCpuMasksForDeviceBackedRows) {
+  CountingCudaDevice inputs(DeviceType::WEBGPU);
+  inputs.state->separate_host_mirror = true;
+  struct RestoreInputDevice {
+    Model& model;
+    DeviceInterface* original;
+    ~RestoreInputDevice() { model.p_device_inputs_ = original; }
+  } restore{*model_, model_->p_device_inputs_};
+  model_->p_device_inputs_ = &inputs;
+  ASSERT_EQ(model_->p_device_scoring_->GetType(), DeviceType::CPU);
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 11 ? 12 : 11;
+  for (const bool sampled : {false, true}) {
+    for (const bool bonus_below_floor : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "sampled=" << sampled
+                                        << ", bonus_below_floor=" << bonus_below_floor);
+      auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+      engine.cache->SetMaxDraftTokensPerStep(3);
+      TurnOptions options;
+      options.do_sample = sampled;
+      options.top_k = sampled ? 2 : 1;
+      options.top_p = 0.0f;
+      options.seed = 13;
+      options.min_generated_tokens = bonus_below_floor ? 4 : 3;
+      options.max_generated_tokens = 8;
+      auto request = CreateRequestWithPrompt(engine.engine, Prompt(10), options);
+      ASSERT_EQ(RunOne(*engine.engine).token, filler);
+      std::vector<int32_t> drafts{filler, filler};
+      if (!bonus_below_floor) drafts.push_back(eos);
+      request->SetDraftTokens(drafts);
+      std::vector<float> row(model_->config_->model.vocab_size, -1000.0f);
+      row[eos] = 1000.0f;
+      row[filler] = 100.0f;
+      engine.executor->SetVerifyRowLogits(
+          std::vector<std::vector<float>>(drafts.size() + 1, row));
+      const auto uploads_before = inputs.state->host_to_device_copies;
+      std::array<EngineEvent, 8> events;
+      const size_t count = engine.engine->Run(events);
+      ASSERT_EQ(count, bonus_below_floor ? 3u : 2u);
+      for (size_t i = 0; i < count; ++i) {
+        EXPECT_TRUE(events[i].flags & EngineEventFlagToken);
+        EXPECT_EQ(events[i].token, filler);
+      }
+      EXPECT_EQ(request->TurnGeneratedTokens(), options.min_generated_tokens);
+      EXPECT_EQ(request->IsTurnComplete(), !bonus_below_floor);
+      // One upload creates the scripted logits; every masked verification row needs another.
+      EXPECT_GE(inputs.state->host_to_device_copies - uploads_before,
+                bonus_below_floor ? 4u : 3u);
+      EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
+      if (bonus_below_floor) {
+        engine.executor->SetVerifyRowLogits({});
+        engine.executor->SetForcedToken(eos);
+        EXPECT_TRUE(RunOne(*engine.engine).flags & EngineEventFlagTurnFinished);
+      }
+      EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+      EXPECT_EQ(request->TurnGeneratedTokens(), options.min_generated_tokens);
+    }
+  }
+}
+
 TEST_F(EngineRunTest, SampledSpeculativeRunKeepsAcceptedPrefixAndCorrection) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;

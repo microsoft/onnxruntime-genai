@@ -14,6 +14,7 @@ struct IndexerCache {
   void Update(DeviceSpan<int32_t> beam_indices, int total_length, int current_length);
   void Snapshot(size_t position);
   void RewindTo(size_t index);
+  void ValidateRewindTo(size_t index) const;
   void CommitAcceptedPrefix(size_t token_count);
   void ValidateAcceptedPrefix(size_t token_count) const;
   bool UsesHostSequenceLength() const { return past_sequence_length_ != nullptr; }

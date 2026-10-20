@@ -292,7 +292,7 @@ Because the add-on is loaded dynamically, `kDeviceInterfaceVersion` in
 `OrtGlobals::LoadCudaInterface` *before* `GetInterface` is resolved, so a mismatched
 `onnxruntime-genai-cuda` package fails loudly instead of calling through a shifted vtable.
 The rotary-history/configuration interface changes use device-interface version
-11. Rebuild provider add-ons against the matching core; do not reuse a binary
+12. Rebuild provider add-ons against the matching core; do not reuse a binary
 compiled against the earlier layout.
 
 ### Hybrid (linear-attention) models
@@ -325,6 +325,9 @@ Legacy rank-5 recurrent windows remain supported alongside rank-4 recurrent
 state with compact update capsules. Convolution and recurrent window widths
 must agree for the legacy format. Crop validation happens before search, KV,
 position, or convolution state is changed.
+Unsupported recurrent/PLE/indexer rewinds are likewise validated before the
+Generator rewinds search or any decoder cache, so a rejected rewind leaves the
+existing sequence and its state usable.
 
 `RecurrentState::GraphCaptureVariant()` feeds the graph-capture annotation id so a double-buffered
 recurrent state never replays a graph bound to the other buffer.

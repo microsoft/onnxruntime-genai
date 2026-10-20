@@ -2,6 +2,7 @@
 
 #include "position_inputs.h"
 #include "rotary_position_history.h"
+#include <map>
 
 namespace Generators {
 
@@ -87,6 +88,7 @@ struct Qwen2VLPositionInputs : PositionInputs {
   std::unique_ptr<Tensor> rotary_history_input_;
   size_t rotary_input_index_{};
   OrtValue* rotary_source_{};
+  std::map<int, std::unique_ptr<Tensor>> captured_rotary_positions_;
   bool is_first_update_{true};
   std::shared_ptr<Tensor> image_grid_thw_;
   std::shared_ptr<Tensor> video_grid_thw_;

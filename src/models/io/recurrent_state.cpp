@@ -362,7 +362,23 @@ void RecurrentState::Update() {
   if (graph_double_buffer_) graph_buffer_variant_ ^= 1;
 }
 
+void RecurrentState::ValidateRewindTo(size_t index) const {
+  if (layer_indices_.empty() || index == 0) return;
+  if (snapshot_valid_ && index != snapshot_position_) {
+    throw std::runtime_error(
+        "RecurrentState::RewindTo(" + std::to_string(index) + ") cannot restore snapshot at length " +
+        std::to_string(snapshot_position_));
+  }
+  if (!snapshot_valid_) {
+    throw std::runtime_error(
+        "RecurrentState::RewindTo(" + std::to_string(index) +
+        ") is not supported without a snapshot. Recurrent states cannot be partially rewound; "
+        "call Snapshot() at the target length first (e.g. for speculative decoding).");
+  }
+}
+
 void RecurrentState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (layer_indices_.empty()) return;
 
   if (index != 0) {
@@ -371,19 +387,8 @@ void RecurrentState::RewindTo(size_t index) {
     // snapshot captured at the target length (used by speculative decoding to
     // roll back a rejected draft). The caller (e.g. the MTP orchestrator)
     // guarantees the snapshot was taken at exactly `index`.
-    if (snapshot_valid_) {
-      if (index != snapshot_position_) {
-        throw std::runtime_error(
-            "RecurrentState::RewindTo(" + std::to_string(index) + ") cannot restore snapshot at length " +
-            std::to_string(snapshot_position_));
-      }
-      RestoreSnapshot();
-      return;
-    }
-    throw std::runtime_error(
-        "RecurrentState::RewindTo(" + std::to_string(index) +
-        ") is not supported without a snapshot. Recurrent states cannot be partially rewound; "
-        "call Snapshot() at the target length first (e.g. for speculative decoding).");
+    RestoreSnapshot();
+    return;
   }
   // Full reset to length 0.
   snapshot_valid_ = false;

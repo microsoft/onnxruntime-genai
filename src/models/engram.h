@@ -14,6 +14,7 @@ struct EngramState : State {
   void CopyEmbeddingsTo(Embeddings& destination);
   void CopyEmbeddingsTo(OrtValue& destination);
   void RewindTo(size_t index) override;
+  void ValidateRewindTo(size_t index) const override;
   void SnapshotState(size_t position) override;
   void CommitAcceptedPrefix(size_t token_count);
   void ValidateAcceptedPrefix(size_t token_count) const;

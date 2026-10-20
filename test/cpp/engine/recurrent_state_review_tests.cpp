@@ -8,6 +8,7 @@
 #include "engine_test_helpers.h"
 #include "models/io/recurrent_state.h"
 #include "models/io/indexer_cache.h"
+#include "models/io/ple_state.h"
 
 namespace Generators::test {
 namespace {
@@ -74,6 +75,29 @@ TEST_F(RecurrentStateReview, LegacyRankFiveWindowsCropBothConvolutionAndRecurren
 TEST_F(RecurrentStateReview, RejectsMismatchedLegacyWindowWidths) {
   UseSession("mismatched.onnx");
   EXPECT_THROW(CreateRecurrentState(*state_, false), std::runtime_error);
+}
+
+TEST_F(RecurrentStateReview, PleResetRestoresCanonicalBufferOrderAndVariant) {
+  UseSession("ple.onnx");
+  auto& decoder = model_->config_->model.decoder;
+  decoder.ple_token_pad_id = 7;
+  decoder.inputs.past_ple_token_names = "past.%d.ple_tokens";
+  decoder.inputs.past_ple_conv_names = "past.%d.ple_conv";
+  decoder.outputs.present_ple_token_names = "present.%d.ple_tokens";
+  decoder.outputs.present_ple_conv_names = "present.%d.ple_conv";
+  auto ple = CreatePleState(*state_);
+  ASSERT_NE(ple, nullptr);
+  ple->Add();
+  auto* input = state_->inputs_[0];
+  auto* output = state_->outputs_[0];
+  ple->Update();
+  EXPECT_EQ(ple->GraphCaptureVariant(), 1);
+  ple->RewindTo(0);
+  EXPECT_EQ(ple->GraphCaptureVariant(), 0);
+  EXPECT_EQ(state_->inputs_[0], input);
+  EXPECT_EQ(state_->outputs_[0], output);
+  ple->Update();
+  EXPECT_EQ(ple->GraphCaptureVariant(), 1);
 }
 
 TEST_F(RecurrentStateReview, CompactCropRequiresSnapshotBeforeAnyConvolutionMutation) {

@@ -13,6 +13,7 @@ struct PleState {
   void Add();
   void Update();
   void RewindTo(size_t index);
+  void ValidateRewindTo(size_t index) const;
   void Snapshot(size_t position);
   void SetForwardLength(int sequence_length) { forward_length_ = sequence_length; }
   void CropToPosition(size_t position);

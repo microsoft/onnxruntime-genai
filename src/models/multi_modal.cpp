@@ -598,7 +598,14 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
   return logits_.Get();
 }
 
+void DecoderState::ValidateRewindTo(size_t index) const {
+  if (indexer_cache_) indexer_cache_->ValidateRewindTo(index);
+  if (recurrent_state_) recurrent_state_->ValidateRewindTo(index);
+  if (ple_state_) ple_state_->ValidateRewindTo(index);
+}
+
 void DecoderState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   position_inputs_->RewindTo(index);
   if (kv_cache_)
     kv_cache_->RewindTo(index);
@@ -862,7 +869,13 @@ DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> l
   return audio_output_->SampleFrame(*hidden_states);
 }
 
+void MultiModalPipelineState::ValidateRewindTo(size_t index) const {
+  decoder_state_->ValidateRewindTo(index);
+  if (engram_state_) engram_state_->ValidateRewindTo(index);
+}
+
 void MultiModalPipelineState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   decoder_state_->RewindTo(index);
   if (engram_state_) engram_state_->RewindTo(index);
   if (index == 0) {

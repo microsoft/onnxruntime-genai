@@ -13,6 +13,34 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("use_cuda", [False, True])
+@pytest.mark.parametrize(
+    "definitions,enabled",
+    [
+        ([], True),
+        (["ENABLE_MSVC_SPECTRE=OFF"], False),
+        (["-DENABLE_MSVC_SPECTRE:BOOL=FALSE"], False),
+        (["ENABLE_MSVC_SPECTRE=0"], False),
+        (["ENABLE_MSVC_SPECTRE=OFF", "ENABLE_MSVC_SPECTRE=ON"], True),
+    ],
+)
+def test_packaged_windows_flags_honor_the_spectre_option(use_cuda, definitions, enabled):
+    spec = importlib.util.spec_from_file_location("genai_packaged_build_review", REPO_ROOT / "build.py")
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+    args = SimpleNamespace(config="Release", use_cuda=use_cuda, cmake_extra_defines=definitions)
+    flags = build._get_windows_build_args(args)
+    compile_flags = [
+        flag
+        for flag in flags
+        if flag.startswith(("-DCMAKE_C_FLAGS_INIT=", "-DCMAKE_CXX_FLAGS_INIT=", "-DCMAKE_CUDA_FLAGS_INIT="))
+    ]
+    assert len(compile_flags) == 2 + use_cuda
+    for flag in compile_flags:
+        assert ("/Qspectre" in flag) is enabled
+        assert "/guard:cf" in flag
+
+
 def test_examples_rebuild_uses_python311_compatible_cleanup(monkeypatch, tmp_path):
     spec = importlib.util.spec_from_file_location("genai_build_review", REPO_ROOT / "build.py")
     build = importlib.util.module_from_spec(spec)

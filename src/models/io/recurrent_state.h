@@ -15,6 +15,7 @@ struct RecurrentState {
   void Add();
   void Update();
   void RewindTo(size_t index);
+  void ValidateRewindTo(size_t index) const;
 
   // Snapshot/restore the recurrent (conv + recurrent) state buffers. Required for
   // speculative decoding (e.g. MTP): the recurrent state cannot be partially rewound

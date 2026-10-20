@@ -327,6 +327,11 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
           // own logical length, including the correction/bonus row, before argmax or top-k.
           request->search_->SetLogits(verify_rows[first_row + offset]);
           request->search_->ApplyMinLength(eos_floor, static_cast<int>(row_length));
+          if (model_->p_device_scoring_->GetType() == DeviceType::CPU) {
+            // SetLogits downloads the shared buffer again for the next row, so persist this
+            // host-side mask first. Device scorers already modify the device buffer in place.
+            verify_rows[first_row + offset].CopyCpuToDevice();
+          }
         }
       }
       first_row += draft_count + 1;

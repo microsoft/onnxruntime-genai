@@ -33,7 +33,6 @@ struct PlacementTestState : Generators::State {
                                     Generators::DeviceSpan<int32_t>) override {
     return {};
   }
-
 };
 
 TEST(MultiModalDevicePlacementTests, HiddenStateWidthUsesGraphOrLegacyConfigFallback) {
@@ -114,6 +113,7 @@ TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveCapturedDecodeBufferAcros
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto params = Generators::CreateGeneratorParams(*model);
   params->use_graph_capture = true;
+  params->max_graph_capture_length = 3;
   PlacementTestState state{*params, *model, nullptr};
   const auto& name = model->config_->model.decoder.inputs.input_ids;
 
@@ -121,6 +121,11 @@ TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveCapturedDecodeBufferAcros
     Generators::Embeddings embeddings(state, Generators::Embeddings::Mode::Input, name, hidden_size);
     embeddings.Add();
     embeddings.UpdateSequenceLength(8);
+    std::array<void*, 3> captured_buffers{};
+    for (size_t length = 1; length <= captured_buffers.size(); ++length) {
+      embeddings.UpdateSequenceLength(length);
+      captured_buffers[length - 1] = embeddings.Get()->GetTensorMutableRawData();
+    }
     embeddings.UpdateSequenceLength(1);
     void* decode_buffer = embeddings.Get()->GetTensorMutableRawData();
 
@@ -140,6 +145,10 @@ TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveCapturedDecodeBufferAcros
       embeddings.UpdateSequenceLength(1);
       EXPECT_EQ(embeddings.Get()->GetTensorMutableRawData(), decode_buffer);
       EXPECT_EQ(state.inputs_.back(), embeddings.Get());
+      for (size_t length = 1; length <= captured_buffers.size(); ++length) {
+        embeddings.UpdateSequenceLength(length);
+        EXPECT_EQ(embeddings.Get()->GetTensorMutableRawData(), captured_buffers[length - 1]);
+      }
     }
   }
 }

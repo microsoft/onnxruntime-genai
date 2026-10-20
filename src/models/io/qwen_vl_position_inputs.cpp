@@ -524,8 +524,21 @@ void Qwen2VLPositionInputs::UpdateFromRotarySource(int total_length, int new_len
     const auto source = rotary_history_->Values().subspan(row * capacity + total_length - new_length, new_length);
     std::copy(source.begin(), source.end(), data + row * new_length);
   }
-  position_ids_->ort_tensor_ = model_.ExpandInputs(positions, 1);
-  state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
+  if (state_.params_->use_graph_capture && new_length <= state_.params_->max_graph_capture_length) {
+    auto& buffer = captured_rotary_positions_[new_length];
+    if (!buffer) {
+      buffer = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+      buffer->CreateTensor(position_ids_shape_, true);
+    }
+    auto destination = buffer->GetDeviceSpan<int64_t>();
+    std::copy_n(positions->GetTensorData<int64_t>(), positions->GetTensorTypeAndShapeInfo()->GetElementCount(),
+                destination.CpuSpan().begin());
+    destination.CopyCpuToDevice();
+    state_.inputs_[posid_input_index_] = buffer->GetOrtTensor();
+  } else {
+    position_ids_->ort_tensor_ = model_.ExpandInputs(positions, 1);
+    state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
+  }
   PublishRotaryHistory();
 }
 

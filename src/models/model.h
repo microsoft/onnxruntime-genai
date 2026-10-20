@@ -40,6 +40,7 @@ struct State {
   virtual void Finalize(int current_length) {}
 
   virtual void RewindTo(size_t index) { (void)index; };
+  virtual void ValidateRewindTo(size_t index) const { (void)index; }
 
   // Snapshot/restore the model's recurrent state for speculative decoding. Default no-op
   // for models without recurrent state. SnapshotState() captures the conv/linear-attention
