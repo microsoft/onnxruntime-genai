@@ -73,10 +73,12 @@ all models have been destroyed. Normal Python module cleanup tears down GenAI.
 
 ## State and public-token semantics
 
-Prompt ingestion uses the same fixed-R8 target, eight tokens per call. The final
-chunk is padded but only valid rows are committed; its last valid row selects
-the recurrent state and first generated anchor. Target `past_*` and `present_*`
-share the same allocation. Verification consumes `[anchor, seven drafts]`,
+Prompt ingestion uses the same fixed-R8 target, eight tokens per call. Intermediate
+chunks execute asynchronously without host readback; the final chunk is padded
+but only valid rows are committed, and its last valid row selects the recurrent
+state and first generated anchor. The drafter then ingests the prompt's trailing
+sliding-window suffix (`<= context_window`) in a single proposal pass after the
+final prompt chunk. Target `past_*` and `present_*` share the same allocation. Verification consumes `[anchor, seven drafts]`,
 advances dense KV length by `accepted + 1`, and selects recurrent row `accepted`.
 Only accepted context reaches the drafter. Its packed row maps preserve the real
 last-context `anchor_row_index`, even when padded to eight rows for graph replay.
