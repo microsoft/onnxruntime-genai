@@ -1,7 +1,7 @@
 #include "qwen_vl_model.h"
 #include "model.h"
 #include "onnxruntime_api.h"
-#include "vision_stage_io.h"
+#include "models/io/vision_stage_io.h"
 #include "../logging.h"
 #include <iostream>
 #include <cstring>

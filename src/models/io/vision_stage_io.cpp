@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "vision_stage_io.h"
+#include "models/io/vision_stage_io.h"
 
 #include <algorithm>
 #include <cstring>

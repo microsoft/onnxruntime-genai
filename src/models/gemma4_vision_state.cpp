@@ -3,7 +3,7 @@
 
 #include "generator/generators.h"
 #include "gemma4_vision_state.h"
-#include "vision_stage_io.h"
+#include "models/io/vision_stage_io.h"
 
 #include <array>
 #include <numeric>

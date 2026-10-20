@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "model.h"
+#include "models/model.h"
 
 namespace Generators {
 

@@ -75,7 +75,6 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
  private:
   void InjectVisionEmbeddings(const std::string& embeddings_output_name);
 
-  // Runs the Gemma-4 vision session(s) and publishes image_features_value_.
   void RunSingleSessionVision(const std::vector<ExtraInput>& extra_inputs);
 
   // Runs whichever vision path this model was configured with, at most once.

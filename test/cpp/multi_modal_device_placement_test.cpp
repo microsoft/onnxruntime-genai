@@ -15,7 +15,7 @@
 #include "models/io/embeddings.h"
 #include "models/io/kv_cache.h"
 #include "models/session_options.h"
-#include "models/vision_stage_io.h"
+#include "models/io/vision_stage_io.h"
 #include "search.h"
 
 namespace {

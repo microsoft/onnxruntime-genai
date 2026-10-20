@@ -186,6 +186,32 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
   return {std::move(input_ids_value), std::move(token_type_ids), std::move(num_img_tokens)};
 }
 
+template <typename T>
+std::unique_ptr<OrtValue> CreatePositionIds(const int64_t* data, std::span<const int64_t> shape,
+                                            int64_t target_patches, Ort::Allocator& allocator) {
+  const int64_t num_padded_pos = shape[shape.size() - 2];
+  const int64_t pos_last_dim = shape.back();
+  const int64_t pos_batch = shape.size() == 3 ? shape[0] : 1;
+  std::vector<int64_t> processed_pos_shape(shape.begin(), shape.end());
+  if (target_patches != num_padded_pos) {
+    processed_pos_shape[shape.size() - 2] = target_patches;
+  }
+
+  auto processed_pos = OrtValue::CreateTensor<T>(allocator, processed_pos_shape);
+  auto* dst = processed_pos->template GetTensorMutableData<T>();
+  if (target_patches > num_padded_pos) {
+    std::fill_n(dst, pos_batch * target_patches * pos_last_dim, static_cast<T>(-1));
+  }
+  const size_t src_stride = static_cast<size_t>(num_padded_pos * pos_last_dim);
+  const size_t dst_stride = static_cast<size_t>(target_patches * pos_last_dim);
+  const size_t copy_count = static_cast<size_t>(std::min(num_padded_pos, target_patches) * pos_last_dim);
+  for (int64_t b = 0; b < pos_batch; ++b) {
+    std::transform(data + b * src_stride, data + b * src_stride + copy_count,
+                   dst + b * dst_stride, [](int64_t value) { return static_cast<T>(value); });
+  }
+  return processed_pos;
+}
+
 }  // namespace
 
 std::unique_ptr<OrtValue> ConvertAndResizeGemma4PositionIds(const int64_t* data, std::span<const int64_t> shape,
@@ -198,33 +224,8 @@ std::unique_ptr<OrtValue> ConvertAndResizeGemma4PositionIds(const int64_t* data,
   if (target_patches <= 0) {
     throw std::runtime_error("Gemma4 pixel_position_ids target patch count must be positive");
   }
-  const int64_t num_padded_pos = shape[shape.size() - 2];
-  const int64_t pos_last_dim = shape.back();
-  const int64_t pos_batch = shape.size() == 3 ? shape[0] : 1;
-  std::vector<int64_t> processed_pos_shape(shape.begin(), shape.end());
-  if (target_patches != num_padded_pos) {
-    processed_pos_shape[shape.size() - 2] = target_patches;
-  }
-
-  auto create_position_ids = [&](auto value_type) {
-    using T = decltype(value_type);
-    auto processed_pos = OrtValue::CreateTensor<T>(allocator, processed_pos_shape);
-    auto* dst = processed_pos->template GetTensorMutableData<T>();
-    if (target_patches > num_padded_pos) {
-      std::fill_n(dst, pos_batch * target_patches * pos_last_dim, static_cast<T>(-1));
-    }
-    const size_t src_stride = static_cast<size_t>(num_padded_pos * pos_last_dim);
-    const size_t dst_stride = static_cast<size_t>(target_patches * pos_last_dim);
-    const size_t copy_count = static_cast<size_t>(std::min(num_padded_pos, target_patches) * pos_last_dim);
-    for (int64_t b = 0; b < pos_batch; ++b) {
-      std::transform(data + b * src_stride, data + b * src_stride + copy_count,
-                     dst + b * dst_stride, [](int64_t value) { return static_cast<T>(value); });
-    }
-    return processed_pos;
-  };
-
-  if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) return create_position_ids(int32_t{});
-  if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) return create_position_ids(int64_t{});
+  if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) return CreatePositionIds<int32_t>(data, shape, target_patches, allocator);
+  if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) return CreatePositionIds<int64_t>(data, shape, target_patches, allocator);
   throw std::runtime_error("Gemma4 pixel_position_ids must have an int32 or int64 model input type");
 }
 

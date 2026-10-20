@@ -8,7 +8,7 @@
 #include "models/io/qwen_vl_position_inputs.h"
 #include "pixtral_vision_state.h"
 #include "qwen_vl_state.h"
-#include "vision_stage_io.h"
+#include "models/io/vision_stage_io.h"
 #include <algorithm>
 #include <numeric>
 
