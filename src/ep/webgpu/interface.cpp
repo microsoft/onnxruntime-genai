@@ -334,7 +334,7 @@ struct InterfaceImpl : DeviceInterface {
     // excluded because they are meaningless for the trivial initialization model.
     // Keep this list in sync with ParseWebGpuContextConfig in
     // onnxruntime/core/providers/webgpu/webgpu_provider_factory.cc.
-    constexpr std::array<std::string_view, 15> kWebGpuGlobalOptions = {
+    constexpr std::array<std::string_view, 16> kWebGpuGlobalOptions = {
         "deviceId",
         "adapterIndex",
         "webgpuInstance",
@@ -350,6 +350,7 @@ struct InterfaceImpl : DeviceInterface {
         "uniformBufferCacheMode",
         "queryResolveBufferCacheMode",
         "defaultBufferCacheMode",
+        "weightLoadAcceleration",
     };
     for (const auto& opt : user_options->options) {
       if (std::find(kWebGpuGlobalOptions.begin(), kWebGpuGlobalOptions.end(), opt.first) != kWebGpuGlobalOptions.end()) {
