@@ -6,8 +6,8 @@ import onnx_ir as ir
 from builder_config import serialize_genai_config
 
 from .base import Model
-from .expansions.qwen3_5 import Qwen35, Qwen35MoE
 from .expansions.mtp import Qwen35MTP
+from .expansions.qwen3_5 import Qwen35, Qwen35MoE
 from .mtp import MTPModel
 
 
