@@ -171,7 +171,9 @@ The embedding model uses d1-3B's own embedding table (d1-3B retrained it) and pu
 where the image token (id 124907) is. `processor_config.json` uses d1-3B's bicubic resize. The vision
 and embedding models are not quantized: they are float32 in the CPU export and float16 in the CUDA one,
 and they run on the decoder's execution provider. The same steps work for a WebGPU export
-(`-p fp32 -e webgpu`, with `onnxruntime-ep-webgpu` installed).
+(`-p fp32 -e webgpu`, with `onnxruntime-ep-webgpu` installed). Use fp32 on WebGPU: the plug-in's fp16
+kernels drift more. With the fp16 vision model, the image features of `cats.jpg` below have a smallest
+per-token cosine similarity to transformers of 0.832 on WebGPU, against 0.990 for the same file on the CPU.
 
 Then pass images with `--image`. Use `"state": null` when the images are the whole state. For example,
 with the two-cats picture from the model card and a `cats.json` that asks one `choice`, "How many cats
@@ -182,7 +184,7 @@ curl -o cats.jpg http://images.cocodataset.org/val2017/000000039769.jpg
 python d1-decisions.py -m ./d1-3b/cpu-vl -r cats.json --image cats.jpg
 ```
 
-The answer is `two` (transformers gives it a probability of 0.985).
+The answer is `two` (transformers gives it a probability of 0.986).
 
 ## 7. Limitations
 
@@ -215,6 +217,6 @@ On the first 1000 items of public sets, GenAI gave the same top answer as transf
 
 - BoolQ: 998 (fp16, CUDA) and 995 (int8, CPU);
 - MNLI (matched): 997 (fp16, CUDA) and 995 (int8, CPU);
-- POPE (images, int8 CPU pipeline from [Images](#6-images)): 998.
+- POPE (images, built as in [Images](#6-images)): 1000 (fp16, CUDA) and 999 (int8, CPU).
 
 Use fp16 on CUDA, not bf16: bf16 gave fewer same top answers (BoolQ 994, MNLI 988) and more exact ties.

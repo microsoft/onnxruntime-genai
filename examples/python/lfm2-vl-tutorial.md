@@ -81,8 +81,8 @@ The three vision fields drive the image processor and come from the image proces
 | `vision.max_num_patches` | `max_num_patches` (`max_image_tokens * downsample_factor²`) | 1024 |
 
 `max_num_patches` is the sequence length every image is padded to so that several images can share
-one vision run; set it to `0` to pad each batch to its own longest image instead, which is cheaper
-but only valid if the vision graph accepts a dynamic patch count.
+one vision run. The vision model the builder writes accepts any patch count, so you can set it to `0`
+to pad each batch to its own longest image instead. That is cheaper and gives the same image features.
 
 `processor_config.json` decodes each image, smart-resizes it so the patch count lands between
 `min_image_tokens` and `max_image_tokens` after the projector's 2× pixel unshuffle, then rescales and
