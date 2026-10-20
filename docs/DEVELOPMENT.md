@@ -308,6 +308,29 @@ For a physical iOS device, use `--apple_sysroot iphoneos`. Cross-compiled target
 
 ---
 
+### Qwen3.8 operator attributes
+
+The text and MTP builders keep coupled operator settings in canonical dictionaries,
+shared by their expansion emitters rather than duplicated as loose instance fields:
+
+- `sparse_indexer_attrs`: `num_heads` (HF `indexer_n_heads`), `kv_heads`,
+  `head_dim`, `token_budget` (HF `indexer_budget`), `compress_ratio`,
+  `fixed_cache`, and paged `state_capacity`. These configure the sparse indexer
+  operators and their cache bindings.
+- `ple_attrs`: zero-based `layer_ids` (HF `ple_layer_ids` is one-based), `embed_dim`,
+  `conv_kernel_size`, `conv_dilation` (HF `ngram_size`), `ngram_size`,
+  `token_pad_id`, `heads_per_ngram`, and `external`. These configure Engram's
+  n-gram mapping, embedding lookup, and stateful convolution.
+- `hyper_connection_attrs`: `num_branches` (HF `hc_count`), expanded `hidden_size`,
+  `tile_first_hidden_state`, and `emit_pre_final_hidden_states`.
+  These configure branchwise normalization, mixing, and hidden-state graph outputs.
+- `attention_attrs["output_gate_type"]`: the attention output-gate activation,
+  taken from HF `output_gate_type` or falling back to HF `hidden_act`.
+
+HF configuration field names are unchanged. Compact capture bindings for all three
+state families use the resolved `context_length_attrs["state_update_capacity"]`;
+paged CUDA `state_window=8` resolves to capacity 7, including PLE and indexer outputs.
+
 ## 11. Troubleshooting
 
 - **Dependency fetch errors during CMake configure** — dependencies are downloaded via `FetchContent` (`cmake/deps.txt`); ensure network access to the declared URLs, then re-run with `--update`.

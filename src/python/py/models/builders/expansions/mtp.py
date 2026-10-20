@@ -46,11 +46,11 @@ class Qwen38MTP:
             self.hidden_size,
         )
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
-        grouped_shape = [*token_shape, self.hc_count, self.hidden_size]
+        grouped_shape = [*token_shape, self.hyper_connection_attrs["num_branches"], self.hidden_size]
         grouped_dims = (
-            [-1, self.hc_count, self.hidden_size]
+            [-1, self.hyper_connection_attrs["num_branches"], self.hidden_size]
             if self.use_paged_attention
-            else [0, 0, self.hc_count, self.hidden_size]
+            else [0, 0, self.hyper_connection_attrs["num_branches"], self.hidden_size]
         )
         hidden_grouped = f"{basename}/hidden/Reshape"
         self.make_reshape(
@@ -84,13 +84,16 @@ class Qwen38MTP:
             self.io_dtype,
             grouped_shape,
         )
-        flatten_dims = [-1, self.hc_hidden_size] if self.use_paged_attention else [0, 0, self.hc_hidden_size]
+        flatten_dims = (
+            [-1, self.hyper_connection_attrs["hidden_size"]]
+            if self.use_paged_attention else [0, 0, self.hyper_connection_attrs["hidden_size"]]
+        )
         flattened = f"{basename}/input_fusion/Reshape"
         self.make_reshape(
             flattened,
             [f"{fused}/output_0", f"/model/constants/INT64/{flatten_dims}"],
             self.io_dtype,
-            self.make_hidden_state_shape(last_dim=self.hc_hidden_size),
+            self.make_hidden_state_shape(last_dim=self.hyper_connection_attrs["hidden_size"]),
         )
         return f"{flattened}/output_0"
 

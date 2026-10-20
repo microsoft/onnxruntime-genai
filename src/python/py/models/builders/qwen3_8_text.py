@@ -47,34 +47,41 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
         self.model.metadata_props["qwen4_exp.past_ple_conv_names"] = "past.%d.ple_conv"
         self.model.metadata_props["qwen4_exp.present_ple_conv_names"] = "present.%d.ple_conv"
 
-        self.hc_count = config.hc_count
-        self.hc_hidden_size = self.hc_count * self.hidden_size
-        self.ple_layer_ids = {layer_id - 1 for layer_id in config.ple_layer_ids}
-        self.ple_embed_dim = config.ple_embed_dim
-        self.ple_conv_kernel_size = config.ple_conv_kernel_size
-        self.ple_conv_dilation = config.ngram_size
-        self.ngram_size = config.ngram_size
-        self.ple_token_pad_id = self.get_engram_pad_id(config.eos_token_id)
+        self.hyper_connection_attrs = {
+            "num_branches": config.hc_count,
+            "hidden_size": config.hc_count * self.hidden_size,
+            "tile_first_hidden_state": True,
+            "emit_pre_final_hidden_states": False,
+        }
+        self.ple_attrs = {
+            "layer_ids": {layer_id - 1 for layer_id in config.ple_layer_ids},
+            "embed_dim": config.ple_embed_dim,
+            "conv_kernel_size": config.ple_conv_kernel_size,
+            "conv_dilation": config.ngram_size,
+            "ngram_size": config.ngram_size,
+            "token_pad_id": self.get_engram_pad_id(config.eos_token_id),
+            "heads_per_ngram": config.heads_per_ngram,
+            "external": extra_options.get("external_engram", False),
+        }
         self.rope_attrs["cast"]["use_fp32"] = False
-        self.heads_per_ngram = config.heads_per_ngram
-        self.indexer_num_heads = config.indexer_n_heads
-        self.indexer_kv_heads = config.indexer_kv_heads
-        self.indexer_head_dim = config.indexer_head_dim
-        self.indexer_budget = config.indexer_budget
-        self.indexer_compress_ratio = config.indexer_compress_ratio
+        self.attention_attrs["output_gate_type"] = config.output_gate_type or config.hidden_act
+        self.sparse_indexer_attrs = {
+            "num_heads": config.indexer_n_heads,
+            "kv_heads": config.indexer_kv_heads,
+            "head_dim": config.indexer_head_dim,
+            "token_budget": config.indexer_budget,
+            "compress_ratio": config.indexer_compress_ratio,
+            "fixed_cache": not self.use_paged_attention and self.ep == "cuda",
+        }
         if extra_options.get("kv_cache_quant_scheme", "none") != "none":
             raise ValueError(
                 "Qwen3.8 sparse attention does not support quantized KV caches; use kv_cache_quant_scheme=none."
             )
-        self.output_gate_type = config.output_gate_type or config.hidden_act
         self.make_sparse_rotary_init(not text_only)
-        self.tile_first_hidden_state = True
-        self.emit_pre_final_hidden_states = False
-        self.external_engram = extra_options.get("external_engram", False)
-        if getattr(self, "external_engram", False):
+        if self.ple_attrs["external"]:
             self.input_names["engram_embeddings"] = "engram_embeddings"
             self.input_types["engram_embeddings"] = self.io_dtype
-            self.input_shapes["engram_embeddings"] = self.make_hidden_state_shape(last_dim=self.ple_embed_dim)
+            self.input_shapes["engram_embeddings"] = self.make_hidden_state_shape(last_dim=self.ple_attrs["embed_dim"])
 
         qsa_layers = {
             layer_id: f"past.{layer_id}.indexer_key"
@@ -96,18 +103,19 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
         self.output_names["present.value"] = self.make_cache_names(["qwen_sparse_attention"], "present.value")
         self.input_names["past.indexer"] = qsa_layers
         self.input_types["past.indexer"] = self.io_dtype
-        self.fixed_indexer_cache = not self.use_paged_attention and self.ep == "cuda"
         self.output_names["present.indexer"] = qsa_outputs
         self.output_types["present.indexer"] = self.io_dtype
         if self.use_paged_attention:
-            self.indexer_state_capacity = (
-                self.context_length + self.indexer_compress_ratio - 1
-            ) // self.indexer_compress_ratio
-            indexer_state_shape = ["batch_size", self.indexer_state_capacity, self.indexer_head_dim]
+            self.sparse_indexer_attrs["state_capacity"] = (
+                self.context_length + self.sparse_indexer_attrs["compress_ratio"] - 1
+            ) // self.sparse_indexer_attrs["compress_ratio"]
+            indexer_state_shape = [
+                "batch_size", self.sparse_indexer_attrs["state_capacity"], self.sparse_indexer_attrs["head_dim"]
+            ]
             indexer_buffer_shape = [
                 "batch_size",
-                2 * self.indexer_compress_ratio - 1,
-                self.indexer_head_dim,
+                2 * self.sparse_indexer_attrs["compress_ratio"] - 1,
+                self.sparse_indexer_attrs["head_dim"],
             ]
             indexer_lengths_shape = ["batch_size", 2]
             self.input_shapes["past.indexer"] = indexer_state_shape
@@ -134,42 +142,49 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
             self.output_shapes["present.indexer_state_lengths"] = indexer_lengths_shape
             self.input_shapes["attention_metadata"] = [5]
         else:
-            self.input_shapes["past.indexer"] = ["batch_size", "past_sequence_length", self.indexer_head_dim]
-            self.output_shapes["present.indexer"] = ["batch_size", "total_sequence_length", self.indexer_head_dim]
-        if self.fixed_indexer_cache:
+            self.input_shapes["past.indexer"] = [
+                "batch_size", "past_sequence_length", self.sparse_indexer_attrs["head_dim"]
+            ]
+            self.output_shapes["present.indexer"] = [
+                "batch_size", "total_sequence_length", self.sparse_indexer_attrs["head_dim"]
+            ]
+        if self.sparse_indexer_attrs["fixed_cache"]:
             self.input_names["past_sequence_length"] = "past_sequence_length"
             self.input_types["past_sequence_length"] = ir.DataType.INT32
             self.input_shapes["past_sequence_length"] = [1]
 
-        ple_token_state = {layer_id: f"past.{layer_id}.ple_tokens" for layer_id in self.ple_layer_ids}
-        ple_conv_state = {layer_id: f"past.{layer_id}.ple_conv" for layer_id in self.ple_layer_ids}
-        present_ple_tokens = {layer_id: f"present.{layer_id}.ple_tokens" for layer_id in self.ple_layer_ids}
-        present_ple_conv = {layer_id: f"present.{layer_id}.ple_conv" for layer_id in self.ple_layer_ids}
+        ple_token_state = {layer_id: f"past.{layer_id}.ple_tokens" for layer_id in self.ple_attrs["layer_ids"]}
+        ple_conv_state = {layer_id: f"past.{layer_id}.ple_conv" for layer_id in self.ple_attrs["layer_ids"]}
+        present_ple_tokens = {layer_id: f"present.{layer_id}.ple_tokens" for layer_id in self.ple_attrs["layer_ids"]}
+        present_ple_conv = {layer_id: f"present.{layer_id}.ple_conv" for layer_id in self.ple_attrs["layer_ids"]}
         self.input_names["past.ple_tokens"] = ple_token_state
         self.input_types["past.ple_tokens"] = ir.DataType.INT64
-        self.input_shapes["past.ple_tokens"] = ["batch_size", self.ngram_size - 1]
+        self.input_shapes["past.ple_tokens"] = ["batch_size", self.ple_attrs["ngram_size"] - 1]
         self.input_names["past.ple_conv"] = ple_conv_state
         self.input_types["past.ple_conv"] = self.io_dtype
-        ple_conv_state_length = self.ple_conv_dilation * (self.ple_conv_kernel_size - 1)
+        ple_conv_state_length = self.ple_attrs["conv_dilation"] * (self.ple_attrs["conv_kernel_size"] - 1)
         self.input_shapes["past.ple_conv"] = (
-            ["batch_size", self.hc_hidden_size, ple_conv_state_length]
+            ["batch_size", self.hyper_connection_attrs["hidden_size"], ple_conv_state_length]
             if self.use_paged_attention
             else [
                 *self.context_length_attrs["state_window_dims"],
                 "batch_size",
                 ple_conv_state_length,
-                self.hc_hidden_size,
+                self.hyper_connection_attrs["hidden_size"],
             ]
         )
         self.output_names["present.ple_tokens"] = present_ple_tokens
         self.output_types["present.ple_tokens"] = ir.DataType.INT64
-        self.output_shapes["present.ple_tokens"] = ["batch_size", self.ngram_size - 1]
+        self.output_shapes["present.ple_tokens"] = ["batch_size", self.ple_attrs["ngram_size"] - 1]
         self.output_names["present.ple_conv"] = present_ple_conv
         self.output_types["present.ple_conv"] = self.io_dtype
         self.output_shapes["present.ple_conv"] = self.input_shapes["past.ple_conv"]
 
-        state_update_capacity = int(extra_options.get("state_update_capacity", 0)) if self.use_paged_attention else 0
-        if state_update_capacity and (self.ple_layer_ids or qsa_layers):
+        state_update_capacity = (
+            int(extra_options.get("state_update_capacity", self.context_length_attrs["state_update_capacity"]))
+            if self.use_paged_attention else 0
+        )
+        if state_update_capacity and (self.ple_attrs["layer_ids"] or qsa_layers):
             self.context_length_attrs["state_update_capacity"] = state_update_capacity
             self.input_names["state_update.capture_count"] = "state_update_capture_count"
             self.input_types["state_update.capture_count"] = ir.DataType.INT32
@@ -178,22 +193,22 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
             self.input_types["state_update.active"] = ir.DataType.INT32
             self.input_shapes["state_update.active"] = [1]
             self.output_names["state_update.ple_tokens"] = {
-                layer_id: f"state_update.{layer_id}.ple_tokens" for layer_id in self.ple_layer_ids
+                layer_id: f"state_update.{layer_id}.ple_tokens" for layer_id in self.ple_attrs["layer_ids"]
             }
             self.output_types["state_update.ple_tokens"] = ir.DataType.INT64
             self.output_shapes["state_update.ple_tokens"] = [
                 "batch_size",
                 state_update_capacity,
-                self.ngram_size - 1,
+                self.ple_attrs["ngram_size"] - 1,
             ]
             self.output_names["state_update.ple_conv_value"] = {
-                layer_id: f"state_update.{layer_id}.ple_conv_value" for layer_id in self.ple_layer_ids
+                layer_id: f"state_update.{layer_id}.ple_conv_value" for layer_id in self.ple_attrs["layer_ids"]
             }
             self.output_types["state_update.ple_conv_value"] = self.io_dtype
             self.output_shapes["state_update.ple_conv_value"] = [
                 "batch_size",
                 state_update_capacity,
-                self.hc_hidden_size,
+                self.hyper_connection_attrs["hidden_size"],
             ]
             self.output_names["state_update.indexer"] = {
                 layer_id: f"state_update.{layer_id}.indexer" for layer_id in qsa_layers
@@ -202,7 +217,7 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
             self.output_shapes["state_update.indexer"] = [
                 "batch_size",
                 state_update_capacity,
-                self.indexer_head_dim,
+                self.sparse_indexer_attrs["head_dim"],
             ]
 
         self.input_names["input_ids"] = "input_ids"
@@ -228,7 +243,7 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
         decoder["inputs"]["past_indexer_names"] = "past.%d.indexer_key"
         decoder["inputs"]["past_indexer_kv_buffer_names"] = "past.%d.indexer_kv_buffer"
         decoder["inputs"]["past_indexer_state_lengths_names"] = "past.%d.indexer_state_lengths"
-        if getattr(self, "fixed_indexer_cache", False):
+        if self.sparse_indexer_attrs["fixed_cache"]:
             decoder["inputs"]["past_sequence_length"] = self.input_names["past_sequence_length"]
         decoder["outputs"]["present_ple_token_names"] = "present.%d.ple_tokens"
         decoder["outputs"]["present_ple_conv_names"] = "present.%d.ple_conv"
@@ -238,9 +253,9 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
         if getattr(self, "context_length_attrs", {}).get("state_window", 0):
             decoder["outputs"]["state_update_indexer_value_names"] = "state_update.%d.indexer_value"
             decoder["outputs"]["state_update_indexer_row_names"] = "state_update.%d.indexer_row"
-        decoder["ple_token_pad_id"] = self.ple_token_pad_id
-        decoder["indexer_compress_ratio"] = self.indexer_compress_ratio
-        if self.ep != "cpu" and not getattr(self, "external_engram", False):
+        decoder["ple_token_pad_id"] = self.ple_attrs["token_pad_id"]
+        decoder["indexer_compress_ratio"] = self.sparse_indexer_attrs["compress_ratio"]
+        if self.ep != "cpu" and not self.ple_attrs["external"]:
             session_options = decoder["session_options"]
             session_options["session.layer_assignment_settings"] = f"cpu(={self.CPU_EMBEDDING_ANNOTATION})"
 
@@ -259,10 +274,10 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
             else:
                 paged_group["layer_ids"] = sorted(set(paged_group["layer_ids"] + qsa_layers))
 
-        if self.ple_layer_ids:
+        if self.ple_attrs["layer_ids"]:
             group = {
                 "kind": "fixed_ple",
-                "layer_ids": sorted(self.ple_layer_ids),
+                "layer_ids": sorted(self.ple_attrs["layer_ids"]),
             }
             if self.context_length_attrs["state_update_capacity"]:
                 group["state_update"] = {"capacity": self.context_length_attrs["state_update_capacity"]}
@@ -282,32 +297,33 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
                 if self.context_length_attrs["state_update_capacity"]:
                     group["state_update"] = {
                         "capacity": self.context_length_attrs["state_update_capacity"],
-                        "compress_ratio": self.indexer_compress_ratio,
+                        "compress_ratio": self.sparse_indexer_attrs["compress_ratio"],
                     }
                 state_groups.append(group)
         return state_groups
 
     def make_layer(self, layer_id, layer):
-        if layer_id == 0 and self.tile_first_hidden_state:
+        if layer_id == 0 and self.hyper_connection_attrs["tile_first_hidden_state"]:
             tile_name = "/model/hyper_connection/Tile"
-            tile_repeats = [1, self.hc_count] if self.use_paged_attention else [1, 1, self.hc_count]
+            num_branches = self.hyper_connection_attrs["num_branches"]
+            tile_repeats = [1, num_branches] if self.use_paged_attention else [1, 1, num_branches]
             self.make_tile(
                 tile_name,
                 [self.layernorm_attrs["root_input"], f"/model/constants/INT64/{tile_repeats}"],
                 self.io_dtype,
-                self.make_hidden_state_shape(last_dim=self.hc_hidden_size),
+                self.make_hidden_state_shape(last_dim=self.hyper_connection_attrs["hidden_size"]),
             )
             self.layernorm_attrs["root_input"] = f"{tile_name}/output_0"
 
         hyper_states = self.layernorm_attrs["root_input"]
-        if layer_id in self.ple_layer_ids:
+        if layer_id in self.ple_attrs["layer_ids"]:
             ple_output = self.make_ple(layer_id, layer.ple, hyper_states)
             ple_add = f"/model/layers.{layer_id}/ple/residual/Add"
             self.make_add(
                 ple_add,
                 [hyper_states, ple_output],
                 self.io_dtype,
-                self.make_hidden_state_shape(last_dim=self.hc_hidden_size),
+                self.make_hidden_state_shape(last_dim=self.hyper_connection_attrs["hidden_size"]),
             )
             hyper_states = f"{ple_add}/output_0"
 
@@ -333,7 +349,7 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
         hidden_states_output = (
             self.output_names["hidden_states"]
             if layer_id == self.num_layers - 1
-            and self.emit_pre_final_hidden_states
+            and self.hyper_connection_attrs["emit_pre_final_hidden_states"]
             and (self.include_hidden_states or self.exclude_lm_head)
             else None
         )
@@ -351,7 +367,7 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
                 "final",
                 combine=False,
             )
-            if (self.include_hidden_states or self.exclude_lm_head) and not self.emit_pre_final_hidden_states:
+            if (self.include_hidden_states or self.exclude_lm_head) and not self.hyper_connection_attrs["emit_pre_final_hidden_states"]:
                 self.make_node(
                     "Identity",
                     inputs=[final_output],

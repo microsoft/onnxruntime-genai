@@ -209,6 +209,10 @@ def test_rejects_already_converted_graph(mtp_graph):
         "base_row_indices",
         "range_starts",
         "range_ends",
+        "/model/layers.0/attn/indexshare/GatherProjectionRows/output_0",
+        "/model/layers.0/attn/indexshare/IndexerMerge/output_0",
+        "/model/layers.0/attn/indexshare/IndexerMerge/output_1",
+        "/model/layers.0/attn/indexshare/IndexerMerge/status",
     ],
 )
 def test_rejects_indexshare_name_collision(mtp_graph, reserved_name):
@@ -229,6 +233,90 @@ def test_rejects_projection_with_other_consumers(mtp_graph):
     with pytest.raises(ValueError, match="projection with other consumers"):
         MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 7)
     assert (mtp_graph / "mtp.onnx").read_bytes() == source_bytes
+
+
+@pytest.mark.parametrize("exposed_value", ["index_qk", "index_query", "index_key"])
+def test_rejects_projection_or_split_exposed_as_graph_output(mtp_graph, exposed_value):
+    model = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
+    model.graph.output.append(helper.make_tensor_value_info(exposed_value, TensorProto.FLOAT, ["num_tokens", 2]))
+    onnx.save_model(model, mtp_graph / "mtp.onnx")
+    source_bytes = (mtp_graph / "mtp.onnx").read_bytes()
+    with pytest.raises(ValueError, match="other consumers"):
+        MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 7)
+    assert (mtp_graph / "mtp.onnx").read_bytes() == source_bytes
+
+
+def test_indexshare_preserves_metadata_and_live_value_info(mtp_graph):
+    model = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
+    model.doc_string = "model documentation"
+    model.producer_name = "test producer"
+    helper.set_model_props(model, {"model_key": "model_value"})
+    model.graph.doc_string = "graph documentation"
+    model.graph.metadata_props.add(key="graph_key", value="graph_value")
+    indexer = next(node for node in model.graph.node if node.op_type == "PackedSparseAttentionIndexer")
+    indexer.doc_string = "indexer documentation"
+    indexer.metadata_props.add(key="node_key", value="node_value")
+    untouched = helper.make_tensor_value_info("attention_out", TensorProto.FLOAT, ["num_tokens", 2])
+    untouched.doc_string = "keep this intermediate"
+    untouched.metadata_props.add(key="value_key", value="value_value")
+    projected = helper.make_tensor_value_info("index_qk", TensorProto.FLOAT, ["num_tokens", 6])
+    projected.doc_string = "projection documentation"
+    projected.type.tensor_type.shape.dim[1].denotation = "FEATURE"
+    selected = helper.make_tensor_value_info(indexer.output[0], TensorProto.INT32, ["num_tokens", 5])
+    selected.doc_string = "selection documentation"
+    selected.type.denotation = "indices"
+    selected.type.tensor_type.shape.dim[1].denotation = "SELECTION"
+    selected.metadata_props.add(key="selection_key", value="selection_value")
+    model.graph.value_info.extend([untouched, projected, selected])
+    model.graph.input[0].doc_string = "hidden documentation"
+    model.graph.output[0].doc_string = "logits documentation"
+    onnx.save_model(model, mtp_graph / "mtp.onnx")
+    external_refs = {
+        tensor.name: tensor.SerializeToString() for tensor in model.graph.initializer
+        if tensor.name != "unused.initializer"
+    }
+    external_bytes = (mtp_graph / "mtp.onnx.data").read_bytes()
+
+    MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 7)
+
+    result = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
+    assert result.doc_string == model.doc_string
+    assert result.producer_name == model.producer_name
+    assert result.metadata_props == model.metadata_props
+    assert result.graph.doc_string == model.graph.doc_string
+    assert result.graph.metadata_props == model.graph.metadata_props
+    result_indexer = next(node for node in result.graph.node if node.op_type == indexer.op_type)
+    assert result_indexer.doc_string == indexer.doc_string
+    assert result_indexer.metadata_props == indexer.metadata_props
+    value_info = {value.name: value for value in result.graph.value_info}
+    assert value_info["attention_out"].SerializeToString() == untouched.SerializeToString()
+    assert value_info["index_qk"].doc_string == projected.doc_string
+    assert value_info["index_qk"].type.tensor_type.shape.dim[0].dim_param == "indexer_projection_rows"
+    assert value_info["index_qk"].type.tensor_type.shape.dim[1].denotation == "FEATURE"
+    present_indices = next(value for value in result.graph.output if value.name == "present_indices")
+    assert present_indices.doc_string == selected.doc_string
+    assert present_indices.metadata_props == selected.metadata_props
+    assert present_indices.type.tensor_type.shape.dim[1].dim_value == 11
+    assert present_indices.type.denotation == "indices"
+    assert present_indices.type.tensor_type.shape.dim[1].denotation == "SELECTION"
+    assert result.graph.input[0].SerializeToString() == model.graph.input[0].SerializeToString()
+    assert result.graph.output[0].SerializeToString() == model.graph.output[0].SerializeToString()
+    assert {tensor.name: tensor.SerializeToString() for tensor in result.graph.initializer} == external_refs
+    assert (mtp_graph / "mtp.onnx.data").read_bytes() == external_bytes
+
+
+def test_indexshare_does_not_require_node_names(mtp_graph):
+    model = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
+    for node in model.graph.node:
+        node.ClearField("name")
+    onnx.save_model(model, mtp_graph / "mtp.onnx")
+    MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 7)
+    result = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
+    assert not any(node.op_type == "Split" for node in result.graph.node)
+    assert any(node.op_type == "Gather" for node in result.graph.node)
+    indexer = next(node for node in result.graph.node if node.op_type == "PackedSparseAttentionIndexer")
+    attention = next(node for node in result.graph.node if node.op_type == "SparsePagedAttention")
+    assert list(attention.input[9:11]) == list(indexer.output[:2]) == ["present_indices", "present_counts"]
 
 
 @pytest.mark.parametrize("budget", [8, 16])

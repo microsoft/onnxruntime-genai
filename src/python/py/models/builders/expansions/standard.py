@@ -354,9 +354,10 @@ class Standard:
     def make_branchwise_rms_norm_expansion(self, name, root_input, norm, hidden_size):
         """Apply RMS normalization independently to each hyper-connection branch."""
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
-        grouped_shape = [*token_shape, self.hc_count, hidden_size]
+        grouped_shape = [*token_shape, self.hyper_connection_attrs["num_branches"], hidden_size]
         grouped_dims = (
-            [-1, self.hc_count, hidden_size] if self.use_paged_attention else [0, 0, self.hc_count, hidden_size]
+            [-1, self.hyper_connection_attrs["num_branches"], hidden_size]
+            if self.use_paged_attention else [0, 0, self.hyper_connection_attrs["num_branches"], hidden_size]
         )
         reshape_name = f"{name}/Reshape"
         self.make_reshape(
@@ -380,9 +381,10 @@ class Standard:
             epsilon=self.layernorm_attrs["epsilon"],
         )
         flatten_name = f"{name}/Flatten"
-        flat_shape = [*token_shape, self.hc_count * hidden_size]
+        flat_shape = [*token_shape, self.hyper_connection_attrs["num_branches"] * hidden_size]
         flat_dims = (
-            [-1, self.hc_count * hidden_size] if self.use_paged_attention else [0, 0, self.hc_count * hidden_size]
+            [-1, self.hyper_connection_attrs["num_branches"] * hidden_size]
+            if self.use_paged_attention else [0, 0, self.hyper_connection_attrs["num_branches"] * hidden_size]
         )
         self.make_reshape(
             flatten_name,
@@ -417,9 +419,10 @@ class Standard:
 
     def make_hyper_connection_pre_mix_expansion(self, name, streams, pre_mix, token_shape, hidden_size):
         """Expand HyperConnectionPreMix into reshape, multiply, and reduction nodes."""
-        grouped_shape = [*token_shape, self.hc_count, hidden_size]
+        grouped_shape = [*token_shape, self.hyper_connection_attrs["num_branches"], hidden_size]
         grouped_dims = (
-            [-1, self.hc_count, hidden_size] if self.use_paged_attention else [0, 0, self.hc_count, hidden_size]
+            [-1, self.hyper_connection_attrs["num_branches"], hidden_size]
+            if self.use_paged_attention else [0, 0, self.hyper_connection_attrs["num_branches"], hidden_size]
         )
         stream_reshape = f"{name}/streams/Reshape"
         self.make_reshape(
@@ -464,30 +467,31 @@ class Standard:
             weight_unsqueeze,
             [post_mix, "/model/constants/INT64/[-1]"],
             self.io_dtype,
-            [*token_shape, self.hc_count, 1],
+            [*token_shape, self.hyper_connection_attrs["num_branches"], 1],
         )
         weighted = f"{name}/Mul"
         self.make_mul(
             weighted,
             [f"{output_unsqueeze}/output_0", f"{weight_unsqueeze}/output_0"],
             self.io_dtype,
-            [*token_shape, self.hc_count, hidden_size],
+            [*token_shape, self.hyper_connection_attrs["num_branches"], hidden_size],
         )
         flatten = f"{name}/Reshape"
         flat_dims = (
-            [-1, self.hc_count * hidden_size] if self.use_paged_attention else [0, 0, self.hc_count * hidden_size]
+            [-1, self.hyper_connection_attrs["num_branches"] * hidden_size]
+            if self.use_paged_attention else [0, 0, self.hyper_connection_attrs["num_branches"] * hidden_size]
         )
         self.make_reshape(
             flatten,
             [f"{weighted}/output_0", f"/model/constants/INT64/{flat_dims}"],
             self.io_dtype,
-            [*token_shape, self.hc_count * hidden_size],
+            [*token_shape, self.hyper_connection_attrs["num_branches"] * hidden_size],
         )
         self.make_add(
             name,
             [streams, f"{flatten}/output_0"],
             self.io_dtype,
-            [*token_shape, self.hc_count * hidden_size],
+            [*token_shape, self.hyper_connection_attrs["num_branches"] * hidden_size],
         )
         return f"{name}/output_0"
 

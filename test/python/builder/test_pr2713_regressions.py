@@ -187,7 +187,8 @@ def test_indexer_rotary_caches_preserve_full_thw_history(paged):
     model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
     graph_module.Qwen4ExpGraphModel.__init__(model, ir.DataType.FLOAT, "rotary.onnx", "rotary")
     model.use_paged_attention = paged
-    model.head_size = model.indexer_head_dim = 12
+    model.head_size = 12
+    model.sparse_indexer_attrs = {"head_dim": 12}
     model.rope_attrs = {"rotary_embedding_dim": 12, "mrope_section": [2, 2, 2], "mrope_layout": 1}
     model.input_names = {"rotary_position_ids": "rotary_position_ids"}
     positions = np.array(
@@ -222,7 +223,7 @@ def test_indexer_rotary_caches_preserve_full_thw_history(paged):
 def test_text_indexer_uses_full_split_half_rotary_table():
     model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
     graph_module.Qwen4ExpGraphModel.__init__(model, ir.DataType.FLOAT, "rotary.onnx", "rotary")
-    model.indexer_head_dim = 12
+    model.sparse_indexer_attrs = {"head_dim": 12}
     cos = np.arange(18, dtype=np.float32).reshape(3, 6)
     sin = cos + 20
     model.make_initializer(cos, "cos")
@@ -365,10 +366,15 @@ def test_dense_engram_clears_padding_before_convolution_and_residual():
     )
     model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
     base.Model.__init__(model, config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", "", {})
-    model.hc_count, model.hc_hidden_size, model.ple_embed_dim = 2, 16, 8
-    model.ngram_size, model.heads_per_ngram = 2, 1
-    model.ple_conv_kernel_size, model.ple_conv_dilation = 2, 2
-    model.external_engram = True
+    model.hyper_connection_attrs = {"num_branches": 2, "hidden_size": 16}
+    model.ple_attrs = {
+        "embed_dim": 8,
+        "ngram_size": 2,
+        "heads_per_ngram": 1,
+        "conv_kernel_size": 2,
+        "conv_dilation": 2,
+        "external": True,
+    }
     model.input_names.update(
         {
             "engram_embeddings": "engram_embeddings",

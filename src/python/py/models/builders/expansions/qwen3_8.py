@@ -264,7 +264,7 @@ class Qwen38(Qwen38Engram):
             name=name,
             domain="com.microsoft",
             epsilon=epsilon,
-            activation=self.output_gate_type,
+            activation=self.attention_attrs["output_gate_type"],
         )
         self.make_value(output, self.io_dtype, shape=shape)
 
@@ -280,9 +280,9 @@ class Qwen38(Qwen38Engram):
             name=name,
             domain="com.microsoft",
             epsilon=self.layernorm_attrs["epsilon"],
-            num_branches=self.hc_count,
+            num_branches=self.hyper_connection_attrs["num_branches"],
         )
-        self.make_value(output, self.io_dtype, [*token_shape, self.hc_count * hidden_size])
+        self.make_value(output, self.io_dtype, [*token_shape, self.hyper_connection_attrs["num_branches"] * hidden_size])
         return output
 
     def make_scaled_silu(self, name, root_input, shape):
@@ -293,7 +293,7 @@ class Qwen38(Qwen38Engram):
             outputs=[output],
             name=name,
             domain="com.microsoft",
-            alpha=1.0 / self.hc_count,
+            alpha=1.0 / self.hyper_connection_attrs["num_branches"],
         )
         self.make_value(output, self.io_dtype, shape)
         return output
@@ -306,8 +306,8 @@ class Qwen38(Qwen38Engram):
             outputs=[output],
             name=name,
             domain="com.microsoft",
-            num_branches=self.hc_count,
-            reduction_scale=1.0 / self.hc_count,
+            num_branches=self.hyper_connection_attrs["num_branches"],
+            reduction_scale=1.0 / self.hyper_connection_attrs["num_branches"],
         )
         self.make_value(output, self.io_dtype, [*token_shape, self.hidden_size])
         return output
@@ -320,9 +320,9 @@ class Qwen38(Qwen38Engram):
             outputs=[output],
             name=name,
             domain="com.microsoft",
-            num_branches=self.hc_count,
+            num_branches=self.hyper_connection_attrs["num_branches"],
         )
-        self.make_value(output, self.io_dtype, [*token_shape, self.hc_hidden_size])
+        self.make_value(output, self.io_dtype, [*token_shape, self.hyper_connection_attrs["hidden_size"]])
         return output
 
     def make_hyper_connection_mix(self, layer_id, hyper_connection, root_input, location, combine=True):
@@ -347,7 +347,7 @@ class Qwen38(Qwen38Engram):
             f"{basename}/input_mix_weight_up/MatMul",
             silu_output,
         )
-        mix_sigmoid_shape = [*token_shape, self.hc_hidden_size]
+        mix_sigmoid_shape = [*token_shape, self.hyper_connection_attrs["hidden_size"]]
         mix_sigmoid = f"{basename}/input_mix_weight_up/Sigmoid"
         self.make_sigmoid(
             mix_sigmoid,
@@ -366,10 +366,10 @@ class Qwen38(Qwen38Engram):
             return mixed_output
 
         inject_div = f"{basename}/block_inject_weight/Div"
-        inject_shape = [*token_shape, self.hc_count]
+        inject_shape = [*token_shape, self.hyper_connection_attrs["num_branches"]]
         self.make_div(
             inject_div,
-            [f"{inject_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.hc_count}"],
+            [f"{inject_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.hyper_connection_attrs['num_branches']}"],
             self.io_dtype,
             inject_shape,
         )
@@ -442,7 +442,7 @@ class Qwen38(Qwen38Engram):
         else:
             indexer_cos, indexer_sin = self.make_indexer_rope_caches(cos_cache, sin_cache)
         past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
-        capacity = self.indexer_budget + self.indexer_compress_ratio - 1
+        capacity = self.sparse_indexer_attrs["token_budget"] + self.sparse_indexer_attrs["compress_ratio"] - 1
         index_qk_path = self.attention_attrs.pop("indexer_qk_path", None)
         if index_qk_path is None:
             index_matmul = self.make_matmul(
@@ -457,13 +457,13 @@ class Qwen38(Qwen38Engram):
         self.make_initializer(attention.indexer.k_layernorm.weight + 1, index_k_scale, to=self.io_dtype)
 
         if self.use_paged_attention:
-            if self.indexer_kv_heads != 1:
+            if self.sparse_indexer_attrs["kv_heads"] != 1:
                 raise ValueError("PackedSparseAttentionIndexer requires indexer_kv_heads=1 for QSA.")
             indexer_name = f"/model/layers.{layer_id}/attn/PackedSparseAttentionIndexer"
             index_query = f"{indexer_name}/query"
             index_key = f"{indexer_name}/key"
-            query_size = self.indexer_num_heads * self.indexer_head_dim
-            key_size = self.indexer_head_dim
+            query_size = self.sparse_indexer_attrs["num_heads"] * self.sparse_indexer_attrs["head_dim"]
+            key_size = self.sparse_indexer_attrs["head_dim"]
             self.make_split(
                 f"{indexer_name}/Split",
                 [index_qk_path, f"/model/constants/INT64/[{query_size}, {key_size}]"],
@@ -518,11 +518,11 @@ class Qwen38(Qwen38Engram):
                 name=indexer_name,
                 domain="com.microsoft",
                 policy_mode="qsa",
-                compress_ratio=self.indexer_compress_ratio,
-                state_capacity=self.indexer_state_capacity,
-                token_budget=self.indexer_budget,
+                compress_ratio=self.sparse_indexer_attrs["compress_ratio"],
+                state_capacity=self.sparse_indexer_attrs["state_capacity"],
+                token_budget=self.sparse_indexer_attrs["token_budget"],
                 epsilon=self.layernorm_attrs["epsilon"],
-                scale=self.indexer_head_dim**-0.5,
+                scale=self.sparse_indexer_attrs["head_dim"]**-0.5,
                 **(
                     {"state_update_capacity": self.context_length_attrs["state_update_capacity"]}
                     if getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
@@ -534,7 +534,7 @@ class Qwen38(Qwen38Engram):
         else:
             indexer_name = f"/model/layers.{layer_id}/attn/SparseAttentionIndexer"
             selected_indices = f"{indexer_name}/output_0"
-            if self.fixed_indexer_cache:
+            if self.sparse_indexer_attrs["fixed_cache"]:
                 indexer_inputs = [
                     index_qk_path,
                     "",
@@ -578,10 +578,10 @@ class Qwen38(Qwen38Engram):
                 name=indexer_name,
                 domain="com.microsoft",
                 policy_mode="qsa",
-                compress_ratio=self.indexer_compress_ratio,
-                token_budget=self.indexer_budget,
+                compress_ratio=self.sparse_indexer_attrs["compress_ratio"],
+                token_budget=self.sparse_indexer_attrs["token_budget"],
                 epsilon=self.layernorm_attrs["epsilon"],
-                scale=self.indexer_head_dim**-0.5,
+                scale=self.sparse_indexer_attrs["head_dim"]**-0.5,
             )
             self.make_value(
                 selected_indices,
@@ -592,7 +592,7 @@ class Qwen38(Qwen38Engram):
                 indexer_update_value = self.make_value(
                     f"state_update.{layer_id}.indexer_value",
                     self.io_dtype,
-                    ["batch_size", "sequence_length", self.indexer_head_dim],
+                    ["batch_size", "sequence_length", self.sparse_indexer_attrs["head_dim"]],
                 )
                 indexer_update_row = self.make_value(
                     f"state_update.{layer_id}.indexer_row",
@@ -746,7 +746,7 @@ class Qwen38(Qwen38Engram):
         outputs = tuple(f"/model/indexer_rotary/{kind}/Concat/output_0" for kind in ("cos", "sin"))
         if outputs[0] not in self.values:
             length, width = self.values[cos_cache].shape
-            if 2 * width > self.indexer_head_dim:
+            if 2 * width > self.sparse_indexer_attrs["head_dim"]:
                 raise ValueError("Qwen3.8 indexer head must cover the full rotary dimension.")
             for kind, cache in (("cos", cos_cache), ("sin", sin_cache)):
                 self.make_concat(
@@ -765,7 +765,7 @@ class Qwen38(Qwen38Engram):
         if outputs[0] in self.values:
             return outputs
         rotary_dim = self.rope_attrs["rotary_embedding_dim"] or self.head_size
-        if rotary_dim > self.indexer_head_dim:
+        if rotary_dim > self.sparse_indexer_attrs["head_dim"]:
             raise ValueError("Qwen3.8 indexer head must cover the full rotary dimension.")
         owners = Standard.get_mrope_owners(self, rotary_dim)
         shape = ["batch_size", "rotary_sequence_length", rotary_dim // 2]

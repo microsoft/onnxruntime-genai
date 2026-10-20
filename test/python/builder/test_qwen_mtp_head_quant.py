@@ -48,7 +48,7 @@ class FakeQwen4ExpComponent(FakeComponent):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.multimodal_rotary = multimodal_rotary
         self.model_type = "qwen4_exp"
-        self.hc_hidden_size = 8
+        self.hyper_connection_attrs = {"hidden_size": 8}
         self.output_shapes = {"hidden_states": ["batch_size", "sequence_length", 2]}
         self.filename = extra_options.get("filename", "text.onnx")
 
@@ -125,7 +125,7 @@ def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch, ep, prune_lm_head)
     assert model.decoder.model_type == "qwen3_5"
     assert model.decoder.extra_options["external_engram"] is True
     assert model.decoder.extra_options["include_hidden_states"] is True
-    assert model.decoder.emit_pre_final_hidden_states is True
+    assert model.decoder.hyper_connection_attrs["emit_pre_final_hidden_states"] is True
     assert model.decoder.output_shapes["hidden_states"] == ["batch_size", "sequence_length", 8]
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
     assert model.decoder.extra_options["prune_lm_head"] is prune_lm_head

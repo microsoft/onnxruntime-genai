@@ -11,6 +11,7 @@ import onnxruntime as ort
 import pytest
 import torch
 from _builder_test_utils import ort_runs_engram_op
+from transformers import LlamaConfig
 
 from models.builders.base import Model
 from models.builders.qwen3_5 import Qwen35MoETextModel
@@ -46,13 +47,15 @@ def make_sparse_model(paged):
     model.num_attn_heads = 8
     model.num_kv_heads = 2
     model.head_size = 16
-    model.indexer_num_heads = 4
-    model.indexer_kv_heads = 1
-    model.indexer_head_dim = 16
-    model.indexer_budget = 32
-    model.indexer_compress_ratio = 4
-    model.indexer_state_capacity = 32
-    model.fixed_indexer_cache = not paged
+    model.sparse_indexer_attrs = {
+        "num_heads": 4,
+        "kv_heads": 1,
+        "head_dim": 16,
+        "token_budget": 32,
+        "compress_ratio": 4,
+        "state_capacity": 32,
+        "fixed_cache": not paged,
+    }
     model.layernorm_attrs = {"epsilon": 1e-6}
     model.rope_attrs = {"interleaved": 0, "cast": {"use_fp32": True}}
     model.attention_attrs = {
@@ -140,6 +143,7 @@ def test_dense_cuda_indexer_cache_shapes_are_symbolic(monkeypatch):
         self.output_types = {}
         self.output_shapes = {}
         self.rope_attrs = {"cast": {"use_fp32": True}}
+        self.attention_attrs = {}
         self.model = SimpleNamespace(metadata_props={})
 
     monkeypatch.setattr(Qwen35MoETextModel, "__init__", initialize_parent)
@@ -162,7 +166,7 @@ def test_dense_cuda_indexer_cache_shapes_are_symbolic(monkeypatch):
 
     model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
 
-    assert model.fixed_indexer_cache
+    assert model.sparse_indexer_attrs["fixed_cache"]
     assert model.input_shapes["past.indexer"] == ["batch_size", "past_sequence_length", 16]
     assert model.output_shapes["present.indexer"] == ["batch_size", "total_sequence_length", 16]
     assert model.input_shapes["past_sequence_length"] == [1]
@@ -177,6 +181,7 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
         self.context_length = 128
         self.hidden_size = 16
         self.layer_types = ["qwen_sparse_attention"]
+        self.context_length_attrs = {"state_window": 0, "state_window_dims": [], "state_update_capacity": 0}
         self.input_names = {}
         self.input_types = {}
         self.input_shapes = {"attention_metadata": [1]}
@@ -185,6 +190,7 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
         self.output_types = {}
         self.output_shapes = {}
         self.rope_attrs = {"cast": {"use_fp32": True}}
+        self.attention_attrs = {}
         self.model = SimpleNamespace(metadata_props={})
 
     monkeypatch.setattr(Qwen35MoETextModel, "__init__", initialize_parent)
@@ -207,10 +213,10 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
 
     model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
 
-    assert not model.fixed_indexer_cache
+    assert not model.sparse_indexer_attrs["fixed_cache"]
     assert model.input_names["position_ids"] == "position_ids"
     assert model.input_shapes["attention_metadata"] == [5]
-    assert model.indexer_state_capacity == 32
+    assert model.sparse_indexer_attrs["state_capacity"] == 32
     assert model.input_shapes["past.indexer"] == ["batch_size", 32, 16]
     assert model.input_shapes["past.indexer_kv_buffer"] == ["batch_size", 7, 16]
     assert model.input_shapes["past.indexer_state_lengths"] == ["batch_size", 2]
@@ -248,6 +254,7 @@ def test_qwen38_ple_conv_state_layout_tracks_packed_execution(monkeypatch):
         self.context_length = 128
         self.hidden_size = 16
         self.layer_types = ["linear_attention"]
+        self.context_length_attrs = {"state_window": 0, "state_window_dims": [], "state_update_capacity": 0}
         self.input_names = {}
         self.input_types = {}
         self.input_shapes = {}
@@ -255,6 +262,7 @@ def test_qwen38_ple_conv_state_layout_tracks_packed_execution(monkeypatch):
         self.output_types = {}
         self.output_shapes = {}
         self.rope_attrs = {"cast": {"use_fp32": True}}
+        self.attention_attrs = {}
         self.model = SimpleNamespace(metadata_props={})
 
     monkeypatch.setattr(Qwen35MoETextModel, "__init__", initialize_parent)
@@ -286,6 +294,69 @@ def test_qwen38_ple_conv_state_layout_tracks_packed_execution(monkeypatch):
     assert packed.input_shapes["past.ple_conv"] == ["batch_size", 32, 9]
     assert dense.output_shapes["present.ple_conv"] == dense.input_shapes["past.ple_conv"]
     assert packed.output_shapes["present.ple_conv"] == packed.input_shapes["past.ple_conv"]
+
+
+@pytest.mark.parametrize("linear_layers", [False, True])
+def test_paged_qwen38_resolves_compact_capacity_for_ple_and_indexer(linear_layers):
+    config = LlamaConfig(
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=32,
+        max_position_embeddings=128,
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        layer_types=["linear_attention" if linear_layers else "qwen_sparse_attention", "qwen_sparse_attention"],
+        hc_count=2,
+        ple_layer_ids=[2],
+        ple_embed_dim=8,
+        ple_conv_kernel_size=4,
+        ngram_size=3,
+        heads_per_ngram=2,
+        indexer_n_heads=4,
+        indexer_kv_heads=1,
+        indexer_head_dim=16,
+        indexer_budget=32,
+        indexer_compress_ratio=4,
+        output_gate_type=None,
+    )
+    options = {"use_paged_attention": True, "text_only": True}
+    options.update({"state_window": 8} if linear_layers else {"state_update_capacity": 7})
+    model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", "", options)
+
+    assert model.context_length_attrs["state_update_capacity"] == 7
+    assert model.output_shapes["state_update.ple_tokens"] == ["batch_size", 7, 2]
+    assert model.output_shapes["state_update.ple_conv_value"] == ["batch_size", 7, 16]
+    assert model.output_shapes["state_update.indexer"] == ["batch_size", 7, 16]
+    if linear_layers:
+        assert "state_update_capacity" not in options
+        assert model.output_shapes["state_update.conv_value"][1] == 7
+
+    sparse = make_sparse_model(paged=True)
+    ple_model, ple = make_ple_model(paged=True)
+    for emitter in (sparse, ple_model):
+        emitter.context_length_attrs = model.context_length_attrs
+        emitter.input_names.update(model.input_names)
+        emitter.output_names.update(model.output_names)
+        emitter.output_shapes = model.output_shapes
+    sparse.make_qwen_sparse_attention(1, make_attention(), "hidden_states")
+    indexer = next(kwargs for op, kwargs in emitted_nodes(sparse) if op == "PackedSparseAttentionIndexer")
+    assert indexer["state_update_capacity"] == 7
+    assert indexer["outputs"][6] == model.output_names["state_update.indexer"][1]
+
+    ple_model.make_ple(1, ple, "hidden_states")
+    ngram = next(kwargs for op, kwargs in emitted_nodes(ple_model) if op == "VarlenNGramHashMapping")
+    conv = next(kwargs for op, kwargs in emitted_nodes(ple_model) if op == "VarlenCausalConvWithState")
+    assert ngram["state_update_capacity"] == conv["state_update_capacity"] == 7
+    assert ngram["outputs"][3] == model.output_names["state_update.ple_tokens"][1]
+    assert conv["outputs"][2] == model.output_names["state_update.ple_conv_value"][1]
+    update_shape = next(
+        kwargs["shape"] for method, args, kwargs in ple_model.calls
+        if method == "make_value" and args[0] == "state_update.1.ple_conv_value"
+    )
+    assert update_shape == model.output_shapes["state_update.ple_conv_value"]
 
 
 def test_qwen38_gated_delta_net_expansion_emits_linear_attention():
@@ -706,8 +777,7 @@ def test_mtp_residual_linear_shared_preserves_hyper_connection_shape():
     model.io_dtype = ir.DataType.FLOAT16
     model.use_paged_attention = False
     model.hidden_size = 8
-    model.hc_count = 4
-    model.hc_hidden_size = 32
+    model.hyper_connection_attrs = {"num_branches": 4, "hidden_size": 32}
     model.input_names = {"input_ids": "input_ids", "hidden_states": "hidden_states"}
     model.mtp_weights = SimpleNamespace(
         embedding=SimpleNamespace(weight=torch.ones((16, 8))),
@@ -741,7 +811,7 @@ def test_paged_branchwise_norm_emits_fused_op():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = True
     model.io_dtype = ir.DataType.FLOAT16
-    model.hc_count = 2
+    model.hyper_connection_attrs = {"num_branches": 2}
     model.layernorm_attrs = {"epsilon": 1e-6}
     record_calls(model, ["make_initializer", "make_node", "make_value"])
 
@@ -762,7 +832,7 @@ def test_dense_branchwise_norm_emits_fused_op():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.BFLOAT16
-    model.hc_count = 4
+    model.hyper_connection_attrs = {"num_branches": 4}
     model.layernorm_attrs = {"epsilon": 1e-6}
     record_calls(model, ["make_initializer", "make_node", "make_value"])
 
@@ -778,9 +848,8 @@ def test_hyper_connection_emits_fused_ops():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
-    model.hc_count = 4
+    model.hyper_connection_attrs = {"num_branches": 4, "hidden_size": 32}
     model.hidden_size = 8
-    model.hc_hidden_size = 32
     record_calls(
         model,
         [
@@ -836,9 +905,8 @@ def test_hyper_connection_injection_emits_fused_post_mix(output_name):
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
-    model.hc_count = 4
+    model.hyper_connection_attrs = {"num_branches": 4, "hidden_size": 32}
     model.hidden_size = 8
-    model.hc_hidden_size = 32
     record_calls(model, ["make_node", "make_value"])
 
     output = model.make_hyper_connection_injection(
@@ -860,14 +928,16 @@ def test_final_hidden_states_output_connects_to_post_mix(paged, pre_final):
     model = object.__new__(Qwen4ExpMTPTextModel)
     model.use_paged_attention = paged
     model.io_dtype = ir.DataType.FLOAT16
-    model.hc_count = 4
+    model.hyper_connection_attrs = {
+        "num_branches": 4,
+        "hidden_size": 32,
+        "tile_first_hidden_state": False,
+        "emit_pre_final_hidden_states": pre_final,
+    }
     model.hidden_size = 8
-    model.hc_hidden_size = 32
     model.num_layers = 1
     model.layer_types = ["qwen_sparse_attention"]
-    model.ple_layer_ids = set()
-    model.tile_first_hidden_state = False
-    model.emit_pre_final_hidden_states = pre_final
+    model.ple_attrs = {"layer_ids": set()}
     model.include_hidden_states = True
     model.exclude_lm_head = False
     model.output_names = {"hidden_states": "hidden_states_out"}
@@ -908,7 +978,7 @@ def test_qwen_hyper_connection_expansions_emit_standard_onnx():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
-    model.hc_count = 4
+    model.hyper_connection_attrs = {"num_branches": 4}
     model.hidden_size = 8
     model.layernorm_attrs = {"epsilon": 1e-6}
     record_calls(
@@ -952,7 +1022,7 @@ def test_qwen_hyper_connection_expansions_emit_standard_onnx():
 def test_gated_rms_norm_emits_configured_activation():
     model = object.__new__(Qwen4ExpTextModel)
     model.io_dtype = ir.DataType.FLOAT16
-    model.output_gate_type = "sigmoid"
+    model.attention_attrs = {"output_gate_type": "sigmoid"}
     record_calls(model, ["make_node", "make_value"])
 
     model.make_gated_rms_norm(
@@ -1162,13 +1232,15 @@ def make_ple_model(paged, fp8_embedding=False):
     model.use_paged_attention = paged
     model.io_dtype = ir.DataType.FLOAT16
     model.hidden_size = 8
-    model.hc_count = 2
-    model.hc_hidden_size = 16
-    model.ple_embed_dim = 8
-    model.ngram_size = 3
-    model.heads_per_ngram = 2
-    model.ple_conv_kernel_size = 4
-    model.ple_conv_dilation = 3
+    model.hyper_connection_attrs = {"num_branches": 2, "hidden_size": 16}
+    model.ple_attrs = {
+        "embed_dim": 8,
+        "ngram_size": 3,
+        "heads_per_ngram": 2,
+        "conv_kernel_size": 4,
+        "conv_dilation": 3,
+        "external": False,
+    }
     model.layernorm_attrs = {"epsilon": 1e-5}
     model.values = {}
     model.input_names = {
@@ -1320,7 +1392,7 @@ def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
 @pytest.mark.parametrize("external_engram", [False, True])
 def test_paged_ple_appends_compact_token_and_conv_updates(external_engram):
     model, ple = make_ple_model(paged=True)
-    model.external_engram = external_engram
+    model.ple_attrs["external"] = external_engram
     if external_engram:
         model.input_names["engram_embeddings"] = "engram_embeddings"
     model.context_length_attrs = {"state_update_capacity": 7}
@@ -1532,7 +1604,7 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
     wrapper.config = SimpleNamespace(text_config=text_config, vision_config=SimpleNamespace(out_hidden_size=8))
     wrapper.decoder = component("model.onnx")
     wrapper.decoder.io_dtype = ir.DataType.FLOAT16
-    wrapper.decoder.ple_layer_ids = {1}
+    wrapper.decoder.ple_attrs = {"layer_ids": {1}}
     wrapper.decoder.hidden_size = 8
     language_model = SimpleNamespace(
         layers=[None, SimpleNamespace(ple=ple)],
@@ -1649,9 +1721,8 @@ def test_text_only_config_connects_external_engram(
 def test_qwen38_config_assigns_embedding_annotation_to_cpu():
     model = object.__new__(Qwen4ExpTextModel)
     model.ep = "cuda"
-    model.ple_token_pad_id = 248044
-    model.indexer_compress_ratio = 4
-    model.fixed_indexer_cache = True
+    model.ple_attrs = {"token_pad_id": 248044, "external": False}
+    model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": True}
     model.input_names = {"past_sequence_length": "past_sequence_length"}
     genai_config = {"model": {"decoder": {"inputs": {}, "outputs": {}, "session_options": {}}}}
 
@@ -1666,10 +1737,8 @@ def test_qwen38_config_assigns_embedding_annotation_to_cpu():
 def test_qwen38_external_engram_keeps_decoder_cuda_only():
     model = object.__new__(Qwen4ExpTextModel)
     model.ep = "cuda"
-    model.external_engram = True
-    model.ple_token_pad_id = 248044
-    model.indexer_compress_ratio = 4
-    model.fixed_indexer_cache = True
+    model.ple_attrs = {"token_pad_id": 248044, "external": True}
+    model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": True}
     model.input_names = {"past_sequence_length": "past_sequence_length"}
     genai_config = {"model": {"decoder": {"inputs": {}, "outputs": {}, "session_options": {}}}}
 
