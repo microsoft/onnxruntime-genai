@@ -591,7 +591,7 @@ __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restr
         if (descriptor.element_size == 2) {
           static_cast<uint16_t*>(descriptor.destination_state)[index] =
               static_cast<const uint16_t*>(source)[source_index];
-        } else {
+        } else if (descriptor.element_size == 4) {
           static_cast<uint32_t*>(descriptor.destination_state)[index] =
               static_cast<const uint32_t*>(source)[source_index];
         }
@@ -611,7 +611,7 @@ __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restr
         if (descriptor.element_size == 2) {
           static_cast<uint16_t*>(descriptor.destination_aux_state)[index] =
               static_cast<const uint16_t*>(source)[source_index];
-        } else {
+        } else if (descriptor.element_size == 4) {
           static_cast<uint32_t*>(descriptor.destination_aux_state)[index] =
               static_cast<const uint32_t*>(source)[source_index];
         }
@@ -664,16 +664,15 @@ __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restr
       state = __fmul_rn(
           state,
           descriptor.decay[static_cast<uint64_t>(transition) * descriptor.channel_count + value_head]);
-      // Match GatedDeltaNet's separately rounded multiply and add. Contracting this update changes
-      // the target state after replaying an accepted prefix and can alter later greedy tokens.
-      const float update = __fmul_rn(
+      // ORT rounds the decay multiply, then contracts the key/delta update into an FMA.
+      state = __fmaf_rn(
           descriptor.key[(static_cast<uint64_t>(transition) * descriptor.key_head_count + key_head) *
                              descriptor.key_width +
                          key_index],
           descriptor.delta[(static_cast<uint64_t>(transition) * descriptor.channel_count + value_head) *
                                descriptor.state_width +
-                           value_index]);
-      state = __fadd_rn(state, update);
+                           value_index],
+          state);
     }
     static_cast<float*>(descriptor.destination_state)[state_index] = state;
   }
@@ -740,10 +739,10 @@ __global__ void __launch_bounds__(kReplayThreads) ReplayGatedDeltaNetKernel(
         const float decay = decay_tile[t];
         const float delta = delta_tile[t * kReplayRows + r];
         const float* key = key_tile + t * key_width + k;
-        s.x = __fadd_rn(__fmul_rn(s.x, decay), __fmul_rn(key[0], delta));
-        s.y = __fadd_rn(__fmul_rn(s.y, decay), __fmul_rn(key[1], delta));
-        s.z = __fadd_rn(__fmul_rn(s.z, decay), __fmul_rn(key[2], delta));
-        s.w = __fadd_rn(__fmul_rn(s.w, decay), __fmul_rn(key[3], delta));
+        s.x = __fmaf_rn(key[0], delta, __fmul_rn(s.x, decay));
+        s.y = __fmaf_rn(key[1], delta, __fmul_rn(s.y, decay));
+        s.z = __fmaf_rn(key[2], delta, __fmul_rn(s.z, decay));
+        s.w = __fmaf_rn(key[3], delta, __fmul_rn(s.w, decay));
       }
       *reinterpret_cast<float4*>(destination + row + k) = s;
     }

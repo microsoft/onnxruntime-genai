@@ -521,7 +521,8 @@ struct Config {
       // Hybrid SSM+Attention (LFM2) parameters
       std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
       int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
-      int64_t ple_token_pad_id{};
+      int64_t ple_token_pad_id{-1};
+      int indexer_compress_ratio{};  // Zero means unspecified by an older export.
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
@@ -580,6 +581,7 @@ struct Config {
         std::string engram_embeddings;
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string rotary_position_ids;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
         std::string past_key_scale_names;
@@ -729,6 +731,7 @@ struct Config {
         std::string hidden_states{Defaults::HiddenStatesName};
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string rotary_position_ids;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
         std::string past_indexer_names;
@@ -835,7 +838,6 @@ struct Config {
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
-    bool adaptive_chunking{};          // Select a tuned prefill chunk size when chunk_size is not explicitly set.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
     bool audio_interleaved{};          // LFM2-Audio: alternate text tokens and audio frames by count (interleaved mode) rather than switching on <|audio_start|>.
     float audio_temperature{1.0f};     // LFM2-Audio: temperature the audio codes are sampled with. 0 takes the most likely code.

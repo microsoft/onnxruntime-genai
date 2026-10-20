@@ -8,6 +8,8 @@
 #include "models/io/kv_cache.h"
 #include "interface.h"
 
+#include <cmath>
+
 namespace Generators {
 
 static Ort::Allocator* ort_allocator_{};
@@ -209,6 +211,23 @@ struct CpuInterface : DeviceInterface {
         continue;
       }
       if (descriptor.kind == StateUpdateReplayKind::Indexer) {
+        const int32_t old_key_length = descriptor.source_lengths[0];
+        const int32_t old_buffer_length = descriptor.source_lengths[1];
+        if (descriptor.compress_ratio == 0 ||
+            descriptor.compress_ratio - 1 > descriptor.aux_capacity ||
+            old_key_length < 0 || old_buffer_length < 0 ||
+            static_cast<uint64_t>(old_key_length) > descriptor.state_capacity ||
+            static_cast<uint32_t>(old_buffer_length) >= descriptor.compress_ratio ||
+            static_cast<uint64_t>(old_buffer_length) > descriptor.aux_capacity) {
+          throw std::runtime_error("Indexer state_update has invalid committed lengths.");
+        }
+        const uint64_t retained = static_cast<uint64_t>(old_buffer_length) + descriptor.kept_count;
+        if (retained / descriptor.compress_ratio >
+                descriptor.state_capacity - static_cast<uint64_t>(old_key_length) ||
+            retained % descriptor.compress_ratio > descriptor.aux_capacity ||
+            retained / descriptor.compress_ratio > static_cast<uint64_t>(INT32_MAX - old_key_length)) {
+          throw std::runtime_error("Indexer state_update replay exceeds state capacity.");
+        }
         const uint64_t key_row_bytes = descriptor.state_width * descriptor.element_size;
         if (descriptor.destination_state != descriptor.source_state) {
           std::memcpy(descriptor.destination_state, descriptor.source_state,
@@ -276,12 +295,14 @@ struct CpuInterface : DeviceInterface {
             float state = source[state_index];
             for (uint32_t transition = 0; transition < descriptor.kept_count; ++transition) {
               state *= descriptor.decay[static_cast<uint64_t>(transition) * descriptor.channel_count + value_head];
-              state += descriptor.key[(static_cast<uint64_t>(transition) * descriptor.key_head_count + key_head) *
-                                          descriptor.key_width +
-                                      key_index] *
-                       descriptor.delta[(static_cast<uint64_t>(transition) * descriptor.channel_count + value_head) *
-                                            descriptor.state_width +
-                                        value_index];
+              state = std::fma(
+                  descriptor.key[(static_cast<uint64_t>(transition) * descriptor.key_head_count + key_head) *
+                                     descriptor.key_width +
+                                 key_index],
+                  descriptor.delta[(static_cast<uint64_t>(transition) * descriptor.channel_count + value_head) *
+                                       descriptor.state_width +
+                                   value_index],
+                  state);
             }
             destination[state_index] = state;
           }

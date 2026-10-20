@@ -80,6 +80,10 @@ unset(_msec_plat_lc)
 # --- /Qspectre  Spectre variant 1 mitigations ---
 # Generator expressions restrict this to C/C++ only — CUDA nvcc does not
 # accept /Qspectre and will error if it is passed to it.
+if(NOT DEFINED ENABLE_MSVC_SPECTRE)
+  # Standalone SDK builds do not include options.cmake. Keep mitigation on there too.
+  set(ENABLE_MSVC_SPECTRE ON)
+endif()
 if(ENABLE_MSVC_SPECTRE)
   add_compile_options(
     "$<$<COMPILE_LANGUAGE:C>:/Qspectre>"

@@ -99,6 +99,23 @@ struct PrefixCheckpointOwner {
 
 }  // namespace
 
+void ValidateFixedStateUpdateElementSize(
+    Config::Model::Decoder::StateUpdateKind kind, size_t element_size) {
+  using Kind = Config::Model::Decoder::StateUpdateKind;
+  if (kind == Kind::CausalConv && element_size != 2 && element_size != 4) {
+    throw std::runtime_error(
+        "Causal convolution state_update supports only 2-byte and 4-byte elements.");
+  }
+  if (kind == Kind::Indexer && element_size != 2 && element_size != 4) {
+    throw std::runtime_error(
+        "Indexer state_update supports only 2-byte and 4-byte elements.");
+  }
+  if (kind == Kind::Ple && element_size != 2 && element_size != 4 && element_size != 8) {
+    throw std::runtime_error(
+        "PLE snapshot state_update supports only 2-byte, 4-byte and 8-byte elements.");
+  }
+}
+
 FixedStateGeometry ValidateFixedStateGeometry(std::string_view input_name,
                                               ONNXTensorElementDataType input_type,
                                               std::span<const int64_t> input_shape,
@@ -950,13 +967,8 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
             spec.state_update_channel_count = static_cast<size_t>(spec.session_shape[1]);
             spec.state_update_state_width = static_cast<size_t>(spec.session_shape[2]);
           }
-          if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::CausalConv) {
-            const size_t element_size = Ort::SizeOf(spec.data_type);
-            if (element_size != 2 && element_size != 4) {
-              throw std::runtime_error(
-                  "Causal convolution state_update supports only 2-byte and 4-byte elements.");
-            }
-          } else if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet) {
+          ValidateFixedStateUpdateElementSize(spec.state_update_kind, Ort::SizeOf(spec.data_type));
+          if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet) {
             spec.state_update_key_width = static_cast<size_t>(spec.session_shape[3]);
             spec.state_update_key_head_count = static_cast<size_t>(update.key_head_count);
           }
@@ -1886,6 +1898,25 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
           indexer_lengths_index = tensor_index + 2;
           indexer_buffer_spec = &impl_->tensors[indexer_buffer_index];
           indexer_lengths_spec = &impl_->tensors[indexer_lengths_index];
+          auto lengths_tensor =
+              WrapTensor<int32_t>(*impl_->device, *views.gathered_inputs[indexer_lengths_index]);
+          const auto lengths = lengths_tensor.CopyDeviceToCpu().subspan(row * 2, 2);
+          const size_t ratio = spec.state_update_compress_ratio;
+          const size_t key_capacity = spec.state_update_state_capacity;
+          const size_t buffer_capacity = static_cast<size_t>(indexer_buffer_spec->session_shape[1]);
+          if (ratio == 0 || ratio - 1 > buffer_capacity ||
+              lengths[0] < 0 || lengths[1] < 0 ||
+              static_cast<size_t>(lengths[0]) > key_capacity ||
+              static_cast<size_t>(lengths[1]) >= ratio ||
+              static_cast<size_t>(lengths[1]) > buffer_capacity) {
+            throw std::runtime_error("Indexer state_update has invalid committed lengths.");
+          }
+          const size_t retained = static_cast<size_t>(lengths[1]) + kept_tokens;
+          if (retained / ratio > key_capacity - static_cast<size_t>(lengths[0]) ||
+              retained / ratio > static_cast<size_t>(INT32_MAX - lengths[0]) ||
+              retained % ratio > buffer_capacity) {
+            throw std::runtime_error("Indexer state_update replay exceeds state capacity.");
+          }
         }
         const auto sibling_source = [&](size_t index, const Impl::TensorSpec* sibling) -> const uint8_t* {
           return sibling

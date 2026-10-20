@@ -846,7 +846,8 @@ inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> 
 
 inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
                                              int32_t forced_token,
-                                             int64_t hidden_states_width = 0) {
+                                             int64_t hidden_states_width = 0,
+                                             int indexshare_draft_capacity = 0) {
   if (hidden_states_width == 0) {
     hidden_states_width = model->config_->model.decoder.hidden_size;
   }
@@ -861,6 +862,15 @@ inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
 
   auto mtp_model = std::make_shared<DecoderOnly_Model>(
       CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+  if (indexshare_draft_capacity > 0) {
+    // The recording executor supplies selection outputs without needing a second ONNX fixture.
+    auto& indexshare = mtp_model->index_share_config_;
+    indexshare.enabled = true;
+    indexshare.base_capacity = 4;
+    indexshare.max_draft_tokens = indexshare_draft_capacity;
+    indexshare.indices_output = "indices";
+    indexshare.counts_output = "counts";
+  }
   auto mtp_cache = std::make_shared<RecordingCacheManager>(
       mtp_model, /*capacity=*/8);
   auto* mtp_cache_observer = mtp_cache.get();
@@ -876,6 +886,27 @@ inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
   return MtpDoublesEngine{
       nullptr, std::move(engine), cache_observer, executor_observer,
       mtp_cache_observer, mtp_executor_observer, nullptr};
+}
+
+// Simulates the exported selection outputs, including a per-query status. The Engine still executes
+// its real packing, persistent stage bindings, selection seeding, and transaction rollback paths.
+inline void WriteIndexShareOutputs(ExecutionContext& context, int32_t status = 0) {
+  if (context.extra_outputs.empty()) return;
+  auto* indices = context.extra_outputs[0];
+  auto* counts = context.extra_outputs[1];
+  auto* statuses = context.extra_outputs[2];
+  const auto shape = indices->GetTensorTypeAndShapeInfo()->GetShape();
+  const size_t rows = static_cast<size_t>(shape[0]);
+  const size_t capacity = static_cast<size_t>(shape[1]);
+  auto* index_data = indices->GetTensorMutableData<int32_t>();
+  auto* count_data = counts->GetTensorMutableData<int32_t>();
+  auto* status_data = statuses->GetTensorMutableData<int32_t>();
+  for (size_t row = 0; row < rows; ++row) {
+    count_data[row] = static_cast<int32_t>(std::min(size_t{4}, capacity));
+    status_data[row] = status;
+    for (size_t column = 0; column < capacity; ++column)
+      index_data[row * capacity + column] = static_cast<int32_t>(100 * row + column);
+  }
 }
 
 }  // namespace test

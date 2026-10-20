@@ -100,7 +100,8 @@ State::State(const GeneratorParams& params, const Model& model, DeviceInterface*
 }
 
 const std::string& State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
-  const int graph_key = graph_capture_length * 2 + graph_capture_variant;
+  const uint64_t graph_key = (static_cast<uint64_t>(static_cast<uint32_t>(graph_capture_length)) << 32) |
+                             static_cast<uint32_t>(graph_capture_variant);
   auto it = graph_ids_.find(graph_key);
   if (it != graph_ids_.end()) {
     return it->second.text;

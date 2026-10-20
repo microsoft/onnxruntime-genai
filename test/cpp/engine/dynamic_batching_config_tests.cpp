@@ -202,6 +202,7 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
 TEST(DecoderStateGroupsConfigTest, ParsesPleAndPackedIndexerStateGroups) {
   const auto config = LoadDecoderConfig(R"({
     "num_hidden_layers": 2,
+    "ple_token_pad_id": 7,
     "inputs": {
       "past_ple_token_names": "past.%d.ple_tokens",
       "past_ple_conv_names": "past.%d.ple_conv",

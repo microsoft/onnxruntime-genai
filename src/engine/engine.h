@@ -9,7 +9,9 @@
 #include "../decoding/speculative_stats.h"
 #include "../dflash2_drafter.h"
 
+#include <algorithm>
 #include <array>
+#include <functional>
 #include <map>
 #include <random>
 #include <thread>
@@ -257,7 +259,6 @@ struct Engine : std::enable_shared_from_this<Engine>,
     std::vector<std::shared_ptr<Request>> target_requests;
     std::vector<bool> newly_created;
     std::vector<std::vector<int32_t>> drafts;
-    std::vector<std::unique_ptr<OrtValue>> indexshare_views;
     std::unique_ptr<CacheStepReservation> reservation;
   };
 
@@ -326,6 +327,35 @@ struct Engine : std::enable_shared_from_this<Engine>,
     std::vector<std::vector<DeviceSpan<uint8_t>>> stage_state_outputs;
     std::vector<std::vector<DeviceSpan<uint8_t>>> stage_state_updates;
     std::vector<DeviceSpan<int32_t>> stage_capture_counts;
+    struct ViewKey {
+      void* data{};
+      ONNXTensorElementDataType type{};
+      std::vector<int64_t> shape;
+    };
+    struct ViewLookup {
+      void* data{};
+      ONNXTensorElementDataType type{};
+      std::span<const int64_t> shape;
+    };
+    struct ViewLess {
+      using is_transparent = void;
+      template <typename Left, typename Right>
+      bool operator()(const Left& left, const Right& right) const {
+        if (left.data != right.data) return std::less<void*>{}(left.data, right.data);
+        if (left.type != right.type) return left.type < right.type;
+        return std::lexicographical_compare(left.shape.begin(), left.shape.end(),
+                                            right.shape.begin(), right.shape.end());
+      }
+    };
+    std::map<ViewKey, std::unique_ptr<OrtValue>, ViewLess> views;
+    std::vector<std::vector<FixedStateSlotHandle>> stage_slots;
+    std::vector<std::vector<FixedStateBinding>> stage_bindings;
+    struct ExtraBindingLayout {
+      std::vector<const void*> tensor_addresses;
+    };
+    // The tuple names views of this owner's fixed buffers. A layout object is never replaced,
+    // so its address is an exact, owner-lifetime graph identity rather than a pointer hash.
+    std::map<std::array<size_t, 6>, std::unique_ptr<ExtraBindingLayout>> extra_layouts;
   } mtp_indexshare_buffers_;
   std::unique_ptr<ModelExecutor> mtp_model_executor_;
   std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;

@@ -12,9 +12,12 @@ HiddenStatesInputs::HiddenStatesInputs(State& state)
   const std::string& name = model_.config_->model.decoder.inputs.hidden_states;
   type_ = model_.session_info_.GetInputDataType(name);
   const auto input_shape = model_.session_info_.GetInputShape(name);
-  if (input_shape.empty() || input_shape.back() <= 0)
-    throw std::runtime_error("hidden_states input must have a static width");
-  shape_ = {state_.params_->BatchBeamSize(), 0, input_shape.back()};
+  const int64_t width = !input_shape.empty() && input_shape.back() > 0
+                            ? input_shape.back()
+                            : model_.config_->model.decoder.hidden_size;
+  if (width <= 0)
+    throw std::runtime_error("hidden_states input requires a positive graph or configured hidden_size");
+  shape_ = {state_.params_->BatchBeamSize(), 0, width};
 }
 
 void HiddenStatesInputs::Add() {
@@ -96,9 +99,12 @@ HiddenStatesOutputs::HiddenStatesOutputs(State& state)
   const std::string& name = model_.config_->model.decoder.outputs.hidden_states;
   type_ = model_.session_info_.GetOutputDataType(name);
   const auto output_shape = model_.session_info_.GetOutputShape(name);
-  if (output_shape.empty() || output_shape.back() <= 0)
-    throw std::runtime_error("hidden_states output must have a static width");
-  shape_ = {state_.params_->BatchBeamSize(), 0, output_shape.back()};
+  const int64_t width = !output_shape.empty() && output_shape.back() > 0
+                            ? output_shape.back()
+                            : model_.config_->model.decoder.hidden_size;
+  if (width <= 0)
+    throw std::runtime_error("hidden_states output requires a positive graph or configured hidden_size");
+  shape_ = {state_.params_->BatchBeamSize(), 0, width};
 }
 
 void HiddenStatesOutputs::Add() {

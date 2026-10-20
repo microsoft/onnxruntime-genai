@@ -503,6 +503,105 @@ TEST(FixedStatePoolComponentsTest, ReplaysIndexerUpdateAcrossBlockBoundaryFromTh
   EXPECT_EQ(lengths[1], 2);
 }
 
+TEST(FixedStatePoolComponentsTest, RejectsInvalidIndexerReplayLengthsBeforePublication) {
+  const std::array<std::array<int32_t, 2>, 6> invalid_lengths{
+      {{-1, 0}, {0, -1}, {9, 0}, {0, 4}, {8, 0}, {7, 3}}};
+  for (const auto& lengths : invalid_lengths) {
+    SCOPED_TRACE(::testing::Message() << "keys " << lengths[0] << " buffer " << lengths[1]);
+    auto model = LoadSyntheticFixedComponentsModel();
+    FixedStatePool pool{model, 1};
+    {
+      auto initial = pool.Reserve(One(kRequestA, 3));
+      std::copy(lengths.begin(), lengths.end(),
+                initial.Bindings()[4].output->GetTensorMutableData<int32_t>());
+      initial.Commit();
+    }
+    auto reservation = pool.Reserve(One(kRequestA, 11, 7));
+    reservation.CommitPrefix(0, 8, 7);
+    EXPECT_THROW(reservation.Commit(), std::runtime_error);
+    EXPECT_EQ(reservation.State(), FixedStateReservationState::Failed);
+    EXPECT_EQ(reservation.Bindings()[4].input->GetTensorData<int32_t>()[0], lengths[0]);
+    EXPECT_EQ(reservation.Bindings()[4].input->GetTensorData<int32_t>()[1], lengths[1]);
+  }
+}
+
+TEST(FixedStatePoolComponentsTest, IndexerReplayCanFillKeyCapacityExactly) {
+  auto model = LoadSyntheticFixedComponentsModel();
+  FixedStatePool pool{model, 1};
+  {
+    auto initial = pool.Reserve(One(kRequestA, 3));
+    auto* lengths = initial.Bindings()[4].output->GetTensorMutableData<int32_t>();
+    lengths[0] = 7;
+    lengths[1] = 3;
+    initial.Commit();
+  }
+  {
+    auto reservation = pool.Reserve(One(kRequestA, 11, 7));
+    std::fill_n(reservation.Bindings()[0].state_update_value->GetTensorMutableData<int64_t>(), 14, 8);
+    FillHalfTensor(*reservation.Bindings()[1].state_update_value, 0.0f);
+    auto* updates = reservation.Bindings()[2].state_update_value->GetTensorMutableData<float>();
+    std::fill_n(updates, 14, 42.0f);
+    reservation.CommitPrefix(0, 8, 1);
+    EXPECT_NO_THROW(reservation.Commit());
+  }
+  auto resident = pool.Reserve(One(kRequestA, 4));
+  const auto* lengths = resident.Bindings()[4].input->GetTensorData<int32_t>();
+  EXPECT_EQ(lengths[0], 8);
+  EXPECT_EQ(lengths[1], 0);
+  const auto* keys = resident.Bindings()[2].input->GetTensorData<float>();
+  EXPECT_EQ(keys[14], 42.0f);
+  EXPECT_EQ(keys[15], 42.0f);
+}
+
+TEST(FixedStateReplayTest, RejectsInvalidIndexerDescriptorWithoutWriting) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  std::array<float, 16> source{}, destination;
+  std::array<float, 6> buffer{}, destination_buffer;
+  std::array<float, 14> updates{};
+  const std::array<std::array<int32_t, 2>, 6> invalid_lengths{
+      {{-1, 0}, {0, -1}, {9, 0}, {0, 4}, {8, 0}, {7, 3}}};
+  for (const auto& lengths : invalid_lengths) {
+    destination.fill(123.0f);
+    destination_buffer.fill(456.0f);
+    std::array<int32_t, 2> destination_lengths{99, 99};
+    StateUpdateReplayDesc descriptor{};
+    descriptor.kind = StateUpdateReplayKind::Indexer;
+    descriptor.source_state = source.data();
+    descriptor.destination_state = destination.data();
+    descriptor.source_aux_state = buffer.data();
+    descriptor.destination_aux_state = destination_buffer.data();
+    descriptor.source_lengths = lengths.data();
+    descriptor.destination_lengths = destination_lengths.data();
+    descriptor.value = updates.data();
+    descriptor.state_width = 2;
+    descriptor.state_capacity = 8;
+    descriptor.aux_capacity = 3;
+    descriptor.compress_ratio = 4;
+    descriptor.kept_count = 7;
+    descriptor.element_size = sizeof(float);
+    EXPECT_THROW(cpu->ReplayStateUpdates(&descriptor, 1), std::runtime_error);
+    EXPECT_TRUE(std::all_of(destination.begin(), destination.end(),
+                            [](float value) { return value == 123.0f; }));
+    EXPECT_TRUE(std::all_of(destination_buffer.begin(), destination_buffer.end(),
+                            [](float value) { return value == 456.0f; }));
+    EXPECT_EQ(destination_lengths, (std::array<int32_t, 2>{99, 99}));
+  }
+}
+
+TEST(FixedStateReplayTest, ValidatesPortableElementWidths) {
+  using Kind = Config::Model::Decoder::StateUpdateKind;
+  for (size_t width : {size_t{1}, size_t{2}, size_t{4}, size_t{8}, size_t{16}}) {
+    for (auto kind : {Kind::CausalConv, Kind::Indexer, Kind::Ple}) {
+      const bool supported = width == 2 || width == 4 || (kind == Kind::Ple && width == 8);
+      if (supported) {
+        EXPECT_NO_THROW(ValidateFixedStateUpdateElementSize(kind, width));
+      } else {
+        EXPECT_THROW(ValidateFixedStateUpdateElementSize(kind, width), std::runtime_error);
+      }
+    }
+  }
+}
+
 TEST_F(FixedStatePoolTest, SlotReuseGathersZeroAfterRelease) {
   auto pool = MakePool(1);
   const auto handle_a = MakeResident(*pool, kRequestA, 5.0f);
@@ -2300,6 +2399,86 @@ TEST_F(FixedStatePoolTest, DirectBindingStorageOutlivesPool) {
 }
 
 #if USE_CUDA
+template <typename T>
+void ExpectIndexerReplayMatchesCpu(DeviceInterface& device) {
+  constexpr size_t width = 3;
+  constexpr size_t key_capacity = 8;
+  constexpr size_t buffer_capacity = 3;
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  for (int32_t old_buffer_length = 0; old_buffer_length < 4; ++old_buffer_length) {
+    for (uint32_t kept = 1; kept <= 7; ++kept) {
+      for (bool in_place : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "bytes " << sizeof(T) << " buffer "
+                                          << old_buffer_length << " kept " << kept
+                                          << " in_place " << in_place);
+        std::vector<T> source(key_capacity * width), buffer(buffer_capacity * width), values(7 * width);
+        for (size_t i = 0; i < source.size(); ++i) source[i] = static_cast<T>(100 + i);
+        for (size_t i = 0; i < buffer.size(); ++i) buffer[i] = static_cast<T>(200 + i);
+        for (size_t i = 0; i < values.size(); ++i) values[i] = static_cast<T>(300 + i);
+        std::array<int32_t, 2> lengths{2, old_buffer_length}, expected_lengths{};
+        auto expected = source;
+        auto expected_buffer = buffer;
+        StateUpdateReplayDesc descriptor{};
+        descriptor.kind = StateUpdateReplayKind::Indexer;
+        descriptor.source_state = in_place ? expected.data() : source.data();
+        descriptor.destination_state = expected.data();
+        descriptor.source_aux_state = in_place ? expected_buffer.data() : buffer.data();
+        descriptor.destination_aux_state = expected_buffer.data();
+        descriptor.source_lengths = lengths.data();
+        descriptor.destination_lengths = expected_lengths.data();
+        descriptor.value = values.data();
+        descriptor.state_width = width;
+        descriptor.state_capacity = key_capacity;
+        descriptor.aux_capacity = buffer_capacity;
+        descriptor.compress_ratio = 4;
+        descriptor.capacity = 7;
+        descriptor.kept_count = kept;
+        descriptor.element_size = sizeof(T);
+        cpu->ReplayStateUpdates(&descriptor, 1);
+
+        auto gpu_source = device.Allocate<T>(source.size());
+        auto gpu_buffer = device.Allocate<T>(buffer.size());
+        auto gpu_values = device.Allocate<T>(values.size());
+        auto gpu_destination = in_place ? gpu_source : device.Allocate<T>(source.size());
+        auto gpu_destination_buffer = in_place ? gpu_buffer : device.Allocate<T>(buffer.size());
+        auto gpu_lengths = device.Allocate<int32_t>(2);
+        auto gpu_destination_lengths = device.Allocate<int32_t>(2);
+        gpu_source.CopyFromCpu(source);
+        gpu_buffer.CopyFromCpu(buffer);
+        gpu_values.CopyFromCpu(values);
+        gpu_lengths.CopyFromCpu(lengths);
+        descriptor.source_state = gpu_source.Span().data();
+        descriptor.destination_state = gpu_destination.Span().data();
+        descriptor.source_aux_state = gpu_buffer.Span().data();
+        descriptor.destination_aux_state = gpu_destination_buffer.Span().data();
+        descriptor.source_lengths = gpu_lengths.Span().data();
+        descriptor.destination_lengths = gpu_destination_lengths.Span().data();
+        descriptor.value = gpu_values.Span().data();
+        device.ReplayStateUpdates(&descriptor, 1);
+        device.Synchronize();
+        const auto actual_lengths = gpu_destination_lengths.CopyDeviceToCpu();
+        ASSERT_EQ(actual_lengths[0], expected_lengths[0]);
+        ASSERT_EQ(actual_lengths[1], expected_lengths[1]);
+        const auto actual = gpu_destination.CopyDeviceToCpu();
+        EXPECT_TRUE(std::equal(actual.begin(), actual.end(), expected.begin()));
+        const auto actual_buffer = gpu_destination_buffer.CopyDeviceToCpu();
+        // Entries beyond buffer_length are scratch, not part of the published state.
+        EXPECT_TRUE(std::equal(actual_buffer.begin(), actual_buffer.begin() + expected_lengths[1] * width,
+                               expected_buffer.begin()));
+      }
+    }
+  }
+}
+
+TEST(CudaFixedStatePoolTest, IndexerReplayMatchesCpuAcrossEveryCompressionBoundary) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  ExpectIndexerReplayMatchesCpu<uint16_t>(*model->p_device_kvcache_);
+  ExpectIndexerReplayMatchesCpu<uint32_t>(*model->p_device_kvcache_);
+}
+
 TEST(CudaFixedStatePoolTest, ReplaysHalfSnapshotAtAcceptedPrefix) {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
   ClearProviders(*config);
@@ -2449,9 +2628,8 @@ TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
           float s = reference[(h * g.value_width + v) * g.key_width + k];
           for (size_t t = 0; t < g.kept; ++t) {
             const volatile float scaled_state = s * decay[t * g.heads + h];
-            const volatile float update = key[(t * g.key_heads + kh) * g.key_width + k] *
-                                          delta[(t * g.heads + h) * g.value_width + v];
-            s = scaled_state + update;
+            s = std::fma(key[(t * g.key_heads + kh) * g.key_width + k],
+                         delta[(t * g.heads + h) * g.value_width + v], scaled_state);
           }
           reference[(h * g.value_width + v) * g.key_width + k] = s;
         }
@@ -2492,6 +2670,109 @@ TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
     ASSERT_EQ(actual.size(), expected[i].size());
     for (size_t j = 0; j < actual.size(); ++j) {
       ASSERT_EQ(actual[j], expected[i][j]) << "descriptor " << i << " element " << j;
+    }
+  }
+}
+
+TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesActualOrtAcceptedPrefix) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto& device = *model->p_device_kvcache_;
+  struct Geometry {
+    const char* filename;
+    size_t heads, key_heads, value_width, key_width;
+  };
+  const std::array<Geometry, 2> geometries{{
+      {"gdn-replay-fast.onnx", 4, 2, 40, 128},
+      {"gdn-replay-generic.onnx", 3, 3, 5, 6},
+  }};
+  uint32_t seed = 17;
+  const auto next = [&seed] {
+    seed = seed * 1664525u + 1013904223u;
+    return static_cast<float>(seed >> 8) / static_cast<float>(1u << 24) - 0.5f;
+  };
+  for (const auto& g : geometries) {
+    SCOPED_TRACE(g.filename);
+    constexpr size_t capacity = 7;
+    const size_t state_count = g.heads * g.value_width * g.key_width;
+    std::vector<float> initial(state_count), query(capacity * g.key_heads * g.key_width),
+        key(query.size()), value(capacity * g.heads * g.value_width),
+        decay(capacity * g.heads), beta(decay.size());
+    for (auto* values : {&initial, &query, &key, &value, &beta}) {
+      for (auto& element : *values) element = next();
+    }
+    for (auto& element : decay) element = -std::abs(next());
+    auto session = model->CreateSession(GetOrtEnv(), g.filename, model->session_options_.get());
+    const auto run = [&](size_t tokens) {
+      const auto floats = [&](std::span<const float> values, std::initializer_list<int64_t> shape) {
+        auto tensor = OrtValue::CreateTensor<float>(
+            model->allocator_cpu_, std::span<const int64_t>{shape.begin(), shape.size()});
+        const size_t count = tensor->GetTensorTypeAndShapeInfo()->GetElementCount();
+        std::copy_n(values.data(), count, tensor->GetTensorMutableData<float>());
+        return tensor;
+      };
+      std::vector<std::unique_ptr<OrtValue>> inputs;
+      const int64_t n = static_cast<int64_t>(tokens), h = static_cast<int64_t>(g.heads),
+                    kh = static_cast<int64_t>(g.key_heads), k = static_cast<int64_t>(g.key_width),
+                    v = static_cast<int64_t>(g.value_width);
+      inputs.push_back(floats(query, {n, kh, k}));
+      inputs.push_back(floats(key, {n, kh, k}));
+      inputs.push_back(floats(value, {n, h, v}));
+      inputs.push_back(floats(decay, {n, h}));
+      inputs.push_back(floats(beta, {n, h}));
+      inputs.push_back(floats(initial, {1, h, v, k}));
+      inputs.push_back(OrtValue::CreateTensor<int32_t>(model->allocator_cpu_, std::array<int64_t, 1>{1}));
+      inputs.back()->GetTensorMutableData<int32_t>()[0] = static_cast<int32_t>(tokens);
+      const std::array<const char*, 7> names{
+          "query", "key", "value", "decay", "beta", "initial_state", "capture_count"};
+      std::array<const OrtValue*, 7> pointers;
+      for (size_t i = 0; i < inputs.size(); ++i) pointers[i] = inputs[i].get();
+      const std::array<const char*, 2> output_names{"final_state", "state_update"};
+      return session->Run(nullptr, names.data(), pointers.data(), pointers.size(),
+                          output_names.data(), output_names.size());
+    };
+    auto full = run(capacity);
+    const size_t capsule_count = capacity * (g.heads + g.key_heads * g.key_width + g.heads * g.value_width);
+    const auto* capsule = full[1]->GetTensorData<float>();
+    auto source = device.Allocate<float>(state_count);
+    auto destination = device.Allocate<float>(state_count);
+    auto gpu_capsule = device.Allocate<float>(capsule_count);
+    source.CopyFromCpu(initial);
+    gpu_capsule.CopyFromCpu(std::span<const float>{capsule, capsule_count});
+    for (uint32_t kept = 1; kept < capacity; ++kept) {
+      SCOPED_TRACE(kept);
+      auto prefix = run(kept);
+      const auto* expected = prefix[0]->GetTensorData<float>();
+      StateUpdateReplayDesc descriptor{};
+      descriptor.kind = StateUpdateReplayKind::GatedDeltaNet;
+      descriptor.source_state = source.Span().data();
+      descriptor.destination_state = destination.Span().data();
+      descriptor.decay = gpu_capsule.Span().data();
+      descriptor.key = descriptor.decay + capacity * g.heads;
+      descriptor.delta = descriptor.key + capacity * g.key_heads * g.key_width;
+      descriptor.channel_count = g.heads;
+      descriptor.state_width = g.value_width;
+      descriptor.key_width = g.key_width;
+      descriptor.key_head_count = g.key_heads;
+      descriptor.capacity = capacity;
+      descriptor.kept_count = kept;
+      descriptor.element_size = sizeof(float);
+      device.ReplayStateUpdates(&descriptor, 1);
+      device.Synchronize();
+      const auto actual = destination.CopyDeviceToCpu();
+      std::vector<float> cpu_state(state_count);
+      descriptor.source_state = initial.data();
+      descriptor.destination_state = cpu_state.data();
+      descriptor.decay = capsule;
+      descriptor.key = capsule + capacity * g.heads;
+      descriptor.delta = descriptor.key + capacity * g.key_heads * g.key_width;
+      GetDeviceInterface(DeviceType::CPU)->ReplayStateUpdates(&descriptor, 1);
+      for (size_t i = 0; i < state_count; ++i) {
+        ASSERT_EQ(actual[i], expected[i]) << "CUDA element " << i;
+        ASSERT_EQ(cpu_state[i], expected[i]) << "CPU element " << i;
+      }
     }
   }
 }

@@ -540,8 +540,6 @@ bool GeneratorParams::GetSearchBool(std::string_view name) const {
     return search.early_stopping;
   } else if (name == "past_present_share_buffer") {
     return search.past_present_share_buffer;
-  } else if (name == "adaptive_chunking") {
-    return search.adaptive_chunking;
   } else {
     throw std::runtime_error(std::string(name) + " is an invalid name for GetSearchBool.");
   }
@@ -1053,6 +1051,7 @@ void Generator::CropToAccepted(size_t new_length, size_t recurrent_position) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (new_length > search_->GetSequenceLength())
     throw std::runtime_error("CropToAccepted: new_length exceeds current sequence length");
+  state_->ValidateCropToAccepted(new_length, recurrent_position);
   search_->RewindTo(new_length);
   state_->CropToAccepted(new_length, recurrent_position);
   if (guidance_logits_processor_) {

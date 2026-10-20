@@ -16,6 +16,7 @@ struct EngramState : State {
   void RewindTo(size_t index) override;
   void SnapshotState(size_t position) override;
   void CommitAcceptedPrefix(size_t token_count);
+  void ValidateAcceptedPrefix(size_t token_count) const;
 
  private:
   struct CacheEntry {

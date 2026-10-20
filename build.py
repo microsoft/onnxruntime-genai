@@ -911,7 +911,7 @@ def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
     util.run(build_command, env=env)
 
     if args.sdk == "python" and not args.skip_wheel:
-        util.run(build_command + ["--target", "PyPackageBuild"], env=env)
+        util.run([*build_command, "--target", "PyPackageBuild"], env=env)
 
 
 def _build_sdk_csharp(args: argparse.Namespace, env: dict[str, str]):
@@ -1004,11 +1004,12 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
 
     if build_dir.exists():
         log.info(f"Removing existing build directory: {build_dir}")
+
         def remove_readonly(function, path, _):
             os.chmod(path, stat.S_IWRITE)
             function(path)
 
-        shutil.rmtree(build_dir, onexc=remove_readonly)
+        shutil.rmtree(build_dir, onerror=remove_readonly)
 
     build_dir.mkdir()
 

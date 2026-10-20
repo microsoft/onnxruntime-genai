@@ -41,6 +41,10 @@ struct ExecutionContext {
   std::span<OrtValue* const> extra_inputs;
   std::span<const char* const> extra_output_names;
   std::span<OrtValue* const> extra_outputs;
+  // Nonzero only for an immutable, owner-lifetime layout of extra bindings (names, types, shapes,
+  // addresses, and any fixed-state/control tensors not already covered by fixed_state_binding_key).
+  // The owner assigns this identity when creating the persistent views; unknown layouts run eager.
+  size_t extra_binding_layout_key{};
   std::unique_ptr<OrtRunOptions> run_options;
   size_t block_table_columns{};
 };

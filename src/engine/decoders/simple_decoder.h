@@ -15,6 +15,9 @@ struct SimpleDecoder : public Decoder {
 
   void Decode(ScheduledRequests& scheduled_requests,
               ExecutionContext& context) override;
+  static std::optional<GraphAnnotationIds::Key> GraphKeyForContext(
+      size_t batch_size, size_t tokens_per_request, const ExecutionContext& context,
+      const OrtSession* default_session = nullptr);
 
  private:
   // Why a step ran eagerly, for the graph_capture log. Steady state is one value forever, so only a
@@ -24,6 +27,7 @@ struct SimpleDecoder : public Decoder {
     kDisabled,
     kNonUniformStep,
     kStepTooWide,
+    kUnknownBindingLayout,
     kUncapturableShape,
   };
 

@@ -149,6 +149,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.inputs.input_ids = mtp.inputs.input_ids;
   decoder.inputs.hidden_states = mtp.inputs.hidden_states;
   decoder.inputs.position_ids = mtp.inputs.position_ids;
+  decoder.inputs.rotary_position_ids = mtp.inputs.rotary_position_ids;
   decoder.inputs.past_key_names = mtp.inputs.past_key_names;
   decoder.inputs.past_value_names = mtp.inputs.past_value_names;
   decoder.inputs.past_indexer_names = mtp.inputs.past_indexer_names;
@@ -537,6 +538,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.embeddings = JSON::Get<std::string_view>(value);
     } else if (name == "engram_embeddings") {
       v_.engram_embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "rotary_position_ids") {
+      v_.rotary_position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {
@@ -1104,7 +1107,13 @@ struct Decoder_Element : JSON::Element {
     } else if (name == "conv_cache_size") {
       v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "ple_token_pad_id") {
-      v_.ple_token_pad_id = static_cast<int64_t>(JSON::Get<double>(value));
+      v_.ple_token_pad_id = SafeDoubleToInt64(JSON::Get<double>(value), name);
+      if (v_.ple_token_pad_id < 0)
+        throw std::runtime_error("ple_token_pad_id must be nonnegative");
+    } else if (name == "indexer_compress_ratio") {
+      v_.indexer_compress_ratio = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.indexer_compress_ratio <= 0)
+        throw std::runtime_error("indexer_compress_ratio must be positive");
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1178,6 +1187,8 @@ struct MtpInputs_Element : JSON::Element {
       v_.input_ids = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "rotary_position_ids") {
+      v_.rotary_position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {
@@ -2683,8 +2694,6 @@ struct Search_Element : JSON::Element {
       } else {
         v_.chunk_size = std::nullopt;
       }
-    } else if (name == "adaptive_chunking") {
-      v_.adaptive_chunking = JSON::Get<bool>(value);
     } else if (name == "do_sample") {
       v_.do_sample = JSON::Get<bool>(value);
     } else if (name == "past_present_share_buffer") {
@@ -3529,11 +3538,21 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
   ValidateRuntimeProfiles(config);
 }
 
+void RefreshEngramProviders(Config& config) {
+  if (config.model.engram.session_options) {
+    auto& options = *config.model.engram.session_options;
+    options.providers.clear();
+    for (const auto& provider : options.provider_options)
+      options.providers.push_back(provider.name);
+  }
+}
+
 void OverlayConfig(Config& config, std::string_view json) {
   Config candidate{config};
   Root_Element root{candidate};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+  RefreshEngramProviders(candidate);
   ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
   std::swap(config, candidate);
@@ -3751,6 +3770,12 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
     for (const auto& provider_option : model.embedding.session_options->provider_options) {
       model.embedding.session_options->providers.push_back(provider_option.name);
     }
+  }
+  RefreshEngramProviders(*this);
+
+  if ((!model.engram.filename.empty() || !model.decoder.inputs.past_ple_token_names.empty()) &&
+      model.decoder.ple_token_pad_id < 0) {
+    throw std::runtime_error("Engram/PLE models require model.decoder.ple_token_pad_id");
   }
 
   // Validate all config-specified filenames/paths after parsing so downstream loaders
