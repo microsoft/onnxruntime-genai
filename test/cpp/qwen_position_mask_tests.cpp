@@ -123,9 +123,11 @@ void CheckShortPromptPositions(const char* model_type) {
       auto check = [&](int width, int base) {
         const auto* positions = state.GetInput("position_ids");
         EXPECT_EQ(positions->GetTensorRawData(), address);
-        EXPECT_EQ(positions->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{3, 1, width}));
+        const bool standard = std::string{model_type} == "gpt2";
+        EXPECT_EQ(positions->GetTensorTypeAndShapeInfo()->GetShape(),
+                  standard ? (std::vector<int64_t>{1, width}) : (std::vector<int64_t>{3, 1, width}));
         const auto* data = positions->GetTensorData<T>();
-        for (int dim = 0; dim < 3; ++dim)
+        for (int dim = 0; dim < (standard ? 1 : 3); ++dim)
           for (int i = 0; i < width; ++i)
             EXPECT_EQ(data[dim * width + i], base + i);
       };
@@ -146,6 +148,60 @@ TEST(QwenPositionMask, ShortPromptInt32) { CheckShortPromptPositions<int32_t>("q
 TEST(QwenPositionMask, ShortPromptInt64) { CheckShortPromptPositions<int64_t>("qwen3_5_moe_text"); }
 TEST(QwenPositionMask, DenseShortPromptInt32) { CheckShortPromptPositions<int32_t>("qwen3_5_text"); }
 TEST(QwenPositionMask, DenseShortPromptInt64) { CheckShortPromptPositions<int64_t>("qwen3_5_text"); }
+
+TEST(StandardPositionMask, ShortPromptInt32) { CheckShortPromptPositions<int32_t>("gpt2"); }
+TEST(StandardPositionMask, ShortPromptInt64) { CheckShortPromptPositions<int64_t>("gpt2"); }
+
+template <typename T>
+void CheckStandardMask(bool capture) {
+  for (int num_beams : {1, 2}) {
+    SCOPED_TRACE(num_beams);
+    auto model = std::make_shared<PositionTestModel>(sizeof(T) == 4 ? "int32" : "int64");
+    model->config_->model.type = "gpt2";
+    auto params = std::make_shared<GeneratorParams>(*model);
+    params->search.batch_size = 2;
+    params->search.num_beams = num_beams;
+    params->search.max_length = 8;
+    params->use_graph_capture = capture;
+    params->max_graph_capture_length = 2;
+    PositionTestState state{*params, *model};
+    auto& cpu = *GetDeviceInterface(DeviceType::CPU);
+    std::vector<int32_t> lengths(2 * num_beams), prompt{5, 6, 0, 7, 8, 9}, next(2 * num_beams, 10);
+    auto inputs = CreateStandardPositionInputs(state, cpu.WrapMemory(std::span{lengths}), "attention_mask");
+    inputs->Add();
+    auto check = [&](int total_length) {
+      const int width = capture ? 8 : total_length;
+      auto* mask = state.GetInput("attention_mask");
+      EXPECT_EQ(mask->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{2 * num_beams, width}));
+      const auto* data = mask->template GetTensorData<T>();
+      for (int row = 0; row < 2 * num_beams; ++row)
+        for (int col = 0; col < width; ++col)
+          EXPECT_EQ(data[row * width + col], col < total_length && !(row < num_beams && col == 2) ? 1 : 0);
+      if (total_length > 3) {
+        const auto* positions = state.GetInput("position_ids")->template GetTensorData<T>();
+        for (int row = 0; row < 2 * num_beams; ++row)
+          EXPECT_EQ(positions[row], total_length - (row < num_beams ? 2 : 1));
+      }
+    };
+    for (int run = 0; run < 2; ++run) {
+      inputs->Update(cpu.WrapMemory(std::span{prompt}), 3, 3);
+      check(3);
+      const void* mask_address = state.GetInput("attention_mask")->GetTensorRawData();
+      inputs->Update(cpu.WrapMemory(std::span{next}), 4, 1);
+      check(4);
+      inputs->Update(cpu.WrapMemory(std::span{next}), 5, 1);
+      check(5);
+      if (capture)
+        EXPECT_EQ(mask_address, state.GetInput("attention_mask")->GetTensorRawData());
+      inputs->RewindTo(0);
+    }
+  }
+}
+
+TEST(StandardPositionMask, StaticInt32) { CheckStandardMask<int32_t>(true); }
+TEST(StandardPositionMask, StaticInt64) { CheckStandardMask<int64_t>(true); }
+TEST(StandardPositionMask, DynamicInt32) { CheckStandardMask<int32_t>(false); }
+TEST(StandardPositionMask, DynamicInt64) { CheckStandardMask<int64_t>(false); }
 
 }  // namespace
 }  // namespace Generators::test
