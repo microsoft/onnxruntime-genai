@@ -276,6 +276,7 @@ jobs:
         if ('${{ parameters.enable_win_x64 }}' -eq 'True')   { $cudaExpected['win-x64']   = 'onnxruntime-genai-cuda.dll' }
         if ('${{ parameters.enable_win_arm64 }}' -eq 'True') { $cudaExpected['win-arm64'] = 'onnxruntime-genai-cuda.dll' }
         if ('${{ parameters.enable_linux_x64 }}' -eq 'True') { $cudaExpected['linux-x64'] = 'libonnxruntime-genai-cuda.so' }
+        if ('${{ parameters.enable_linux_arm64 }}' -eq 'True') { $cudaExpected['linux-arm64'] = 'libonnxruntime-genai-cuda.so' }
         foreach ($rid in $cudaExpected.Keys) {
           $lib = "$outputDir/$rid/$(buildConfig)/$($cudaExpected[$rid])"
           if (-not (Test-Path $lib)) { throw "Expected CUDA native library missing for RID '$rid': $lib" }
@@ -301,6 +302,48 @@ jobs:
       versionSpec: 3.11
       addToPath: true
 
+  # GPU.Linux NuGet only ships x64. The ARM64 GPU Python runtime carries the
+  # corresponding ORT 1.30 native libraries; include them in the CUDA NuGet
+  # ARM64 RID so the published package works without a second native package.
+  - ${{ if eq(parameters.ep, 'cuda') }}:
+    - template: steps/utils/authenticate-pip-lotus.yml
+    - powershell: |
+        $ErrorActionPreference = 'Stop'
+        $wheelDir = '$(Agent.TempDirectory)/ort-gpu-arm64'
+        New-Item -ItemType Directory -Force $wheelDir | Out-Null
+        python.exe -m pip download --no-deps --only-binary=:all: `
+          --platform manylinux_2_34_aarch64 --python-version 3.12 --implementation cp --abi cp312 `
+          --dest $wheelDir onnxruntime-gpu==1.30.0
+        if ($LASTEXITCODE -ne 0) { throw 'Could not download ARM64 ORT GPU 1.30 wheel from Lotus' }
+        $wheels = @(Get-ChildItem $wheelDir -Filter '*manylinux_2_34_aarch64.whl')
+        if ($wheels.Count -ne 1) { throw "Expected one ARM64 ORT GPU wheel; found $($wheels.Count)" }
+        $zip = Join-Path $wheelDir 'ort-gpu.zip'
+        Copy-Item $wheels[0].FullName $zip
+        Expand-Archive $zip -DestinationPath "$wheelDir/unpacked"
+        $source = "$wheelDir/unpacked/onnxruntime/capi"
+        $dest = '$(Build.Repository.LocalPath)/$(buildDir)/linux-arm64/$(buildConfig)'
+        foreach ($lib in @('libonnxruntime.so.1.30.0', 'libonnxruntime_providers_shared.so', 'libonnxruntime_providers_cuda.so')) {
+          if (-not (Test-Path "$source/$lib")) { throw "ARM64 ORT GPU wheel missing $lib" }
+          $stream = [System.IO.File]::OpenRead("$source/$lib")
+          try {
+            $header = New-Object byte[] 20
+            if ($stream.Read($header, 0, 20) -ne 20 -or
+                $header[0] -ne 127 -or $header[1] -ne 69 -or $header[2] -ne 76 -or $header[3] -ne 70 -or
+                [BitConverter]::ToUInt16($header, 18) -ne 183) {
+              throw "ARM64 ORT GPU wheel contains a non-AArch64 library: $lib"
+            }
+          }
+          finally { $stream.Dispose() }
+          Copy-Item "$source/$lib" "$dest/$lib"
+        }
+        Copy-Item "$source/libonnxruntime.so.1.30.0" "$dest/libonnxruntime.so"
+        Copy-Item "$source/libonnxruntime.so.1.30.0" "$dest/libonnxruntime.so.1"
+        foreach ($notice in @('LICENSE', 'ThirdPartyNotices.txt')) {
+          if (-not (Test-Path "$wheelDir/unpacked/onnxruntime/$notice")) { throw "ARM64 ORT GPU wheel missing $notice" }
+          Copy-Item "$wheelDir/unpacked/onnxruntime/$notice" "$dest/ORT-$notice"
+        }
+      displayName: 'Stage ARM64 CUDA ONNX Runtime native libraries'
+
   # --- Generate + pack the native NuGet -------------------------------------
   - powershell: |
       python.exe $(Build.Repository.LocalPath)/tools/nuget/generate_nuspec_for_native_nuget.py `
@@ -312,6 +355,7 @@ jobs:
         --sources_path $(Build.Repository.LocalPath) `
         --native_build_path $(buildDir) `
         --nuspec_output_path $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
+      if ($LASTEXITCODE -ne 0) { throw "Native nuspec generation failed with exit code $LASTEXITCODE" }
       cat $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
     displayName: 'Generate native nuspec'
 
@@ -349,6 +393,19 @@ jobs:
       foreach ($rid in $expectRids) {
         if (-not ($names | Where-Object { $_ -replace '\\','/' -like "$rid/*" })) {
           Write-Error "ASSERT FAIL: nupkg missing $rid"; exit 1
+        }
+      }
+      if ('${{ parameters.ep }}' -eq 'cuda') {
+        foreach ($name in @('libonnxruntime-genai.so', 'libonnxruntime-genai-cuda.so', 'libonnxruntime.so', 'libonnxruntime.so.1', 'libonnxruntime.so.1.30.0', 'libonnxruntime_providers_shared.so', 'libonnxruntime_providers_cuda.so')) {
+          $path = "runtimes/linux-arm64/native/$name"
+          if (-not ($names | Where-Object { ($_ -replace '\\','/') -eq $path })) {
+            throw "CUDA nupkg missing $path"
+          }
+        }
+        foreach ($notice in @('LICENSE', 'ThirdPartyNotices.txt')) {
+          if (-not ($names | Where-Object { ($_ -replace '\\','/') -eq "licenses/onnxruntime/$notice" })) {
+            throw "CUDA nupkg missing ARM64 ORT $notice"
+          }
         }
       }
       Write-Host "ASSERT OK: native nupkg contains expected RIDs: $($expectRids -join ', ')"

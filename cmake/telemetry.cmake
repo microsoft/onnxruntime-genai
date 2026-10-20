@@ -75,6 +75,17 @@ set(MATSDK_BUILD_SWIFT_WRAPPER OFF CACHE BOOL "Disable 1DS Swift wrapper" FORCE)
 set(MATSDK_BUILD_JNI_WRAPPER OFF CACHE BOOL "Disable 1DS JNI wrapper" FORCE)
 set(MATSDK_BUILD_PACKAGE OFF CACHE BOOL "Disable 1DS package generation" FORCE)
 set(MATSDK_BUILD_APPLE_HTTP ${APPLE} CACHE BOOL "Build the 1DS Apple HTTP client" FORCE)
+set(MATSDK_DISABLE_LOGGING ON CACHE BOOL "Compile out internal 1DS SDK logging" FORCE)
+set(MATSDK_DISABLE_EXCEPTIONS OFF CACHE BOOL "Retain 1DS SDK exception support" FORCE)
+set(MATSDK_USE_WININET OFF CACHE BOOL "Use WinHTTP for desktop Windows telemetry" FORCE)
+# Desktop GenAI supplies a hashed, generated device ID; mobile builds use the SDK's platform ID.
+if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "visionOS")
+  set(MATSDK_ENABLE_DEVICE_ID ON CACHE BOOL "Use the 1DS platform device ID on mobile" FORCE)
+else()
+  set(MATSDK_ENABLE_DEVICE_ID OFF CACHE BOOL "Disable native 1DS device ID collection on desktop" FORCE)
+endif()
+set(MATSDK_ANDROID_USE_ROOM OFF CACHE BOOL "Use native SQLite for Android telemetry storage" FORCE)
+set(MATSDK_ENABLE_CAPI_HTTP_CLIENT OFF CACHE BOOL "Disable the alternative Android C API HTTP client" FORCE)
 set(MATSDK_ANDROID_HTTP_CLIENT JAVA CACHE STRING "Use the 1DS Java HTTP bridge on Android" FORCE)
 set(MATSDK_CURL_TLS_BACKEND MBEDTLS CACHE STRING "Use mbedTLS for 1DS curl" FORCE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -108,8 +119,47 @@ FetchContent_Declare(
   URL_HASH SHA1=${DEP_SHA1_cpp_client_telemetry}
   EXCLUDE_FROM_ALL
 )
+# Release archives lack the Git metadata used to derive the SDK's fourth version component.
+if(DEFINED BUILD_VERSION)
+  set(_ortgenai_saved_mat_build_version "${BUILD_VERSION}")
+endif()
+set(BUILD_VERSION "3.10.281.1")
 FetchContent_MakeAvailable(cpp_client_telemetry)
-target_compile_definitions(mat PRIVATE MATSDK_DISABLE_LOGGING)
+# The SDK's lazy version string can otherwise be destroyed before GenAI joins the upload worker.
+# Compile a patched copy, leaving the downloaded source intact. Like the SDK PAL itself, this
+# immutable value uses process-lifetime storage; normal shutdown still releases SDK workers.
+set(_ortgenai_pal_source "${cpp_client_telemetry_SOURCE_DIR}/lib/pal/PAL.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ortgenai_pal_source}")
+file(READ "${_ortgenai_pal_source}" _ortgenai_pal)
+set(_ortgenai_version_original [=[        static const std::string sdkVersion(EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR);
+        return sdkVersion;]=])
+set(_ortgenai_version_fixed [=[        using SdkVersion = std::string;
+        alignas(SdkVersion) static unsigned char storage[sizeof(SdkVersion)];
+        static const SdkVersion* sdkVersion = ::new (storage)
+            SdkVersion(EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR);
+        return *sdkVersion;]=])
+string(FIND "${_ortgenai_pal}" "${_ortgenai_version_original}" _ortgenai_version_position)
+if(_ortgenai_version_position EQUAL -1)
+  message(FATAL_ERROR "Update the 1DS SDK version-lifetime patch for the selected SDK source")
+endif()
+string(REPLACE "${_ortgenai_version_original}" "${_ortgenai_version_fixed}"
+  _ortgenai_pal "${_ortgenai_pal}")
+set(ORTGENAI_TELEMETRY_PAL_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/telemetry-sdk/PAL.cpp")
+file(CONFIGURE OUTPUT "${ORTGENAI_TELEMETRY_PAL_SOURCE}" CONTENT "${_ortgenai_pal}" @ONLY)
+get_target_property(_ortgenai_mat_sources mat SOURCES)
+list(FIND _ortgenai_mat_sources "pal/PAL.cpp" _ortgenai_pal_position)
+if(_ortgenai_pal_position EQUAL -1)
+  message(FATAL_ERROR "Update the 1DS SDK PAL source replacement for the selected SDK target")
+endif()
+list(REMOVE_ITEM _ortgenai_mat_sources "pal/PAL.cpp")
+set_property(TARGET mat PROPERTY SOURCES "${_ortgenai_mat_sources}")
+target_sources(mat PRIVATE "${ORTGENAI_TELEMETRY_PAL_SOURCE}")
+if(DEFINED _ortgenai_saved_mat_build_version)
+  set(BUILD_VERSION "${_ortgenai_saved_mat_build_version}")
+  unset(_ortgenai_saved_mat_build_version)
+else()
+  unset(BUILD_VERSION)
+endif()
 if(ANDROID)
   target_compile_definitions(mat PRIVATE ANDROID_SUPPRESS_LOGCAT)
 endif()
@@ -138,6 +188,12 @@ foreach(_ortgenai_1ds_cache_var
     MATSDK_BUILD_JNI_WRAPPER
     MATSDK_BUILD_PACKAGE
     MATSDK_BUILD_APPLE_HTTP
+    MATSDK_DISABLE_LOGGING
+    MATSDK_DISABLE_EXCEPTIONS
+    MATSDK_USE_WININET
+    MATSDK_ENABLE_DEVICE_ID
+    MATSDK_ANDROID_USE_ROOM
+    MATSDK_ENABLE_CAPI_HTTP_CLIENT
     MATSDK_ANDROID_HTTP_CLIENT
     MATSDK_CURL_PROVIDER
     MATSDK_CURL_TLS_BACKEND

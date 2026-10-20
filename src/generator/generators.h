@@ -109,6 +109,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   int max_graph_capture_length{1};
   bool use_multi_profile{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
+  bool IsGreedySampling() const { return !search.do_sample || search.top_k == 1 || search.temperature == 0; }
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
 
@@ -216,6 +217,11 @@ struct OrtGlobals {
   ~OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
+
+  // True when genai (not a host) registered the AMDGPU umbrella EP library on env_. Scoped to this
+  // OrtGlobals so it is cleared whenever the env is torn down (Shutdown / re-init), keeping ownership
+  // tied to the registration's lifetime. Read/written by the AMDGPU session-options teardown gate.
+  bool amdgpu_owns_ep_registration_ = false;
 
   // Get-or-create the DeviceInterface for a device type. The interface is owned by this
   // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every

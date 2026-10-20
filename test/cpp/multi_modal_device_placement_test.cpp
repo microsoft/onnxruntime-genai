@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "models/model.h"
+#include "models/io/embeddings.h"
 
 namespace {
 
@@ -69,6 +70,42 @@ TEST(MultiModalDevicePlacementTests, StateOnAnotherDeviceKeepsItsOwnInputsDevice
   // p_device_inputs_ was picked for the *model's* device, so a session that runs somewhere else
   // must not allocate its inputs from it.
   EXPECT_EQ(state.p_session_device_inputs_, elsewhere);
+}
+
+// Uncaptured prefills and chunk views must preserve the persistent graph-capture decode buffer.
+TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveCapturedDecodeBufferAcrossPrefills) {
+  Ort::InitApi();
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = Generators::CreateGeneratorParams(*model);
+  params->use_graph_capture = true;
+  PlacementTestState state{*params, *model, nullptr};
+  const auto& name = model->config_->model.decoder.inputs.input_ids;
+
+  for (int64_t hidden_size : {32, 128}) {
+    Generators::Embeddings embeddings(state, Generators::Embeddings::Mode::Input, name, hidden_size);
+    embeddings.Add();
+    embeddings.UpdateSequenceLength(8);
+    embeddings.UpdateSequenceLength(1);
+    void* decode_buffer = embeddings.Get()->GetTensorMutableRawData();
+
+    for (size_t prompt_length : {4, 19, 2}) {
+      embeddings.UpdateSequenceLength(prompt_length);
+      auto competing_buffer = OrtValue::CreateTensor(
+          state.p_session_device_inputs_->GetAllocator(),
+          std::array<int64_t, 3>{1, 1, hidden_size},
+          model->session_info_.GetInputDataType(name));
+      EXPECT_NE(competing_buffer->GetTensorMutableRawData(), decode_buffer);
+      auto* prefill_tensor = embeddings.Get();
+      embeddings.UseChunkView(1, prompt_length - 1);
+      EXPECT_EQ(state.inputs_.back()->GetTensorTypeAndShapeInfo()->GetShape(),
+                (std::vector<int64_t>{1, static_cast<int64_t>(prompt_length - 1), hidden_size}));
+      embeddings.RestoreFullView();
+      EXPECT_EQ(state.inputs_.back(), prefill_tensor);
+      embeddings.UpdateSequenceLength(1);
+      EXPECT_EQ(embeddings.Get()->GetTensorMutableRawData(), decode_buffer);
+      EXPECT_EQ(state.inputs_.back(), embeddings.Get());
+    }
+  }
 }
 
 }  // namespace

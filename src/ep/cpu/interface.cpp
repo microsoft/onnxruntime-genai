@@ -84,25 +84,13 @@ struct CpuInterface : DeviceInterface {
       throw std::runtime_error("Cast - input and output types are the same");
 
     if (input_type == Ort::TypeToTensorType<float> && output_type == Ort::TypeToTensorType<Ort::Float16_t>) {
-      auto* fp32 = static_cast<float*>(input_data);
-      auto* fp16 = static_cast<uint16_t*>(output_data);
-      for (size_t i = 0; i < element_count; i++)
-        fp16[i] = FastFloat32ToFloat16(fp32[i]);
+      ConvertFloat32ToFloat16(static_cast<float*>(input_data), static_cast<uint16_t*>(output_data), element_count);
     } else if (input_type == Ort::TypeToTensorType<float> && output_type == Ort::TypeToTensorType<Ort::BFloat16_t>) {
-      auto* fp32 = static_cast<float*>(input_data);
-      auto* bf16 = static_cast<uint16_t*>(output_data);
-      for (size_t i = 0; i < element_count; i++)
-        bf16[i] = Float32ToBFloat16(fp32[i]);
+      ConvertFloat32ToBFloat16(static_cast<float*>(input_data), static_cast<uint16_t*>(output_data), element_count);
     } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
-      auto* fp16 = static_cast<uint16_t*>(input_data);
-      auto* fp32 = static_cast<float*>(output_data);
-      for (size_t i = 0; i < element_count; i++)
-        fp32[i] = FastFloat16ToFloat32(fp16[i]);
+      ConvertFloat16ToFloat32(static_cast<uint16_t*>(input_data), static_cast<float*>(output_data), element_count);
     } else if (input_type == Ort::TypeToTensorType<Ort::BFloat16_t> && output_type == Ort::TypeToTensorType<float>) {
-      auto* bf16 = static_cast<uint16_t*>(input_data);
-      auto* fp32 = static_cast<float*>(output_data);
-      for (size_t i = 0; i < element_count; i++)
-        fp32[i] = BFloat16ToFloat32(bf16[i]);
+      ConvertBFloat16ToFloat32(static_cast<uint16_t*>(input_data), static_cast<float*>(output_data), element_count);
     } else if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
       auto* int32 = static_cast<int32_t*>(input_data);
       auto* int64 = static_cast<int64_t*>(output_data);

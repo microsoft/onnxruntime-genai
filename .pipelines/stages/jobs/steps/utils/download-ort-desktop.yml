@@ -45,7 +45,12 @@ steps:
 - ${{ if eq(parameters.os, 'linux') }}:
   - bash: |
       set -e
-      if [ '${{ parameters.ep }}' = 'cuda' ]; then
+      if [ '${{ parameters.ep }}' = 'cuda' ] && [ '${{ parameters.arch }}' = 'arm64' ]; then
+        # GPU.Linux NuGet has no ARM64 payload. Build against the matching
+        # ARM64 ORT core; onnxruntime-gpu 1.30 supplies CUDA at runtime.
+        pkg_name='Microsoft.ML.OnnxRuntime'
+        hdr_src='build/native/include'
+      elif [ '${{ parameters.ep }}' = 'cuda' ]; then
         pkg_name='Microsoft.ML.OnnxRuntime.Gpu.Linux'
         hdr_src='buildTransitive/native/include'
       else

@@ -126,4 +126,13 @@ ONNX Runtime is an open source project. See:
 
 See [ONNX Runtime GenAI Documentation](https://onnxruntime.ai/docs/genai)
 
+## Linux ARM64 CUDA
 
+The CUDA NuGet contains the Linux ARM64 GenAI binaries and ONNX Runtime GPU
+1.30.0 native libraries under `runtimes/linux-arm64/native`. A CUDA 13.1 runtime
+and a compatible NVIDIA driver are required on the target machine. Other RIDs
+continue to obtain ONNX Runtime from the NuGet dependency. The `.Foundry`
+package carries the Linux ARM64 CUDA GenAI core, but deliberately excludes
+the CUDA shim and ONNX Runtime libraries, as it does for Linux x64. Its
+Linux ARM64 consumer must provide a compatible ONNX Runtime GPU 1.30.0
+native installation separately.

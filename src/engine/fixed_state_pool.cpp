@@ -1105,7 +1105,9 @@ size_t FixedStatePool::AvailablePrefixCheckpoints() const {
 }
 
 std::shared_ptr<const FixedStatePrefixCheckpoint>
-FixedStatePool::CapturePrefixCheckpoint(const void* request_id) {
+FixedStatePool::CapturePrefixCheckpoint(
+    const void* request_id, const FixedStatePrefixCheckpoint* replacement,
+    const std::function<void()>& reclaim_checkpoint) {
   impl_->EnsureHealthy();
   impl_->FlushDeferredReplay();
   const auto committed = CommittedState(request_id);
@@ -1113,11 +1115,18 @@ FixedStatePool::CapturePrefixCheckpoint(const void* request_id) {
     throw std::runtime_error(
         "Cannot capture fixed state for a request without committed ownership.");
   }
-  const auto checkpoint_slot = std::find_if(
+  auto checkpoint_slot = std::find_if(
       impl_->prefix_checkpoints.begin(), impl_->prefix_checkpoints.end(),
       [](const Impl::PrefixCheckpointSlot& slot) { return !slot.occupied; });
   if (checkpoint_slot == impl_->prefix_checkpoints.end()) {
-    return nullptr;
+    if (!replacement) {
+      return nullptr;
+    }
+    if (!reclaim_checkpoint) {
+      throw std::invalid_argument("Replacing a fixed state checkpoint requires reclamation.");
+    }
+    ValidatePrefixCheckpoint(*replacement);
+    checkpoint_slot = impl_->prefix_checkpoints.begin() + replacement->slot_;
   }
   if (checkpoint_slot->generation == std::numeric_limits<uint64_t>::max()) {
     throw std::overflow_error(
@@ -1143,16 +1152,24 @@ FixedStatePool::CapturePrefixCheckpoint(const void* request_id) {
           static_cast<size_t>(committed->committed_tokens), std::move(lease)}};
 
   const auto& source_slot = impl_->slots[committed->handle.slot];
+  std::vector<std::pair<DeviceSpan<uint8_t>, DeviceSpan<uint8_t>>> copies;
+  copies.reserve(impl_->tensors.size());
+  for (const auto& spec : impl_->tensors) {
+    copies.emplace_back(
+        ByteWrapTensor(*impl_->device, *spec.checkpoint_bank)
+            .subspan(checkpoint_index * spec.row_bytes, spec.row_bytes),
+        ByteWrapTensor(*impl_->device, *spec.banks[source_slot.active_bank])
+            .subspan(committed->handle.slot * spec.row_bytes, spec.row_bytes));
+  }
+  // Checkpoint metadata and tensor wrappers must all exist before a working checkpoint is lost.
+  if (checkpoint_slot->occupied) {
+    reclaim_checkpoint();
+    if (checkpoint_slot->occupied) {
+      throw std::logic_error("Fixed state checkpoint reclamation did not release the selected row.");
+    }
+  }
   try {
-    for (const auto& spec : impl_->tensors) {
-      auto destination = ByteWrapTensor(*impl_->device, *spec.checkpoint_bank)
-                             .subspan(checkpoint_index * spec.row_bytes,
-                                      spec.row_bytes);
-      const auto source = ByteWrapTensor(
-                              *impl_->device,
-                              *spec.banks[source_slot.active_bank])
-                              .subspan(committed->handle.slot * spec.row_bytes,
-                                       spec.row_bytes);
+    for (auto& [destination, source] : copies) {
       destination.CopyFrom(source);
     }
     impl_->device->Synchronize();

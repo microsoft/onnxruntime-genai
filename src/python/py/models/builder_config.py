@@ -909,7 +909,7 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         raise ValueError("runtime_config.engine.dynamic_batching must be an object")
     check_fields(
         dynamic_batching,
-        {"max_batch_size", "max_scheduled_tokens", "num_blocks", "gpu_utilization_factor"},
+        {"max_batch_size", "max_scheduled_tokens", "num_blocks", "gpu_utilization_factor", "dflash2_max_snapshots"},
         "runtime_config.engine.dynamic_batching",
     )
     if "engine" in runtime_config and "engine" not in generated_config:
@@ -928,6 +928,13 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             raise ValueError(f"runtime_config.engine.dynamic_batching.{field_name} must be at most 2147483647")
     if dynamic_batching.get("max_batch_size", 1) > 256:
         raise ValueError("runtime_config.engine.dynamic_batching.max_batch_size must be at most 256")
+    if "dflash2_max_snapshots" in dynamic_batching:
+        value = dynamic_batching["dflash2_max_snapshots"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2_147_483_647:
+            raise ValueError(
+                "runtime_config.engine.dynamic_batching.dflash2_max_snapshots "
+                "must be an integer between 0 and 2147483647"
+            )
     if "gpu_utilization_factor" in dynamic_batching:
         value = dynamic_batching["gpu_utilization_factor"]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
@@ -1067,20 +1074,37 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
             raise ValueError(f"{path}.eligibility must be an object")
         check_fields(
             eligibility,
-            {"minimum_total_device_memory_bytes", "maximum_total_device_memory_bytes"},
+            {
+                "minimum_total_device_memory_bytes",
+                "maximum_total_device_memory_bytes",
+                "minimum_free_device_memory_bytes",
+                "maximum_free_device_memory_bytes",
+                "is_integrated",
+            },
             f"{path}.eligibility",
         )
         minimum = eligibility.get("minimum_total_device_memory_bytes")
         maximum = eligibility.get("maximum_total_device_memory_bytes", 2**53 - 1)
+        minimum_free = eligibility.get("minimum_free_device_memory_bytes", 0)
+        maximum_free = eligibility.get("maximum_free_device_memory_bytes", 2**53 - 1)
         for field_name, value in (
             ("minimum_total_device_memory_bytes", minimum),
             ("maximum_total_device_memory_bytes", maximum),
+            ("minimum_free_device_memory_bytes", minimum_free),
+            ("maximum_free_device_memory_bytes", maximum_free),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 2**53 - 1:
                 raise ValueError(f"{path}.eligibility.{field_name} must be a non-negative integer")
         if maximum < minimum:
             raise ValueError(f"{path}.eligibility maximum must not be below minimum")
-        ranges.append((minimum, maximum, profile_id))
+        if maximum_free < minimum_free:
+            raise ValueError(f"{path}.eligibility maximum free memory must not be below minimum")
+        if minimum_free > maximum:
+            raise ValueError(f"{path}.eligibility minimum free memory exceeds maximum total memory")
+        integrated = eligibility.get("is_integrated")
+        if "is_integrated" in eligibility and not isinstance(integrated, bool):
+            raise ValueError(f"{path}.eligibility.is_integrated must be a boolean")
+        ranges.append((minimum, maximum, minimum_free, maximum_free, integrated, profile_id))
 
         overlay = profile.get("overlay")
         if not isinstance(overlay, dict):
@@ -1107,7 +1131,7 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
             raise ValueError(f"{path}.overlay.engine.dynamic_batching must be an object")
         check_fields(
             dynamic_batching,
-            {"num_blocks", "max_batch_size", "max_scheduled_tokens"},
+            {"num_blocks", "max_batch_size", "max_scheduled_tokens", "dflash2_max_snapshots"},
             f"{path}.overlay.engine.dynamic_batching",
         )
         search = overlay.get("search", {})
@@ -1131,9 +1155,16 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
         if not (decoder or dynamic_batching or search or speculative):
             raise ValueError(f"{path}.overlay must contain at least one overlay field")
 
-    for index, (minimum, maximum, profile_id) in enumerate(ranges):
-        for other_minimum, other_maximum, other_id in ranges[index + 1 :]:
-            if minimum <= other_maximum and other_minimum <= maximum:
+    for index, (minimum, maximum, minimum_free, maximum_free, integrated, profile_id) in enumerate(ranges):
+        for other_minimum, other_maximum, other_minimum_free, other_maximum_free, other_integrated, other_id in ranges[
+            index + 1 :
+        ]:
+            if (
+                max(minimum, other_minimum) <= min(maximum, other_maximum)
+                and max(minimum_free, other_minimum_free) <= min(maximum_free, other_maximum_free)
+                and max(minimum_free, other_minimum_free) <= min(maximum, other_maximum)
+                and (integrated is None or other_integrated is None or integrated == other_integrated)
+            ):
                 raise ValueError(f"runtime profile eligibility ranges overlap: {profile_id!r} and {other_id!r}")
 
 

@@ -79,13 +79,23 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
   if (!child.log_severity_level) child.log_severity_level = parent.log_severity_level;
   if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
   if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
-  if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
+  // custom_ops_library and custom_ops_libraries form one setting: the child inherits both only when it sets neither.
+  // Because custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and
+  // still inherits the parent's custom-op libraries unless custom_ops_library is set.
+  if (!child.custom_ops_library && child.custom_ops_libraries.empty()) {
+    child.custom_ops_library = parent.custom_ops_library;
+    child.custom_ops_libraries = parent.custom_ops_libraries;
+  }
   if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
   InheritNamedStrings(parent.config_entries, child.config_entries);
   InheritProviderOptions(parent, child);
 }
 
 }  // namespace
+
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child) {
+  InheritSessionOptions(parent, child);
+}
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
@@ -336,6 +346,18 @@ GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
   }
 }
 
+// Appends parsed string elements to `v`; an empty array leaves `v` unchanged.
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
@@ -360,6 +382,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     } else if (name == "custom_ops_library") {
       v_.custom_ops_library = JSON::Get<std::string_view>(value);
+    } else if (name == "custom_ops_libraries") {
+      throw std::runtime_error("custom_ops_libraries must be an array of strings");
     } else {
       // Session options that are set with AddConfigEntry
       v_.config_entries.emplace_back(name, JSON::Get<std::string_view>(value));
@@ -370,12 +394,18 @@ struct SessionOptions_Element : JSON::Element {
     if (name == "provider_options") {
       return provider_options_;
     }
+    if (name == "custom_ops_libraries") {
+      // Overlays append to custom_ops_libraries (and [] leaves existing entries unchanged), matching config_entries
+      // and provider_options.
+      return custom_ops_libraries_;
+    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
+  StringArray_Element custom_ops_libraries_{v_.custom_ops_libraries};
 };
 
 struct RunOptions_Element : JSON::Element {
@@ -582,17 +612,6 @@ struct DecoderOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
-};
-
-struct StringArray_Element : JSON::Element {
-  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
-  }
-
- private:
-  std::vector<std::string>& v_;
 };
 
 struct IntArray_Element : JSON::Element {
@@ -805,7 +824,9 @@ struct PipelineModel_Element : JSON::Element {
 
   JSON::Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options) {
+        v_.session_options.emplace();
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -838,19 +859,36 @@ struct PipelineModel_Element : JSON::Element {
   StringStringMap_Element output_names_forwarder_{v_.output_names_forwarder};
 };
 
+namespace {
+
+template <typename PipelineModel>
+PipelineModel& GetOrCreatePipelineModel(std::vector<PipelineModel>& models, std::string_view model_id) {
+  auto model = std::find_if(models.begin(), models.end(),
+                            [model_id](const auto& model) { return model.model_id == model_id; });
+  if (model != models.end()) {
+    return *model;
+  }
+
+  auto& new_model = models.emplace_back();
+  new_model.model_id = model_id;
+  return new_model;
+}
+
+}  // namespace
+
 struct PipelineModelObject_Element : JSON::Element {
   explicit PipelineModelObject_Element(std::vector<Config::Model::Decoder::PipelineModel>& v) : v_{v} {}
 
   Element& OnObject(std::string_view name) override {
-    auto& model = v_.emplace_back();
-    model.model_id = name;
-    pipeline_model_elements_.emplace_back(model);
-    return pipeline_model_elements_.back();
+    pipeline_model_element_.reset();  // Appending below may reallocate v_.
+    auto& model = GetOrCreatePipelineModel(v_, name);
+    pipeline_model_element_ = std::make_unique<PipelineModel_Element>(model);
+    return *pipeline_model_element_;
   }
 
  private:
   std::vector<Config::Model::Decoder::PipelineModel>& v_;
-  std::vector<PipelineModel_Element> pipeline_model_elements_;
+  std::unique_ptr<PipelineModel_Element> pipeline_model_element_;
 };
 
 struct Pipeline_Element : JSON::Element {
@@ -1404,7 +1442,9 @@ struct VisionPipelineModel_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options) {
+        v_.session_options.emplace();
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -1438,15 +1478,15 @@ struct VisionPipelineModelObject_Element : JSON::Element {
   explicit VisionPipelineModelObject_Element(std::vector<Config::Model::Vision::PipelineModel>& v) : v_{v} {}
 
   Element& OnObject(std::string_view name) override {
-    auto& model = v_.emplace_back();
-    model.model_id = name;
-    elements_.emplace_back(model);
-    return elements_.back();
+    element_.reset();  // Appending below may reallocate v_.
+    auto& model = GetOrCreatePipelineModel(v_, name);
+    element_ = std::make_unique<VisionPipelineModel_Element>(model);
+    return *element_;
   }
 
  private:
   std::vector<Config::Model::Vision::PipelineModel>& v_;
-  std::vector<VisionPipelineModel_Element> elements_;
+  std::unique_ptr<VisionPipelineModel_Element> element_;
 };
 
 struct VisionPipeline_Element : JSON::Element {
@@ -2542,6 +2582,11 @@ struct DynamicBatching_Element : JSON::Element {
     } else if (name == "prefix_caching") {
       v_->prefix_caching = JSON::Get<bool>(value);
       v_->prefix_caching_explicitly_set = true;
+    } else if (name == "dflash2_max_snapshots") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value < 0)
+        throw std::out_of_range("dflash2_max_snapshots must be >= 0");
+      v_->dflash2_max_snapshots = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2612,6 +2657,12 @@ struct RuntimeProfileEligibility_Element : JSON::Element {
       v_.minimum_total_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
     } else if (name == "maximum_total_device_memory_bytes") {
       v_.maximum_total_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "minimum_free_device_memory_bytes") {
+      v_.minimum_free_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "maximum_free_device_memory_bytes") {
+      v_.maximum_free_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "is_integrated") {
+      v_.is_integrated = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2626,8 +2677,9 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     const auto parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
-    if (parsed <= 0) {
-      throw std::out_of_range(std::string{name} + " must be > 0");
+    if (parsed < 0 || (parsed == 0 && name != "dflash2_max_snapshots")) {
+      throw std::out_of_range(std::string{name} +
+                              (name == "dflash2_max_snapshots" ? " must be >= 0" : " must be > 0"));
     }
     if (name == "num_blocks") {
       v_.num_blocks = static_cast<size_t>(parsed);
@@ -2635,6 +2687,8 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
       v_.max_batch_size = static_cast<size_t>(parsed);
     } else if (name == "max_scheduled_tokens") {
       v_.max_scheduled_tokens = static_cast<size_t>(parsed);
+    } else if (name == "dflash2_max_snapshots") {
+      v_.dflash2_max_snapshots = static_cast<size_t>(parsed);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2826,6 +2880,45 @@ void ValidateConfigPath(const std::string& path, std::string_view context = {}) 
 
 }  // namespace
 
+template <typename T>
+bool ExactConditionsIntersect(const std::optional<T>& first, const std::optional<T>& second) {
+  return !first || !second || *first == *second;
+}
+
+bool EligibilitiesIntersect(const Config::RuntimeProfile::Eligibility& a,
+                            const Config::RuntimeProfile::Eligibility& b) {
+  const auto minimum_total = std::max(*a.minimum_total_device_memory_bytes,
+                                      *b.minimum_total_device_memory_bytes);
+  const auto maximum_total = std::min(a.maximum_total_device_memory_bytes.value_or(
+                                          std::numeric_limits<uint64_t>::max()),
+                                      b.maximum_total_device_memory_bytes.value_or(
+                                          std::numeric_limits<uint64_t>::max()));
+  const auto minimum_free = std::max(a.minimum_free_device_memory_bytes.value_or(0),
+                                     b.minimum_free_device_memory_bytes.value_or(0));
+  const auto maximum_free = std::min(a.maximum_free_device_memory_bytes.value_or(
+                                         std::numeric_limits<uint64_t>::max()),
+                                     b.maximum_free_device_memory_bytes.value_or(
+                                         std::numeric_limits<uint64_t>::max()));
+  return minimum_total <= maximum_total && minimum_free <= maximum_free &&
+         minimum_free <= maximum_total &&
+         ExactConditionsIntersect(a.is_integrated, b.is_integrated);
+}
+
+bool MatchesEligibility(const Config::RuntimeProfile::Eligibility& eligibility,
+                        const RuntimeProfileDeviceFacts& device) {
+  return device.total_device_memory_bytes >= *eligibility.minimum_total_device_memory_bytes &&
+         (!eligibility.maximum_total_device_memory_bytes ||
+          device.total_device_memory_bytes <= *eligibility.maximum_total_device_memory_bytes) &&
+         (!eligibility.minimum_free_device_memory_bytes ||
+          (device.free_device_memory_bytes &&
+           *device.free_device_memory_bytes >= *eligibility.minimum_free_device_memory_bytes)) &&
+         (!eligibility.maximum_free_device_memory_bytes ||
+          (device.free_device_memory_bytes &&
+           *device.free_device_memory_bytes <= *eligibility.maximum_free_device_memory_bytes)) &&
+         (!eligibility.is_integrated ||
+          (device.is_integrated && *device.is_integrated == *eligibility.is_integrated));
+}
+
 void ValidateRuntimeProfiles(const Config& config) {
   std::unordered_set<std::string> ids;
   for (const auto& profile : config.runtime_profiles) {
@@ -2845,6 +2938,19 @@ void ValidateRuntimeProfiles(const Config& config) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' has maximum_total_device_memory_bytes below its minimum");
     }
+    if (profile.eligibility.maximum_free_device_memory_bytes &&
+        *profile.eligibility.maximum_free_device_memory_bytes <
+            profile.eligibility.minimum_free_device_memory_bytes.value_or(0)) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' has maximum_free_device_memory_bytes below its minimum");
+    }
+    if (profile.eligibility.minimum_free_device_memory_bytes &&
+        profile.eligibility.maximum_total_device_memory_bytes &&
+        *profile.eligibility.minimum_free_device_memory_bytes >
+            *profile.eligibility.maximum_total_device_memory_bytes) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' requires more free device memory than its maximum total");
+    }
     const auto& batching = profile.overlay.dynamic_batching;
     const auto& search = profile.overlay.search;
     if (profile.overlay.model.decoder_filename && profile.overlay.model.decoder_filename->empty()) {
@@ -2856,7 +2962,7 @@ void ValidateRuntimeProfiles(const Config& config) {
                          "runtime profile '" + profile.id + "' model.decoder.filename");
     }
     if (!profile.overlay.model.decoder_filename && !batching.num_blocks && !batching.max_batch_size &&
-        !batching.max_scheduled_tokens && !search.chunk_size &&
+        !batching.max_scheduled_tokens && !batching.dflash2_max_snapshots && !search.chunk_size &&
         !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
@@ -2865,15 +2971,9 @@ void ValidateRuntimeProfiles(const Config& config) {
 
   for (size_t first = 0; first < config.runtime_profiles.size(); ++first) {
     const auto& a = config.runtime_profiles[first];
-    const uint64_t a_minimum = *a.eligibility.minimum_total_device_memory_bytes;
-    const uint64_t a_maximum = a.eligibility.maximum_total_device_memory_bytes.value_or(
-        std::numeric_limits<uint64_t>::max());
     for (size_t second = first + 1; second < config.runtime_profiles.size(); ++second) {
       const auto& b = config.runtime_profiles[second];
-      const uint64_t b_minimum = *b.eligibility.minimum_total_device_memory_bytes;
-      const uint64_t b_maximum = b.eligibility.maximum_total_device_memory_bytes.value_or(
-          std::numeric_limits<uint64_t>::max());
-      if (a_minimum <= b_maximum && b_minimum <= a_maximum) {
+      if (EligibilitiesIntersect(a.eligibility, b.eligibility)) {
         throw std::runtime_error("runtime profile eligibility ranges overlap: '" +
                                  a.id + "' and '" + b.id + "'");
       }
@@ -2991,7 +3091,7 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   }
 
   // JSON-escape all caller-supplied string fragments before concatenating them into the
-  // JSON document. Without escaping, quote/backslash characters in provider_name,
+  // JSON document. Without escaping, quote/backslash characters in the provider name,
   // option_name, or option_value would let a caller inject arbitrary JSON structure
   // (sibling keys, new provider entries, etc.) into the parsed configuration.
   std::ostringstream json;
@@ -3033,6 +3133,16 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         }
         return true;
       } else if (provider_options->name == "AMDGPU") {
+        // Graph capture defaults to ON for the AMDGPU umbrella EP (both the MIGraphX and DirectX
+        // backends) and can be opted out per model via the provider option "enable_graph_capture": "0"
+        // (like DML). The MIGraphX backend relies on capture being on by default; non-decoder
+        // sub-sessions are already forced off via the disable_graph_capture flag in
+        // AppendExecutionProvider.
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_graph_capture" && value.second == "0") {
+            return false;
+          }
+        }
         return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {
@@ -3221,28 +3331,44 @@ void OverlayConfig(Config& config, std::string_view json) {
   std::swap(config, candidate);
 }
 
-void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
+void LogRuntimeProfileSelection(std::string_view profile_id, const RuntimeProfileDeviceFacts& device) {
+  if (!g_log.enabled) return;
+
+  auto& stream = Log("info");
+  stream << "Runtime profile: " << profile_id
+         << " (total_device_memory_bytes=" << device.total_device_memory_bytes
+         << ", free_device_memory_bytes=";
+  if (device.free_device_memory_bytes) {
+    stream << *device.free_device_memory_bytes;
+  } else {
+    stream << "unknown";
+  }
+  stream << ", is_integrated=" << (device.is_integrated ? (*device.is_integrated ? "true" : "false") : "unknown")
+         << ')' << std::endl;
+}
+
+void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   ValidateRuntimeProfiles(config);
   const Config::RuntimeProfile* selected = nullptr;
   for (const auto& profile : config.runtime_profiles) {
-    const auto minimum = *profile.eligibility.minimum_total_device_memory_bytes;
-    const auto maximum = profile.eligibility.maximum_total_device_memory_bytes;
-    if (total_device_memory_bytes < minimum ||
-        (maximum && total_device_memory_bytes > *maximum)) {
+    if (!MatchesEligibility(profile.eligibility, device)) {
       continue;
     }
     if (selected) {
-      throw std::runtime_error("multiple runtime profiles match total device memory: '" +
+      throw std::runtime_error("multiple runtime profiles match device eligibility: '" +
                                selected->id + "' and '" + profile.id + "'");
     }
     selected = &profile;
   }
   if (!selected) {
+    if (!config.runtime_profiles.empty()) {
+      LogRuntimeProfileSelection("base config", device);
+    }
     return;
   }
   const auto& batching = selected->overlay.dynamic_batching;
   const bool has_batching_overlay = batching.num_blocks || batching.max_batch_size ||
-                                    batching.max_scheduled_tokens;
+                                    batching.max_scheduled_tokens || batching.dflash2_max_snapshots;
   if (has_batching_overlay && !config.engine.dynamic_batching) {
     throw std::runtime_error("runtime profile '" + selected->id +
                              "' requires engine.dynamic_batching in the base config");
@@ -3256,6 +3382,7 @@ void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
     if (batching.num_blocks) effective.num_blocks = batching.num_blocks;
     if (batching.max_batch_size) effective.max_batch_size = *batching.max_batch_size;
     if (batching.max_scheduled_tokens) effective.max_scheduled_tokens = *batching.max_scheduled_tokens;
+    if (batching.dflash2_max_snapshots) effective.dflash2_max_snapshots = *batching.dflash2_max_snapshots;
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;
@@ -3266,6 +3393,11 @@ void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
   if (selected->overlay.speculative.max_draft_tokens) {
     WarnOnClampedDraftWidth(config);
   }
+  LogRuntimeProfileSelection(selected->id, device);
+}
+
+void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{total_device_memory_bytes, std::nullopt});
 }
 
 fs::path Config::ResolvePath(std::string_view value) const {

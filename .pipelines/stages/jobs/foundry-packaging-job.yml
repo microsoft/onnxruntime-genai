@@ -5,8 +5,8 @@
 # Microsoft.ML.OnnxRuntimeGenAI.Foundry. The package carries NO ORT dependency.
 #
 # Consumes the NEW core archive artifacts (core-<os>-<arch>-<ep>-archive) with a
-# fixed RID→EP mapping (win-x64/win-arm64/linux-x64 = cuda; osx-arm64/linux-arm64
-# = cpu). The stage only schedules this job when both EPs are built, so every RID
+# fixed RID→EP mapping (win-x64/win-arm64/linux-x64/linux-arm64 = cuda;
+# osx-arm64 = cpu). The stage only schedules this job when both EPs are built, so every RID
 # archive is available.
 # =============================================================================
 
@@ -55,9 +55,9 @@ jobs:
       artifactName: 'core-linux-x64-cuda-archive'
       targetPath: '$(downloadsDir)/linux-x64'
   - task: DownloadPipelineArtifact@2
-    displayName: 'Download core archive (linux-arm64 / cpu)'
+    displayName: 'Download core archive (linux-arm64 / cuda)'
     inputs:
-      artifactName: 'core-linux-arm64-cpu-archive'
+      artifactName: 'core-linux-arm64-cuda-archive'
       targetPath: '$(downloadsDir)/linux-arm64'
 
   - checkout: self
@@ -120,6 +120,19 @@ jobs:
       cat $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
       Write-Host "##vso[task.setvariable variable=nuspec_path;]$(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec"
     displayName: 'Generate .Foundry nuspec'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $contents = Get-Content '$(nuspec_path)' -Raw
+      if ($contents -notmatch 'runtimes/linux-arm64/native/libonnxruntime-genai.so') {
+        throw '.Foundry nuspec is missing the ARM64 CUDA core'
+      }
+      if ($contents -match 'runtimes/linux-arm64/native/libonnxruntime-genai-cuda.so') {
+        throw '.Foundry must exclude the separately distributed CUDA shim'
+      }
+      $archives = @(Get-ChildItem '$(downloadsDir)/linux-arm64' -Filter '*-linux-arm64-cuda.tar.gz' -Recurse -File)
+      if ($archives.Count -ne 1) { throw "Expected one ARM64 CUDA source archive; found $($archives.Count)" }
+    displayName: 'Assert .Foundry ARM64 CUDA payload'
 
   - task: NuGetCommand@2
     displayName: 'Pack .Foundry NuGet'

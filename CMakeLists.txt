@@ -129,6 +129,11 @@ else()
   target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj)
 endif()
 
+# Keep bundled dependencies (including curl) and C++ internals private so a
+# host cannot interpose their calls with incompatible implementations.
+include(cmake/shared-library-exports.cmake)
+ortgenai_configure_shared_library_exports(onnxruntime-genai)
+
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_HEADER_DIR})
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE ${GENERATORS_ROOT})

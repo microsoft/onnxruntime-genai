@@ -108,9 +108,7 @@ def _write_config(monkeypatch, tmp_path, model):
 
 
 def test_composite_config_resolves_nested_and_tokenizer_special_token_ids(monkeypatch, tmp_path):
-    hf_config = SimpleNamespace(
-        text_config=SimpleNamespace(bos_token_id=None, eos_token_id=248044, pad_token_id=None)
-    )
+    hf_config = SimpleNamespace(text_config=SimpleNamespace(bos_token_id=None, eos_token_id=248044, pad_token_id=None))
     tokenizer = SimpleNamespace(
         bos_token_id=None,
         eos_token="<|im_end|>",
@@ -209,6 +207,27 @@ def test_fpa_intb_session_option_selection(monkeypatch, tmp_path, ep, enabled, p
 
     session_options = config["model"]["decoder"]["session_options"]
     assert ("ep.cuda.fpa_intb_gemm" in session_options) is expected
+
+
+@pytest.mark.parametrize(
+    "ep,prepacked,expected",
+    [
+        ("cuda", 0, False),
+        ("cuda", 1, True),
+        ("cuda", 2, True),
+        ("cpu", 1, False),
+    ],
+)
+def test_prepacked_matmulnbits_disables_bias_fusion(monkeypatch, tmp_path, ep, prepacked, expected):
+    model = _make_config_model(Model)
+    model.ep = ep
+    model.ep_attrs = {ep: {}}
+    model.matmul_attrs["weights_prepacked"] = prepacked
+
+    config = _write_config(monkeypatch, tmp_path, model)
+
+    session_options = config["model"]["decoder"]["session_options"]
+    assert (session_options.get("optimization.disable_specified_optimizers") == "MatMulNBitsFusion") is expected
 
 
 def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
@@ -592,8 +611,8 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 @pytest.mark.parametrize(
     ("use_paged_attention", "linear_attn_op", "state_window", "ep", "message"),
     [
-        (True, "linear_attention", 0, "webgpu", "CUDA execution provider"),
-        (False, "gated_delta_net", 0, "webgpu", "CUDA execution provider"),
+        (True, "linear_attention", 0, "cpu", "CUDA or WebGPU execution provider"),
+        (False, "gated_delta_net", 0, "cpu", "CUDA or WebGPU execution provider"),
         (True, "linear_attention", 1, "cuda", "require state_window=0"),
         (False, "gated_delta_net", 1, "cuda", "require state_window=0"),
     ],
@@ -613,6 +632,12 @@ def test_qwen35_gated_delta_net_option_validation(
             state_window,
             ep,
         )
+
+
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_qwen35_gated_delta_net_supported_providers(ep):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.validate_gated_delta_net_options(True, "linear_attention", 0, ep)
 
 
 def _packed_gated_delta_net_model(
