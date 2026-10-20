@@ -334,7 +334,8 @@ property of the ONNX graph or a per-session, per-Request, or per-Turn setting.
 The pool is not resized during active request processing.
 
 For example, retain up to four snapshots on a larger device while preserving
-the one-snapshot base default:
+the one-snapshot base count ceiling. Both configurations explicitly enable
+prefix caching and share a RAM byte budget, which can further limit the count:
 
 ```json
 {
@@ -342,7 +343,9 @@ the one-snapshot base default:
     "dynamic_batching": {
       "num_blocks": 512,
       "max_batch_size": 8,
-      "dflash2_max_snapshots": 1
+      "prefix_caching": true,
+      "dflash2_max_snapshots": 1,
+      "snapshot_cache": {"ram_bytes": 1073741824}
     }
   },
   "runtime_profiles": [{
