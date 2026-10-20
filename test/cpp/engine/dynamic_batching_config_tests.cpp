@@ -102,9 +102,9 @@ TEST(DynamicBatchingConfigTest, SnapshotTiersDefaultOffAndAcceptIndependentBudge
 TEST(DynamicBatchingConfigTest, RejectsInvalidSnapshotBudgetsAndCount) {
   for (const auto* value : {"-1", "1.5", "true", "\"16\"", "9007199254740992"}) {
     for (const auto* tier : {"vram_bytes", "ram_bytes", "disk_bytes"}) {
-      EXPECT_THROW(LoadDynamicConfig(std::string{R"({"snapshot_cache":{")"} +
-                                     tier + "\":" + value + "}}"),
-                   std::runtime_error);
+      const auto config = std::string{"{\"snapshot_cache\":{\""} +
+                          tier + "\":" + value + "}}";
+      EXPECT_THROW(LoadDynamicConfig(config), std::runtime_error);
     }
   }
   for (const auto* value : {"-1", "1.5", "true", "2147483648"}) {
