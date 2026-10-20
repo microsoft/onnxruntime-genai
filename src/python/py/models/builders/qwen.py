@@ -115,10 +115,19 @@ class VideoChatFlashQwenModel(QwenModel):
 
 
 class Qwen35TextModel(Model):
-    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep):
+    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep, io_dtype):
         uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
         if uses_gated_delta_net and ep not in ("cuda", "webgpu"):
             raise ValueError("GatedDeltaNet exports require the CUDA or WebGPU execution provider")
+        if uses_gated_delta_net and ep == "webgpu":
+            supported_dtypes = (
+                (ir.DataType.FLOAT16,) if use_paged_attention else (ir.DataType.FLOAT16, ir.DataType.FLOAT)
+            )
+            if io_dtype not in supported_dtypes:
+                raise ValueError(
+                    "GatedDeltaNet exports on WebGPU require FP16 for paged attention "
+                    "or FP16/FP32 for non-paged attention"
+                )
         if uses_gated_delta_net and state_window:
             raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
 
@@ -156,6 +165,7 @@ class Qwen35TextModel(Model):
             self.linear_attn_op,
             self.context_length_attrs["state_window"],
             self.ep,
+            self.io_dtype,
         )
 
         if self.use_paged_attention:
@@ -1238,8 +1248,12 @@ class Qwen35MoEModel(MTPModel):
         )
         drafter_quant_config = extra_options.get("_drafter_quant_config")
         drafter_io_dtype = (
-            drafter_quant_config.to_onnx_dtypes()[0] if drafter_quant_config is not None else ir.DataType.BFLOAT16
+            drafter_quant_config.to_onnx_dtypes()[0]
+            if drafter_quant_config is not None
+            else io_dtype if self.decoder.ep == "webgpu" else ir.DataType.BFLOAT16
         )
+        if self.decoder.ep == "webgpu" and drafter_io_dtype != ir.DataType.FLOAT16:
+            raise ValueError("WebGPU DFlash2 requires FP16 body activations and KV caches.")
 
         num_draft_tokens = None
         if "dflash2_num_draft_tokens" in extra_options:
@@ -1307,6 +1321,7 @@ class Qwen35MoEModel(MTPModel):
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
             include_attention_metadata=True,
+            ep=self.decoder.ep,
             compute_dtype=self.dflash2_attrs["compute_dtype"],
             fuse_qkv=self.dflash2_attrs["fuse_qkv"],
         )
@@ -1456,6 +1471,11 @@ class Qwen35MoEModel(MTPModel):
             raise ValueError("dspark_path and dflash2_path are mutually exclusive.")
         if not self.decoder.use_paged_attention:
             raise ValueError("dspark_path requires use_paged_attention=true.")
+        if self.decoder.ep == "webgpu":
+            raise ValueError(
+                "dspark_path is not supported on WebGPU: the DSpark drafter requires "
+                "BF16 activations and KV caches, but WebGPU PagedAttention supports only FP16."
+            )
 
         num_draft_tokens = None
         if "dspark_num_draft_tokens" in extra_options:

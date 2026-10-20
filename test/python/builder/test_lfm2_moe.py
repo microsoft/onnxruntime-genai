@@ -456,7 +456,9 @@ def test_lfm2_qmoe_cpu_executes_partial_blocks(tmp_path, monkeypatch, bits, hidd
     model, graph = _executable_model(2, 1, hidden, inter)
     model.moe_attrs.update(op_type="QMoE", expert_weight_bits=bits)
     model.quant_attrs["qmoe_block_size"] = 32
-    moe = _moe_module(2, hidden, inter)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(7)
+        moe = _moe_module(2, hidden, inter)
     # Constant rows with exactly representable scales isolate the storage layout from quantization error.
     for weight in (moe.experts.gate_up_proj, moe.experts.down_proj):
         rows = torch.arange(weight.shape[0] * weight.shape[1]).reshape(*weight.shape[:2], 1)
