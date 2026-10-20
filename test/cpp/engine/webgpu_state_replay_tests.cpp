@@ -283,7 +283,7 @@ TEST_P(WebGpuStateReplayTest, RejectsInvalidViewsAndPropagatesOrtFailures) {
   EXPECT_NO_THROW(device_->ReplayStateUpdates(&valid, 1));
 }
 
-TEST_P(WebGpuStateReplayTest, ConvolutionStillStagesThroughCpu) {
+TEST_P(WebGpuStateReplayTest, ConvolutionReplaysOnGpuWithoutCpuStaging) {
   Upload(2);
   std::array<float, 12> values{10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 25};
   auto updates = device_->Allocate<uint8_t>(sizeof(values));
@@ -305,15 +305,10 @@ TEST_P(WebGpuStateReplayTest, ConvolutionStillStagesThroughCpu) {
   PoisonCpuShadow(updates);
   device_->ReplayStateUpdates(&descriptor, 1);
   const auto expected = Read(reference.destination_state);
-  // The fallback refreshes inputs and uploads the CPU-computed destination row.
-  EXPECT_EQ(std::memcmp(source_.BackingBuffer()->p_cpu_, source_values_.data(),
-                        source_values_.size() * sizeof(float)),
-            0);
-  EXPECT_EQ(std::memcmp(updates.BackingBuffer()->p_cpu_, values.data(), sizeof(values)), 0);
-  EXPECT_EQ(std::memcmp(destination_.BackingBuffer()->p_cpu_ + descriptor.destination_state.ByteOffset(),
-                        expected.data(), expected.size() * sizeof(float)),
-            0);
-  if (!GetParam()) ExpectPoisonedCpuShadow(capsule_);
+  ExpectPoisonedCpuShadow(source_);
+  ExpectPoisonedCpuShadow(updates);
+  ExpectPoisonedCpuShadow(destination_);
+  ExpectPoisonedCpuShadow(capsule_);
   const auto actual = Read(destination_);
   for (size_t i = 0; i < actual.size(); ++i) {
     EXPECT_EQ(actual[i], i >= kStateElements && i < 2 * kStateElements
@@ -370,6 +365,7 @@ TEST_P(WebGpuStateReplayTest, MixedDescriptorsPreserveDependentExecutionOrder) {
         descriptor.kind = reference.kind = StateUpdateReplayKind::CausalConv;
         descriptor.channel_count = reference.channel_count = kHv * kDv;
         descriptor.state_width = reference.state_width = kDk;
+        descriptor.capacity = reference.capacity = 2;
         descriptor.value = updates;
         reference.value = cpu_updates;
         descriptor.decay = descriptor.key = descriptor.delta = {};
@@ -383,10 +379,18 @@ TEST_P(WebGpuStateReplayTest, MixedDescriptorsPreserveDependentExecutionOrder) {
         descriptor.source_state = descriptors[i - 1].destination_state;
         reference.source_state = references[i - 1].destination_state;
       }
+      PoisonCpuShadow(descriptor.destination_state);
     }
+    PoisonCpuShadow(source_);
+    PoisonCpuShadow(capsule_);
+    PoisonCpuShadow(updates);
     ReplayStateUpdatesOnCpu(references.data(), references.size());
     device_->ReplayStateUpdates(descriptors.data(), descriptors.size());
+    ExpectPoisonedCpuShadow(source_);
+    ExpectPoisonedCpuShadow(capsule_);
+    ExpectPoisonedCpuShadow(updates);
     for (size_t i = 0; i < descriptors.size(); ++i) {
+      ExpectPoisonedCpuShadow(descriptors[i].destination_state);
       const auto actual = Read(descriptors[i].destination_state);
       const auto expected = Read(references[i].destination_state);
       for (size_t j = 0; j < actual.size(); ++j) {
@@ -395,6 +399,115 @@ TEST_P(WebGpuStateReplayTest, MixedDescriptorsPreserveDependentExecutionOrder) {
       }
     }
   }
+}
+
+TEST_P(WebGpuStateReplayTest, ConvolutionEveryPrefixAndExactPayloads) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  for (const uint32_t element_size : {2u, 4u}) {
+    for (const uint64_t width : {1u, 3u, 7u}) {
+      constexpr uint64_t channels = 3;
+      constexpr uint32_t capacity = 5;
+      const auto state_bytes = channels * width * element_size;
+      const auto capture_bytes = channels * capacity * element_size;
+      // Odd FP16 offsets and odd row widths force boundary-word preservation.
+      std::vector<uint8_t> source(state_bytes + 7 * element_size);
+      std::vector<uint8_t> capture(capture_bytes + 9 * element_size);
+      std::vector<uint8_t> destination(state_bytes + 11 * element_size, 0xa7);
+      for (size_t i = 0; i < source.size(); ++i) source[i] = static_cast<uint8_t>(i * 37 + 11);
+      for (size_t i = 0; i < capture.size(); ++i) capture[i] = static_cast<uint8_t>(i * 53 + 19);
+      if (element_size == 2) {
+        const std::array<uint16_t, 8> special{0, 0x8000, 0x7c00, 0xfc00, 0x7e35, 0x7c01, 1, 0x8001};
+        std::memcpy(source.data() + element_size, special.data(), sizeof(special));
+        std::memcpy(capture.data() + 3 * element_size, special.data(), sizeof(special));
+      } else {
+        const std::array<uint32_t, 8> special{0, 0x80000000, 0x7f800000, 0xff800000,
+                                              0x7fc12345, 0x7f800001, 1, 0x80000001};
+        std::memcpy(source.data() + element_size, special.data(), sizeof(special));
+        std::memcpy(capture.data() + 3 * element_size, special.data(), sizeof(special));
+      }
+      const auto upload = [&](std::vector<uint8_t>& bytes) {
+        auto buffer = device_->Allocate<uint8_t>(bytes.size());
+        buffer.BackingBuffer()->CopyFromCpu(bytes.data(), bytes.size());
+        return buffer;
+      };
+      auto source_gpu = upload(source), capture_gpu = upload(capture), destination_gpu = upload(destination);
+      auto source_cpu = DeviceSpan<uint8_t>(cpu->WrapMemoryBase(source.data(), source.size()));
+      auto capture_cpu = DeviceSpan<uint8_t>(cpu->WrapMemoryBase(capture.data(), capture.size()));
+      for (uint32_t kept = 0; kept <= capacity; ++kept) {
+        SCOPED_TRACE(::testing::Message() << "bytes=" << element_size << " width=" << width << " kept=" << kept);
+        StateUpdateReplayDesc descriptor{
+            source_gpu.subspan(element_size, state_bytes),
+            destination_gpu.subspan(5 * element_size, state_bytes),
+            capture_gpu.subspan(3 * element_size, capture_bytes),
+            {},
+            {},
+            {},
+            channels,
+            width,
+            0,
+            0,
+            capacity,
+            kept,
+            element_size,
+            StateUpdateReplayKind::CausalConv};
+        auto expected = destination;
+        auto reference = descriptor;
+        reference.source_state = source_cpu.subspan(element_size, state_bytes);
+        reference.value = capture_cpu.subspan(3 * element_size, capture_bytes);
+        reference.destination_state = DeviceSpan<uint8_t>(cpu->WrapMemoryBase(expected.data(), expected.size()))
+                                          .subspan(5 * element_size, state_bytes);
+        ReplayStateUpdatesOnCpu(&reference, 1);
+        PoisonCpuShadow(source_gpu);
+        PoisonCpuShadow(capture_gpu);
+        PoisonCpuShadow(destination_gpu);
+        device_->ReplayStateUpdates(&descriptor, 1);
+        ExpectPoisonedCpuShadow(source_gpu);
+        ExpectPoisonedCpuShadow(capture_gpu);
+        ExpectPoisonedCpuShadow(destination_gpu);
+        auto actual = destination_gpu.CopyDeviceToCpu();
+        EXPECT_EQ(std::memcmp(actual.data(), expected.data(), expected.size()), 0);
+        actual = source_gpu.CopyDeviceToCpu();
+        EXPECT_EQ(std::memcmp(actual.data(), source.data(), source.size()), 0);
+        actual = capture_gpu.CopyDeviceToCpu();
+        EXPECT_EQ(std::memcmp(actual.data(), capture.data(), capture.size()), 0);
+      }
+    }
+  }
+}
+
+TEST_P(WebGpuStateReplayTest, ConvolutionFailureStopsSequenceWithoutCpuRetry) {
+  Upload(2);
+  std::array<float, 12> values{10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 25};
+  auto updates = device_->Allocate<uint8_t>(sizeof(values));
+  updates.BackingBuffer()->CopyFromCpu(values.data(), sizeof(values));
+  auto descriptor = Descriptor(2);
+  descriptor.kind = StateUpdateReplayKind::CausalConv;
+  descriptor.channel_count = kHv * kDv;
+  descriptor.state_width = kDk;
+  descriptor.capacity = 2;
+  descriptor.value = updates;
+  descriptor.decay = descriptor.key = descriptor.delta = {};
+  auto failed = descriptor;
+  failed.kept_count = 3;
+  const std::array<StateUpdateReplayDesc, 2> descriptors{failed, descriptor};
+  PoisonCpuShadow(source_);
+  PoisonCpuShadow(updates);
+  PoisonCpuShadow(destination_);
+  EXPECT_THROW(device_->ReplayStateUpdates(descriptors.data(), descriptors.size()), Ort::Exception);
+  ExpectPoisonedCpuShadow(source_);
+  ExpectPoisonedCpuShadow(updates);
+  ExpectPoisonedCpuShadow(destination_);
+  for (const auto value : Read(destination_)) EXPECT_EQ(value, kSentinel);
+  failed = descriptor;
+  failed.value = failed.value.subspan(1, failed.value.size() - 1);
+  EXPECT_THROW(device_->ReplayStateUpdates(&failed, 1), std::invalid_argument);
+  failed = descriptor;
+  failed.destination_state = destination_.subspan(destination_.size() - 4, 4);
+  EXPECT_THROW(device_->ReplayStateUpdates(&failed, 1), std::invalid_argument);
+  failed = descriptor;
+  failed.destination_state = source_.subspan(descriptor.source_state.ByteOffset(), descriptor.source_state.size());
+  EXPECT_THROW(device_->ReplayStateUpdates(&failed, 1), Ort::Exception);
+  EXPECT_NO_THROW(device_->ReplayStateUpdates(&descriptor, 1));
 }
 
 TEST_P(WebGpuStateReplayTest, GpuRunFailureStopsMixedSequenceWithoutCpuRetry) {

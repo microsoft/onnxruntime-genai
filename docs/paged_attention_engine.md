@@ -1515,30 +1515,51 @@ bindings. Compact partial-acceptance replay is device-native on CUDA. WebGPU's
 `ReplayStateUpdates`, called by `PrepareCommit`, processes descriptors in their supplied
 order: FP32 GatedDeltaNet descriptors with one shared backing owner for their
 decay/key/delta capsule sections invoke ORT's `com.microsoft::GatedDeltaNetStateReplay`
-(version 1). Convolution descriptors and FP32 recurrent descriptors with separate
-capsule backing owners retain CPU staging, `ReplayStateUpdatesOnCpu`, and upload.
+(version 1). FP16/FP32 convolution descriptors invoke `com.microsoft::ConvStateReplay`
+(version 1), without CPU state/capture staging or destination upload. Only FP32
+recurrent descriptors with separate capsule backing owners retain CPU staging,
+`ReplayStateUpdatesOnCpu`, and upload: the recurrent GPU operator requires a
+single capsule backing owner.
 Each descriptor finishes before the next one reads its inputs. Non-FP32 recurrent
 state and unknown replay kinds are rejected; the CPU recurrent reference also
 requires FP32. Invalid GPU views, helper-session creation errors, and failed ORT runs
 propagate without retrying on CPU.
 
 The replay invocation remains private to the WebGPU device interface.
-The device owns its lazily created helper session, cloned from the fully configured
+The device owns lazily created helper sessions (one recurrent and one per convolution
+dtype), cloned from the fully configured
 allocator-initialization session options, with graph capture disabled. This first
-version supports context 0 only and requires an ORT build containing the operator.
+version supports context 0 only and requires an ORT build containing both operators.
 Full backing allocations are bound as rank-1 tensors; absolute logical byte offsets
-from `DeviceSpan::ByteOffset()` are converted to FP32-element metadata offsets.
+from `DeviceSpan::ByteOffset()` are converted to FP32-element metadata offsets for
+recurrent replay and passed directly in bytes for convolution replay.
 The output is prebound to the same inactive destination allocation as its input.
 The operator's checked completion makes a successful helper return a GPU-completion
 boundary; ORT failures propagate to the caller. The helper serializes its own runs,
 but callers must order target-session work before replay and keep borrowed
 buffer owners alive through the call. There is one helper `Session::Run` and one
-checked-completion boundary per recurrent descriptor, with no batching or GPU
-convolution replay. It does not publish or flip a state bank; `PrepareCommit` failures
+checked-completion boundary per GPU descriptor, without replay batching.
+It does not publish or flip a state bank; `PrepareCommit` failures
 leave active banks unchanged, fail the reservation, and mark the pool unhealthy.
 The source must be the incoming state before capsule capture, and capsule geometry
 and original capture capacity must match the producer; `kept_count` selects only
 the leading transitions, not a different capsule layout.
+
+Convolution metadata is CPU `int64[8]`:
+`source_offset_bytes, destination_offset_bytes, capture_offset_bytes, batch_size,
+channels, history_width, capacity, kept_count`. Each descriptor represents one
+request row (`batch_size=1`), with state layout `[channels, history_width]` and
+capture layout `[capacity, channels]`. `capacity` is the original capture stride,
+not the retained prefix length. Source and capture must be distinct from destination
+backing, even for disjoint subviews. Element-aligned byte offsets include valid
+two-byte-aligned FP16 subviews; full backing byte extents and geometry must fit
+uint32 indexing. Invalid/unsupported descriptors and GPU failures are errors,
+never implicit CPU retries. Convolution helpers explicitly disable CPU EP fallback.
+Integer-only selection preserves payload bits, including NaNs and signed zero.
+`kept_count=0` copies incoming history, while counts at or above history width
+select only the last history-width entries of the retained captured prefix.
+Zero accepted drafts may still retain the anchor (`kept_count=1`).
+Full acceptance continues to commit the target's staged final state without replay.
 
 Each resident request owns a stable slot identified by request identity and an
 allocation generation. A released and reused slot receives a new generation, so
