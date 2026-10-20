@@ -80,7 +80,8 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
 TEST(DynamicBatchingConfigTest, SnapshotTiersDefaultOffAndAcceptIndependentBudgets) {
   const auto defaults = LoadDynamicConfig(R"({"max_batch_size":4})");
   EXPECT_FALSE(defaults.engine.dynamic_batching->snapshot_cache.Enabled());
-  EXPECT_EQ(defaults.engine.dynamic_batching->max_snapshots, 1u);
+  EXPECT_FALSE(defaults.engine.dynamic_batching->max_snapshots);
+  EXPECT_EQ(defaults.engine.dynamic_batching->dflash2_max_snapshots, 1u);
   const auto config = LoadDynamicConfig(R"({
     "prefix_caching": true,
     "max_snapshots": 8,
@@ -91,7 +92,7 @@ TEST(DynamicBatchingConfigTest, SnapshotTiersDefaultOffAndAcceptIndependentBudge
   })");
   const auto& batching = *config.engine.dynamic_batching;
   EXPECT_TRUE(batching.prefix_caching);
-  EXPECT_EQ(batching.max_snapshots, 8u);
+  ASSERT_EQ(batching.max_snapshots, 8u);
   EXPECT_EQ(batching.snapshot_cache.vram_bytes, 4294967296ull);
   EXPECT_EQ(batching.snapshot_cache.ram_bytes, 8589934592ull);
   EXPECT_EQ(batching.snapshot_cache.disk_bytes, 17179869184ull);
@@ -132,7 +133,7 @@ TEST(DynamicBatchingConfigTest, RuntimeProfileReplacesSnapshotPolicyAndCanDisabl
   const auto& batching = *config.engine.dynamic_batching;
   EXPECT_FALSE(batching.prefix_caching);
   EXPECT_TRUE(batching.prefix_caching_explicitly_set);
-  EXPECT_EQ(batching.max_snapshots, 0u);
+  ASSERT_EQ(batching.max_snapshots, 0u);
   EXPECT_EQ(batching.snapshot_cache.vram_bytes, 0u);
   EXPECT_EQ(batching.snapshot_cache.ram_bytes, 0u);
   EXPECT_EQ(batching.snapshot_cache.disk_bytes, 4096u);

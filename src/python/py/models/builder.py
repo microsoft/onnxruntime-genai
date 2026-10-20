@@ -140,6 +140,16 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     return hf_details
 
 
+def validate_paged_cache_config(dynamic_batching, execution_provider):
+    # An explicit capacity and a utilization factor select incompatible cache-sizing policies.
+    if "num_blocks" in dynamic_batching and "gpu_utilization_factor" in dynamic_batching:
+        raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+    if execution_provider == "webgpu":
+        num_blocks = dynamic_batching.get("num_blocks")
+        if isinstance(num_blocks, bool) or not isinstance(num_blocks, int) or num_blocks <= 0:
+            raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
+
+
 def check_extra_options(
     model_name,
     input_path,
@@ -217,6 +227,8 @@ def check_extra_options(
             raise ValueError(message)
         if state_update_capacity and not extra_options.get("use_paged_attention", False):
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
+        if state_update_capacity and execution_provider == "webgpu":
+            raise ValueError("state_update_capacity > 0 is not supported on WebGPU: Engine compact state replay is not implemented.")
         extra_options["state_update_capacity"] = state_update_capacity
 
     if "max_draft_tokens" in extra_options:
@@ -280,7 +292,6 @@ def check_extra_options(
             raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
-
         if "gpu_utilization_factor" in extra_options:
             try:
                 gpu_utilization_factor = float(extra_options["gpu_utilization_factor"])
@@ -290,10 +301,12 @@ def check_extra_options(
                 raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.")
             extra_options["gpu_utilization_factor"] = gpu_utilization_factor
 
-        # `num_blocks` pins the cache instead of deriving it from free memory, so a
-        # utilization factor would be silently ignored.
-        if "num_blocks" in extra_options and "gpu_utilization_factor" in extra_options:
-            raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+        runtime_batching = extra_options.get("_runtime_config", {}).get("engine", {}).get("dynamic_batching", {})
+        cache_config = {
+            key: extra_options[key] for key in ("num_blocks", "gpu_utilization_factor") if key in extra_options
+        }
+        cache_config.update(runtime_batching)
+        validate_paged_cache_config(cache_config, execution_provider)
     else:
         engine_only_options = [
             key for key in ("max_scheduled_tokens", "num_blocks") if key in extra_options
@@ -402,6 +415,13 @@ def check_extra_options(
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
+
+    if (
+        execution_provider == "webgpu"
+        and extra_options.get("use_paged_attention", False)
+        and getattr(config, "attn_logit_softcapping", 0.0) not in (None, 0.0)
+    ):
+        raise ValueError("WebGPU paged attention does not support non-zero attention softcap.")
 
     if "num_hidden_layers" in extra_options:
         num_hidden_layers = int(extra_options["num_hidden_layers"])
@@ -828,6 +848,10 @@ def create_model(
         with open(config_path, encoding="utf-8") as config_file:
             genai_config = json.load(config_file)
         genai_config = apply_runtime_config(genai_config, runtime_config)
+        if extra_options.get("use_paged_attention", False):
+            validate_paged_cache_config(
+                genai_config.get("engine", {}).get("dynamic_batching", {}), execution_provider
+            )
         with open(config_path, "w", encoding="utf-8") as config_file:
             json.dump(genai_config, config_file, indent=4)
 
@@ -1052,7 +1076,8 @@ def get_args():
                     ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and supports fp16
                     or bf16 I/O.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
-                    Must be an integer from 0 through 8 and requires use_paged_attention=true. This experimental
+                    Must be an integer from 0 through 8 and requires use_paged_attention=true. Positive capacities
+                    are not supported on WebGPU because Engine compact state replay is not implemented. This experimental
                     contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
@@ -1073,8 +1098,10 @@ def get_args():
                     prune_lm_head=true, adds a logits_indices input that selects the packed hidden states consumed
                     by generation or draft verification, so the model outputs [num_logits, vocab_size] logits.
                     By default, the model outputs [num_tokens, vocab_size] logits.
-                    Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
-                    combined with exclude_embeds or exclude_lm_head.
+                    Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
+                    attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
+                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
+                    exclude_lm_head.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
                     accepts. Default is 256. Also written to the `engine.dynamic_batching` section of

@@ -296,6 +296,37 @@ target_link_libraries(engine_unit_tests PRIVATE
 # The shared library stages the ORT runtime (and CUDA add-on) next to itself; depend on it so those
 # are present in engine_unit_tests' output directory at run time.
 add_dependencies(engine_unit_tests onnxruntime-genai)
+set(CUSTOM_OPS_TEST_LIB_DIR "${CMAKE_CURRENT_BINARY_DIR}/custom_ops_test_libs")
+foreach(custom_ops_test_tag IN ITEMS first second)
+  set(custom_ops_test_target "custom_ops_test_${custom_ops_test_tag}")
+  add_library(${custom_ops_test_target} SHARED
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/custom_ops_test_lib/custom_ops_test_lib.cpp")
+  target_include_directories(${custom_ops_test_target} PRIVATE ${ORT_HEADER_DIR})
+  target_compile_definitions(${custom_ops_test_target} PRIVATE
+    ORTGENAI_TEST_CUSTOM_OPS_TAG="${custom_ops_test_tag}")
+  set_target_properties(${custom_ops_test_target} PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CUSTOM_OPS_TEST_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY "${CUSTOM_OPS_TEST_LIB_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CUSTOM_OPS_TEST_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CUSTOM_OPS_TEST_LIB_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CUSTOM_OPS_TEST_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CUSTOM_OPS_TEST_LIB_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CUSTOM_OPS_TEST_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CUSTOM_OPS_TEST_LIB_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL "${CUSTOM_OPS_TEST_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CUSTOM_OPS_TEST_LIB_DIR}"
+    FOLDER "Tests"
+  )
+  if (NOT MSVC)
+    target_compile_options(${custom_ops_test_target} PRIVATE "-fvisibility=hidden")
+  endif()
+endforeach()
+target_compile_definitions(engine_unit_tests PRIVATE
+  ORTGENAI_TEST_CUSTOM_OPS_LIB_DIR="${CUSTOM_OPS_TEST_LIB_DIR}"
+  ORTGENAI_TEST_CUSTOM_OPS_FIRST_FILENAME="$<TARGET_FILE_NAME:custom_ops_test_first>"
+  ORTGENAI_TEST_CUSTOM_OPS_SECOND_FILENAME="$<TARGET_FILE_NAME:custom_ops_test_second>"
+)
+add_dependencies(engine_unit_tests custom_ops_test_first custom_ops_test_second)
 set_target_properties(engine_unit_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
     FOLDER "Tests"

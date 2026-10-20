@@ -11,6 +11,7 @@
 #include <string>
 
 #include "../models/model_state_manifest.h"
+#include "../logging.h"
 #include "dflash2_drafter.h"
 
 namespace Generators {
@@ -399,7 +400,10 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
       auxiliary_bytes_per_block == 0) {
     const auto& batching = *model_->config_->engine.dynamic_batching;
     const auto& limits = batching.snapshot_cache;
-    const size_t count = std::min(batching.max_snapshots, prefix_checkpoint_capacity);
+    size_t count = std::min(batching.dflash2_max_snapshots, prefix_checkpoint_capacity);
+    if (batching.max_snapshots) {
+      count = std::min(count, *batching.max_snapshots);
+    }
     if (limits.vram_bytes != 0 && model_->p_device_kvcache_->GetType() != DeviceType::CUDA) {
       throw std::runtime_error("A VRAM prefix snapshot budget requires a CUDA device.");
     }
@@ -422,16 +426,35 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
                                         available / optional_draft_checkpoint_bytes});
     draft_checkpoint_vram_bytes_ = vram_count * optional_draft_checkpoint_bytes;
     auxiliary_reserved_memory_bytes += draft_checkpoint_vram_bytes_;
-    draft_checkpoint_enabled_ = count != 0 &&
-                                (draft_checkpoint_vram_bytes_ >= optional_draft_checkpoint_bytes ||
-                                 limits.ram_bytes >= optional_draft_checkpoint_bytes ||
-                                 limits.disk_bytes >= optional_draft_checkpoint_bytes);
+    const size_t ram_count = limits.ram_bytes / optional_draft_checkpoint_bytes;
+    const size_t disk_count = limits.disk_bytes / optional_draft_checkpoint_bytes;
+    const size_t host_count =
+        ram_count > std::numeric_limits<size_t>::max() - disk_count
+            ? std::numeric_limits<size_t>::max()
+            : ram_count + disk_count;
+    const size_t tier_count =
+        vram_count > std::numeric_limits<size_t>::max() - host_count
+            ? std::numeric_limits<size_t>::max()
+            : vram_count + host_count;
+    draft_checkpoint_capacity_ = std::min(count, tier_count);
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.
   key_value_cache_ = std::make_unique<PagedKeyValueCache>(
       model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
       hybrid_prefix_caching, prefix_checkpoint_capacity);
+  if (optional_draft_checkpoint_bytes != 0 && g_log.enabled) {
+    const auto& batching = *model_->config_->engine.dynamic_batching;
+    const size_t target_blocks = key_value_cache_->Snapshot().total_blocks;
+    Log("engine_cache",
+        "DFlash 2 snapshots: requested=%zu, effective=%zu; target cache: blocks=%zu, "
+        "block_size=%zu, bytes=%zu; draft snapshot reservation: bytes=%zu",
+        batching.dflash2_max_snapshots,
+        draft_checkpoint_capacity_, target_blocks,
+        static_cast<size_t>(batching.block_size),
+        target_blocks * PagedKeyValueCacheBytesPerBlock(model_),
+        draft_checkpoint_vram_bytes_);
+  }
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
 }
 

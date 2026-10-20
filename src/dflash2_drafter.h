@@ -29,6 +29,9 @@ void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destina
 
 bool CanReserveDflash2PrefixCheckpoint(size_t target_budget_bytes, size_t reserved_bytes,
                                        size_t snapshot_bytes, size_t target_block_bytes);
+size_t Dflash2PrefixCheckpointCapacity(size_t target_budget_bytes, size_t reserved_bytes,
+                                       size_t snapshot_bytes, size_t target_block_bytes,
+                                       size_t max_checkpoints);
 
 size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,

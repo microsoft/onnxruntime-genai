@@ -439,13 +439,14 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
                            &dflash2_prefix_checkpoints_enabled);
   std::shared_ptr<PrefixSnapshotCache> snapshot_cache;
   const auto& batching = model->config_->engine.dynamic_batching;
-  if (batching && batching->prefix_caching && batching->max_snapshots != 0 &&
+  if (batching && batching->prefix_caching && batching->dflash2_max_snapshots != 0 &&
+      (!batching->max_snapshots || *batching->max_snapshots != 0) &&
       batching->snapshot_cache.Enabled()) {
     const auto& limits = batching->snapshot_cache;
     snapshot_cache = std::make_shared<PrefixSnapshotCache>(
         std::array<size_t, 3>{cache_manager->DraftCheckpointVramBytes(),
                               limits.ram_bytes, limits.disk_bytes},
-        std::min(batching->max_snapshots, batching->max_batch_size),
+        batching->max_snapshots.value_or(std::numeric_limits<size_t>::max()),
         std::filesystem::path{fs::path{limits.directory}.c_str()});
   }
   if (dflash2_model && !dflash2_drafter) {

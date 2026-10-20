@@ -45,7 +45,7 @@ def _draft_checkpoint(tmp_path, name="dspark_draft", target_layer_ids=TARGET_LAY
     return str(draft_dir)
 
 
-def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=None):
+def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=None, ep="cuda"):
     model = object.__new__(Qwen35MoEModel)
     model.dspark = None
     model.dspark_shared_initializers = []
@@ -71,6 +71,7 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=Non
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
         original_context_length=131072,
+        ep=ep,
     )
     return model
 
@@ -228,6 +229,22 @@ def test_kv_cache_uses_configured_paged_block_size(tmp_path):
     builder.declare_io()
 
     assert builder.values["past_key_values.0.key"].shape[1] == 512
+
+
+def test_webgpu_drafter_omits_attention_metadata(tmp_path):
+    builder = DSparkBuilder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        include_attention_metadata=False,
+    )
+
+    builder.declare_io()
+
+    assert "attention_metadata" not in builder.values
+    assert builder.genai_config_section()["inputs"]["attention_metadata"] == ""
 
 
 def test_non_fp8_lm_head_does_not_require_a_scale(tmp_path):
@@ -425,19 +442,21 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     class StubDSparkBuilder:
         def __init__(self, _draft_dir, _target_dir, _io_dtype, _paged_block_size, max_position, **_kwargs):
             captured["max_position"] = max_position
+            captured["include_attention_metadata"] = _kwargs["include_attention_metadata"]
 
         def make_model(self):
             pass
 
     dspark_module = importlib.import_module("models.builders.dspark")
     monkeypatch.setattr(dspark_module, "DSparkBuilder", StubDSparkBuilder)
-    model = _composite()
+    model = _composite(ep="webgpu")
     model.dspark_path = _draft_checkpoint(tmp_path)
     model.dspark_attrs = {"io_dtype": None, "num_draft_tokens": None, "top_k": 16}
 
     model.make_dspark_model(str(tmp_path))
 
     assert captured["max_position"] == model.decoder.context_length
+    assert captured["include_attention_metadata"] is True
 
 
 @pytest.mark.parametrize("prefix_caching", [None, False, True])

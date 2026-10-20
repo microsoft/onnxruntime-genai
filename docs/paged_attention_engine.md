@@ -210,8 +210,8 @@ emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
 can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
 optional ring checkpoint can be attached to the exact indexed target boundary
 after its fixed-state checkpoint and the complete drafter proposal succeed.
-The ring is restored into newly allocated drafter blocks before a cached
-request joins at a nonzero position.
+The ring is restored into newly allocated drafter blocks before a cached request
+joins at a nonzero position.
 
 ### Tiered snapshot cache
 
@@ -219,9 +219,9 @@ Snapshot storage uses one Engine-owned policy, not separate limits keyed by
 `decoder`, `dflash2`, `mtp`, or other component names. Configure
 `engine.dynamic_batching.snapshot_cache` with any combination of
 `vram_bytes`, `ram_bytes`, and `disk_bytes`; omitted limits default to zero and
-disable that tier. `max_snapshots` is the shared count cap, not a per-component
-allowance. Separate Engine instances have independent policies; these are not
-process-wide limits.
+disable that tier. `max_snapshots`, when present, is the shared count cap, not a per-component
+allowance. It is unbounded when omitted. Separate Engine instances have
+independent policies; these are not process-wide limits.
 
 **Current integration: DFlash snapshots only.** DFlash ring payloads are the
 only component registered with this policy today. These limits do not cover retained
@@ -234,6 +234,7 @@ budgets. CPU execution supports RAM and disk; VRAM storage requires CUDA.
   "engine": {
     "dynamic_batching": {
       "prefix_caching": true,
+      "dflash2_max_snapshots": 8,
       "max_snapshots": 8,
       "snapshot_cache": {
         "vram_bytes": 104857600,
@@ -245,9 +246,12 @@ budgets. CPU execution supports RAM and disk; VRAM storage requires CUDA.
 }
 ```
 
-`max_snapshots` defaults to one and is an additional count cap across all
-tiers, not an alternative to byte budgets. Zero disables snapshots. The count is
-also capped by the hybrid fixed-state checkpoint capacity (`max_batch_size`).
+`dflash2_max_snapshots` defaults to one and adds a DFlash-only count ceiling
+across all tiers. Zero disables DFlash snapshots without disabling target prefix
+caching. The DFlash count is also capped by the hybrid fixed-state checkpoint
+capacity (`max_batch_size`). `max_snapshots` is an optional additional count cap
+shared by every producer; zero disables all snapshot publication. Neither count
+increases a tier budget or enables storage when all byte budgets are zero.
 Snapshot counts must be integers from zero through 2147483647; byte limits must
 be non-negative exact integers no greater than 9007199254740991 and fit the
 platform's `size_t`. Prefix caching may be enabled without enabling any draft
@@ -285,9 +289,10 @@ Disk I/O failures propagate explicitly; cleanup failures are logged as warnings.
 Spill directories request owner-only filesystem permissions. Windows inherits
 the parent directory's ACL, so a custom parent must restrict access appropriately.
 
-Runtime-profile overlays accept `prefix_caching`, `max_snapshots`, and
-`snapshot_cache`. A profile's snapshot-cache object replaces the base
-object completely, so omitted tier limits disable those tiers in that profile.
+Runtime-profile overlays accept `prefix_caching`, `dflash2_max_snapshots`,
+`max_snapshots`, and `snapshot_cache`. A profile's snapshot-cache object replaces
+the base object completely, so omitted tier limits disable those tiers in that
+profile.
 
 The generic configuration and shared Engine ownership establish the policy for
 future snapshot-producing components without creating component-specific controls.
@@ -301,9 +306,46 @@ not integrate or offload those components, and the configured budgets do not yet
 bound the entire retained prefix.
 
 If the matching draft checkpoint is absent, the request retains the full
-target hit and runs target-only until the windowed drafter has rebuilt its context.
+target hit, but cannot immediately resume DFlash drafting at that boundary.
+An eligible windowed drafter with a free ring can start ingesting auxiliary
+hidden states from target tokens executed **after** the cached boundary. It
+does not replay or reconstruct the skipped prefix. DFlash drafts remain disabled
+until those newly executed tokens cover its required context window
+(`model.dflash2.sliding_window + model.dflash2.block_size`). Only then can
+drafting resume, subject to the normal turn eligibility and generation limits.
+A short request may finish before reaching that threshold and use no DFlash
+drafts at all. A matching snapshot avoids this warm-up.
 Full-attention DSpark remains target-only
 after a nonzero-position prefix hit.
+
+The selected runtime profile overrides the base configuration (default `1`),
+including an explicit `0` to disable drafter snapshots. The Engine allocates its
+snapshot pool from the resolved GenAI configuration; there is no separate
+Engine-construction API override. This is Engine-wide resource policy, not a
+property of the ONNX graph or a per-session, per-Request, or per-Turn setting.
+The pool is not resized during active request processing.
+
+For example, retain up to four snapshots on a larger device while preserving
+the one-snapshot base default:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 512,
+      "max_batch_size": 8,
+      "dflash2_max_snapshots": 1
+    }
+  },
+  "runtime_profiles": [{
+    "id": "larger-snapshot-pool",
+    "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
+    "overlay": {
+      "engine": {"dynamic_batching": {"dflash2_max_snapshots": 4}}
+    }
+  }]
+}
+```
 
 For operator-run boundary, request-order, branching, lease, cancellation, and
 bounded-pool checks on the intended GPU stack, see
@@ -969,6 +1011,10 @@ composition changes even though request state and continuation are correct. Qual
 use continuation/replay invariants, tolerant logits or top-k comparisons, and task-level quality;
 bitwise token equality across batch compositions is available only when every selected backend is
 batch-invariant.
+
+After logits processing, greedy selection must return a token with a maximum score in the current
+row. Selecting a lower-scoring token or using results from an earlier step is a correctness error,
+not expected floating-point variability.
 
 ### 9. Run the decoder once
 
@@ -1957,31 +2003,31 @@ pool is sized for `max_batch_size` rings and its footprint is independent of con
 automatic sizing, that pool is allocated before the target measures free memory. When `num_blocks`
 is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
 by that baseline target block count before either cache pool is allocated.
-A windowed DFlash 2 model with hybrid target prefix caching retains one
-additional ring for its optional checkpoint, independent of context length.
-On CUDA, this ring uses reusable pinned CPU memory rather than GPU memory;
-active drafter cache blocks remain on the GPU. Capture downloads only the
-selected ring blocks, and admission uploads them into the request's active ring.
-Both operations synchronize before publishing state. Other providers retain
-device-local snapshots and their existing GPU-budget accounting.
-Readers lease the immutable snapshot through admission; replacing it cannot
-overwrite an in-flight adopter, and a lease keeps its host storage alive even
-after the drafter is destroyed. Host buffers are reused only after the previous
-snapshot's last lease ends. CUDA snapshots are not charged to the GPU KV budget;
-their bounded pinned-memory footprint is one ring. Allocation failure leaves
-target-only prefix reuse available.
-If the budget cannot leave at least one target paged block after the auxiliary
-pool and any device-local snapshot reservation, the
-optional checkpoint is disabled and the existing target-only prefix behavior
-is retained.
+A windowed DFlash 2 model with hybrid target prefix caching reserves one
+additional ring per retained snapshot, independent of context length.
+`engine.dynamic_batching.dflash2_max_snapshots` (default `1`, with `0` disabling
+draft snapshots) caps only DFlash snapshots. The configured VRAM, RAM, and disk
+byte budgets take effect first, and can reduce that count to zero. An optional
+`max_snapshots` applies a further shared count cap without changing any
+component-specific limit.
 
-CPU snapshots add transfer latency to capture and prefix-hit startup, not
-per-token host transfers during steady-state decoding. Capture still occurs at
-eligible prefill-step endpoints, so long prefills can pay that transfer cost
-repeatedly. Publication cadence, fixed-state checkpoint capacity, and the
-single DFlash snapshot limit are unchanged. In particular, moving the snapshot
-does not retain drafting state for multiple alternating histories.
+VRAM snapshots reserve only the whole rings that fit their VRAM byte budget and
+the shared target-cache budget, while preserving at least one target paged
+block. RAM and disk snapshots do not reduce target cache capacity. CUDA RAM
+snapshots use pinned host storage; capture downloads selected ring blocks and
+restore uploads them into a request's active ring. CPU execution uses ordinary
+RAM or disk storage. These transfers add capture and prefix-hit latency, not
+per-token transfers during steady-state decoding.
 
+Readers lease immutable snapshots through admission; replacement cannot move or
+overwrite an in-flight adopter, and leased bytes remain charged to their tier.
+A lease keeps storage alive after the drafter or Engine manager is destroyed.
+Compatible storage is reused only after the previous snapshot's last lease
+ends. Allocation failure leaves target-only prefix reuse available. Without a
+matching draft snapshot, the target prefix still hits, but DFlash cannot draft immediately.
+It can ingest newly executed target tokens into a fresh windowed ring and resume
+drafting only after those tokens fill the required context window; a short
+request can remain target-only throughout. The skipped prefix is not rebuilt.
 A full-attention block
 drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
 query-spill bytes are charged against the same budget before target capacity is selected, using the
@@ -1999,8 +2045,11 @@ ingest-only, because retaining its cache is what lets a later greedy turn resume
 Rewind releases any tracked DFlash/DSpark state, including its cache blocks. On replay, a request
 that was previously sampled or admission-denied can try to join again if its new position-zero
 step is draft-eligible and capacity is available. A nonzero-position hit also joins a windowed
-DFlash 2 drafter when its exact target boundary still has a draft checkpoint and a free ring.
-Otherwise it remains target-only; rewind does not guarantee renewed drafting.
+DFlash 2 drafter immediately when its exact target boundary still has a draft checkpoint and a
+free ring. Without a matching checkpoint, an eligible windowed drafter can claim a free ring but
+must ingest a full required context window of newly executed target tokens before proposing
+drafts. Full-attention DSpark cannot join at a nonzero position without its prior context.
+Rewind therefore does not guarantee renewed drafting.
 
 ## Backpressure and fairness
 

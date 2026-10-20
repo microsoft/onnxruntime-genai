@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -57,8 +58,29 @@ std::shared_ptr<PrefixSnapshotCache> MakeSnapshotCache(const Config& config) {
   const auto& limits = batching.snapshot_cache;
   return std::make_shared<PrefixSnapshotCache>(
       std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
-      std::min(batching.max_snapshots, batching.max_batch_size),
+      batching.max_snapshots.value_or(std::numeric_limits<size_t>::max()),
       fs_std::path{fs::path{limits.directory}.c_str()});
+}
+
+TEST(ConfigTests, FullProviderNameUpdatesCanonicalOptions) {
+  Config config;
+  SetProviderOption(config, "webgpu", "validationMode", "basic");
+  SetProviderOption(config, "WebGpuExecutionProvider", "adapterIndex", "3");
+
+  ASSERT_EQ(config.model.decoder.session_options.provider_options.size(), 1u);
+  const auto& provider_options = config.model.decoder.session_options.provider_options.front();
+  EXPECT_EQ(provider_options.name, "WebGPU");
+  ASSERT_EQ(provider_options.options.size(), 2u);
+  const auto find_option = [&provider_options](std::string_view name) {
+    return std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                        [name](const auto& option) { return option.first == name; });
+  };
+  const auto validation_mode = find_option("validationMode");
+  ASSERT_NE(validation_mode, provider_options.options.end());
+  EXPECT_EQ(validation_mode->second, "basic");
+  const auto adapter_index = find_option("adapterIndex");
+  ASSERT_NE(adapter_index, provider_options.options.end());
+  EXPECT_EQ(adapter_index->second, "3");
 }
 
 struct TensorMetadata {
@@ -147,6 +169,8 @@ class FakeModelStateMetadata final : public ModelStateMetadata {
 
   bool HasInput(const std::string& name) const override { return inputs_.contains(name); }
   bool HasOutput(const std::string& name) const override { return outputs_.contains(name); }
+
+  void RemoveInput(const std::string& name) { inputs_.erase(name); }
 
   ONNXTensorElementDataType GetInputDataType(const std::string& name) const override {
     return inputs_.at(name).data_type;
@@ -510,6 +534,14 @@ TEST(Dflash2ConfigTest, AcceptsCompatibleAuxiliaryHiddenStates) {
   EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
 }
 
+TEST(Dflash2ConfigTest, AcceptsOmittedAttentionMetadata) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.inputs.attention_metadata.clear();
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.RemoveInput("attention_metadata");
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
+}
+
 // Dflash2Drafter::AllocateCache() allocates only key and value buffers from the logical head size
 // and binds only past_key_names/past_value_names, so a declared scale template would be silently
 // dropped and the drafter session would run against unbound, uninitialized scales. Reject it.
@@ -788,6 +820,22 @@ TEST(Dflash2ConfigTest, RejectsWindowedPoolByteOverflow) {
           config, 8, std::numeric_limits<size_t>::max(),
           ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
       std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, SnapshotCapacityHonorsConfiguredLimitAndMemoryBudget) {
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 0), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 1), 1u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 4), 4u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 32), 7u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(199, 40, 20, 20, 32), 6u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(79, 40, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 100, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 101, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 0, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 20, 0, 32), 0u);
+  const size_t maximum = std::numeric_limits<size_t>::max();
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, 0, maximum / 2, 1, maximum), 2u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, maximum - 1, maximum, 1, maximum), 0u);
 }
 
 TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
@@ -1710,11 +1758,14 @@ TEST(Dflash2ConfigTest, SnapshotProducersShareCountBudgetAndLeaseProtection) {
 namespace {
 
 std::shared_ptr<PrefixSnapshotCache::Entry> MakeStorageEntry(PrefixSnapshotCache& cache,
-                                                             DeviceInterface* device) {
+                                                             DeviceInterface* device,
+                                                             std::string_view component = {},
+                                                             size_t component_limit =
+                                                                 std::numeric_limits<size_t>::max()) {
   auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
   entry->shapes = {{16}};
   entry->type = Ort::TypeToTensorType<uint8_t>;
-  if (!cache.Allocate(entry, device)) return nullptr;
+  if (!cache.Allocate(entry, device, component, component_limit)) return nullptr;
   Tensor source{GetDeviceInterface(DeviceType::CPU), entry->type};
   source.CreateTensor(std::array<int64_t, 1>{32});
   std::array<uint8_t, 32> values{};
@@ -1836,6 +1887,28 @@ TEST(PrefixSnapshotCacheTest, LeasesProtectTierAndCountCapacity) {
   EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
   EXPECT_EQ(second->state, PrefixSnapshotCache::State::Resident);
   CheckStorageEntry(*second_lease);
+}
+
+TEST(PrefixSnapshotCacheTest, ComponentCountsAreIndependentWithinSharedBudgetsAndGlobalCount) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache cache{{0, 64, 0}, 3};
+  auto dflash = MakeStorageEntry(cache, cpu, "dflash2", 1);
+  auto other_first = MakeStorageEntry(cache, cpu, "other", 2);
+  ASSERT_NE(dflash, nullptr);
+  ASSERT_NE(other_first, nullptr);
+  auto dflash_lease = dflash;
+  EXPECT_EQ(MakeStorageEntry(cache, cpu, "dflash2", 1), nullptr);
+  auto other_second = MakeStorageEntry(cache, cpu, "other", 2);
+  ASSERT_NE(other_second, nullptr);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 48, 0}));
+
+  auto other_lease = other_first;
+  auto global_replacement = MakeStorageEntry(cache, cpu, "third", 2);
+  ASSERT_NE(global_replacement, nullptr);
+  EXPECT_EQ(other_second->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(dflash->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(other_first->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 48, 0}));
 }
 
 TEST(PrefixSnapshotCacheTest, CommittedUseRefreshesCountEvictionRecency) {

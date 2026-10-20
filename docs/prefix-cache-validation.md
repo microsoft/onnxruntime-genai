@@ -199,6 +199,48 @@ Reversed admission and the pinned-slot control help separate batching from
 state-slot effects. Preserve seed/profile/prompt hashes and minimize failures
 into named regressions; never waive them as numerical noise.
 
+## Measuring checkpoint protection in scheduler planning
+
+`PagedKeyValueCache::PlanStepResources()` queries reclaimable prefix capacity
+on every planned step. The opt-in component benchmark measures that exact
+`PrefixCache::ReclaimableBlocks()` query with real fixed-state checkpoints from
+the checked-in hybrid test model:
+
+```powershell
+.\engine_unit_tests.exe --gtest_also_run_disabled_tests `
+  --gtest_filter=PrefixCacheBenchmark.DISABLED_HybridCheckpointReclamationScaling
+```
+
+On Linux, use `./engine_unit_tests` with the same arguments. This benchmark is
+disabled in ordinary test runs because timings are diagnostic, not portable
+pass/fail thresholds; the lease-safety regressions run normally.
+
+The matrix uses 256-token blocks, histories of 128/512/2,048 blocks
+(32,768/131,072/524,288 tokens), and 1/8/32 checkpoint histories, limiting the
+aggregate pool to 16,384 blocks. Each geometry measures no leases, half the
+histories leased, and all histories leased. The `batch` column is checkpoint
+history count, not a measured execution batch; `matched_blocks` is aggregate
+indexed blocks. Each row checks the exact reclaimable count before timing,
+then reports mean/p50/p95 microseconds from five samples after one warmup.
+These token histories exercise metadata; they do not execute a long-context
+model graph or prove that a deployment model supports those context lengths.
+
+Compare the same benchmark source and Release compiler settings against the
+baseline and candidate. Checkpoint protection uses one preallocated CPU byte
+per physical pool block, no additional GPU storage, and no query-time
+allocation. Unleased queries inspect checkpoint endpoints without scanning
+blocks. Leased queries clear that bounded scratch buffer and walk each
+retained physical ancestor once, deduplicating shared ancestry. Scratch is
+rebuilt for each query because fixed/draft leases can change without a cache
+mutation.
+
+Component timings isolate the scheduler scan, not end-to-end token latency.
+Also run the operator matrix on an available GPU with fixed pool sizing,
+long prompts, multiple requests, retained owners, and repeated uncached
+controls. Compare host RSS and per-process GPU high-water marks through
+alternation/churn; neither the microbenchmark nor a single peak snapshot
+establishes a memory plateau or deployment-device fit.
+
 ## Testing the runner
 
 ```bash

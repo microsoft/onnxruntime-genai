@@ -79,13 +79,23 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
   if (!child.log_severity_level) child.log_severity_level = parent.log_severity_level;
   if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
   if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
-  if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
+  // custom_ops_library and custom_ops_libraries form one setting: the child inherits both only when it sets neither.
+  // Because custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and
+  // still inherits the parent's custom-op libraries unless custom_ops_library is set.
+  if (!child.custom_ops_library && child.custom_ops_libraries.empty()) {
+    child.custom_ops_library = parent.custom_ops_library;
+    child.custom_ops_libraries = parent.custom_ops_libraries;
+  }
   if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
   InheritNamedStrings(parent.config_entries, child.config_entries);
   InheritProviderOptions(parent, child);
 }
 
 }  // namespace
+
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child) {
+  InheritSessionOptions(parent, child);
+}
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
@@ -336,6 +346,18 @@ GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
   }
 }
 
+// Appends parsed string elements to `v`; an empty array leaves `v` unchanged.
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
@@ -360,6 +382,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     } else if (name == "custom_ops_library") {
       v_.custom_ops_library = JSON::Get<std::string_view>(value);
+    } else if (name == "custom_ops_libraries") {
+      throw std::runtime_error("custom_ops_libraries must be an array of strings");
     } else {
       // Session options that are set with AddConfigEntry
       v_.config_entries.emplace_back(name, JSON::Get<std::string_view>(value));
@@ -370,12 +394,18 @@ struct SessionOptions_Element : JSON::Element {
     if (name == "provider_options") {
       return provider_options_;
     }
+    if (name == "custom_ops_libraries") {
+      // Overlays append to custom_ops_libraries (and [] leaves existing entries unchanged), matching config_entries
+      // and provider_options.
+      return custom_ops_libraries_;
+    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
+  StringArray_Element custom_ops_libraries_{v_.custom_ops_libraries};
 };
 
 struct RunOptions_Element : JSON::Element {
@@ -582,17 +612,6 @@ struct DecoderOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
-};
-
-struct StringArray_Element : JSON::Element {
-  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
-  }
-
- private:
-  std::vector<std::string>& v_;
 };
 
 struct IntArray_Element : JSON::Element {
@@ -2592,6 +2611,11 @@ struct DynamicBatching_Element : JSON::Element {
       const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
       if (parsed_value < 0) throw std::out_of_range("max_snapshots must be >= 0");
       v_->max_snapshots = static_cast<size_t>(parsed_value);
+    } else if (name == "dflash2_max_snapshots") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value < 0)
+        throw std::out_of_range("dflash2_max_snapshots must be >= 0");
+      v_->dflash2_max_snapshots = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2694,9 +2718,12 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
       return;
     }
     const auto parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
-    if (parsed < 0 || (parsed == 0 && name != "max_snapshots")) {
+    if (parsed < 0 ||
+        (parsed == 0 && name != "max_snapshots" && name != "dflash2_max_snapshots")) {
       throw std::out_of_range(std::string{name} +
-                              (name == "max_snapshots" ? " must be >= 0" : " must be > 0"));
+                              (name == "max_snapshots" || name == "dflash2_max_snapshots"
+                                   ? " must be >= 0"
+                                   : " must be > 0"));
     }
     if (name == "num_blocks") {
       v_.num_blocks = static_cast<size_t>(parsed);
@@ -2706,6 +2733,8 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
       v_.max_scheduled_tokens = static_cast<size_t>(parsed);
     } else if (name == "max_snapshots") {
       v_.max_snapshots = static_cast<size_t>(parsed);
+    } else if (name == "dflash2_max_snapshots") {
+      v_.dflash2_max_snapshots = static_cast<size_t>(parsed);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2989,6 +3018,7 @@ void ValidateRuntimeProfiles(const Config& config) {
     if (!profile.overlay.model.decoder_filename && !batching.num_blocks && !batching.max_batch_size &&
         !batching.max_scheduled_tokens && !batching.prefix_caching &&
         !batching.max_snapshots && !batching.snapshot_cache && !search.chunk_size &&
+        !batching.dflash2_max_snapshots &&
         !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
@@ -3117,7 +3147,7 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   }
 
   // JSON-escape all caller-supplied string fragments before concatenating them into the
-  // JSON document. Without escaping, quote/backslash characters in provider_name,
+  // JSON document. Without escaping, quote/backslash characters in the provider name,
   // option_name, or option_value would let a caller inject arbitrary JSON structure
   // (sibling keys, new provider entries, etc.) into the parsed configuration.
   std::ostringstream json;
@@ -3159,6 +3189,16 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         }
         return true;
       } else if (provider_options->name == "AMDGPU") {
+        // Graph capture defaults to ON for the AMDGPU umbrella EP (both the MIGraphX and DirectX
+        // backends) and can be opted out per model via the provider option "enable_graph_capture": "0"
+        // (like DML). The MIGraphX backend relies on capture being on by default; non-decoder
+        // sub-sessions are already forced off via the disable_graph_capture flag in
+        // AppendExecutionProvider.
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_graph_capture" && value.second == "0") {
+            return false;
+          }
+        }
         return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {
@@ -3385,7 +3425,8 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   const auto& batching = selected->overlay.dynamic_batching;
   const bool has_batching_overlay = batching.num_blocks || batching.max_batch_size ||
                                     batching.max_scheduled_tokens || batching.prefix_caching ||
-                                    batching.max_snapshots || batching.snapshot_cache;
+                                    batching.max_snapshots || batching.snapshot_cache ||
+                                    batching.dflash2_max_snapshots;
   if (has_batching_overlay && !config.engine.dynamic_batching) {
     throw std::runtime_error("runtime profile '" + selected->id +
                              "' requires engine.dynamic_batching in the base config");
@@ -3405,6 +3446,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     }
     if (batching.max_snapshots) effective.max_snapshots = *batching.max_snapshots;
     if (batching.snapshot_cache) effective.snapshot_cache = *batching.snapshot_cache;
+    if (batching.dflash2_max_snapshots) effective.dflash2_max_snapshots = *batching.dflash2_max_snapshots;
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;

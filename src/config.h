@@ -137,7 +137,13 @@ struct Config {
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
+    // Custom-op library or libraries registered on the session options: custom_ops_library is registered first,
+    // followed by custom_ops_libraries in order, with duplicate resolved paths registered once. Every entry must
+    // resolve to an existing file in the model folder, a registered EP library directory, or the current working
+    // directory (entries are not searched via LD_LIBRARY_PATH / PATH). OverlayConfig appends to custom_ops_libraries
+    // (an empty [] overlay leaves existing entries unchanged).
     std::optional<std::string> custom_ops_library;
+    std::vector<std::string> custom_ops_libraries;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
@@ -797,7 +803,7 @@ struct Config {
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       bool prefix_caching{false};
       bool prefix_caching_explicitly_set{};
-      size_t max_snapshots{1};
+      std::optional<size_t> max_snapshots;  // Optional shared Engine-wide snapshot count limit.
       struct SnapshotCache {
         size_t vram_bytes{};
         size_t ram_bytes{};
@@ -805,6 +811,7 @@ struct Config {
         std::string directory;
         bool Enabled() const noexcept { return vram_bytes != 0 || ram_bytes != 0 || disk_bytes != 0; }
       } snapshot_cache;
+      size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -845,6 +852,7 @@ struct Config {
         std::optional<bool> prefix_caching;
         std::optional<size_t> max_snapshots;
         std::optional<Engine::DynamicBatching::SnapshotCache> snapshot_cache;
+        std::optional<size_t> dflash2_max_snapshots;
       } dynamic_batching;
 
       struct Search {
@@ -875,6 +883,10 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // the main model's device, batching and paged-attention contract, but replaces model-specific
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
+// Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
+// custom_ops_library and custom_ops_libraries are inherited together only when the child sets neither; because
+// custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

@@ -910,8 +910,14 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
     check_fields(
         dynamic_batching,
         {
-            "max_batch_size", "max_scheduled_tokens", "num_blocks", "gpu_utilization_factor",
-            "prefix_caching", "max_snapshots", "snapshot_cache",
+            "max_batch_size",
+            "max_scheduled_tokens",
+            "num_blocks",
+            "gpu_utilization_factor",
+            "prefix_caching",
+            "max_snapshots",
+            "snapshot_cache",
+            "dflash2_max_snapshots",
         },
         "runtime_config.engine.dynamic_batching",
     )
@@ -936,7 +942,9 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
     if "max_snapshots" in dynamic_batching:
         value = dynamic_batching["max_snapshots"]
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2_147_483_647:
-            raise ValueError("runtime_config.engine.dynamic_batching.max_snapshots must be an integer from 0 to 2147483647")
+            raise ValueError(
+                "runtime_config.engine.dynamic_batching.max_snapshots must be an integer from 0 to 2147483647"
+            )
     if "snapshot_cache" in dynamic_batching:
         cache = dynamic_batching["snapshot_cache"]
         if not isinstance(cache, dict):
@@ -945,9 +953,18 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         for name in ("vram_bytes", "ram_bytes", "disk_bytes"):
             value = cache.get(name, 0)
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 9_007_199_254_740_991:
-                raise ValueError(f"snapshot_cache.{name} must be a non-negative integer byte count no greater than 9007199254740991")
+                raise ValueError(
+                    f"snapshot_cache.{name} must be a non-negative integer byte count no greater than 9007199254740991"
+                )
         if "directory" in cache and not isinstance(cache["directory"], str):
             raise ValueError("snapshot_cache.directory must be a string")
+    if "dflash2_max_snapshots" in dynamic_batching:
+        value = dynamic_batching["dflash2_max_snapshots"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2_147_483_647:
+            raise ValueError(
+                "runtime_config.engine.dynamic_batching.dflash2_max_snapshots "
+                "must be an integer between 0 and 2147483647"
+            )
     if "gpu_utilization_factor" in dynamic_batching:
         value = dynamic_batching["gpu_utilization_factor"]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
@@ -1144,8 +1161,15 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
             raise ValueError(f"{path}.overlay.engine.dynamic_batching must be an object")
         check_fields(
             dynamic_batching,
-            {"num_blocks", "max_batch_size", "max_scheduled_tokens", "prefix_caching",
-             "max_snapshots", "snapshot_cache"},
+            {
+                "num_blocks",
+                "max_batch_size",
+                "max_scheduled_tokens",
+                "prefix_caching",
+                "max_snapshots",
+                "snapshot_cache",
+                "dflash2_max_snapshots",
+            },
             f"{path}.overlay.engine.dynamic_batching",
         )
         search = overlay.get("search", {})

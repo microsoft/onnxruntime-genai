@@ -6,7 +6,10 @@
 #include <array>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "../models/model.h"
@@ -52,13 +55,16 @@ class PrefixSnapshotCache {
     struct DiskStorage;
     std::shared_ptr<Accounting> accounting;
     std::unique_ptr<DiskStorage> disk;
+    std::string component;
     void Release() noexcept;
     void* TransferBuffer(DeviceInterface* device) const;
   };
 
   PrefixSnapshotCache(std::array<size_t, 3> limits, size_t max_entries,
                       std::filesystem::path directory = {});
-  bool Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device);
+  bool Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
+                std::string_view component = {},
+                size_t component_max_entries = std::numeric_limits<size_t>::max());
   void Touch(const Entry& entry) noexcept;
   const std::array<size_t, 3>& Used() const noexcept { return accounting_->used; }
 
@@ -67,8 +73,9 @@ class PrefixSnapshotCache {
   bool Move(Entry& entry, Tier tier, DeviceInterface* device);
   void AllocateStorage(Entry& entry, Tier tier, DeviceInterface* device);
   void Prune();
-  bool EvictOldest();
-  bool ReuseOldest(Entry& destination);
+  size_t Count(std::string_view component) const;
+  bool EvictOldest(std::string_view component = {});
+  bool ReuseOldest(Entry& destination, std::string_view component = {});
 
   std::array<size_t, 3> limits_;
   size_t max_entries_;

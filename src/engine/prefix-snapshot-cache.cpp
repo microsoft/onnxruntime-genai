@@ -172,13 +172,22 @@ void PrefixSnapshotCache::Prune() {
                  entries_.end());
 }
 
-bool PrefixSnapshotCache::EvictOldest() {
+size_t PrefixSnapshotCache::Count(std::string_view component) const {
+  return static_cast<size_t>(std::count_if(entries_.begin(), entries_.end(), [&](const auto& weak) {
+    auto entry = weak.lock();
+    return entry && entry->state == State::Resident &&
+           (component.empty() || entry->component == component);
+  }));
+}
+
+bool PrefixSnapshotCache::EvictOldest(std::string_view component) {
   std::weak_ptr<Entry>* selected = nullptr;
   uint64_t oldest = std::numeric_limits<uint64_t>::max();
   for (auto& weak : entries_) {
     if (weak.use_count() != 1) continue;
     auto entry = weak.lock();
-    if (entry && entry->recency < oldest) {
+    if (entry && (component.empty() || entry->component == component) &&
+        entry->recency < oldest) {
       selected = &weak;
       oldest = entry->recency;
     }
@@ -191,13 +200,14 @@ bool PrefixSnapshotCache::EvictOldest() {
   return true;
 }
 
-bool PrefixSnapshotCache::ReuseOldest(Entry& destination) {
+bool PrefixSnapshotCache::ReuseOldest(Entry& destination, std::string_view component) {
   std::weak_ptr<Entry>* selected = nullptr;
   uint64_t oldest = std::numeric_limits<uint64_t>::max();
   for (auto& weak : entries_) {
     if (weak.use_count() != 1) continue;
     auto entry = weak.lock();
-    if (entry && entry->state == State::Resident && entry->type == destination.type &&
+    if (entry && (component.empty() || entry->component == component) &&
+        entry->state == State::Resident && entry->type == destination.type &&
         entry->shapes == destination.shapes && entry->recency < oldest) {
       selected = &weak;
       oldest = entry->recency;
@@ -210,6 +220,7 @@ bool PrefixSnapshotCache::ReuseOldest(Entry& destination) {
   destination.host_buffers = std::move(source->host_buffers);
   destination.caches = std::move(source->caches);
   destination.disk = std::move(source->disk);
+  destination.component = std::move(source->component);
   source->state = State::Evicted;
   Prune();
   return true;
@@ -316,7 +327,9 @@ bool PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device)
   return true;
 }
 
-bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device) {
+bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
+                                   std::string_view component,
+                                   size_t component_max_entries) {
   if (entry->state != State::Empty || entry->accounting) {
     throw std::logic_error("Prefix snapshot storage may only be allocated once.");
   }
@@ -334,12 +347,23 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     }
     entry->bytes += bytes;
   }
-  if (entry->bytes == 0 || max_entries_ == 0 ||
+  if (entry->bytes == 0 || max_entries_ == 0 || component_max_entries == 0 ||
       std::none_of(limits_.begin(), limits_.end(), [&](size_t limit) { return limit >= entry->bytes; })) return false;
   Prune();
   entries_.reserve(entries_.size() + 1);
+  while (!component.empty() && Count(component) >= component_max_entries) {
+    if (ReuseOldest(*entry, component)) {
+      entry->component = component;
+      entry->state = State::Resident;
+      entry->recency = ++clock_;
+      entries_.push_back(entry);
+      return true;
+    }
+    if (!EvictOldest(component)) return false;
+  }
   while (entries_.size() >= max_entries_) {
     if (ReuseOldest(*entry)) {
+      entry->component = component;
       entry->state = State::Resident;
       entry->recency = ++clock_;
       entries_.push_back(entry);
@@ -359,6 +383,7 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     entry->host_buffers = std::move(staged.host_buffers);
     entry->caches = std::move(staged.caches);
     entry->disk = std::move(staged.disk);
+    entry->component = component;
     entry->state = State::Resident;
     entry->recency = ++clock_;
     entries_.push_back(entry);

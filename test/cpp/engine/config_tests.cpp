@@ -89,6 +89,58 @@ TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
 }
 
+TEST(ConfigTest, Dflash2SnapshotsDefaultToOneAndAllowZeroOrLargerPools) {
+  Config defaults;
+  OverlayConfig(defaults, R"({"engine":{"dynamic_batching":{"num_blocks":32}}})");
+  ASSERT_TRUE(defaults.engine.dynamic_batching);
+  EXPECT_EQ(defaults.engine.dynamic_batching->dflash2_max_snapshots, 1u);
+
+  for (const size_t capacity : {size_t{0}, size_t{1}, size_t{3}, size_t{2147483647}}) {
+    Config config;
+    OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                              std::to_string(capacity) + "}}}");
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity);
+    OverlayConfig(config, R"({"runtime_profiles":[{
+      "id":"snapshot-pool",
+      "eligibility":{"minimum_total_device_memory_bytes":100},
+      "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                              std::to_string(capacity == 0 ? 3 : 0) + "}}}}]}");
+    ApplyRuntimeProfile(config, 99);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity);
+    ApplyRuntimeProfile(config, 100);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity == 0 ? 3u : 0u);
+  }
+}
+
+TEST(ConfigTest, Dflash2SnapshotLimitRejectsInvalidValuesTransactionally) {
+  for (const auto* value : {"-1", "1.5", "2147483648", "true", "\"3\"", "null"}) {
+    Config config;
+    OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":3}}})");
+    EXPECT_THROW(OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                                           std::string{value} + "}}}"),
+                 std::runtime_error);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, 3u);
+    EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+      "id":"invalid",
+      "eligibility":{"minimum_total_device_memory_bytes":0},
+      "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                                           std::string{value} + "}}}}]}"),
+                 std::runtime_error);
+    EXPECT_TRUE(config.runtime_profiles.empty());
+  }
+}
+
+TEST(ConfigTest, Dflash2SnapshotOnlyProfileRequiresDynamicBatchingEvenWhenDisabled) {
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"disabled",
+    "eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":0}}}
+  }]})");
+  EXPECT_THROW(ApplyRuntimeProfile(config, 0), std::runtime_error);
+  EXPECT_FALSE(config.engine.dynamic_batching);
+}
+
 TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
   Config config;
   OverlayConfig(config, R"({
