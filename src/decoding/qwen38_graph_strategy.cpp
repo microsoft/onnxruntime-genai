@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#if defined(__linux__)
 #include "decoding/qwen38_graph_strategy.h"
 
 #include <algorithm>
@@ -46,11 +47,13 @@ void Qwen38GraphStrategy::Step(Generator& g) {
       const bool more = !IsEos(g, first) && length + 1 < max_length;
       engine.BeginDecode(more);
       queue_.push_back(first);
+      ++queued_;
       started_ = true;
     } else {
       const Qwen38CycleResult result = engine.WaitCycle();
       int32_t tokens[2] = {static_cast<int32_t>(result.pred0), static_cast<int32_t>(result.pred1)};
-      size_t count = result.accepted ? 2 : 1;
+      const size_t produced = result.accepted ? 2 : 1;
+      size_t count = std::min(produced, static_cast<size_t>(max_length - length));
       bool hit_eos = false;
       for (size_t i = 0; i < count; ++i) {
         if (IsEos(g, tokens[i])) {
@@ -60,16 +63,20 @@ void Qwen38GraphStrategy::Step(Generator& g) {
         }
       }
       const bool more = !hit_eos && length + static_cast<int>(count) < max_length;
+      if (count == 2) engine.SaveBufferedLogits();
       engine.Advance(result, more);
       for (size_t i = 0; i < count; ++i) queue_.push_back(tokens[i]);
+      queued_ += produced;
+      discarded_ += produced - count;
     }
     g.computed_logits_ = false;
   }
 
   const int32_t token = queue_.front();
-  queue_.pop_front();
   g.last_action_ = Generator::Action::generated;
   search.CommitToken(token);
+  queue_.pop_front();
+  ++emitted_;
 }
 
 SpeculativeStats Qwen38GraphStrategy::GetStats() const {
@@ -83,13 +90,15 @@ SpeculativeStats Qwen38GraphStrategy::GetStats() const {
   s.target_forward_passes = stats.cycles;
   s.target_verify_forward_passes = stats.cycles;
   s.draft_forward_passes = stats.cycles;
-  s.tokens_emitted = stats.tokens;
+  s.tokens_emitted = emitted_;
+  s.tokens_queued = queued_;
+  s.tokens_discarded = discarded_;
   s.tokens_buffered = queue_.size();
   s.full_accept_rounds = stats.accepted;
   s.zero_accept_rounds = stats.cycles - stats.accepted;
   if (stats.cycles > 0) {
     s.acceptance_rate = static_cast<float>(stats.accepted) / static_cast<float>(stats.cycles);
-    s.mean_emitted_tokens_per_round = static_cast<float>(stats.tokens) / static_cast<float>(stats.cycles);
+    s.mean_emitted_tokens_per_round = static_cast<float>(emitted_) / static_cast<float>(stats.cycles);
     s.avg_draft_tokens_per_round = 1.0f;
   }
   return s;
@@ -98,6 +107,20 @@ SpeculativeStats Qwen38GraphStrategy::GetStats() const {
 void Qwen38GraphStrategy::Reset() {
   queue_.clear();
   started_ = false;
+  emitted_ = queued_ = discarded_ = 0;
+  external_logits_ = {};
+}
+
+bool Qwen38GraphStrategy::TryGetExternalLogits(Generator& g, DeviceSpan<float>& logits) {
+  if (!started_) return false;
+  if (g.search_->IsDone())
+    throw std::runtime_error("qwen38_flash_graph logits are unavailable after generation is complete.");
+  if (external_logits_.empty())
+    external_logits_ = g.search_->params_->p_device->Allocate<float>(static_cast<size_t>(g.model_->config_->model.vocab_size));
+  state_.engine().DecodeLogits(!queue_.empty(), external_logits_.CpuSpan());
+  external_logits_.CopyCpuToDevice();
+  logits = external_logits_;
+  return true;
 }
 
 void Qwen38GraphStrategy::PrepareForAppend(Generator&) {
@@ -112,3 +135,4 @@ void Qwen38GraphStrategy::PrepareForSetLogits(Generator&) {
 }
 
 }  // namespace Generators
+#endif  // defined(__linux__)

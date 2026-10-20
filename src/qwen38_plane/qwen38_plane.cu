@@ -65,7 +65,10 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
     int lo = 0, hi = P->n_shards - 1;  // first shard whose end > id
     while (lo < hi) {
       const int mid = (lo + hi) >> 1;
-      if (P->shard_end[mid] > id) hi = mid; else lo = mid + 1;
+      if (P->shard_end[mid] > id)
+        hi = mid;
+      else
+        lo = mid + 1;
     }
     const i64 first = lo == 0 ? 0 : P->shard_end[lo - 1];
     s_row[h] = id - first;
@@ -75,14 +78,17 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
     input_ids[0] = tok;
     position_ids[0] = pos;
     committed[0] = (int)pos;
-    if (pos >= 0 && pos < P->capacity) past_pos[pos] = pos; else state[5] |= 1;
+    if (pos >= 0 && pos < P->capacity)
+      past_pos[pos] = pos;
+    else
+      state[5] |= 1;
   }
   __syncthreads();
   const int hd = P->head_dim;
   const int total = P->n_heads * hd;
   // all (<= 3) host-memory byte loads of this thread are issued before any use: one PCIe round trip
   unsigned char b[3];
-  #pragma unroll
+#pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     b[u] = 0;
@@ -91,7 +97,7 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
       b[u] = s_src[h][s_row[h] * hd + c];
     }
   }
-  #pragma unroll
+#pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
@@ -115,7 +121,10 @@ __global__ void k_argmax_part(const __nv_bfloat16* logits, int n, float* outv, i
   int bi = 0x7fffffff;
   for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
     const float v = __bfloat162float(logits[i]);
-    if (v > best || (v == best && i < bi)) { best = v; bi = i; }
+    if (v > best || (v == best && i < bi)) {
+      best = v;
+      bi = i;
+    }
   }
   sv[threadIdx.x] = best;
   si[threadIdx.x] = bi;
@@ -124,18 +133,27 @@ __global__ void k_argmax_part(const __nv_bfloat16* logits, int n, float* outv, i
     if (threadIdx.x < s) {
       const float v = sv[threadIdx.x + s];
       const int i = si[threadIdx.x + s];
-      if (v > sv[threadIdx.x] || (v == sv[threadIdx.x] && i < si[threadIdx.x])) { sv[threadIdx.x] = v; si[threadIdx.x] = i; }
+      if (v > sv[threadIdx.x] || (v == sv[threadIdx.x] && i < si[threadIdx.x])) {
+        sv[threadIdx.x] = v;
+        si[threadIdx.x] = i;
+      }
     }
     __syncthreads();
   }
-  if (threadIdx.x == 0) { outv[blockIdx.x] = sv[0]; outi[blockIdx.x] = si[0]; }
+  if (threadIdx.x == 0) {
+    outv[blockIdx.x] = sv[0];
+    outi[blockIdx.x] = si[0];
+  }
 }
 
 __device__ int merge_argmax(const float* v, const int* idx, int nb) {
   float best = -INFINITY;
   int bi = 0x7fffffff;
   for (int b = 0; b < nb; ++b)
-    if (v[b] > best || (v[b] == best && idx[b] < bi)) { best = v[b]; bi = idx[b]; }
+    if (v[b] > best || (v[b] == best && idx[b] < bi)) {
+      best = v[b];
+      bi = idx[b];
+    }
   return bi;
 }
 
@@ -167,7 +185,7 @@ __global__ void k_post(const float* v0, const int* i0, const float* v1, const in
   r[1] = pred0;
   r[2] = pred1;
   r[3] = accept ? 1 : 0;
-  r[4] = status;
+  r[4] = status | state[5];
   r[5] = new_pending;
   r[6] = new_len;
   __threadfence_system();
@@ -197,7 +215,7 @@ __global__ void k_post_tok(const i64* tok01, i64* state, i64* ctx_commit, const 
   r[1] = pred0;
   r[2] = pred1;
   r[3] = accept ? 1 : 0;
-  r[4] = status;
+  r[4] = status | state[5];
   r[5] = new_pending;
   r[6] = new_len;
   __threadfence_system();
@@ -219,7 +237,7 @@ __global__ void k_post1(const float* v0, const int* i0, int nb, i64* state, i64*
   state[4] += 1;
   state[5] |= status ? 2 : 0;
   r[1] = pred0;
-  r[4] = status;
+  r[4] = status | state[5];
   r[5] = pred0;
   r[6] = state[1];
   __threadfence_system();
@@ -234,10 +252,16 @@ __global__ void k_head_prep(const i64* ctl, int rows, int hlen, const uint4* src
   if (threadIdx.x == 0) {
     const i64 pend = ctl[0], L = ctl[1], draft = ctl[2];
     if (rows == 2) {
-      tokens[0] = draft; tokens[1] = pend; positions[0] = L - 1; positions[1] = L;
-      committed[0] = hlen; committed[1] = hlen + 1;
+      tokens[0] = draft;
+      tokens[1] = pend;
+      positions[0] = L - 1;
+      positions[1] = L;
+      committed[0] = hlen;
+      committed[1] = hlen + 1;
     } else {
-      tokens[0] = pend; positions[0] = L; committed[0] = hlen;
+      tokens[0] = pend;
+      positions[0] = L;
+      committed[0] = hlen;
     }
   }
   const int n16 = rows * 10240 * 2 / 16;
@@ -287,7 +311,10 @@ __global__ void k_ple_rows(const PleParams* P, const i64* tokens, int n, const i
     int lo = 0, hi = P->n_shards - 1;
     while (lo < hi) {
       const int mid = (lo + hi) >> 1;
-      if (P->shard_end[mid] > id) hi = mid; else lo = mid + 1;
+      if (P->shard_end[mid] > id)
+        hi = mid;
+      else
+        lo = mid + 1;
     }
     const i64 first = lo == 0 ? 0 : P->shard_end[lo - 1];
     s_row[h] = id - first;
@@ -298,7 +325,7 @@ __global__ void k_ple_rows(const PleParams* P, const i64* tokens, int n, const i
   const int total = P->n_heads * hd;
   __nv_bfloat16* out = ple_out + (size_t)i * total;
   unsigned char b[3];
-  #pragma unroll
+#pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     b[u] = 0;
@@ -307,7 +334,7 @@ __global__ void k_ple_rows(const PleParams* P, const i64* tokens, int n, const i
       b[u] = s_src[h][s_row[h] * hd + c];
     }
   }
-  #pragma unroll
+#pragma unroll
   for (int u = 0; u < 3; ++u) {
     const int j = tid + u * blockDim.x;
     if (j < total) {
@@ -381,7 +408,7 @@ void mtp_prep(cudaStream_t s, const PleParams* P, const i64* tok_ptr, const i64*
               const i64* ctx_in, i64* ctx_out, i64* input_ids, i64* position_ids, int* committed, i64* past_pos,
               __nv_bfloat16* ple_out, i64* state) {
   k_prep<<<1, 1024, 0, s>>>(P, tok_ptr, pos_ptr, pos_add, ctx_in, ctx_out, input_ids, position_ids, committed,
-                           past_pos, ple_out, state);
+                            past_pos, ple_out, state);
 }
 
 void mtp_argmax_part(cudaStream_t s, const __nv_bfloat16* logits, int n, float* outv, int* outi, int nblocks) {

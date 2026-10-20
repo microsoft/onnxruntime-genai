@@ -293,9 +293,8 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
   endif()
 
-  # Qwen3.8-Flash CUDA data plane. It is dlopen-ed by the "qwen38_flash_graph" model type (path from genai_config.json),
-  # not linked into GenAI, so it can be swapped without rebuilding the core library.
-  if(UNIX AND NOT APPLE)
+  # The graph model loads the CUDA data plane dynamically from its package.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_library(qwen38_plane SHARED "${GENERATORS_ROOT}/qwen38_plane/qwen38_plane.cu")
     target_link_libraries(qwen38_plane PRIVATE cudart)
     set_target_properties(qwen38_plane PROPERTIES FOLDER "GenAI")

@@ -4,6 +4,7 @@
 // Qwen3.8-Flash-Next NVFP4 (model.type "qwen38_flash_graph"), fast prefill: shared weight pool, dense chunked prefill,
 // dense -> packed state hand-off, batched KV-only head prefill. Port of CG/mtp_runner/prefill (engine.py, handoff.py,
 // head_kv.py, shared_weights.py); see tools/qwen38_graph/README.md.
+#if defined(__linux__)
 #include "generator/generators.h"
 #include "qwen38_graph.h"
 
@@ -95,9 +96,9 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::string& manife
   for (auto& entry : entries_) {
     void* p = nullptr;
     plane_.Check(plane_.malloc_(&p, std::max<uint64_t>(entry.length, 16)), "cudaMalloc(weight pool)");
-    entry.ptr = static_cast<uint8_t*>(p);
+    entry.buffer = {static_cast<uint8_t*>(p), plane_.free_};
     bytes += entry.length;
-    entry.value = OrtValue::CreateTensor(memory_info, entry.ptr, static_cast<size_t>(entry.length), entry.shape,
+    entry.value = OrtValue::CreateTensor(memory_info, entry.buffer.get(), static_cast<size_t>(entry.length), entry.shape,
                                          static_cast<ONNXTensorElementDataType>(entry.dtype));
   }
 
@@ -116,11 +117,10 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::string& manife
       plane_.Check(plane_.stream_create(&stream), "cudaStreamCreate");
       for (size_t i = next.fetch_add(1); i < entries_.size(); i = next.fetch_add(1)) {
         Entry& entry = entries_[i];
-        int& fd = fds[entry.file];
-        if (fd == 0) {
-          fd = open(entry.file.c_str(), O_RDONLY);
-          if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open weight file " + entry.file);
-        }
+        auto [it, inserted] = fds.emplace(entry.file, -1);
+        int& fd = it->second;
+        if (inserted) fd = open(entry.file.c_str(), O_RDONLY);
+        if (fd < 0) throw std::runtime_error("qwen38_graph: cannot open weight file " + entry.file);
         for (uint64_t done = 0; done < entry.length;) {
           const size_t n = static_cast<size_t>(std::min<uint64_t>(kStage, entry.length - done));
           size_t got = 0;
@@ -129,7 +129,7 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::string& manife
             if (r <= 0) throw std::runtime_error("qwen38_graph: short read of weight file " + entry.file);
             got += static_cast<size_t>(r);
           }
-          plane_.Check(plane_.memcpy_h2d(entry.ptr + done, stage, n, stream), "weight upload");
+          plane_.Check(plane_.memcpy_h2d(entry.buffer.get() + done, stage, n, stream), "weight upload");
           plane_.Check(plane_.stream_sync(stream), "weight upload sync");
           done += n;
         }
@@ -140,13 +140,21 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::string& manife
       next.store(entries_.size());
     }
     for (auto& f : fds)
-      if (f.second > 0) close(f.second);
+      if (f.second >= 0) close(f.second);
     if (stream) plane_.stream_destroy(stream);
     if (stage) plane_.host_free(stage);
   };
   if (!plane_.stream_create) throw std::runtime_error("qwen38_graph: the plane library lacks the weight pool helpers");
+  if (threads <= 0) throw std::runtime_error("qwen38_graph: weight upload requires at least one worker");
   std::vector<std::thread> pool;
-  for (int t = 0; t < threads; ++t) pool.emplace_back(worker);
+  pool.reserve(static_cast<size_t>(threads));
+  try {
+    for (int t = 0; t < threads; ++t) pool.emplace_back(worker);
+  } catch (...) {
+    next.store(entries_.size());
+    for (auto& t : pool) t.join();
+    throw;
+  }
   for (auto& t : pool) t.join();
   if (!error.empty()) throw std::runtime_error(error);
   seconds = SecondsSince(start);
@@ -155,12 +163,7 @@ Qwen38WeightPool::Qwen38WeightPool(Qwen38Plane& plane, const std::string& manife
               << " GiB in " << seconds << " s" << std::endl;
 }
 
-Qwen38WeightPool::~Qwen38WeightPool() {
-  for (auto& entry : entries_) {
-    entry.value.reset();
-    if (entry.ptr) plane_.free_(entry.ptr);
-  }
-}
+Qwen38WeightPool::~Qwen38WeightPool() = default;
 
 size_t Qwen38WeightPool::AddTo(OrtSessionOptions& options, const std::string& label) const {
   auto it = sessions_.find(label);
@@ -189,12 +192,16 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::string& in
     std::istringstream fields(line);
     std::string key;
     fields >> key;
-    if (key == "file") fields >> file;
-    else if (key == "epsilon") fields >> epsilon;
-    else if (key == "width") fields >> target.width, head.width = target.width;
+    if (key == "file")
+      fields >> file;
+    else if (key == "epsilon")
+      fields >> epsilon;
+    else if (key == "width")
+      fields >> target.width, head.width = target.width;
     else if (key == "tensor") {
-      Item item;
-      fields >> item.set >> item.name >> item.offset >> item.bytes;
+      Item item{};
+      if (!(fields >> item.set >> item.name >> item.offset >> item.bytes))
+        throw std::runtime_error("qwen38_graph: malformed QSA constant in " + index_path);
       items.push_back(item);
     }
   }
@@ -204,17 +211,25 @@ Qwen38QsaConstants::Qwen38QsaConstants(Qwen38Plane& plane, const std::string& in
   std::vector<uint8_t> host(total);
   data.seekg(0);
   data.read(reinterpret_cast<char*>(host.data()), static_cast<std::streamsize>(total));
+  if (!data) throw std::runtime_error("qwen38_graph: short read of QSA constants data " + file);
+  for (const Item& item : items) {
+    if (item.bytes == 0 || item.offset > total || item.bytes > total - item.offset)
+      throw std::runtime_error("qwen38_graph: QSA constant range exceeds data blob: " + item.set + "." + item.name);
+  }
   buffer_ = PlaneBuffer(plane, total, stream);
   plane.Check(plane.memcpy_h2d(buffer_.data(), host.data(), total, stream), "QSA constants upload");
   plane.Check(plane.stream_sync(stream), "QSA constants sync");
   for (const Item& item : items) {
     Set& set = item.set == "head" ? head : target;
     const uint8_t* ptr = buffer_.data() + item.offset;
-    if (item.name == "cos") set.cos = ptr;
-    else if (item.name == "sin") set.sin = ptr;
-    else if (item.name.rfind("knorm.", 0) == 0) set.knorm[std::stoi(item.name.substr(6))] = ptr;
+    if (item.name == "cos")
+      set.cos = ptr;
+    else if (item.name == "sin")
+      set.sin = ptr;
+    else if (item.name.rfind("knorm.", 0) == 0)
+      set.knorm[std::stoi(item.name.substr(6))] = ptr;
   }
-  if (!target.cos || !head.cos || target.knorm.empty() || head.knorm.empty())
+  if (!target.cos || !target.sin || !head.cos || !head.sin || target.knorm.empty() || head.knorm.empty())
     throw std::runtime_error("qwen38_graph: incomplete QSA constants " + index_path);
 }
 
@@ -278,9 +293,12 @@ void Qwen38GraphEngine::BuildFastPrefill() {
     const std::string tail = name == "past_position_ids" ? "positions" : TailOf(name);
     for (int64_t& d : shape)
       if (d <= 0) d = 1;
-    if (tail == "positions") shape = {1, 0};
-    else if (tail == "key" || tail == "value") shape[2] = 0;
-    else if (tail == "index_key") shape[1] = 0;
+    if (tail == "positions")
+      shape = {1, 0};
+    else if (tail == "key" || tail == "value")
+      shape[2] = 0;
+    else if (tail == "index_key")
+      shape[1] = 0;
     const auto type = info.GetInputDataType(name);
     size_t elements = 1;
     for (int64_t d : shape) elements *= static_cast<size_t>(d);
@@ -341,11 +359,16 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
       return *views.back();
     };
     for (const auto& name : f.dense_inputs) {
-      if (name == "input_ids") binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * pos, {1, int64_t(m)}, i64));
-      else if (name == "attention_mask") binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(pos + m)}, i64));
-      else if (name == "position_ids") binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * pos, {1, int64_t(m)}, i64));
-      else if (name == "logits_indices") binding->BindInput(name.c_str(), view(f.idx.data(), {1}, i64));
-      else if (name == ple_name) binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
+      if (name == "input_ids")
+        binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * pos, {1, int64_t(m)}, i64));
+      else if (name == "attention_mask")
+        binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(pos + m)}, i64));
+      else if (name == "position_ids")
+        binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * pos, {1, int64_t(m)}, i64));
+      else if (name == "logits_indices")
+        binding->BindInput(name.c_str(), view(f.idx.data(), {1}, i64));
+      else if (name == ple_name)
+        binding->BindInput(name.c_str(), view(f.ples.data(), {1, int64_t(m), ple_width_}, bf16));
       else {
         auto it = f.states.find(name);
         OrtValue* value = it != f.states.end() ? it->second.get() : f.initial.at(name).get();
@@ -365,9 +388,12 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
     auto values = binding->GetOutputValues();
     std::map<std::string, std::unique_ptr<OrtValue>> next;
     for (size_t i = 0; i < names.size(); ++i) {
-      if (names[i] == "present_position_ids") next["past_position_ids"] = std::move(values[i]);
-      else if (names[i].rfind("present.", 0) == 0) next["past_key_values." + names[i].substr(8)] = std::move(values[i]);
-      else if (names[i] == "logits") f.logits = std::move(values[i]);
+      if (names[i] == "present_position_ids")
+        next["past_position_ids"] = std::move(values[i]);
+      else if (names[i].rfind("present.", 0) == 0)
+        next["past_key_values." + names[i].substr(8)] = std::move(values[i]);
+      else if (names[i] == "logits")
+        f.logits = std::move(values[i]);
     }
     f.states = std::move(next);
     f.dense_length += m;
@@ -381,8 +407,7 @@ void Qwen38GraphEngine::FastAppend(std::span<const int32_t> tokens) {
   for (size_t d = 0; d + 1 < shape.size(); ++d) rows *= static_cast<size_t>(shape[d]);
   if (shape.back() != vocab_) throw std::runtime_error("qwen38_graph: unexpected dense logits shape");
   std::vector<uint16_t> raw(static_cast<size_t>(vocab_));
-  plane_.Check(plane_.memcpy_d2h(raw.data(), static_cast<uint8_t*>(f.logits->GetTensorMutableRawData()) +
-                                                   (rows - 1) * static_cast<size_t>(vocab_) * 2,
+  plane_.Check(plane_.memcpy_d2h(raw.data(), static_cast<uint8_t*>(f.logits->GetTensorMutableRawData()) + (rows - 1) * static_cast<size_t>(vocab_) * 2,
                                  raw.size() * 2, stream_),
                "read logits");
   plane_.Check(plane_.memcpy_d2d(d_last_hidden_.data(), d_prompt_hidden_.data() + (length_ - 1) * row_bytes, row_bytes, stream_),
@@ -501,14 +526,20 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
       return *views.back();
     };
     for (const auto& name : f.head_kv->GetInputNames()) {
-      if (name == "input_ids") binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
-      else if (name == "attention_mask") binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(m)}, i64));
-      else if (name == "position_ids") binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
-      else if (name == "past_position_ids") binding->BindInput(name.c_str(), view(f.scratch.data(), {1, 0}, i64));
-      else if (name == "past_key_values.0.index_key") binding->BindInput(name.c_str(), view(f.scratch.data(), {1, 0, 128}, bf16));
+      if (name == "input_ids")
+        binding->BindInput(name.c_str(), view(d_tokens_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
+      else if (name == "attention_mask")
+        binding->BindInput(name.c_str(), view(f.ones.data(), {1, int64_t(m)}, i64));
+      else if (name == "position_ids")
+        binding->BindInput(name.c_str(), view(d_arange64_.data() + 8 * (1 + lo), {1, int64_t(m)}, i64));
+      else if (name == "past_position_ids")
+        binding->BindInput(name.c_str(), view(f.scratch.data(), {1, 0}, i64));
+      else if (name == "past_key_values.0.index_key")
+        binding->BindInput(name.c_str(), view(f.scratch.data(), {1, 0, 128}, bf16));
       else if (name == "hidden_states")
         binding->BindInput(name.c_str(), view(d_prompt_hidden_.data() + lo * row_bytes, {1, int64_t(m), hidden_width_}, bf16));
-      else throw std::runtime_error("qwen38_graph: unsupported head_kv input " + name);
+      else
+        throw std::runtime_error("qwen38_graph: unsupported head_kv input " + name);
     }
     for (const char* name : {"key", "value", "index_key"}) binding->BindOutput(name, *memory_info_);
     f.head_kv->Run(f.run_options.get(), *binding);
@@ -525,12 +556,14 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
           // [1, 2, m, 256]
           for (int h = 0; h < 2; ++h)
             plane_.Check(plane_.memcpy_d2d(key + h * head_stride + lo * row_size, src + h * m * row_size,
-                                         m * row_size, stream_), "head key");
+                                           m * row_size, stream_),
+                         "head key");
         } else if (shape.size() == 3 && shape[1] == int64_t(m) && shape[2] == 512) {
           // [1, m, 512] -> per head h columns [256 h, 256 (h+1))
           for (int h = 0; h < 2; ++h)
             plane_.Check(plane_.memcpy2d_d2d(key + h * head_stride + lo * row_size, row_size, src + h * row_size,
-                                           2 * row_size, row_size, m, stream_), "head key");
+                                             2 * row_size, row_size, m, stream_),
+                         "head key");
         } else {
           std::ostringstream message;
           message << "qwen38_graph: unexpected head_kv key shape [";
@@ -543,7 +576,8 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
           throw std::runtime_error("qwen38_graph: unexpected head_kv value shape");
         for (int h = 0; h < 2; ++h)
           plane_.Check(plane_.memcpy2d_d2d(value + h * head_stride + lo * row_size, row_size, src + h * row_size,
-                                         2 * row_size, row_size, m, stream_), "head value");
+                                           2 * row_size, row_size, m, stream_),
+                       "head value");
       } else if (names[i] == "index_key") {
         if (shape.size() != 3 || shape[1] != int64_t(m) || shape[2] != 128)
           throw std::runtime_error("qwen38_graph: unexpected head_kv index_key shape");
@@ -569,3 +603,4 @@ void Qwen38GraphEngine::FastHeadKvPrefill() {
 }
 
 }  // namespace Generators
+#endif  // defined(__linux__)

@@ -7,10 +7,14 @@
   mtp_pool_keys     pooled / RMS-normalised / half-RoPE compressed index keys vs handoff_lib.pooled_block_keys (fp32)
   mtp_transpose_f32 GDN state transpose (bitwise)
 
-usage (research env: mobius, torch; any GPU, < 2 GB): test_plane_kernels.py <package dir> [--lib libqwen38_plane.so] [--out json]
+usage (mobius, torch; any GPU, < 2 GB): test_plane_kernels.py <package dir>
+  --plane-module <plane.py> --handoff-module <handoff_lib.py> --checkpoint <directory>
+  [--lib libqwen38_plane.so] [--out json]
 """
+
 import argparse
 import ctypes
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -18,10 +22,33 @@ from pathlib import Path
 import numpy as np
 import torch
 
-CG = Path("/home/tianlei/git/eval_runs/qwen38_cuda_graph_20261010_01")
-sys.path.insert(0, str(CG / "mtp_runner"))
-sys.path.insert(0, "/home/tianlei/git/eval_runs/qwen38_prefill_20261012_01")
 c_vp = ctypes.c_void_p
+
+
+def reference_file(value):
+    path = Path(value).expanduser().resolve()
+    if not path.is_file() or path.suffix != ".py":
+        raise argparse.ArgumentTypeError(f"expected an existing Python reference module: {path}")
+    return path
+
+
+def checkpoint_dir(value):
+    path = Path(value).expanduser().resolve()
+    if not path.is_dir() or not (path / "config.json").is_file():
+        raise argparse.ArgumentTypeError(f"expected a checkpoint directory containing config.json: {path}")
+    return path
+
+
+def load_reference(name, path, required):
+    sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    for symbol in required:
+        if not callable(getattr(module, symbol, None)):
+            raise ValueError(f"{path} must provide {symbol}")
+    return module
 
 
 def main():
@@ -29,7 +56,14 @@ def main():
     ap.add_argument("package", type=Path)
     ap.add_argument("--lib", type=Path)
     ap.add_argument("--out", type=Path)
+    ap.add_argument("--plane-module", type=reference_file, required=True, help="trusted plane.py reference file")
+    ap.add_argument(
+        "--handoff-module", type=reference_file, required=True, help="trusted handoff_lib.py reference file"
+    )
+    ap.add_argument("--checkpoint", type=checkpoint_dir, required=True, help="local Hugging Face checkpoint directory")
     args = ap.parse_args()
+    plane = load_reference("plane", args.plane_module, ("PleDevice", "PleParams"))
+    handoff_lib = load_reference("handoff_lib", args.handoff_module, ("pooled_block_keys",))
     lib = ctypes.CDLL(str(args.lib or args.package / "libs/libqwen38_plane.so"))
     ci = ctypes.c_int
     lib.mtp_ple_rows.argtypes = [c_vp, c_vp, c_vp, ci, c_vp, c_vp, c_vp]
@@ -40,22 +74,27 @@ def main():
     result = {}
 
     # ---- PLE rows ----
-    import plane  # research data plane wrapper (PleDevice builds the PleParams of a lookup)
-    from mobius._configs import Qwen4ExpConfig
-    from mobius.generation._qwen4_exp_ple import Qwen4ExpCPUPLELookup
-    from mobius.integrations.transformers._builder import _load_transformers_config
+    from mobius._configs import Qwen4ExpConfig  # noqa: PLC0415
+    from mobius.generation._qwen4_exp_ple import Qwen4ExpCPUPLELookup  # noqa: PLC0415
+    from mobius.integrations.transformers._builder import _load_transformers_config  # noqa: PLC0415
 
-    checkpoint = "/home/tianlei/git/Qwen3.8-Flash-Next-NVFP4"
+    checkpoint = str(args.checkpoint)
     hf_config, _ = _load_transformers_config(checkpoint, revision=None, trust_remote_code=False)
     config = Qwen4ExpConfig.from_transformers(hf_config)
-    layer = [int(i) - 1 for i in config.ple_layer_ids][0]
+    layer = next(int(i) - 1 for i in config.ple_layer_ids)
     lookup = Qwen4ExpCPUPLELookup(checkpoint, config, layer)
     dev = plane.PleDevice(lookup, 33028)
     assert lib.mtp_sizeof_params() == ctypes.sizeof(plane.PleParams)
     rng = np.random.default_rng(1)
     eos = int(lookup._eos_token_id)
     ok_ple = True
-    for n, with_eos, carried in ((1, False, False), (2, False, True), (37, True, True), (1000, True, False), (4097, True, True)):
+    for n, with_eos, carried in (
+        (1, False, False),
+        (2, False, True),
+        (37, True, True),
+        (1000, True, False),
+        (4097, True, True),
+    ):
         tokens = rng.integers(1000, 200000, n).tolist()
         if with_eos:
             for i in rng.integers(0, n, max(1, n // 50)):
@@ -74,12 +113,13 @@ def main():
         same = bool(torch.equal(out.view(torch.int16), ref.to(torch.bfloat16).view(torch.int16)))
         ctx_same = np.asarray(ctx_ref).reshape(-1).tolist() == ctx_out.cpu().tolist()
         ok_ple &= same and ctx_same
-        print(f"ple_rows n={n} eos={with_eos} carried={carried}: rows bitwise equal {same}, context equal {ctx_same}", flush=True)
+        print(
+            f"ple_rows n={n} eos={with_eos} carried={carried}: rows bitwise equal {same}, context equal {ctx_same}",
+            flush=True,
+        )
     result["ple_rows"] = ok_ple
 
     # ---- pooled keys ----
-    import handoff_lib
-
     index, consts = {}, {}
     for line in (args.package / "qsa_consts.txt").read_text().splitlines():
         f = line.split()
@@ -91,7 +131,7 @@ def main():
 
     def tensor(set_name, name, shape):
         off, nbytes = index[(set_name, name)]
-        return torch.from_numpy(blob[off: off + nbytes].copy()).view(torch.bfloat16).reshape(shape).to("cuda")
+        return torch.from_numpy(blob[off : off + nbytes].copy()).view(torch.bfloat16).reshape(shape).to("cuda")
 
     width = int(consts["width"])
     ok_pool = True
@@ -103,15 +143,28 @@ def main():
             raw = (torch.randn(nb * 4, 128, device="cuda") * (3.0 if nb == 513 else 1.0)).to(torch.bfloat16)
             ref = handoff_lib.pooled_block_keys(raw, knorm, cos, sin, consts["epsilon"])
             out = torch.empty((nb, 128), dtype=torch.float32, device="cuda")
-            lib.mtp_pool_keys(stream, raw.data_ptr(), nb, knorm.data_ptr(), cos.data_ptr(), sin.data_ptr(), width,
-                              ctypes.c_float(consts["epsilon"]), 0, out.data_ptr())
+            lib.mtp_pool_keys(
+                stream,
+                raw.data_ptr(),
+                nb,
+                knorm.data_ptr(),
+                cos.data_ptr(),
+                sin.data_ptr(),
+                width,
+                ctypes.c_float(consts["epsilon"]),
+                0,
+                out.data_ptr(),
+            )
             torch.cuda.synchronize()
             diff = (out - ref).abs()
             rel = (diff / ref.abs().clamp_min(1e-30)).max().item()
             frac = (out == ref).float().mean().item()
             ok_pool &= diff.max().item() < 1e-5 and rel < 1e-4
-            print(f"pool_keys {set_name} layer {layer_id} nb={nb}: max abs diff {diff.max().item():.3e}, max rel {rel:.3e}, "
-                  f"exactly equal {100 * frac:.2f} %", flush=True)
+            print(
+                f"pool_keys {set_name} layer {layer_id} nb={nb}: max abs diff {diff.max().item():.3e}, max rel {rel:.3e}, "
+                f"exactly equal {100 * frac:.2f} %",
+                flush=True,
+            )
     result["pool_keys"] = ok_pool
 
     # ---- transpose ----

@@ -3840,6 +3840,16 @@ fs::path Config::ResolvePath(std::string_view value) const {
 namespace {
 
 void ValidateModelPaths(const Config& config) {
+  const auto& qwen = config.model.qwen38_graph;
+  ValidateConfigPath(qwen.head.filename_s1, "model.qwen38_graph.head.filename_s1");
+  ValidateConfigPath(qwen.head.filename_s2, "model.qwen38_graph.head.filename_s2");
+  ValidateConfigPath(qwen.fold.head_r2.filename, "model.qwen38_graph.fold.head_r2.filename");
+  ValidateConfigPath(qwen.plane_library, "model.qwen38_graph.plane_library");
+  ValidateConfigPath(qwen.ple_table, "model.qwen38_graph.ple_table");
+  ValidateConfigPath(qwen.prefill.dense.filename, "model.qwen38_graph.prefill.dense.filename");
+  ValidateConfigPath(qwen.prefill.head_kv.filename, "model.qwen38_graph.prefill.head_kv.filename");
+  ValidateConfigPath(qwen.prefill.weights_pool, "model.qwen38_graph.prefill.weights_pool");
+  ValidateConfigPath(qwen.prefill.constants, "model.qwen38_graph.prefill.constants");
   const auto& m = config.model;
   ValidateConfigPath(m.encoder.filename, "model.encoder.filename");
   ValidateConfigPath(m.embedding.filename, "model.embedding.filename");
@@ -3945,17 +3955,11 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
     }
   }
 
-  if (model.qwen38_graph.head.session_options.has_value()) {
-    for (const auto& provider_option : model.qwen38_graph.head.session_options->provider_options) {
-      model.qwen38_graph.head.session_options->providers.push_back(provider_option.name);
-    }
-  }
-
-  for (auto* extra : {&model.qwen38_graph.fold.head_r2.session_options, &model.qwen38_graph.prefill.dense.session_options,
-                      &model.qwen38_graph.prefill.head_kv.session_options}) {
-    if (extra->has_value()) {
-      for (const auto& provider_option : (*extra)->provider_options) {
-        (*extra)->providers.push_back(provider_option.name);
+  for (auto* options : {&model.qwen38_graph.head.session_options, &model.qwen38_graph.fold.head_r2.session_options,
+                        &model.qwen38_graph.prefill.dense.session_options, &model.qwen38_graph.prefill.head_kv.session_options}) {
+    if (options->has_value()) {
+      for (const auto& provider_option : (*options)->provider_options) {
+        (*options)->providers.push_back(provider_option.name);
       }
     }
   }
