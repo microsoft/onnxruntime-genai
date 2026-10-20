@@ -23,7 +23,7 @@ TEST(ConfigTest, ParsesDeterministicCompute) {
   OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":false}}}})");
   EXPECT_EQ(config.model.decoder.session_options.use_deterministic_compute, false);
   EXPECT_THROW(OverlayConfig(config,
-                            R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":"true"}}}})"),
+                             R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":"true"}}}})"),
                std::exception);
 }
 

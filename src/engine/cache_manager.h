@@ -261,7 +261,7 @@ struct PagedCacheManager : CacheManager {
     key_value_cache_->RecordPrefixPublicationRefusal();
   }
   const PrefixCacheMetrics* PrefixMetrics() const override {
-    return &key_value_cache_->PrefixMetrics();
+    return key_value_cache_->PrefixCachingEnabled() ? &key_value_cache_->PrefixMetrics() : nullptr;
   }
 
   PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }

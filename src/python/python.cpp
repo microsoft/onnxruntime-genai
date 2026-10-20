@@ -1034,7 +1034,16 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_capabilities", &OgaEngine::GetCapabilities)
       .def("max_draft_tokens_per_proposal", &OgaEngine::MaxDraftTokensPerProposal,
            "Speculative draft tokens a request may attach to one proposal; zero when unsupported.")
-      .def("get_speculative_stats", [](const OgaEngine& engine) { return ToSpeculativeStatsDict(*engine.GetSpeculativeStats()); }, "Return cumulative speculative-decoding telemetry.");
+      .def("get_speculative_stats", [](const OgaEngine& engine) { return ToSpeculativeStatsDict(*engine.GetSpeculativeStats()); }, "Return cumulative speculative-decoding telemetry.")
+      .def("get_prefix_cache_stats", [](const OgaEngine& engine) {
+        const auto stats = engine.GetPrefixCacheStats();
+        pybind11::dict result;
+        result["enabled"] = stats->GetBool("enabled");
+        result["lookups"] = stats->GetCount("lookups");
+        result["hits"] = stats->GetCount("hits");
+        result["matched_tokens"] = stats->GetCount("matched_tokens");
+        result["evictions"] = stats->GetCount("evictions");
+        return result; }, "Return cumulative prefix-cache adoption telemetry.");
 
   pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")
       .def(pybind11::init([](OgaModel& model) { return OgaStreamingProcessor::Create(model); }),

@@ -112,7 +112,9 @@ def get_target_pip_package_version(target_pip_package_name_list):
 
 def aggregate_measurements(measurements, aggregation):
     if not measurements:
-        raise ValueError("No measurements to aggregate (empty timing list). Check --repetitions / warmup / generation lengths.")
+        raise ValueError(
+            "No measurements to aggregate (empty timing list). Check --repetitions / warmup / generation lengths."
+        )
     if aggregation == "mean":
         return float(np.mean(measurements))
     if aggregation == "median":
@@ -255,7 +257,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
-            provider_to_append = "WebGpuExecutionProvider" if args.execution_provider == "webgpu" else args.execution_provider
+            provider_to_append = (
+                "WebGpuExecutionProvider" if args.execution_provider == "webgpu" else args.execution_provider
+            )
             if args.verbose:
                 print(f"Setting model to {provider_to_append}")
             config.append_provider(provider_to_append)
@@ -480,9 +484,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         generator_creation_latency_s * 1000 if generator_creation_latency_s is not None else None
     )
     first_warmup_append_tokens_latency_ms = (
-        first_warmup_append_tokens_latency_s * 1000
-        if first_warmup_append_tokens_latency_s is not None
-        else None
+        first_warmup_append_tokens_latency_s * 1000 if first_warmup_append_tokens_latency_s is not None else None
     )
     print(f"Model Creation Latency: {model_creation_latency_ms} ms")
     print(f"Tokenizer Creation Latency: {tokenizer_creation_latency_ms} ms")
@@ -510,7 +512,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     per_token_prompt_thrpt = batch_size * (1000 / per_token_prompt_latency_ms)
 
     # Time to first token = prompt prefill + first-token sampling
-    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times)]
+    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times, strict=False)]
     ttft_ms = aggregate_measurements(ttft_times, args.aggregation) * 1000
     std_ttft_ms = float(np.std(ttft_times)) * 1000
     print(f"{aggregation_label} Time to First Token: {ttft_ms} ms")
@@ -608,7 +610,7 @@ def main(args):
     elif args.execution_provider == "webgpu":
         print("WebGPU EP selected. Attempting to import 'onnxruntime-ep-webgpu' for registration...")
         try:
-            import onnxruntime_ep_webgpu as webgpu_ep
+            import onnxruntime_ep_webgpu as webgpu_ep  # noqa: PLC0415
         except ImportError as exc:
             raise ValueError(
                 "WebGPU EP selected but 'onnxruntime-ep-webgpu' is not installed. "

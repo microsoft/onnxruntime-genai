@@ -738,7 +738,6 @@ void MtpGenerator::RunRound() {
     return;
   }
 
-
   if (sampling_)
     GenerateStepMultiSample(t);
   else if (num_speculative_tokens_ == 1)

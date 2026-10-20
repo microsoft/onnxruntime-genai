@@ -271,6 +271,8 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   else()
     add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
   endif()
+  # The CUDA library calls GetEnv directly and cannot resolve the core library's hidden copy.
+  target_sources(onnxruntime-genai-cuda PRIVATE "${GENERATORS_ROOT}/models/env_utils.cpp")
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)

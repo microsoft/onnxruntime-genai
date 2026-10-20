@@ -538,7 +538,8 @@ __global__ void CopyStateSlotsKernel(const StateSlotDescGpu* __restrict__ descs,
   }
 }
 
-__global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restrict__ descs) {
+__global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restrict__ descs,
+                                         bool bounded_indexer_replay) {
   const StateUpdateReplayDescGpu descriptor = descs[blockIdx.y];
   const uint64_t stride = static_cast<uint64_t>(gridDim.x) * blockDim.x;
   const uint64_t start = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -571,6 +572,57 @@ __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restr
     const uint64_t new_buffer_length =
         (static_cast<uint64_t>(old_buffer_length) + descriptor.kept_count) %
         descriptor.compress_ratio;
+    if (bounded_indexer_replay) {
+      // Shared indexer state is append-only; separately published lengths keep the inactive tails
+      // invisible until later transitions overwrite them.
+      const uint64_t active_key_length =
+          min(descriptor.state_capacity, static_cast<uint64_t>(old_key_length) + new_block_count);
+      const uint64_t active_buffer_length = min(descriptor.aux_capacity, new_buffer_length);
+      const uint64_t active_entries = max(active_key_length, active_buffer_length);
+      for (uint64_t index = start; index < active_entries * descriptor.state_width; index += stride) {
+        const uint64_t entry = index / descriptor.state_width;
+        const uint64_t component = index % descriptor.state_width;
+        if (entry < active_key_length) {
+          uint64_t source_index = index;
+          const void* source = descriptor.source_state;
+          if (entry >= static_cast<uint64_t>(old_key_length)) {
+            const uint64_t completion_token =
+                descriptor.compress_ratio - old_buffer_length - 1 +
+                (entry - old_key_length) * descriptor.compress_ratio;
+            source = descriptor.value;
+            source_index = completion_token * descriptor.state_width + component;
+          }
+          if (descriptor.element_size == 2) {
+            static_cast<uint16_t*>(descriptor.destination_state)[index] =
+                static_cast<const uint16_t*>(source)[source_index];
+          } else {
+            static_cast<uint32_t*>(descriptor.destination_state)[index] =
+                static_cast<const uint32_t*>(source)[source_index];
+          }
+        }
+        if (entry < active_buffer_length) {
+          const uint64_t virtual_position = new_block_count * descriptor.compress_ratio + entry;
+          const bool from_old_buffer = virtual_position < static_cast<uint64_t>(old_buffer_length);
+          const uint64_t source_index =
+              (from_old_buffer ? virtual_position : virtual_position - old_buffer_length) *
+                  descriptor.state_width +
+              component;
+          const void* source = from_old_buffer ? descriptor.source_aux_state : descriptor.value;
+          if (descriptor.element_size == 2) {
+            static_cast<uint16_t*>(descriptor.destination_aux_state)[index] =
+                static_cast<const uint16_t*>(source)[source_index];
+          } else {
+            static_cast<uint32_t*>(descriptor.destination_aux_state)[index] =
+                static_cast<const uint32_t*>(source)[source_index];
+          }
+        }
+      }
+      if (blockIdx.x == 0 && threadIdx.x == 0) {
+        descriptor.destination_lengths[0] = old_key_length + static_cast<int32_t>(new_block_count);
+        descriptor.destination_lengths[1] = static_cast<int32_t>(new_buffer_length);
+      }
+      return;
+    }
     const uint64_t work_entries = descriptor.state_capacity > descriptor.aux_capacity
                                       ? descriptor.state_capacity
                                       : descriptor.aux_capacity;
@@ -758,7 +810,8 @@ void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_sl
 }
 
 void LaunchReplayStateUpdates(const void* descs, int fast_count, int generic_count,
-                              int fast_blocks_per_descriptor, cudaStream_t stream) {
+                              int fast_blocks_per_descriptor, bool bounded_indexer_replay,
+                              cudaStream_t stream) {
   const auto* typed = reinterpret_cast<const StateUpdateReplayDescGpu*>(descs);
   if (fast_count > 0) {
     const dim3 grid(static_cast<unsigned>(fast_blocks_per_descriptor), static_cast<unsigned>(fast_count));
@@ -767,7 +820,8 @@ void LaunchReplayStateUpdates(const void* descs, int fast_count, int generic_cou
   }
   if (generic_count > 0) {
     const dim3 grid(kSlotCopyBlocksPerTensor, static_cast<unsigned>(generic_count));
-    ReplayStateUpdatesKernel<<<grid, kSlotCopyThreads, 0, stream>>>(typed + fast_count);
+    ReplayStateUpdatesKernel<<<grid, kSlotCopyThreads, 0, stream>>>(
+        typed + fast_count, bounded_indexer_replay);
     CUDA_CHECK_LAUNCH();
   }
 }

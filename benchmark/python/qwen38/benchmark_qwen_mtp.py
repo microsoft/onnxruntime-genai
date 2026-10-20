@@ -90,8 +90,7 @@ def main():
         "do_sample": False,
         "overlay": overlay,
         "mode_overlay": mode_overlay,
-        "max_draft_tokens": overlay.get("speculative", {}).get("max_draft_tokens", 7)
-        if args.mode == "mtp" else 0,
+        "max_draft_tokens": overlay.get("speculative", {}).get("max_draft_tokens", 7) if args.mode == "mtp" else 0,
         "model_load_seconds": load_seconds,
         "warmup_runs": args.warmup,
         "measured_runs": args.repetitions,
@@ -138,24 +137,39 @@ def main():
                     if first_time is None:
                         first_time = now
                         if args.memory_markers:
-                            print("MEMORY_PHASE " + ("warmup" if run < args.warmup else "measured") + "_decode", flush=True)
+                            print(
+                                "MEMORY_PHASE " + ("warmup" if run < args.warmup else "measured") + "_decode",
+                                flush=True,
+                            )
                     last_time = now
                 if event.flags & og.EngineEventFlags.TURN_FINISHED:
                     finished = True
             steps += 1
             if args.step_timings:
                 stats_now = engine.get_speculative_stats()
-                step_timings.append({
-                    "step": steps,
-                    "start_ns": step_start_ns,
-                    "engine_end_ns": int(now * 1e9),
-                    "observed_end_ns": time.perf_counter_ns(),
-                    "tokens_before": previous_tokens,
-                    "tokens_after": len(output_tokens),
-                    "stats": {key: stats_now[key] for key in (
-                        "rounds", "draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted",
-                        "draft_forward_passes", "target_forward_passes", "standard_fallback_steps", "mtp_failures")},
-                })
+                step_timings.append(
+                    {
+                        "step": steps,
+                        "start_ns": step_start_ns,
+                        "engine_end_ns": int(now * 1e9),
+                        "observed_end_ns": time.perf_counter_ns(),
+                        "tokens_before": previous_tokens,
+                        "tokens_after": len(output_tokens),
+                        "stats": {
+                            key: stats_now[key]
+                            for key in (
+                                "rounds",
+                                "draft_tokens_proposed",
+                                "draft_tokens_evaluated",
+                                "draft_tokens_accepted",
+                                "draft_forward_passes",
+                                "target_forward_passes",
+                                "standard_fallback_steps",
+                                "mtp_failures",
+                            )
+                        },
+                    }
+                )
             capture_run = run >= args.warmup if args.capture_each_decode else run == args.warmup
             if cudart is not None and capture_run and first_time is not None:
                 if args.capture_prefill and not capture_stopped:
@@ -199,13 +213,21 @@ def main():
             row["step_timings"] = step_timings
         results["runs"].append(row)
         args.output.write_text(json.dumps(results, indent=2) + "\n")
-        print(json.dumps({key: value for key, value in row.items()
-                          if key not in {"speculative_stats", "token_ids", "step_timings"}}), flush=True)
+        print(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"speculative_stats", "token_ids", "step_timings"}
+                }
+            ),
+            flush=True,
+        )
         request.close()
         del event, events, turn, request, request_options, buffer, engine
         if args.memory_markers:
             print("MEMORY_PHASE between_requests", flush=True)
-    measured = results["runs"][args.warmup:]
+    measured = results["runs"][args.warmup :]
     results["summary"] = {
         "decode_tps": sum(row["output_tokens"] - 1 for row in measured)
         / sum(row["decode_seconds"] for row in measured),

@@ -58,8 +58,7 @@ namespace {
 
 struct CpuEngram {
   explicit CpuEngram(const DecoderOnly_Model& model)
-      : config{model.config_->model.engram}, session{*model.session_engram_},
-        pad_id{model.config_->model.decoder.ple_token_pad_id} {
+      : config{model.config_->model.engram}, session{*model.session_engram_}, pad_id{model.config_->model.decoder.ple_token_pad_id} {
     const auto history_shape = model.session_info_.GetInputShape(config.inputs.past_tokens);
     const auto output_shape = model.session_info_.GetOutputShape(config.outputs.embeddings);
     const auto& decoder_input = model.config_->model.decoder.inputs.engram_embeddings;
@@ -124,13 +123,13 @@ struct CpuEngram {
       auto past_tensor = OrtValue::CreateTensor(cpu_memory, past.data(), past.size() * sizeof(int64_t),
                                                 past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
       auto embeddings = OrtValue::CreateTensor(*output_memory, host.data() + offset * row_bytes,
-                                                ids.size() * row_bytes, embeddings_shape, type);
+                                               ids.size() * row_bytes, embeddings_shape, type);
       auto present = present_tokens
-             ? OrtValue::CreateTensor(cpu_memory, present_span.CpuSpan().data() + history_offset,
-                      static_cast<size_t>(history_length) * sizeof(int64_t),
-                      past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
-             : OrtValue::CreateTensor(GetDeviceInterface(DeviceType::CPU)->GetAllocator(),
-                      past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+                         ? OrtValue::CreateTensor(cpu_memory, present_span.CpuSpan().data() + history_offset,
+                                                  static_cast<size_t>(history_length) * sizeof(int64_t),
+                                                  past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+                         : OrtValue::CreateTensor(GetDeviceInterface(DeviceType::CPU)->GetAllocator(),
+                                                  past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
       const char* input_names[]{config.inputs.input_ids.c_str(), config.inputs.past_tokens.c_str()};
       OrtValue* input_values[]{ids_tensor.get(), past_tensor.get()};
       const char* output_names[]{config.outputs.embeddings.c_str(), config.outputs.present_tokens.c_str()};
@@ -380,7 +379,8 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
     plan.buffers[GraphBufferPlan::kEmbeddings] = {
         model.session_info_.GetInputDataType(name),
         {rows, model.config_->model.engram.filename.empty()
-                   ? hidden_size : model.session_info_.GetInputShape(name).back()}};
+                   ? hidden_size
+                   : model.session_info_.GetInputShape(name).back()}};
   }
   plan.buffers[GraphBufferPlan::kCumulativeSequenceLengths] = {Ort::TypeToTensorType<int32_t>,
                                                                {batch + 1}};
@@ -502,7 +502,7 @@ std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t 
     ++columns_bucket;
   }
   return GraphAnnotationIds::Key{batch_size, tokens_per_request, columns_bucket, state_binding_key,
-                                  state_binding_domain};
+                                 state_binding_domain};
 }
 
 VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,

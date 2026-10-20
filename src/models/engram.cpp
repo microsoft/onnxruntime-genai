@@ -49,13 +49,13 @@ void EngramState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens) {
   const int64_t batch_size = params_->BatchBeamSize();
   const int64_t sequence_length = static_cast<int64_t>(next_tokens.size()) / batch_size;
   input_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_,
-      std::array<int64_t, 2>{batch_size, sequence_length}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+                                      std::array<int64_t, 2>{batch_size, sequence_length}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
   const auto tokens_cpu = next_tokens.CpuSpan();
   std::transform(tokens_cpu.begin(), tokens_cpu.end(), input_ids_->GetTensorMutableData<int64_t>(),
                  [](int32_t token) { return static_cast<int64_t>(token); });
   inputs_[input_ids_index_] = input_ids_.get();
   embeddings_output_ = OrtValue::CreateTensor(model_.allocator_cpu_,
-      std::array<int64_t, 3>{batch_size, sequence_length, embeddings_width_}, embeddings_type_);
+                                              std::array<int64_t, 3>{batch_size, sequence_length, embeddings_width_}, embeddings_type_);
   outputs_[embeddings_output_index_] = embeddings_output_.get();
   if (!first_run_) {
     std::swap(past_tokens_, present_tokens_);
@@ -89,7 +89,7 @@ void EngramState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens) {
 }
 
 DeviceSpan<float> EngramState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
-                                    DeviceSpan<int32_t> next_indices) {
+                                   DeviceSpan<int32_t> next_indices) {
   (void)current_length;
   (void)next_tokens;
   (void)next_indices;
@@ -128,8 +128,7 @@ void EngramState::CopyEmbeddingsTo(OrtValue& destination) {
       source_info->GetElementCount() != destination_info->GetElementCount()) {
     throw std::runtime_error("Engram output must match the decoder Engram input type and shape");
   }
-  ByteWrapTensor(*model_.p_device_inputs_, destination).CopyFrom(
-      ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *embeddings_output_));
+  ByteWrapTensor(*model_.p_device_inputs_, destination).CopyFrom(ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *embeddings_output_));
 }
 
 void EngramState::RewindTo(size_t index) {

@@ -38,6 +38,14 @@ struct Result {
   std::string what_;
 };
 
+struct PrefixCacheStats {
+  bool enabled{};
+  uint64_t lookups{};
+  uint64_t hits{};
+  uint64_t matched_tokens{};
+  uint64_t evictions{};
+};
+
 struct EngineEventBuffer {
   EngineEventBuffer(
       std::weak_ptr<Engine> bound_engine,
@@ -104,6 +112,7 @@ struct OgaResult : Generators::Result, OgaAbstract {};
 struct OgaRuntimeSettings : Generators::RuntimeSettings, OgaAbstract {};
 struct OgaSequences : Generators::TokenSequences, OgaAbstract {};
 struct OgaSpeculativeStats : Generators::SpeculativeStats, OgaAbstract {};
+struct OgaPrefixCacheStats : Generators::PrefixCacheStats, OgaAbstract {};
 struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
@@ -1785,6 +1794,68 @@ OgaResult* OgaEngineGetSpeculativeStats(
   }
   *out = ReturnUnique<OgaSpeculativeStats>(
       std::make_unique<Generators::SpeculativeStats>(engine->GetSpeculativeStats()));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineGetPrefixCacheStats(
+    const OgaEngine* engine, OgaPrefixCacheStats** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = nullptr;
+  if (!engine) {
+    throw std::runtime_error("engine must not be null.");
+  }
+  auto snapshot = std::make_unique<Generators::PrefixCacheStats>();
+  if (const auto stats = engine->PrefixCacheStats()) {
+    snapshot->enabled = true;
+    snapshot->lookups = stats->lookups;
+    snapshot->hits = stats->hits;
+    snapshot->matched_tokens = stats->matched_tokens;
+    snapshot->evictions = stats->evictions;
+  }
+  *out = ReturnUnique<OgaPrefixCacheStats>(std::move(snapshot));
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyPrefixCacheStats(OgaPrefixCacheStats* stats) {
+  delete static_cast<Generators::PrefixCacheStats*>(stats);
+}
+
+OgaResult* OGA_API_CALL OgaPrefixCacheStatsGetCount(
+    const OgaPrefixCacheStats* stats, const char* name, uint64_t* value) {
+  OGA_TRY
+  if (!stats || !name || !value) {
+    throw std::runtime_error("stats, name, and value must not be null.");
+  }
+  if (std::strcmp(name, "lookups") == 0) {
+    *value = stats->lookups;
+  } else if (std::strcmp(name, "hits") == 0) {
+    *value = stats->hits;
+  } else if (std::strcmp(name, "matched_tokens") == 0) {
+    *value = stats->matched_tokens;
+  } else if (std::strcmp(name, "evictions") == 0) {
+    *value = stats->evictions;
+  } else {
+    throw std::runtime_error(std::string(name) + " is an invalid name for OgaPrefixCacheStatsGetCount.");
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaPrefixCacheStatsGetBool(
+    const OgaPrefixCacheStats* stats, const char* name, bool* value) {
+  OGA_TRY
+  if (!stats || !name || !value) {
+    throw std::runtime_error("stats, name, and value must not be null.");
+  }
+  if (std::strcmp(name, "enabled") != 0) {
+    throw std::runtime_error(std::string(name) + " is an invalid name for OgaPrefixCacheStatsGetBool.");
+  }
+  *value = stats->enabled;
   return nullptr;
   OGA_CATCH
 }

@@ -107,9 +107,7 @@ def make_sparse_model(paged):
     model.make_key_value_cache_names = MethodType(
         lambda self, layer_id: ("past_key", "past_value", "present_key", "present_value"), model
     )
-    model.make_selected_counts = MethodType(
-        lambda self, layer_id, selected, capacity, packed: "selected_counts", model
-    )
+    model.make_selected_counts = MethodType(lambda self, layer_id, selected, capacity, packed: "selected_counts", model)
     model.make_attention_output_proj = MethodType(lambda self, layer_id, attention, root_input: None, model)
     return model
 
@@ -219,7 +217,11 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
 
     config.ple_layer_ids = [2]
     external_model = Qwen4ExpTextModel(
-        config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None,
+        config,
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        "cuda",
+        None,
         {"external_engram": True, "state_update_capacity": 7, "text_only": True},
     )
     assert not external_model.use_cpu_embedding_gather
@@ -288,9 +290,7 @@ def test_qwen38_gated_delta_net_expansion_emits_linear_attention():
     model.input_names = {"past.recurrent": {4: "past"}}
     model.output_names = {"present.recurrent": {4: "present"}}
     record_calls(model, ["make_linear_attention"])
-    model.make_gated_delta_net_gates_expansion = MethodType(
-        lambda self, *args: ("q", "k", "v", "decay", "beta"), model
-    )
+    model.make_gated_delta_net_gates_expansion = MethodType(lambda self, *args: ("q", "k", "v", "decay", "beta"), model)
 
     output = model.make_gated_delta_net_expansion(4, SimpleNamespace(), "conv", "b", "a")
 
@@ -329,9 +329,7 @@ def test_qwen38_dense_linear_attention_layer_always_emits_gated_delta_net():
     model.make_gated_delta_net_layer = MethodType(
         lambda self, *args: calls.append(("gated_delta_net", args)) or "gdn_output", model
     )
-    model.make_linear_attention_output_proj = MethodType(
-        lambda self, *args: calls.append(("output_proj", args)), model
-    )
+    model.make_linear_attention_output_proj = MethodType(lambda self, *args: calls.append(("output_proj", args)), model)
     model.make_linear_attention = MethodType(
         lambda self, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected expansion")), model
     )
@@ -575,9 +573,7 @@ def test_qwen_attention_emits_packed_qkv_with_separate_gate_and_indexer_qk():
     assert model.attention_attrs["k_path"] == ""
     assert model.attention_attrs["v_path"] == ""
     assert model.attention_attrs["gate_path"] == "/model/layers.3/attn/gate_proj/MatMul/output_0"
-    assert model.attention_attrs["indexer_qk_path"] == (
-        "/model/layers.3/attn/indexer/index_qk_proj/MatMul/output_0"
-    )
+    assert model.attention_attrs["indexer_qk_path"] == ("/model/layers.3/attn/indexer/index_qk_proj/MatMul/output_0")
 
 
 def test_packed_matmul_class_concatenates_four_int4_projections():
@@ -762,9 +758,7 @@ def test_dense_branchwise_norm_emits_fused_op():
     model.layernorm_attrs = {"epsilon": 1e-6}
     record_calls(model, ["make_initializer", "make_node", "make_value"])
 
-    output = model.make_branchwise_rms_norm(
-        "/norm", "hidden_states", SimpleNamespace(weight=torch.zeros(32)), 8
-    )
+    output = model.make_branchwise_rms_norm("/norm", "hidden_states", SimpleNamespace(weight=torch.zeros(32)), 8)
 
     assert output == "/norm/output_0"
     norm = emitted_nodes(model)[0]
@@ -870,8 +864,9 @@ def test_final_hidden_states_output_connects_to_post_mix(paged, pre_final):
     model.exclude_lm_head = False
     model.output_names = {"hidden_states": "hidden_states_out"}
     model.layernorm_attrs = {"root_input": "hidden_states", "skip_input": "attention_output"}
-    record_calls(model, ["make_node", "make_value", "make_qwen_sparse_attention",
-                         "make_moe_preprocessing", "make_moe_router"])
+    record_calls(
+        model, ["make_node", "make_value", "make_qwen_sparse_attention", "make_moe_preprocessing", "make_moe_router"]
+    )
     model.get_attn_module = MethodType(lambda self, *args: object(), model)
     model.get_moe_module = MethodType(lambda self, *args: object(), model)
     model.make_moe_subgraph = MethodType(lambda self, *args: "moe_output", model)
@@ -924,13 +919,9 @@ def test_qwen_hyper_connection_expansions_emit_standard_onnx():
         ],
     )
 
-    model.make_branchwise_rms_norm_expansion(
-        "/norm", "streams", SimpleNamespace(weight=torch.zeros(32)), 8
-    )
+    model.make_branchwise_rms_norm_expansion("/norm", "streams", SimpleNamespace(weight=torch.zeros(32)), 8)
     model.make_scaled_silu_expansion("/silu", "down", ["batch_size", "sequence_length", 4], 0.25)
-    model.make_hyper_connection_pre_mix_expansion(
-        "/pre", "normalized", "pre_mix", ["batch_size", "sequence_length"], 8
-    )
+    model.make_hyper_connection_pre_mix_expansion("/pre", "normalized", "pre_mix", ["batch_size", "sequence_length"], 8)
     model.make_hyper_connection_post_mix_expansion(
         "/post", "streams", "block_output", "post_mix", ["batch_size", "sequence_length"], 8
     )
@@ -1203,9 +1194,7 @@ def test_dense_ple_emits_verified_contrib_schemas():
 
     model.make_ple(1, ple, "hidden_states")
 
-    assert model.external_data_files == {
-        "model.ple.ngram_embedding.weight": "engram.onnx.data"
-    }
+    assert model.external_data_files == {"model.ple.ngram_embedding.weight": "engram.onnx.data"}
 
     nodes = emitted_nodes(model)
     ngram = next(kwargs for op_type, kwargs in nodes if op_type == "NGramHashMapping")
@@ -1231,9 +1220,7 @@ def test_dense_ple_emits_verified_contrib_schemas():
     assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
     assert not any(op_type == "GatherND" for op_type, _ in nodes)
 
-    embedding_initializers = {
-        args[1]: args[0] for method, args, _ in model.calls if method == "make_initializer"
-    }
+    embedding_initializers = {args[1]: args[0] for method, args, _ in model.calls if method == "make_initializer"}
     assert embedding_initializers["model.ple.ngram_embedding.weight"].dtype == torch.float8_e4m3fn
     assert embedding_initializers["model.ple.ngram_embedding.weight_scale"].shape == (1, 1)
 
@@ -1279,9 +1266,7 @@ def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
         "model.ple.ngram_embedding.weight_scale",
     ]
     assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
-    assert model.external_data_files == {
-        "model.ple.ngram_embedding.weight": "engram.onnx.data"
-    }
+    assert model.external_data_files == {"model.ple.ngram_embedding.weight": "engram.onnx.data"}
     conv = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenCausalConvWithState")
     assert conv["inputs"] == [
         "/model/layers.1/ple/EngramGate/FlattenNormed/output_0",
@@ -1334,12 +1319,14 @@ def test_paged_ple_appends_compact_token_and_conv_updates(external_engram):
         assert not any(op_type == "GatherBlockQuantized" for op_type, _ in nodes)
         assert not any(op_type == "Identity" for op_type, _ in nodes)
         assert ngram["outputs"][1] == "present.1.ple_tokens"
-        projections = [args for method, args, _ in model.calls
-                       if method == "make_matmul" and args[1].endswith(("/key_proj/MatMul", "/value_proj/MatMul"))]
+        projections = [
+            args
+            for method, args, _ in model.calls
+            if method == "make_matmul" and args[1].endswith(("/key_proj/MatMul", "/value_proj/MatMul"))
+        ]
         assert len(projections) == 2
         assert all(args[2] == "engram_embeddings" for args in projections)
-        assert not any(method == "make_initializer" and "ngram_embedding" in args[1]
-                       for method, args, _ in model.calls)
+        assert not any(method == "make_initializer" and "ngram_embedding" in args[1] for method, args, _ in model.calls)
 
 
 def test_paged_ple_emits_packed_engram_gate_shapes():
@@ -1362,11 +1349,7 @@ def test_paged_ple_emits_packed_engram_gate_shapes():
     assert reshapes["/model/layers.1/ple/EngramGate/Flatten"][1][1] == "/model/constants/INT64/[-1, 16]"
     assert reshapes["/model/layers.1/ple/EngramGate/FlattenNormed"][1][1] == "/model/constants/INT64/[-1, 16]"
 
-    value_shapes = {
-        args[0]: args[2]
-        for method, args, _ in model.calls
-        if method == "make_value" and len(args) >= 3
-    }
+    value_shapes = {args[0]: args[2] for method, args, _ in model.calls if method == "make_value" and len(args) >= 3}
     assert value_shapes["/model/layers.1/ple/EngramGate/output_0"] == ["num_tokens", 2, 8]
     assert value_shapes["/model/layers.1/ple/EngramGate/output_1"] == ["num_tokens", 2, 8]
 
@@ -1375,10 +1358,12 @@ def test_ple_reuses_model_level_embedding_initializers():
     model, ple = make_ple_model(paged=True, fp8_embedding=True)
 
     model.make_ple(1, ple, "hidden_states")
-    model.values.update({
-        "model.ple.ngram_embedding.weight": object(),
-        "model.ple.ngram_embedding.weight_scale": object(),
-    })
+    model.values.update(
+        {
+            "model.ple.ngram_embedding.weight": object(),
+            "model.ple.ngram_embedding.weight_scale": object(),
+        }
+    )
     model.input_names["past.ple_tokens"][2] = "past.2.ple_tokens"
     model.input_names["past.ple_conv"][2] = "past.2.ple_conv"
     model.output_names["present.ple_tokens"][2] = "present.2.ple_tokens"
@@ -1430,10 +1415,18 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path, ple_layer_id
     assert {prop.key: prop.value for prop in gather.metadata_props} == {"layer_ann": "cpu_embedding"}
     reshape = next(node for node in exported.graph.node if node.op_type == "Reshape")
     assert list(reshape.output) == ["engram_embeddings"]
-    table = next(initializer for initializer in exported.graph.initializer
-                 if initializer.name == "model.ple.ngram_embedding.weight")
+    table = next(
+        initializer
+        for initializer in exported.graph.initializer
+        if initializer.name == "model.ple.ngram_embedding.weight"
+    )
     assert next(entry.value for entry in table.external_data if entry.key == "location") == "engram.onnx.data"
-    session = ort.InferenceSession(str(tmp_path / "engram.onnx"), providers=["CPUExecutionProvider"])
+    try:
+        session = ort.InferenceSession(str(tmp_path / "engram.onnx"), providers=["CPUExecutionProvider"])
+    except ort.capi.onnxruntime_pybind11_state.Fail as error:
+        if "NGramHashMapping(-1) is not a registered function/op" not in str(error):
+            raise
+        pytest.skip("Installed ONNX Runtime does not include NGramHashMapping")
     inputs = {
         "input_ids": np.array([[1, 2, 3]], dtype=np.int64),
         f"past.{ple_layer_id}.ple_tokens": np.zeros((1, 2), dtype=np.int64),
@@ -1442,12 +1435,20 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path, ple_layer_id
     assert embeddings.shape == (1, 3, 8)
     assert np.isfinite(embeddings).all()
     np.testing.assert_array_equal(history, [[2, 3]])
-    next_embeddings, next_history = session.run(None, {
-        "input_ids": np.array([[4]], dtype=np.int64), f"past.{ple_layer_id}.ple_tokens": history,
-    })
-    full_embeddings, full_history = session.run(None, {
-        **inputs, "input_ids": np.array([[1, 2, 3, 4]], dtype=np.int64),
-    })
+    next_embeddings, next_history = session.run(
+        None,
+        {
+            "input_ids": np.array([[4]], dtype=np.int64),
+            f"past.{ple_layer_id}.ple_tokens": history,
+        },
+    )
+    full_embeddings, full_history = session.run(
+        None,
+        {
+            **inputs,
+            "input_ids": np.array([[1, 2, 3, 4]], dtype=np.int64),
+        },
+    )
     np.testing.assert_array_equal(next_embeddings, full_embeddings[:, -1:, :])
     np.testing.assert_array_equal(next_history, full_history)
 
@@ -1475,11 +1476,17 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
 
     def component(filename):
         builder = Model.__new__(Model)
-        builder.model = ir.Model(ir.Graph(
-            inputs=(), outputs=(), nodes=(),
-            initializers=[ir.Value(name=table_name, const_value=table)],
-            opset_imports={"": 22},
-        ), ir_version=10, producer_name="onnxruntime-genai")
+        builder.model = ir.Model(
+            ir.Graph(
+                inputs=(),
+                outputs=(),
+                nodes=(),
+                initializers=[ir.Value(name=table_name, const_value=table)],
+                opset_imports={"": 22},
+            ),
+            ir_version=10,
+            producer_name="onnxruntime-genai",
+        )
         builder.filename = filename
         builder.cache_dir = str(tmp_path / "cache")
         builder.quant_type = None
@@ -1500,15 +1507,23 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
         layers=[None, SimpleNamespace(ple=ple)],
         embed_tokens=SimpleNamespace(weight=torch.zeros((2, 8))),
     )
-    wrapper.decoder.load_weights = lambda _: SimpleNamespace(model=SimpleNamespace(language_model=language_model, visual=None))
+    wrapper.decoder.load_weights = lambda _: SimpleNamespace(
+        model=SimpleNamespace(language_model=language_model, visual=None)
+    )
     wrapper.mtp = component("mtp.onnx") if include_mtp else None
     if wrapper.mtp is not None:
         wrapper.mtp.use_paged_attention = False
     wrapper.mtp_attrs = {}
     wrapper.share_initializers = lambda *args: []
     saved_components = []
-    monkeypatch.setattr("models.builders.qwen3_8.Qwen4ExpEmbeddingModel", lambda *args: SimpleNamespace(save_model=lambda _: saved_components.append("embedding")))
-    monkeypatch.setattr("models.builders.qwen3_8.Qwen4ExpVisionModel", lambda *args: SimpleNamespace(save_model=lambda _: saved_components.append("vision")))
+    monkeypatch.setattr(
+        "models.builders.qwen3_8.Qwen4ExpEmbeddingModel",
+        lambda *args: SimpleNamespace(save_model=lambda _: saved_components.append("embedding")),
+    )
+    monkeypatch.setattr(
+        "models.builders.qwen3_8.Qwen4ExpVisionModel",
+        lambda *args: SimpleNamespace(save_model=lambda _: saved_components.append("vision")),
+    )
 
     wrapper.save_model(tmp_path)
 
@@ -1521,18 +1536,22 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
     offsets = [next(entry.value for entry in value.external_data if entry.key == "offset") for value in tables]
     assert offsets == [offsets[0]] * len(tables)
     data_file = "engram.onnx.data"
-    assert all(next(entry.value for entry in value.external_data if entry.key == "location") == data_file
-               for value in tables)
+    assert all(
+        next(entry.value for entry in value.external_data if entry.key == "location") == data_file for value in tables
+    )
     loaded = [onnx.load(tmp_path / filename, load_external_data=True) for filename in filenames]
-    table_values = [onnx.numpy_helper.to_array(next(value for value in model.graph.initializer
-                                                    if value.name == table_name)) for model in loaded]
+    table_values = [
+        onnx.numpy_helper.to_array(next(value for value in model.graph.initializer if value.name == table_name))
+        for model in loaded
+    ]
     assert all((value == table_values[0]).all() for value in table_values[1:])
     if native_fp8:
         assert all(value.data_type == onnx.TensorProto.FLOAT8E4M3FN for value in tables)
         expected_bytes = embedding.ngram_embedding.weight.view(torch.uint8).numpy()
         assert all((value.view("uint8") == expected_bytes).all() for value in table_values)
-        scale = next(value for value in loaded[0].graph.initializer
-                     if value.name == "model.ple.ngram_embedding.weight_scale")
+        scale = next(
+            value for value in loaded[0].graph.initializer if value.name == "model.ple.ngram_embedding.weight_scale"
+        )
         assert scale.data_type == onnx.TensorProto.FLOAT
         assert onnx.numpy_helper.to_array(scale).item() == 0.25
         assert embedding.ngram_embedding.weight_scale.dtype == torch.bfloat16
@@ -1549,15 +1568,18 @@ def test_text_only_config_connects_external_engram(
     tmp_path, include_mtp, ple_layer_id, ep, moe_quant_type, weights_prepacked
 ):
     def write_decoder_config(config, extra_kwargs, out_dir):
-        (out_dir / "genai_config.json").write_text(json.dumps({
-            "model": {"type": "qwen4_exp_text", "decoder": {"inputs": {}}},
-        }))
+        (out_dir / "genai_config.json").write_text(
+            json.dumps(
+                {
+                    "model": {"type": "qwen4_exp_text", "decoder": {"inputs": {}}},
+                }
+            )
+        )
 
     wrapper = object.__new__(Qwen4ExpModel)
     wrapper.text_only = True
     wrapper.decoder = SimpleNamespace(
-        make_genai_config=write_decoder_config, ep=ep,
-        moe_attrs={"quant_type": moe_quant_type}
+        make_genai_config=write_decoder_config, ep=ep, moe_attrs={"quant_type": moe_quant_type}
     )
     if weights_prepacked is not None:
         wrapper.decoder.moe_attrs["weights_prepacked"] = weights_prepacked
@@ -1565,7 +1587,9 @@ def test_text_only_config_connects_external_engram(
     mtp_calls = []
     wrapper.add_mtp_to_genai_config = lambda directory: mtp_calls.append(directory)
 
-    wrapper.make_genai_config(SimpleNamespace(text_config=SimpleNamespace(ple_layer_ids=[ple_layer_id + 1])), {}, tmp_path)
+    wrapper.make_genai_config(
+        SimpleNamespace(text_config=SimpleNamespace(ple_layer_ids=[ple_layer_id + 1])), {}, tmp_path
+    )
 
     config = json.loads((tmp_path / "genai_config.json").read_text())["model"]
     assert config["type"] == "qwen4_exp_text"
@@ -1575,10 +1599,12 @@ def test_text_only_config_connects_external_engram(
     )
     assert config["engram"]["filename"] == "engram.onnx"
     assert config["engram"]["inputs"] == {
-        "input_ids": "input_ids", "past_ple_token_names": f"past.{ple_layer_id}.ple_tokens",
+        "input_ids": "input_ids",
+        "past_ple_token_names": f"past.{ple_layer_id}.ple_tokens",
     }
     assert config["engram"]["outputs"] == {
-        "embeddings": "engram_embeddings", "present_ple_token_names": f"present.{ple_layer_id}.ple_tokens",
+        "embeddings": "engram_embeddings",
+        "present_ple_token_names": f"present.{ple_layer_id}.ple_tokens",
     }
     assert config["engram"]["session_options"]["provider_options"] == [{ep: {}}]
     assert config["engram"]["session_options"].get("session.layer_assignment_settings") == (

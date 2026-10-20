@@ -3,35 +3,17 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import onnx_ir as ir
 import pytest
 import torch
+from _builder_test_utils import load_builder_module
 
-BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parent))
-
-
-def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-sys.modules.setdefault("models", types.ModuleType("models"))
-builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
-builders_package.__path__ = [str(BUILDERS_DIR)]
-
-base_module = _load_builder_module("base")
-qwen_module = _load_builder_module("qwen")
-Model = base_module.Model
+base_module = load_builder_module("base")
+qwen_module = load_builder_module("qwen")
+Model = qwen_module.Model
 Qwen35TextModel = qwen_module.Qwen35TextModel
 
 from loaders.base import QuantizedTensorModule  # noqa: E402

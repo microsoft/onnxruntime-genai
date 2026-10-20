@@ -106,6 +106,24 @@ struct OgaSpeculativeStats : OgaAbstract {
   }
 };
 
+struct OgaPrefixCacheStats : OgaAbstract {
+  uint64_t GetCount(const char* name) const {
+    uint64_t value{};
+    OgaCheckResult(OgaPrefixCacheStatsGetCount(this, name, &value));
+    return value;
+  }
+
+  bool GetBool(const char* name) const {
+    bool value{};
+    OgaCheckResult(OgaPrefixCacheStatsGetBool(this, name, &value));
+    return value;
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyPrefixCacheStats(reinterpret_cast<OgaPrefixCacheStats*>(p));
+  }
+};
+
 struct OgaFloat16_t;
 struct OgaBFloat16_t;
 
@@ -1231,6 +1249,12 @@ struct OgaEngine : OgaAbstract {
     OgaSpeculativeStats* stats;
     OgaCheckResult(OgaEngineGetSpeculativeStats(this, &stats));
     return std::unique_ptr<OgaSpeculativeStats>(stats);
+  }
+
+  std::unique_ptr<OgaPrefixCacheStats> GetPrefixCacheStats() const {
+    OgaPrefixCacheStats* stats{};
+    OgaCheckResult(OgaEngineGetPrefixCacheStats(this, &stats));
+    return std::unique_ptr<OgaPrefixCacheStats>(stats);
   }
 
   std::unique_ptr<OgaRequest> CreateRequest(

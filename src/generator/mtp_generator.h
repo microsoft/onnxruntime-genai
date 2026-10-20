@@ -188,7 +188,7 @@ struct MtpGenerator {
   DeviceSpan<int32_t> verify_argmax_device_;
 
   // --- Speculative-sampling (do_sample=true) state. ---
-  bool sampling_{false};                // true when do_sample && temperature > 0: use rejection sampling
+  bool sampling_{false};  // true when do_sample && temperature > 0: use rejection sampling
   float verify_margin_threshold_{};
   int top_k_{};                         // top-k truncation shared by draft (q) and target (p) distributions
   float top_p_{};                       // top-p (nucleus) truncation
@@ -207,10 +207,10 @@ struct MtpGenerator {
   int topk_k_{};                                  // effective k used for the last device top-k
 
   // Loop carry state (see the design doc draft/verify invariant):
-  int32_t next_token_{};  // token predicted for the current cache length L (not yet committed)
-  size_t length_{};       // committed cache length L
-  size_t prompt_length_{};       // committed cache length L
-  bool primed_{false};    // whether AppendTokens has run the prompt
+  int32_t next_token_{};    // token predicted for the current cache length L (not yet committed)
+  size_t length_{};         // committed cache length L
+  size_t prompt_length_{};  // committed cache length L
+  bool primed_{false};      // whether AppendTokens has run the prompt
   bool done_{false};
   // Pipelined draft: on an accepted step the next step's draft is computed ahead (fused into the
   // post-accept KV-advance as one 2-token MTP forward), so the next GenerateNextToken reuses it

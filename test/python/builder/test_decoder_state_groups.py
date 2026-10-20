@@ -3,34 +3,16 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
-import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
+from _builder_test_utils import load_builder_module
 
-BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parent))
-
-
-def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-sys.modules.setdefault("models", types.ModuleType("models"))
-builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
-builders_package.__path__ = [str(BUILDERS_DIR)]
-
-base_module = _load_builder_module("base")
-qwen_module = _load_builder_module("qwen")
-Model = base_module.Model
+base_module = load_builder_module("base")
+qwen_module = load_builder_module("qwen")
+Model = qwen_module.Model
 Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen4ExpTextModel = qwen_module.Qwen4ExpTextModel
 
@@ -868,7 +850,7 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     calls = []
     monkeypatch.setattr(Model, "make_gated_delta_net", lambda self, name, **kwargs: calls.append((name, kwargs)))
 
-    a_log = qwen_module.torch.tensor([0.25, -0.5, 0.0])
+    a_log = torch.tensor([0.25, -0.5, 0.0])
     output = model.make_gated_delta_net_layer(
         1,
         SimpleNamespace(A_log=a_log, dt_bias="dt_bias_value"),

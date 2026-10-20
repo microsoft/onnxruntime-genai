@@ -63,10 +63,10 @@ void DecoderOnly_Model::InitializeIndexShare(const Config::Model::Mtp::IndexShar
   }
   {
     if (!decode_info.HasInput("mode") || !decode_info.HasInput("projection_rows") ||
-      decode_info.GetInputDataType("mode") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
-      decode_info.GetInputShape("mode") != std::vector<int64_t>{1} ||
-      decode_info.GetInputDataType("projection_rows") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
-      decode_info.GetInputShape("projection_rows").size() != 1) {
+        decode_info.GetInputDataType("mode") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+        decode_info.GetInputShape("mode") != std::vector<int64_t>{1} ||
+        decode_info.GetInputDataType("projection_rows") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+        decode_info.GetInputShape("projection_rows").size() != 1) {
       throw std::runtime_error("IndexShare requires an int32[1] mode and int64 projection rows.");
     }
   }
