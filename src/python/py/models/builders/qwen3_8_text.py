@@ -18,6 +18,10 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
     prepare_engram_embedding = EngramWeights.prepare_engram_embedding
     get_engram_pad_id = EngramWeights.get_engram_pad_id
 
+    def resolve_model_loader(self):
+        """Load Qwen4-Exp weights independently of the Qwen3.5 multimodal runtime alias."""
+        return self.resolve_transformers_class("Qwen4ExpForConditionalGeneration")
+
     def is_packed_matmul_supported(self):
         return Model.is_packed_matmul_supported(self)
 
