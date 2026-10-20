@@ -377,6 +377,8 @@ void Qwen38GraphEngine::BuildTarget() {
   const auto& q = model_.config_->model.qwen38_graph;
   const auto in_names = session.GetInputNames();
   const auto out_names = session.GetOutputNames();
+  if (fold_ && info.HasOutput("fold.updated_ctl") != info.HasOutput("fold.updated_ctx_commit"))
+    throw std::runtime_error("qwen38_graph: explicit fold state requires both control and context outputs");
 
   enum class Kind { kStore,
                     kShared,
@@ -573,6 +575,10 @@ void Qwen38GraphEngine::BuildTarget() {
           t = add_own(name, {1, 1, 1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
         else if (fold_ && name == "fold.tail_done")
           t = add_own(name, {1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+        else if (fold_ && name == "fold.updated_ctl")
+          t = fold_tensors_.at("fold.ctl").get();
+        else if (fold_ && name == "fold.updated_ctx_commit")
+          t = fold_tensors_.at("fold.ctx_commit").get();
         else if (name == "present_position_ids")
           t = store_["past_position_ids"].get();
         else if (StartsWith(name, "present_mid."))

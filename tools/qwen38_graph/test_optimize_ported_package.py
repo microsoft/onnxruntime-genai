@@ -37,6 +37,7 @@ from optimize_ported_package import (
     refresh_weight_pool,
     share_rotary_cache_expands,
     untile_weights,
+    upgrade_fold_state,
     write_performance_metadata,
 )
 
@@ -86,6 +87,59 @@ def capture_value(model, value, dtype=TensorProto.FLOAT):
 
 
 class OptimizePortedPackageTest(unittest.TestCase):
+    def legacy_fold_model(self):
+        mid = helper.make_node(
+            "FoldMid2",
+            ["tokens", "ids", "status", "fold.ctl", "fold.ctx_commit", "ctx_a", "ctx_b", "ptrs", "cos", "sin"],
+            ["head_ids", "head_c", "slots", "seqlens", "cos_out", "sin_out", "sel"],
+            domain="com.microsoft",
+        )
+        tail = helper.make_node(
+            "FoldTail", ["draft", "status", "fold.ctl"], ["fold.tail_done"], domain="com.microsoft"
+        )
+        return helper.make_model(
+            helper.make_graph(
+                [mid, helper.make_node("Identity", ["fold.ctx_commit"], ["observed_context"]), tail],
+                "fold",
+                [
+                    helper.make_tensor_value_info("fold.ctl", TensorProto.INT64, [8]),
+                    helper.make_tensor_value_info("fold.ctx_commit", TensorProto.INT64, [2]),
+                ],
+                [helper.make_tensor_value_info("fold.tail_done", TensorProto.INT32, [1])],
+            )
+        )
+
+    def test_upgrade_fold_state_is_explicit_and_idempotent(self):
+        model = self.legacy_fold_model()
+        self.assertEqual(upgrade_fold_state(model), 2)
+        mid, observed, tail = model.graph.node
+        self.assertEqual(list(mid.output[7:]), ["fold.mid_ctl", "fold.updated_ctx_commit"])
+        self.assertEqual(tail.input[2], mid.output[7])
+        self.assertEqual(observed.input[0], mid.output[8])
+        self.assertEqual(tail.output[1], "fold.updated_ctl")
+        self.assertEqual(
+            [value.name for value in model.graph.output],
+            ["fold.tail_done", "fold.updated_ctl", "fold.updated_ctx_commit"],
+        )
+        before = model.SerializeToString()
+        self.assertEqual(upgrade_fold_state(model), 0)
+        self.assertEqual(model.SerializeToString(), before)
+
+    def test_upgrade_fold_state_rejects_partial_contract_without_mutation(self):
+        model = self.legacy_fold_model()
+        model.graph.node[0].output.append("partial")
+        before = model.SerializeToString()
+        with self.assertRaisesRegex(ValueError, "Unsupported legacy"):
+            upgrade_fold_state(model)
+        self.assertEqual(model.SerializeToString(), before)
+
+    def test_upgrade_fold_state_rejects_captured_control_without_mutation(self):
+        model = capture_value(self.legacy_fold_model(), "fold.ctl", TensorProto.INT64)
+        before = model.SerializeToString()
+        with self.assertRaisesRegex(ValueError, "nested captures"):
+            upgrade_fold_state(model)
+        self.assertEqual(model.SerializeToString(), before)
+
     def fp8_model(self, scale_dtype=np.float32, output="output", missing_shape=False):
         return helper.make_model(
             helper.make_graph(

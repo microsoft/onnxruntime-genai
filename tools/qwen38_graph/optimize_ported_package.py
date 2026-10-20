@@ -49,8 +49,63 @@ def ensure_opset_import(model, domain="com.microsoft", version=1):
         opset.version = version
 
 
+def upgrade_fold_state(model):
+    """Expose fold state updates explicitly for the reviewed ORT fold kernels."""
+    nodes = list(model.graph.node)
+    mid = [node for node in nodes if node.domain == "com.microsoft" and node.op_type == "FoldMid2"]
+    tail = [node for node in nodes if node.domain == "com.microsoft" and node.op_type == "FoldTail"]
+    if not mid and not tail:
+        return 0
+    if len(mid) != 1 or len(tail) != 1:
+        raise ValueError("Qwen fold state upgrade requires exactly one FoldMid2 and one FoldTail")
+    mid, tail = mid[0], tail[0]
+    if len(mid.input) != 10 or len(tail.input) != 3:
+        raise ValueError("Unsupported fold input contract")
+    if list(mid.input[3:5]) != ["fold.ctl", "fold.ctx_commit"]:
+        raise ValueError("FoldMid2 must consume fold.ctl and fold.ctx_commit")
+    if len(mid.output) == 9 and len(tail.output) == 2:
+        if (
+            tail.input[2] != mid.output[7]
+            or tail.output[1] != "fold.updated_ctl"
+            or mid.output[8] != "fold.updated_ctx_commit"
+            or not {"fold.updated_ctl", "fold.updated_ctx_commit"} <= {v.name for v in model.graph.output}
+        ):
+            raise ValueError("Explicit fold state outputs do not match the Qwen runtime binding contract")
+        return 0
+    if len(mid.output) != 7 or len(tail.output) != 1 or tail.input[2] != "fold.ctl":
+        raise ValueError("Unsupported legacy fold state contract")
+    mid_index = next(i for i, node in enumerate(nodes) if node is mid)
+    tail_index = next(i for i, node in enumerate(nodes) if node is tail)
+    if tail_index <= mid_index:
+        raise ValueError("FoldTail must follow FoldMid2")
+    if {"fold.ctl", "fold.ctx_commit"} & captured_values(model.graph):
+        raise ValueError("Fold state upgrade does not support nested captures of control inputs")
+    names = graph_value_names(model.graph)
+    additions = {"fold.mid_ctl", "fold.updated_ctl", "fold.updated_ctx_commit"}
+    if additions & names:
+        raise ValueError("Fold state output names collide with existing graph values")
+    if {"fold.ctl", "fold.ctx_commit"} & {v.name for v in model.graph.output}:
+        raise ValueError("Legacy fold control inputs must not also be graph outputs")
+    mid.output.extend(["fold.mid_ctl", "fold.updated_ctx_commit"])
+    tail.output.append("fold.updated_ctl")
+    for i, node in enumerate(nodes[mid_index + 1 :], start=mid_index + 1):
+        for j, name in enumerate(node.input):
+            if name == "fold.ctl":
+                node.input[j] = "fold.mid_ctl" if i <= tail_index else "fold.updated_ctl"
+            elif name == "fold.ctx_commit":
+                node.input[j] = "fold.updated_ctx_commit"
+    model.graph.output.extend(
+        [
+            helper.make_tensor_value_info("fold.updated_ctl", TensorProto.INT64, [8]),
+            helper.make_tensor_value_info("fold.updated_ctx_commit", TensorProto.INT64, [2]),
+        ]
+    )
+    return 2
+
+
 def optimize_model(path, transformed_provenance=None):
     model = onnx.load(path, load_external_data=False)
+    upgraded_fold_nodes = upgrade_fold_state(model)
     initializers = {t.name: t for t in model.graph.initializer}
     producers = {out: n for n in model.graph.node for out in n.output}
     consumers = Counter(x for n in model.graph.node for x in n.input)
@@ -61,6 +116,8 @@ def optimize_model(path, transformed_provenance=None):
     names = graph_value_names(model.graph)
     transformed_weights = {}
     counts = Counter()
+    if upgraded_fold_nodes:
+        counts["explicit_fold_state"] = upgraded_fold_nodes
     data_path = path.with_name("performance_weights.bin")
     if data_path.exists():
         raise FileExistsError(data_path)
@@ -1511,7 +1568,7 @@ def infer_value_types(model):
     types = {v.name: v.type.tensor_type.elem_type for v in (*inferred.graph.input, *inferred.graph.value_info)}
     types.update((t.name, t.data_type) for t in model.graph.initializer)
     for node in model.graph.node:
-        if node.domain == "com.microsoft" and node.op_type == "FoldMid2" and len(node.output) == 7:
+        if node.domain == "com.microsoft" and node.op_type == "FoldMid2" and len(node.output) in (7, 9):
             for name in node.output[4:6]:
                 if types.get(name, TensorProto.BFLOAT16) not in (0, TensorProto.BFLOAT16):
                     raise ValueError(f"FoldMid2 rotary outputs require BF16: {name}")
@@ -1776,7 +1833,7 @@ def fuse_attention_rotary(path):
     }
     inference_model = copy.deepcopy(model)
     for node in inference_model.graph.node:
-        if node.domain == "com.microsoft" and node.op_type == "FoldMid2" and len(node.output) == 7:
+        if node.domain == "com.microsoft" and node.op_type == "FoldMid2" and len(node.output) in (7, 9):
             # FoldMid2's CUDA output contract is fixed, independently of its mutable control state.
             for name in node.output[4:6]:
                 for info in (
@@ -2333,14 +2390,30 @@ def main():
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
     parser.add_argument(
-        "--provider", type=Path, required=True, help="CUDA plugin built with INT8 DynamicSparseAttention"
+        "--upgrade-fold-state-only", action="store_true",
+        help="Upgrade one ONNX graph to explicit fold outputs; destination must be a new file beside the source"
     )
-    parser.add_argument("--runtime", type=Path, required=True, help="Matching libonnxruntime.so with updated schemas")
     parser.add_argument(
-        "--genai-library", type=Path, required=True, help="GenAI library with INT8 fast-prefill handoff"
+        "--provider", type=Path, help="CUDA plugin built with INT8 DynamicSparseAttention"
+    )
+    parser.add_argument("--runtime", type=Path, help="Matching libonnxruntime.so with updated schemas")
+    parser.add_argument(
+        "--genai-library", type=Path, help="GenAI library with INT8 fast-prefill handoff"
     )
     args = parser.parse_args()
     source = args.source.resolve(strict=True)
+    if args.upgrade_fold_state_only:
+        destination = args.destination.absolute()
+        if destination.exists() or destination.is_symlink() or destination.parent.resolve() != source.parent:
+            raise ValueError("Destination must be a new ONNX file in the source graph directory")
+        model = onnx.load(source, load_external_data=False)
+        changed = upgrade_fold_state(model)
+        with destination.open("xb") as stream:
+            stream.write(model.SerializeToString())
+        print(json.dumps({"explicit_fold_state": changed, "graph": str(destination)}))
+        return
+    if args.provider is None or args.runtime is None or args.genai_library is None:
+        parser.error("--provider, --runtime and --genai-library are required for package optimization")
     provider = args.provider.resolve(strict=True)
     runtime = args.runtime.resolve(strict=True)
     genai_library = args.genai_library.resolve(strict=True)
