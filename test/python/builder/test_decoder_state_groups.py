@@ -3,34 +3,16 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
-import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
+from _builder_test_utils import load_builder_module
 
-BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parent))
-
-
-def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-sys.modules.setdefault("models", types.ModuleType("models"))
-builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
-builders_package.__path__ = [str(BUILDERS_DIR)]
-
-base_module = _load_builder_module("base")
-qwen_module = _load_builder_module("qwen")
-Model = base_module.Model
+base_module = load_builder_module("base")
+qwen_module = load_builder_module("qwen")
+Model = qwen_module.Model
 Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen4ExpTextModel = qwen_module.Qwen4ExpTextModel
 
@@ -109,9 +91,7 @@ def _write_config(monkeypatch, tmp_path, model):
 
 
 def test_composite_config_resolves_nested_and_tokenizer_special_token_ids(monkeypatch, tmp_path):
-    hf_config = SimpleNamespace(
-        text_config=SimpleNamespace(bos_token_id=None, eos_token_id=248044, pad_token_id=None)
-    )
+    hf_config = SimpleNamespace(text_config=SimpleNamespace(bos_token_id=None, eos_token_id=248044, pad_token_id=None))
     tokenizer = SimpleNamespace(
         bos_token_id=None,
         eos_token="<|im_end|>",
@@ -210,6 +190,27 @@ def test_fpa_intb_session_option_selection(monkeypatch, tmp_path, ep, enabled, p
 
     session_options = config["model"]["decoder"]["session_options"]
     assert ("ep.cuda.fpa_intb_gemm" in session_options) is expected
+
+
+@pytest.mark.parametrize(
+    "ep,prepacked,expected",
+    [
+        ("cuda", 0, False),
+        ("cuda", 1, True),
+        ("cuda", 2, True),
+        ("cpu", 1, False),
+    ],
+)
+def test_prepacked_matmulnbits_disables_bias_fusion(monkeypatch, tmp_path, ep, prepacked, expected):
+    model = _make_config_model(Model)
+    model.ep = ep
+    model.ep_attrs = {ep: {}}
+    model.matmul_attrs["weights_prepacked"] = prepacked
+
+    config = _write_config(monkeypatch, tmp_path, model)
+
+    session_options = config["model"]["decoder"]["session_options"]
+    assert (session_options.get("optimization.disable_specified_optimizers") == "MatMulNBitsFusion") is expected
 
 
 def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
@@ -716,14 +717,20 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 @pytest.mark.parametrize(
     ("state_window", "ep", "message"),
     [
-        (0, "webgpu", "CUDA execution provider"),
-        (1, "cuda", "require state_window=0"),
+        (0, "cpu", "CUDA or WebGPU execution provider"),
+        (1, "cuda", "state_window must be 0 or at least 2"),
     ],
 )
 def test_qwen35_gated_delta_net_validation(state_window, ep, message):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     with pytest.raises(ValueError, match=message):
         model.validate_gated_delta_net_options(state_window, ep)
+
+
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_qwen35_gated_delta_net_supported_providers(ep):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.validate_gated_delta_net_options(0, ep)
 
 
 def _packed_gated_delta_net_model(
@@ -843,7 +850,7 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     calls = []
     monkeypatch.setattr(Model, "make_gated_delta_net", lambda self, name, **kwargs: calls.append((name, kwargs)))
 
-    a_log = qwen_module.torch.tensor([0.25, -0.5, 0.0])
+    a_log = torch.tensor([0.25, -0.5, 0.0])
     output = model.make_gated_delta_net_layer(
         1,
         SimpleNamespace(A_log=a_log, dt_bias="dt_bias_value"),

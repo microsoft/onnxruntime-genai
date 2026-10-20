@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -233,6 +234,7 @@ class FixedStateReservation {
 
 class FixedStatePool {
  public:
+  static size_t StateBankBytes(const Model& model, size_t capacity);
   FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
                  size_t prefix_checkpoint_capacity = 0);
   ~FixedStatePool();
@@ -260,7 +262,9 @@ class FixedStatePool {
   size_t PrefixCheckpointCapacity() const;
   size_t AvailablePrefixCheckpoints() const;
   std::shared_ptr<const FixedStatePrefixCheckpoint> CapturePrefixCheckpoint(
-      const void* request_id);
+      const void* request_id,
+      const FixedStatePrefixCheckpoint* replacement = nullptr,
+      const std::function<void()>& reclaim_checkpoint = {});
 
   FixedStateSlotHandle HandleFor(const void* request_id) const;
   // True when `request_id` currently owns a committed slot. Non-throwing counterpart to HandleFor

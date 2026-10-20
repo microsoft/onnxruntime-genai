@@ -372,6 +372,30 @@ TEST_F(CudaSearchCheckpointTest, CommitTokenStopsAtMiddleEosWithoutAppendingIt) 
   EXPECT_EQ(single_search->GetSequenceLength(), 2);
 }
 
+TEST_F(CudaSearchCheckpointTest, CommitTokenAppendsNonEosTokensUntilMaxLength) {
+  auto single_params = CreateGeneratorParams(*model);
+  single_params->search.batch_size = 1;
+  single_params->search.max_length = 4;
+  auto single_search = CreateSearch(*single_params);
+  auto input = single_params->p_device->Allocate<int32_t>(1);
+  input.CpuSpan()[0] = 1;
+  input.CopyCpuToDevice();
+  single_search->AppendTokens(input);
+
+  single_search->CommitToken(2);
+  EXPECT_EQ(single_search->GetNextTokens().CpuSpan()[0], 2);
+  single_search->CommitToken(0);
+  ASSERT_FALSE(single_search->IsDone());
+  single_search->CommitToken(1);
+
+  EXPECT_TRUE(single_search->IsDone());
+  EXPECT_EQ(single_search->GetSequenceLength(), 4);
+  EXPECT_EQ(single_search->GetNextTokens().CopyDeviceToCpu()[0], 1);
+  const auto sequence = single_search->GetSequence(0).CopyDeviceToCpu();
+  EXPECT_EQ(std::vector<int32_t>(sequence.begin(), sequence.begin() + 4),
+            std::vector<int32_t>({1, 2, 0, 1}));
+}
+
 TEST_F(CudaSearchCheckpointTest, RollbackRestoresDoneEosAndLengthState) {
   auto input = Tokens({1, 2});
   search->AppendTokens(input);

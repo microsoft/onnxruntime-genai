@@ -29,8 +29,8 @@ DefaultInputIDs::DefaultInputIDs(State& state)
     *past_sequence_length_->GetTensorMutableData<int32_t>() = -1;
   }
 
-  value_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int32_t>);
-  cast_value_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+  value_ = std::make_unique<Tensor>(state_.p_session_device_inputs_, Ort::TypeToTensorType<int32_t>);
+  cast_value_ = std::make_unique<Tensor>(state_.p_session_device_inputs_, Ort::TypeToTensorType<int64_t>);
 }
 
 void DefaultInputIDs::Add() {
@@ -102,7 +102,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
       const size_t static_cap_bytes = use_static ? static_cast<size_t>(shape_[0]) * max_cap * sizeof(int64_t) : 0;
       cast_value_->CreateTensor(shape_, use_static, static_cap_bytes);
     }
-    Cast(*value_->GetOrtTensor(), cast_value_->ort_tensor_, *model_.p_device_inputs_, type_);
+    Cast(*value_->GetOrtTensor(), cast_value_->ort_tensor_, *state_.p_session_device_inputs_, type_);
     state_.inputs_[input_index_] = cast_value_->GetOrtTensor();
   }
 

@@ -9,6 +9,8 @@
 #include "../decoding/speculative_stats.h"
 #include "../dflash2_drafter.h"
 
+#include <array>
+#include <map>
 #include <random>
 #include <thread>
 #include <utility>
@@ -98,6 +100,7 @@ struct EngineDependencies {
   std::shared_ptr<CacheManager> mtp_cache_manager;
   std::unique_ptr<ModelExecutor> mtp_model_executor;
   std::unique_ptr<Dflash2Drafter> dflash2_drafter;
+  bool dflash2_prefix_checkpoints_enabled{};
   // Test-only fault injection for allocation-sensitive durable error construction.
   EngineStepErrorFactory make_step_error{};
 };
@@ -254,6 +257,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
     std::vector<std::shared_ptr<Request>> target_requests;
     std::vector<bool> newly_created;
     std::vector<std::vector<int32_t>> drafts;
+    std::vector<std::unique_ptr<OrtValue>> indexshare_views;
     std::unique_ptr<CacheStepReservation> reservation;
   };
 
@@ -268,6 +272,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   // feeds are captured before Request::CommitStep clears the accepted-draft counts they depend on.
   void PrepareDflash2Feeds(const StepPlan& plan, const std::vector<RequestStepResult>& results);
   void PublishDflash2Drafts(ScheduledRequests& scheduled_requests);
+  void ReleaseConsumedDflash2Checkpoints() noexcept;
   void PublishDflash2DraftResults();
   // Accounts for a recoverable DFlash 2 failure and decides whether the drafter stays enabled.
   void RecordDflash2Failure(std::exception_ptr error, bool contract_error);
@@ -295,15 +300,44 @@ struct Engine : std::enable_shared_from_this<Engine>,
   // the Engine so both cache pools share one memory budget; draft orchestration is added separately.
   std::shared_ptr<DecoderOnly_Model> mtp_model_;
   std::shared_ptr<CacheManager> mtp_cache_manager_;
+  struct MtpChainState {
+    using Banks = std::array<std::unique_ptr<OrtValue>, 2>;
+    std::vector<Banks> buffers;
+    std::map<size_t, std::vector<Banks>> views;
+  } mtp_chain_state_;
+  struct IndexShareBuffers {
+    size_t max_batch{};
+    DeviceSpan<int32_t> extend_indices;
+    DeviceSpan<int32_t> extend_counts;
+    DeviceSpan<int32_t> indices;
+    DeviceSpan<int32_t> counts;
+    DeviceSpan<int32_t> capture_ends;
+    DeviceSpan<int32_t> extend_row_indices;
+    std::vector<DeviceSpan<int32_t>> row_indices;
+    DeviceSpan<int32_t> status;
+    std::array<int32_t, 2> modes{0, 1};
+    DeviceSpan<int64_t> projection_rows;
+    std::vector<DeviceSpan<int64_t>> stage_projection_rows;
+    std::vector<DeviceSpan<int32_t>> range_starts;
+    std::vector<DeviceSpan<int32_t>> range_ends;
+    DeviceSpan<int32_t> stage_indices;
+    DeviceSpan<int32_t> stage_counts;
+    std::vector<std::vector<DeviceSpan<uint8_t>>> stage_state_inputs;
+    std::vector<std::vector<DeviceSpan<uint8_t>>> stage_state_outputs;
+    std::vector<std::vector<DeviceSpan<uint8_t>>> stage_state_updates;
+    std::vector<DeviceSpan<int32_t>> stage_capture_counts;
+  } mtp_indexshare_buffers_;
   std::unique_ptr<ModelExecutor> mtp_model_executor_;
   std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;
   size_t mtp_consecutive_failures_{};
   bool mtp_disabled_{};
   // Present only when model.dflash2 names a block drafter. Owns its own session and paged cache.
   std::unique_ptr<Dflash2Drafter> dflash2_drafter_;
+  bool dflash2_prefix_checkpoints_enabled_{};
   std::vector<Dflash2Drafter::Feed> dflash2_feeds_;
   std::vector<std::vector<int32_t>> dflash2_drafts_;
   std::vector<std::vector<TargetTokenSelection>> dflash2_draft_distributions_;
+  std::vector<Dflash2Lattice> dflash2_lattices_;
   std::vector<size_t> dflash2_draft_widths_;
   std::vector<std::pair<Request*, std::mt19937>> dflash2_rng_checkpoints_;
   size_t dflash2_consecutive_failures_{};

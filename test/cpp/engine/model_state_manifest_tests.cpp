@@ -141,9 +141,9 @@ Config::Model::Decoder MakePleAndIndexerDecoder() {
   decoder.outputs.present_indexer_names = "present.%d.indexer_key";
   decoder.outputs.present_indexer_kv_buffer_names = "present.%d.indexer_kv_buffer";
   decoder.outputs.present_indexer_state_lengths_names = "present.%d.indexer_state_lengths";
-    decoder.outputs.state_update_ple_token_names = "state_update.%d.ple_tokens";
-    decoder.outputs.state_update_ple_conv_value_names = "state_update.%d.ple_conv_value";
-    decoder.outputs.state_update_indexer_names = "state_update.%d.indexer";
+  decoder.outputs.state_update_ple_token_names = "state_update.%d.ple_tokens";
+  decoder.outputs.state_update_ple_conv_value_names = "state_update.%d.ple_conv_value";
+  decoder.outputs.state_update_indexer_names = "state_update.%d.indexer";
   decoder.state_groups = std::vector<Decoder::StateGroup>{
       Decoder::StateGroup{Decoder::StateGroupKind::FixedPle, {0}, Decoder::StateUpdate{7}},
       Decoder::StateGroup{Decoder::StateGroupKind::FixedIndexer, {1}, Decoder::StateUpdate{7, true, 0, 4}}};

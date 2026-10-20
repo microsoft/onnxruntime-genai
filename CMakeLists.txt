@@ -129,6 +129,11 @@ else()
   target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj)
 endif()
 
+# Keep bundled dependencies (including curl) and C++ internals private so a
+# host cannot interpose their calls with incompatible implementations.
+include(cmake/shared-library-exports.cmake)
+ortgenai_configure_shared_library_exports(onnxruntime-genai)
+
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_HEADER_DIR})
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE ${GENERATORS_ROOT})
@@ -205,6 +210,20 @@ endif()
 # The genai library itself is always embedded in the shared library
 list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
 
+if(WIN32 AND NOT USE_WINML)
+  file(GLOB ort_runtime_dlls "${ORT_LIB_DIR}/*.dll")
+  add_custom_target(onnxruntime-genai-ort-runtime
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${ort_runtime_dlls}
+            "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    DEPENDS ${ort_runtime_dlls}
+    COMMAND_EXPAND_LISTS
+  )
+  add_dependencies(onnxruntime-genai onnxruntime-genai-ort-runtime)
+endif()
+
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
 if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST)))
@@ -252,6 +271,8 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   else()
     add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
   endif()
+  # The CUDA library calls GetEnv directly and cannot resolve the core library's hidden copy.
+  target_sources(onnxruntime-genai-cuda PRIVATE "${GENERATORS_ROOT}/models/env_utils.cpp")
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)

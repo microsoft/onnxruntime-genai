@@ -55,16 +55,16 @@ TEST(VarlenDecoderIOTest, PackedHybridPositionIdsAcceptTokenVectorOrMropeMatrix)
 
 TEST(VarlenDecoderIOTest, PackedHiddenStatesUseExportedInputWidth) {
   EXPECT_NO_THROW(ValidatePackedHiddenStatesInputShape(
-    std::array<int64_t, 2>{3, 10240}, 3,
-    std::array<int64_t, 2>{-1, 10240}));
+      std::array<int64_t, 2>{3, 10240}, 3,
+      std::array<int64_t, 2>{-1, 10240}));
   EXPECT_THROW(ValidatePackedHiddenStatesInputShape(
-           std::array<int64_t, 2>{3, 2560}, 3,
-           std::array<int64_t, 2>{-1, 10240}),
-         std::runtime_error);
+                   std::array<int64_t, 2>{3, 2560}, 3,
+                   std::array<int64_t, 2>{-1, 10240}),
+               std::runtime_error);
   EXPECT_THROW(ValidatePackedHiddenStatesInputShape(
-           std::array<int64_t, 2>{2, 10240}, 3,
-           std::array<int64_t, 2>{-1, 10240}),
-         std::runtime_error);
+                   std::array<int64_t, 2>{2, 10240}, 3,
+                   std::array<int64_t, 2>{-1, 10240}),
+               std::runtime_error);
 }
 
 TEST(VarlenDecoderIOTest, EagerMetadataUsesExactStepBounds) {
@@ -327,6 +327,24 @@ TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {
   EXPECT_GT(single, 0);
   EXPECT_GT(flipped_bank, 0);
   EXPECT_EQ(ids.size(), 5u);
+}
+
+TEST(VarlenDecoderIOTest, GraphIdSeparatesMtpScratchBanksFromCommittedState) {
+  GraphAnnotationIds ids;
+  const auto committed = DecodeGraphKey(1, 1, 8, 3);
+  const auto first_bank = DecodeGraphKey(1, 1, 8, 3, 1);
+  const auto second_bank = DecodeGraphKey(1, 1, 8, 3, 2);
+  ASSERT_TRUE(committed.has_value());
+  ASSERT_TRUE(first_bank.has_value());
+  ASSERT_TRUE(second_bank.has_value());
+  const int committed_id = ids.Id(*committed);
+  const int first_id = ids.Id(*first_bank);
+  const int second_id = ids.Id(*second_bank);
+  EXPECT_NE(committed_id, first_id);
+  EXPECT_NE(committed_id, second_id);
+  EXPECT_NE(first_id, second_id);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, 3, 1)), first_id);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, 3, 2)), second_id);
 }
 
 TEST(VarlenDecoderIOTest, GraphIdIsStableForARepeatedShape) {

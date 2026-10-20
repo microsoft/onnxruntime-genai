@@ -106,6 +106,24 @@ struct OgaSpeculativeStats : OgaAbstract {
   }
 };
 
+struct OgaPrefixCacheStats : OgaAbstract {
+  uint64_t GetCount(const char* name) const {
+    uint64_t value{};
+    OgaCheckResult(OgaPrefixCacheStatsGetCount(this, name, &value));
+    return value;
+  }
+
+  bool GetBool(const char* name) const {
+    bool value{};
+    OgaCheckResult(OgaPrefixCacheStatsGetBool(this, name, &value));
+    return value;
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyPrefixCacheStats(reinterpret_cast<OgaPrefixCacheStats*>(p));
+  }
+};
+
 struct OgaFloat16_t;
 struct OgaBFloat16_t;
 
@@ -1125,11 +1143,17 @@ struct OgaTurnOptions : OgaAbstract {
     OgaCheckResult(OgaTurnOptionsSetStopStrings(this, &values));
   }
   /** Constrains this Turn's output to a grammar ("json_schema", "regex", or "lark_grammar"),
-   *  copying both strings immediately. Guidance is strictly Turn-scoped. */
+   *  copying both strings immediately. Guidance is strictly Turn-scoped and cannot be combined
+   *  with delimited guidance. */
   void SetGuidance(const char* type, const char* data) {
     OgaCheckResult(OgaTurnOptionsSetGuidance(this, type, data));
   }
-  /** Removes the configured grammar, so the Turn is unguided. */
+  /** Copies a Lark grammar for the body between distinct opening and closing token IDs.
+   *  Cannot be combined with whole-turn guidance; ClearGuidance or Reset switches modes. */
+  void SetDelimitedGuidance(int32_t opening_token, int32_t closing_token, const char* grammar) {
+    OgaCheckResult(OgaTurnOptionsSetDelimitedGuidance(this, opening_token, closing_token, grammar));
+  }
+  /** Removes whole-turn or delimited guidance, so the Turn is unguided. */
   void ClearGuidance() {
     OgaCheckResult(OgaTurnOptionsClearGuidance(this));
   }
@@ -1225,6 +1249,12 @@ struct OgaEngine : OgaAbstract {
     OgaSpeculativeStats* stats;
     OgaCheckResult(OgaEngineGetSpeculativeStats(this, &stats));
     return std::unique_ptr<OgaSpeculativeStats>(stats);
+  }
+
+  std::unique_ptr<OgaPrefixCacheStats> GetPrefixCacheStats() const {
+    OgaPrefixCacheStats* stats{};
+    OgaCheckResult(OgaEngineGetPrefixCacheStats(this, &stats));
+    return std::unique_ptr<OgaPrefixCacheStats>(stats);
   }
 
   std::unique_ptr<OgaRequest> CreateRequest(

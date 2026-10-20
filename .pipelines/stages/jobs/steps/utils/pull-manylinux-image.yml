@@ -18,7 +18,11 @@ steps:
     fi
     python3 -m pip install requests
     dockerBuildArgs="--build-arg BUILD_UID=$(id -u) --secret id=pip_index_url,env=PIP_INDEX_URL"
-    if [ '${{ parameters.ep }}' = 'cuda' ]; then
+    if [ '${{ parameters.ep }}' = 'cuda' ] && [ '${{ parameters.arch }}' = 'arm64' ]; then
+      [ '${{ parameters.cuda_version }}' = '13.1' ] || {
+        echo 'Linux ARM64 CUDA requires CUDA 13.1'; exit 1; }
+      dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_34_cuda_13_aarch64'
+    elif [ '${{ parameters.ep }}' = 'cuda' ]; then
       cudaDockerVer='${{ parameters.cuda_version }}'
       if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
         cudaDockerVer='13'

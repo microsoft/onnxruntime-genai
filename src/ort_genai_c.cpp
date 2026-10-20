@@ -38,6 +38,14 @@ struct Result {
   std::string what_;
 };
 
+struct PrefixCacheStats {
+  bool enabled{};
+  uint64_t lookups{};
+  uint64_t hits{};
+  uint64_t matched_tokens{};
+  uint64_t evictions{};
+};
+
 struct EngineEventBuffer {
   EngineEventBuffer(
       std::weak_ptr<Engine> bound_engine,
@@ -104,6 +112,7 @@ struct OgaResult : Generators::Result, OgaAbstract {};
 struct OgaRuntimeSettings : Generators::RuntimeSettings, OgaAbstract {};
 struct OgaSequences : Generators::TokenSequences, OgaAbstract {};
 struct OgaSpeculativeStats : Generators::SpeculativeStats, OgaAbstract {};
+struct OgaPrefixCacheStats : Generators::PrefixCacheStats, OgaAbstract {};
 struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
@@ -140,7 +149,36 @@ T* ReturnUnique(std::unique_ptr<U> p) {
   return static_cast<T*>(p.release());
 }
 
+#define OGA_TRY try {
+#define OGA_CATCH                                                                   \
+  }                                                                                 \
+  catch (const std::exception& e) {                                                 \
+    return ReturnUnique<OgaResult>(std::make_unique<Generators::Result>(e.what())); \
+  }
+
 namespace {
+
+OgaResult* OgaGenerator_GetInputOutput(const OgaGenerator* oga_generator, const char* name, bool is_input, OgaTensor** out) {
+  OGA_TRY
+  auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
+  auto* ortvalue = is_input ? generator.state_->GetInput(name) : generator.state_->GetOutput(name);
+  if (ortvalue == nullptr)
+    throw std::runtime_error(std::string("Generator ") + (is_input ? "input '" : "output '") + name + "' was not found.");
+
+  auto type_info = ortvalue->GetTensorTypeAndShapeInfo();
+  auto ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_, type_info->GetShape(), type_info->GetElementType());
+
+  // Copy data to ortvalue_clone
+  bool is_cpu = ortvalue->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
+  auto tensor_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *generator.model_->p_device_, *ortvalue);
+  auto copy_span = Generators::ByteWrapTensor(*Generators::GetDeviceInterface(Generators::DeviceType::CPU), *ortvalue_clone);
+  copy_span.CopyFrom(tensor_span);
+
+  auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
+  *out = ReturnShared<OgaTensor>(tensor);
+  return nullptr;
+  OGA_CATCH
+}
 
 OgaFinishReason ToCFinishReason(
     Generators::GenerationFinishReason finish_reason) {
@@ -171,13 +209,6 @@ static_assert(sizeof(OgaErrorCode) == sizeof(uint32_t));
 }  // namespace
 
 extern "C" {
-
-#define OGA_TRY try {
-#define OGA_CATCH                                                                   \
-  }                                                                                 \
-  catch (const std::exception& e) {                                                 \
-    return ReturnUnique<OgaResult>(std::make_unique<Generators::Result>(e.what())); \
-  }
 
 void OGA_API_CALL OgaShutdown() {
   if (!Generators::GenAiTelemetry::IsDestroyed()) {
@@ -735,41 +766,6 @@ OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, c
   return nullptr;
   OGA_CATCH
 }
-
-namespace {
-
-/**
- * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
- *       and will be released when the OgaTensor is destroyed
- * \param[in] oga_generator The generator to run the GetInput or GetOutput method on the name provided and the out pointer to store the output.
- * \param[in] name The name of the tensor.
- * \param[in] is_input Whether the tensor name is for an input or not.
- * \param[out] out The returned OgaTensor.
- * \return OgaResult containing the error message if the computation failed.
- */
-OgaResult* OGA_API_CALL OgaGenerator_GetInputOutput(const OgaGenerator* oga_generator, const char* name, bool is_input, OgaTensor** out) {
-  OGA_TRY
-  auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  auto* ortvalue = is_input ? generator.state_->GetInput(name) : generator.state_->GetOutput(name);
-  if (ortvalue == nullptr)
-    throw std::runtime_error(std::string("Generator ") + (is_input ? "input '" : "output '") + name + "' was not found.");
-
-  auto type_info = ortvalue->GetTensorTypeAndShapeInfo();
-  auto ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_, type_info->GetShape(), type_info->GetElementType());
-
-  // Copy data to ortvalue_clone
-  bool is_cpu = ortvalue->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
-  auto tensor_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *generator.model_->p_device_, *ortvalue);
-  auto copy_span = Generators::ByteWrapTensor(*Generators::GetDeviceInterface(Generators::DeviceType::CPU), *ortvalue_clone);
-  copy_span.CopyFrom(tensor_span);
-
-  auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
-  *out = ReturnShared<OgaTensor>(tensor);
-  return nullptr;
-  OGA_CATCH
-}
-
-}  // namespace
 
 OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* generator, const char* name, OgaTensor** out) {
   return OgaGenerator_GetInputOutput(generator, name, true, out);
@@ -1802,6 +1798,68 @@ OgaResult* OgaEngineGetSpeculativeStats(
   OGA_CATCH
 }
 
+OgaResult* OgaEngineGetPrefixCacheStats(
+    const OgaEngine* engine, OgaPrefixCacheStats** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = nullptr;
+  if (!engine) {
+    throw std::runtime_error("engine must not be null.");
+  }
+  auto snapshot = std::make_unique<Generators::PrefixCacheStats>();
+  if (const auto stats = engine->PrefixCacheStats()) {
+    snapshot->enabled = true;
+    snapshot->lookups = stats->lookups;
+    snapshot->hits = stats->hits;
+    snapshot->matched_tokens = stats->matched_tokens;
+    snapshot->evictions = stats->evictions;
+  }
+  *out = ReturnUnique<OgaPrefixCacheStats>(std::move(snapshot));
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyPrefixCacheStats(OgaPrefixCacheStats* stats) {
+  delete static_cast<Generators::PrefixCacheStats*>(stats);
+}
+
+OgaResult* OGA_API_CALL OgaPrefixCacheStatsGetCount(
+    const OgaPrefixCacheStats* stats, const char* name, uint64_t* value) {
+  OGA_TRY
+  if (!stats || !name || !value) {
+    throw std::runtime_error("stats, name, and value must not be null.");
+  }
+  if (std::strcmp(name, "lookups") == 0) {
+    *value = stats->lookups;
+  } else if (std::strcmp(name, "hits") == 0) {
+    *value = stats->hits;
+  } else if (std::strcmp(name, "matched_tokens") == 0) {
+    *value = stats->matched_tokens;
+  } else if (std::strcmp(name, "evictions") == 0) {
+    *value = stats->evictions;
+  } else {
+    throw std::runtime_error(std::string(name) + " is an invalid name for OgaPrefixCacheStatsGetCount.");
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaPrefixCacheStatsGetBool(
+    const OgaPrefixCacheStats* stats, const char* name, bool* value) {
+  OGA_TRY
+  if (!stats || !name || !value) {
+    throw std::runtime_error("stats, name, and value must not be null.");
+  }
+  if (std::strcmp(name, "enabled") != 0) {
+    throw std::runtime_error(std::string(name) + " is an invalid name for OgaPrefixCacheStatsGetBool.");
+  }
+  *value = stats->enabled;
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaEngineCreateRequest(
     OgaEngine* engine,
     const OgaRequestOptions* options,
@@ -1998,8 +2056,46 @@ OgaResult* OgaTurnOptionsSetGuidance(
         "guidance_type and guidance_data must both be non-empty. Use "
         "OgaTurnOptionsClearGuidance for an unguided turn.");
   }
+  if (options->delimited_guidance) {
+    throw std::runtime_error(
+        "Whole-turn guidance conflicts with delimited guidance. Use "
+        "OgaTurnOptionsClearGuidance before changing guidance modes.");
+  }
   options->guidance_type = guidance_type;
   options->guidance_data = guidance_data;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnOptionsSetDelimitedGuidance(
+    OgaTurnOptions* options, int32_t opening_token,
+    int32_t closing_token, const char* grammar) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  if (!grammar) {
+    throw std::runtime_error("grammar must not be null.");
+  }
+  options->ValidateOwnerThread();
+  if (opening_token < 0 || closing_token < 0 || opening_token == closing_token) {
+    throw std::runtime_error(
+        "opening_token and closing_token must be distinct nonnegative token IDs.");
+  }
+  if (!Generators::ValidateGuidanceRequest("lark_grammar", grammar)) {
+    throw std::runtime_error("grammar must not be empty.");
+  }
+  if (!options->guidance_type.empty() || !options->guidance_data.empty()) {
+    throw std::runtime_error(
+        "Delimited guidance conflicts with whole-turn guidance. Use "
+        "OgaTurnOptionsClearGuidance before changing guidance modes.");
+  }
+
+  // Allocate before replacing the old value so an invalid or failed update is atomic.
+  std::optional<Generators::TurnOptions::DelimitedGuidance> next{
+      Generators::TurnOptions::DelimitedGuidance{
+          opening_token, closing_token, grammar}};
+  options->delimited_guidance.swap(next);
   return nullptr;
   OGA_CATCH
 }
@@ -2012,6 +2108,7 @@ OgaResult* OgaTurnOptionsClearGuidance(OgaTurnOptions* options) {
   options->ValidateOwnerThread();
   options->guidance_type.clear();
   options->guidance_data.clear();
+  options->delimited_guidance.reset();
   return nullptr;
   OGA_CATCH
 }

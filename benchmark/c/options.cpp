@@ -41,7 +41,7 @@ namespace {
     << "      --prompt_file <file containing prompt text>\n"
     << "        Path to file containing prompt text to use. Default: See --prompt_length.\n"
     << "      --use_random_tokens\n"
-    << "        Use random token IDs in [0, 99] per position instead of generating or encoding\n"
+    << "        Use deterministic random token IDs in [1, 99] per position instead of generating or encoding\n"
     << "        a text prompt. Requires -l/--prompt_length (cannot be used with --prompt or\n"
     << "        --prompt_file).\n"
     << "      Note: --prompt, --prompt_file, and --use_random_tokens are mutually exclusive;\n"

@@ -1,0 +1,116 @@
+name: "Linux CUDA ARM64 Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - rel-*
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
+
+env:
+  ORT_BUILD_VERSION: "1.30.0"
+  ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime
+
+jobs:
+  linux-cuda-arm64-build:
+    permissions:
+      contents: read
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU", "JobId=linux-cuda-arm64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          submodules: true
+
+      - name: Download ARM64 ONNX Runtime 1.30 build libraries
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${{ env.ORT_BUILD_VERSION }}/microsoft.ml.onnxruntime.${{ env.ORT_BUILD_VERSION }}.nupkg" \
+            -o ort-build.zip
+          unzip -q ort-build.zip -d ort-build-package
+          mkdir -p ort-build/include ort-build/lib
+          cp -a ort-build-package/build/native/include/. ort-build/include/
+          cp -a ort-build-package/runtimes/linux-arm64/native/. ort-build/lib/
+          test -f ort-build/lib/libonnxruntime.so
+          readelf -h ort-build/lib/libonnxruntime.so | grep 'Machine:.*AArch64'
+          cp ort-build/lib/libonnxruntime.so ort-build/lib/libonnxruntime.so.1
+
+      - name: Build ARM64 CUDA manylinux image
+        env:
+          PIP_INDEX_URL: https://pypi.org/simple
+        run: |
+          set -euo pipefail
+          az login --identity --object-id 161bbca8-9899-4f61-950c-4d556fbcf830
+          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+          python3 tools/ci_build/get_docker_image.py \
+            --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_34_cuda_13_aarch64 \
+            --context tools/ci_build/github/linux/docker/manylinux \
+            --docker-build-args "--build-arg BUILD_UID=$(id -u) --secret id=pip_index_url,env=PIP_INDEX_URL" \
+            --repository ort_genai_linux_cuda_arm64_gha
+
+      - name: Build CUDA core and Python wheel without GPU runtime
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/ort_genai_src" \
+            -w /ort_genai_src \
+            -e ONNXRUNTIME_VERSION=1.30.0 \
+            ort_genai_linux_cuda_arm64_gha bash -c '
+              set -e
+              PY=/opt/python/cp312-cp312/bin/python3.12
+              "$PY" -m pip install -r requirements-dev.txt
+              "$PY" build.py \
+                --config Release \
+                --build_dir build/cuda \
+                --install_dir /ort_genai_src/install \
+                --cmake_generator Ninja \
+                --ort_home /ort_genai_src/ort-build \
+                --use_cuda \
+                --cuda_home /usr/local/cuda \
+                --use_guidance \
+                --skip_tests \
+                --skip_examples \
+                --package \
+                --cmake_extra_defines MANYLINUX=ON PYTHON_EXECUTABLE="$PY" \
+                  "CMAKE_CUDA_ARCHITECTURES=89-real;90-real;100-real;103-real;120-real;121-real"
+              cubins=$(cuobjdump --list-elf /ort_genai_src/install/lib/libonnxruntime-genai-cuda.so)
+              for sm in 89 90 100 103 120 121; do
+                grep -q "sm_${sm}\.cubin" <<< "$cubins" || { echo "Missing sm_${sm} CUDA cubin"; exit 1; }
+              done
+            '
+
+      - name: Check ARM64 CUDA package contents
+        run: |
+          set -euo pipefail
+          test -f install/lib/libonnxruntime-genai.so
+          test -f install/lib/libonnxruntime-genai-cuda.so
+          test -f install/lib/cmake/onnxruntime-genai/onnxruntime-genaiConfig.cmake
+          for lib in install/lib/libonnxruntime-genai{,-cuda}.so; do
+            readelf -h "$lib" | grep 'Machine:.*AArch64'
+          done
+          archive=(build/cuda/Release/package/*-linux-arm64-cuda.tar.gz)
+          test "${#archive[@]}" -eq 1
+          test -f "${archive[0]}"
+          tar -tzf "${archive[0]}" | grep 'libonnxruntime-genai-cuda.so$'
+          python3 - <<'PY'
+          import glob
+          import struct
+          import zipfile
+
+          wheels = glob.glob("build/cuda/Release/wheel/*manylinux*aarch64.whl")
+          assert len(wheels) == 1, f"Expected one ARM64 CUDA manylinux wheel, got {wheels}"
+          assert "cuda" in wheels[0], f"CUDA wheel name missing cuda: {wheels[0]}"
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              libs = [name for name in wheel.namelist() if name.endswith(".so")]
+              for library in ("libonnxruntime-genai.so", "libonnxruntime-genai-cuda.so"):
+                  assert any(name.endswith(library) for name in libs), f"Missing {library}"
+              for name in libs:
+                  with wheel.open(name) as binary:
+                      header = binary.read(20)
+                  assert header[:4] == b"\x7fELF" and struct.unpack("<H", header[18:20])[0] == 183, name
+          PY

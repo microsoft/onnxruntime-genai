@@ -27,7 +27,8 @@ sys.path.insert(0, str(MODELS_DIR))
 
 
 def _load_base_module():
-    sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package = sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package.__path__ = [str(MODELS_DIR)]
     builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
     builders_package.__path__ = [str(BUILDERS_DIR)]
 
@@ -407,7 +408,6 @@ def _make_quant_model(bits):
         "nodes_to_exclude": [],
         "use_qdq": False,
         "op_types_to_quantize": ("MatMul",),
-        "algo_config": None,
     }
     return model
 
@@ -475,16 +475,61 @@ def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mod
 
     model.prepack_matmulnbits_weights(model_proto)
 
-    attrs = {
-        attr.name: onnx.helper.get_attribute_value(attr)
-        for attr in model_proto.graph.node[0].attribute
-    }
+    attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in model_proto.graph.node[0].attribute}
     assert attrs.get("weight_prepacked", 0) == expected
     assert model_proto.graph.node[0].input[3] == ("" if expected else "zero_point")
     assert ("zero_point" in {initializer.name for initializer in model_proto.graph.initializer}) == (not expected)
     if not expected:
         np.testing.assert_array_equal(onnx.numpy_helper.to_array(model_proto.graph.initializer[0]), weight)
     model_proto.SerializeToString()
+
+
+def _make_matmul_chain(node_names, width=64):
+    rng = np.random.default_rng(0)
+    nodes, initializers, hidden = [], [], "x"
+    for index, name in enumerate(node_names):
+        weight = onnx.numpy_helper.from_array(rng.standard_normal((width, width), dtype=np.float32), f"w{index}")
+        initializers.append(weight)
+        nodes.append(onnx.helper.make_node("MatMul", [hidden, weight.name], [f"y{index}"], name=name))
+        hidden = f"y{index}"
+    graph = onnx.helper.make_graph(
+        nodes,
+        "matmul_chain",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1, width])],
+        [onnx.helper.make_tensor_value_info(hidden, onnx.TensorProto.FLOAT, [1, width])],
+        initializers,
+    )
+    return ir.from_proto(onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 21)]))
+
+
+DOWN_PROJ = "/model/layers.0/mlp/down_proj/MatMul"
+LM_HEAD = "/lm_head/MatMul"
+
+
+@pytest.mark.parametrize("method", ["default", "rtn", "k_quant"])
+@pytest.mark.parametrize(
+    "bits, options, expected",
+    [
+        (4, {}, {DOWN_PROJ: 4, LM_HEAD: 4}),
+        (8, {}, {DOWN_PROJ: 8, LM_HEAD: 8}),
+        (4, {"matmul_mixed_precision": "last_matmul:int8"}, {DOWN_PROJ: 4, LM_HEAD: 8}),
+        (8, {"matmul_mixed_precision": "last_matmul:int4"}, {DOWN_PROJ: 8, LM_HEAD: 4}),
+        (8, {"nodes_to_exclude": [LM_HEAD]}, {DOWN_PROJ: 8}),
+    ],
+)
+def test_to_nbits_quantizes_matmuls_to_requested_bits(method, bits, options, expected):
+    model = _make_quant_model(bits)
+    model.model = _make_matmul_chain([DOWN_PROJ, LM_HEAD])
+    model.quant_config = base_module.QuantConfig.from_extra_options(
+        {"algo_config": method, **options}, precision=f"int{bits}", execution_provider="cpu"
+    )
+    model.quant_type = None
+    model.make_quant_init(types.SimpleNamespace())
+
+    quantized = model.to_nbits()
+
+    emitted = {node.name: node.attributes["bits"].as_int() for node in quantized.graph if node.op_type == "MatMulNBits"}
+    assert emitted == {f"{name}_Q{node_bits}": node_bits for name, node_bits in expected.items()}
 
 
 def _run_check_extra_options(
@@ -544,6 +589,21 @@ def test_structured_unquantized_moe_completes_cli_option_parsing(monkeypatch):
 
     assert options["_quant_config"].moe.type == "none"
     assert "moe_quant_type" not in options
+
+
+@pytest.mark.parametrize(
+    ("extra_options", "expected"),
+    [
+        ({"disable_qkv_fusion": "true"}, False),
+        ({"disable_qkv_fusion": "false"}, True),
+        ({"disable_qkv_fusion": "true", "fuse_qkv": "true"}, True),
+    ],
+)
+def test_disable_qkv_fusion_is_a_deprecated_inverse_alias(monkeypatch, capsys, extra_options, expected):
+    _run_check_extra_options(monkeypatch, extra_options)
+
+    assert extra_options["fuse_qkv"] is expected
+    assert "'disable_qkv_fusion' is deprecated" in capsys.readouterr().out
 
 
 def test_mtp_quant_config_json_is_parsed(monkeypatch):

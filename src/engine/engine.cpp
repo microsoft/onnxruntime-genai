@@ -181,6 +181,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
       mtp_cache_manager_{std::move(dependencies.mtp_cache_manager)},
       mtp_model_executor_{std::move(dependencies.mtp_model_executor)},
       dflash2_drafter_{std::move(dependencies.dflash2_drafter)},
+      dflash2_prefix_checkpoints_enabled_{dependencies.dflash2_prefix_checkpoints_enabled},
       make_step_error_{dependencies.make_step_error
                            ? dependencies.make_step_error
                            : MakeEngineStepError} {
@@ -221,6 +222,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     dflash2_draft_widths_.reserve(max_batch_size);
     dflash2_drafts_.reserve(max_batch_size);
     dflash2_draft_distributions_.reserve(max_batch_size);
+    dflash2_lattices_.reserve(max_batch_size);
     dflash2_rng_checkpoints_.reserve(max_batch_size);
   }
   WarnOnClampedDraftWidth();
@@ -315,6 +317,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     target_hidden_states = model->config_->model.mtp.main_hidden_states;
     mtp_model = std::make_shared<DecoderOnly_Model>(
         CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+    mtp_model->InitializeIndexShare(model->config_->model.mtp.index_share, GetOrtEnv());
     ValidateMtpModelCompatibility(
         *model->config_, model->session_info_, mtp_model->session_info_);
     mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
@@ -328,6 +331,8 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   size_t dflash2_reserved_memory_bytes = 0;
   size_t dflash2_max_batch_size = 0;
   size_t dflash2_pool_blocks = 0;
+  size_t dflash2_prefix_checkpoint_bytes = 0;
+  bool dflash2_prefix_checkpoints_enabled = false;
   if (!model->config_->model.dflash2.filename.empty()) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
@@ -389,6 +394,12 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       }
       dflash2_reserved_memory_bytes += embedding_bytes;
     }
+    if (dflash2_pool_blocks != 0 && mtp_bytes_per_block == 0 && !dflash2.is_dspark &&
+        ModelStateManifest{model->config_->model.decoder}.HasFixedStateGroups() &&
+        ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0)) {
+      dflash2_prefix_checkpoint_bytes = Dflash2Drafter::PrefixCheckpointBytes(
+          *model->config_, paged_block_size, dflash2_cache_type);
+    }
   }
 
   if (dflash2_bytes_per_block > std::numeric_limits<size_t>::max() - mtp_bytes_per_block) {
@@ -410,6 +421,14 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
                                     kMaxDraftTokensPerStep + 1);
     };
     graph_buffer_reserved_bytes = reserve_for(model) + reserve_for(mtp_model);
+    if (mtp_model) {
+      const size_t bank_bytes = FixedStatePool::StateBankBytes(
+          *mtp_model, model->config_->engine.dynamic_batching->max_batch_size);
+      if (bank_bytes > (std::numeric_limits<size_t>::max() - graph_buffer_reserved_bytes) / 2) {
+        throw std::runtime_error("MTP scratch state memory bytes overflow size_t.");
+      }
+      graph_buffer_reserved_bytes += 2 * bank_bytes;
+    }
   }
   if (graph_buffer_reserved_bytes >
       std::numeric_limits<size_t>::max() - dflash2_reserved_memory_bytes) {
@@ -417,7 +436,9 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   }
   std::shared_ptr<CacheManager> cache_manager =
       CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
-                           dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes);
+                           dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes,
+                           dflash2_prefix_checkpoint_bytes,
+                           &dflash2_prefix_checkpoints_enabled);
   if (dflash2_model && !dflash2_drafter) {
     const size_t paged_block_size =
         static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
@@ -452,7 +473,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   return EngineDependencies{
       std::move(cache_manager), std::move(scheduler), std::move(model_executor),
       std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor),
-      std::move(dflash2_drafter)};
+      std::move(dflash2_drafter), dflash2_prefix_checkpoints_enabled};
 }
 
 void Engine::PrepareDflash2Feeds(const StepPlan& plan,
@@ -465,8 +486,13 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& entry = plan.requests[i];
     const bool greedy = entry.request->TurnPolicy().IsGreedy();
-    const bool independent_sampling =
-        model_->config_->model.dflash2.independent_sampling && !greedy;
+    using Proposal = Config::Model::Dflash2::SampledProposal;
+    const Proposal sampled_proposal =
+        greedy ? Proposal::None : model_->config_->model.dflash2.sampled_proposal;
+    const bool independent_sampling = sampled_proposal == Proposal::Independent;
+    // A sampled turn without a positive top_k fails draft validation, so it should not take a slot.
+    const bool drafts_enabled =
+        greedy || (sampled_proposal != Proposal::None && entry.request->TurnPolicy().top_k > 0);
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
     if (accepted > entry.draft_token_count) {
       throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
@@ -481,11 +507,15 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
 
     Dflash2Drafter::Feed feed;
     feed.request = entry.request.get();
+    if (entry.prefix_match) {
+      feed.prefix_checkpoint = entry.prefix_match->draft_checkpoint;
+    }
     feed.aux_row_begin = entry.packed_token_offset;
     feed.aux_row_count = valid_rows;
     feed.first_position = first_position;
-    feed.draft_eligible = greedy || independent_sampling;
+    feed.draft_eligible = drafts_enabled;
     feed.wants_independent_sampling = independent_sampling;
+    feed.wants_lattice = sampled_proposal == Proposal::Lattice;
 
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
@@ -500,7 +530,7 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
         max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
-    feed.wants_drafts = (greedy || independent_sampling) && width > 0 &&
+    feed.wants_drafts = drafts_enabled && width > 0 &&
                         results[i].token_appended && !results[i].done &&
                         !entry.request->DraftTokenValidationError();
     feed.anchor_token = results[i].token;
@@ -519,10 +549,42 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
   }
 
   if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_,
-                                &dflash2_draft_distributions_)) {
+                                &dflash2_draft_distributions_, &dflash2_lattices_)) {
     ++speculative_stats_.draft_forward_passes;
   }
+  ReleaseConsumedDflash2Checkpoints();
   PublishDflash2DraftResults();
+  if (!dflash2_prefix_checkpoints_enabled_) {
+    return;
+  }
+  for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
+    const auto& entry = step_plan_.requests[i];
+    const auto& feed = dflash2_feeds_[i];
+    if (!entry.is_prefill || !feed.draft_eligible ||
+        feed.first_position + feed.aux_row_count != entry.target_cache_slots) {
+      continue;
+    }
+    auto boundary = cache_manager_->DraftBoundary(entry.request_id, entry.target_cache_slots);
+    if (!boundary ||
+        !dflash2_drafter_->CanCapturePrefix(feed.request, entry.target_cache_slots)) {
+      continue;
+    }
+    try {
+      cache_manager_->DropUnleasedDraftCheckpoints();
+      auto checkpoint = dflash2_drafter_->CapturePrefix(feed.request, entry.target_cache_slots);
+      if (checkpoint && !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
+        cache_manager_->RecordPrefixPublicationRefusal();
+      }
+    } catch (const std::bad_alloc&) {
+      cache_manager_->RecordPrefixPublicationRefusal();
+    }
+  }
+}
+
+void Engine::ReleaseConsumedDflash2Checkpoints() noexcept {
+  for (auto& feed : dflash2_feeds_) {
+    feed.prefix_checkpoint.reset();
+  }
 }
 
 void Engine::PublishDflash2DraftResults() {
@@ -531,7 +593,20 @@ void Engine::PublishDflash2DraftResults() {
     for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
       auto& drafts = dflash2_drafts_[i];
       auto& distributions = dflash2_draft_distributions_[i];
-      if (drafts.empty() && distributions.empty()) {
+      const Dflash2Lattice* lattice =
+          i < dflash2_lattices_.size() && dflash2_lattices_[i].top_k != 0 ? &dflash2_lattices_[i]
+                                                                          : nullptr;
+      if (drafts.empty() && distributions.empty() && !lattice) {
+        continue;
+      }
+      Request& request = *dflash2_feeds_[i].request;
+      if (lattice) {
+        dflash2_rng_checkpoints_.emplace_back(&request, request.draft_rng_);
+        const auto& policy = request.TurnPolicy();
+        Dflash2SampleLatticePath(*lattice, dflash2_draft_widths_[i], policy.temperature,
+                                 policy.top_k, policy.top_p, request.draft_rng_, drafts,
+                                 distributions);
+        request.SetSampledDraftTokens(drafts, distributions);
         continue;
       }
       // The drafter always emits its full block; a request with a narrower budget takes the prefix
@@ -698,7 +773,9 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       // match: it is true for any committed StopString result exactly like any other finish
       // reason, so this check below already skips proposing a new draft block for it with no
       // stop-specific condition needed.
-      if (!result.token_appended || result.done ||
+      // MTP is intentionally unavailable for scoped turns: its chained proposals may cross
+      // an opener before the target can switch to the grammar cursor.
+      if (!result.token_appended || result.done || entry.request->HasDelimitedGuidance() ||
           entry.request->DraftTokenValidationError() ||
           max_draft_tokens == 0) {
         continue;
@@ -802,6 +879,88 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
                                           return left.max_draft_tokens < right.max_draft_tokens;
                                         })
                                         ->max_draft_tokens;
+    const auto& indexshare = mtp_model_->index_share_config_;
+    const bool use_indexshare = indexshare.base_capacity > 0;
+    if (use_indexshare && max_draft_tokens > static_cast<size_t>(indexshare.max_draft_tokens)) {
+      throw std::logic_error("MTP draft budget exceeds the IndexShare model's exported capacity.");
+    }
+    auto& selection_buffers = mtp_indexshare_buffers_;
+    const size_t selection_capacity = static_cast<size_t>(indexshare.base_capacity);
+    const size_t output_capacity = use_indexshare ? selection_capacity + indexshare.max_draft_tokens - 1 : 0;
+    if (use_indexshare && selection_buffers.max_batch == 0) {
+      const size_t max_batch = mtp_model_->config_->engine.dynamic_batching->max_batch_size;
+      const size_t max_extend_rows = max_batch * (static_cast<size_t>(indexshare.max_draft_tokens) + 1);
+      auto* device = mtp_model_->p_device_inputs_;
+      selection_buffers.extend_indices = device->Allocate<int32_t>(max_extend_rows * output_capacity);
+      selection_buffers.extend_counts = device->Allocate<int32_t>(max_extend_rows);
+      selection_buffers.indices = device->Allocate<int32_t>(max_batch * selection_capacity);
+      selection_buffers.counts = device->Allocate<int32_t>(max_batch);
+      selection_buffers.capture_ends = device->Allocate<int32_t>(max_batch);
+      selection_buffers.extend_row_indices = device->Allocate<int32_t>(max_extend_rows);
+      selection_buffers.row_indices.resize(indexshare.max_draft_tokens - 1);
+      for (auto& rows : selection_buffers.row_indices) rows = device->Allocate<int32_t>(max_batch);
+      selection_buffers.status = device->Allocate<int32_t>(max_batch * std::max(1, indexshare.max_draft_tokens - 1) +
+                                                           max_extend_rows);
+      {
+        const size_t stages = static_cast<size_t>(indexshare.max_draft_tokens - 1);
+        selection_buffers.projection_rows = device->Allocate<int64_t>(max_extend_rows);
+        auto projection_host = selection_buffers.projection_rows.CpuSpan();
+        std::iota(projection_host.begin(), projection_host.end(), int64_t{0});
+        selection_buffers.projection_rows.CopyCpuToDevice();
+        selection_buffers.stage_projection_rows.resize(stages);
+        selection_buffers.range_starts.resize(stages);
+        selection_buffers.range_ends.resize(stages);
+        selection_buffers.stage_capture_counts.resize(stages);
+        selection_buffers.stage_state_inputs.resize(stages);
+        selection_buffers.stage_state_outputs.resize(stages);
+        selection_buffers.stage_state_updates.resize(stages);
+        for (size_t stage = 0; stage < stages; ++stage) {
+          selection_buffers.stage_projection_rows[stage] = device->Allocate<int64_t>(max_batch);
+          auto rows = selection_buffers.stage_projection_rows[stage].CpuSpan();
+          std::iota(rows.begin(), rows.end(), int64_t{0});
+          selection_buffers.stage_projection_rows[stage].CopyCpuToDevice();
+          selection_buffers.range_starts[stage] = device->Allocate<int32_t>(max_batch);
+          selection_buffers.range_ends[stage] = device->Allocate<int32_t>(max_batch);
+          selection_buffers.stage_capture_counts[stage] = device->Allocate<int32_t>(max_batch);
+          selection_buffers.stage_capture_counts[stage].Zero();
+        }
+        selection_buffers.stage_indices = device->Allocate<int32_t>(stages * max_batch * output_capacity);
+        selection_buffers.stage_counts = device->Allocate<int32_t>(stages * max_batch);
+      }
+      selection_buffers.max_batch = max_batch;
+    }
+    if (use_indexshare) {
+      if (feeds.size() > selection_buffers.max_batch || total_rows > selection_buffers.extend_counts.size()) {
+        throw std::runtime_error("IndexShare feed exceeds its persistent buffer capacity.");
+      }
+      selection_buffers.status.Zero();
+    }
+    const auto selection_view = [&](DeviceSpan<int32_t> values, std::initializer_list<int64_t> shape) {
+      auto tensor = OrtValue::CreateTensor(*mtp_model_->p_device_inputs_->GetMemoryInfo(),
+                                           values.Span().data(), values.size() * sizeof(int32_t),
+                                           {shape.begin(), shape.size()}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+      auto* result = tensor.get();
+      step->indexshare_views.push_back(std::move(tensor));
+      return result;
+    };
+    const auto projection_view = [&](DeviceSpan<int64_t> values) {
+      const std::array<int64_t, 1> shape{static_cast<int64_t>(values.size())};
+      auto tensor = OrtValue::CreateTensor(*mtp_model_->p_device_inputs_->GetMemoryInfo(),
+                                           values.Span().data(), values.size() * sizeof(int64_t), shape,
+                                           ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      auto* result = tensor.get();
+      step->indexshare_views.push_back(std::move(tensor));
+      return result;
+    };
+    const auto mode_view = [&](bool reuse) {
+      auto memory = OrtMemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+      const std::array<int64_t, 1> shape{1};
+      auto tensor = OrtValue::CreateTensor(*memory, &selection_buffers.modes[reuse ? 1 : 0],
+                                           sizeof(int32_t), shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+      auto* result = tensor.get();
+      step->indexshare_views.push_back(std::move(tensor));
+      return result;
+    };
     bool device_draft_chain =
         max_draft_tokens > 1 && mtp_model_->p_device_->GetType() == DeviceType::CUDA;
     DeviceSpan<int32_t> device_drafts;
@@ -857,11 +1016,61 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();
     }
     context.hidden_states_input = packed_hidden_states.GetOrtTensor();
+    std::array<OrtValue*, 2> selection_outputs{};
+    const std::array<const char*, 7> packed_selection_input_names{
+        "mode", "projection_rows", indexshare.indices_input.c_str(), indexshare.counts_input.c_str(),
+        "base_row_indices", "range_starts", "range_ends"};
+    const std::array<const char*, 3> packed_selection_output_names{
+        indexshare.indices_output.c_str(), indexshare.counts_output.c_str(), indexshare.status_output.c_str()};
+    std::array<OrtValue*, 7> packed_extend_inputs{};
+    std::array<OrtValue*, 3> packed_extend_outputs{};
+    if (use_indexshare) {
+      context.decoder_session = mtp_model_->session_decoder_.get();
+      {
+        const int64_t cached_rows = static_cast<int64_t>(selection_buffers.max_batch);
+        packed_extend_inputs = {
+            mode_view(false), projection_view(selection_buffers.projection_rows.subspan(0, total_rows)),
+            selection_view(selection_buffers.indices, {cached_rows, static_cast<int64_t>(selection_capacity)}),
+            selection_view(selection_buffers.counts, {cached_rows}),
+            selection_view(selection_buffers.extend_row_indices.subspan(0, 0), {0}),
+            selection_view(selection_buffers.capture_ends.subspan(0, 0), {0}),
+            selection_view(selection_buffers.capture_ends.subspan(0, 0), {0})};
+        context.extra_input_names = packed_selection_input_names;
+        context.extra_inputs = packed_extend_inputs;
+      }
+      selection_outputs = {
+          selection_view(selection_buffers.extend_indices.subspan(0, total_rows * output_capacity),
+                         {static_cast<int64_t>(total_rows), static_cast<int64_t>(output_capacity)}),
+          selection_view(selection_buffers.extend_counts.subspan(0, total_rows), {static_cast<int64_t>(total_rows)})};
+      {
+        packed_extend_outputs = {selection_outputs[0], selection_outputs[1],
+                                 selection_view(selection_buffers.status.subspan(0, total_rows),
+                                                {static_cast<int64_t>(total_rows)})};
+        context.extra_output_names = packed_selection_output_names;
+        context.extra_outputs = packed_extend_outputs;
+      }
+    }
     if (device_draft_chain) {
       context.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
     }
     mtp_model_executor_->Decode(mtp_requests, context);
     ++speculative_stats_.draft_forward_passes;
+    if (use_indexshare) {
+      std::vector<int32_t> capture_ends(feeds.size());
+      for (size_t row = 0; row < feeds.size(); ++row) {
+        const auto& entry = step->plan.requests[row];
+        if (entry.target_cache_slots >= static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+          throw std::runtime_error("IndexShare capture position must fit int32 with room for the next query.");
+        }
+        capture_ends[row] = static_cast<int32_t>(entry.target_cache_slots);
+        selection_buffers.indices.subspan(row * selection_capacity, selection_capacity).CopyFrom(selection_buffers.extend_indices.subspan(entry.logits_row_index * output_capacity, selection_capacity));
+        selection_buffers.counts.subspan(row, 1).CopyFrom(
+            selection_buffers.extend_counts.subspan(entry.logits_row_index, 1));
+      }
+      auto capture_end_host = selection_buffers.capture_ends.CpuSpan();
+      std::copy(capture_ends.begin(), capture_ends.end(), capture_end_host.begin());
+      selection_buffers.capture_ends.CopyCpuToDevice();
+    }
     auto logits = mtp_requests.ProcessLogits();
     device_draft_chain =
         device_draft_chain &&
@@ -930,6 +1139,12 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     pending_device_requests.reserve(max_draft_tokens - 1);
     std::vector<std::unique_ptr<Tensor>> pending_device_inputs;
     pending_device_inputs.reserve(max_draft_tokens - 1);
+    struct ChainFixedState {
+      std::vector<FixedStateSlotHandle> handles;
+      std::vector<FixedStateBinding> bindings;
+    };
+    std::vector<ChainFixedState> pending_fixed_states;
+    pending_fixed_states.reserve(max_draft_tokens - 1);
 
     for (size_t draft_index = 1; !active_feed_indices.empty(); ++draft_index) {
       StepPlan chain_plan;
@@ -975,13 +1190,218 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
           chain_plan, mtp_model_, nullptr, nullptr);
       ExecutionContext chain_context{&chain_plan};
       chain_context.cache_reservation = step->reservation->PagedReservation();
-      chain_context.fixed_state_slots = step->reservation->FixedStateSlots();
-      chain_context.fixed_state_bindings = step->reservation->FixedStateBindings();
+      const auto source_bindings = pending_fixed_states.empty()
+                                       ? step->reservation->FixedStateBindings()
+                                       : std::span<const FixedStateBinding>{pending_fixed_states.back().bindings};
+      pending_fixed_states.emplace_back();
+      auto& chain_state = pending_fixed_states.back();
+      const auto reserved_handles = step->reservation->FixedStateSlots();
+      if (!reserved_handles.empty()) {
+        for (const size_t feed_index : active_feed_indices) {
+          chain_state.handles.push_back(reserved_handles[feed_index]);
+        }
+      }
+      const size_t input_bank = (draft_index - 1) % 2;
+      size_t binding_index = 0;
+      const bool initialize_buffers = mtp_chain_state_.buffers.empty();
+      std::vector<MtpChainState::Banks> new_buffers;
+      std::vector<MtpChainState::Banks> new_views;
+      auto& buffers = initialize_buffers ? new_buffers : mtp_chain_state_.buffers;
+      auto& cached_views = mtp_chain_state_.views[active_feed_indices.size()];
+      const bool initialize_views = cached_views.empty();
+      auto& views = initialize_views ? new_views : cached_views;
+      if ((!initialize_buffers && buffers.size() != source_bindings.size()) ||
+          (!initialize_views && views.size() != source_bindings.size())) {
+        throw std::logic_error("Chained MTP fixed state binding count changed.");
+      }
+      for (const auto& binding : source_bindings) {
+        const auto info = binding.output->GetTensorTypeAndShapeInfo();
+        auto shape = info->GetShape();
+        if (shape.empty() || shape.front() <= 0) {
+          throw std::logic_error("Chained MTP fixed state requires a nonempty batch dimension.");
+        }
+        auto source = ByteWrapTensor(*mtp_model_->p_device_inputs_, *binding.output);
+        const size_t source_rows = static_cast<size_t>(shape.front());
+        const size_t fixed_state_row_bytes = source.size() / source_rows;
+        if (initialize_buffers) {
+          const size_t capacity = mtp_cache_manager_->MaxBatchSize();
+          shape.front() = static_cast<int64_t>(capacity);
+          MtpChainState::Banks banks;
+          for (auto& bank : banks) {
+            bank = OrtValue::CreateTensor(mtp_model_->p_device_inputs_->GetAllocator(),
+                                          shape, info->GetElementType());
+          }
+          buffers.push_back(std::move(banks));
+        }
+        const auto& banks = buffers[binding_index];
+        const auto bank_info = banks.front()->GetTensorTypeAndShapeInfo();
+        const auto bank_shape = bank_info->GetShape();
+        if (bank_info->GetElementType() != info->GetElementType() ||
+            bank_shape.size() != shape.size() ||
+            !std::equal(shape.begin() + 1, shape.end(), bank_shape.begin() + 1) ||
+            active_feed_indices.size() > static_cast<size_t>(bank_shape.front())) {
+          throw std::logic_error("Chained MTP fixed state exceeds its persistent layout.");
+        }
+        if (initialize_views) {
+          shape.front() = static_cast<int64_t>(active_feed_indices.size());
+          MtpChainState::Banks row_views;
+          for (size_t bank = 0; bank < banks.size(); ++bank) {
+            row_views[bank] = OrtValue::CreateTensor(
+                banks[bank]->GetTensorMemoryInfo(), banks[bank]->GetTensorMutableData<void>(),
+                fixed_state_row_bytes * active_feed_indices.size(), shape, info->GetElementType());
+          }
+          views.push_back(std::move(row_views));
+        }
+        auto* input = views[binding_index][input_bank].get();
+        auto* output = views[binding_index][input_bank ^ 1].get();
+        auto destination = ByteWrapTensor(*mtp_model_->p_device_inputs_, *input);
+        for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+          const size_t source_row = previous_stage_rows[active_feed_indices[row]];
+          if (source_row >= source_rows) {
+            throw std::logic_error("Chained MTP fixed state row is out of range.");
+          }
+          if (binding.output != input) {
+            destination.subspan(row * fixed_state_row_bytes, fixed_state_row_bytes)
+                .CopyFrom(source.subspan(source_row * fixed_state_row_bytes, fixed_state_row_bytes));
+          } else if (source_row != row) {
+            throw std::logic_error("Chained MTP aliased rows must retain their order.");
+          }
+        }
+        auto chain_binding = binding;
+        chain_binding.input = input;
+        chain_binding.output = output;
+        chain_state.bindings.push_back(chain_binding);
+        ++binding_index;
+      }
+      if (initialize_buffers) {
+        mtp_chain_state_.buffers = std::move(new_buffers);
+      }
+      if (initialize_views) {
+        cached_views = std::move(new_views);
+      }
+      chain_context.fixed_state_slots = chain_state.handles;
+      chain_context.fixed_state_bindings = chain_state.bindings;
+      if (!chain_state.bindings.empty()) {
+        chain_context.fixed_state_binding_domain = input_bank + 1;
+      }
       chain_context.fixed_state_staging_bytes = step->reservation->FixedStateStagingBytes();
       if (auto* fixed_reservation = step->reservation->FixedReservation()) {
         chain_context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();
       }
       chain_context.hidden_states_input = feedback_hidden->GetOrtTensor();
+      std::array<OrtValue*, 7> packed_stage_inputs{};
+      std::array<OrtValue*, 3> packed_stage_outputs{};
+      std::vector<FixedStateSlotHandle> stage_slots;
+      std::vector<FixedStateBinding> stage_bindings;
+      if (use_indexshare) {
+        std::vector<int32_t> row_indices;
+        row_indices.reserve(active_feed_indices.size());
+        for (size_t feed_index : active_feed_indices) {
+          if (feed_index > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            throw std::runtime_error("IndexShare row index exceeds int32.");
+          }
+          row_indices.push_back(static_cast<int32_t>(feed_index));
+        }
+        auto stage_rows = selection_buffers.row_indices[draft_index - 1];
+        auto row_host = stage_rows.CpuSpan();
+        std::copy(row_indices.begin(), row_indices.end(), row_host.begin());
+        stage_rows.CopyCpuToDevice();
+        const int64_t cached_rows = static_cast<int64_t>(selection_buffers.max_batch);
+        const int64_t query_count = static_cast<int64_t>(row_indices.size());
+        chain_context.decoder_session = mtp_model_->session_decoder_.get();
+        {
+          const size_t stage = draft_index - 1;
+          const bool reuse = indexshare.enabled;
+          const size_t merge_queries = reuse ? row_indices.size() : 0;
+          auto starts_host = selection_buffers.range_starts[stage].CpuSpan();
+          auto ends_host = selection_buffers.range_ends[stage].CpuSpan();
+          auto capture_host = selection_buffers.capture_ends.CpuSpan();
+          for (size_t row = 0; row < row_indices.size(); ++row) {
+            const auto end = chain_plan.requests[row].target_cache_slots;
+            if (end > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+              throw std::runtime_error("IndexShare range end exceeds int32.");
+            }
+            starts_host[row] = capture_host[active_feed_indices[row]];
+            ends_host[row] = static_cast<int32_t>(end);
+          }
+          selection_buffers.range_starts[stage].CopyCpuToDevice();
+          selection_buffers.range_ends[stage].CopyCpuToDevice();
+          packed_stage_inputs = {
+              mode_view(reuse), projection_view(selection_buffers.stage_projection_rows[stage].subspan(0, reuse ? 0 : row_indices.size())),
+              selection_view(selection_buffers.indices, {cached_rows, static_cast<int64_t>(selection_capacity)}),
+              selection_view(selection_buffers.counts, {cached_rows}),
+              selection_view(stage_rows.subspan(0, merge_queries), {static_cast<int64_t>(merge_queries)}),
+              selection_view(selection_buffers.range_starts[stage].subspan(0, merge_queries), {static_cast<int64_t>(merge_queries)}),
+              selection_view(selection_buffers.range_ends[stage].subspan(0, merge_queries), {static_cast<int64_t>(merge_queries)})};
+          packed_stage_outputs = {
+              selection_view(selection_buffers.stage_indices.subspan(stage * selection_buffers.max_batch * output_capacity,
+                                                                     row_indices.size() * output_capacity),
+                             {query_count, static_cast<int64_t>(output_capacity)}),
+              selection_view(selection_buffers.stage_counts.subspan(stage * selection_buffers.max_batch, row_indices.size()), {query_count}),
+              selection_view(selection_buffers.status.subspan(selection_buffers.extend_counts.size() + stage * selection_buffers.max_batch,
+                                                              row_indices.size()),
+                             {query_count})};
+          chain_context.indexshare_decode = reuse;
+          chain_context.extra_input_names = packed_selection_input_names;
+          chain_context.extra_inputs = packed_stage_inputs;
+          chain_context.extra_output_names = packed_selection_output_names;
+          chain_context.extra_outputs = packed_stage_outputs;
+
+          if (!context.fixed_state_slots.empty()) {
+            for (size_t feed_index : active_feed_indices) stage_slots.push_back(context.fixed_state_slots[feed_index]);
+          }
+          stage_bindings.assign(context.fixed_state_bindings.begin(), context.fixed_state_bindings.end());
+          auto& state_inputs = selection_buffers.stage_state_inputs[stage];
+          auto& state_outputs = selection_buffers.stage_state_outputs[stage];
+          auto& state_updates = selection_buffers.stage_state_updates[stage];
+          state_inputs.resize(stage_bindings.size());
+          state_outputs.resize(stage_bindings.size());
+          state_updates.resize(stage_bindings.size());
+          const auto state_view = [&](DeviceSpan<uint8_t>& buffer, OrtValue& geometry) {
+            auto info = geometry.GetTensorTypeAndShapeInfo();
+            auto shape = info->GetShape();
+            const size_t row_bytes = info->GetElementCount() / static_cast<size_t>(shape[0]) * Ort::SizeOf(info->GetElementType());
+            if (buffer.size() == 0) buffer = mtp_model_->p_device_inputs_->Allocate<uint8_t>(selection_buffers.max_batch * row_bytes);
+            shape[0] = query_count;
+            auto tensor = OrtValue::CreateTensor(*mtp_model_->p_device_inputs_->GetMemoryInfo(), buffer.Span().data(),
+                                                 row_indices.size() * row_bytes, shape, info->GetElementType());
+            auto* result = tensor.get();
+            step->indexshare_views.push_back(std::move(tensor));
+            return result;
+          };
+          for (size_t state_binding_index = 0; state_binding_index < stage_bindings.size(); ++state_binding_index) {
+            auto& binding = stage_bindings[state_binding_index];
+            const auto& original = context.fixed_state_bindings[state_binding_index];
+            binding.input = state_view(state_inputs[state_binding_index], *original.input);
+            binding.output = state_view(state_outputs[state_binding_index], *original.output);
+            auto source = draft_index == 1
+                              ? ByteWrapTensor(*mtp_model_->p_device_inputs_, *original.output)
+                              : selection_buffers.stage_state_outputs[stage - 1][state_binding_index];
+            const size_t state_row_bytes = state_inputs[state_binding_index].size() / selection_buffers.max_batch;
+            for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+              const size_t source_row = draft_index == 1 ? active_feed_indices[row] : previous_stage_rows[active_feed_indices[row]];
+              state_inputs[state_binding_index].subspan(row * state_row_bytes, state_row_bytes).CopyFrom(source.subspan(source_row * state_row_bytes, state_row_bytes));
+            }
+            if (binding.state_update_capacity != 0) {
+              binding.state_update_capture_count = selection_view(selection_buffers.stage_capture_counts[stage].subspan(0, row_indices.size()), {query_count});
+              if (binding.state_update_active) binding.state_update_active = packed_extend_inputs[0];
+              if (binding.state_update_value) binding.state_update_value = state_view(state_updates[state_binding_index], *original.state_update_value);
+              if (binding.state_update_capsule) throw std::runtime_error("IndexShare MTP supports indexer state, not recurrent capsules.");
+            }
+          }
+          if (!stage_bindings.empty()) {
+            OrtValue* capture_count = nullptr;
+            for (auto& binding : stage_bindings) {
+              if (binding.state_update_capture_count) {
+                if (!capture_count) capture_count = binding.state_update_capture_count;
+                binding.state_update_capture_count = capture_count;
+              }
+            }
+          }
+          chain_context.fixed_state_slots = stage_slots;
+          chain_context.fixed_state_bindings = stage_bindings;
+        }
+      }
       if (device_draft_chain) {
         chain_context.input_ids = packed_device_inputs;
         chain_context.run_options->AddConfigEntry(
@@ -1050,6 +1470,13 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
 
     if (device_draft_chain) {
       materialize_device_drafts();
+    }
+
+    if (use_indexshare) {
+      const auto status = selection_buffers.status.CopyDeviceToCpu();
+      if (std::any_of(status.begin(), status.end(), [](int32_t value) { return value != 0; })) {
+        throw std::logic_error("IndexShare indexer merge failed; tentative drafts were not published.");
+      }
     }
 
     for (size_t i = 0; i < feeds.size(); ++i) {
@@ -1289,6 +1716,9 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   // Request joins the batch rather than inside a rollback-capable step. Reject both before any
   // Request mutation rather than letting a turn run without the guarantee its options promise.
   if (!dynamic_batching) {
+    if (options.delimited_guidance) {
+      throw std::runtime_error("Delimited guidance requires an Engine configured for dynamic batching.");
+    }
     if (!options.stop_strings.empty()) {
       throw std::runtime_error(
           "Stop strings require an Engine configured for dynamic batching.");
@@ -2509,6 +2939,20 @@ const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
 
 std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
     const TurnOptions& options) const {
+  if (options.delimited_guidance) {
+    if (!options.guidance_type.empty() || !options.guidance_data.empty()) {
+      throw std::invalid_argument("Delimited and whole-turn guidance cannot be combined.");
+    }
+    const auto& region = *options.delimited_guidance;
+    const auto& config = model_->config_->model;
+    auto params = std::make_shared<GeneratorParams>(*model_);
+    params->search.batch_size = 1;
+    params->SetGuidance("lark_grammar", region.grammar, false);
+    auto body = CreateGuidanceLogitsProcessor(std::move(params));
+    return std::make_unique<DelimitedGuidanceLogitsProcessor>(
+        std::move(body), *model_->p_device_, config.vocab_size,
+        config.eos_token_id, region.opening_token, region.closing_token);
+  }
   if (options.guidance_type.empty() && options.guidance_data.empty()) {
     return nullptr;
   }

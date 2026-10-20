@@ -682,7 +682,7 @@ bool Generator::IsGreedySampling() const {
 
 void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
   const auto& search = params.search;
-  if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
+  if (params.IsGreedySampling()) {
     sampling_method_ = SamplingMethod::kGreedy;
   } else {
     if (search.num_beams != 1)
@@ -814,7 +814,9 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
-  if (ModelType::IsLLM(model_->config_->model.type) || ModelType::IsPipe(model_->config_->model.type)) {
+  const auto& model_type = model_->config_->model.type;
+  if (ModelType::IsLLM(model_type) ||
+      (ModelType::IsPipe(model_type) && !ModelType::IsVLM(model_type) && !ModelType::IsMMM(model_type))) {
     throw std::runtime_error("Please use generator.AppendTokens for " + model_->config_->model.type + ". SetInputs is not supported for this model type.");
   }
 
@@ -1009,7 +1011,15 @@ DeviceSpan<float> Generator::GetLogits() {
     return strategy_logits;
   }
   if (!computed_logits_) {
-    ComputeLogits(search_->GetNextTokens());
+    auto next_tokens = search_->GetNextTokens();
+    if (last_action_ == Action::rewound) {
+      if (search_->GetSequenceLength() == 0)
+        throw std::runtime_error(
+            "GetLogits called with no prior state. Please call AppendTokens, SetLogits, or SetInputs "
+            "before calling GetLogits.");
+      search_->AppendTokens(next_tokens);
+    }
+    ComputeLogits(next_tokens);
   }
   return search_->GetLogits();
 }

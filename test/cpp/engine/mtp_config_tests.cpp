@@ -87,11 +87,66 @@ class FakeModelStateMetadata final : public ModelStateMetadata {
 
 TEST(MtpDecoderConfigTest, ParsesDisabledRuntimeToggle) {
   const auto root = WriteDisabledMtpConfig();
-  const Config config{fs::path{root.string()}, {}};
+  Config config{fs::path{root.string()}, {}};
 
   EXPECT_FALSE(config.model.mtp.enabled);
   EXPECT_FALSE(config.model.mtp.IsEnabled());
   EXPECT_EQ(config.model.mtp.filename, "mtp.onnx");
+  OverlayConfig(config, R"({"model":{"mtp":{"inputs":{"logits_indices":"head_logits_indices"}}}})");
+  EXPECT_EQ(config.model.mtp.inputs.logits_indices, "head_logits_indices");
+}
+
+TEST(MtpDecoderConfigTest, IndexShareIsOptInAndRequiresCompleteMetadata) {
+  Config config;
+  config.model.decoder.hidden_size = 16;
+  auto& mtp = config.model.mtp;
+  mtp.filename = "mtp.onnx";
+  mtp.num_key_value_heads = 1;
+  mtp.head_size = 16;
+  mtp.shared_initializers.push_back({"lm_head", "model.onnx.data"});
+  EXPECT_FALSE(mtp.index_share.enabled);
+  EXPECT_NO_THROW(CreateMtpDecoderConfig(config));
+  mtp.index_share.enabled = true;
+  EXPECT_THROW(CreateMtpDecoderConfig(config), std::runtime_error);
+  mtp.index_share.indices_output = "indices";
+  mtp.index_share.counts_output = "counts";
+  mtp.index_share.base_capacity = 2051;
+  mtp.index_share.max_draft_tokens = 7;
+  auto projected = CreateMtpDecoderConfig(config);
+  ASSERT_EQ(projected->model.decoder.shared_initializers.size(), 1u);
+  EXPECT_EQ(projected->model.decoder.shared_initializers[0].name, "lm_head");
+  EXPECT_EQ(projected->model.decoder.filename, "mtp.onnx");
+  mtp.index_share.max_draft_tokens = 1;
+  EXPECT_NO_THROW(CreateMtpDecoderConfig(config));
+  mtp.index_share.max_draft_tokens = 0;
+  EXPECT_THROW(CreateMtpDecoderConfig(config), std::runtime_error);
+  mtp.index_share.enabled = false;
+  EXPECT_THROW(CreateMtpDecoderConfig(config), std::runtime_error);
+  mtp.index_share.max_draft_tokens = 7;
+  projected = CreateMtpDecoderConfig(config);
+  EXPECT_EQ(projected->model.decoder.shared_initializers[0].name, "lm_head");
+}
+
+TEST(MtpDecoderConfigTest, SingleModelIndexShareUsesMtpFilenameForEveryBudget) {
+  Config config;
+  config.model.decoder.hidden_size = 16;
+  auto& mtp = config.model.mtp;
+  mtp.filename = "mtp.onnx";
+  mtp.num_key_value_heads = 1;
+  mtp.head_size = 16;
+  mtp.index_share.indices_output = "indices";
+  mtp.index_share.counts_output = "counts";
+  mtp.index_share.base_capacity = 2051;
+  mtp.shared_initializers.push_back({"expert", "mtp.onnx.data"});
+  for (int budget = 1; budget <= 7; ++budget) {
+    mtp.index_share.max_draft_tokens = budget;
+    const auto projected = CreateMtpDecoderConfig(config);
+    EXPECT_EQ(projected->model.decoder.filename, "mtp.onnx");
+    ASSERT_EQ(projected->model.decoder.shared_initializers.size(), 1u);
+    EXPECT_EQ(projected->model.decoder.shared_initializers[0].name, "expert");
+  }
+  mtp.index_share.base_capacity = std::numeric_limits<int>::max();
+  EXPECT_THROW(CreateMtpDecoderConfig(config), std::runtime_error);
 }
 
 TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
@@ -107,6 +162,7 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   decoder.inputs.past_sequence_lengths = "past_sequence_lengths";
   decoder.inputs.attention_metadata = "attention_metadata";
   decoder.inputs.engram_embeddings = "engram_embeddings";
+  decoder.inputs.logits_indices = "target_logits_indices";
   config.model.engram.filename = "engram.onnx";
   decoder.session_options.providers = {"cuda"};
   decoder.session_options.intra_op_num_threads = 2;
@@ -149,6 +205,10 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_EQ(head.head_size, 64);
   EXPECT_EQ(head.hidden_size, 2048);
   EXPECT_EQ(head.inputs.hidden_states, "head_hidden");
+  EXPECT_TRUE(head.inputs.logits_indices.empty());
+  mtp.inputs.logits_indices = "head_logits_indices";
+  EXPECT_EQ(CreateMtpDecoderConfig(config)->model.decoder.inputs.logits_indices,
+            "head_logits_indices");
   EXPECT_EQ(head.outputs.hidden_states, "head_hidden_out");
   EXPECT_EQ(head.inputs.block_table, "block_table");
   EXPECT_EQ(head.inputs.cumulative_sequence_lengths, "cumulative_sequence_lengths");
@@ -208,9 +268,11 @@ TEST(MtpDecoderConfigTest, ProjectsOneLayerFixedIndexerStateForTheHead) {
   decoder.outputs.state_update_indexer_names = "state_update.%d.indexer";
   decoder.state_groups = std::vector<Config::Model::Decoder::StateGroup>{
       {Config::Model::Decoder::StateGroupKind::PagedKeyValue,
-       {3, 7}, std::nullopt},
+       {3, 7},
+       std::nullopt},
       {Config::Model::Decoder::StateGroupKind::FixedIndexer,
-       {3, 7}, Config::Model::Decoder::StateUpdate{7, true, 0, 4}}};
+       {3, 7},
+       Config::Model::Decoder::StateUpdate{7, true, 0, 4}}};
 
   auto& mtp = config.model.mtp;
   mtp.filename = "mtp.onnx";

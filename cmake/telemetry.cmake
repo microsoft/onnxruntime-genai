@@ -75,6 +75,17 @@ set(MATSDK_BUILD_SWIFT_WRAPPER OFF CACHE BOOL "Disable 1DS Swift wrapper" FORCE)
 set(MATSDK_BUILD_JNI_WRAPPER OFF CACHE BOOL "Disable 1DS JNI wrapper" FORCE)
 set(MATSDK_BUILD_PACKAGE OFF CACHE BOOL "Disable 1DS package generation" FORCE)
 set(MATSDK_BUILD_APPLE_HTTP ${APPLE} CACHE BOOL "Build the 1DS Apple HTTP client" FORCE)
+set(MATSDK_DISABLE_LOGGING ON CACHE BOOL "Compile out internal 1DS SDK logging" FORCE)
+set(MATSDK_DISABLE_EXCEPTIONS OFF CACHE BOOL "Retain 1DS SDK exception support" FORCE)
+set(MATSDK_USE_WININET OFF CACHE BOOL "Use WinHTTP for desktop Windows telemetry" FORCE)
+# Desktop GenAI supplies a hashed, generated device ID; mobile builds use the SDK's platform ID.
+if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "visionOS")
+  set(MATSDK_ENABLE_DEVICE_ID ON CACHE BOOL "Use the 1DS platform device ID on mobile" FORCE)
+else()
+  set(MATSDK_ENABLE_DEVICE_ID OFF CACHE BOOL "Disable native 1DS device ID collection on desktop" FORCE)
+endif()
+set(MATSDK_ANDROID_USE_ROOM OFF CACHE BOOL "Use native SQLite for Android telemetry storage" FORCE)
+set(MATSDK_ENABLE_CAPI_HTTP_CLIENT OFF CACHE BOOL "Disable the alternative Android C API HTTP client" FORCE)
 set(MATSDK_ANDROID_HTTP_CLIENT JAVA CACHE STRING "Use the 1DS Java HTTP bridge on Android" FORCE)
 set(MATSDK_CURL_TLS_BACKEND MBEDTLS CACHE STRING "Use mbedTLS for 1DS curl" FORCE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -109,7 +120,6 @@ FetchContent_Declare(
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(cpp_client_telemetry)
-target_compile_definitions(mat PRIVATE MATSDK_DISABLE_LOGGING)
 if(ANDROID)
   target_compile_definitions(mat PRIVATE ANDROID_SUPPRESS_LOGCAT)
 endif()
@@ -138,6 +148,12 @@ foreach(_ortgenai_1ds_cache_var
     MATSDK_BUILD_JNI_WRAPPER
     MATSDK_BUILD_PACKAGE
     MATSDK_BUILD_APPLE_HTTP
+    MATSDK_DISABLE_LOGGING
+    MATSDK_DISABLE_EXCEPTIONS
+    MATSDK_USE_WININET
+    MATSDK_ENABLE_DEVICE_ID
+    MATSDK_ANDROID_USE_ROOM
+    MATSDK_ENABLE_CAPI_HTTP_CLIENT
     MATSDK_ANDROID_HTTP_CLIENT
     MATSDK_CURL_PROVIDER
     MATSDK_CURL_TLS_BACKEND

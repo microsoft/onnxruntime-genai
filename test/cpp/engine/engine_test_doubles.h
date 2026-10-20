@@ -233,6 +233,7 @@ struct RecordingCacheManager : CacheManager {
         // Replay any scripted fixed-state slots so a test can force the Engine's plan/reservation
         // consistency guard to fire without a real fixed-state pool.
         fixed_state_slots_ = cache.scripted_fixed_slots_;
+        fixed_state_bindings_ = cache.scripted_fixed_bindings_;
         fixed_state_staging_bytes_ = cache.scripted_fixed_staging_bytes_;
         fixed_state_new_slot_count_ =
             cache.scripted_fixed_new_slot_count_;
@@ -244,6 +245,10 @@ struct RecordingCacheManager : CacheManager {
 
       std::span<const FixedStateSlotHandle> FixedStateSlots() const override {
         return fixed_state_slots_;
+      }
+
+      std::span<const FixedStateBinding> FixedStateBindings() const override {
+        return fixed_state_bindings_;
       }
 
       size_t FixedStateStagingBytes() const override {
@@ -293,6 +298,7 @@ struct RecordingCacheManager : CacheManager {
       RecordingCacheManager& cache_;
       std::vector<std::shared_ptr<Request>> newly_admitted_;
       std::vector<FixedStateSlotHandle> fixed_state_slots_;
+      std::vector<FixedStateBinding> fixed_state_bindings_;
       size_t fixed_state_staging_bytes_{};
       size_t fixed_state_new_slot_count_{};
       bool throw_prepare_{};
@@ -339,6 +345,9 @@ struct RecordingCacheManager : CacheManager {
   }
   void SetMaxDraftTokensPerStep(size_t token_count) {
     max_draft_tokens_per_step_ = token_count;
+  }
+  void SetFixedStateBindings(std::vector<FixedStateBinding> bindings) {
+    scripted_fixed_bindings_ = std::move(bindings);
   }
   void ThrowPlanningBadAllocOnce() { throw_planning_bad_alloc_ = true; }
   void ThrowPlanningBadAllocAlways() { always_throw_planning_bad_alloc_ = true; }
@@ -416,6 +425,7 @@ struct RecordingCacheManager : CacheManager {
   std::vector<std::shared_ptr<Request>> allocated_;
   std::optional<FixedStateResourcePlan> scripted_fixed_plan_;
   std::vector<FixedStateSlotHandle> scripted_fixed_slots_;
+  std::vector<FixedStateBinding> scripted_fixed_bindings_;
   size_t scripted_fixed_staging_bytes_{};
   size_t scripted_fixed_new_slot_count_{};
 };
@@ -647,8 +657,11 @@ struct CountingCudaDeviceState {
   size_t device_to_host_copies{};
   size_t synchronize_calls{};
   size_t memory_queries{};
+  size_t integrated_queries{};
   size_t device_id_queries{};
   size_t total_memory_bytes{};
+  std::optional<size_t> free_memory_bytes;
+  std::optional<bool> is_integrated{false};
   int device_id{};
   bool fail_memory_query{};
   std::vector<int> argmax_rows;
@@ -717,8 +730,15 @@ struct CountingCudaDevice final : DeviceInterface {
     if (state->fail_memory_query) {
       throw std::runtime_error("test device memory query failed");
     }
-    free_bytes = state->total_memory_bytes;
+    free_bytes = state->free_memory_bytes.value_or(state->total_memory_bytes);
     total_bytes = state->total_memory_bytes;
+  }
+  std::optional<bool> GetIsIntegrated(std::string& error) override {
+    ++state->integrated_queries;
+    if (!state->is_integrated) {
+      error = "test integrated-device query failed";
+    }
+    return state->is_integrated;
   }
 
   bool ArgMaxDevice(const void* logits, ONNXTensorElementDataType logits_type,

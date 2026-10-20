@@ -133,6 +133,12 @@ steps:
     cmakeBuildDir="$(Build.SourcesDirectory)/$(buildDir)/${{ parameters.build_config }}"
     cmake --build "$cmakeBuildDir" --config ${{ parameters.build_config }} --target package
     cmake --install "$cmakeBuildDir" --config ${{ parameters.build_config }} --prefix "$(coreInstall)"
+    cmake \
+      "-DLIBRARY=$(coreInstall)/lib/libonnxruntime-genai.dylib" \
+      -DNM=/usr/bin/nm \
+      "-DAPI_HEADER=$(coreInstall)/include/ort_genai_c.h" \
+      -DAPPLE_EXPORTS=ON \
+      -P test/cmake/check-shared-library-exports.cmake
   displayName: 'Package + install core (signed)'
   workingDirectory: '$(Build.SourcesDirectory)'
 

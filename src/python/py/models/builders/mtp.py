@@ -7,7 +7,9 @@
 import copy
 import os
 
+import onnx
 import onnx_ir as ir
+from onnx import TensorProto, helper
 from quantization import QuantConfig
 
 
@@ -26,6 +28,177 @@ class MTPModel:
         }
         return copy.deepcopy(extra_options)
 
+    def export_indexshare_graphs(self, output_dir, source_file, max_draft_tokens=7):
+        if not 1 <= max_draft_tokens <= 7:
+            raise ValueError("IndexShare export requires between one and seven draft tokens.")
+        source = onnx.load(os.path.join(output_dir, source_file), load_external_data=False)
+        indexers = [node for node in source.graph.node if node.op_type == "PackedSparseAttentionIndexer"]
+        if len(indexers) != 1:
+            raise ValueError("IndexShare export currently requires exactly one packed QSA indexer.")
+        indexer = indexers[0]
+        if any(indexer.input[18:]):
+            raise ValueError("IndexShare export requires a graph that has not already been converted.")
+        attributes = {attribute.name: helper.get_attribute_value(attribute) for attribute in indexer.attribute}
+        if attributes.get("policy_mode") != b"qsa":
+            raise ValueError("IndexShare MTP export requires QSA raw-token selections.")
+        capacity = attributes["token_budget"] + attributes["compress_ratio"] - 1
+        attention_nodes = [
+            node
+            for node in source.graph.node
+            if node.op_type == "SparsePagedAttention" and list(node.input[9:11]) == list(indexer.output[:2])
+        ]
+        if len(attention_nodes) != 1:
+            raise ValueError("The packed indexer must feed exactly one SparsePagedAttention node.")
+        past_lengths = indexer.input[7]
+        input_types = {value.name: value.type.tensor_type.elem_type for value in source.graph.input}
+        if input_types.get(past_lengths) != TensorProto.INT32:
+            raise ValueError("IndexShare requires packed int32 past sequence lengths.")
+        return self._export_packed_indexshare_graph(
+            source, indexer, capacity, output_dir, source_file, max_draft_tokens
+        )
+
+    def _export_packed_indexshare_graph(self, source, indexer, capacity, output_dir, source_file, max_draft_tokens):
+        producers = {name: node for node in source.graph.node for name in node.output if name}
+        existing_names = set(producers)
+        existing_names.update(value.name for value in source.graph.input)
+        existing_names.update(value.name for value in source.graph.initializer)
+        if existing_names.intersection({
+            "past_indices", "past_counts", "present_indices", "present_counts", "indexer_status",
+            "mode", "projection_rows", "base_row_indices", "range_starts", "range_ends",
+        }):
+            raise ValueError("IndexShare graph input/output names must be unused.")
+        query_producer = producers.get(indexer.input[0])
+        split = None
+        if len(indexer.input) > 1 and indexer.input[1]:
+            if (
+                query_producer is None
+                or query_producer.op_type != "Split"
+                or list(query_producer.output) != list(indexer.input[:2])
+            ):
+                raise ValueError("Packed IndexShare requires a shared Q/K projection with an optional Split.")
+            split = query_producer
+            packed_qk = split.input[0]
+        else:
+            packed_qk = indexer.input[0]
+        projection = producers.get(packed_qk)
+        if projection is None or projection.op_type not in {"MatMul", "MatMulNBits"}:
+            raise ValueError("Packed IndexShare requires an indexer MatMul or MatMulNBits projection.")
+        projection_consumers = [node for node in source.graph.node if packed_qk in node.input]
+        if len(projection_consumers) != 1:
+            raise ValueError("Packed IndexShare cannot gate a projection with other consumers.")
+        if split is not None:
+            consumers = [node for node in source.graph.node if any(name in split.output for name in node.input)]
+            if len(consumers) != 1 or consumers[0].name != indexer.name:
+                raise ValueError("Packed IndexShare cannot remove a Split with other consumers.")
+
+        prefix = indexer.name.rsplit("/", 1)[0] + "/indexshare"
+        gated_hidden = prefix + "/GatherProjectionRows/output_0"
+        merged = [
+            prefix + "/IndexerMerge/output_0",
+            prefix + "/IndexerMerge/output_1",
+            prefix + "/IndexerMerge/status",
+        ]
+        output_capacity = capacity + max_draft_tokens - 1
+        gather = helper.make_node(
+            "Gather",
+            [projection.input[0], "projection_rows"],
+            [gated_hidden],
+            name=prefix + "/GatherProjectionRows",
+            axis=0,
+        )
+        merge = helper.make_node(
+            "PackedSparseAttentionIndexerMerge",
+            [
+                "past_indices",
+                "past_counts",
+                "base_row_indices",
+                "range_starts",
+                "range_ends",
+            ],
+            merged,
+            name=prefix + "/IndexerMerge",
+            domain="com.microsoft",
+            policy_mode="append_range",
+            max_output_entries=output_capacity,
+        )
+        projection.input[0] = gated_hidden
+        while len(indexer.input) < 18:
+            indexer.input.append("")
+        indexer.input[0] = packed_qk
+        indexer.input[1] = ""
+        indexer.input.extend(["mode", *merged])
+        while len(indexer.output) < 7:
+            indexer.output.append("")
+        indexer.output.append("indexer_status")
+        indexer.attribute.append(helper.make_attribute("max_output_entries", output_capacity))
+        original_indexer_outputs = tuple(indexer.output[:2])
+        output_names = dict(zip(
+            original_indexer_outputs, ("present_indices", "present_counts"), strict=True,
+        ))
+        for node in source.graph.node:
+            for position, name in enumerate(node.input):
+                if name in output_names:
+                    node.input[position] = output_names[name]
+            for position, name in enumerate(node.output):
+                if name in output_names:
+                    node.output[position] = output_names[name]
+        nodes = []
+        for node in source.graph.node:
+            if split is not None and node.name == split.name:
+                continue
+            if node.name == projection.name:
+                nodes.append(gather)
+            if node.name == indexer.name:
+                nodes.append(merge)
+            nodes.append(node)
+        del source.graph.node[:]
+        source.graph.node.extend(nodes)
+        for name, dtype, shape in (
+            ("mode", TensorProto.INT32, [1]),
+            ("projection_rows", TensorProto.INT64, ["indexer_projection_rows"]),
+            ("past_indices", TensorProto.INT32, ["indexshare_rows", capacity]),
+            ("past_counts", TensorProto.INT32, ["indexshare_rows"]),
+            ("base_row_indices", TensorProto.INT32, ["indexshare_merge_queries"]),
+            ("range_starts", TensorProto.INT32, ["indexshare_merge_queries"]),
+            ("range_ends", TensorProto.INT32, ["indexshare_merge_queries"]),
+        ):
+            source.graph.input.append(helper.make_tensor_value_info(name, dtype, shape))
+        preserved_outputs = [value for value in source.graph.output if value.name not in original_indexer_outputs]
+        del source.graph.output[:]
+        source.graph.output.extend(preserved_outputs)
+        for name, shape in (
+            ("present_indices", ["num_tokens", output_capacity]),
+            ("present_counts", ["num_tokens"]),
+            ("indexer_status", ["num_tokens"]),
+        ):
+            source.graph.output.append(helper.make_tensor_value_info(name, TensorProto.INT32, shape))
+        self.remove_unused_constants(source.graph)
+        del source.graph.value_info[:]
+        onnx.save_model(source, os.path.join(output_dir, source_file))
+        return {
+            "enabled": True,
+            "base_capacity": capacity,
+            "max_draft_tokens": max_draft_tokens,
+            "indices_output": "present_indices",
+            "counts_output": "present_counts",
+            "status_output": "indexer_status",
+        }
+
+    @staticmethod
+    def remove_unused_constants(graph):
+        used_names = {name for node in graph.node for name in node.input if name}
+        used_names.update(value.name for value in graph.output)
+        nodes = [
+            node for node in graph.node
+            if node.op_type != "Constant" or any(name in used_names for name in node.output)
+        ]
+        del graph.node[:]
+        graph.node.extend(nodes)
+        used_names.update(value.name for value in graph.input)
+        initializers = [value for value in graph.initializer if value.name in used_names]
+        del graph.initializer[:]
+        graph.initializer.extend(initializers)
+
     def resolve_mtp_model_config(self, extra_options):
         mtp_quant_config_value = extra_options.get("mtp_quant_config")
         if mtp_quant_config_value is None:
@@ -41,6 +214,12 @@ class MTPModel:
             if isinstance(mtp_quant_config_value, QuantConfig)
             else QuantConfig.from_json(mtp_quant_config_value)
         )
+        if (
+            quant_config.weights.type == "int2"
+            or quant_config.moe.type == "int2"
+            or any(override.type == "int2" for override in quant_config.weights.overrides)
+        ):
+            raise ValueError("MTP quant_config does not support int2; use DFlash2")
         self.mtp_attrs["io_dtype"], self.mtp_attrs["onnx_dtype"] = quant_config.to_onnx_dtypes()
         inherited_options["_quant_config"] = quant_config
         self.mtp_attrs["extra_options"] = inherited_options
@@ -263,11 +442,15 @@ class MTPModel:
             for staged_path in (staged_data, staged_model):
                 if os.path.exists(staged_path):
                     os.remove(staged_path)
-            print(f"Warning: could not share auxiliary initializers ({exc}); duplicated copies remain in {target_data}.")
+            print(
+                f"Warning: could not share auxiliary initializers ({exc}); duplicated copies remain in {target_data}."
+            )
             return []
 
         if not self.replace_shared_initializer_files(target_model_path, target_data, staged_model, staged_data):
-            print(f"Warning: could not commit shared auxiliary initializers; duplicated copies remain in {target_data}.")
+            print(
+                f"Warning: could not commit shared auxiliary initializers; duplicated copies remain in {target_data}."
+            )
             return []
 
         shared_size_mb = sum(length for _, length, _ in shared.values()) / 1e6

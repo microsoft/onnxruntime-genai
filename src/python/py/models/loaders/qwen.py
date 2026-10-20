@@ -26,7 +26,7 @@ class QwenMTPModel:
         cache_dir=None,
         token=None,
     ):
-        if quant_type in {"modelopt", "compressed-tensors"}:
+        if quant_type in {"modelopt", "compressed-tensors", "fp8"}:
             if load_quantized_model is None:
                 raise ValueError("A quantized model loader is required for ModelOpt/compressed-tensors MTP weights.")
             model = load_quantized_model(input_path)

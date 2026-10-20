@@ -73,8 +73,9 @@ compatibility defaults are provider-dependent today:
 | --- | --- |
 | `weights.accuracy_level` | `4` on CPU/WebGPU, else `0` |
 | `moe.block_size` | `128` on TRT-RTX, else `32` |
-| `moe.type` | `mxfp4`/`nvfp4` accepted only on CUDA |
-| Automatic weight packing | CUDA SM80-class GPUs use MatMulNBits mode `1`, SM90-class GPUs use `2`; integer QMoE uses `1` on both. Other EPs and unavailable/older NVIDIA GPUs use `0`. |
+| `moe.type` | `int2`/`mxfp4`/`nvfp4` accepted only on CUDA |
+| `moe.fc1_type`, `moe.fc2_type` | Projection overrides require integer QMoE on CUDA; INT2 and mixed widths require block size 64 or 128 that divides both hidden and intermediate sizes |
+| Automatic weight packing | CUDA SM80-class GPUs use MatMulNBits mode `1`, SM90-class GPUs use `2`; integer QMoE uses `1` on both. Other EPs and unavailable/older NVIDIA GPUs use `0`. INT2 drafter bodies retain portable raw weights. |
 | `format.use_qdq` | Required `true` for TRT-RTX integer dense weights |
 
 So the resolver signature is (envelope, execution provider), and rule 1 in
@@ -100,8 +101,8 @@ full quantization configuration from PR #2588:
 | `io_dtype` | Requested activation/I/O dtype, subject to the component's supported contract. |
 | `checkpoint_policy` | Reserved for loaders that implement both paths. Target options currently reject it; MTP supports `preserve` and `requantize`. |
 | `weights` | `type`, `block_size`, `symmetric`, `method`, `accuracy_level`, `op_types`, and ordered `overrides`. |
-| `moe` | Expert quantization type and block size. |
-| `format` | `use_qdq`. |
+| `moe` | Expert quantization type, optional `fc1_type`/`fc2_type` projection overrides, block size, and packing. |
+| `format` | `use_qdq`; weight packing is resolved automatically. |
 
 `format` is the proposed replacement name for `quant_config.runtime`: QDQ changes
 the exported graph and is not a runtime-profile override. Weight packing is
@@ -122,6 +123,11 @@ string.
 Keep MoE quantization in `quant_config.moe`, separately for each model. Do not add
 a duplicate `moe.quant_config` location. Future non-quantization MoE export options
 can have their own group when there are concrete supported settings to expose.
+`moe.fc1_type` controls the fused gate/up projection (FC1 and FC3), while
+`moe.fc2_type` controls the down projection. They inherit `moe.type` when omitted.
+The initial mixed-width implementation accepts `int2`, `int4`, and `int8`, uses
+symmetric weights without zero points, and requires CUDA with block size 64 or 128
+that divides both the model's hidden size and MoE intermediate size.
 
 An omitted `moe` group needs an explicit rule, because today's default derives
 from the legacy root `precision` rather than from the dense weight type: `int8`
@@ -174,7 +180,7 @@ Pool size, scheduler limits, utilization targets, and prefill chunk size belong
 to `runtime_config`. They remain constrained by the exported graph and supported
 runtime behavior even though they are not graph-construction options.
 
-### Gate/Up Projection Fusion
+### Projection Fusion
 
 Target MLP gate/up projections are always fused before weight quantization,
 producing a single projection (`MatMulNBits` for the INT4 example) followed by
@@ -190,10 +196,23 @@ be preserved. Resolve exact-name overrides against the final emitted graph;
 do not silently drop old gate/up names after fusion or change one projection's
 policy to match the other.
 
+`target_options.optimizations.fuse_qkv` controls target Q/K/V projection fusion
+and defaults to `true`. It maps to the `fuse_qkv` exporter option. The legacy
+inverse option `disable_qkv_fusion` is deprecated but remains supported; when
+both spellings are present, `fuse_qkv` takes precedence. Fusion remains
+automatically disabled for unsupported execution providers and incompatible
+projection or quantization configurations.
+
+`drafter_options.optimizations.fuse_qkv` (DFlash2 only, default `false`) maps to
+`dflash2_fuse_qkv`. Each layer stacks its query-block rows over the shared context
+rows and projects both with one Q/K/V projection whose gathered output feeds
+`PagedAttention` as packed QKV. The fused drafter has no `q_row_map` input and
+therefore requires a runtime that treats `q_row_map` as optional.
+
 Fusion is distinct from selecting the CUDA fpA/intB kernel family. The legacy
 `enable_cuda_fpa_intb_gemm` option maps to the runtime decoder session entry
 `ep.cuda.fpa_intb_gemm`, whereas offline weight layout remains in
-`quant_config.format`. Neither setting implies fusion. DFlash2's raw BF16 body
+`quant_config.format`. Neither setting implies fusion. DFlash2's raw body
 must retain its own supported session settings rather than inherit target flags.
 
 ## 4. Drafter Configuration
@@ -282,29 +301,29 @@ is supplied.
 | Drafter | Current exporter boundary to preserve and validate |
 | --- | --- |
 | MTP | Full `QuantConfig` path with model-specific loader and state constraints. |
-| DFlash2 | BF16 body, target-typed boundary tensors, paged attention, unquantized drafter KV; dense or supported symmetric DEFAULT INT4/INT8 matmuls. |
+| DFlash2 | BF16 body by default (explicit FP16 supported), target-typed boundary tensors, paged attention, unquantized drafter KV; dense or supported symmetric DEFAULT INT2/INT4/INT8 matmuls. |
 | DSpark | Dense BF16 export, paged attention, unquantized drafter KV; integer quantization is separate future work. |
 
-DFlash2's BF16 body currently uses raw, not prepacked, matmul weights. Its borrowed
+DFlash2's body defaults to raw, not prepacked, matmul weights. Its borrowed
 LM head has separate layout rules. Reject explicit new options that cannot be
 honored; preserve legacy effective behavior through the legacy adapter.
 
 ### Two Dtypes in a Block Drafter
 
 `quant_config.io_dtype` names one dtype per component, but a block drafter has
-two. DFlash2 runs its body in BF16 because the activations genuinely leave the
-FP16 range, while the tensors it shares with the target -- the auxiliary hidden
+two. DFlash2 defaults its body to BF16 because the activations can leave the
+FP16 range; structured configuration can explicitly select FP16 at the risk of
+overflow. The tensors it shares with the target -- the auxiliary hidden
 states, the embedding table, and the LM head -- stay at the *target's* I/O dtype.
 Only the body dtype is a component property; the boundary dtype is a consequence
 of the target's, and the drafter cannot choose it independently without breaking
 the sharing it depends on.
 
-So `drafter_options.quant_config.io_dtype` describes the body only, and for
-DFlash2 and DSpark today `bf16` is its single supported value. An explicit
-`fp16`/`fp32` body request must be rejected with that reason rather than
-silently honored or silently ignored; omitting the field selects the supported
-body dtype. The examples below spell `bf16` out to document the exporter's
-choice, not to imply an alternative exists. Do not add a second boundary-dtype
+So `drafter_options.quant_config.io_dtype` describes the body only. DSpark
+requires `bf16`, while DFlash2 defaults to `bf16` and allows explicit `fp16`.
+The generic config parser also accepts `fp32`, but provider support for the
+resulting drafter graph is not validated. The examples below spell `bf16` out
+to document the default exporter's choice. Do not add a second boundary-dtype
 field: it is derived, and letting a recipe set it would only create a way to
 express an invalid pair.
 
@@ -427,6 +446,18 @@ a different profile. Batch/token limits must fit the runtime's signed 32-bit
 parser, `max_batch_size` cannot exceed 256, and batching overrides require an
 exported dynamic-batching configuration. Draft-token overrides are checked
 against the same exported drafter/state capacity as ordinary runtime overlays.
+
+Profile `eligibility` combines its required inclusive total-device-memory range with
+optional inclusive `minimum_free_device_memory_bytes` and `maximum_free_device_memory_bytes`
+bounds and optional `is_integrated: true|false`. Omitted free-memory bounds match any
+free-memory value; omitted `is_integrated` matches either device type. Equal total-memory
+ranges may use disjoint free-memory ranges or separate integrated and discrete profiles.
+The builder checks the same reachable-overlap rules as the C++ loader, rejects invalid
+byte counts and non-boolean `is_integrated`, and rejects a free-memory minimum above the
+maximum total memory. Further typed conditions belong in this existing eligibility object,
+with matching and intersection validation added on both sides. CUDA free memory is sampled
+once at Model creation, not reserved; on integrated devices it is not a measure of free
+OS memory. Select conservative `num_blocks` using measured peak OS-memory headroom.
 
 With a CUDA-enabled GenAI build and ORT built with INT4 KV-cache support, this
 integration test assembles a temporary shared-weight package, selects each
@@ -565,6 +596,10 @@ there, or be supplied as resolved Olive resources.
             "scheme": "int4_per_channel",
             "scale_file": "kv_scales_int8_per_channel.json"
           }
+        },
+        "optimizations": {
+          "fuse_mlp_gate_up": true,
+          "fuse_qkv": true
         }
       },
       "drafter_options": {
@@ -615,7 +650,7 @@ The scale filename retains the original `int8` label intentionally: validate its
 contents for the selected INT4 KV scheme rather than inferring format from its name.
 
 Drafter block size is explicit to reproduce the former target-derived value
-without new implicit inheritance. A BF16 drafter body needs no integer packing;
+without new implicit inheritance. Drafter packing `0` describes the raw body weight layout;
 the target's borrowed head follows its separately validated sharing/layout policy.
 Effective shared tensor behavior must be checked during migration, not assumed
 from these numeric settings alone.
@@ -828,8 +863,9 @@ target/drafter/runtime envelope.
 | `is_symmetric`, `accuracy_level` | Target `quant_config.weights.symmetric` and `weights.accuracy_level` |
 | `algo_config`, `nodes_to_exclude` | Target `quant_config.weights.method` plus generated `weights.overrides` entries; exclusions precede generated preset rules so they stay unconditional |
 | `use_qdq` | Target `quant_config.format.use_qdq` |
-| `moe_quant_type`, `qmoe_block_size` | Target `quant_config.moe` fields |
 | `matmulnbits_weights_prepacked`, `qmoe_weights_prepacked` | Removed; packing is automatic from the execution provider and GPU SM |
+| `enable_cuda_fpa_intb_gemm` | `runtime_config.model.decoder.session_options["ep.cuda.fpa_intb_gemm"]` |
+| `moe_quant_type`, `qmoe_block_size` | Target `quant_config.moe` fields |
 | `use_8bits_moe` | Deprecated `moe_quant_type` alias; unchanged |
 | `use_paged_attention`, `paged_block_size` | Target `attention.implementation` and `attention.paged.block_size` |
 | `kv_cache_quant_scheme`, `kv_cache_scale_file` | Target `attention.kv_cache` fields |
@@ -838,6 +874,11 @@ target/drafter/runtime envelope.
 | `dflash2_path`, `dspark_path` | Drafter selection and `path` |
 | `dflash2_precision` | Drafter weight policy plus explicit legacy-derived settings |
 | `dflash2_num_draft_tokens`, `dspark_num_draft_tokens` | `drafter_options.num_draft_tokens` |
+| `fuse_mlp_gate_up` | `target_options.optimizations.fuse_mlp_gate_up` |
+| `fuse_qkv` | `target_options.optimizations.fuse_qkv` |
+| `disable_qkv_fusion` | Deprecated inverse alias for `target_options.optimizations.fuse_qkv` |
+| `dflash2_fuse_gate_up` | `drafter_options.optimizations.fuse_mlp_gate_up` |
+| `dflash2_fuse_qkv` | `drafter_options.optimizations.fuse_qkv` |
 | `dspark_top_k` | `drafter_options.dspark.top_k` |
 | Existing automatic target/drafter tensor adoption | New `drafter_options.shared_weights` policies; preserve existing decisions for legacy-only calls |
 | `shared_embeddings` | Existing within-model tying; not an alias for cross-model `shared_weights` |
@@ -846,13 +887,14 @@ target/drafter/runtime envelope.
 | `max_batch_size`, `max_scheduled_tokens`, `num_blocks`, `gpu_utilization_factor` | Runtime `engine.dynamic_batching` fields |
 | `paged_chunk_size` | Runtime `search.chunk_size` |
 | `enable_cuda_graph` | Runtime decoder session/provider settings |
-| `enable_cuda_fpa_intb_gemm` | Runtime decoder session entry `ep.cuda.fpa_intb_gemm` |
+| `use_device_allocator_for_initializers` | Removed; initializer device allocation is always enabled |
 | Olive `search` | Runtime `search` |
 | Any other `extra_options` key | No canonical destination yet; see rule 8 |
 
-Target and DFlash2 gate/up fusion and device allocation for initializers are mandatory.
-The removed `fuse_mlp_gate_up`, `dflash2_fuse_gate_up`, and `use_device_allocator_for_initializers` extra
-options are rejected, including when set to `true`.
+Target gate/up fusion defaults to enabled; DFlash2 fusion defaults to disabled.
+Both support upstream fusion controls. Device allocation for initializers remains mandatory.
+The removed `use_device_allocator_for_initializers` extra option is rejected, including
+when set to `true`. Explicit packing fields remain rejected; packing is automatic.
 
 Normalization rules:
 

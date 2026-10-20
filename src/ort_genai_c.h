@@ -1530,12 +1530,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options, const char* guidance_type,
     const char* guidance_data);
-/** \brief Removes the configured grammar, so the Turn is unguided. */
+/** \brief Removes either whole-turn or delimited guidance, so the Turn is unguided. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsClearGuidance(
     OgaTurnOptions* options);
 /** \brief Restores every Turn option to its unset state. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsReset(
     OgaTurnOptions* options);
+/**
+ * \brief Sets marker-delimited Lark guidance for this Turn.
+ *
+ * Copies grammar immediately. opening_token and closing_token must be distinct nonnegative token
+ * IDs; grammar must be nonempty. The grammar describes only the body after the committed opening
+ * token and before the closing token. Outside that region generation is unguided. Marker IDs and
+ * grammar are validated against the model when the Turn is admitted, before Request mutation.
+ * An invalid setter call leaves the previous options unchanged. This mode and whole-turn guidance
+ * are mutually exclusive: call OgaTurnOptionsClearGuidance (or OgaTurnOptionsReset) before
+ * switching modes. The Engine must use dynamic batching. ClearGuidance and Reset both remove
+ * this configuration.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetDelimitedGuidance(
+    OgaTurnOptions* options, int32_t opening_token,
+    int32_t closing_token, const char* grammar);
 
 /** \brief Begins a Turn, copying input and supported options before return. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
@@ -1628,6 +1643,25 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineMaxDraftTokensPerProposal(const OgaE
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetSpeculativeStats(
     const OgaEngine* engine, OgaSpeculativeStats** out);
+
+typedef struct OgaPrefixCacheStats OgaPrefixCacheStats;
+
+/** Allocates a cumulative snapshot. Disabled caches report enabled=false and zero counts.
+ * Must be called from the Engine owner thread. Destroy the snapshot with OgaDestroyPrefixCacheStats.
+ * The snapshot remains valid after the Engine is destroyed. On failure, a non-null out is set to null.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetPrefixCacheStats(
+    const OgaEngine* engine, OgaPrefixCacheStats** out);
+
+OGA_EXPORT void OGA_API_CALL OgaDestroyPrefixCacheStats(OgaPrefixCacheStats* stats);
+
+/** Reads one of: lookups, hits, matched_tokens, evictions. Unknown names or null arguments return an error. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaPrefixCacheStatsGetCount(
+    const OgaPrefixCacheStats* stats, const char* name, uint64_t* value);
+
+/** Reads the enabled flag. Unknown names or null arguments return an error. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaPrefixCacheStatsGetBool(
+    const OgaPrefixCacheStats* stats, const char* name, bool* value);
 
 /**
  * \brief Destroys the given request.

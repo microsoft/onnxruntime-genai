@@ -4,7 +4,7 @@
 # ALL Python wheels are produced by this single stage, one job per (os, arch, EP),
 # incrementally against the prebuilt core. Fixed platform matrix per EP:
 #   CPU   — win-x64, win-arm64, linux-x64, linux-arm64, osx-arm64
-#   CUDA  — win-x64, win-arm64, linux-x64
+#   CUDA  — win-x64, win-arm64, linux-x64, linux-arm64
 #   WinML — win-x64, win-arm64
 # Wheels are built for every requested Python version (the core is Python-agnostic
 # and built once; only the pybind extension + wheel are rebuilt per version).
@@ -136,6 +136,15 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         python_versions: ${{ parameters.python_versions }}
         python_dependency_version: ${{ parameters.ort_dependency_version }}
+    - template: jobs/sdk-python-job.yml
+      parameters:
+        os: linux
+        arch: arm64
+        ep: cuda
+        cuda_version: '13.1'
+        ort_version: '1.30.0'
+        python_versions: ${{ parameters.python_versions }}
+        python_dependency_version: '1.30.0'
 
   # ---- WinML wheels (win-x64 + win-arm64; multi-version, incremental) -------
   - ${{ if eq(parameters.enable_winml, true) }}:

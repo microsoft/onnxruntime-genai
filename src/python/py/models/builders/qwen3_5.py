@@ -4,6 +4,7 @@ import os
 
 import onnx_ir as ir
 import torch
+from builder_config import serialize_genai_config
 
 from .base import Model
 from .expansions.qwen3_5 import Qwen35
@@ -12,8 +13,8 @@ from .mtp import MTPModel
 
 class Qwen35TextModel(Qwen35, Model):
     def validate_gated_delta_net_options(self, state_window, ep):
-        if ep != "cuda":
-            raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
+        if ep not in {"cuda", "webgpu"}:
+            raise ValueError("GatedDeltaNet exports require the CUDA or WebGPU execution provider")
         if state_window == 1:
             raise ValueError("GatedDeltaNet state_window must be 0 or at least 2")
 
@@ -48,9 +49,7 @@ class Qwen35TextModel(Qwen35, Model):
             self.ep,
         )
         if self.context_length_attrs["state_window"]:
-            self.context_length_attrs["state_update_capacity"] = (
-                self.context_length_attrs["state_window"] - 1
-            )
+            self.context_length_attrs["state_update_capacity"] = self.context_length_attrs["state_window"] - 1
 
         if self.use_paged_attention:
             conv_shape = ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1]
@@ -105,10 +104,6 @@ class Qwen35TextModel(Qwen35, Model):
         )
         super().make_inputs_and_outputs()
 
-    def is_packed_matmul_supported(self):
-        # Qwen-3.5 needs a separate Q projection to split its per-head Q and gate values.
-        return False
-
     def is_packed_attn_supported(self):
         return False
 
@@ -117,6 +112,14 @@ class Qwen35TextModel(Qwen35, Model):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
         super().make_attention_init(config)
+        if self.use_paged_attention:
+            self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
+
+    def is_qkv_projection_packable(self, layer_id, attention):
+        v_name = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
+        return v_name not in self.int4_customized_weight_config and super().is_qkv_projection_packable(
+            layer_id, attention
+        )
 
     def is_fused_rope_supported(self):
         # Qwen-3.5 applies MRoPE manually before attention, not fused in the op
@@ -137,8 +140,6 @@ class Qwen35TextModel(Qwen35, Model):
         super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
 
         self.split_attention_query_gate(layer_id)
-
-
 
     def make_qwen_gated_delta_net(self, layer_id, linear_attn, root_input):
         """Build the Qwen linear-attention layer for dense or packed token layouts.
@@ -435,7 +436,6 @@ class Qwen35TextModel(Qwen35, Model):
         return state_groups
 
 
-
 class Qwen35MoETextModel(Qwen35TextModel):
     """Qwen3.5 MoE hybrid model builder.
 
@@ -515,8 +515,9 @@ class Qwen35MoETextModel(Qwen35TextModel):
             root_input=f"{moe_name}/output_0",
             scaled_input=shared_output,
             gate=shared_gate,
-            shape=["batch_size", "sequence_length", self.hidden_size],
+            shape=self.make_hidden_state_shape(),
         )
+        self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
         return f"{combine_name}/output_0"
 
     def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
@@ -537,11 +538,13 @@ class Qwen35MoETextModel(Qwen35TextModel):
         gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
         gate_sigmoid_name = f"{basename}_gate/Sigmoid"
         self.make_sigmoid(
-            gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", 1]
+            gate_sigmoid_name,
+            f"{gate_matmul_name}/output_0",
+            self.io_dtype,
+            shape=self.make_hidden_state_shape(last_dim=1),
         )
 
         return shared_output, f"{gate_sigmoid_name}/output_0"
-
 
 
 class Qwen35MoEModel(MTPModel):
@@ -708,7 +711,7 @@ class Qwen35MoEModel(MTPModel):
             return
         genai_config["search"]["do_sample"] = False
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         print("Set search.do_sample to false: a block drafter only proposes drafts for greedy turns.")
 
     def add_mtp_to_genai_config(self, out_dir):
@@ -746,7 +749,7 @@ class Qwen35MoEModel(MTPModel):
         self.add_shared_initializers_to_genai_config(genai_config)
 
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         print("Added 'mtp' section to genai_config.json")
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
@@ -775,6 +778,8 @@ class Qwen35MoEModel(MTPModel):
     def block_drafter_precision(self, extra_options, option_name):
         precision = str(extra_options.get(option_name, "bf16")).lower()
         allowed = {"bf16", "int4", "int8"}
+        if extra_options.get("_drafter_quant_config") is not None:
+            allowed.add("int2")
         if precision not in allowed:
             raise ValueError(f"{option_name} must be one of {sorted(allowed)}, got '{precision}'.")
         return precision
@@ -783,13 +788,13 @@ class Qwen35MoEModel(MTPModel):
         """Resolve weight-only quantization for a block-drafter body, or ``None`` to keep it dense."""
         if precision == "bf16":
             return None
-        bits = 4 if precision == "int4" else 8
+        bits = int(precision.removeprefix("int"))
         block_size = int(
             quant_config.weights.block_size
             if quant_config is not None
             else self.decoder.quant_attrs["matmul_block_size"]
         )
-        prepack = self.decoder.matmul_attrs["weights_prepacked"] if self.decoder.ep == "cuda" else 0
+        prepack = self.decoder.matmul_attrs["weights_prepacked"] if self.decoder.ep == "cuda" and bits != 2 else 0
         return {"bits": bits, "block_size": block_size, "prepack": prepack}
 
     def block_drafter_lm_head_quant(self):
@@ -885,6 +890,9 @@ class Qwen35MoEModel(MTPModel):
             extra_options.get("_shared_weight_policies", {"embedding": "auto", "lm_head": "auto"})
         )
         drafter_quant_config = extra_options.get("_drafter_quant_config")
+        drafter_io_dtype = (
+            drafter_quant_config.to_onnx_dtypes()[0] if drafter_quant_config is not None else ir.DataType.BFLOAT16
+        )
 
         num_draft_tokens = None
         if "dflash2_num_draft_tokens" in extra_options:
@@ -895,11 +903,20 @@ class Qwen35MoEModel(MTPModel):
             if num_draft_tokens < 1:
                 raise ValueError("dflash2_num_draft_tokens must be a positive integer.")
 
+        fuse_gate_up = str(extra_options.get("dflash2_fuse_gate_up", False)).lower()
+        if fuse_gate_up not in ("true", "false"):
+            raise ValueError("dflash2_fuse_gate_up must be true or false.")
+        fuse_qkv = str(extra_options.get("dflash2_fuse_qkv", False)).lower()
+        if fuse_qkv not in ("true", "false"):
+            raise ValueError("dflash2_fuse_qkv must be true or false.")
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
+            "compute_dtype": drafter_io_dtype,
             "num_draft_tokens": num_draft_tokens,
             "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
             "quant_config": drafter_quant_config,
+            "fuse_gate_up": fuse_gate_up == "true",
+            "fuse_qkv": fuse_qkv == "true",
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
@@ -936,11 +953,12 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.attention_attrs["paged_block_size"],
             self.decoder.context_length,
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
-            quant=self.block_drafter_quant(
-                self.dflash2_attrs["precision"], self.dflash2_attrs["quant_config"]
-            ),
+            quant=self.block_drafter_quant(self.dflash2_attrs["precision"], self.dflash2_attrs["quant_config"]),
             lm_head_quant=self.block_drafter_lm_head_quant(),
             embed_quant=self.block_drafter_embed_quant(),
+            fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
+            compute_dtype=self.dflash2_attrs["compute_dtype"],
+            fuse_qkv=self.dflash2_attrs["fuse_qkv"],
         )
         self.dflash2.make_model()
 
@@ -961,9 +979,7 @@ class Qwen35MoEModel(MTPModel):
         drafter.save_model(output_dir)
 
         initializer_names = set(getattr(getattr(drafter, "graph", None), "initializers", {}))
-        embedding_initializers = frozenset(
-            name for name in initializer_names if name.startswith("model.embed_tokens.")
-        )
+        embedding_initializers = frozenset(name for name in initializer_names if name.startswith("model.embed_tokens."))
         head_initializers = frozenset(name for name in initializer_names if name.startswith("lm_head.MatMul."))
         embedding = getattr(drafter, "embed_quant", None)
         if not embedding_initializers:
@@ -1070,7 +1086,7 @@ class Qwen35MoEModel(MTPModel):
             dynamic_batching.setdefault("prefix_caching", False)
 
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         print("Added 'dflash2' section to genai_config.json")
 
     def make_dspark_init(self, io_dtype, extra_options):
@@ -1171,9 +1187,8 @@ class Qwen35MoEModel(MTPModel):
         genai_config["engine"]["dynamic_batching"].setdefault("prefix_caching", False)
 
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         print("Added 'dspark' section to genai_config.json")
-
 
 
 class Qwen35MTPModel(Qwen35MoETextModel):
@@ -1200,9 +1215,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         quant_config = extra_options.get("_quant_config")
-        self.preserve_mtp_quantization = (
-            quant_config is None or quant_config.checkpoint_policy == "preserve"
-        )
+        self.preserve_mtp_quantization = quant_config is None or quant_config.checkpoint_policy == "preserve"
         self.input_names["hidden_states"] = "hidden_states"
         self.input_types["hidden_states"] = self.io_dtype
         self.input_shapes["hidden_states"] = self.make_hidden_state_shape()
@@ -1309,7 +1322,6 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         )
 
 
-
 class Qwen35DenseMTPModel(Qwen35MTPModel):
     """Dense Qwen3.5/Qwen3.8 MTP head with one full-attention decoder layer."""
 
@@ -1317,7 +1329,6 @@ class Qwen35DenseMTPModel(Qwen35MTPModel):
 
     def make_layer(self, layer_id, layer):
         return Qwen35TextModel.make_layer(self, layer_id, layer)
-
 
 
 class Qwen35Model(Qwen35MoEModel):

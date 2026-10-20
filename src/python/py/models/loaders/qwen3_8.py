@@ -10,13 +10,19 @@ from .modelopt import ModeloptModel
 
 
 class Qwen38ModeloptModel(ModeloptModel):
-    """Load NVIDIA's mixed NVFP4/BF16/FP8 Qwen3.8 checkpoint without HF quantizers."""
+    """Load native Qwen3.8 NVFP4 or official block-FP8 tensors without HF quantizers."""
 
     def __init__(self, quant_type, input_path, **kwargs):
         with open(os.path.join(input_path, "config.json")) as config_file:
             config = json.load(config_file)
         self.text_config = config["text_config"]
         self.vision_config = config.get("vision_config")
+        if quant_type == "fp8":
+            quantization = config["quantization_config"]
+            if quantization.get("weight_block_size") != [128, 128]:
+                raise ValueError("Native Qwen3.8 FP8 export requires weight_block_size=[128, 128].")
+            if quantization.get("activation_scheme") != "dynamic":
+                raise ValueError("Native Qwen3.8 FP8 export requires dynamic activation quantization.")
         super().__init__(quant_type, input_path, **kwargs)
         try:
             language_model = SimpleNamespace(
@@ -27,6 +33,42 @@ class Qwen38ModeloptModel(ModeloptModel):
             self.model = SimpleNamespace(language_model=language_model)
         finally:
             self.close()
+
+    def validate_linear(self, module, base):
+        if self.quant_type != "fp8":
+            return super().validate_linear(module, base)
+        if module.weight.dtype == torch.float8_e4m3fn:
+            module.weight_scale_inv = self.get_tensor(f"{base}.weight_scale_inv")
+            self.validate_fp8_blocks(module)
+            module.quant_type = "fp8_block"
+            module.can_reuse_as_embedding = False
+        elif module.weight_scale is not None or module.weight_scale_2 is not None:
+            raise ValueError(f"Unexpected quantization metadata for native Qwen3.8 FP8 tensor '{base}'.")
+
+    def make_linear_module(self, base, module=None):
+        if self.quant_type == "fp8" and self.get_tensor(f"{base}.weight_global_scale") is not None:
+            raise ValueError(f"Native Qwen3.8 FP8 tensor '{base}' must not require scale inversion.")
+        return super().make_linear_module(base, module)
+
+    def make_dense_linear_module(self, base):
+        if self.quant_type == "fp8":
+            return self.make_linear_module(base)
+        return super().make_dense_linear_module(base)
+
+    def dequantize_tensor(self, weight, weight_scale, weight_scale_2, name):
+        if self.quant_type == "fp8":
+            raise ValueError(f"Native Qwen3.8 FP8 export must not dequantize '{name}'.")
+        return super().dequantize_tensor(weight, weight_scale, weight_scale_2, name)
+
+    def prepare_qmoe_experts(self, experts):
+        if self.quant_type != "fp8":
+            return super().prepare_qmoe_experts(experts)
+        prepared = SimpleNamespace(quant_type="fp8_block")
+        for expert_id, expert in enumerate(experts):
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                self.validate_fp8_blocks(getattr(expert, name))
+            setattr(prepared, str(expert_id), expert)
+        return prepared
 
     def tensor_names(self):
         if self.weight_map is not None:
@@ -121,13 +163,13 @@ class Qwen38ModeloptModel(ModeloptModel):
     def validate_fp8_blocks(projection):
         weight = projection.weight
         if weight.dtype != torch.float8_e4m3fn:
-            raise ValueError("Qwen3.8 MTP experts require native FP8 E4M3 weights.")
+            raise ValueError("Qwen3.8 experts require native FP8 E4M3 weights.")
         scale = getattr(projection, "weight_scale_inv", None)
         expected = tuple(math.ceil(size / 128) for size in weight.shape)
         if scale is None or tuple(scale.shape) != expected:
-            raise ValueError(f"Qwen3.8 FP8 MTP scale must have shape {expected}.")
+            raise ValueError(f"Qwen3.8 FP8 scale must have shape {expected}.")
         if not torch.isfinite(scale.float()).all() or (scale <= 0).any():
-            raise ValueError("Qwen3.8 FP8 MTP scales must be finite and positive.")
+            raise ValueError("Qwen3.8 FP8 scales must be finite and positive.")
 
     def load_visual(self):
         from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpVisionConfig  # noqa: PLC0415

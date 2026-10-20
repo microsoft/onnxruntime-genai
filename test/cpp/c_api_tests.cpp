@@ -950,6 +950,53 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
+TEST(CAPITests, EnginePrefixCacheStatsSnapshotContracts) {
+  OgaDestroyPrefixCacheStats(nullptr);
+  uint64_t count{};
+  bool flag{};
+  EXPECT_NE(std::unique_ptr<OgaResult>(OgaEngineGetPrefixCacheStats(nullptr, nullptr)), nullptr);
+  EXPECT_NE(std::unique_ptr<OgaResult>(OgaPrefixCacheStatsGetCount(nullptr, "lookups", &count)), nullptr);
+  EXPECT_NE(std::unique_ptr<OgaResult>(OgaPrefixCacheStatsGetBool(nullptr, "enabled", &flag)), nullptr);
+
+  for (bool enabled : {false, true}) {
+    auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+    if (enabled) {
+      config->Overlay(R"({"engine": {"dynamic_batching": {"prefix_caching": true}}})");
+    }
+    auto model = OgaModel::Create(*config);
+    auto engine = OgaEngine::Create(*model);
+    auto stats = engine->GetPrefixCacheStats();
+    EXPECT_EQ(stats->GetBool("enabled"), enabled);
+    for (const char* name : {"lookups", "hits", "matched_tokens", "evictions"}) {
+      EXPECT_EQ(stats->GetCount(name), 0u);
+    }
+    auto second_stats = engine->GetPrefixCacheStats();
+    EXPECT_NE(stats.get(), second_stats.get());
+    EXPECT_THROW(stats->GetCount("unknown"), std::runtime_error);
+    EXPECT_THROW(stats->GetBool("lookups"), std::runtime_error);
+    EXPECT_THROW(stats->GetCount(nullptr), std::runtime_error);
+    EXPECT_THROW(stats->GetBool(nullptr), std::runtime_error);
+    EXPECT_NE(std::unique_ptr<OgaResult>(OgaPrefixCacheStatsGetCount(stats.get(), "lookups", nullptr)), nullptr);
+    EXPECT_NE(std::unique_ptr<OgaResult>(OgaPrefixCacheStatsGetBool(stats.get(), "enabled", nullptr)), nullptr);
+    EXPECT_NE(std::unique_ptr<OgaResult>(OgaEngineGetPrefixCacheStats(engine.get(), nullptr)), nullptr);
+    OgaPrefixCacheStats* invalid_snapshot = stats.get();
+    EXPECT_NE(std::unique_ptr<OgaResult>(OgaEngineGetPrefixCacheStats(nullptr, &invalid_snapshot)), nullptr);
+    EXPECT_EQ(invalid_snapshot, nullptr);
+    std::unique_ptr<OgaResult> off_thread_error;
+    std::thread off_owner_thread([&] {
+      OgaPrefixCacheStats* off_thread_snapshot{};
+      off_thread_error.reset(OgaEngineGetPrefixCacheStats(engine.get(), &off_thread_snapshot));
+      EXPECT_EQ(off_thread_snapshot, nullptr);
+    });
+    off_owner_thread.join();
+    EXPECT_NE(off_thread_error, nullptr);
+    engine.reset();
+    model.reset();
+    EXPECT_EQ(stats->GetBool("enabled"), enabled);
+    EXPECT_EQ(stats->GetCount("hits"), 0u);
+  }
+}
+
 TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto engine = OgaEngine::Create(*model);
@@ -1246,6 +1293,43 @@ TEST(CAPITests, EngineTurnOptionsGenerationPolicy) {
     EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
     request->Close();
   }
+}
+
+TEST(CAPITests, EngineTurnOptionsDelimitedGuidanceSetters) {
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  constexpr const char* grammar = "start: \"ok\"";
+
+  auto expect_error = [](OgaResult* result) {
+    std::unique_ptr<OgaResult> error{result};
+    EXPECT_NE(error, nullptr);
+  };
+
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(nullptr, 11, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, nullptr));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), -1, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 11, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, ""));
+
+  // Both C and C++ entry points accept and copy a nonempty grammar. Invalid replacements leave
+  // the delimited configuration in place, so switching to whole-turn guidance still fails.
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(11, 12, grammar));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 11, grammar));
+  expect_error(OgaTurnOptionsSetGuidance(options.get(), "regex", "ok"));
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(13, 14, grammar));
+
+  options->ClearGuidance();
+  EXPECT_NO_THROW(options->SetGuidance("regex", "ok"));
+  expect_error(OgaTurnOptionsSetDelimitedGuidance(options.get(), 11, 12, grammar));
+
+  options->Reset();
+  EXPECT_NO_THROW(options->SetDelimitedGuidance(11, 12, grammar));
+  options->ClearGuidance();
+  EXPECT_NO_THROW(options->SetGuidance("regex", "ok"));
+  request->Close();
 }
 
 // A model whose own search defaults keep every turn greedy silently overrides an explicit

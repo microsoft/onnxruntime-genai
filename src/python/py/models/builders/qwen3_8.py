@@ -4,7 +4,8 @@ import os
 
 import onnx_ir as ir
 import torch
-from huggingface_hub import hf_hub_download
+from builder_config import serialize_genai_config
+from huggingface_hub import hf_hub_download, snapshot_download
 
 from .base import Model
 from .expansions import Qwen38
@@ -16,6 +17,51 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
     """Qwen4-Exp decoder builder using external token/vision embeddings."""
 
     CPU_EMBEDDING_ANNOTATION = "cpu_embedding"
+
+    def make_moe_preprocessing(self, layer_id, moe, root_input):
+        if getattr(moe.experts, "quant_type", None) != "fp8_block":
+            return super().make_moe_preprocessing(layer_id, moe, root_input)
+        if self.ep not in {"cuda", "webgpu"}:
+            raise ValueError("Native block-FP8 Qwen3.8 experts require the CUDA or WebGPU execution provider.")
+        self.moe_attrs.update(
+            op_type="QMoE",
+            quant_type="fp8",
+            expert_weight_bits=8,
+            block_size=128,
+            activation_type="silu",
+            swiglu_fusion=0,
+            weights_prepacked=-1,
+        )
+        names = self.make_moe_expert_names(layer_id)
+        projections = [getattr(moe.experts, str(index)) for index in range(self.moe_attrs["num_experts"])]
+        gate = torch.stack([expert.gate_proj.weight for expert in projections])
+        gate_scales = torch.stack([expert.gate_proj.weight_scale_inv for expert in projections])
+        up = torch.stack([expert.up_proj.weight for expert in projections])
+        up_scales = torch.stack([expert.up_proj.weight_scale_inv for expert in projections])
+        down = torch.stack([expert.down_proj.weight for expert in projections])
+        down_scales = torch.stack([expert.down_proj.weight_scale_inv for expert in projections])
+        scale_dtype = ir.DataType.FLOAT if self.ep == "webgpu" else None
+        self.make_initializer(gate, names["gate_up_weight"])
+        self.make_initializer(gate_scales, names["gate_up_scales"], to=scale_dtype)
+        prefix = f"model.layers.{layer_id}.moe.experts.up_proj"
+        self.moe_attrs["up_projection_names"] = (f"{prefix}.qweight", f"{prefix}.scales")
+        self.make_initializer(up, f"{prefix}.qweight")
+        self.make_initializer(up_scales, f"{prefix}.scales", to=scale_dtype)
+        self.make_initializer(down, names["down_weight"])
+        self.make_initializer(down_scales, names["down_scales"], to=scale_dtype)
+
+    def make_moe_expert_names(self, layer_id):
+        names = super().make_moe_expert_names(layer_id)
+        if self.moe_attrs.get("quant_type") == "fp8" and self.moe_attrs.get("block_size", 0) > 0:
+            for name in ("gate_up_weight", "gate_up_scales"):
+                names[name] = names[name].replace("gate_up_proj", "gate_proj")
+            names["gate_up_bias"] = names["down_bias"] = ""
+        return names
+
+    def make_moe_op(self, name, **kwargs):
+        if self.moe_attrs.get("quant_type") == "fp8" and self.moe_attrs.get("block_size", 0) > 0:
+            kwargs["weight3"], kwargs["scales3"] = self.moe_attrs["up_projection_names"]
+        return super().make_moe_op(name, **kwargs)
 
     def is_packed_matmul_supported(self):
         return Model.is_packed_matmul_supported(self)
@@ -191,7 +237,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.require_dense_linear_attention_gate(b, b_name)
 
         packed_name = f"{basename}/a_b_proj/MatMul"
-        self.exclude_node_from_quantization(packed_name)
 
         class PackedAB:
             weight = torch.cat([a.weight, b.weight], dim=0)
@@ -1384,7 +1429,7 @@ class Qwen4ExpEmbeddingModel(_Qwen4ExpGraphModel):
 
 
 class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
-    def __init__(self, ple, config, io_dtype):
+    def __init__(self, ple, config, io_dtype, scale_dtype=None):
         super().__init__(io_dtype, "engram.onnx", "qwen4_exp_engram")
         self.graph.opset_imports["com.microsoft"] = 1
         embedding = ple.ple_embedding
@@ -1443,8 +1488,9 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
         self.make_initializer(
             weight_scale.reshape(1, 1),
             "model.ple.ngram_embedding.weight_scale",
-            to=self.io_dtype,
+            to=scale_dtype,
         )
+        scale_dtype = self.graph.initializers["model.ple.ngram_embedding.weight_scale"].dtype
         gathered = "/model/ple/ngram_embedding/GatherBlockQuantized/output_0"
         self.make_node(
             "GatherBlockQuantized",
@@ -1459,9 +1505,16 @@ class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
         )
         self.make_value(
             gathered,
-            self.io_dtype,
+            scale_dtype,
             ["batch_size", "sequence_length", ngram_heads, head_dim],
         )
+        if scale_dtype != self.io_dtype:
+            cast_name = "/model/ple/ngram_embedding/Cast"
+            self.make_cast(
+                cast_name, gathered, self.io_dtype,
+                ["batch_size", "sequence_length", ngram_heads, head_dim],
+            )
+            gathered = f"{cast_name}/output_0"
         self.make_reshape(
             "/model/ple/ngram_embedding/Reshape",
             [gathered, f"/model/constants/INT64/[0, 0, {ple_embed_dim}]"],
@@ -2220,8 +2273,10 @@ class Qwen4ExpModel(MTPModel):
         if num_mtp_layers != 1:
             raise ValueError(f"Qwen4-Exp MTP export requires exactly one MTP layer, got {num_mtp_layers}.")
         incompatible_options = [
-            option for option in ("exclude_lm_head", "prune_lm_head") if extra_options.get(option, False)
+            option for option in ("exclude_lm_head",) if extra_options.get(option, False)
         ]
+        if extra_options.get("prune_lm_head", False) and not extra_options.get("use_paged_attention", False):
+            incompatible_options.append("prune_lm_head")
         if incompatible_options:
             raise ValueError("Qwen4-Exp MTP export cannot be combined with " + ", ".join(incompatible_options) + ".")
         decoder_options["include_hidden_states"] = True
@@ -2231,7 +2286,7 @@ class Qwen4ExpModel(MTPModel):
         self.mtp_attrs["io_dtype"] = io_dtype
         self.mtp_attrs["onnx_dtype"] = onnx_dtype
         self.mtp_attrs["extra_options"] = copy.deepcopy(extra_options)
-        if getattr(self.decoder, "quant_type", None) in {"modelopt", "compressed-tensors"} and "mtp_quant_config" not in extra_options:
+        if getattr(self.decoder, "quant_type", None) in {"modelopt", "compressed-tensors", "fp8"} and "mtp_quant_config" not in extra_options:
             mtp_quant_config = copy.deepcopy(self.decoder.quant_config)
             mtp_quant_config.weights.type = "none"
             mtp_quant_config.moe.type = "none"
@@ -2239,6 +2294,13 @@ class Qwen4ExpModel(MTPModel):
             self.mtp_attrs["onnx_dtype"] = io_dtype
         self.resolve_mtp_model_config(extra_options)
         mtp_options = self.mtp_attrs["extra_options"]
+        for option in (
+            "use_paged_attention", "prune_lm_head", "paged_block_size", "enable_webgpu_graph",
+            "gpu_utilization_factor", "max_batch_size", "state_update_capacity",
+            "max_draft_tokens", "indexshare_mtp",
+        ):
+            if option in extra_options:
+                mtp_options[option] = copy.deepcopy(extra_options[option])
         mtp_options["text_only"] = True
         mtp_options["filename"] = "mtp.onnx"
         mtp_options.pop("include_hidden_states", None)
@@ -2254,6 +2316,13 @@ class Qwen4ExpModel(MTPModel):
         )
 
     def make_model(self, input_path):
+        if self.decoder.quant_type == "fp8" and not os.path.isdir(input_path):
+            input_path = snapshot_download(
+                repo_id=self.decoder.model_name_or_path,
+                cache_dir=self.decoder.cache_dir,
+                token=self.decoder.hf_token,
+                allow_patterns=["*.json", "*.safetensors"],
+            )
         self.input_path = input_path
         self.decoder.make_model(input_path)
         if self.mtp is not None:
@@ -2275,6 +2344,7 @@ class Qwen4ExpModel(MTPModel):
             language_model.layers[ple_layer_id].ple,
             self.config.text_config,
             self.decoder.io_dtype,
+            scale_dtype=ir.DataType.FLOAT16 if self.decoder.io_dtype == ir.DataType.FLOAT16 else ir.DataType.FLOAT,
         )
         engram_model.save_model(output_dir)
         table = ir.load(os.path.join(output_dir, engram_model.filename)).graph.initializers[table_name].const_value
@@ -2288,6 +2358,10 @@ class Qwen4ExpModel(MTPModel):
             self.mtp_attrs["shared_initializers"] = self.share_initializers(
                 output_dir, self.decoder.filename, self.mtp.filename
             )
+            if self.extra_options.get("indexshare_mtp", self.mtp.use_paged_attention):
+                self.mtp_attrs["index_share"] = self.export_indexshare_graphs(
+                    output_dir, self.mtp.filename, int(self.extra_options.get("indexshare_max_draft_tokens", 7))
+                )
         if self.text_only:
             return
         embedding_model = Qwen4ExpEmbeddingModel(
@@ -2305,6 +2379,41 @@ class Qwen4ExpModel(MTPModel):
         vision_model.save_model(output_dir)
         del weights
 
+    def configure_paged_sessions(self, genai_config):
+        if self.decoder.ep not in {"cuda", "webgpu"} or not getattr(self.decoder, "use_paged_attention", False):
+            return
+        model_config = genai_config["model"]
+        decoder_options = model_config["decoder"].get("session_options", {})
+        ep = self.decoder.ep
+        inherited_provider_options = next(
+            (provider[ep] for provider in decoder_options.get("provider_options", []) if ep in provider),
+            {},
+        )
+        for section in ("decoder", "mtp"):
+            if section not in model_config:
+                continue
+            options = model_config[section].setdefault("session_options", {})
+            providers = options.setdefault("provider_options", [])
+            provider_options = next((provider[ep] for provider in providers if ep in provider), None)
+            if provider_options is None:
+                provider_options = {}
+                providers.append({ep: provider_options})
+            provider_options.update(copy.deepcopy(inherited_provider_options))
+            options["session.use_device_allocator_for_initializers"] = "1"
+            if ep != "cuda":
+                continue
+            options.update({
+                "ep.cuda.fpa_intb_gemm": "1",
+                "ep.cuda.qmoe_skip_nvfp4_gemv_profiling": "1",
+                "ep.cuda.sparse_paged_attention_grouped": "1",
+                "ep.cuda.sparse_paged_attention_grouped_decode": "0",
+                "ep.cuda.sparse_paged_attention_grouped_decode_splits": "0",
+                "ep.cuda.sparse_paged_attention_grouped_tile_size": "8",
+                "ep.cuda.sparse_paged_attention_grouped_vectorized": "1",
+                "ep.cuda.sparse_paged_attention_warp_reduction": "0",
+                "session.use_device_allocator_for_initializers": "1",
+            })
+
     def make_genai_config(self, config, extra_kwargs, out_dir):
         self.decoder.make_genai_config(config.text_config, extra_kwargs, out_dir)
         config_path = os.path.join(out_dir, "genai_config.json")
@@ -2312,6 +2421,12 @@ class Qwen4ExpModel(MTPModel):
             genai_config = json.load(config_file)
 
         model_config = genai_config["model"]
+        if (
+            self.decoder.ep == "cuda"
+            and self.decoder.moe_attrs.get("quant_type") == "nvfp4"
+            and self.decoder.moe_attrs.get("weights_prepacked", -1) != 1
+        ):
+            model_config["decoder"].setdefault("session_options", {})["session.disable_prepacking"] = "1"
         decoder_inputs = model_config["decoder"]["inputs"]
         decoder_inputs["engram_embeddings"] = "engram_embeddings"
         if not self.text_only:
@@ -2333,7 +2448,6 @@ class Qwen4ExpModel(MTPModel):
             }
         ple_layer_id = config.text_config.ple_layer_ids[0] - 1
         engram_session_options = {
-            "intra_op_num_threads": 8,
             "provider_options": [{"cuda" if self.decoder.ep == "cuda" else "cpu": {}}],
         }
         if self.decoder.ep == "cuda":
@@ -2353,8 +2467,9 @@ class Qwen4ExpModel(MTPModel):
                 "present_ple_token_names": f"present.{ple_layer_id}.ple_tokens",
             },
         }
+        self.configure_paged_sessions(genai_config)
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
         if self.mtp is not None:
             self.add_mtp_to_genai_config(out_dir)
 
@@ -2388,10 +2503,28 @@ class Qwen4ExpModel(MTPModel):
                 "present_value_names": "present.%d.value",
                 "present_indexer_names": "present.%d.indexer_key",
             },
+            "session_options": {
+                name: value
+                for name, value in genai_config["model"]["decoder"].get("session_options", {}).items()
+                if name in ("ep.cuda.fpa_intb_gemm", "session.use_device_allocator_for_initializers")
+            },
         }
+        if self.mtp.use_paged_attention and self.mtp.prune_lm_head:
+            genai_config["model"]["mtp"]["inputs"]["logits_indices"] = "logits_indices"
         self.add_shared_initializers_to_genai_config(genai_config)
+        if "index_share" in self.mtp_attrs:
+            metadata = self.mtp_attrs["index_share"]
+            mtp_config = genai_config["model"]["mtp"]
+            mtp_config["base_capacity"] = metadata["base_capacity"]
+            mtp_config["inputs"]["past_indices"] = "past_indices"
+            mtp_config["inputs"]["past_counts"] = "past_counts"
+            mtp_config["outputs"]["present_indices"] = metadata["indices_output"]
+            mtp_config["outputs"]["present_counts"] = metadata["counts_output"]
+            mtp_config["outputs"]["indexer_status"] = metadata["status_output"]
+            genai_config.setdefault("speculative", {}).setdefault("max_draft_tokens", metadata["max_draft_tokens"])
+        self.configure_paged_sessions(genai_config)
         with open(config_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+            config_file.write(serialize_genai_config(genai_config))
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
@@ -2473,50 +2606,6 @@ class Qwen4ExpModel(MTPModel):
 
 class Qwen4ExpMTPTextModel(Qwen4ExpTextModel):
     """Qwen4-Exp one-layer self-speculative MTP head builder."""
-
-    def make_moe_preprocessing(self, layer_id, moe, root_input):
-        if getattr(moe.experts, "quant_type", None) != "fp8_block":
-            return super().make_moe_preprocessing(layer_id, moe, root_input)
-        if self.ep != "cuda":
-            raise ValueError("Native block-FP8 Qwen3.8 MTP experts require the CUDA execution provider.")
-        self.moe_attrs.update(
-            op_type="QMoE",
-            quant_type="fp8",
-            expert_weight_bits=8,
-            block_size=128,
-            activation_type="silu",
-            swiglu_fusion=0,
-            weights_prepacked=-1,
-        )
-        names = self.make_moe_expert_names(layer_id)
-        projections = [getattr(moe.experts, str(index)) for index in range(self.moe_attrs["num_experts"])]
-        gate = torch.stack([expert.gate_proj.weight for expert in projections])
-        gate_scales = torch.stack([expert.gate_proj.weight_scale_inv for expert in projections])
-        up = torch.stack([expert.up_proj.weight for expert in projections])
-        up_scales = torch.stack([expert.up_proj.weight_scale_inv for expert in projections])
-        down = torch.stack([expert.down_proj.weight for expert in projections])
-        down_scales = torch.stack([expert.down_proj.weight_scale_inv for expert in projections])
-        self.make_initializer(gate, names["gate_up_weight"])
-        self.make_initializer(gate_scales, names["gate_up_scales"])
-        prefix = f"model.layers.{layer_id}.moe.experts.up_proj"
-        self.moe_attrs["up_projection_names"] = (f"{prefix}.qweight", f"{prefix}.scales")
-        self.make_initializer(up, f"{prefix}.qweight")
-        self.make_initializer(up_scales, f"{prefix}.scales")
-        self.make_initializer(down, names["down_weight"])
-        self.make_initializer(down_scales, names["down_scales"])
-
-    def make_moe_expert_names(self, layer_id):
-        names = super().make_moe_expert_names(layer_id)
-        if self.moe_attrs.get("quant_type") == "fp8" and self.moe_attrs.get("block_size", 0) > 0:
-            for name in ("gate_up_weight", "gate_up_scales"):
-                names[name] = names[name].replace("gate_up_proj", "gate_proj")
-            names["gate_up_bias"] = names["down_bias"] = ""
-        return names
-
-    def make_moe_op(self, name, **kwargs):
-        if self.moe_attrs.get("quant_type") == "fp8" and self.moe_attrs.get("block_size", 0) > 0:
-            kwargs["weight3"], kwargs["scales3"] = self.moe_attrs["up_projection_names"]
-        return super().make_moe_op(name, **kwargs)
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         config = copy.deepcopy(config)

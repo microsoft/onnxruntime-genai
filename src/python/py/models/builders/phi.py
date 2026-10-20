@@ -604,9 +604,15 @@ class Phi3MoELongRoPEModel(MistralModel):
 
         for i in range(self.moe_attrs["num_experts"]):
             # Quantize the weights with uint8
-            pre_qweight1, w1_scale = self.make_qmoe_weights(moe.experts[i].w1.weight.T)
-            pre_qweight2, w2_scale = self.make_qmoe_weights(moe.experts[i].w2.weight.T)
-            pre_qweight3, w3_scale = self.make_qmoe_weights(moe.experts[i].w3.weight.T)
+            pre_qweight1, w1_scale = self.make_qmoe_weights(
+                moe.experts[i].w1.weight.T, self.moe_attrs.get("fc1_expert_weight_bits")
+            )
+            pre_qweight2, w2_scale = self.make_qmoe_weights(
+                moe.experts[i].w2.weight.T, self.moe_attrs.get("fc2_expert_weight_bits")
+            )
+            pre_qweight3, w3_scale = self.make_qmoe_weights(
+                moe.experts[i].w3.weight.T, self.moe_attrs.get("fc3_expert_weight_bits")
+            )
 
             w1_list.append(pre_qweight1)
             w2_list.append(pre_qweight2)

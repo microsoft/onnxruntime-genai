@@ -15,6 +15,7 @@ from loaders.modelopt import ModeloptModel
 from loaders.qwen import Qwen4ExpMTPModel, QwenMTPModel
 from safetensors.torch import save_file
 
+from models import builder as builder_module
 from models.builders.qwen import Qwen4ExpModel, Qwen35DenseMTPModel, Qwen35Model, Qwen35MoEModel
 
 
@@ -94,7 +95,9 @@ def test_dense_composite_with_mtp_uses_dense_components(monkeypatch):
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
 
 
-def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch):
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+@pytest.mark.parametrize("prune_lm_head", [False, True])
+def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch, ep, prune_lm_head):
     monkeypatch.setitem(Qwen4ExpModel.__init__.__globals__, "Qwen4ExpTextModel", FakeQwen4ExpComponent)
     monkeypatch.setitem(Qwen4ExpModel.make_mtp_model.__globals__, "Qwen4ExpMTPTextModel", FakeQwen4ExpComponent)
     text_config = SimpleNamespace(
@@ -108,9 +111,13 @@ def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch):
         SimpleNamespace(text_config=text_config),
         ir.DataType.FLOAT16,
         ir.DataType.FLOAT16,
-        "cuda",
+        ep,
         None,
-        {},
+        {
+            "use_paged_attention": True,
+            "prune_lm_head": prune_lm_head,
+            "mtp_quant_config": '{"io_dtype":"fp16","weights":{"type":"int4"},"moe":{"type":"none"}}',
+        },
     )
 
     assert isinstance(model.decoder, FakeQwen4ExpComponent)
@@ -121,6 +128,32 @@ def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch):
     assert model.decoder.emit_pre_final_hidden_states is True
     assert model.decoder.output_shapes["hidden_states"] == ["batch_size", "sequence_length", 8]
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
+    assert model.decoder.extra_options["prune_lm_head"] is prune_lm_head
+    assert model.mtp.extra_options["prune_lm_head"] is prune_lm_head
+    assert model.mtp.extra_options["use_paged_attention"] is True
+
+
+def test_qwen4_exp_mtp_rejects_nonpaged_pruning():
+    model = object.__new__(Qwen4ExpModel)
+    config = SimpleNamespace(text_config=SimpleNamespace(mtp_num_hidden_layers=1))
+    with pytest.raises(ValueError, match="prune_lm_head"):
+        model.make_mtp_init(config, {"prune_lm_head": True})
+
+
+@pytest.mark.parametrize("prune_lm_head", [False, True])
+def test_qwen4_exp_mtp_config_emits_logits_indices(tmp_path, monkeypatch, prune_lm_head):
+    model = object.__new__(Qwen4ExpModel)
+    model.decoder = SimpleNamespace(num_kv_heads=2, head_size=256)
+    model.mtp = SimpleNamespace(use_paged_attention=True, prune_lm_head=prune_lm_head)
+    model.mtp_attrs = {"shared_initializers": []}
+    monkeypatch.setattr(model, "configure_paged_sessions", lambda config: None)
+    config_path = tmp_path / "genai_config.json"
+    config_path.write_text(json.dumps({"model": {"decoder": {}}}))
+
+    model.add_mtp_to_genai_config(str(tmp_path))
+
+    inputs = json.loads(config_path.read_text())["model"]["mtp"]["inputs"]
+    assert (inputs.get("logits_indices") == "logits_indices") is prune_lm_head
 
 
 def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):
@@ -146,13 +179,12 @@ def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):
     assert model.model_type == "qwen4_exp_text"
     assert model.decoder.model_type == "qwen4_exp_text"
     assert isinstance(model.mtp, FakeQwen4ExpComponent)
-    assert model.decoder.extra_options["external_engram"] is False
+    assert model.decoder.extra_options["external_engram"] is True
     assert model.decoder.extra_options["include_hidden_states"] is True
+    assert "external_engram" not in model.mtp.extra_options
 
 
 def test_qwen4_exp_text_only_dispatches_composite_builder(monkeypatch, tmp_path):
-    from models import builder as builder_module
-
     captured = {}
 
     class FakeQwen4ExpModel:
@@ -351,6 +383,19 @@ def test_mtp_quant_config_json_configures_targets_independently():
     quant_config = model.mtp_attrs["extra_options"]["_quant_config"]
     assert quant_config.weights.type == "int4"
     assert quant_config.moe.type == "none"
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "int2"}},
+        {"moe": {"type": "int2"}},
+        {"weights": {"type": "int4", "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int2"}]}},
+    ],
+)
+def test_legacy_mtp_quant_config_rejects_int2(quant_config):
+    with pytest.raises(ValueError, match="MTP quant_config does not support int2"):
+        _resolve({"mtp_quant_config": json.dumps(quant_config)})
 
 
 @pytest.mark.parametrize("shared_embeddings", [False, True])
@@ -865,6 +910,4 @@ def test_qwen4_exp_mtp_state_uses_residual_linear_shared_schema(monkeypatch):
     assert mtp.fc_embedding.weight is mtp_state["mtp.fc_embedding.weight"]
     assert mtp.fc_hidden.weight is mtp_state["mtp.fc_hidden.weight"]
     assert mtp.layers[0].state == {"marker": mtp_state["mtp.layers.0.marker"]}
-    assert mtp.hyper_connection_mixer.state == {
-        "marker": mtp_state["mtp.hyper_connection_mixer.marker"]
-    }
+    assert mtp.hyper_connection_mixer.state == {"marker": mtp_state["mtp.hyper_connection_mixer.marker"]}
