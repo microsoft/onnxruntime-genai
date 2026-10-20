@@ -3,38 +3,20 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 import types
-from pathlib import Path
 
 import numpy as np
 import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from _builder_test_utils import load_builder_module
 from transformers import LlamaConfig
 
-BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parent))
-
-
-def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-sys.modules.setdefault("models", types.ModuleType("models"))
-builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
-builders_package.__path__ = [str(BUILDERS_DIR)]
-
-base_module = _load_builder_module("base")
-qwen_module = _load_builder_module("qwen")
-Model = base_module.Model
+base_module = load_builder_module("base")
+qwen_module = load_builder_module("qwen")
+Model = qwen_module.Model
 Qwen25VLTextModel = qwen_module.Qwen25VLTextModel
 Qwen3VLTextModel = qwen_module.Qwen3VLTextModel
 Qwen35TextModel = qwen_module.Qwen35TextModel
@@ -163,8 +145,12 @@ def test_qwen35_moe_loads_moe_transformers_model(monkeypatch):
     class FakeDenseModel(FakeMoEModel):
         pass
 
-    monkeypatch.setattr(base_module, "Qwen3_5MoeForConditionalGeneration", FakeMoEModel)
-    monkeypatch.setattr(base_module, "Qwen3_5ForConditionalGeneration", FakeDenseModel)
+    monkeypatch.setattr(
+        base_module.Qwen3_5MoeForConditionalGeneration, "from_pretrained", FakeMoEModel.from_pretrained
+    )
+    monkeypatch.setattr(
+        base_module.Qwen3_5ForConditionalGeneration, "from_pretrained", FakeDenseModel.from_pretrained
+    )
 
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
     model.model_type = "qwen3_5_moe_text"

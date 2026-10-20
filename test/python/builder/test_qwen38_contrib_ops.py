@@ -1421,7 +1421,12 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path, ple_layer_id
         if initializer.name == "model.ple.ngram_embedding.weight"
     )
     assert next(entry.value for entry in table.external_data if entry.key == "location") == "engram.onnx.data"
-    session = ort.InferenceSession(str(tmp_path / "engram.onnx"), providers=["CPUExecutionProvider"])
+    try:
+        session = ort.InferenceSession(str(tmp_path / "engram.onnx"), providers=["CPUExecutionProvider"])
+    except ort.capi.onnxruntime_pybind11_state.Fail as error:
+        if "NGramHashMapping(-1) is not a registered function/op" not in str(error):
+            raise
+        pytest.skip("Installed ONNX Runtime does not include NGramHashMapping")
     inputs = {
         "input_ids": np.array([[1, 2, 3]], dtype=np.int64),
         f"past.{ple_layer_id}.ple_tokens": np.zeros((1, 2), dtype=np.int64),

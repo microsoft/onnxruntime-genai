@@ -85,9 +85,11 @@ stub_missing_builder_dependencies()
 def _register_builders_package():
     if str(BUILDERS_DIR.parent) not in sys.path:
         sys.path.insert(0, str(BUILDERS_DIR.parent))
-    sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package = sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package.__path__ = [str(BUILDERS_DIR.parent)]
     builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
     builders_package.__path__ = [str(BUILDERS_DIR)]
+    models_package.builders = builders_package
 
 
 def load_builder_module(module_name):
@@ -95,9 +97,12 @@ def load_builder_module(module_name):
     _register_builders_package()
     qualified_name = f"models.builders.{module_name}"
     if qualified_name in sys.modules:
-        return sys.modules[qualified_name]
+        module = sys.modules[qualified_name]
+        setattr(sys.modules["models.builders"], module_name, module)
+        return module
     spec = importlib.util.spec_from_file_location(qualified_name, BUILDERS_DIR / f"{module_name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[qualified_name] = module
     spec.loader.exec_module(module)
+    setattr(sys.modules["models.builders"], module_name, module)
     return module

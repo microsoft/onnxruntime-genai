@@ -250,6 +250,7 @@ def test_qwen_indexshare_config_and_session_options(mtp_graph, ep, paged, cuda_g
     config_path.write_text(json.dumps({"model": {"decoder": {"session_options": options}, "eos_token_id": [11, 12]}}))
     model = object.__new__(Qwen4ExpModel)
     model.decoder = SimpleNamespace(ep=ep, use_paged_attention=paged, num_kv_heads=2, head_size=256)
+    model.mtp = SimpleNamespace(use_paged_attention=paged, prune_lm_head=False)
     model.mtp_attrs = {"shared_initializers": [], "index_share": metadata}
 
     model.add_mtp_to_genai_config(str(mtp_graph))
