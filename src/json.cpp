@@ -99,10 +99,31 @@ unsigned char JSON::GetChar() {
 void JSON::Parse_Whitespace() {
   while (current_ != end_) {
     char const c = *current_;
-    if (c != '\x20' && c != '\x9' && c != '\xD' && c != '\xA') {  // Space, tab, cr, lf
-      return;
+    if (c == '\x20' || c == '\x9' || c == '\xD' || c == '\xA') {  // Space, tab, cr, lf
+      current_++;
+      continue;
     }
-    current_++;
+    if (c == '/' && current_ + 1 < end_) {
+      char const next = *(current_ + 1);
+      if (next == '/') {
+        // Line comment: skip to end of line (or end of data).
+        current_ += 2;
+        while (current_ != end_ && *current_ != '\n')
+          current_++;
+        continue;
+      }
+      if (next == '*') {
+        // Block comment: skip to the closing "*/".
+        current_ += 2;
+        while (current_ != end_ && !(*current_ == '*' && current_ + 1 < end_ && *(current_ + 1) == '/'))
+          current_++;
+        if (current_ == end_)
+          throw std::runtime_error("Unterminated block comment");
+        current_ += 2;  // Skip past the closing "*/".
+        continue;
+      }
+    }
+    return;
   }
 }
 
