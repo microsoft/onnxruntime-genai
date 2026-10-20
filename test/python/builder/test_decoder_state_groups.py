@@ -322,7 +322,7 @@ def test_qwen4_exp_paged_state_groups_own_ple_and_sparse_kv():
         Qwen4ExpTextModel,
         layer_types=["linear_attention", "qwen_sparse_attention"],
     )
-    model.ple_layer_ids = {0}
+    model.ple_attrs = {"layer_ids": {0}}
 
     groups = model.make_decoder_state_groups({}, {})
 
@@ -339,7 +339,7 @@ def test_qwen4_exp_adds_indexer_group_only_with_complete_bindings():
         Qwen4ExpTextModel,
         layer_types=["qwen_sparse_attention"],
     )
-    model.ple_layer_ids = set()
+    model.ple_attrs = {"layer_ids": set()}
     model.input_names.update(
         {
             "past.indexer": {0: "past.0.indexer_key"},
@@ -362,9 +362,8 @@ def test_qwen4_exp_emits_complete_compact_ple_and_indexer_manifest(monkeypatch, 
         layer_types=["linear_attention", "qwen_sparse_attention"],
     )
     model.num_layers = 2
-    model.ple_layer_ids = {0}
-    model.ple_token_pad_id = 1
-    model.indexer_compress_ratio = 4
+    model.ple_attrs = {"layer_ids": {0}, "token_pad_id": 1, "external": False}
+    model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": False}
     model.linear_num_key_heads = 2
     model.context_length_attrs["state_update_capacity"] = 7
     model.input_names.update(
@@ -408,10 +407,8 @@ def test_qwen4_exp_config_emits_packed_indexer_state_group(monkeypatch, tmp_path
         layer_types=["qwen_sparse_attention"],
     )
     model.num_layers = 1
-    model.ple_layer_ids = set()
-    model.ple_token_pad_id = 248044
-    model.indexer_compress_ratio = 4
-    model.fixed_indexer_cache = False
+    model.ple_attrs = {"layer_ids": set(), "token_pad_id": 248044, "external": False}
+    model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": False}
     model.input_names.update(
         {
             "past.indexer": {0: "past.0.indexer_key"},

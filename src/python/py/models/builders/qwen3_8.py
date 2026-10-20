@@ -31,9 +31,9 @@ class Qwen4ExpModel(MTPModel):
         self.decoder.model_type = "qwen4_exp_text" if self.text_only else "qwen3_5"
         self.mtp = None
         if self.mtp_attrs["build"]:
-            self.decoder.emit_pre_final_hidden_states = True
+            self.decoder.hyper_connection_attrs["emit_pre_final_hidden_states"] = True
             self.decoder.output_shapes["hidden_states"] = self.decoder.make_hidden_state_shape(
-                last_dim=self.decoder.hc_hidden_size
+                last_dim=self.decoder.hyper_connection_attrs["hidden_size"]
             )
             self.make_mtp_model(config, io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
         self.input_path = None
@@ -132,11 +132,11 @@ class Qwen4ExpModel(MTPModel):
             raise RuntimeError("make_model must be called before save_model.")
         weights = self.decoder.load_weights(self.input_path)
         language_model = weights.model.language_model
-        if len(self.decoder.ple_layer_ids) != 1:
+        if len(self.decoder.ple_attrs["layer_ids"]) != 1:
             raise ValueError(
-                f"Qwen4-Exp Engram export requires exactly one PLE layer, got {sorted(self.decoder.ple_layer_ids)}."
+                f"Qwen4-Exp Engram export requires exactly one PLE layer, got {sorted(self.decoder.ple_attrs['layer_ids'])}."
             )
-        ple_layer_id = next(iter(self.decoder.ple_layer_ids))
+        ple_layer_id = next(iter(self.decoder.ple_attrs["layer_ids"]))
         engram_model = Qwen4ExpEngramModel(
             language_model.layers[ple_layer_id].ple,
             self.config.text_config,

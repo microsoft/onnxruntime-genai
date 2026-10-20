@@ -534,9 +534,10 @@ separate build/runtime caching is not required in the initial implementation.
 This is the proposed migration of the user-supplied Qwen3.8-27B DFlash2 Olive
 recipe, reproduced below without requiring a separate recipe checkout.
 It retains the target source, CUDA system, output/cache locations, and requested
-target INT4 plus INT8 embedding policy. It uses mandatory target and drafter gate/up
-fusion and makes embedding/head sharing policy explicit. Fusion is an intentional
-graph change, so this extended example is not a claim of byte-identical migration.
+target INT4 plus INT8 embedding policy and makes embedding/head sharing policy explicit.
+Target and DFlash2 gate/up fusion both default to `false` and can be enabled explicitly.
+Enabling fusion is an intentional graph change, so this extended example is not a
+claim of byte-identical migration when fusion is selected.
 
 **Prerequisite:** INT8 embedding export must be implemented and validated before
 this recipe can be migrated. PR #2588 rejects a Gather type override, and the
@@ -899,10 +900,10 @@ target/drafter/runtime envelope.
 | Olive `search` | Runtime `search` |
 | Any other `extra_options` key | No canonical destination yet; see rule 8 |
 
-Target gate/up fusion defaults to enabled; DFlash2 fusion defaults to disabled.
-Both support upstream fusion controls. Device allocation for initializers remains mandatory.
-The removed `use_device_allocator_for_initializers` extra option is rejected, including
-when set to `true`. Explicit per-op packing fields select the target layout independently.
+Target and DFlash2 gate/up fusion both default to `false` and support explicit fusion
+controls. The `use_device_allocator_for_initializers` extra option remains supported
+and opt-in (default `false`), except that paged Qwen3.8 sessions enable it automatically.
+Explicit per-op packing fields select the target layout independently.
 
 Normalization rules:
 
@@ -972,7 +973,7 @@ and any later vision artifacts when packaging the result.
 2. Adapt MTP/DFlash2/DSpark to isolated policies and resolve cross-model graph
    requirements before export. Reject capabilities not implemented by each adapter.
   Reuse PR #2579's tensor-adoption mechanism with per-tensor sharing policies,
-  and PR #2585's target fusion path with mandatory target and DFlash2 fusion.
+  and PR #2585's target fusion path with opt-in target and DFlash2 fusion.
 3. Add runtime fragment loading, validation, and finalization after composite
    model configuration is complete. Keep the existing runtime hierarchy.
 4. Integrate Olive fields, resources, cache identity, and typed forwarding.
@@ -1013,7 +1014,7 @@ feature, not merely a rename of configuration keys.
   private storage. Cover INT8 embeddings, target tying, QDQ, native FP8 heads,
   prepacked incompatibility, and distinct learned MTP heads without assuming
   every combination supports adoption.
-- Fusion tests for mandatory target/drafter behavior, removed-option rejection, one fused
+- Fusion tests for default-off target/drafter behavior, explicit opt-in, one fused
   projection plus split, invalid shapes/adapters, and exclusion/override conflicts.
   Fusion can change quantization or kernel accumulation; compare numerical outputs
   and validate quality/acceptance rather than assuming bit-identical generation.

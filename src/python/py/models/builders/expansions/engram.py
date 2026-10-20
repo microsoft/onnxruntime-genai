@@ -16,8 +16,10 @@ class Qwen38Engram:
         state_update_capacity = (
             getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0) if self.use_paged_attention else 0
         )
-        flatten_dims = [-1, self.ple_embed_dim] if self.use_paged_attention else [0, 0, self.ple_embed_dim]
-        if not getattr(self, "external_engram", False) or self.use_paged_attention:
+        flatten_dims = (
+            [-1, self.ple_attrs["embed_dim"]] if self.use_paged_attention else [0, 0, self.ple_attrs["embed_dim"]]
+        )
+        if not self.ple_attrs["external"] or self.use_paged_attention:
             eos_token_id = self.get_engram_pad_id(embedding.eos_token_id)
             multipliers = f"model.layers.{layer_id}.ple.layer_multipliers"
             vocab_sizes = f"model.layers.{layer_id}.ple.head_vocab_sizes"
@@ -45,8 +47,8 @@ class Qwen38Engram:
                 outputs=ngram_outputs,
                 name=ngram_name,
                 domain="com.microsoft",
-                max_ngram_size=self.ngram_size,
-                n_head_per_ngram=self.heads_per_ngram,
+                max_ngram_size=self.ple_attrs["ngram_size"],
+                n_head_per_ngram=self.ple_attrs["heads_per_ngram"],
                 pad_id=eos_token_id,
                 reset_on_eos=1,
                 **(
@@ -55,7 +57,7 @@ class Qwen38Engram:
                     else {}
                 ),
             )
-            ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
+            ngram_heads = (self.ple_attrs["ngram_size"] - 1) * self.ple_attrs["heads_per_ngram"]
             self.make_value(
                 ngram_ids,
                 ir.DataType.INT64,
@@ -63,9 +65,9 @@ class Qwen38Engram:
                 if self.use_paged_attention
                 else ["batch_size", "sequence_length", ngram_heads],
             )
-            if getattr(self, "external_engram", False):
-                self.make_value(ngram_outputs[1], ir.DataType.INT64, ["batch_size", self.ngram_size - 1])
-        if getattr(self, "external_engram", False):
+            if self.ple_attrs["external"]:
+                self.make_value(ngram_outputs[1], ir.DataType.INT64, ["batch_size", self.ple_attrs["ngram_size"] - 1])
+        if self.ple_attrs["external"]:
             engram_embeddings = self.input_names["engram_embeddings"]
             if not self.use_paged_attention:
                 self.make_node(
@@ -89,7 +91,7 @@ class Qwen38Engram:
                 self.external_data_files = {}
             self.external_data_files[table_name] = "engram.onnx.data"
             gather_name = f"{basename}/ngram_embedding/GatherBlockQuantized"
-            head_dim = self.ple_embed_dim // ngram_heads
+            head_dim = self.ple_attrs["embed_dim"] // ngram_heads
             gather_shape = (
                 ["num_tokens", ngram_heads, head_dim]
                 if self.use_paged_attention
@@ -113,12 +115,14 @@ class Qwen38Engram:
                 self.make_cast(cast_name, gather_output, self.io_dtype, gather_shape)
                 gather_output = f"{cast_name}/output_0"
             flatten_name = f"{basename}/ngram_embedding/Reshape"
-            flatten_dims = [-1, self.ple_embed_dim] if self.use_paged_attention else [0, 0, self.ple_embed_dim]
+            flatten_dims = (
+                [-1, self.ple_attrs["embed_dim"]] if self.use_paged_attention else [0, 0, self.ple_attrs["embed_dim"]]
+            )
             self.make_reshape(
                 flatten_name,
                 [gather_output, f"/model/constants/INT64/{flatten_dims}"],
                 self.io_dtype,
-                [*token_shape, self.ple_embed_dim],
+                [*token_shape, self.ple_attrs["embed_dim"]],
             )
             engram_embeddings = f"{flatten_name}/output_0"
 
@@ -126,23 +130,26 @@ class Qwen38Engram:
         query_scale = f"model.layers.{layer_id}.ple.query_norm_scale"
         conv_scale = f"model.layers.{layer_id}.ple.conv_norm_scale"
         self.make_initializer(
-            (ple.norm_key.weight + 1).reshape(self.hc_count, self.hidden_size), key_scale, to=self.io_dtype
+            (ple.norm_key.weight + 1).reshape(self.hyper_connection_attrs["num_branches"], self.hidden_size),
+            key_scale, to=self.io_dtype
         )
         self.make_initializer(
-            (ple.norm_query.weight + 1).reshape(self.hc_count, self.hidden_size), query_scale, to=self.io_dtype
+            (ple.norm_query.weight + 1).reshape(self.hyper_connection_attrs["num_branches"], self.hidden_size),
+            query_scale, to=self.io_dtype
         )
         self.make_initializer(
-            (ple.norm_conv.weight + 1).reshape(self.hc_count, self.hidden_size), conv_scale, to=self.io_dtype
+            (ple.norm_conv.weight + 1).reshape(self.hyper_connection_attrs["num_branches"], self.hidden_size),
+            conv_scale, to=self.io_dtype
         )
         key_matmul = self.make_matmul(ple.key_proj, f"{basename}/key_proj/MatMul", engram_embeddings)
         value_matmul = self.make_matmul(ple.value_proj, f"{basename}/value_proj/MatMul", engram_embeddings)
-        grouped_shape = [*token_shape, self.hc_count, self.hidden_size]
+        grouped_shape = [*token_shape, self.hyper_connection_attrs["num_branches"], self.hidden_size]
         key_reshape = f"{basename}/key_proj/Reshape"
         query_reshape = f"{basename}/query/Reshape"
         grouped_dims = (
-            [-1, self.hc_count, self.hidden_size]
+            [-1, self.hyper_connection_attrs["num_branches"], self.hidden_size]
             if self.use_paged_attention
-            else [0, 0, self.hc_count, self.hidden_size]
+            else [0, 0, self.hyper_connection_attrs["num_branches"], self.hidden_size]
         )
         self.make_reshape(
             key_reshape,
@@ -226,18 +233,18 @@ class Qwen38Engram:
                 )
             gated_value = f"{gate_name}/padding/value/output_0"
             gated_value_normed = f"{gate_name}/padding/normed/output_0"
-        ple_shape = [*token_shape, self.hc_hidden_size]
+        ple_shape = [*token_shape, self.hyper_connection_attrs["hidden_size"]]
         gated_value_flat = f"{gate_name}/Flatten"
         gated_value_normed_flat = f"{gate_name}/FlattenNormed"
         self.make_reshape(
             gated_value_flat,
-            [gated_value, f"/model/constants/INT64/{[*flatten_dims[:-1], self.hc_hidden_size]}"],
+            [gated_value, f"/model/constants/INT64/{[*flatten_dims[:-1], self.hyper_connection_attrs['hidden_size']]}"],
             self.io_dtype,
             ple_shape,
         )
         self.make_reshape(
             gated_value_normed_flat,
-            [gated_value_normed, f"/model/constants/INT64/{[*flatten_dims[:-1], self.hc_hidden_size]}"],
+            [gated_value_normed, f"/model/constants/INT64/{[*flatten_dims[:-1], self.hyper_connection_attrs['hidden_size']]}"],
             self.io_dtype,
             ple_shape,
         )
@@ -259,10 +266,10 @@ class Qwen38Engram:
                 output_shape=ple_shape,
                 present_conv_shape=[
                     "batch_size",
-                    self.hc_hidden_size,
-                    self.ple_conv_dilation * (self.ple_conv_kernel_size - 1),
+                    self.hyper_connection_attrs["hidden_size"],
+                    self.ple_attrs["conv_dilation"] * (self.ple_attrs["conv_kernel_size"] - 1),
                 ],
-                dilation=self.ple_conv_dilation,
+                dilation=self.ple_attrs["conv_dilation"],
                 **(
                     {
                         "state_update_capacity": state_update_capacity,
@@ -288,7 +295,7 @@ class Qwen38Engram:
                 name=conv_name,
                 domain="com.microsoft",
                 ndim=1,
-                dilation=self.ple_conv_dilation,
+                dilation=self.ple_attrs["conv_dilation"],
                 channels_last=1,
                 activation="silu",
                 state_window=getattr(self, "context_length_attrs", {}).get("state_window", 0),

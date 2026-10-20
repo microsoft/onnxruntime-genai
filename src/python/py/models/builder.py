@@ -179,6 +179,7 @@ def check_extra_options(
         "shared_embeddings",
         "hf_remote",
         "fuse_qkv",
+        "fuse_mlp_gate_up",
         "disable_qkv_fusion",
         "fuse_qk_norm_gqa",
         "prune_lm_head",
@@ -1056,7 +1057,7 @@ def get_args():
                     The fused drafter omits the q_row_map input, so it requires a runtime that
                     treats q_row_map as optional; older runtimes reject the exported package.
                 fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
-                    MatMul or MatMulNBits followed by Split. Default is true. Applies before
+                    MatMul or MatMulNBits followed by Split. Default is false. Applies before
                     target weight quantization and requires unpacked, unadapted gate/up
                     floating-point projections.
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),

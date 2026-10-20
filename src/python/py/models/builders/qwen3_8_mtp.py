@@ -25,14 +25,14 @@ class Qwen4ExpMTPTextModel(Qwen38MTP, Qwen4ExpTextModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_sparse_rotary_init(multimodal_rotary)
 
-        self.tile_first_hidden_state = False
-        self.emit_pre_final_hidden_states = True
+        self.hyper_connection_attrs["tile_first_hidden_state"] = False
+        self.hyper_connection_attrs["emit_pre_final_hidden_states"] = True
         self.include_hidden_states = True
         self.output_names["hidden_states"] = "hidden_states_out"
-        self.output_shapes["hidden_states"] = self.make_hidden_state_shape(last_dim=self.hc_hidden_size)
+        self.output_shapes["hidden_states"] = self.make_hidden_state_shape(last_dim=self.hyper_connection_attrs["hidden_size"])
         self.input_names["hidden_states"] = "hidden_states"
         self.input_types["hidden_states"] = self.io_dtype
-        self.input_shapes["hidden_states"] = self.make_hidden_state_shape(last_dim=self.hc_hidden_size)
+        self.input_shapes["hidden_states"] = self.make_hidden_state_shape(last_dim=self.hyper_connection_attrs["hidden_size"])
 
     def get_final_hyper_connection_mixer(self):
         return self.mtp_weights.hyper_connection_mixer
