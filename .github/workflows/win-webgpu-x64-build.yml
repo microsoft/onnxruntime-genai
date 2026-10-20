@@ -20,10 +20,11 @@ env:
   buildRoot: 'build/cpu/win-x64'
   binaryDir: 'build/cpu/win-x64/Release'
   WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
-  WEBGPU_EP_PACKAGE_VERSION: '0.5.0-dev.20261009200253'
+  WEBGPU_EP_PACKAGE_VERSION: '0.6.0-dev.20261020022011'
   # Use an API-32 SDK for both the native build and runtime tests.
   # PagedAttention requires the extended schema with attention_metadata at input 16.
-  ORT_TEST_VERSION: '1.32.0-dev-20261012-0507-988cc07'
+  # This core/plugin pair includes the GatedDeltaNetStateReplay schema and WebGPU kernel.
+  ORT_TEST_VERSION: '1.32.0-dev-20261018-0507-c1ea5bf'
 
 jobs:
   windows-webgpu-x64-build:
@@ -147,14 +148,31 @@ jobs:
 
       - name: Run required WebGPU Engine tests
         run: |
-          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep --gtest_filter="WebGpuFixedStatePoolTest.*:FixedStatePoolTest.DeferredReplayFailurePoisonsPool:VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder" --gtest_output="xml:webgpu-engine-tests.xml"
+          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep --gtest_filter="DeviceSpanTest.*:GraphBuilderTest.*:BackingOwners/WebGpuStateReplayTest.*:WebGpuFixedStatePoolTest.*:FixedStatePoolTest.DeferredReplayFailurePoisonsPool:VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder" --gtest_output="xml:webgpu-engine-tests.xml"
           if ($LASTEXITCODE -ne 0) { throw "WebGPU Engine tests failed: $LASTEXITCODE" }
           [xml]$results = Get-Content webgpu-engine-tests.xml
           $required = @(
+            "DeviceSpanTest.BackingAndAbsoluteByteOffsetSurviveNestedViews",
+            "GraphBuilderTest.DefaultOnnxDomainStillExecutesCast",
             "WebGpuFixedStatePoolTest.CompactPartialAcceptanceReplaysConvAndGdn",
             "WebGpuFixedStatePoolTest.AdversarialReplayPreservesRequestState",
+            "WebGpuFixedStatePoolTest.PartialRequestsShareBackingTransfers",
+            "WebGpuFixedStatePoolTest.ConvolutionSharedMirrorsObserveEarlierDescriptorWrites",
+            "WebGpuFixedStatePoolTest.DeferredGpuRunFailurePoisonsPoolBeforeNextReader",
             "FixedStatePoolTest.DeferredReplayFailurePoisonsPool",
-            "VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder"
+            "VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder",
+            "BackingOwners/WebGpuStateReplayTest.ReplaysEveryPrefixOnGpuWithoutCpuStaging/0",
+            "BackingOwners/WebGpuStateReplayTest.ReplaysEveryPrefixOnGpuWithoutCpuStaging/1",
+            "BackingOwners/WebGpuStateReplayTest.RejectsInvalidViewsAndPropagatesOrtFailures/0",
+            "BackingOwners/WebGpuStateReplayTest.RejectsInvalidViewsAndPropagatesOrtFailures/1",
+            "BackingOwners/WebGpuStateReplayTest.ConvolutionStillStagesThroughCpu/0",
+            "BackingOwners/WebGpuStateReplayTest.ConvolutionStillStagesThroughCpu/1",
+            "BackingOwners/WebGpuStateReplayTest.SeparateCapsuleBackingsFallBackBeforeGpuReplay/0",
+            "BackingOwners/WebGpuStateReplayTest.SeparateCapsuleBackingsFallBackBeforeGpuReplay/1",
+            "BackingOwners/WebGpuStateReplayTest.MixedDescriptorsPreserveDependentExecutionOrder/0",
+            "BackingOwners/WebGpuStateReplayTest.MixedDescriptorsPreserveDependentExecutionOrder/1",
+            "BackingOwners/WebGpuStateReplayTest.GpuRunFailureStopsMixedSequenceWithoutCpuRetry/0",
+            "BackingOwners/WebGpuStateReplayTest.GpuRunFailureStopsMixedSequenceWithoutCpuRetry/1"
           )
           foreach ($test in $required) {
             $suite, $name = $test -split '\.', 2

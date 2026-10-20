@@ -2792,8 +2792,8 @@ TEST(WebGpuFixedStatePoolTest, PartialRequestsShareBackingTransfers) {
   for (size_t slot = 0; slot < ids.size(); ++slot) {
     all[slot] = Request{&ids[slot], 6};
   }
-  auto reservation = pool.Reserve(all);   // Materializes the queued replay before gathering.
-  ASSERT_EQ(device.buffers.size(), 6u);   // Two convolution tensors, each with input, updates, and one bank.
+  auto reservation = pool.Reserve(all);  // Materializes the queued replay before gathering.
+  ASSERT_EQ(device.buffers.size(), 6u);  // Two convolution tensors, each with input, updates, and one bank.
   size_t downloads = 0, uploads = 0, staged_bytes = 0;
   for (const auto& buffer : device.buffers) {
     EXPECT_EQ(buffer->downloads, 1u);
