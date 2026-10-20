@@ -6,9 +6,9 @@
 #include <functional>
 #include <string>
 
-#include "models/nemotron_speech.h"
-#include "models/parakeet.h"
-#include "models/whisper.h"
+#include "models/speech/nemotron_speech.h"
+#include "models/speech/parakeet.h"
+#include "models/speech/whisper.h"
 
 namespace {
 std::string GetExceptionMessage(const std::function<void()>& fn) {

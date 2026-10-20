@@ -33,7 +33,9 @@ inline bool SessionCanAccess(const DeviceInterface& session_device, const Device
 struct State {
   // `session_device` is the device the ORT session this state drives runs on. Null means the
   // model's own device, which is the case for every state that drives the decoder session.
-  State(const GeneratorParams& params, const Model& model_, DeviceInterface* session_device = nullptr);
+  State(const GeneratorParams& params, const Model& model_,
+        const std::optional<Config::RunOptions>& configured_run_options,
+        DeviceInterface* session_device = nullptr);
   virtual ~State();
 
   virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
@@ -73,7 +75,6 @@ struct State {
 
   virtual void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
   virtual void SetRunOption(const char* key, const char* value);
-  void SetRunOptions(const Config::RunOptions& config_run_options);
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
 
   void DumpInputs();
@@ -99,11 +100,19 @@ struct State {
  protected:
   void Run(OrtSession& session, bool graph_capture_this_run = false, int graph_capture_length = 1,
            int graph_capture_variant = 0);
+  void RegisterSessionRunOptions(OrtSession& session,
+                                 const std::optional<Config::RunOptions>& configured_run_options);
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
+  std::unique_ptr<OrtRunOptions> CreateRunOptions(
+      const std::optional<Config::RunOptions>& configured_run_options);
+  void SetRunOption(OrtRunOptions& run_options, const char* key, const char* value);
+  OrtRunOptions& GetRunOptions(OrtSession& session);
+  std::unordered_map<OrtSession*, std::unique_ptr<OrtRunOptions>> session_run_options_;
+
   // CUDA graph annotation id per captured input length. The decode path captures
   // sequence_length == 1; speculative decoding (MTP) also captures the 2-token verify shape.
   // Each distinct length gets its own annotation id so ORT captures/replays an independent graph

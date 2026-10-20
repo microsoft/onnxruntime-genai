@@ -29,18 +29,17 @@
 #include "model.h"
 #include "runtime_profiles.h"
 #include "model_package.h"
-#include "gpt.h"
-#include "decoder_only.h"
+#include "decoder/gpt.h"
+#include "decoder/multi_modal_decoder.h"
 #include "speculative_decoding.h"
-#include "whisper.h"
-#include "parakeet.h"
-#include "nemotron_speech.h"
-#include "moonshine_streaming.h"
+#include "speech/whisper.h"
+#include "speech/parakeet.h"
+#include "speech/nemotron_speech.h"
+#include "speech/moonshine_streaming.h"
 #include "multi_modal.h"
-#include "lfm2.h"
-#include "marian.h"
-#include "decoder_only_pipeline.h"
-#include "qwen_vl_model.h"
+#include "decoder/lfm2.h"
+#include "encoder_decoder/marian.h"
+#include "qnn/model_pipeline.h"
 #include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
 #include "ep/openvino/interface.h"
@@ -84,15 +83,21 @@ bool IsPathValuedSessionOption(std::string_view key) {
 
 }  // namespace
 
-State::State(const GeneratorParams& params, const Model& model, DeviceInterface* session_device)
+State::State(const GeneratorParams& params, const Model& model,
+             const std::optional<Config::RunOptions>& configured_run_options,
+             DeviceInterface* session_device)
     : model_{model},
       params_{params.shared_from_this()},
       p_session_device_{session_device ? session_device : model.p_device_},
       // p_device_inputs_ was picked for the model's device (e.g. CPU for WebGPU without graph
       // capture), so only a state on that device may use it.
       p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
-      run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
+  run_options_ = CreateRunOptions(configured_run_options);
+  if (!run_options_) {
+    run_options_ = OrtRunOptions::Create();
+  }
+
   // Generate a random id for graph capture of the default (1-token) decode shape.
   if (params_->use_graph_capture) {
     GraphIdForLength(1, 0);
@@ -138,13 +143,14 @@ void State::DumpOutputs() {
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
                 int graph_capture_variant) {
   DurationTrace trace{"State::Run"};
+  auto& run_options = GetRunOptions(session);
 
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
     if (graph_capture_this_run) {
-      run_options_->AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
+      run_options.AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
     } else {
-      run_options_->AddConfigEntry("gpu_graph_id", "-1");
+      run_options.AddConfigEntry("gpu_graph_id", "-1");
     }
   }
 
@@ -152,13 +158,13 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     extra_outputs_.Add(session.GetOutputNames());
     if (params_->use_multi_profile) {
       // Run the context phase profile for the first run
-      run_options_->AddConfigEntry("nv_profile_index", "0");
+      run_options.AddConfigEntry("nv_profile_index", "0");
     }
     first_run_ = false;
   } else {
     extra_outputs_.Update();
     if (params_->use_multi_profile) {
-      run_options_->AddConfigEntry("nv_profile_index", "1");
+      run_options.AddConfigEntry("nv_profile_index", "1");
     }
   }
 
@@ -176,10 +182,10 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
   }
 
   if (model_.p_device_ && model_.p_device_->GetType() == DeviceType::NvTensorRtRtx) {
-    run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
+    run_options.AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+  session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
   extra_outputs_.RegisterOutputs();
@@ -188,13 +194,20 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
 }
 
 void State::SetRunOption(const char* key, const char* value) {
+  SetRunOption(*run_options_, key, value);
+  for (auto& entry : session_run_options_) {
+    SetRunOption(*entry.second, key, value);
+  }
+}
+
+void State::SetRunOption(OrtRunOptions& run_options, const char* key, const char* value) {
   if (strcmp(key, "terminate_session") == 0) {
     if (strcmp(value, "0") == 0) {
       session_terminated_ = false;
-      run_options_->UnsetTerminate();
+      run_options.UnsetTerminate();
     } else if (strcmp(value, "1") == 0) {
       session_terminated_ = true;
-      run_options_->SetTerminate();
+      run_options.SetTerminate();
     } else {
       // Value not expected
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
@@ -203,30 +216,47 @@ void State::SetRunOption(const char* key, const char* value) {
   } else if (strcmp(key, "enable_profiling") == 0) {
 #if ORT_API_VERSION >= 25
     if (strcmp(value, "0") == 0) {
-      run_options_->DisableProfiling();
+      run_options.DisableProfiling();
     } else {
       // Enable run-level profiling. The profiling output file is named: <prefix>_<timestamp>.json
       // Value "1" uses the default prefix; any other value is treated as a custom prefix.
       constexpr const char* default_profile_prefix = "onnxruntime_run_profile";
       const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
-      run_options_->EnableProfiling(fs::path(prefix).c_str());
+      run_options.EnableProfiling(fs::path(prefix).c_str());
     }
 #else
     throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
 #endif
     return;
   }
-  run_options_->AddConfigEntry(key, value);
+  run_options.AddConfigEntry(key, value);
 }
 
-/*
- * Set all run options that are key-value pairs of strings.
- * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_run_options_config_keys.h
- */
-void State::SetRunOptions(const Config::RunOptions& config_run_options) {
-  for (auto& config_entry : config_run_options) {
-    SetRunOption(config_entry.first.c_str(), config_entry.second.c_str());
+std::unique_ptr<OrtRunOptions> State::CreateRunOptions(
+    const std::optional<Config::RunOptions>& configured_run_options) {
+  if (!configured_run_options.has_value()) {
+    return {};
   }
+
+  auto run_options = OrtRunOptions::Create();
+  for (const auto& [key, value] : configured_run_options.value()) {
+    SetRunOption(*run_options, key.c_str(), value.c_str());
+  }
+  return run_options;
+}
+
+void State::RegisterSessionRunOptions(
+    OrtSession& session, const std::optional<Config::RunOptions>& configured_run_options) {
+  auto options = CreateRunOptions(configured_run_options);
+  if (!options) {
+    options = OrtRunOptions::Create();
+  }
+  session_run_options_.emplace(&session, std::move(options));
+}
+
+OrtRunOptions& State::GetRunOptions(OrtSession& session) {
+  const auto it = session_run_options_.find(&session);
+  return it == session_run_options_.end() ? *run_options_ : *it->second;
 }
 
 OrtValue* State::GetInput(const char* name) {
@@ -997,18 +1027,14 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
-  if (!config->model.decoder.pipeline.empty() &&
-      (ModelType::IsVLM(config->model.type) || ModelType::IsMMM(config->model.type))) {
-    if (!ModelType::IsPipe(config->model.type))
-      throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
-    return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
-  }
+  if (auto pipeline_model = CreatePipelineModel(config, ort_env))
+    return pipeline_model;
   if (ModelType::IsLFM2(config->model.type))
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
-    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+    return std::make_shared<DecoderModel>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsStreamingEncDecASR(config->model.type))
@@ -1039,8 +1065,6 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     }
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
   }
-  if (ModelType::IsPipe(config->model.type))
-    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (config->model.type == "marian-ssru")
     return std::make_shared<MarianModel>(std::move(config), ort_env);
 

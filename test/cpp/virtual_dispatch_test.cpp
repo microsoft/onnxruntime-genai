@@ -13,8 +13,9 @@
 #include <type_traits>
 
 #include "models/multi_modal.h"
-#include "models/pixtral_vision_state.h"
-#include "models/qwen_vl_state.h"
+#include "models/vision/gemma4_vision_state.h"
+#include "models/vision/pixtral_vision_state.h"
+#include "models/vision/qwen_vision_state.h"
 
 namespace Generators::test {
 
@@ -23,7 +24,8 @@ static_assert(std::is_base_of_v<VisionState, PixtralVisionState>,
               "PixtralVisionState must derive from VisionState");
 static_assert(std::is_base_of_v<VisionState, QwenVisionState>,
               "QwenVisionState must derive from VisionState");
-
+static_assert(std::is_base_of_v<VisionState, Gemma4VisionState>,
+              "Gemma4VisionState must derive from VisionState");
 // Verify polymorphic (has virtual functions — needed for correct dispatch
 // through VisionState* base pointers in the factory).
 static_assert(std::is_polymorphic_v<VisionState>,

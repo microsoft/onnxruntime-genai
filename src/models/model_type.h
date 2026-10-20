@@ -92,6 +92,12 @@ struct ModelType {
     return model_type == "lfm2" || model_type == "lfm2_moe" || model_type == "lfm2_vl_text" ||
            model_type == "lfm2_audio_text";
   }
+
+  inline static bool IsLfm2Audio(const std::string& model_type) {
+    // LFM2-Audio / LFM2.5-Audio: runs the multi-modal pipeline (speech encoder -> embedding ->
+    // LFM2 decoder) with an optional depthformer speech output.
+    return model_type == "lfm2_audio";
+  }
 };
 
 }  // namespace Generators

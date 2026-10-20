@@ -255,7 +255,7 @@ TEST(ConventionalKvCacheTest, CreationDispatchesThroughSelectedDevice) {
   class TestState final : public State {
    public:
     TestState(const GeneratorParams& params, const Model& model)
-        : State{params, model} {}
+        : State{params, model, std::nullopt} {}
 
     DeviceSpan<float> Run(int /*total_length*/, DeviceSpan<int32_t>& /*next_tokens*/, DeviceSpan<int32_t> /*next_indices*/) override {
       return {};

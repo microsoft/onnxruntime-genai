@@ -37,7 +37,7 @@ class StandardPositionInputsTest : public testing::Test {
   void SetUp() override {
     model_ = CreateModel(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
     params_ = std::make_shared<GeneratorParams>(*model_);
-    state_ = std::make_unique<PositionInputsTestState>(*params_, *model_);
+    state_ = std::make_unique<PositionInputsTestState>(*params_, *model_, std::nullopt);
     sequence_lengths_ = model_->p_device_->Allocate<int32_t>(params_->search.batch_size);
   }
 

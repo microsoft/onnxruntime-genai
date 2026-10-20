@@ -1,7 +1,7 @@
 #include "position_inputs.h"
 
 #include "default_position_inputs.h"
-#include "qwen_vl_position_inputs.h"
+#include "models/io/qwen_vl_position_inputs.h"
 #include "windowed_position_inputs.h"
 #include "models/model.h"
 #include "models/model_type.h"

@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "../models/decoder_only.h"
+#include "../models/decoder/multi_modal_decoder.h"
 #include "scheduled_requests.h"
 
 namespace Generators {

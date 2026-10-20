@@ -102,7 +102,7 @@ std::exception_ptr MakeFatalFallbackError(StepOutcomeKind outcome) {
 }
 
 std::vector<int32_t> GreedyTokens(
-    const std::shared_ptr<DecoderOnly_Model>& model,
+    const std::shared_ptr<DecoderModel>& model,
     std::vector<DeviceSpan<float>>& logits) {
   std::vector<int32_t> tokens(logits.size());
   auto device_tokens = model->p_device_->Allocate<int32_t>(logits.size());
@@ -133,7 +133,7 @@ std::vector<int32_t> GreedyTokens(
 }
 
 bool TryGreedyTokensToDevice(
-    const std::shared_ptr<DecoderOnly_Model>& model,
+    const std::shared_ptr<DecoderModel>& model,
     std::vector<DeviceSpan<float>>& logits,
     DeviceSpan<int32_t> tokens) {
   if (tokens.size() != logits.size()) {
@@ -306,7 +306,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
         "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
         "prefill.");
   }
-  std::shared_ptr<DecoderOnly_Model> mtp_model;
+  std::shared_ptr<DecoderModel> mtp_model;
   size_t mtp_bytes_per_block = 0;
   if (model->config_->model.mtp.IsEnabled()) {
     if (!model->config_->engine.dynamic_batching) {
@@ -315,7 +315,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     auto& target_hidden_states =
         model->config_->model.decoder.outputs.hidden_states;
     target_hidden_states = model->config_->model.mtp.main_hidden_states;
-    mtp_model = std::make_shared<DecoderOnly_Model>(
+    mtp_model = std::make_shared<DecoderModel>(
         CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
     ValidateMtpModelCompatibility(
         *model->config_, model->session_info_, mtp_model->session_info_);
@@ -354,7 +354,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     const auto& batching = *model->config_->engine.dynamic_batching;
     const size_t paged_block_size = static_cast<size_t>(batching.block_size);
     dflash2_max_batch_size = static_cast<size_t>(batching.max_batch_size);
-    auto decoder_model = std::dynamic_pointer_cast<DecoderOnly_Model>(model);
+    auto decoder_model = std::dynamic_pointer_cast<DecoderModel>(model);
     dflash2_model = std::make_shared<Dflash2Model>(
         CreateDflash2Config(*model->config_), GetOrtEnv(),
         decoder_model ? decoder_model->cpu_embedding_ : nullptr);

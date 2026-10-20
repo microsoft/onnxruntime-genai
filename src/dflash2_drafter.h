@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "models/model.h"
-#include "models/cpu_embedding.h"
+#include "models/embedding/cpu_embedding.h"
 #include "engine/graph_annotation_ids.h"
 #include "decoding/speculative_sampling.h"
 
