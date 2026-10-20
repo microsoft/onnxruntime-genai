@@ -265,6 +265,11 @@ def test_sparse_attention_mrope_keeps_height_and_width(paged):
         model.make_initializer(values, kind)
     norm = SimpleNamespace(weight=torch.zeros(12))
     model.make_sparse_mrope_projections(0, SimpleNamespace(q_norm=norm, k_norm=norm), "cos", "sin")
+    if paged:
+        for label, heads in (("q", 2), ("k", 1)):
+            for suffix in ("Reshape_1", "SimplifiedLayerNormalization"):
+                value = model.values[f"/model/layers.0/attn/{label}_norm/{suffix}/output_0"]
+                assert list(value.shape) == ["num_tokens", heads, 12]
     model.graph.outputs.extend(model.values[model.attention_attrs[path]] for path in ("q_path", "k_path"))
     model.graph.opset_imports["com.microsoft"] = 1
     model.graph.sort()

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import onnx
+import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer
@@ -303,6 +304,83 @@ def test_indexshare_preserves_metadata_and_live_value_info(mtp_graph):
     assert result.graph.output[0].SerializeToString() == model.graph.output[0].SerializeToString()
     assert {tensor.name: tensor.SerializeToString() for tensor in result.graph.initializer} == external_refs
     assert (mtp_graph / "mtp.onnx.data").read_bytes() == external_bytes
+
+
+@pytest.mark.parametrize("projection_row_count", [0, 2])
+@pytest.mark.parametrize("quantized_projection", [False, True])
+@pytest.mark.parametrize("with_split", [False, True])
+def test_gated_projection_value_info_has_independent_row_count(
+    mtp_graph, projection_row_count, quantized_projection, with_split
+):
+    source = onnx.load(mtp_graph / "mtp.onnx", load_external_data=False)
+    source.graph.value_info.append(
+        helper.make_tensor_value_info("index_qk", TensorProto.FLOAT, ["num_tokens", 6])
+    )
+    split = next(node for node in source.graph.node if node.op_type == "Split")
+    if with_split:
+        source.graph.value_info.extend(
+            [
+                helper.make_tensor_value_info("index_query", TensorProto.FLOAT, ["num_tokens", 4]),
+                helper.make_tensor_value_info("index_key", TensorProto.FLOAT, ["num_tokens", 2]),
+            ]
+        )
+    else:
+        indexer = next(node for node in source.graph.node if node.op_type == "PackedSparseAttentionIndexer")
+        indexer.input[:2] = ["index_qk", ""]
+        source.graph.node.remove(split)
+    onnx.save_model(source, mtp_graph / "mtp.onnx")
+    if quantized_projection:
+        quantizer = MatMulNBitsQuantizer(
+            onnx.load(mtp_graph / "mtp.onnx"),
+            bits=4,
+            block_size=16,
+            is_symmetric=True,
+            op_types_to_quantize=("MatMul",),
+        )
+        quantizer.process()
+        onnx.save_model(quantizer.model.model, mtp_graph / "mtp.onnx")
+
+    MTPModel().export_indexshare_graphs(str(mtp_graph), "mtp.onnx", 7)
+
+    result = onnx.load(mtp_graph / "mtp.onnx")
+    value_info = {value.name: value for value in result.graph.value_info}
+    gather = next(node for node in result.graph.node if node.name.endswith("/GatherProjectionRows"))
+    projection = next(node for node in result.graph.node if node.op_type in {"MatMul", "MatMulNBits"})
+    for name, width in ((gather.output[0], 2), (projection.output[0], 6)):
+        shape = value_info[name].type.tensor_type.shape
+        assert shape.dim[0].dim_param == "indexer_projection_rows"
+        assert shape.dim[1].dim_value == width
+    assert "index_query" not in value_info
+    assert "index_key" not in value_info
+    assert not any(node.op_type == "Split" for node in result.graph.node)
+    inputs = {value.name: value for value in result.graph.input}
+    assert inputs["hidden"].type.tensor_type.shape.dim[0].dim_param == "num_tokens"
+    assert inputs["projection_rows"].type.tensor_type.shape.dim[0].dim_param == "indexer_projection_rows"
+    outputs = {value.name: value for value in result.graph.output}
+    assert outputs["present_indices"].type.tensor_type.shape.dim[0].dim_param == "num_tokens"
+
+    # Execute the gated projection alone: reuse can project zero rows while hidden has tokens.
+    prefix = helper.make_model(
+        helper.make_graph(
+            [gather, projection],
+            "gated_projection",
+            [inputs["hidden"], inputs["projection_rows"]],
+            [value_info[projection.output[0]]],
+            [tensor for tensor in result.graph.initializer if tensor.name in projection.input],
+            value_info=[value_info[gather.output[0]]],
+        ),
+        opset_imports=list(result.opset_import),
+        ir_version=10,
+    )
+    session = ort.InferenceSession(prefix.SerializeToString(), providers=["CPUExecutionProvider"])
+    projected = session.run(
+        None,
+        {
+            "hidden": np.ones((3, 2), dtype=np.float32),
+            "projection_rows": np.arange(projection_row_count, dtype=np.int64),
+        },
+    )[0]
+    assert projected.shape == (projection_row_count, 6)
 
 
 def test_indexshare_does_not_require_node_names(mtp_graph):
