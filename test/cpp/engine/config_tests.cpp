@@ -141,6 +141,77 @@ TEST(ConfigTest, Dflash2SnapshotOnlyProfileRequiresDynamicBatchingEvenWhenDisabl
   EXPECT_FALSE(config.engine.dynamic_batching);
 }
 
+TEST(ConfigTest, RuntimeProfileAppliesDecoderSessionOptionsAndHostMemoryEligibility) {
+  Config config;
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "filename": "model.onnx",
+        "session_options": {
+          "session.moe.offload.mode": "auto",
+          "session.moe.offload.device_expert_bytes": "auto"
+        }
+      }
+    },
+    "runtime_profiles": [
+      {
+        "id": "consumer-gpu-low-ram",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 0,
+          "maximum_total_device_memory_bytes": 25769803776,
+          "maximum_effective_host_memory_bytes": 68719476735
+        },
+        "overlay": {
+          "model": {
+            "decoder": {
+              "session_options": {
+                "session.moe.offload.mode": "required",
+                "session.moe.offload.device_expert_bytes": "10351636480",
+                "session.moe.offload.host_expert_bytes": "8589934592"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "consumer-gpu-more-ram",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 0,
+          "maximum_total_device_memory_bytes": 25769803776,
+          "minimum_effective_host_memory_bytes": 68719476736
+        },
+        "overlay": {
+          "model": {
+            "decoder": {
+              "session_options": {
+                "session.moe.offload.mode": "required",
+                "session.moe.offload.device_expert_bytes": "10351636480",
+                "session.moe.offload.host_expert_bytes": "42949672960"
+              }
+            }
+          }
+        }
+      }
+    ]
+  })");
+
+  ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{
+      25769803776ULL,
+      false,
+      20000000000ULL,
+      68719476736ULL,
+      50000000000ULL,
+  });
+
+  std::map<std::string, std::string> entries;
+  for (const auto& [k, v] : config.model.decoder.session_options.config_entries) {
+    entries[k] = v;
+  }
+  EXPECT_EQ(entries["session.moe.offload.mode"], "required");
+  EXPECT_EQ(entries["session.moe.offload.device_expert_bytes"], "10351636480");
+  EXPECT_EQ(entries["session.moe.offload.host_expert_bytes"], "42949672960");
+}
+
 TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
   Config config;
   OverlayConfig(config, R"({
