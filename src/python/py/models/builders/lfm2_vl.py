@@ -21,6 +21,10 @@ class LFM2VLVisionEncoder(Model):
     # pixel_values, pixel_attention_mask, spatial_shapes --> image_features (the tokens of all images, in order)
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # The projector is built with an exact Gelu
+        if config.projector_hidden_act != "gelu":
+            raise ValueError(f"Unsupported projector_hidden_act {config.projector_hidden_act}: expected gelu")
+
         # Standardize config attributes for the vision layers to simplify layer building logic
         vision_config = config.vision_config
         config.hidden_size = vision_config.hidden_size
@@ -112,7 +116,7 @@ class LFM2VLVisionEncoder(Model):
         #
         #   pixel_attention_mask --> attention bias [B,1,L,L] for every layer
         basename = "/model/embeddings"
-        embeddings = self.weights.model.vision_tower.embeddings
+        embeddings = self.vision_tower(self.weights).embeddings
         shape = self.make_hidden_state_shape()
 
         patch_name = f"{basename}/patch_embedding/MatMul"
@@ -282,8 +286,12 @@ class LFM2VLVisionEncoder(Model):
         # The vision model does not use any KV caches
         return "", "", "", ""
 
+    def vision_tower(self, model):
+        # Transformers before 5.6 nests the SigLIP2 tower under vision_model
+        return getattr(model.model.vision_tower, "vision_model", model.model.vision_tower)
+
     def has_final_norm(self, module, model):
-        return module is model.model.vision_tower.post_layernorm
+        return module is self.vision_tower(model).post_layernorm
 
     def has_lm_head(self, module):
         # The vision model ends with the projector
@@ -547,7 +555,7 @@ class LFM2VLModel(Model):
 
         # Read the image processor settings before the build, so an unsupported checkpoint fails early
         self.image_processor, _ = ImageProcessingMixin.get_image_processor_dict(
-            config._name_or_path, cache_dir=cache_dir, token=self.hf_token
+            self.decoder.model_name_or_path, cache_dir=cache_dir, token=self.hf_token
         )
         self.processor_config = self.make_processor_config(self.image_processor)
 

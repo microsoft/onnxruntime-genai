@@ -23,11 +23,15 @@ import types
 from pathlib import Path
 
 import numpy as np
-import onnx
-import onnxruntime as ort
 import pytest
-import torch
-import transformers
+
+torch = pytest.importorskip("torch")
+onnx = pytest.importorskip("onnx")
+ort = pytest.importorskip("onnxruntime")
+transformers = pytest.importorskip("transformers")
+# _builder_test_utils, used by other tests in the session, stubs onnxruntime when it is not installed
+if not hasattr(ort, "InferenceSession"):
+    pytest.skip("onnxruntime is not installed", allow_module_level=True)
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
 BUILDERS_DIR = MODELS_DIR / "builders"
@@ -196,6 +200,7 @@ def tiny_lfm2_vl(projector_use_layernorm=True):
         num_patches=16,
         patch_size=4,
         vision_use_head=False,
+        layer_norm_eps=0.1,
     )
     config = transformers.Lfm2VlConfig(
         architectures=["Lfm2VlForConditionalGeneration"],
@@ -212,6 +217,9 @@ def tiny_lfm2_vl(projector_use_layernorm=True):
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         hf_model = transformers.Lfm2VlForConditionalGeneration(config).eval()
+    # A large epsilon, so a LayerNorm built with the wrong one moves the features past the tolerance
+    if hf_model.model.multi_modal_projector.layer_norm is not None:
+        hf_model.model.multi_modal_projector.layer_norm.eps = 0.1
     return config, hf_model
 
 
@@ -324,7 +332,7 @@ def test_embedding_model_matches_transformers(tmp_path, table_dtype, features_dt
 def test_precision_and_quantization_reach_only_the_decoder(tmp_path, ep, io_dtype, onnx_dtype, vision_dtype):
     config, hf_model = tiny_lfm2_vl()
     write_image_processor(tmp_path / "checkpoint")
-    config._name_or_path = str(tmp_path / "checkpoint")
+    config.name_or_path = str(tmp_path / "checkpoint")
     options = {"exclude_embeds": True}
     model = builder_module.LFM2VLModel(
         copy.deepcopy(config), io_dtype, onnx_dtype, ep, str(tmp_path / "cache"), options
@@ -352,6 +360,9 @@ def test_precision_and_quantization_reach_only_the_decoder(tmp_path, ep, io_dtyp
     vision, embedding = graphs["vision.onnx"], graphs["embeddings.onnx"]
     assert vision.input[0].type.tensor_type.elem_type == vision_dtype
     assert vision.output[0].type.tensor_type.elem_type == vision_dtype
+    # The position table stays fp32 in an fp16 vision model, as its resize runs in fp32
+    table = "model.embeddings.position_embedding.weight"
+    assert {tensor.data_type for tensor in vision.initializer if tensor.name == table} == {ir.DataType.FLOAT}
     assert embedding.input[1].type.tensor_type.elem_type == vision_dtype
     assert embedding.output[0].type.tensor_type.elem_type == io_dtype
     assert {tensor.data_type for tensor in embedding.initializer if tensor.name == "model.embed_tokens.weight"} == {
@@ -367,7 +378,7 @@ def test_precision_and_quantization_reach_only_the_decoder(tmp_path, ep, io_dtyp
 def test_genai_config_and_processor_config(tmp_path, layout, interpolation):
     config, _ = tiny_lfm2_vl()
     write_image_processor(tmp_path / "checkpoint", layout)
-    config._name_or_path = str(tmp_path / "checkpoint")
+    config.name_or_path = str(tmp_path / "checkpoint")
     model = builder_module.LFM2VLModel(
         config, ir.DataType.FLOAT, ir.DataType.INT4, "cpu", str(tmp_path / "cache"), {"exclude_embeds": True}
     )
@@ -407,7 +418,7 @@ def test_sub_models_follow_the_decoder_without_graph_capture(
     # every prompt.
     config, _ = tiny_lfm2_vl()
     write_image_processor(tmp_path / "checkpoint")
-    config._name_or_path = str(tmp_path / "checkpoint")
+    config.name_or_path = str(tmp_path / "checkpoint")
     model = builder_module.LFM2VLModel(
         config,
         ir.DataType.FLOAT16,
@@ -436,7 +447,7 @@ def test_sub_models_follow_the_decoder_without_graph_capture(
 def test_refuses_before_building(tmp_path, extra_options, resample, message):
     config, _ = tiny_lfm2_vl()
     write_image_processor(tmp_path / "checkpoint", resample=resample)
-    config._name_or_path = str(tmp_path / "checkpoint")
+    config.name_or_path = str(tmp_path / "checkpoint")
     with pytest.raises(ValueError, match=message):
         builder_module.LFM2VLModel(
             config,
@@ -445,4 +456,13 @@ def test_refuses_before_building(tmp_path, extra_options, resample, message):
             "cpu",
             str(tmp_path / "cache"),
             {"exclude_embeds": True, **extra_options},
+        )
+
+
+def test_refuses_a_projector_activation_other_than_gelu(tmp_path):
+    config, _ = tiny_lfm2_vl()
+    config.projector_hidden_act = "gelu_pytorch_tanh"
+    with pytest.raises(ValueError, match="Unsupported projector_hidden_act gelu_pytorch_tanh"):
+        lfm2_vl_module.LFM2VLVisionEncoder(
+            config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", str(tmp_path / "cache"), {}
         )
