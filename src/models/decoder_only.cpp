@@ -63,10 +63,10 @@ void DecoderOnly_Model::InitializeIndexShare(const Config::Model::Mtp::IndexShar
   }
   {
     if (!decode_info.HasInput("mode") || !decode_info.HasInput("projection_rows") ||
-      decode_info.GetInputDataType("mode") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
-      decode_info.GetInputShape("mode") != std::vector<int64_t>{1} ||
-      decode_info.GetInputDataType("projection_rows") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
-      decode_info.GetInputShape("projection_rows").size() != 1) {
+        decode_info.GetInputDataType("mode") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+        decode_info.GetInputShape("mode") != std::vector<int64_t>{1} ||
+        decode_info.GetInputDataType("projection_rows") != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+        decode_info.GetInputShape("projection_rows").size() != 1) {
       throw std::runtime_error("IndexShare requires an int32[1] mode and int64 projection rows.");
     }
   }
@@ -96,9 +96,11 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
   if (model_.session_engram_) {
     engram_state_ = std::make_unique<EngramState>(model_, *model_.session_engram_, params);
     const auto& name = model_.config_->model.decoder.inputs.engram_embeddings;
-    engram_input_index_ = inputs_.size();
-    inputs_.push_back(nullptr);
-    input_names_.push_back(name.c_str());
+    const auto shape = model_.session_info_.GetInputShape(name);
+    if (shape.size() != 3 || shape.back() <= 0)
+      throw std::runtime_error("Generator Engram embeddings require [batch, sequence, static_width]");
+    engram_embeddings_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Input, name, shape.back());
+    engram_embeddings_->Add();
   }
   // Models with a hidden_states input (e.g. the MTP self-speculative head) feed the main
   // model's last hidden state. Only created when the config declares the input.
@@ -137,17 +139,7 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   if (engram_state_) {
     engram_state_->UpdateInputsOutputs(next_tokens);
     engram_state_->Run(total_length, next_tokens, next_indices);
-    auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.engram_embeddings);
-    if (shape.size() == 2)
-      shape[0] = static_cast<int64_t>(num_tokens);
-    else if (shape.size() == 3) {
-      shape[0] = params_->BatchBeamSize();
-      shape[1] = static_cast<int64_t>(num_tokens / params_->BatchBeamSize());
-    } else
-      throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
-    engram_embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape,
-                                                model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
-    inputs_[engram_input_index_] = engram_embeddings_.get();
+    engram_embeddings_->UpdateSequenceLength(num_tokens / params_->BatchBeamSize());
     engram_state_->CopyEmbeddingsTo(*engram_embeddings_);
   }
   if (model_.config_->model.decoder.run_options.has_value()) {
@@ -159,7 +151,8 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   // each captured length getting its own annotation id / static buffers.
   const int seq_len = static_cast<int>(input_ids_.GetShape()[1]);
   const bool graph_capture_this_run =
-      params_->use_graph_capture && seq_len >= 1 && seq_len <= params_->max_graph_capture_length;
+      params_->use_graph_capture && seq_len >= 1 && seq_len <= params_->max_graph_capture_length &&
+      (!indexer_cache_ || !indexer_cache_->UsesHostSequenceLength());
   int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
   if (ple_state_) {
     const int ple_graph_capture_variant = ple_state_->GraphCaptureVariant();
@@ -171,7 +164,9 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
 
   // ORT captures by re-running the model inside this one Run(), which over-applies an
   // in-place recurrent state. Let the capture happen, then undo it and replay.
-  const int graph_id = seq_len * 2 + graph_capture_variant;
+  if (recurrent_state_ && recurrent_state_->StateUpdateCaptureEnabled())
+    graph_capture_variant += 2;
+  const int graph_id = seq_len * 4 + graph_capture_variant;
   if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
     recurrent_state_->SaveForGraphCapture();
     State::Run(*model_.session_decoder_, true, seq_len, graph_capture_variant);
@@ -206,17 +201,7 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
     if (engram_state_) {
       engram_state_->UpdateInputsOutputs(chunk_tokens);
       engram_state_->Run(length, chunk_tokens, next_indices);
-      auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.engram_embeddings);
-      if (shape.size() == 2)
-        shape[0] = static_cast<int64_t>(current_chunk_size);
-      else if (shape.size() == 3) {
-        shape[0] = params_->BatchBeamSize();
-        shape[1] = static_cast<int64_t>(current_chunk_size / params_->BatchBeamSize());
-      } else
-        throw std::runtime_error("Decoder Engram embeddings must be rank 2 or 3");
-      engram_embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape,
-                                                  model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.engram_embeddings));
-      inputs_[engram_input_index_] = engram_embeddings_.get();
+      engram_embeddings_->UpdateSequenceLength(current_chunk_size / params_->BatchBeamSize());
       engram_state_->CopyEmbeddingsTo(*engram_embeddings_);
     }
 
@@ -231,7 +216,15 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   return logits_.Get();
 }
 
+void DecoderOnly_State::ValidateRewindTo(size_t index) const {
+  if (indexer_cache_) indexer_cache_->ValidateRewindTo(index);
+  if (recurrent_state_) recurrent_state_->ValidateRewindTo(index);
+  if (ple_state_) ple_state_->ValidateRewindTo(index);
+  if (engram_state_) engram_state_->ValidateRewindTo(index);
+}
+
 void DecoderOnly_State::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (engram_state_) engram_state_->RewindTo(index);
   position_inputs_->RewindTo(index);
   if (kv_cache_)
@@ -263,7 +256,16 @@ int64_t DecoderOnly_State::RecurrentStateWindow() const {
   return recurrent_state_ ? recurrent_state_->StateWindow() : 1;
 }
 
+void DecoderOnly_State::ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const {
+  (void)new_length;
+  if (recurrent_state_) recurrent_state_->ValidateCropPosition(recurrent_position);
+  if (ple_state_) ple_state_->ValidateCropPosition(recurrent_position);
+  if (engram_state_) engram_state_->ValidateAcceptedPrefix(recurrent_position + 1);
+  if (indexer_cache_) indexer_cache_->ValidateAcceptedPrefix(recurrent_position + 1);
+}
+
 void DecoderOnly_State::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  ValidateCropToAccepted(new_length, recurrent_position);
   // Roll the attention KV cache + position back to the committed length, and crop the recurrent
   // state to the state AFTER verify token `recurrent_position` (no replay forward). Used by
   // lossless multi-token MTP partial accept.

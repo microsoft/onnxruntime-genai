@@ -97,8 +97,8 @@ RecurrentState::RecurrentState(State& state, bool graph_capture_variants_support
   // legacy unwindowed layout (W == 1).
   const bool conv_windowed = conv_shape_.size() == 4;
   const bool recurrent_windowed = recurrent_shape_.size() == 5;
-  if (recurrent_windowed)
-    throw std::runtime_error("RecurrentState: GatedDeltaNet uses compact state updates, not a recurrent state window");
+  if (recurrent_windowed && (!conv_windowed || conv_shape_[0] != recurrent_shape_[0]))
+    throw std::runtime_error("RecurrentState: convolution and recurrent windows must agree");
   if (conv_windowed) {
     state_window_ = conv_shape_[0];
   }
@@ -238,7 +238,7 @@ void RecurrentState::SetForwardLength(int sequence_length) {
   forward_length_ = sequence_length;
 }
 
-void RecurrentState::CropToPosition(size_t position) {
+void RecurrentState::ValidateCropPosition(size_t position) const {
   if (!IsWindowed())
     throw std::runtime_error(
         "RecurrentState::CropToPosition requires the model exported with state_window > 1");
@@ -256,6 +256,16 @@ void RecurrentState::CropToPosition(size_t position) {
     throw std::runtime_error(
         "RecurrentState::CropToPosition(" + std::to_string(position) + ") is past the last position of a forward of length " +
         std::to_string(forward_length_));
+  if (!state_update_capsules_.empty() &&
+      (forward_length_ < 2 || position + 1 >= static_cast<size_t>(forward_length_) ||
+       position + 1 > state_update_capacity_ || !snapshot_valid_)) {
+    throw std::runtime_error("RecurrentState compact commit position is outside the captured verify prefix");
+  }
+}
+
+void RecurrentState::CropToPosition(size_t position) {
+  ValidateCropPosition(position);
+  const int64_t signed_slot = static_cast<int64_t>(position) + state_window_ - forward_length_;
   const size_t slot = static_cast<size_t>(signed_slot);
   auto& device = *model_.p_device_kvcache_;
   // Fast path: one kernel for all 2*num_layers tensors. The per-tensor loop below issues one
@@ -263,7 +273,8 @@ void RecurrentState::CropToPosition(size_t position) {
   // already GPU-idle-bound.
   if (slot + 1 != static_cast<size_t>(state_window_) &&
       !TryBatchedSlotPromote(slot)) {
-    for (size_t index = 0; index < presents_.size(); index += 2) {
+    const size_t increment = recurrent_shape_.size() == 5 ? 1 : 2;
+    for (size_t index = 0; index < presents_.size(); index += increment) {
       auto& present = presents_[index];
       auto window = ByteWrapTensor(device, *present);
       const size_t slot_bytes = window.size() / static_cast<size_t>(state_window_);
@@ -273,40 +284,32 @@ void RecurrentState::CropToPosition(size_t position) {
   }
 
   const size_t kept_count = position + 1;
-  if (forward_length_ < 2 || kept_count >= static_cast<size_t>(forward_length_) ||
-      kept_count > state_update_capacity_ || !snapshot_valid_) {
-    throw std::runtime_error(
-        "RecurrentState compact commit position is outside the captured verify prefix");
-  }
+  if (state_update_capsules_.empty()) return;
   std::vector<StateUpdateReplayDesc> descriptors;
   descriptors.reserve(layer_indices_.size());
   for (size_t layer = 0; layer < layer_indices_.size(); ++layer) {
-    auto capsule = WrapTensor<float>(device, *state_update_capsules_[layer]).Span();
+    auto capsule = ByteWrapTensor(device, *state_update_capsules_[layer]);
     const size_t channels = static_cast<size_t>(recurrent_shape_[1]);
     const size_t state_width = static_cast<size_t>(recurrent_shape_[2]);
     const size_t key_width = static_cast<size_t>(recurrent_shape_[3]);
     const size_t key_heads = state_update_key_head_counts_[layer];
+    const size_t decay_bytes = state_update_capacity_ * channels * sizeof(float);
+    const size_t key_bytes = state_update_capacity_ * key_heads * key_width * sizeof(float);
     descriptors.push_back(StateUpdateReplayDesc{
-        ByteWrapTensor(device, *snapshot_[layer * 2 + 1]).Span().data(),
-        ByteWrapTensor(device, *presents_[layer * 2 + 1]).Span().data(),
-        nullptr,
-        capsule.data(),
-        capsule.data() + state_update_capacity_ * channels,
-        capsule.data() + state_update_capacity_ * (channels + key_heads * key_width),
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
+        ByteWrapTensor(device, *snapshot_[layer * 2 + 1]),
+        ByteWrapTensor(device, *presents_[layer * 2 + 1]),
+        {},
+        capsule.subspan(0, decay_bytes),
+        capsule.subspan(decay_bytes, key_bytes),
+        capsule.subspan(decay_bytes + key_bytes,
+                        state_update_capacity_ * channels * state_width * sizeof(float)),
         static_cast<uint64_t>(channels),
         static_cast<uint64_t>(state_width),
         static_cast<uint64_t>(key_width),
         static_cast<uint64_t>(key_heads),
-        0,
-        0,
         static_cast<uint32_t>(state_update_capacity_),
         static_cast<uint32_t>(kept_count),
         static_cast<uint32_t>(sizeof(float)),
-        0,
         StateUpdateReplayKind::GatedDeltaNet,
     });
   }
@@ -318,11 +321,12 @@ bool RecurrentState::TryBatchedSlotPromote(size_t slot) {
 
   // The state buffers are stable across steps when inputs alias outputs (which graph capture
   // requires), but re-derive the descriptors and compare so a reallocation cannot go unnoticed.
-  const size_t tensor_count = presents_.size() / 2;
+  const size_t stride = recurrent_shape_.size() == 5 ? 1 : 2;
+  const size_t tensor_count = presents_.size() / stride;
   bool descriptors_changed = slot_descs_cpu_.size() != tensor_count;
   slot_descs_cpu_.resize(tensor_count);
   for (size_t i = 0; i < tensor_count; ++i) {
-    auto& present = presents_[i * 2];
+    auto& present = presents_[i * stride];
     auto window = ByteWrapTensor(device, *present);
     auto bytes = window.Span();
     const StateSlotDesc desc{reinterpret_cast<uint8_t*>(bytes.data()),
@@ -354,7 +358,23 @@ void RecurrentState::Update() {
   if (graph_double_buffer_) graph_buffer_variant_ ^= 1;
 }
 
+void RecurrentState::ValidateRewindTo(size_t index) const {
+  if (layer_indices_.empty() || index == 0) return;
+  if (snapshot_valid_ && index != snapshot_position_) {
+    throw std::runtime_error(
+        "RecurrentState::RewindTo(" + std::to_string(index) + ") cannot restore snapshot at length " +
+        std::to_string(snapshot_position_));
+  }
+  if (!snapshot_valid_) {
+    throw std::runtime_error(
+        "RecurrentState::RewindTo(" + std::to_string(index) +
+        ") is not supported without a snapshot. Recurrent states cannot be partially rewound; "
+        "call Snapshot() at the target length first (e.g. for speculative decoding).");
+  }
+}
+
 void RecurrentState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (layer_indices_.empty()) return;
 
   if (index != 0) {
@@ -363,19 +383,8 @@ void RecurrentState::RewindTo(size_t index) {
     // snapshot captured at the target length (used by speculative decoding to
     // roll back a rejected draft). The caller (e.g. the MTP orchestrator)
     // guarantees the snapshot was taken at exactly `index`.
-    if (snapshot_valid_) {
-      if (index != snapshot_position_) {
-        throw std::runtime_error(
-            "RecurrentState::RewindTo(" + std::to_string(index) + ") cannot restore snapshot at length " +
-            std::to_string(snapshot_position_));
-      }
-      RestoreSnapshot();
-      return;
-    }
-    throw std::runtime_error(
-        "RecurrentState::RewindTo(" + std::to_string(index) +
-        ") is not supported without a snapshot. Recurrent states cannot be partially rewound; "
-        "call Snapshot() at the target length first (e.g. for speculative decoding).");
+    RestoreSnapshot();
+    return;
   }
   // Full reset to length 0.
   snapshot_valid_ = false;
@@ -451,20 +460,6 @@ void RecurrentState::RestoreSnapshot() {
   // Copy back into the live buffers in place so their addresses stay stable
   // (required by CUDA-graph replay, which captures fixed buffer pointers).
   CopyStates(snapshot_, presents_);
-  if (std::getenv("ORTGENAI_MTP_DEBUG_STATE") != nullptr) {
-    auto& device = *model_.p_device_kvcache_;
-    device.Synchronize();
-    for (size_t index = 0; index < snapshot_.size(); ++index) {
-      auto expected_tensor = ByteWrapTensor(device, *snapshot_[index]);
-      auto actual_tensor = ByteWrapTensor(device, *presents_[index]);
-      const auto expected = expected_tensor.CopyDeviceToCpu();
-      const auto actual = actual_tensor.CopyDeviceToCpu();
-      if (!std::equal(expected.begin(), expected.end(), actual.begin())) {
-        throw std::runtime_error(
-            "RecurrentState snapshot restore mismatch at state " + std::to_string(index));
-      }
-    }
-  }
   if (state_update_active_) {
     state_update_active_->GetTensorMutableData<int32_t>()[0] = 0;
   }

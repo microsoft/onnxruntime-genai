@@ -99,6 +99,23 @@ struct PrefixCheckpointOwner {
 
 }  // namespace
 
+void ValidateFixedStateUpdateElementSize(
+    Config::Model::Decoder::StateUpdateKind kind, size_t element_size) {
+  using Kind = Config::Model::Decoder::StateUpdateKind;
+  if (kind == Kind::CausalConv && element_size != 2 && element_size != 4) {
+    throw std::runtime_error(
+        "Causal convolution state_update supports only 2-byte and 4-byte elements.");
+  }
+  if (kind == Kind::Indexer && element_size != 2 && element_size != 4) {
+    throw std::runtime_error(
+        "Indexer state_update supports only 2-byte and 4-byte elements.");
+  }
+  if (kind == Kind::Ple && element_size != 2 && element_size != 4 && element_size != 8) {
+    throw std::runtime_error(
+        "PLE snapshot state_update supports only 2-byte, 4-byte and 8-byte elements.");
+  }
+}
+
 FixedStateGeometry ValidateFixedStateGeometry(std::string_view input_name,
                                               ONNXTensorElementDataType input_type,
                                               std::span<const int64_t> input_shape,
@@ -950,13 +967,8 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
             spec.state_update_channel_count = static_cast<size_t>(spec.session_shape[1]);
             spec.state_update_state_width = static_cast<size_t>(spec.session_shape[2]);
           }
-          if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::CausalConv) {
-            const size_t element_size = Ort::SizeOf(spec.data_type);
-            if (element_size != 2 && element_size != 4) {
-              throw std::runtime_error(
-                  "Causal convolution state_update supports only 2-byte and 4-byte elements.");
-            }
-          } else if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet) {
+          ValidateFixedStateUpdateElementSize(spec.state_update_kind, Ort::SizeOf(spec.data_type));
+          if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet) {
             spec.state_update_key_width = static_cast<size_t>(spec.session_shape[3]);
             spec.state_update_key_head_count = static_cast<size_t>(update.key_head_count);
           }
@@ -1014,10 +1026,9 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
         "Fixed state pools require qualified transactional device semantics.");
   }
   if (SupportsStateUpdates() &&
-      impl_->device->GetType() != DeviceType::CPU &&
-      impl_->device->GetType() != DeviceType::CUDA) {
+      !impl_->device->SupportsCompactStateReplay()) {
     throw std::runtime_error(
-        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+        "Compact fixed state replay is not supported by this device.");
   }
   if (impl_->state_update_capacity != 0) {
     impl_->persistent_bytes = CheckedAdd(
@@ -1828,6 +1839,19 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
          ++tensor_index) {
       const auto& spec = impl_->tensors[tensor_index];
       auto& staged = *views.staged_outputs[tensor_index];
+      // Shared wrappers let device replay coalesce host mirrors across rows of the same backing.
+      DeviceSpan<uint8_t> input_backing, value_backing, capsule_backing;
+      std::array<DeviceSpan<uint8_t>, 2> bank_backings;
+      const auto row_view = [&](DeviceSpan<uint8_t>& backing, OrtValue* tensor,
+                                size_t row, size_t row_bytes) {
+        if (!tensor) {
+          return DeviceSpan<uint8_t>{};
+        }
+        if (backing.empty()) {
+          backing = ByteWrapTensor(*impl_->device, *tensor);
+        }
+        return backing.subspan(row * row_bytes, row_bytes);
+      };
       for (size_t row = 0; row < storage.handles.size(); ++row) {
         const auto& slot = impl_->slots[storage.handles[row].slot];
         const uint8_t inactive_bank = slot.active_bank ^ 1u;
@@ -1853,30 +1877,6 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
           continue;
         }
 
-        // Raw data pointers: wrapping each tensor in a DeviceSpan allocates, and this loop runs for
-        // every fixed tensor on every partially accepted step.
-        const auto& updates = views.state_update_tensors[tensor_index];
-        const auto row_pointer = [row](const std::unique_ptr<OrtValue>& tensor,
-                                       size_t row_bytes) -> const uint8_t* {
-          if (!tensor) {
-            return nullptr;
-          }
-          return tensor->GetTensorMutableData<uint8_t>() + row * row_bytes;
-        };
-        const uint8_t* source = row_pointer(views.gathered_inputs[tensor_index], spec.row_bytes);
-        uint8_t* destination = spec.banks[inactive_bank]->GetTensorMutableData<uint8_t>() +
-                               storage.handles[row].slot * spec.row_bytes;
-        const auto* capsule = reinterpret_cast<const float*>(
-            row_pointer(updates.capsule, spec.state_update_capsule.row_bytes));
-        const float* decay = capsule;
-        const float* key = capsule
-                               ? capsule + spec.state_update_capacity * spec.state_update_channel_count
-                               : nullptr;
-        const float* delta = key
-                                 ? key + spec.state_update_capacity *
-                                             spec.state_update_key_head_count *
-                                             spec.state_update_key_width
-                                 : nullptr;
         const Impl::TensorSpec* indexer_buffer_spec{};
         const Impl::TensorSpec* indexer_lengths_spec{};
         size_t indexer_buffer_index{};
@@ -1886,40 +1886,75 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
           indexer_lengths_index = tensor_index + 2;
           indexer_buffer_spec = &impl_->tensors[indexer_buffer_index];
           indexer_lengths_spec = &impl_->tensors[indexer_lengths_index];
+          auto lengths_tensor =
+              WrapTensor<int32_t>(*impl_->device, *views.gathered_inputs[indexer_lengths_index]);
+          const auto lengths = lengths_tensor.CopyDeviceToCpu().subspan(row * 2, 2);
+          const size_t ratio = spec.state_update_compress_ratio;
+          const size_t key_capacity = spec.state_update_state_capacity;
+          const size_t buffer_capacity = static_cast<size_t>(indexer_buffer_spec->session_shape[1]);
+          if (ratio == 0 || ratio - 1 > buffer_capacity ||
+              lengths[0] < 0 || lengths[1] < 0 ||
+              static_cast<size_t>(lengths[0]) > key_capacity ||
+              static_cast<size_t>(lengths[1]) >= ratio ||
+              static_cast<size_t>(lengths[1]) > buffer_capacity) {
+            throw std::runtime_error("Indexer state_update has invalid committed lengths.");
+          }
+          const size_t retained = static_cast<size_t>(lengths[1]) + kept_tokens;
+          if (retained / ratio > key_capacity - static_cast<size_t>(lengths[0]) ||
+              retained / ratio > static_cast<size_t>(INT32_MAX - lengths[0]) ||
+              retained % ratio > buffer_capacity) {
+            throw std::runtime_error("Indexer state_update replay exceeds state capacity.");
+          }
         }
-        const auto sibling_source = [&](size_t index, const Impl::TensorSpec* sibling) -> const uint8_t* {
+        const auto sibling_source = [&](size_t index, const Impl::TensorSpec* sibling) {
           return sibling
-                     ? ByteWrapTensor(*impl_->device, *views.gathered_inputs[index]).Span().data() +
-                           row * sibling->row_bytes
-                     : nullptr;
+                     ? ByteWrapTensor(*impl_->device, *views.gathered_inputs[index])
+                           .subspan(row * sibling->row_bytes, sibling->row_bytes)
+                     : DeviceSpan<uint8_t>{};
         };
-        const auto sibling_destination = [&](const Impl::TensorSpec* sibling) -> uint8_t* {
+        const auto sibling_destination = [&](const Impl::TensorSpec* sibling) {
           return sibling
-                     ? ByteWrapTensor(*impl_->device, *sibling->banks[inactive_bank]).Span().data() +
-                           storage.handles[row].slot * sibling->row_bytes
-                     : nullptr;
+                     ? ByteWrapTensor(*impl_->device, *sibling->banks[inactive_bank])
+                           .subspan(storage.handles[row].slot * sibling->row_bytes, sibling->row_bytes)
+                     : DeviceSpan<uint8_t>{};
         };
+        const auto& updates = views.state_update_tensors[tensor_index];
+        const auto source = row_view(input_backing, views.gathered_inputs[tensor_index].get(),
+                                     row, spec.row_bytes);
+        auto destination = row_view(bank_backings[inactive_bank], spec.banks[inactive_bank].get(),
+                                    storage.handles[row].slot, spec.row_bytes);
+        auto capsule = row_view(capsule_backing, updates.capsule.get(),
+                                row, spec.state_update_capsule.row_bytes);
+        DeviceSpan<const uint8_t> decay;
+        DeviceSpan<const uint8_t> key;
+        DeviceSpan<const uint8_t> delta;
+        if (!capsule.empty()) {
+          const size_t decay_bytes =
+              spec.state_update_capacity * spec.state_update_channel_count * sizeof(float);
+          const size_t key_bytes =
+              spec.state_update_capacity * spec.state_update_key_head_count *
+              spec.state_update_key_width * sizeof(float);
+          const size_t delta_bytes =
+              spec.state_update_capacity * spec.state_update_channel_count *
+              spec.state_update_state_width * sizeof(float);
+          decay = capsule.subspan(0, decay_bytes);
+          key = capsule.subspan(decay_bytes, key_bytes);
+          delta = capsule.subspan(decay_bytes + key_bytes, delta_bytes);
+        }
         replay_descriptors.push_back(StateUpdateReplayDesc{
             source,
             destination,
-            row_pointer(updates.value, spec.state_update_value.row_bytes),
+            row_view(value_backing, updates.value.get(), row, spec.state_update_value.row_bytes),
             decay,
             key,
             delta,
-            sibling_source(indexer_buffer_index, indexer_buffer_spec),
-            sibling_destination(indexer_buffer_spec),
-            reinterpret_cast<const int32_t*>(sibling_source(indexer_lengths_index, indexer_lengths_spec)),
-            reinterpret_cast<int32_t*>(sibling_destination(indexer_lengths_spec)),
             static_cast<uint64_t>(spec.state_update_channel_count),
             static_cast<uint64_t>(spec.state_update_state_width),
             static_cast<uint64_t>(spec.state_update_key_width),
             static_cast<uint64_t>(spec.state_update_key_head_count),
-            static_cast<uint64_t>(spec.state_update_state_capacity),
-            static_cast<uint64_t>(indexer_buffer_spec ? indexer_buffer_spec->session_shape[1] : 0),
             static_cast<uint32_t>(spec.state_update_capacity),
             static_cast<uint32_t>(kept_tokens),
             static_cast<uint32_t>(Ort::SizeOf(spec.data_type)),
-            static_cast<uint32_t>(spec.state_update_compress_ratio),
             spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::CausalConv
                 ? StateUpdateReplayKind::CausalConv
             : spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet
@@ -1927,6 +1962,13 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
             : spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::Ple
                 ? StateUpdateReplayKind::Snapshot
                 : StateUpdateReplayKind::Indexer,
+            sibling_source(indexer_buffer_index, indexer_buffer_spec),
+            sibling_destination(indexer_buffer_spec),
+            sibling_source(indexer_lengths_index, indexer_lengths_spec),
+            sibling_destination(indexer_lengths_spec),
+            static_cast<uint64_t>(spec.state_update_state_capacity),
+            static_cast<uint64_t>(indexer_buffer_spec ? indexer_buffer_spec->session_shape[1] : 0),
+            static_cast<uint32_t>(spec.state_update_compress_ratio),
         });
       }
     }

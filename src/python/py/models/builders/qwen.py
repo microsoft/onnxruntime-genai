@@ -8,8 +8,6 @@
 
 import os
 
-from transformers import Qwen2ForCausalLM
-
 from .base import Model
 from .expansions.qwen import Qwen
 from .qwen3_5 import (
@@ -107,8 +105,10 @@ class VideoChatFlashQwenModel(QwenModel):
     def load_weights(self, input_path):
         # Load the standard Qwen2 backbone without importing the checkpoint's
         # custom video modeling code and its optional dependencies.
+        model_class = self.resolve_transformers_class("Qwen2ForCausalLM")
+
         extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
-        return Qwen2ForCausalLM.from_pretrained(
+        return model_class.from_pretrained(
             self.model_name_or_path,
             token=self.hf_token,
             **extra_kwargs,

@@ -15,10 +15,12 @@ import os
 import subprocess
 import types
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import onnx_ir as ir
 import torch
+import transformers
 from builder_config import serialize_genai_config
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
@@ -29,21 +31,12 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
 )
 from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 from tqdm import tqdm
-from transformers import (
-    AutoModelForCausalLM,
-    AutoModelForSpeechSeq2Seq,
-    AutoTokenizer,
-    Gemma3ForConditionalGeneration,
-    GenerationConfig,
-    Lfm2VlForConditionalGeneration,
-    Mistral3ForConditionalGeneration,
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen3_5ForConditionalGeneration,
-    Qwen3_5MoeForConditionalGeneration,
-    Qwen3VLForConditionalGeneration,
-)
+from transformers import AutoTokenizer, GenerationConfig
 
-class Model:
+from .expansions.paged_attention import PagedAttention
+
+
+class Model(PagedAttention):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.extra_options = extra_options
         self.hf_load_config = (
@@ -174,12 +167,6 @@ class Model:
             "past_key_values.value": self.make_cache_names(["full_attention", "sliding_attention"], "past_key_values.value"),        # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
             "past.conv": self.make_cache_names(["conv", "linear_attention"], "past.conv"),                                           # For causal convolution models
             "past.recurrent": self.make_cache_names(["linear_attention"], "past.recurrent"),                                         # For linear attention models
-            "block_table": "block_table",                                                                                            # For paged attention models
-            "block_table_windowed": "block_table_windowed",                                                                          # For paged attention models with sliding-window layers
-            "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                                            # For paged attention models
-            "past_sequence_lengths": "past_sequence_lengths",                                                                        # For paged attention models
-            "attention_metadata": "attention_metadata",                                                                              # For paged attention models
-            "logits_indices": "logits_indices",                                                                                      # For paged attention models with a pruned LM head
         }
         self.input_types = {
             "input_ids": ir.DataType.INT64,                                                                                          # For standard models
@@ -190,12 +177,6 @@ class Model:
             "past_key_values.value": self.io_dtype,                                                                                  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
             "past.conv": self.io_dtype,                                                                                              # For causal convolution models
             "past.recurrent": self.io_dtype,                                                                                         # For linear attention models
-            "block_table": ir.DataType.INT32,                                                                                        # For paged attention models
-            "block_table_windowed": ir.DataType.INT32,                                                                               # For paged attention models with sliding-window layers
-            "cumulative_sequence_lengths": ir.DataType.INT32,                                                                        # For paged attention models
-            "past_sequence_lengths": ir.DataType.INT32,                                                                              # For paged attention models
-            "attention_metadata": ir.DataType.INT32,                                                                                 # For paged attention models
-            "logits_indices": ir.DataType.INT32,                                                                                     # For paged attention models with a pruned LM head
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                                          # For standard models
@@ -217,13 +198,8 @@ class Model:
                 self.linear_key_head_dim,
                 self.linear_value_head_dim
             ],
-            "block_table": ["batch_size", "max_num_blocks"],                                                                         # For paged attention models
-            "block_table_windowed": ["batch_size", "max_num_blocks"],                                                                # Same column count as `block_table`: the op indexes it by true position, only the block ids repeat
-            "cumulative_sequence_lengths": ["batch_size + 1"],                                                                       # For paged attention models
-            "past_sequence_lengths": ["batch_size"],                                                                                 # For paged attention models
-            "attention_metadata": [3],                                                                                               # For paged attention models. Static shape: a tuple of scalars, not a per-sequence tensor.
-            "logits_indices": ["num_logits"],                                                                                        # For paged attention models with a pruned LM head
         }
+        self.make_paged_bindings_init()
         self.make_inputs_init()
 
         # Map all output names, types, and shapes
@@ -404,7 +380,7 @@ class Model:
         self.make_kv_cache_init()
 
         # MLP-specific variables
-        fuse_gate_up = str(extra_options.get("fuse_mlp_gate_up", True)).lower()
+        fuse_gate_up = str(extra_options.get("fuse_mlp_gate_up", False)).lower()
         if fuse_gate_up not in ("true", "false"):
             raise ValueError("fuse_mlp_gate_up must be true or false.")
         self.mlp_attrs = {
@@ -594,26 +570,7 @@ class Model:
             del self.input_names["past.recurrent"]
 
         # Manage the inputs for paged attention
-        if self.use_paged_attention:
-            self.input_shapes["input_ids"] = ["num_tokens"]
-            self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            if "attention_mask" in self.input_names:
-                del self.input_names["attention_mask"]
-            if not self.has_windowed_paged_layers():
-                del self.input_names["block_table_windowed"]
-            if not self.extra_options.get("prune_lm_head", False):
-                del self.input_names["logits_indices"]
-        else:
-            for name in [
-                "block_table",
-                "block_table_windowed",
-                "cumulative_sequence_lengths",
-                "past_sequence_lengths",
-                "attention_metadata",
-                "logits_indices",
-            ]:
-                del self.input_names[name]
+        self.make_paged_inputs_init()
 
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
@@ -651,12 +608,7 @@ class Model:
             self.prune_lm_head = False
 
         # Manage the outputs for paged attention
-        if self.use_paged_attention:
-            self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
-            logits_first_dim = "num_logits" if self.prune_lm_head else "num_tokens"
-            self.output_shapes["logits"] = [logits_first_dim, self.vocab_size]
+        self.make_paged_outputs_init()
 
         if not (self.include_hidden_states or self.exclude_lm_head):
             del self.output_names["hidden_states"]
@@ -773,40 +725,8 @@ class Model:
         self.kv_size = self.num_kv_heads * self.head_size
 
         if self.use_paged_attention:
-            valid_paged_configurations = {
-                ("cuda", ir.DataType.FLOAT16),
-                ("cuda", ir.DataType.BFLOAT16),
-                ("webgpu", ir.DataType.FLOAT16),
-            }
-            if (self.ep, self.io_dtype) not in valid_paged_configurations:
-                raise NotImplementedError(
-                    "PagedAttention (use_paged_attention=true) requires CUDA with FP16/BF16 or WebGPU "
-                    f"with FP16, not ({self.ep}, {self.io_dtype})."
-                )
-            block_size = int(self.extra_options.get("paged_block_size", 256))
-            self.attention_attrs["paged_block_size"] = block_size
-            if "multi_cache" in self.rope_attrs and self.original_context_length % block_size != 0:
-                raise ValueError(
-                    "paged_block_size must evenly divide original_max_position_embeddings "
-                    "for models that use short and long rotary caches."
-                )
-            self.attention_attrs["op_type"] = "PagedAttention"
-            print("PagedAttention (PA) is used in this model.")
+            self.make_paged_attention_init()
 
-            # Packed Q/K/V MatMul is used unless disabled by LoRA/QLoRA or Q/K norm.
-            self.attention_attrs["use_packed_matmul"] = (
-                not self.matmul_attrs["use_lora"]
-                and not self.attention_attrs["q_norm"]
-                and not self.attention_attrs["k_norm"]
-                and self.extra_options.get(
-                    "fuse_qkv", not self.extra_options.get("disable_qkv_fusion", False)
-                )
-            )
-
-            # Some architectures require a separate RoPE op before PagedAttention.
-            self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
-            if self.attention_attrs["use_rope_in_attn"] and "position_ids" in self.input_names:
-                del self.input_names["position_ids"]
 
         elif self.is_gqa_supported():
             # Change model settings for GroupQueryAttention
@@ -1033,17 +953,10 @@ class Model:
         self.make_weight_packing_init()
 
     def make_weight_packing_init(self):
-        """Resolve CUDA layouts from the active GPU; integer QMoE uses SM80 packing on SM90 too."""
-        packing_mode = 0
-        if self.ep == "cuda" and torch.version.hip is None:
-            try:
-                if torch.cuda.is_available():
-                    major = torch.cuda.get_device_capability(torch.cuda.current_device())[0]
-                    packing_mode = 2 if major >= 9 else int(major >= 8)
-            except (RuntimeError, AssertionError):
-                packing_mode = 0
-        self.quant_config.moe.weights_prepacked = int(packing_mode > 0)
-        self.quant_config.runtime.matmulnbits_weights_prepacked = packing_mode
+        """Honor explicit target layouts without depending on the export host's GPU."""
+        if self.ep != "cuda" or torch.version.hip is not None:
+            self.quant_config.moe.weights_prepacked = 0
+            self.quant_config.runtime.matmulnbits_weights_prepacked = 0
 
     def make_moe_attrs_init(self, config):
         num_experts = (
@@ -1121,8 +1034,10 @@ class Model:
 
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
-        # with CPU/WebGPU/TRT-RTX. The execution provider and active NVIDIA GPU SM determine the mode.
+        # with CPU/WebGPU/TRT-RTX. The configured mode describes the deployment target, not the build host.
         self.moe_attrs["weights_prepacked"] = self.quant_config.moe.weights_prepacked
+        if moe_descriptor.name in {"nvfp4", "fp8"} and self.moe_attrs["weights_prepacked"] == -1:
+            self.moe_attrs["weights_prepacked"] = 0
         if mixed_width or uses_int2:
             self.moe_attrs["weights_prepacked"] = 0
 
@@ -1349,15 +1264,7 @@ class Model:
             inputs["attention_mask"] = self.input_names["attention_mask"]
         if "position_ids" in self.input_names:
             inputs["position_ids"] = self.input_names["position_ids"]
-        if self.use_paged_attention:
-            inputs["block_table"] = self.input_names["block_table"]
-            if self.has_windowed_paged_layers():
-                inputs["block_table_windowed"] = self.input_names["block_table_windowed"]
-            inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
-            inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
-            inputs["attention_metadata"] = self.input_names["attention_metadata"]
-            if "logits_indices" in self.input_names:
-                inputs["logits_indices"] = self.input_names["logits_indices"]
+        self.make_paged_config_inputs(inputs)
         if "past_key_values.key" in self.input_names:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
@@ -1459,30 +1366,7 @@ class Model:
                 "cache_slack": self.context_length_attrs["window_kv_cache_slack"],
             }
 
-        if self.has_windowed_paged_layers():
-            # The runtime sizes the ring from `window_size` and the prefill chunk size, and
-            # builds `block_table_windowed` by repeating each request's ring across the columns.
-            # Only these layers read that table and the smaller `num_blocks_windowed` cache.
-            genai_config["model"]["decoder"]["sliding_window"] = {
-                "window_size": self.window_size,
-                "slide_key_value_cache": False,
-                "slide_inputs": False,
-                "layers": [
-                    layer_id for layer_id in range(self.num_layers) if self.is_windowed_paged_layer(layer_id)
-                ],
-                "cache_slack": 0,  # ring capacity comes from chunk_size, not from slack
-            }
-            # The ring only holds `chunk_size + window_size - 1` positions, so a prefill that
-            # ran in one shot would overwrite positions it still had to attend to. Chunking is
-            # not optional for this model, hence a default rather than an opt-in.
-            genai_config["search"]["chunk_size"] = int(
-                self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
-            )
-        elif self.use_paged_attention and "paged_chunk_size" in self.extra_options:
-            # Nothing forces chunking without a ring, but this caps one request where
-            # max_scheduled_tokens only caps the step, so concurrent prefills interleave
-            # instead of running one at a time.
-            genai_config["search"]["chunk_size"] = int(self.extra_options["paged_chunk_size"])
+        self.make_paged_window_config(genai_config)
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -1496,29 +1380,15 @@ class Model:
             # Prepacked nodes take the fpA_intB path unconditionally. This flag also selects that
             # kernel family for raw-layout nodes and prepack-pass skips.
             session_options["ep.cuda.fpa_intb_gemm"] = "1"
-        session_options["session.use_device_allocator_for_initializers"] = "1"
+        if self.extra_options.get("use_device_allocator_for_initializers", False):
+            session_options["session.use_device_allocator_for_initializers"] = "1"
         if self.ep == "cuda" and self.matmul_attrs["weights_prepacked"] > 0:
             # MatMulNBitsFusion folds a following Add into optional bias input 5, but offline-
             # prepacked weights force the fpA_intB path, which does not support bias. Keep the
             # builder's separate Add nodes intact.
             session_options["optimization.disable_specified_optimizers"] = "MatMulNBitsFusion"
 
-        if self.use_paged_attention:
-            dynamic_batching = {
-                "block_size": self.attention_attrs["paged_block_size"],
-                "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
-            }
-            if self.has_windowed_paged_layers():
-                dynamic_batching["prefix_caching"] = False
-            if "num_blocks" in self.extra_options:
-                dynamic_batching["num_blocks"] = int(self.extra_options["num_blocks"])
-            else:
-                dynamic_batching["gpu_utilization_factor"] = float(
-                    self.extra_options.get("gpu_utilization_factor", 0.6)
-                )
-            if "max_scheduled_tokens" in self.extra_options:
-                dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
-            genai_config["engine"] = {"dynamic_batching": dynamic_batching}
+        self.make_paged_engine_config(genai_config)
 
         if "max_draft_tokens" in self.extra_options:
             # Caps how many drafted tokens the engine verifies per step. This is independent of
@@ -1567,49 +1437,6 @@ class Model:
             and self.ep in {"cpu", "cuda", "trt-rtx"}
         )
 
-    def make_decoder_state_groups(self, inputs, outputs):
-        """Group paged decoder layers by the runtime state they maintain."""
-        if not self.use_paged_attention:
-            return []
-
-        full_attention_layers = [
-            layer_id
-            for layer_id, layer_type in enumerate(self.layer_types)
-            if layer_type in {"full_attention", "sliding_attention"}
-        ]
-        conv_layers = [
-            layer_id
-            for layer_id, layer_type in enumerate(self.layer_types)
-            if layer_type in {"conv", "linear_attention"}
-        ]
-        recurrent_layers = [
-            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
-        ]
-
-        state_groups = []
-        if full_attention_layers:
-            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
-        if conv_layers:
-            state_groups.append(
-                {
-                    "kind": "fixed_conv",
-                    "layer_ids": conv_layers,
-                }
-            )
-        if recurrent_layers:
-            state_groups.append(
-                {
-                    "kind": "fixed_recurrent",
-                    "layer_ids": recurrent_layers,
-                }
-            )
-        return state_groups
-
-    def make_paged_key_value_state_group(self, layer_ids):
-        return {
-            "kind": "paged_kv",
-            "layer_ids": layer_ids,
-        }
 
     def make_key_value_cache_names(self, layer_id):
         """
@@ -1621,28 +1448,6 @@ class Model:
         present_v = self.output_names["present.value"][layer_id]
         return past_k, past_v, present_k, present_v
 
-    def is_windowed_paged_layer(self, layer_id):
-        """True when this layer's paged KV cache is a ring sized to the window rather than to the
-        full context. Such layers read a different block table and a differently sized cache."""
-        return self.has_windowed_paged_layers() and self.is_local(layer_id)
-
-    def has_windowed_paged_layers(self):
-        """True when at least one layer is actually served from the ring.
-
-        A model can carry `sliding_window` in its config without the builder knowing which layers
-        it applies to, in which case no layer reads the ring and nothing extra must be emitted.
-        The runtime also needs at least one full-context layer to size the shared paged cache, so
-        an all-local export falls back to full paged caches.
-        """
-        if (
-            not self.context_length_attrs["window_kv_cache"]
-            or not self.use_paged_attention
-            or self.window_size is None
-            or self.window_size <= 0
-        ):
-            return False
-        local_layers = [self.is_local(layer_id) for layer_id in range(self.num_layers)]
-        return any(local_layers) and not all(local_layers)
 
     def make_key_value_cache_shape(self, layer_id, shape):
         """
@@ -1996,12 +1801,26 @@ class Model:
                 and k % block_size == 0
                 and n % (32 if bits == 8 else 64) == 0
             )
-            if not fpa_intb_eligible:
+            if not fpa_intb_eligible or self.io_dtype not in (ir.DataType.FLOAT16, ir.DataType.BFLOAT16):
+                continue
+            if len(node.input) > 4 and node.input[4]:
                 continue
 
             init = initializers.get(node.input[1])
             if init is None:
                 continue
+            # Shared embedding lookups must continue to read the original blockwise bytes.
+            if any(
+                other is not node and init.name in other.input
+                for other in model_proto.graph.node
+            ):
+                continue
+            if len(node.input) > 3 and node.input[3]:
+                zero_points = initializers.get(node.input[3])
+                if zero_points is None or not np.all(
+                    numpy_helper.to_array(zero_points) == (0x88 if bits == 4 else 0x80)
+                ):
+                    continue
 
             packed = CudaQuantizer.prepack_matmulnbits_weight(numpy_helper.to_array(init), n, k, bits, force_arch)
             init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
@@ -2081,6 +1900,10 @@ class Model:
             model = self.to_nbits()
         else:
             model = self.model
+
+        if hasattr(self, "quant_config"):
+            model.metadata_props["onnxruntime_genai.qmoe_weights_prepacked"] = str(self.moe_attrs["weights_prepacked"])
+            model.metadata_props["onnxruntime_genai.matmulnbits_weights_prepacked"] = str(self.matmul_attrs["weights_prepacked"])
 
         # Make sure all nodes are topologically sorted
         model.graph.sort()
@@ -2358,8 +2181,9 @@ class Model:
         self.make_node("Gather", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
 
-    def make_gather_elements(self, name, inputs, dtype, shape, axis):
-        output = f"{name}/output_0"
+    def make_gather_elements(self, name, inputs, dtype, shape, axis, output=None):
+        # output is the name of the result. It defaults to {name}/output_0; pass a graph output name to write it directly.
+        output = output or f"{name}/output_0"
         self.make_node("GatherElements", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
 
@@ -2380,9 +2204,9 @@ class Model:
         self.make_node("Reshape", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
-    def make_shape(self, name, root_input, shape):
+    def make_shape(self, name, root_input, shape, **kwargs):
         output = f"{name}/output_0"
-        self.make_node("Shape", inputs=[root_input], outputs=[output], name=name)
+        self.make_node("Shape", inputs=[root_input], outputs=[output], name=name, **kwargs)
         self.make_value(output, ir.DataType.INT64, shape=shape)
 
     def make_constant_of_shape(self, name, root_input, value, dtype, shape):
@@ -2460,6 +2284,11 @@ class Model:
         self.make_node("ReduceMax", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
 
+    def make_cumsum(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("CumSum", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
     def make_reduce_mean(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
         self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
@@ -2491,6 +2320,16 @@ class Model:
     def make_sub(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Sub", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_min(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Min", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_max(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Max", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
     def make_less(self, name, inputs):
@@ -2620,44 +2459,59 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
 
-    def make_varlen_causal_conv_with_state(self, name, **kwargs):
-        """Emit packed causal convolution with optional compact state updates."""
-        inputs = [
-            kwargs["root_input"],
-            kwargs["weight"],
-            kwargs["cumulative_sequence_length"],
-            kwargs["bias"],
-            kwargs["past_conv_state"],
-        ]
-        state_update_capacity = kwargs.get("state_update_capacity", 0)
-        if state_update_capacity:
-            inputs.append(kwargs["state_update_capture_count"])
-            inputs.append(kwargs.get("state_update_active", ""))
+    def make_causal_conv_state_at_last_real_token(self, name, **kwargs):
+        """Write each row's conv state from the K-1 columns that end at its last real token.
 
-        output = f"{name}/output_0"
-        present_conv = kwargs["present_conv_state"]
-        outputs = [output, present_conv]
-        if state_update_capacity:
-            outputs.append(kwargs["state_update_value"])
+        CausalConvWithState returns its last K-1 input columns as the state. In a right-padded batch
+        those are pads for the shorter rows. Here row b reads columns n_b .. n_b + K-2 of
+        Concat(past_conv_state, conv_input), where n_b comes from make_last_real_token_position: the row's
+        last real token in this step is at index n_b - 1. Later steps then see the same state as a run of
+        that row alone. A row with n_b = 0 keeps its past state. An unpadded or left-padded row has
+        n_b = S, which gives the op's own state.
 
-        attributes = {
-            "activation": kwargs.get("activation", "silu"),
-            "dilation": kwargs.get("dilation", 1),
-        }
-        if state_update_capacity:
-            attributes["state_update_capacity"] = state_update_capacity
-        self.make_node(
-            "VarlenCausalConvWithState",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            **attributes,
+        The Generator API pads only on the right and only in the first prefill, which this covers. The
+        Engine's static batching pads every step with a mask of ones, so its shorter rows still get pad
+        columns, as before. The index nodes are named by (C, K-1), so all layers of the same size share them.
+        """
+        #   n (make_last_real_token_position)
+        #         |
+        #   Add([0 .. K-2])         past_conv_state   conv_input
+        #         |                         \           /
+        #   Unsqueeze(1)                     +- Concat -+
+        #         |                               |
+        #   Expand([1, C, 1]) ----------- GatherElements(axis=2)
+        #                                         |
+        #                                 present_conv_state
+        channels = kwargs["channels"]
+        state_size = kwargs["state_size"]
+
+        indices_basename = f"/model/conv_state/indices_{channels}x{state_size}"
+        add_name = f"{indices_basename}/Add"
+        add_inputs = [self.make_last_real_token_position(kwargs["root_input"]), f"/model/constants/INT32/{list(range(state_size))}"]
+        self.make_add(add_name, add_inputs, dtype=ir.DataType.INT32, shape=["batch_size", state_size])
+        unsqueeze_name = f"{indices_basename}/Unsqueeze"
+        unsqueeze_inputs = [f"{add_name}/output_0", "/model/constants/INT64/[1]"]
+        self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1, state_size])
+        expand_name = f"{indices_basename}/Expand"
+        expand_inputs = [f"{unsqueeze_name}/output_0", f"/model/constants/INT64/{[1, channels, 1]}"]
+        self.make_expand(expand_name, expand_inputs, dtype=ir.DataType.INT32, shape=["batch_size", channels, state_size])
+
+        concat_name = f"{name}/Concat"
+        concat_inputs = [kwargs["past_conv_state"], kwargs["conv_input"]]
+        self.make_concat(concat_name, concat_inputs, dtype=self.io_dtype, shape=["batch_size", channels, None], axis=2)
+
+        # genai keeps separate past and present conv buffers, so reading past while writing present is safe.
+        gather_name = f"{name}/GatherElements"
+        gather_inputs = [f"{concat_name}/output_0", f"{expand_name}/output_0"]
+        self.make_gather_elements(
+            gather_name,
+            gather_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", channels, state_size],
+            axis=2,
+            output=kwargs["present_conv_state"],
         )
-        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
-        self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
-        if state_update_capacity:
-            self.make_value(kwargs["state_update_value"], self.io_dtype, shape=kwargs["state_update_value_shape"])
+
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
@@ -3132,6 +2986,18 @@ class Model:
         # Tied float:     lm_head weight -> Transpose -> Gather
         # Separate:       embedding weight -------------> Gather
         can_reuse_lm_head = getattr(lm_head, "can_reuse_as_embedding", True)
+        requested_bits = (
+            self.quant_attrs.get("embedding_bits")
+            if getattr(self, "extra_options", {}).get("embedding_quant_type") is not None
+            else None
+        )
+        if requested_bits is not None:
+            if "Gather" not in self.quant_attrs["op_types_to_quantize"] or f"{basename}/Gather" in self.quant_attrs["nodes_to_exclude"]:
+                raise ValueError("embedding_quant_type conflicts with the token embedding's quantization exclusion.")
+            if requested_bits == 4 and self.onnx_dtype not in (ir.DataType.INT4, ir.DataType.UINT4):
+                raise ValueError("embedding_quant_type=int4 currently requires int4 model precision.")
+            if requested_bits != self.quant_attrs["bits"]:
+                can_reuse_lm_head = False
 
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and the export model
         # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
@@ -3688,23 +3554,9 @@ class Model:
         mrope_output = output
 
         if self.use_paged_attention:
-            input_unsqueeze_name = f"{name}/input/Unsqueeze"
-            self.make_unsqueeze(
-                input_unsqueeze_name,
-                [root_input, "/model/constants/INT64/[0]"],
-                dtype,
-                [1, "num_tokens", self.head_size * num_heads],
+            mrope_input, mrope_position_ids, mrope_output = self.make_paged_mrope_inputs(
+                name, root_input, position_ids, dtype, num_heads
             )
-            position_ids_unsqueeze_name = f"{name}/position_ids/Unsqueeze"
-            self.make_unsqueeze(
-                position_ids_unsqueeze_name,
-                [position_ids, "/model/constants/INT64/[1]"],
-                ir.DataType.INT64,
-                [3, 1, "num_tokens"],
-            )
-            mrope_input = f"{input_unsqueeze_name}/output_0"
-            mrope_position_ids = f"{position_ids_unsqueeze_name}/output_0"
-            mrope_output = f"{name}/rank3_output_0"
 
         inputs = [mrope_input, mrope_position_ids, kwargs.pop("cos_cache_name"), kwargs.pop("sin_cache_name")]
 
@@ -3730,13 +3582,7 @@ class Model:
         )
 
         if self.use_paged_attention:
-            self.make_node(
-                "Squeeze",
-                inputs=[mrope_output, "/model/constants/INT64/[0]"],
-                outputs=[output],
-                name=f"{name}/output/Squeeze",
-            )
-            self.make_value(output, dtype, shape=["num_tokens", self.head_size * num_heads])
+            self.make_paged_mrope_output(name, mrope_output, output, dtype, num_heads)
 
     def make_rotary_embedding_multi_cache(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
@@ -3892,28 +3738,6 @@ class Model:
         self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
-    def make_paged_rotary_multi_cache_subgraph(self):
-        # PagedAttention has no `attention_mask` input to derive the current sequence length from,
-        # so approximate the effective context length from the block table:
-        #
-        #   block_table --> Shape --> Gather(idx=1) --> Multiply(x block_size) --> (context length)
-        #
-        # The result feeds the Greater node that selects the short vs. long rotary cache.
-        basename = "/model/context_length_subgraph"
-        shape_name = f"{basename}/Shape"
-        shape_output = f"{shape_name}/output_0"
-        self.make_shape(shape_name, "block_table", shape=[2])
-
-        gather_name = f"{basename}/Gather"
-        gather_output = f"{gather_name}/output_0"
-        self.make_gather(gather_name, [shape_output, "/model/constants/INT64/1"], dtype=ir.DataType.INT64, shape=None, axis=0)
-
-        # max_num_blocks (block_table dim 1) x block_size approximates the max representable
-        # context length. block_size is a build-time constant (matches the engine's block_size).
-        block_size = self.attention_attrs["paged_block_size"]
-        mul_name = f"{basename}/Mul"
-        mul_inputs = [gather_output, f"/model/constants/INT64/{block_size}"]
-        self.make_mul(mul_name, mul_inputs, dtype=ir.DataType.INT64, shape=None)
 
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
@@ -3932,11 +3756,21 @@ class Model:
         new_io_dtype = ir.DataType.FLOAT if self.layernorm_attrs["cast"]["use_fp32"] else self.io_dtype
         cast = old_io_dtype != new_io_dtype
 
+        q_norm_shape = (
+            ["num_tokens", self.q_size // self.head_size, self.head_size]
+            if self.use_paged_attention
+            else ["batch_size", "sequence_length * num_attention_heads", self.head_size]
+        )
+        k_norm_shape = (
+            ["num_tokens", self.kv_size // self.head_size, self.head_size]
+            if self.use_paged_attention
+            else ["batch_size", "sequence_length * num_key_value_heads", self.head_size]
+        )
         # Reshape Q MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
         q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/INT64/[0, -1, {self.head_size}]"]
         q_reshape_1_output = f"{q_reshape_1_name}/output_0"
-        self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length * num_attention_heads", self.head_size])
+        self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=q_norm_shape)
 
         # Make Q LayerNorm
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
@@ -3960,7 +3794,7 @@ class Model:
         self.make_value(
             q_layernorm_outputs[0],
             dtype=new_io_dtype,
-            shape=["batch_size", "sequence_length * num_attention_heads", self.head_size],
+            shape=q_norm_shape,
         )
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD.
@@ -3985,7 +3819,7 @@ class Model:
             k_reshape_1_name,
             k_reshape_1_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length * num_key_value_heads", self.head_size],
+            shape=k_norm_shape,
         )
 
         # Make K LayerNorm
@@ -4014,7 +3848,7 @@ class Model:
         self.make_value(
             k_layernorm_outputs[0],
             dtype=new_io_dtype,
-            shape=["batch_size", "sequence_length * num_key_value_heads", self.head_size],
+            shape=k_norm_shape,
         )
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD.
@@ -4323,7 +4157,7 @@ class Model:
                 cumulative_sequence_lengths=self.input_names["cumulative_sequence_lengths"],
                 past_sequence_lengths=self.input_names["past_sequence_lengths"],
                 block_table=block_table,
-                attention_metadata=self.input_names["attention_metadata"],
+                attention_metadata=self.input_names.get("attention_metadata", ""),
                 **kwargs,
             )
         else:
@@ -4591,61 +4425,6 @@ class Model:
                 shape=kwargs["state_update_capsule_shape"],
             )
 
-    def make_varlen_gated_delta_net(self, name, **kwargs):
-        """Emit packed GatedDeltaNet with optional compact transition capsules."""
-        decay, beta = self.make_gated_delta_net_gates(name, kwargs)
-        inputs = [
-            kwargs["q_path"],
-            kwargs["k_path"],
-            kwargs["v_path"],
-            kwargs["cumulative_sequence_length"],
-            decay,
-            beta,
-            kwargs["past_recurrent_state"],
-        ]
-        a_log = kwargs.get("a_log", "")
-        dt_bias = kwargs.get("dt_bias", "")
-        if bool(a_log) != bool(dt_bias):
-            raise ValueError("a_log and dt_bias must be set together")
-        state_update_capacity = kwargs.get("state_update_capacity", 0)
-        if a_log or state_update_capacity:
-            inputs.extend([a_log, dt_bias])
-        state_update_capture_count = kwargs.get("state_update_capture_count", "")
-        state_update_active = kwargs.get("state_update_active", "")
-        if bool(state_update_capture_count) != bool(state_update_active):
-            raise ValueError("state_update_capture_count and state_update_active must be provided together")
-        if state_update_capacity:
-            if not state_update_capture_count:
-                raise ValueError(
-                    "state_update_capture_count and state_update_active are required when state_update_capacity is set"
-                )
-            inputs.extend([state_update_capture_count, state_update_active])
-
-        output = f"{name}/output_0"
-        present_recurrent = kwargs["present_recurrent_state"]
-        outputs = [output, present_recurrent]
-        if state_update_capacity:
-            outputs.append(kwargs["state_update_capsule"])
-
-        attributes = self.make_gated_delta_net_attributes(kwargs)
-        if state_update_capacity:
-            attributes["state_update_capacity"] = state_update_capacity
-        self.make_node(
-            "GatedDeltaNet",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            **attributes,
-        )
-        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
-        self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
-        if state_update_capacity:
-            self.make_value(
-                kwargs["state_update_capsule"],
-                ir.DataType.FLOAT,
-                shape=kwargs["state_update_capsule_shape"],
-            )
 
     def make_linear_attention_gate(self, name, a, dt_bias, decay_scale, b, shape):
         decay = f"{name}/output_0"
@@ -4690,69 +4469,6 @@ class Model:
             rotary_interleaved=self.rope_attrs["interleaved"],
         )
 
-    def make_paged_attention(self, name, **kwargs):
-        inputs = [
-            kwargs["q_path"],
-            kwargs["k_path"],
-            kwargs["v_path"],
-            kwargs.get("past_k", ""),
-            kwargs.get("past_v", ""),
-            kwargs["cumulative_sequence_lengths"],
-            kwargs["past_sequence_lengths"],
-            kwargs["block_table"],
-            kwargs.get("cos_cache", ""),
-            kwargs.get("sin_cache", ""),
-        ]
-
-        q_norm_weight, k_norm_weight = self.get_qk_norm_weight_inputs(**kwargs)
-        k_scale_name, v_scale_name = self.get_kv_cache_scale_inputs(**kwargs)
-
-        # Optional trailing inputs of PagedAttention, in schema order:
-        #   10: slot_mapping, 11: head_sink, 12: q_norm_weight, 13: k_norm_weight, 14: k_scale, 15: v_scale,
-        #   16: attention_metadata
-        # The scheduler-provided slot_mapping is not used here; slots are derived from
-        # past_seqlens / cumulative_sequence_length / block_table by the op.
-        # attention_metadata carries [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]
-        # in CPU memory so the op can select a backend and size its launch without a device-to-host
-        # readback of the sequence lengths. Feeding it is what removes the per-node stream
-        # synchronization on the decode path.
-        self.extend_with_optional_inputs(
-            inputs,
-            [
-                "",  # slot_mapping
-                kwargs.get("sinks", ""),  # head_sink
-                q_norm_weight,
-                k_norm_weight,
-                k_scale_name,
-                v_scale_name,
-                kwargs.get("attention_metadata", ""),
-            ],
-        )
-
-        output = f"{name}/output_0"
-        outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        # PagedAttention derives the cache element type from the tensor itself, so unlike
-        # GroupQueryAttention it has no `kv_cache_bit_width` attribute.
-        attributes = self.get_attention_op_attributes(**kwargs)
-        if self.kv_cache_attrs.get("bit_width", 0) == 4:
-            attributes.update(k_cache_dtype="int4", v_cache_dtype="int4")
-        rotation = self.kv_cache_attrs.get("rotation", "NONE")
-        if rotation != "NONE":
-            attributes.update(qk_rotation=rotation, v_rotation=rotation)
-        if self.kv_cache_attrs.get("quant_mode") == "PER_TOKEN":
-            layer_id = kwargs["layer_id"]
-            inputs.extend([""] * (17 - len(inputs)))
-            inputs.extend(self.input_names[f"past_key_values.{side}_scale"][layer_id] for side in ("key", "value"))
-            outputs.extend(self.output_names[f"present.{side}_scale"][layer_id] for side in ("key", "value"))
-        self.make_node(
-            "PagedAttention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            **attributes,
-        )
-        self.make_value(output, self.io_dtype, shape=["num_tokens", self.head_size * self.num_attn_heads])
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph
@@ -6100,25 +5816,109 @@ class Model:
         # The hidden_states output is the final norm's output, so it pins every row before the LM head.
         return self.use_paged_attention and self.prune_lm_head and not self.include_hidden_states
 
-    def make_selected_hidden_rows(self):
-        """Gather the residual-stream rows the LM head reads, so every later op runs on those rows only."""
-        if self.hidden_rows_dim == "num_logits":
-            return
-        selected = {}
-        for key in ("root_input", "skip_input"):
-            name = self.layernorm_attrs[key]
-            if name not in selected:
-                gather_name = f"/model/selected_rows/{key}/Gather"
-                self.make_gather(
-                    gather_name,
-                    [name, self.input_names["logits_indices"]],
-                    dtype=self.values[name].dtype,
-                    shape=["num_logits", self.hidden_size],
-                    axis=0,
-                )
-                selected[name] = f"{gather_name}/output_0"
-            self.layernorm_attrs[key] = selected[name]
-        self.hidden_rows_dim = "num_logits"
+
+    def make_last_real_token_position(self, root_input):
+        """Find where each row's real tokens end in this step and return the [B, 1] int32 output name.
+
+        The result is n = min(p, S). p is the position after the last 1 in the row's attention_mask (0 when
+        the row has no 1), and S is the sequence length of root_input, any [B, S, ...] tensor of this step.
+        The row's last real token in this step is at index n - 1. When n is 0, this step has none.
+
+        This is right for every mask onnxruntime-genai's Generator API makes, and for other common ones:
+        - a right-padded first prefill: p is the row's real length (genai pads batches on the right);
+        - a left-padded prefill: p is S;
+        - zeros inside the row: the Qwen-VL mask is 0 at every pad-id token, also inside a prompt;
+        - a static mask, zero-filled to max_length for graph capture: the zeros come after p;
+        - decode: S is 1, so n is 1;
+        - a batch-1 continuation: the mask also counts past tokens, so n is S;
+        - a row with no 1: n is 0.
+        After the first prefill, every row must add the same number of new tokens, with no padding at the
+        end of the new chunk. og.Generator does this.
+
+        The nodes have fixed names, so every caller shares them: make_node skips names that already exist.
+        S then comes from the first caller's root_input, which is fine because every caller passes a
+        tensor of the same step.
+        """
+        #   attention_mask
+        #         |
+        #   Cast(int32) ---------------------+                root_input
+        #         |                          |                    |
+        #   Shape(start=1, end=2)            |            Shape(start=1, end=2)
+        #         |                          |                    |
+        #     Expand(1)                      |                Expand(1)
+        #         |                          |                    |
+        #    CumSum(axis=0)                  |                ReduceSum
+        #    [1, 2, ..., T]                  |                    |
+        #          \                         |                    |
+        #           +--------- Mul ----------+                    |
+        #                       |                                 |
+        #                ReduceMax(axis=1)                        |
+        #                        \                               /
+        #                         +------------ Min ------------+
+        #
+        # Shape writes its output on the CPU, and Expand reads its shape input on the CPU, so T and S reach
+        # the device as rows of ones. With CUDA, and with WebGPU when its graph capture is on, this adds no
+        # copy node; a copy node would block graph capture. Shape -> Gather -> Sub feeding a device op
+        # (measured with Clip) added one on CUDA. The math is int32 because WebGPU has no int64 CumSum or
+        # ReduceMax, and its Shape does not take an int64 input. WebGPU exports built without
+        # enable_webgpu_graph run the Cast on the CPU and copy the int32 mask to the device on each run.
+        basename = "/model/last_real_token"
+
+        mask_name = f"{basename}/Cast"
+        self.make_cast(mask_name, self.input_names["attention_mask"], dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+        mask = f"{mask_name}/output_0"
+        total_shape_name = f"{basename}/positions/Shape"
+        self.make_shape(total_shape_name, mask, shape=[1], start=1, end=2)
+        total_ones_name = f"{basename}/positions/Expand"
+        total_ones_inputs = ["/model/constants/INT32/[1]", f"{total_shape_name}/output_0"]
+        self.make_expand(total_ones_name, total_ones_inputs, dtype=ir.DataType.INT32, shape=["total_sequence_length"])
+        positions_name = f"{basename}/positions/CumSum"
+        self.make_cumsum(positions_name, [f"{total_ones_name}/output_0", "/model/constants/INT64/0"], dtype=ir.DataType.INT32, shape=["total_sequence_length"])
+        mul_name = f"{basename}/Mul"
+        self.make_mul(mul_name, [mask, f"{positions_name}/output_0"], dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+        end_name = f"{basename}/ReduceMax"
+        end_inputs = [f"{mul_name}/output_0", "/model/constants/INT64/[1]"]
+        self.make_reduce_max(end_name, end_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1], keepdims=True)
+
+        seq_shape_name = f"{basename}/seq_len/Shape"
+        self.make_shape(seq_shape_name, root_input, shape=[1], start=1, end=2)
+        seq_ones_name = f"{basename}/seq_len/Expand"
+        seq_ones_inputs = ["/model/constants/INT32/[1]", f"{seq_shape_name}/output_0"]
+        self.make_expand(seq_ones_name, seq_ones_inputs, dtype=ir.DataType.INT32, shape=["sequence_length"])
+        seq_len_name = f"{basename}/seq_len/ReduceSum"
+        self.make_reduce_sum(seq_len_name, [f"{seq_ones_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT32, shape=[1], keepdims=True)
+
+        min_name = f"{basename}/Min"
+        self.make_min(min_name, [f"{end_name}/output_0", f"{seq_len_name}/output_0"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        return f"{min_name}/output_0"
+
+    def make_last_real_token_selection(self, basename, root_input):
+        """Pick each row's last real token from [B, S, H] hidden states and return the [B, 1, H] output name.
+
+        The index is n - 1, with n from make_last_real_token_position. A row with no real token reads
+        column 0.
+        """
+        #   n (make_last_real_token_position)       root_input
+        #         |                                     |
+        #   Sub(1) --> Max(0) --> Unsqueeze --> Expand  |
+        #                                         |     |
+        #                               GatherElements(axis=1)
+        sub_name = f"{basename}/Sub"
+        sub_inputs = [self.make_last_real_token_position(root_input), "/model/constants/INT32/1"]
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        # A row with no real token would give -1, so keep the index at 0 or more.
+        max_name = f"{basename}/Max"
+        self.make_max(max_name, [f"{sub_name}/output_0", "/model/constants/INT32/0"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        unsqueeze_name = f"{basename}/Unsqueeze"
+        self.make_unsqueeze(unsqueeze_name, [f"{max_name}/output_0", "/model/constants/INT64/[2]"], dtype=ir.DataType.INT32, shape=["batch_size", 1, 1])
+        # GatherElements returns the shape of its indices, so this assumes the LM head input is hidden_size wide.
+        expand_name = f"{basename}/Expand"
+        expand_inputs = [f"{unsqueeze_name}/output_0", f"/model/constants/INT64/[1, 1, {self.hidden_size}]"]
+        self.make_expand(expand_name, expand_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1, self.hidden_size])
+
+        gather_name = f"{basename}/GatherElements"
+        self.make_gather_elements(gather_name, [root_input, f"{expand_name}/output_0"], dtype=self.io_dtype, shape=["batch_size", 1, self.hidden_size], axis=1)
+        return f"{gather_name}/output_0"
 
     def make_lm_head(self, lm_head):
         basename = "/lm_head"
@@ -6144,37 +5944,29 @@ class Model:
             # The runtime selects one final row per prefill request and every row required for
             # speculative verification. Rows are usually selected earlier, in the last decoder layer;
             # gather here only when the final norm's output must keep every row.
-            seq_dim = "num_logits"
-            if self.hidden_rows_dim != "num_logits":
-                gather_name = f"{basename}/selected_hidden_states/Gather"
-                gather_inputs = [root_input, self.input_names["logits_indices"]]
-                self.make_gather(
-                    gather_name,
-                    gather_inputs,
-                    dtype=self.io_dtype,
-                    shape=["num_logits", self.hidden_size],
-                    axis=0,
-                )
-                root_input = f"{gather_name}/output_0"
-            # Outputs built after the LM head, such as aux_hidden_states, keep every row.
-            self.hidden_rows_dim = "num_tokens"
-            self.output_shapes["logits"] = ["num_logits", self.vocab_size]
+            root_input, seq_dim = self.make_paged_lm_head(basename, root_input)
+
 
         elif self.prune_lm_head:
-            # Insert Gather(axis=1, idx=-1) + Unsqueeze(axis=1) to select only the last token's
-            # hidden state before the LM head. This avoids the expensive MatMul for all S tokens
-            # during prefill, reducing compute by ~S×.
+            # Select one hidden state per row before the LM head. This avoids the expensive MatMul
+            # for all S tokens during prefill, reducing compute by ~S×.
             seq_dim = 1
 
-            # Gather: [B, S, H] + scalar(-1) -> [B, H]
-            gather_name = f"{basename}/prune/Gather"
-            self.make_gather(gather_name, inputs=[root_input, "/model/constants/INT64/-1"], dtype=self.io_dtype, shape=["batch_size", self.hidden_size], axis=1)
+            if "attention_mask" in self.input_names:
+                root_input = self.make_last_real_token_selection(f"{basename}/prune", root_input)
+            else:
+                # Without a mask, take the last column, as before. Among non-paged exports only the Whisper
+                # decoder gets here. Its decoder prompts usually have the same length in every row, but they
+                # can differ, and then the shorter rows read a pad column, as they did before.
+                # Gather: [B, S, H] + scalar(-1) -> [B, H]
+                gather_name = f"{basename}/prune/Gather"
+                self.make_gather(gather_name, inputs=[root_input, "/model/constants/INT64/-1"], dtype=self.io_dtype, shape=["batch_size", self.hidden_size], axis=1)
 
-            # Unsqueeze: [B, H] -> [B, 1, H]
-            unsqueeze_name = f"{basename}/prune/Unsqueeze"
-            self.make_unsqueeze(unsqueeze_name, inputs=[f"{gather_name}/output_0", "/model/constants/INT64/[1]"], dtype=self.io_dtype, shape=["batch_size", 1, self.hidden_size])
+                # Unsqueeze: [B, H] -> [B, 1, H]
+                unsqueeze_name = f"{basename}/prune/Unsqueeze"
+                self.make_unsqueeze(unsqueeze_name, inputs=[f"{gather_name}/output_0", "/model/constants/INT64/[1]"], dtype=self.io_dtype, shape=["batch_size", 1, self.hidden_size])
 
-            root_input = f"{unsqueeze_name}/output_0"
+                root_input = f"{unsqueeze_name}/output_0"
 
             # Update logits output shape
             self.output_shapes["logits"] = ["batch_size", 1, self.vocab_size]
@@ -6285,6 +6077,40 @@ class Model:
     def get_moe_module(self, layer_id, layer):
         return layer.moe
 
+    def resolve_transformers_class(self, class_name: str) -> type[Any]:
+        """Resolve only the selected Transformers class, without requiring newer architectures."""
+        try:
+            return getattr(transformers, class_name)
+        except AttributeError as error:
+            version = getattr(transformers, "__version__", "unknown")
+            raise ImportError(
+                f"The selected model requires transformers.{class_name}, but "
+                f"Transformers {version} does not provide that class. Upgrade "
+                "Transformers to use this model architecture."
+            ) from error
+
+    def resolve_model_loader(self) -> type[Any]:
+        """Resolve the Transformers weight loader for this model's architecture."""
+        # More specific markers must precede overlapping general markers (e.g. Qwen3.5 MoE before dense).
+        model_loader_rules = (
+            ("qwen4_exp", "Qwen4ExpForConditionalGeneration"),
+            ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
+            ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
+            ("qwen3_vl_text", "Qwen3VLForConditionalGeneration"),
+            ("Qwen3VL", "Qwen3VLForConditionalGeneration"),
+            ("qwen2_5_vl_text", "Qwen2_5_VLForConditionalGeneration"),
+            ("Qwen2_5_VL", "Qwen2_5_VLForConditionalGeneration"),
+            ("gemma3_vl_text", "Gemma3ForConditionalGeneration"),
+            ("lfm2_vl", "Lfm2VlForConditionalGeneration"),
+            ("mistral3_text", "Mistral3ForConditionalGeneration"),
+            ("Mistral3", "Mistral3ForConditionalGeneration"),
+            ("Whisper", "AutoModelForSpeechSeq2Seq"),
+        )
+        for model_type_marker, class_name in model_loader_rules:
+            if model_type_marker in self.model_type:
+                return self.resolve_transformers_class(class_name)
+        return self.resolve_transformers_class("AutoModelForCausalLM")
+
     def load_weights(self, input_path):
         # Load weights of original model
         if input_path.endswith(".gguf"):
@@ -6339,32 +6165,7 @@ class Model:
                 else:
                     extra_kwargs["num_hidden_layers"] = self.num_layers
 
-            # Get auto class to load PyTorch model based on model type
-            auto_class_map = {
-                "ForCausalLM": AutoModelForCausalLM,
-                "gemma3_vl_text": Gemma3ForConditionalGeneration,
-                "lfm2_vl": Lfm2VlForConditionalGeneration,
-                "mistral3_text": Mistral3ForConditionalGeneration,
-                "Mistral3": Mistral3ForConditionalGeneration,
-                "qwen2_5_vl_text": Qwen2_5_VLForConditionalGeneration,
-                "Qwen2_5_VL": Qwen2_5_VLForConditionalGeneration,
-                "qwen3_vl_text": Qwen3VLForConditionalGeneration,
-                "Qwen3VL": Qwen3VLForConditionalGeneration,
-                "qwen3_5_moe_text": Qwen3_5MoeForConditionalGeneration,
-                "qwen3_5_moe": Qwen3_5MoeForConditionalGeneration,
-                "qwen3_5_text": Qwen3_5ForConditionalGeneration,
-                "qwen3_5": Qwen3_5ForConditionalGeneration,
-                "Whisper": AutoModelForSpeechSeq2Seq,
-            }
-            if "qwen4_exp" in self.model_type.lower():
-                from transformers import Qwen4ExpForConditionalGeneration
-
-                auto_class_map["qwen4_exp"] = Qwen4ExpForConditionalGeneration
-            auto_class = AutoModelForCausalLM
-            for k, v in auto_class_map.items():
-                if k.lower() in self.model_type.lower():
-                    auto_class = v
-                    break
+            auto_class = self.resolve_model_loader()
 
             # Load PyTorch model
             model = auto_class.from_pretrained(

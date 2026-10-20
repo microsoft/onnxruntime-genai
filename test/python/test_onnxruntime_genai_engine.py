@@ -63,6 +63,8 @@ def _make_indexshare_mtp_model(
     del target.graph.value_info[:]
     onnx.save_model(target, root / "decoder.onnx")
     config = json.loads((_DRAFT_MODEL_DIR / "genai_config.json").read_text())
+    # Persistent compressed keys span the request lifetime, not just one speculative chain.
+    key_capacity = (config["model"]["context_length"] + 1) // 2 if persistent_state else 4
     config["model"]["decoder"]["session_options"]["provider_options"] = [{"cuda": {}}]
     config["speculative"] = {"max_draft_tokens": draft_count}
     config["model"]["mtp"] = {
@@ -153,7 +155,7 @@ def _make_indexshare_mtp_model(
             onnx.numpy_helper.from_array(np.ones(2, dtype=np.float16), "index_norm"),
             onnx.numpy_helper.from_array(np.ones((64, 2), dtype=np.float16), "index_cos"),
             onnx.numpy_helper.from_array(np.zeros((64, 2), dtype=np.float16), "index_sin"),
-            helper.make_tensor("key_geometry", tensor.INT64, [2], [4, 2]),
+            helper.make_tensor("key_geometry", tensor.INT64, [2], [key_capacity, 2]),
             helper.make_tensor("buffer_geometry", tensor.INT64, [2], [3, 2]),
             helper.make_tensor("length_geometry", tensor.INT64, [1], [2]),
             helper.make_tensor("range_extra", tensor.INT32, [], [0 if merge_capacity == 8 else 64]),
@@ -239,7 +241,7 @@ def _make_indexshare_mtp_model(
             domain="com.microsoft",
             policy_mode="qsa",
             compress_ratio=2,
-            state_capacity=4,
+            state_capacity=key_capacity,
             token_budget=2,
             max_output_entries=9,
         ),
@@ -252,7 +254,7 @@ def _make_indexshare_mtp_model(
     ]
     if persistent_state:
         state_names = {
-            "key_state": ("indexer_key", tensor.FLOAT16, [4, 2]),
+            "key_state": ("indexer_key", tensor.FLOAT16, [key_capacity, 2]),
             "kv_buffer": ("indexer_kv_buffer", tensor.FLOAT16, [3, 2]),
             "state_lengths": ("indexer_state_lengths", tensor.INT32, [2]),
         }
@@ -383,7 +385,9 @@ def test_indexshare_persistent_state_and_shrinking_batch(tmp_path, capture):
     _run(engine, sinks)
     assert first.tokens == predicted_tokens(_PROMPT_A, 6)
     assert second.tokens == predicted_tokens(_PROMPT_B, 16)
-    assert engine.get_speculative_stats()["mtp_failures"] == 0
+    stats = engine.get_speculative_stats()
+    assert stats["draft_forward_passes"] > 0
+    assert stats["mtp_failures"] == 0
 
 
 @pytest.mark.skipif(not og.is_cuda_available(), reason="Requires CUDA")
@@ -391,20 +395,30 @@ def test_indexshare_persistent_state_and_shrinking_batch(tmp_path, capture):
 def test_indexshare_status_rejects_chain_before_publication(tmp_path, status_output):
     if not _has_indexer_merge():
         pytest.skip("Requires an ORT runtime with PackedSparseAttentionIndexerMerge")
+    target_config = og.Config(str(_DRAFT_MODEL_DIR))
+    target_config.clear_providers()
+    target_config.append_provider("cuda")
+    expected = _generate_isolated(og.Model(target_config), _PROMPT_A, 12)
     model = _make_indexshare_mtp_model(tmp_path, merge_capacity=1, status_output=status_output)
     engine = og.Engine(model)
     sink = _Sink()
     sinks = {}
     _create_request(engine, _PROMPT_A, 12, sink, sinks)
-    try:
-        _run(engine, sinks)
-    except RuntimeError as error:
-        assert "IndexShare indexer merge failed" in str(error)
-    else:
-        assert sink.finish_reason == og.FinishReason.FAILED
-    assert len(sink.tokens) < 12
-    assert sink.tokens == predicted_tokens(_PROMPT_A, len(sink.tokens))
+    _run(engine, sinks)
+    assert sink.finish_reason == og.FinishReason.MAX_SESSION_TOKENS
+    assert sink.tokens == expected == predicted_tokens(_PROMPT_A, 12)
     assert 17 not in sink.tokens
+    stats = engine.get_speculative_stats()
+    assert stats["mtp_failures"] > 0
+    assert stats["standard_fallback_steps"] > 0
+    assert stats["draft_tokens_proposed"] == 0
+
+    # A failed optional merge must not poison the Engine: admit and finish another target request.
+    following = _Sink()
+    _create_request(engine, _PROMPT_B, 4, following, sinks)
+    _run(engine, sinks)
+    assert following.finish_reason == og.FinishReason.MAX_SESSION_TOKENS
+    assert following.tokens == predicted_tokens(_PROMPT_B, 4)
 
 
 def predicted_tokens(prompt, max_new_tokens):

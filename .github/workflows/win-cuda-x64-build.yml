@@ -21,12 +21,12 @@ env:
   binaryDir: 'build/cuda/win-x64/Release'
   ORT_NUGET_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_EP_NUGET_SOURCE: "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
-  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
+  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
-  ORT_PACKAGE_VERSION: "1.30.0-dev-20260825-0522-9cbf665b59"
+  ORT_PACKAGE_VERSION: "1.31.0"
   ORT_EP_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.EP.Cuda12.win-x64"
-  ORT_EP_NUGET_VERSION: "0.2.0-dev.20260819+f1d07f0d"
-  ORT_EP_PYPI_VERSION: "0.2.0.dev20260819"
+  ORT_EP_NUGET_VERSION: "0.3.0-dev.20261009143618"
+  ORT_EP_PYPI_VERSION: "0.3.0"
 
 jobs:
   windows-cuda-x64-build:
@@ -183,11 +183,17 @@ jobs:
       - name: Install the Python Wheel and Test Dependencies
         run: |
           python -m pip uninstall -y onnxruntime-gpu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install -r test\python\requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install -r test\python\cuda\torch\requirements.txt
-          python -m pip install --index-url $env:ORT_EP_PYPI_SOURCE -r test\python\cuda\ort\requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install --index-url https://pypi.org/simple/ -r test\python\cuda\ort\requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install --index-url $env:ORT_EP_PYPI_SOURCE onnxruntime-ep-cuda12==$env:ORT_EP_PYPI_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run the synthetic Engine Python tests
         run: |

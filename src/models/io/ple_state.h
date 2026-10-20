@@ -13,9 +13,11 @@ struct PleState {
   void Add();
   void Update();
   void RewindTo(size_t index);
+  void ValidateRewindTo(size_t index) const;
   void Snapshot(size_t position);
   void SetForwardLength(int sequence_length) { forward_length_ = sequence_length; }
   void CropToPosition(size_t position);
+  void ValidateCropPosition(size_t position) const;
   bool IsWindowed() const { return state_window_ > 1; }
 
   bool IsEmpty() const { return layer_indices_.empty(); }

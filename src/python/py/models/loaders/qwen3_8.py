@@ -5,17 +5,24 @@ from types import SimpleNamespace
 
 import torch
 
-from .base import QuantizedDecoderLayer, TensorModule
+from .base import TensorModule
+from .engram import Qwen38EngramLoader
 from .modelopt import ModeloptModel
+from .mtp import Qwen38MTPLoader
+from .vision import Qwen38VisionLoader
 
 
-class Qwen38ModeloptModel(ModeloptModel):
+class Qwen38ModeloptModel(Qwen38EngramLoader, Qwen38MTPLoader, Qwen38VisionLoader, ModeloptModel):
     """Load native Qwen3.8 NVFP4 or official block-FP8 tensors without HF quantizers."""
 
     def __init__(self, quant_type, input_path, **kwargs):
         with open(os.path.join(input_path, "config.json")) as config_file:
             config = json.load(config_file)
-        self.text_config = config["text_config"]
+        self.text_config = config.get("text_config", config)
+        required = {"num_hidden_layers", "eos_token_id", "num_experts"}
+        missing = required - self.text_config.keys()
+        if missing:
+            raise ValueError(f"Qwen3.8 text configuration is missing required fields: {sorted(missing)}.")
         self.vision_config = config.get("vision_config")
         if quant_type == "fp8":
             quantization = config["quantization_config"]
@@ -44,6 +51,7 @@ class Qwen38ModeloptModel(ModeloptModel):
             module.can_reuse_as_embedding = False
         elif module.weight_scale is not None or module.weight_scale_2 is not None:
             raise ValueError(f"Unexpected quantization metadata for native Qwen3.8 FP8 tensor '{base}'.")
+        return None
 
     def make_linear_module(self, base, module=None):
         if self.quant_type == "fp8" and self.get_tensor(f"{base}.weight_global_scale") is not None:
@@ -54,6 +62,11 @@ class Qwen38ModeloptModel(ModeloptModel):
         if self.quant_type == "fp8":
             return self.make_linear_module(base)
         return super().make_dense_linear_module(base)
+
+    def make_gate_module(self, base, dense=False):
+        module = super().make_gate_module(base, dense)
+        module.exclude_from_quantization = False
+        return module
 
     def dequantize_tensor(self, weight, weight_scale, weight_scale_2, name):
         if self.quant_type == "fp8":
@@ -115,52 +128,10 @@ class Qwen38ModeloptModel(ModeloptModel):
             layer.ple = self.make_ple(f"{prefix}.ple")
         return layer
 
-    def make_ple(self, prefix):
-        ple = self.make_namespace(prefix)
-        embedding = ple.ple_embedding
-        embedding.eos_token_id = self.text_config["eos_token_id"]
-        table = embedding.ngram_embedding
-        if not hasattr(table, "weight"):
-            shard_names = [name for name in vars(table) if name.startswith("shard_")]
-            shard_names.sort(key=lambda name: int(name.removeprefix("shard_")))
-            expected = self.text_config.get("split_ngram_parts", len(shard_names))
-            if shard_names != [f"shard_{index}" for index in range(expected)] or not shard_names:
-                raise ValueError(f"Incomplete Qwen3.8 PLE embedding shards at '{prefix}'.")
-            table.weight = torch.cat([getattr(table, name).weight for name in shard_names], dim=0)
-            for name in shard_names:
-                delattr(table, name)
-        if table.weight.dtype == torch.float8_e4m3fn:
-            self.validate_positive_scalar(getattr(table, "weight_scale", None), f"{prefix}.weight_scale")
-        return ple
-
     def make_mtp(self):
         return None
 
-    def load_mtp(self):
-        try:
-            mtp = self.make_namespace("mtp")
-            if not hasattr(mtp, "layers"):
-                raise ValueError("The Qwen3.8 checkpoint has no MTP head.")
-            layers = []
-            for layer_id in range(self.text_config.get("mtp_num_hidden_layers", 0)):
-                source = getattr(mtp.layers, str(layer_id))
-                layer = QuantizedDecoderLayer(layer_id)
-                layer.__dict__.update(vars(source))
-                for expert_id in range(self.num_experts):
-                    expert = getattr(layer.mlp.experts, str(expert_id))
-                    for name in ("gate_proj", "up_proj", "down_proj"):
-                        self.validate_fp8_blocks(getattr(expert, name))
-                layer.mlp.experts.quant_type = "fp8_block"
-                layers.append(layer)
-            mtp.layers = layers
-            mtp.embedding = self.embedding
-            mtp.lm_head = self.lm_head
-            return mtp
-        finally:
-            self.close()
-
-    @staticmethod
-    def validate_fp8_blocks(projection):
+    def validate_fp8_blocks(self, projection):
         weight = projection.weight
         if weight.dtype != torch.float8_e4m3fn:
             raise ValueError("Qwen3.8 experts require native FP8 E4M3 weights.")
@@ -170,27 +141,6 @@ class Qwen38ModeloptModel(ModeloptModel):
             raise ValueError(f"Qwen3.8 FP8 scale must have shape {expected}.")
         if not torch.isfinite(scale.float()).all() or (scale <= 0).any():
             raise ValueError("Qwen3.8 FP8 scales must be finite and positive.")
-
-    def load_visual(self):
-        from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpVisionConfig  # noqa: PLC0415
-        from transformers.models.qwen4_exp.modeling_qwen4_exp import (  # noqa: PLC0415
-            Qwen4ExpVisionModel,
-            Qwen4ExpVisionRotaryEmbedding,
-        )
-
-        try:
-            config = Qwen4ExpVisionConfig(**self.vision_config)
-            with torch.device("meta"):
-                visual = Qwen4ExpVisionModel(config)
-            prefix = "model.visual."
-            state = {
-                name[len(prefix) :]: self.get_tensor(name) for name in self.tensor_names() if name.startswith(prefix)
-            }
-            visual.load_state_dict(state, strict=True, assign=True)
-            visual.rotary_pos_emb = Qwen4ExpVisionRotaryEmbedding(config)
-            return visual
-        finally:
-            self.close()
 
     def modules(self):
         return [self.embedding, *self.layers, self.lm_head]

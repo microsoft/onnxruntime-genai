@@ -473,7 +473,8 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
   const int seq_len = static_cast<int>(inputs_embeds_.GetShape()[1]);
   if (hidden_states_output_)
     hidden_states_output_->Update(seq_len);
-  const bool graph_capture_this_run = params_->use_graph_capture && seq_len == 1;
+  const bool graph_capture_this_run = params_->use_graph_capture && seq_len == 1 &&
+                                      (!indexer_cache_ || !indexer_cache_->UsesHostSequenceLength());
   int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
   if (ple_state_) {
     const int ple_graph_capture_variant = ple_state_->GraphCaptureVariant();
@@ -483,7 +484,9 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
     graph_capture_variant = ple_graph_capture_variant;
   }
 
-  const int graph_id = seq_len * 2 + graph_capture_variant;
+  if (recurrent_state_ && recurrent_state_->StateUpdateCaptureEnabled())
+    graph_capture_variant += 2;
+  const int graph_id = seq_len * 4 + graph_capture_variant;
   if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
     recurrent_state_->SaveForGraphCapture();
     State::Run(*model_.decoder_session_, true, seq_len, graph_capture_variant);
@@ -595,7 +598,14 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
   return logits_.Get();
 }
 
+void DecoderState::ValidateRewindTo(size_t index) const {
+  if (indexer_cache_) indexer_cache_->ValidateRewindTo(index);
+  if (recurrent_state_) recurrent_state_->ValidateRewindTo(index);
+  if (ple_state_) ple_state_->ValidateRewindTo(index);
+}
+
 void DecoderState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   position_inputs_->RewindTo(index);
   if (kv_cache_)
     kv_cache_->RewindTo(index);
@@ -618,7 +628,7 @@ void DecoderState::SnapshotState(size_t position) {
 
 bool DecoderState::HasCroppableRecurrentState() const {
   return recurrent_state_ && recurrent_state_->IsWindowed() &&
-         (!ple_state_ || ple_state_->IsWindowed()) &&
+         !ple_state_ &&
          (!indexer_cache_ || indexer_cache_->HasStateUpdates());
 }
 
@@ -626,7 +636,15 @@ int64_t DecoderState::RecurrentStateWindow() const {
   return recurrent_state_ ? recurrent_state_->StateWindow() : 1;
 }
 
+void DecoderState::ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const {
+  (void)new_length;
+  if (recurrent_state_) recurrent_state_->ValidateCropPosition(recurrent_position);
+  if (ple_state_) ple_state_->ValidateCropPosition(recurrent_position);
+  if (indexer_cache_) indexer_cache_->ValidateAcceptedPrefix(recurrent_position + 1);
+}
+
 void DecoderState::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  ValidateCropToAccepted(new_length, recurrent_position);
   position_inputs_->RewindTo(new_length);
   if (kv_cache_)
     kv_cache_->RewindTo(new_length);
@@ -756,9 +774,6 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   // prompt embeddings in several smaller runs to bound peak memory usage.
   const size_t num_tokens = next_tokens.size();
   auto chunk_size = params_->search.chunk_size.value_or(0);
-  if (chunk_size == 0 && params_->search.adaptive_chunking) {
-    chunk_size = num_tokens <= 32768 ? 512 : 1024;
-  }
   const bool has_multimodal_content = num_image_tokens_ != 0 || num_audio_tokens_ != 0;
   const bool chunk_prefill =
       is_prompt_ && chunk_size > 0 && num_tokens > chunk_size &&
@@ -854,14 +869,21 @@ DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> l
   return audio_output_->SampleFrame(*hidden_states);
 }
 
+void MultiModalPipelineState::ValidateRewindTo(size_t index) const {
+  decoder_state_->ValidateRewindTo(index);
+  if (engram_state_) engram_state_->ValidateRewindTo(index);
+}
+
 void MultiModalPipelineState::RewindTo(size_t index) {
-  if (index == 0 && (num_image_tokens_ > 0 || num_audio_tokens_ > 0)) {
-    throw std::runtime_error(
-        "RewindTo(0) is not supported after multimodal encoder state is released");
-  }
+  ValidateRewindTo(index);
   decoder_state_->RewindTo(index);
   if (engram_state_) engram_state_->RewindTo(index);
-  if (index == 0) is_prompt_ = true;
+  if (index == 0) {
+    is_prompt_ = true;
+    num_images_ = 0;
+    num_image_tokens_ = 0;
+    num_audio_tokens_ = 0;
+  }
 }
 
 void MultiModalPipelineState::SnapshotState(size_t position) {
@@ -870,7 +892,7 @@ void MultiModalPipelineState::SnapshotState(size_t position) {
 }
 
 bool MultiModalPipelineState::HasCroppableRecurrentState() const {
-  return decoder_state_->HasCroppableRecurrentState() && engram_state_;
+  return decoder_state_->HasCroppableRecurrentState();
 }
 
 int64_t MultiModalPipelineState::RecurrentStateWindow() const {
@@ -878,10 +900,16 @@ int64_t MultiModalPipelineState::RecurrentStateWindow() const {
 }
 
 void MultiModalPipelineState::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  ValidateCropToAccepted(new_length, recurrent_position);
   decoder_state_->CropToAccepted(new_length, recurrent_position);
   if (engram_state_) {
     engram_state_->CommitAcceptedPrefix(recurrent_position + 1);
   }
+}
+
+void MultiModalPipelineState::ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const {
+  decoder_state_->ValidateCropToAccepted(new_length, recurrent_position);
+  if (engram_state_) engram_state_->ValidateAcceptedPrefix(recurrent_position + 1);
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {

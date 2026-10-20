@@ -14,7 +14,10 @@ struct IndexerCache {
   void Update(DeviceSpan<int32_t> beam_indices, int total_length, int current_length);
   void Snapshot(size_t position);
   void RewindTo(size_t index);
+  void ValidateRewindTo(size_t index) const;
   void CommitAcceptedPrefix(size_t token_count);
+  void ValidateAcceptedPrefix(size_t token_count) const;
+  bool UsesHostSequenceLength() const { return past_sequence_length_ != nullptr; }
   bool HasStateUpdates() const { return !state_update_value_name_strings_.empty(); }
   bool IsEmpty() const { return layer_indices_.empty(); }
 
@@ -42,6 +45,7 @@ struct IndexerCache {
   size_t state_update_length_{};
   size_t snapshot_position_{};
   size_t snapshot_row_bytes_{};
+  size_t compress_ratio_{};
   std::vector<size_t> snapshot_rows_;
   DeviceSpan<uint8_t> snapshot_data_;
 };

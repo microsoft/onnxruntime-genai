@@ -6,6 +6,8 @@ namespace Generators {
 
 EngramState::EngramState(const Model& model, OrtSession& session, const GeneratorParams& params)
     : State{params, model}, model_{model}, session_{session} {
+  if (model_.config_->model.decoder.ple_token_pad_id < 0)
+    throw std::runtime_error("EngramState requires model.decoder.ple_token_pad_id");
   if (params.search.num_beams != 1) {
     throw std::runtime_error("Engram-backed models currently support num_beams=1 only");
   }
@@ -49,13 +51,13 @@ void EngramState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens) {
   const int64_t batch_size = params_->BatchBeamSize();
   const int64_t sequence_length = static_cast<int64_t>(next_tokens.size()) / batch_size;
   input_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_,
-      std::array<int64_t, 2>{batch_size, sequence_length}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+                                      std::array<int64_t, 2>{batch_size, sequence_length}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
   const auto tokens_cpu = next_tokens.CpuSpan();
   std::transform(tokens_cpu.begin(), tokens_cpu.end(), input_ids_->GetTensorMutableData<int64_t>(),
                  [](int32_t token) { return static_cast<int64_t>(token); });
   inputs_[input_ids_index_] = input_ids_.get();
   embeddings_output_ = OrtValue::CreateTensor(model_.allocator_cpu_,
-      std::array<int64_t, 3>{batch_size, sequence_length, embeddings_width_}, embeddings_type_);
+                                              std::array<int64_t, 3>{batch_size, sequence_length, embeddings_width_}, embeddings_type_);
   outputs_[embeddings_output_index_] = embeddings_output_.get();
   if (!first_run_) {
     std::swap(past_tokens_, present_tokens_);
@@ -71,7 +73,8 @@ void EngramState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens) {
     const size_t past_count = past_info->GetElementCount();
     const auto* past_data = past_tokens_->GetTensorData<int64_t>();
     key.assign(past_data, past_data + past_count);
-    key.push_back(input_ids_->GetTensorData<int64_t>()[0]);
+    const auto* current_tokens = input_ids_->GetTensorData<int64_t>();
+    key.insert(key.end(), current_tokens, current_tokens + batch_size);
     auto cached = cache_.find(key);
     if (cached != cache_.end()) {
       const auto output_info = embeddings_output_->GetTensorTypeAndShapeInfo();
@@ -89,7 +92,7 @@ void EngramState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens) {
 }
 
 DeviceSpan<float> EngramState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
-                                    DeviceSpan<int32_t> next_indices) {
+                                   DeviceSpan<int32_t> next_indices) {
   (void)current_length;
   (void)next_tokens;
   (void)next_indices;
@@ -128,11 +131,17 @@ void EngramState::CopyEmbeddingsTo(OrtValue& destination) {
       source_info->GetElementCount() != destination_info->GetElementCount()) {
     throw std::runtime_error("Engram output must match the decoder Engram input type and shape");
   }
-  ByteWrapTensor(*model_.p_device_inputs_, destination).CopyFrom(
-      ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *embeddings_output_));
+  ByteWrapTensor(*model_.p_device_inputs_, destination).CopyFrom(ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *embeddings_output_));
+}
+
+void EngramState::ValidateRewindTo(size_t index) const {
+  if (index != 0 && (!snapshot_valid_ || snapshot_position_ != index))
+    throw std::runtime_error("EngramState cannot rewind to position " + std::to_string(index) +
+                             " without a matching snapshot");
 }
 
 void EngramState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (index == 0) {
     InitializeTokens(*past_tokens_);
     InitializeTokens(*present_tokens_);
@@ -142,19 +151,7 @@ void EngramState::RewindTo(size_t index) {
     outputs_[present_output_index_] = present_tokens_.get();
     return;
   }
-  if (!snapshot_valid_ || snapshot_position_ != index) {
-    throw std::runtime_error("EngramState cannot rewind to position " + std::to_string(index) +
-                             " without a matching snapshot");
-  }
   CopyTokens(*snapshot_tokens_, *present_tokens_);
-  if (std::getenv("ORTGENAI_MTP_DEBUG_STATE") != nullptr) {
-    const auto* expected = snapshot_tokens_->GetTensorData<int64_t>();
-    const auto* actual = present_tokens_->GetTensorData<int64_t>();
-    const size_t count = snapshot_tokens_->GetTensorTypeAndShapeInfo()->GetElementCount();
-    if (!std::equal(expected, expected + count, actual)) {
-      throw std::runtime_error("EngramState snapshot restore mismatch");
-    }
-  }
 }
 
 void EngramState::SnapshotState(size_t position) {
@@ -167,7 +164,7 @@ void EngramState::SnapshotState(size_t position) {
   snapshot_valid_ = true;
 }
 
-void EngramState::CommitAcceptedPrefix(size_t token_count) {
+void EngramState::ValidateAcceptedPrefix(size_t token_count) const {
   if (!snapshot_valid_ || !snapshot_tokens_ || !input_ids_) {
     throw std::runtime_error("EngramState accepted-prefix commit requires a snapshot and input tokens");
   }
@@ -176,6 +173,10 @@ void EngramState::CommitAcceptedPrefix(size_t token_count) {
   if (input_shape.size() != 2 || input_shape[0] != 1 || token_count > static_cast<size_t>(input_shape[1])) {
     throw std::runtime_error("EngramState accepted-prefix commit received an invalid token count");
   }
+}
+
+void EngramState::CommitAcceptedPrefix(size_t token_count) {
+  ValidateAcceptedPrefix(token_count);
   CopyTokens(*snapshot_tokens_, *present_tokens_);
   auto* history = present_tokens_->GetTensorMutableData<int64_t>();
   const size_t history_size = present_tokens_->GetTensorTypeAndShapeInfo()->GetElementCount();

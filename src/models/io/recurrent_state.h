@@ -15,6 +15,7 @@ struct RecurrentState {
   void Add();
   void Update();
   void RewindTo(size_t index);
+  void ValidateRewindTo(size_t index) const;
 
   // Snapshot/restore the recurrent (conv + recurrent) state buffers. Required for
   // speculative decoding (e.g. MTP): the recurrent state cannot be partially rewound
@@ -32,11 +33,16 @@ struct RecurrentState {
   // accepted length by copying slot `position` into slot W-1 -- no full-cost main-model replay
   // forward, and no extra graph outputs to bind or keep alive across CUDA-graph capture.
   bool IsWindowed() const {
-    return state_window_ > 1 && !state_update_capsules_.empty();
+    return state_window_ > 1 && (recurrent_shape_.size() == 5 || !state_update_capsules_.empty());
   }
+  bool CropRequiresSnapshot() const { return !state_update_capsules_.empty(); }
   int64_t StateWindow() const { return state_window_; }
   void SetForwardLength(int sequence_length);  // Record this step's seq_len (maps position -> slot).
   void CropToPosition(size_t position);        // Copy window slot for `position` -> slot W-1.
+  void ValidateCropPosition(size_t position) const;
+  bool StateUpdateCaptureEnabled() const {
+    return state_update_active_ && state_update_active_->GetTensorData<int32_t>()[0] != 0;
+  }
 
   bool IsEmpty() const { return layer_indices_.empty(); }
   int GraphCaptureVariant() const { return graph_buffer_variant_; }
@@ -78,8 +84,8 @@ struct RecurrentState {
   std::unique_ptr<OrtValue> state_update_active_;
   std::vector<size_t> state_update_key_head_counts_;
   size_t state_update_capacity_{};
-  bool snapshot_valid_{false};                       // Whether snapshot_ holds a valid captured state.
-  size_t snapshot_position_{};                       // Sequence length represented by snapshot_.
+  bool snapshot_valid_{false};  // Whether snapshot_ holds a valid captured state.
+  size_t snapshot_position_{};  // Sequence length represented by snapshot_.
 
   // Per-position state window. When the model declares a rank-4 conv_state / rank-5
   // recurrent_state, axis 1 is a static window of W per-token states (see IsWindowed above).

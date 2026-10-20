@@ -32,6 +32,8 @@ def _load_base_module():
     builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
     builders_package.__path__ = [str(BUILDERS_DIR)]
 
+    if "models.builders.base" in sys.modules:
+        return sys.modules["models.builders.base"]
     spec = importlib.util.spec_from_file_location("models.builders.base", BUILDERS_DIR / "base.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules["models.builders.base"] = module
@@ -191,21 +193,6 @@ def test_webgpu_paged_attention_rejects_unsupported_io_dtype(io_dtype):
 
 
 def _load_builder_entrypoint_module():
-    # `builder.py` imports the concrete model classes via `from builders import (...)`.
-    # Provide a stub `builders` module so we can import the lightweight precision helpers
-    # (`set_onnx_dtype` / `set_io_dtype` / `check_extra_options`) without pulling in every
-    # model builder.
-    builders_stub = types.ModuleType("builders")
-
-    def _stub_getattr(name):  # PEP 562: satisfies `from builders import <ModelClass>`
-        return type(name, (), {})
-
-    builders_stub.__getattr__ = _stub_getattr
-    # Submodule imports (e.g. `from quantization import ...`) must resolve to the
-    # real, dependency-free modules rather than the catch-all above.
-    builders_stub.__path__ = [str(BUILDERS_DIR)]
-    sys.modules["builders"] = builders_stub
-
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -442,6 +429,7 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
 def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mode, block_size, expected):
     model = Model.__new__(Model)
     model.ep = "cuda"
+    model.io_dtype = ir.DataType.FLOAT16
     model.matmul_attrs = {"weights_prepacked": mode}
     model.quant_attrs = {"is_symmetric": True}
 
@@ -463,7 +451,7 @@ def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mod
         [],
         [
             onnx.numpy_helper.from_array(weight, "weight"),
-            onnx.numpy_helper.from_array(np.full((64, 1), 8, dtype=np.uint8), "zero_point"),
+            onnx.numpy_helper.from_array(np.full((64, 1), 0x88, dtype=np.uint8), "zero_point"),
         ],
     )
     model_proto = onnx.helper.make_model(graph)
@@ -540,9 +528,14 @@ def _run_check_extra_options(
     execution_provider="cpu",
     tie_word_embeddings=True,
     layer_types=None,
+    attn_logit_softcapping=None,
 ):
     # Avoid Hugging Face network/config loading and provide only the config fields needed.
-    fake_config = types.SimpleNamespace(tie_word_embeddings=tie_word_embeddings, layer_types=layer_types)
+    fake_config = types.SimpleNamespace(
+        tie_word_embeddings=tie_word_embeddings,
+        layer_types=layer_types,
+        attn_logit_softcapping=attn_logit_softcapping,
+    )
 
     def _fake_get_hf_details(*_args, **_kwargs):
         return {
@@ -604,6 +597,28 @@ def test_disable_qkv_fusion_is_a_deprecated_inverse_alias(monkeypatch, capsys, e
 
     assert extra_options["fuse_qkv"] is expected
     assert "'disable_qkv_fusion' is deprecated" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value,expected", [("0", False), ("1", True), ("false", False), ("true", True)])
+def test_target_gate_up_fusion_cli_boolean_normalization(monkeypatch, value, expected):
+    options = {"fuse_mlp_gate_up": value}
+    _run_check_extra_options(monkeypatch, options)
+    assert options["fuse_mlp_gate_up"] is expected
+
+
+def test_target_gate_up_fusion_help_documents_default_off(monkeypatch):
+    help_text = []
+
+    def inspect_help(parser):
+        help_text.extend(action.help for action in parser._actions if action.dest == "extra_options")
+        raise SystemExit(0)
+
+    monkeypatch.setattr(builder_module.argparse.ArgumentParser, "parse_args", inspect_help)
+    with pytest.raises(SystemExit) as error:
+        builder_module.get_args()
+    assert error.value.code == 0
+    fusion_help = help_text[0].split("fuse_mlp_gate_up =", 1)[1].split("dflash2_precision =", 1)[0]
+    assert "Default is false." in fusion_help
 
 
 def test_mtp_quant_config_json_is_parsed(monkeypatch):
@@ -718,6 +733,33 @@ def test_state_update_capacity_is_normalized(monkeypatch):
     _run_check_extra_options(monkeypatch, options)
 
     assert options["state_update_capacity"] == 3
+
+
+@pytest.mark.parametrize("capacity", ["1", "8", 3])
+def test_webgpu_accepts_compact_state_updates(monkeypatch, capacity):
+    options = {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": capacity}
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    assert options["state_update_capacity"] == int(capacity)
+
+
+def test_webgpu_allows_disabled_compact_state_updates(monkeypatch):
+    options = {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": "0"}
+
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    assert options["state_update_capacity"] == 0
+
+
+def test_webgpu_paged_attention_rejects_gemma2_softcap(monkeypatch):
+    with pytest.raises(ValueError, match="does not support non-zero attention softcap"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true", "num_blocks": "8"},
+            precision="fp16",
+            execution_provider="webgpu",
+            attn_logit_softcapping=50.0,
+        )
 
 
 def test_num_hidden_layers_rejects_more_layers_than_configured(monkeypatch):
@@ -1161,6 +1203,8 @@ def test_paged_layer_overrides_select_rows_before_final_feed_forward(monkeypatch
         ({"use_paged_attention": "true", "paged_chunk_size": "0"}, "paged_chunk_size"),
         ({"use_paged_attention": "true", "paged_chunk_size": "-1"}, "paged_chunk_size"),
         ({"use_paged_attention": "true", "paged_chunk_size": "abc"}, "paged_chunk_size"),
+        ({"use_paged_attention": "true", "num_blocks": "0"}, "num_blocks"),
+        ({"use_paged_attention": "true", "num_blocks": "abc"}, "num_blocks"),
         ({"use_paged_attention": "true", "max_batch_size": "-1"}, "max_batch_size"),
         ({"use_paged_attention": "true", "max_batch_size": "257"}, "max_batch_size"),
         ({"use_paged_attention": "true", "gpu_utilization_factor": "0"}, "gpu_utilization_factor"),
@@ -1170,6 +1214,116 @@ def test_paged_layer_overrides_select_rows_before_final_feed_forward(monkeypatch
 def test_paged_attention_rejects_invalid_engine_options(monkeypatch, extra_options, error):
     with pytest.raises(ValueError, match=error):
         _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+
+
+def test_webgpu_paged_attention_requires_num_blocks(monkeypatch):
+    with pytest.raises(ValueError, match="num_blocks"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true"},
+            precision="fp16",
+            execution_provider="webgpu",
+        )
+
+
+@pytest.mark.parametrize("legacy_num_blocks", [None, "4"])
+def test_webgpu_paged_attention_accepts_runtime_num_blocks(monkeypatch, legacy_num_blocks):
+    options = {
+        "use_paged_attention": "true",
+        "_runtime_config": {"engine": {"dynamic_batching": {"num_blocks": 8}}},
+    }
+    if legacy_num_blocks is not None:
+        options["num_blocks"] = legacy_num_blocks
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+
+@pytest.mark.parametrize("num_blocks", [0, -1, False, 1.5, "8"])
+def test_webgpu_paged_attention_rejects_invalid_runtime_num_blocks(monkeypatch, num_blocks):
+    options = {
+        "use_paged_attention": "true",
+        "num_blocks": "8",
+        "_runtime_config": {"engine": {"dynamic_batching": {"num_blocks": num_blocks}}},
+    }
+    with pytest.raises(ValueError, match="num_blocks"):
+        _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+
+@pytest.mark.parametrize("execution_provider", ["webgpu", "cuda"])
+@pytest.mark.parametrize(
+    ("legacy_options", "runtime_batching"),
+    [
+        ({}, {"num_blocks": 8, "gpu_utilization_factor": 0.6}),
+        ({"num_blocks": "8"}, {"gpu_utilization_factor": 0.6}),
+        ({"gpu_utilization_factor": "0.6"}, {"num_blocks": 8}),
+        ({"num_blocks": "8", "gpu_utilization_factor": "0.6"}, {}),
+    ],
+)
+def test_paged_attention_rejects_merged_cache_sizing_conflicts(
+    monkeypatch, execution_provider, legacy_options, runtime_batching
+):
+    options = {
+        "use_paged_attention": "true",
+        **legacy_options,
+        "_runtime_config": {"engine": {"dynamic_batching": runtime_batching}},
+    }
+    with pytest.raises(ValueError, match="num_blocks and gpu_utilization_factor are mutually exclusive"):
+        _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider=execution_provider)
+
+
+@pytest.mark.parametrize(
+    "legacy_allocation,runtime_allocation,expected_blocks",
+    [
+        ({}, {"num_blocks": 8}, 8),
+        ({"num_blocks": "16"}, {}, 16),
+        ({"num_blocks": "16"}, {"num_blocks": 8}, 8),
+    ],
+)
+def test_webgpu_paged_attention_effective_block_budget(
+    monkeypatch, legacy_allocation, runtime_allocation, expected_blocks
+):
+    effective = builder_module.normalize_builder_config(
+        "fp16",
+        "webgpu",
+        {"use_paged_attention": "true", **legacy_allocation},
+        runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
+    )
+    options = effective.extra_options
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    generated = {
+        "engine": {
+            "dynamic_batching": {
+                key: options[key]
+                for key in ("num_blocks", "gpu_utilization_factor")
+                if key in options
+            }
+        }
+    }
+    merged = builder_module.apply_runtime_config(generated, effective.runtime_config)
+    assert merged["engine"]["dynamic_batching"] == {"num_blocks": expected_blocks}
+
+
+@pytest.mark.parametrize(
+    "runtime_allocation,error",
+    [
+        ({"gpu_utilization_factor": 0.6}, "num_blocks and gpu_utilization_factor are mutually exclusive"),
+        ({"num_blocks": 0}, "num_blocks.*positive integer"),
+        ({"num_blocks": None}, "num_blocks.*must not contain null"),
+    ],
+)
+def test_webgpu_paged_attention_rejects_runtime_removal_of_block_budget(
+    monkeypatch, runtime_allocation, error
+):
+    with pytest.raises(ValueError, match=error):
+        effective = builder_module.normalize_builder_config(
+            "fp16",
+            "webgpu",
+            {"use_paged_attention": "true", "num_blocks": "16"},
+            runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
+        )
+        _run_check_extra_options(
+            monkeypatch, effective.extra_options, precision="fp16", execution_provider="webgpu"
+        )
 
 
 def test_paged_attention_normalizes_engine_options(monkeypatch):
@@ -1185,6 +1339,13 @@ def test_paged_attention_normalizes_engine_options(monkeypatch):
     assert extra_options["paged_chunk_size"] == 64
     assert extra_options["gpu_utilization_factor"] == 0.75
     assert extra_options["max_batch_size"] == 32
+
+    fixed_cache_options = {
+        "use_paged_attention": "true",
+        "num_blocks": "1024",
+    }
+    _run_check_extra_options(monkeypatch, fixed_cache_options, precision="bf16", execution_provider="cuda")
+    assert fixed_cache_options["num_blocks"] == 1024
 
 
 @pytest.mark.parametrize(

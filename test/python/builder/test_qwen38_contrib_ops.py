@@ -10,6 +10,8 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from _builder_test_utils import ort_runs_engram_op
+from transformers import LlamaConfig
 
 from models.builders.base import Model
 from models.builders.qwen3_5 import Qwen35MoETextModel
@@ -29,6 +31,7 @@ def record_calls(model, method_names):
             self.calls.append((method_name, args, kwargs))
             if method_name in {"make_matmul", "make_matmul_nbits"}:
                 return args[1]
+            return None
 
         return record
 
@@ -44,13 +47,15 @@ def make_sparse_model(paged):
     model.num_attn_heads = 8
     model.num_kv_heads = 2
     model.head_size = 16
-    model.indexer_num_heads = 4
-    model.indexer_kv_heads = 1
-    model.indexer_head_dim = 16
-    model.indexer_budget = 32
-    model.indexer_compress_ratio = 4
-    model.indexer_state_capacity = 32
-    model.fixed_indexer_cache = not paged
+    model.sparse_indexer_attrs = {
+        "num_heads": 4,
+        "kv_heads": 1,
+        "head_dim": 16,
+        "token_budget": 32,
+        "compress_ratio": 4,
+        "state_capacity": 32,
+        "fixed_cache": not paged,
+    }
     model.layernorm_attrs = {"epsilon": 1e-6}
     model.rope_attrs = {"interleaved": 0, "cast": {"use_fp32": True}}
     model.attention_attrs = {
@@ -104,12 +109,11 @@ def make_sparse_model(paged):
     model.make_attention_input_proj = MethodType(make_attention_input_proj, model)
     model.get_qk_norm_weight_names = MethodType(lambda self, layer_id: ("q_norm", "k_norm"), model)
     model.make_rotary_embedding_caches = MethodType(lambda self: ("cos_cache", "sin_cache"), model)
+    model.make_indexer_rope_caches = MethodType(lambda self, cos, sin: (cos, sin), model)
     model.make_key_value_cache_names = MethodType(
         lambda self, layer_id: ("past_key", "past_value", "present_key", "present_value"), model
     )
-    model.make_selected_counts = MethodType(
-        lambda self, layer_id, selected, capacity, packed: "selected_counts", model
-    )
+    model.make_selected_counts = MethodType(lambda self, layer_id, selected, capacity, packed: "selected_counts", model)
     model.make_attention_output_proj = MethodType(lambda self, layer_id, attention, root_input: None, model)
     return model
 
@@ -126,11 +130,12 @@ def make_attention():
 
 def test_dense_cuda_indexer_cache_shapes_are_symbolic(monkeypatch):
     def initialize_parent(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.kv_cache_attrs = {"quant_scheme": "none"}
         self.io_dtype = io_dtype
         self.ep = ep
         self.use_paged_attention = False
         self.hidden_size = 16
-        self.layer_types = ["qwen_sparse_attention"]
+        self.layer_types = ["indexed_attention"]
         self.input_names = {"position_ids": "position_ids"}
         self.input_types = {}
         self.input_shapes = {}
@@ -138,6 +143,7 @@ def test_dense_cuda_indexer_cache_shapes_are_symbolic(monkeypatch):
         self.output_types = {}
         self.output_shapes = {}
         self.rope_attrs = {"cast": {"use_fp32": True}}
+        self.attention_attrs = {}
         self.model = SimpleNamespace(metadata_props={})
 
     monkeypatch.setattr(Qwen35MoETextModel, "__init__", initialize_parent)
@@ -160,7 +166,7 @@ def test_dense_cuda_indexer_cache_shapes_are_symbolic(monkeypatch):
 
     model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
 
-    assert model.fixed_indexer_cache
+    assert model.sparse_indexer_attrs["fixed_cache"]
     assert model.input_shapes["past.indexer"] == ["batch_size", "past_sequence_length", 16]
     assert model.output_shapes["present.indexer"] == ["batch_size", "total_sequence_length", 16]
     assert model.input_shapes["past_sequence_length"] == [1]
@@ -174,14 +180,17 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
         self.hidden_rows_dim = "num_tokens"
         self.context_length = 128
         self.hidden_size = 16
-        self.layer_types = ["qwen_sparse_attention"]
+        self.layer_types = ["indexed_attention"]
+        self.context_length_attrs = {"state_window": 0, "state_window_dims": [], "state_update_capacity": 0}
         self.input_names = {}
         self.input_types = {}
         self.input_shapes = {"attention_metadata": [1]}
+        self.input_names["position_ids"] = "position_ids"
         self.output_names = {}
         self.output_types = {}
         self.output_shapes = {}
         self.rope_attrs = {"cast": {"use_fp32": True}}
+        self.attention_attrs = {}
         self.model = SimpleNamespace(metadata_props={})
 
     monkeypatch.setattr(Qwen35MoETextModel, "__init__", initialize_parent)
@@ -204,10 +213,10 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
 
     model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
 
-    assert not model.fixed_indexer_cache
-    assert "position_ids" not in model.input_names
+    assert not model.sparse_indexer_attrs["fixed_cache"]
+    assert model.input_names["position_ids"] == "position_ids"
     assert model.input_shapes["attention_metadata"] == [5]
-    assert model.indexer_state_capacity == 32
+    assert model.sparse_indexer_attrs["state_capacity"] == 32
     assert model.input_shapes["past.indexer"] == ["batch_size", 32, 16]
     assert model.input_shapes["past.indexer_kv_buffer"] == ["batch_size", 7, 16]
     assert model.input_shapes["past.indexer_state_lengths"] == ["batch_size", 2]
@@ -219,7 +228,11 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
 
     config.ple_layer_ids = [2]
     external_model = Qwen4ExpTextModel(
-        config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None,
+        config,
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        "cuda",
+        None,
         {"external_engram": True, "state_update_capacity": 7, "text_only": True},
     )
     assert not external_model.use_cpu_embedding_gather
@@ -241,6 +254,7 @@ def test_qwen38_ple_conv_state_layout_tracks_packed_execution(monkeypatch):
         self.context_length = 128
         self.hidden_size = 16
         self.layer_types = ["linear_attention"]
+        self.context_length_attrs = {"state_window": 0, "state_window_dims": [], "state_update_capacity": 0}
         self.input_names = {}
         self.input_types = {}
         self.input_shapes = {}
@@ -248,6 +262,7 @@ def test_qwen38_ple_conv_state_layout_tracks_packed_execution(monkeypatch):
         self.output_types = {}
         self.output_shapes = {}
         self.rope_attrs = {"cast": {"use_fp32": True}}
+        self.attention_attrs = {}
         self.model = SimpleNamespace(metadata_props={})
 
     monkeypatch.setattr(Qwen35MoETextModel, "__init__", initialize_parent)
@@ -281,6 +296,74 @@ def test_qwen38_ple_conv_state_layout_tracks_packed_execution(monkeypatch):
     assert packed.output_shapes["present.ple_conv"] == packed.input_shapes["past.ple_conv"]
 
 
+@pytest.mark.parametrize("linear_layers", [False, True])
+def test_paged_qwen38_resolves_compact_capacity_for_ple_and_indexer(linear_layers):
+    config = LlamaConfig(
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=32,
+        max_position_embeddings=128,
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        hc_count=2,
+        ple_layer_ids=[2],
+        ple_embed_dim=8,
+        ple_conv_kernel_size=4,
+        ngram_size=3,
+        heads_per_ngram=2,
+        indexer_n_heads=4,
+        indexer_kv_heads=1,
+        indexer_head_dim=16,
+        indexer_budget=32,
+        indexer_compress_ratio=4,
+        output_gate_type=None,
+    )
+    # Set after construction so this fixture also works with older Transformers config validators.
+    config.layer_types = ["linear_attention" if linear_layers else "indexed_attention", "indexed_attention"]
+    options = {"use_paged_attention": True, "text_only": True}
+    options.update({"state_window": 8} if linear_layers else {"state_update_capacity": 7})
+    model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", "", options)
+
+    assert model.layer_types == [
+        "linear_attention" if linear_layers else "indexed_attention",
+        "indexed_attention",
+    ]
+    assert model.context_length_attrs["state_update_capacity"] == 7
+    assert model.output_shapes["state_update.ple_tokens"] == ["batch_size", 7, 2]
+    assert model.output_shapes["state_update.ple_conv_value"] == ["batch_size", 7, 16]
+    assert model.output_shapes["state_update.indexer"] == ["batch_size", 7, 16]
+    if linear_layers:
+        assert "state_update_capacity" not in options
+        assert model.output_shapes["state_update.conv_value"][1] == 7
+
+    sparse = make_sparse_model(paged=True)
+    ple_model, ple = make_ple_model(paged=True)
+    for emitter in (sparse, ple_model):
+        emitter.context_length_attrs = model.context_length_attrs
+        emitter.input_names.update(model.input_names)
+        emitter.output_names.update(model.output_names)
+        emitter.output_shapes = model.output_shapes
+    sparse.make_qwen_sparse_attention(1, make_attention(), "hidden_states")
+    indexer = next(kwargs for op, kwargs in emitted_nodes(sparse) if op == "PackedSparseAttentionIndexer")
+    assert indexer["state_update_capacity"] == 7
+    assert indexer["outputs"][6] == model.output_names["state_update.indexer"][1]
+
+    ple_model.make_ple(1, ple, "hidden_states")
+    ngram = next(kwargs for op, kwargs in emitted_nodes(ple_model) if op == "VarlenNGramHashMapping")
+    conv = next(kwargs for op, kwargs in emitted_nodes(ple_model) if op == "VarlenCausalConvWithState")
+    assert ngram["state_update_capacity"] == conv["state_update_capacity"] == 7
+    assert ngram["outputs"][3] == model.output_names["state_update.ple_tokens"][1]
+    assert conv["outputs"][2] == model.output_names["state_update.ple_conv_value"][1]
+    update_shape = next(
+        kwargs["shape"] for method, args, kwargs in ple_model.calls
+        if method == "make_value" and args[0] == "state_update.1.ple_conv_value"
+    )
+    assert update_shape == model.output_shapes["state_update.ple_conv_value"]
+
+
 def test_qwen38_gated_delta_net_expansion_emits_linear_attention():
     model = object.__new__(Qwen4ExpTextModel)
     model.linear_num_key_heads = 2
@@ -288,9 +371,7 @@ def test_qwen38_gated_delta_net_expansion_emits_linear_attention():
     model.input_names = {"past.recurrent": {4: "past"}}
     model.output_names = {"present.recurrent": {4: "present"}}
     record_calls(model, ["make_linear_attention"])
-    model.make_gated_delta_net_gates_expansion = MethodType(
-        lambda self, *args: ("q", "k", "v", "decay", "beta"), model
-    )
+    model.make_gated_delta_net_gates_expansion = MethodType(lambda self, *args: ("q", "k", "v", "decay", "beta"), model)
 
     output = model.make_gated_delta_net_expansion(4, SimpleNamespace(), "conv", "b", "a")
 
@@ -329,9 +410,7 @@ def test_qwen38_dense_linear_attention_layer_always_emits_gated_delta_net():
     model.make_gated_delta_net_layer = MethodType(
         lambda self, *args: calls.append(("gated_delta_net", args)) or "gdn_output", model
     )
-    model.make_linear_attention_output_proj = MethodType(
-        lambda self, *args: calls.append(("output_proj", args)), model
-    )
+    model.make_linear_attention_output_proj = MethodType(lambda self, *args: calls.append(("output_proj", args)), model)
     model.make_linear_attention = MethodType(
         lambda self, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected expansion")), model
     )
@@ -539,6 +618,9 @@ def test_qwen_attention_emits_packed_qkv_with_separate_gate_and_indexer_qk():
     model.num_attn_heads = 4
     model.head_size = 32
     model.attention_attrs = {"use_packed_matmul": True}
+    model.int4_customized_weight_config = {}
+    model.quant_attrs = {"nodes_to_exclude": []}
+    model.exact_quant_override_names = set()
     projection = lambda output_size, offset=0: SimpleNamespace(  # noqa: E731
         weight=torch.arange(offset, offset + output_size, dtype=torch.float16).unsqueeze(1).expand(-1, 64),
         bias=None,
@@ -575,9 +657,7 @@ def test_qwen_attention_emits_packed_qkv_with_separate_gate_and_indexer_qk():
     assert model.attention_attrs["k_path"] == ""
     assert model.attention_attrs["v_path"] == ""
     assert model.attention_attrs["gate_path"] == "/model/layers.3/attn/gate_proj/MatMul/output_0"
-    assert model.attention_attrs["indexer_qk_path"] == (
-        "/model/layers.3/attn/indexer/index_qk_proj/MatMul/output_0"
-    )
+    assert model.attention_attrs["indexer_qk_path"] == ("/model/layers.3/attn/indexer/index_qk_proj/MatMul/output_0")
 
 
 def test_packed_matmul_class_concatenates_four_int4_projections():
@@ -702,8 +782,7 @@ def test_mtp_residual_linear_shared_preserves_hyper_connection_shape():
     model.io_dtype = ir.DataType.FLOAT16
     model.use_paged_attention = False
     model.hidden_size = 8
-    model.hc_count = 4
-    model.hc_hidden_size = 32
+    model.hyper_connection_attrs = {"num_branches": 4, "hidden_size": 32}
     model.input_names = {"input_ids": "input_ids", "hidden_states": "hidden_states"}
     model.mtp_weights = SimpleNamespace(
         embedding=SimpleNamespace(weight=torch.ones((16, 8))),
@@ -737,7 +816,7 @@ def test_paged_branchwise_norm_emits_fused_op():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = True
     model.io_dtype = ir.DataType.FLOAT16
-    model.hc_count = 2
+    model.hyper_connection_attrs = {"num_branches": 2}
     model.layernorm_attrs = {"epsilon": 1e-6}
     record_calls(model, ["make_initializer", "make_node", "make_value"])
 
@@ -758,13 +837,11 @@ def test_dense_branchwise_norm_emits_fused_op():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.BFLOAT16
-    model.hc_count = 4
+    model.hyper_connection_attrs = {"num_branches": 4}
     model.layernorm_attrs = {"epsilon": 1e-6}
     record_calls(model, ["make_initializer", "make_node", "make_value"])
 
-    output = model.make_branchwise_rms_norm(
-        "/norm", "hidden_states", SimpleNamespace(weight=torch.zeros(32)), 8
-    )
+    output = model.make_branchwise_rms_norm("/norm", "hidden_states", SimpleNamespace(weight=torch.zeros(32)), 8)
 
     assert output == "/norm/output_0"
     norm = emitted_nodes(model)[0]
@@ -776,9 +853,8 @@ def test_hyper_connection_emits_fused_ops():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
-    model.hc_count = 4
+    model.hyper_connection_attrs = {"num_branches": 4, "hidden_size": 32}
     model.hidden_size = 8
-    model.hc_hidden_size = 32
     record_calls(
         model,
         [
@@ -834,9 +910,8 @@ def test_hyper_connection_injection_emits_fused_post_mix(output_name):
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
-    model.hc_count = 4
+    model.hyper_connection_attrs = {"num_branches": 4, "hidden_size": 32}
     model.hidden_size = 8
-    model.hc_hidden_size = 32
     record_calls(model, ["make_node", "make_value"])
 
     output = model.make_hyper_connection_injection(
@@ -858,20 +933,23 @@ def test_final_hidden_states_output_connects_to_post_mix(paged, pre_final):
     model = object.__new__(Qwen4ExpMTPTextModel)
     model.use_paged_attention = paged
     model.io_dtype = ir.DataType.FLOAT16
-    model.hc_count = 4
+    model.hyper_connection_attrs = {
+        "num_branches": 4,
+        "hidden_size": 32,
+        "tile_first_hidden_state": False,
+        "emit_pre_final_hidden_states": pre_final,
+    }
     model.hidden_size = 8
-    model.hc_hidden_size = 32
     model.num_layers = 1
-    model.layer_types = ["qwen_sparse_attention"]
-    model.ple_layer_ids = set()
-    model.tile_first_hidden_state = False
-    model.emit_pre_final_hidden_states = pre_final
+    model.layer_types = ["indexed_attention"]
+    model.ple_attrs = {"layer_ids": set()}
     model.include_hidden_states = True
     model.exclude_lm_head = False
     model.output_names = {"hidden_states": "hidden_states_out"}
     model.layernorm_attrs = {"root_input": "hidden_states", "skip_input": "attention_output"}
-    record_calls(model, ["make_node", "make_value", "make_qwen_sparse_attention",
-                         "make_moe_preprocessing", "make_moe_router"])
+    record_calls(
+        model, ["make_node", "make_value", "make_qwen_sparse_attention", "make_moe_preprocessing", "make_moe_router"]
+    )
     model.get_attn_module = MethodType(lambda self, *args: object(), model)
     model.get_moe_module = MethodType(lambda self, *args: object(), model)
     model.make_moe_subgraph = MethodType(lambda self, *args: "moe_output", model)
@@ -905,7 +983,7 @@ def test_qwen_hyper_connection_expansions_emit_standard_onnx():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
-    model.hc_count = 4
+    model.hyper_connection_attrs = {"num_branches": 4}
     model.hidden_size = 8
     model.layernorm_attrs = {"epsilon": 1e-6}
     record_calls(
@@ -924,19 +1002,16 @@ def test_qwen_hyper_connection_expansions_emit_standard_onnx():
         ],
     )
 
-    model.make_branchwise_rms_norm_expansion(
-        "/norm", "streams", SimpleNamespace(weight=torch.zeros(32)), 8
-    )
+    model.make_branchwise_rms_norm_expansion("/norm", "streams", SimpleNamespace(weight=torch.zeros(32)), 8)
     model.make_scaled_silu_expansion("/silu", "down", ["batch_size", "sequence_length", 4], 0.25)
-    model.make_hyper_connection_pre_mix_expansion(
-        "/pre", "normalized", "pre_mix", ["batch_size", "sequence_length"], 8
-    )
+    model.make_hyper_connection_pre_mix_expansion("/pre", "normalized", "pre_mix", ["batch_size", "sequence_length"], 8)
     model.make_hyper_connection_post_mix_expansion(
         "/post", "streams", "block_output", "post_mix", ["batch_size", "sequence_length"], 8
     )
 
     standard_nodes = [op_type for op_type, _ in emitted_nodes(model)]
-    assert standard_nodes == ["SimplifiedLayerNormalization"]
+    assert standard_nodes == ["Cast", "Pow", "Sqrt", "Cast", "Mul"]
+    assert all(onnx.defs.has(op_type) for op_type in standard_nodes)
     assert not {
         "BranchwiseRMSNorm",
         "ScaledSiLU",
@@ -944,15 +1019,15 @@ def test_qwen_hyper_connection_expansions_emit_standard_onnx():
         "HyperConnectionPostMix",
     }.intersection(standard_nodes)
     assert [call[0] for call in model.calls].count("make_reshape") == 5
-    assert [call[0] for call in model.calls].count("make_mul") == 4
-    assert [call[0] for call in model.calls].count("make_reduce_mean") == 1
-    assert [call[0] for call in model.calls].count("make_add") == 1
+    assert [call[0] for call in model.calls].count("make_mul") == 5
+    assert [call[0] for call in model.calls].count("make_reduce_mean") == 2
+    assert [call[0] for call in model.calls].count("make_add") == 2
 
 
 def test_gated_rms_norm_emits_configured_activation():
     model = object.__new__(Qwen4ExpTextModel)
     model.io_dtype = ir.DataType.FLOAT16
-    model.output_gate_type = "sigmoid"
+    model.attention_attrs = {"output_gate_type": "sigmoid"}
     record_calls(model, ["make_node", "make_value"])
 
     model.make_gated_rms_norm(
@@ -969,6 +1044,26 @@ def test_gated_rms_norm_emits_configured_activation():
     assert gated_norm[1]["inputs"] == ["hidden_states", "norm_scale", "output_gate"]
     assert gated_norm[1]["epsilon"] == 1e-6
     assert gated_norm[1]["activation"] == "sigmoid"
+
+
+@pytest.mark.parametrize("paged", [False, True])
+def test_multimodal_sparse_attention_uses_history_tables_and_explicit_mrope(paged):
+    model = make_sparse_model(paged)
+    model.sparse_rotary_attrs = {"multimodal": True}
+    model.make_sparse_mrope_projections = MethodType(
+        lambda self, *args: self.attention_attrs.update(q_path="rotated_q", k_path="rotated_k", v_path="v"), model
+    )
+    model.make_indexer_mrope_caches = MethodType(lambda self, *args: ("history_cos", "history_sin"), model)
+    model.make_qwen_sparse_attention(3, make_attention(), "hidden_states")
+    nodes = dict(emitted_nodes(model))
+    indexer = nodes["PackedSparseAttentionIndexer" if paged else "SparseAttentionIndexer"]
+    assert indexer["inputs"][4:6] == ["history_cos", "history_sin"]
+    executor = nodes["SparsePagedAttention" if paged else "DynamicSparseAttention"]
+    assert executor["inputs"][:3] == ["rotated_q", "rotated_k", "v"]
+    assert executor["do_rotary"] == 0
+    rotary_start = 14 if paged else 11
+    assert executor["inputs"][rotary_start : rotary_start + 5] == [""] * 5
+    assert not any(method == "make_gather" and args[1][0] == "position_ids" for method, args, _ in model.calls)
 
 
 def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
@@ -1142,17 +1237,20 @@ def make_ple_model(paged, fp8_embedding=False):
     model.use_paged_attention = paged
     model.io_dtype = ir.DataType.FLOAT16
     model.hidden_size = 8
-    model.hc_count = 2
-    model.hc_hidden_size = 16
-    model.ple_embed_dim = 8
-    model.ngram_size = 3
-    model.heads_per_ngram = 2
-    model.ple_conv_kernel_size = 4
-    model.ple_conv_dilation = 3
+    model.hyper_connection_attrs = {"num_branches": 2, "hidden_size": 16}
+    model.ple_attrs = {
+        "embed_dim": 8,
+        "ngram_size": 3,
+        "heads_per_ngram": 2,
+        "conv_kernel_size": 4,
+        "conv_dilation": 3,
+        "external": False,
+    }
     model.layernorm_attrs = {"epsilon": 1e-5}
     model.values = {}
     model.input_names = {
         "input_ids": "input_ids",
+        "attention_mask": "attention_mask",
         "past.ple_tokens": {1: "past.1.ple_tokens"},
         "past.ple_conv": {1: "past.1.ple_conv"},
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
@@ -1172,6 +1270,10 @@ def make_ple_model(paged, fp8_embedding=False):
             "make_reshape",
             "make_matmul",
             "make_add",
+            "make_shape",
+            "make_cast",
+            "make_slice",
+            "make_where",
         ],
     )
     table = SimpleNamespace(weight=torch.zeros((32, 2), dtype=torch.float16))
@@ -1203,9 +1305,7 @@ def test_dense_ple_emits_verified_contrib_schemas():
 
     model.make_ple(1, ple, "hidden_states")
 
-    assert model.external_data_files == {
-        "model.ple.ngram_embedding.weight": "engram.onnx.data"
-    }
+    assert model.external_data_files == {"model.ple.ngram_embedding.weight": "engram.onnx.data"}
 
     nodes = emitted_nodes(model)
     ngram = next(kwargs for op_type, kwargs in nodes if op_type == "NGramHashMapping")
@@ -1231,9 +1331,7 @@ def test_dense_ple_emits_verified_contrib_schemas():
     assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
     assert not any(op_type == "GatherND" for op_type, _ in nodes)
 
-    embedding_initializers = {
-        args[1]: args[0] for method, args, _ in model.calls if method == "make_initializer"
-    }
+    embedding_initializers = {args[1]: args[0] for method, args, _ in model.calls if method == "make_initializer"}
     assert embedding_initializers["model.ple.ngram_embedding.weight"].dtype == torch.float8_e4m3fn
     assert embedding_initializers["model.ple.ngram_embedding.weight_scale"].shape == (1, 1)
 
@@ -1279,9 +1377,7 @@ def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
         "model.ple.ngram_embedding.weight_scale",
     ]
     assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
-    assert model.external_data_files == {
-        "model.ple.ngram_embedding.weight": "engram.onnx.data"
-    }
+    assert model.external_data_files == {"model.ple.ngram_embedding.weight": "engram.onnx.data"}
     conv = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenCausalConvWithState")
     assert conv["inputs"] == [
         "/model/layers.1/ple/EngramGate/FlattenNormed/output_0",
@@ -1301,7 +1397,7 @@ def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
 @pytest.mark.parametrize("external_engram", [False, True])
 def test_paged_ple_appends_compact_token_and_conv_updates(external_engram):
     model, ple = make_ple_model(paged=True)
-    model.external_engram = external_engram
+    model.ple_attrs["external"] = external_engram
     if external_engram:
         model.input_names["engram_embeddings"] = "engram_embeddings"
     model.context_length_attrs = {"state_update_capacity": 7}
@@ -1334,12 +1430,14 @@ def test_paged_ple_appends_compact_token_and_conv_updates(external_engram):
         assert not any(op_type == "GatherBlockQuantized" for op_type, _ in nodes)
         assert not any(op_type == "Identity" for op_type, _ in nodes)
         assert ngram["outputs"][1] == "present.1.ple_tokens"
-        projections = [args for method, args, _ in model.calls
-                       if method == "make_matmul" and args[1].endswith(("/key_proj/MatMul", "/value_proj/MatMul"))]
+        projections = [
+            args
+            for method, args, _ in model.calls
+            if method == "make_matmul" and args[1].endswith(("/key_proj/MatMul", "/value_proj/MatMul"))
+        ]
         assert len(projections) == 2
         assert all(args[2] == "engram_embeddings" for args in projections)
-        assert not any(method == "make_initializer" and "ngram_embedding" in args[1]
-                       for method, args, _ in model.calls)
+        assert not any(method == "make_initializer" and "ngram_embedding" in args[1] for method, args, _ in model.calls)
 
 
 def test_paged_ple_emits_packed_engram_gate_shapes():
@@ -1349,9 +1447,9 @@ def test_paged_ple_emits_packed_engram_gate_shapes():
 
     gate = next(kwargs for op_type, kwargs in emitted_nodes(model) if op_type == "EngramGate")
     assert gate["inputs"][:3] == [
-        "/model/layers.1/ple/key_proj/Reshape/output_0",
-        "/model/layers.1/ple/query/Reshape/output_0",
-        "/model/layers.1/ple/value_proj/MatMul/output_0",
+        "/model/layers.1/ple/EngramGate/input_0/Unsqueeze/output_0",
+        "/model/layers.1/ple/EngramGate/input_1/Unsqueeze/output_0",
+        "/model/layers.1/ple/EngramGate/input_2/Unsqueeze/output_0",
     ]
 
     reshapes = {args[0]: args for method, args, _ in model.calls if method == "make_reshape"}
@@ -1362,23 +1460,21 @@ def test_paged_ple_emits_packed_engram_gate_shapes():
     assert reshapes["/model/layers.1/ple/EngramGate/Flatten"][1][1] == "/model/constants/INT64/[-1, 16]"
     assert reshapes["/model/layers.1/ple/EngramGate/FlattenNormed"][1][1] == "/model/constants/INT64/[-1, 16]"
 
-    value_shapes = {
-        args[0]: args[2]
-        for method, args, _ in model.calls
-        if method == "make_value" and len(args) >= 3
-    }
-    assert value_shapes["/model/layers.1/ple/EngramGate/output_0"] == ["num_tokens", 2, 8]
-    assert value_shapes["/model/layers.1/ple/EngramGate/output_1"] == ["num_tokens", 2, 8]
+    value_shapes = {args[0]: args[2] for method, args, _ in model.calls if method == "make_value" and len(args) >= 3}
+    assert value_shapes["/model/layers.1/ple/EngramGate/output_0"] == [1, "num_tokens", 2, 8]
+    assert value_shapes["/model/layers.1/ple/EngramGate/output_1"] == [1, "num_tokens", 2, 8]
 
 
 def test_ple_reuses_model_level_embedding_initializers():
     model, ple = make_ple_model(paged=True, fp8_embedding=True)
 
     model.make_ple(1, ple, "hidden_states")
-    model.values.update({
-        "model.ple.ngram_embedding.weight": object(),
-        "model.ple.ngram_embedding.weight_scale": object(),
-    })
+    model.values.update(
+        {
+            "model.ple.ngram_embedding.weight": object(),
+            "model.ple.ngram_embedding.weight_scale": object(),
+        }
+    )
     model.input_names["past.ple_tokens"][2] = "past.2.ple_tokens"
     model.input_names["past.ple_conv"][2] = "past.2.ple_conv"
     model.output_names["present.ple_tokens"][2] = "present.2.ple_tokens"
@@ -1430,9 +1526,14 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path, ple_layer_id
     assert {prop.key: prop.value for prop in gather.metadata_props} == {"layer_ann": "cpu_embedding"}
     reshape = next(node for node in exported.graph.node if node.op_type == "Reshape")
     assert list(reshape.output) == ["engram_embeddings"]
-    table = next(initializer for initializer in exported.graph.initializer
-                 if initializer.name == "model.ple.ngram_embedding.weight")
+    table = next(
+        initializer
+        for initializer in exported.graph.initializer
+        if initializer.name == "model.ple.ngram_embedding.weight"
+    )
     assert next(entry.value for entry in table.external_data if entry.key == "location") == "engram.onnx.data"
+    if not ort_runs_engram_op("NGramHashMapping"):
+        pytest.skip("Installed ORT wheel lacks NGramHashMapping; graph construction and serialization passed")
     session = ort.InferenceSession(str(tmp_path / "engram.onnx"), providers=["CPUExecutionProvider"])
     inputs = {
         "input_ids": np.array([[1, 2, 3]], dtype=np.int64),
@@ -1442,12 +1543,20 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path, ple_layer_id
     assert embeddings.shape == (1, 3, 8)
     assert np.isfinite(embeddings).all()
     np.testing.assert_array_equal(history, [[2, 3]])
-    next_embeddings, next_history = session.run(None, {
-        "input_ids": np.array([[4]], dtype=np.int64), f"past.{ple_layer_id}.ple_tokens": history,
-    })
-    full_embeddings, full_history = session.run(None, {
-        **inputs, "input_ids": np.array([[1, 2, 3, 4]], dtype=np.int64),
-    })
+    next_embeddings, next_history = session.run(
+        None,
+        {
+            "input_ids": np.array([[4]], dtype=np.int64),
+            f"past.{ple_layer_id}.ple_tokens": history,
+        },
+    )
+    full_embeddings, full_history = session.run(
+        None,
+        {
+            **inputs,
+            "input_ids": np.array([[1, 2, 3, 4]], dtype=np.int64),
+        },
+    )
     np.testing.assert_array_equal(next_embeddings, full_embeddings[:, -1:, :])
     np.testing.assert_array_equal(next_history, full_history)
 
@@ -1475,11 +1584,17 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
 
     def component(filename):
         builder = Model.__new__(Model)
-        builder.model = ir.Model(ir.Graph(
-            inputs=(), outputs=(), nodes=(),
-            initializers=[ir.Value(name=table_name, const_value=table)],
-            opset_imports={"": 22},
-        ), ir_version=10, producer_name="onnxruntime-genai")
+        builder.model = ir.Model(
+            ir.Graph(
+                inputs=(),
+                outputs=(),
+                nodes=(),
+                initializers=[ir.Value(name=table_name, const_value=table)],
+                opset_imports={"": 22},
+            ),
+            ir_version=10,
+            producer_name="onnxruntime-genai",
+        )
         builder.filename = filename
         builder.cache_dir = str(tmp_path / "cache")
         builder.quant_type = None
@@ -1494,21 +1609,29 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
     wrapper.config = SimpleNamespace(text_config=text_config, vision_config=SimpleNamespace(out_hidden_size=8))
     wrapper.decoder = component("model.onnx")
     wrapper.decoder.io_dtype = ir.DataType.FLOAT16
-    wrapper.decoder.ple_layer_ids = {1}
+    wrapper.decoder.ple_attrs = {"layer_ids": {1}}
     wrapper.decoder.hidden_size = 8
     language_model = SimpleNamespace(
         layers=[None, SimpleNamespace(ple=ple)],
         embed_tokens=SimpleNamespace(weight=torch.zeros((2, 8))),
     )
-    wrapper.decoder.load_weights = lambda _: SimpleNamespace(model=SimpleNamespace(language_model=language_model, visual=None))
+    wrapper.decoder.load_weights = lambda _: SimpleNamespace(
+        model=SimpleNamespace(language_model=language_model, visual=None)
+    )
     wrapper.mtp = component("mtp.onnx") if include_mtp else None
     if wrapper.mtp is not None:
         wrapper.mtp.use_paged_attention = False
     wrapper.mtp_attrs = {}
     wrapper.share_initializers = lambda *args: []
     saved_components = []
-    monkeypatch.setattr("models.builders.qwen3_8.Qwen4ExpEmbeddingModel", lambda *args: SimpleNamespace(save_model=lambda _: saved_components.append("embedding")))
-    monkeypatch.setattr("models.builders.qwen3_8.Qwen4ExpVisionModel", lambda *args: SimpleNamespace(save_model=lambda _: saved_components.append("vision")))
+    monkeypatch.setattr(
+        "models.builders.qwen3_8.Qwen4ExpEmbeddingModel",
+        lambda *args: SimpleNamespace(save_model=lambda _: saved_components.append("embedding")),
+    )
+    monkeypatch.setattr(
+        "models.builders.qwen3_8.Qwen4ExpVisionModel",
+        lambda *args: SimpleNamespace(save_model=lambda _: saved_components.append("vision")),
+    )
 
     wrapper.save_model(tmp_path)
 
@@ -1521,18 +1644,22 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
     offsets = [next(entry.value for entry in value.external_data if entry.key == "offset") for value in tables]
     assert offsets == [offsets[0]] * len(tables)
     data_file = "engram.onnx.data"
-    assert all(next(entry.value for entry in value.external_data if entry.key == "location") == data_file
-               for value in tables)
+    assert all(
+        next(entry.value for entry in value.external_data if entry.key == "location") == data_file for value in tables
+    )
     loaded = [onnx.load(tmp_path / filename, load_external_data=True) for filename in filenames]
-    table_values = [onnx.numpy_helper.to_array(next(value for value in model.graph.initializer
-                                                    if value.name == table_name)) for model in loaded]
+    table_values = [
+        onnx.numpy_helper.to_array(next(value for value in model.graph.initializer if value.name == table_name))
+        for model in loaded
+    ]
     assert all((value == table_values[0]).all() for value in table_values[1:])
     if native_fp8:
         assert all(value.data_type == onnx.TensorProto.FLOAT8E4M3FN for value in tables)
         expected_bytes = embedding.ngram_embedding.weight.view(torch.uint8).numpy()
         assert all((value.view("uint8") == expected_bytes).all() for value in table_values)
-        scale = next(value for value in loaded[0].graph.initializer
-                     if value.name == "model.ple.ngram_embedding.weight_scale")
+        scale = next(
+            value for value in loaded[0].graph.initializer if value.name == "model.ple.ngram_embedding.weight_scale"
+        )
         assert scale.data_type == onnx.TensorProto.FLOAT
         assert onnx.numpy_helper.to_array(scale).item() == 0.25
         assert embedding.ngram_embedding.weight_scale.dtype == torch.bfloat16
@@ -1549,15 +1676,18 @@ def test_text_only_config_connects_external_engram(
     tmp_path, include_mtp, ple_layer_id, ep, moe_quant_type, weights_prepacked
 ):
     def write_decoder_config(config, extra_kwargs, out_dir):
-        (out_dir / "genai_config.json").write_text(json.dumps({
-            "model": {"type": "qwen4_exp_text", "decoder": {"inputs": {}}},
-        }))
+        (out_dir / "genai_config.json").write_text(
+            json.dumps(
+                {
+                    "model": {"type": "qwen4_exp_text", "decoder": {"inputs": {}}},
+                }
+            )
+        )
 
     wrapper = object.__new__(Qwen4ExpModel)
     wrapper.text_only = True
     wrapper.decoder = SimpleNamespace(
-        make_genai_config=write_decoder_config, ep=ep,
-        moe_attrs={"quant_type": moe_quant_type}
+        make_genai_config=write_decoder_config, ep=ep, moe_attrs={"quant_type": moe_quant_type}
     )
     if weights_prepacked is not None:
         wrapper.decoder.moe_attrs["weights_prepacked"] = weights_prepacked
@@ -1565,7 +1695,9 @@ def test_text_only_config_connects_external_engram(
     mtp_calls = []
     wrapper.add_mtp_to_genai_config = lambda directory: mtp_calls.append(directory)
 
-    wrapper.make_genai_config(SimpleNamespace(text_config=SimpleNamespace(ple_layer_ids=[ple_layer_id + 1])), {}, tmp_path)
+    wrapper.make_genai_config(
+        SimpleNamespace(text_config=SimpleNamespace(ple_layer_ids=[ple_layer_id + 1])), {}, tmp_path
+    )
 
     config = json.loads((tmp_path / "genai_config.json").read_text())["model"]
     assert config["type"] == "qwen4_exp_text"
@@ -1575,10 +1707,12 @@ def test_text_only_config_connects_external_engram(
     )
     assert config["engram"]["filename"] == "engram.onnx"
     assert config["engram"]["inputs"] == {
-        "input_ids": "input_ids", "past_ple_token_names": f"past.{ple_layer_id}.ple_tokens",
+        "input_ids": "input_ids",
+        "past_ple_token_names": f"past.{ple_layer_id}.ple_tokens",
     }
     assert config["engram"]["outputs"] == {
-        "embeddings": "engram_embeddings", "present_ple_token_names": f"present.{ple_layer_id}.ple_tokens",
+        "embeddings": "engram_embeddings",
+        "present_ple_token_names": f"present.{ple_layer_id}.ple_tokens",
     }
     assert config["engram"]["session_options"]["provider_options"] == [{ep: {}}]
     assert config["engram"]["session_options"].get("session.layer_assignment_settings") == (
@@ -1592,8 +1726,8 @@ def test_text_only_config_connects_external_engram(
 def test_qwen38_config_assigns_embedding_annotation_to_cpu():
     model = object.__new__(Qwen4ExpTextModel)
     model.ep = "cuda"
-    model.ple_token_pad_id = 248044
-    model.fixed_indexer_cache = True
+    model.ple_attrs = {"token_pad_id": 248044, "external": False}
+    model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": True}
     model.input_names = {"past_sequence_length": "past_sequence_length"}
     genai_config = {"model": {"decoder": {"inputs": {}, "outputs": {}, "session_options": {}}}}
 
@@ -1608,9 +1742,8 @@ def test_qwen38_config_assigns_embedding_annotation_to_cpu():
 def test_qwen38_external_engram_keeps_decoder_cuda_only():
     model = object.__new__(Qwen4ExpTextModel)
     model.ep = "cuda"
-    model.external_engram = True
-    model.ple_token_pad_id = 248044
-    model.fixed_indexer_cache = True
+    model.ple_attrs = {"token_pad_id": 248044, "external": True}
+    model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": True}
     model.input_names = {"past_sequence_length": "past_sequence_length"}
     genai_config = {"model": {"decoder": {"inputs": {}, "outputs": {}, "session_options": {}}}}
 

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import types
@@ -11,17 +10,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
+from _builder_test_utils import load_builder_module
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_builder_module(module_name)
 
 
 sys.modules.setdefault("models", types.ModuleType("models"))
@@ -323,9 +320,9 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
 def test_qwen4_exp_paged_state_groups_own_ple_and_sparse_kv():
     model = _make_config_model(
         Qwen4ExpTextModel,
-        layer_types=["linear_attention", "qwen_sparse_attention"],
+        layer_types=["linear_attention", "indexed_attention"],
     )
-    model.ple_layer_ids = {0}
+    model.ple_attrs = {"layer_ids": {0}}
 
     groups = model.make_decoder_state_groups({}, {})
 
@@ -340,9 +337,9 @@ def test_qwen4_exp_paged_state_groups_own_ple_and_sparse_kv():
 def test_qwen4_exp_adds_indexer_group_only_with_complete_bindings():
     model = _make_config_model(
         Qwen4ExpTextModel,
-        layer_types=["qwen_sparse_attention"],
+        layer_types=["indexed_attention"],
     )
-    model.ple_layer_ids = set()
+    model.ple_attrs = {"layer_ids": set()}
     model.input_names.update(
         {
             "past.indexer": {0: "past.0.indexer_key"},
@@ -362,12 +359,11 @@ def test_qwen4_exp_adds_indexer_group_only_with_complete_bindings():
 def test_qwen4_exp_emits_complete_compact_ple_and_indexer_manifest(monkeypatch, tmp_path):
     model = _make_config_model(
         Qwen4ExpTextModel,
-        layer_types=["linear_attention", "qwen_sparse_attention"],
+        layer_types=["linear_attention", "indexed_attention"],
     )
     model.num_layers = 2
-    model.ple_layer_ids = {0}
-    model.ple_token_pad_id = 1
-    model.indexer_compress_ratio = 4
+    model.ple_attrs = {"layer_ids": {0}, "token_pad_id": 1, "external": False}
+    model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": False}
     model.linear_num_key_heads = 2
     model.context_length_attrs["state_update_capacity"] = 7
     model.input_names.update(
@@ -408,12 +404,11 @@ def test_qwen4_exp_emits_complete_compact_ple_and_indexer_manifest(monkeypatch, 
 def test_qwen4_exp_config_emits_packed_indexer_state_group(monkeypatch, tmp_path):
     model = _make_config_model(
         Qwen4ExpTextModel,
-        layer_types=["qwen_sparse_attention"],
+        layer_types=["indexed_attention"],
     )
     model.num_layers = 1
-    model.ple_layer_ids = set()
-    model.ple_token_pad_id = 248044
-    model.fixed_indexer_cache = False
+    model.ple_attrs = {"layer_ids": set(), "token_pad_id": 248044, "external": False}
+    model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": False}
     model.input_names.update(
         {
             "past.indexer": {0: "past.0.indexer_key"},
@@ -741,6 +736,9 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 )
 def test_qwen35_gated_delta_net_validation(state_window, ep, message):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = True
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.context_length_attrs = {"state_update_capacity": 0}
     with pytest.raises(ValueError, match=message):
         model.validate_gated_delta_net_options(state_window, ep)
 
@@ -748,7 +746,40 @@ def test_qwen35_gated_delta_net_validation(state_window, ep, message):
 @pytest.mark.parametrize("ep", ["cuda", "webgpu"])
 def test_qwen35_gated_delta_net_supported_providers(ep):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = True
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.context_length_attrs = {"state_update_capacity": 0}
     model.validate_gated_delta_net_options(0, ep)
+
+
+@pytest.mark.parametrize("use_paged_attention", [False, True])
+def test_qwen35_gated_delta_net_accepts_webgpu(use_paged_attention):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = use_paged_attention
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.context_length_attrs = {"state_update_capacity": 0}
+    model.validate_gated_delta_net_options(0, "webgpu")
+
+
+def test_qwen35_non_paged_gated_delta_net_accepts_webgpu_fp32():
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = False
+    model.io_dtype = base_module.ir.DataType.FLOAT
+    model.context_length_attrs = {"state_update_capacity": 0}
+    model.validate_gated_delta_net_options(0, "webgpu")
+
+
+@pytest.mark.parametrize(
+    "use_paged_attention,io_dtype",
+    [(True, base_module.ir.DataType.FLOAT), (False, base_module.ir.DataType.BFLOAT16)],
+)
+def test_qwen35_gated_delta_net_rejects_unsupported_webgpu_dtype(use_paged_attention, io_dtype):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = use_paged_attention
+    model.io_dtype = io_dtype
+    model.context_length_attrs = {"state_update_capacity": 0}
+    with pytest.raises(ValueError, match="WebGPU require FP16"):
+        model.validate_gated_delta_net_options(0, "webgpu")
 
 
 def _packed_gated_delta_net_model(
@@ -850,6 +881,8 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
 
 def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.ep = "cuda"
+    model.context_length_attrs = {"state_update_capacity": 0}
     model.use_paged_attention = False
     model.io_dtype = base_module.ir.DataType.FLOAT16
     model.linear_key_dim = 8
@@ -868,7 +901,7 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     calls = []
     monkeypatch.setattr(Model, "make_gated_delta_net", lambda self, name, **kwargs: calls.append((name, kwargs)))
 
-    a_log = qwen_module.torch.tensor([0.25, -0.5, 0.0])
+    a_log = torch.tensor([0.25, -0.5, 0.0])
     output = model.make_gated_delta_net_layer(
         1,
         SimpleNamespace(A_log=a_log, dt_bias="dt_bias_value"),
@@ -886,5 +919,5 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     assert gdn["gate_shape"] == ["batch_size", "sequence_length", 3]
     assert "state_update_capacity" not in gdn
     exported_a_log = next(args[0] for args, _ in initializers if args[1] == gdn["a_log"])
-    qwen_module.torch.testing.assert_close(exported_a_log, a_log)
+    torch.testing.assert_close(exported_a_log, a_log)
     assert output.endswith("/gdn_out/Reshape/output_0")

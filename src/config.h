@@ -138,7 +138,13 @@ struct Config {
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
+    // Custom-op library or libraries registered on the session options: custom_ops_library is registered first,
+    // followed by custom_ops_libraries in order, with duplicate resolved paths registered once. Every entry must
+    // resolve to an existing file in the model folder, a registered EP library directory, or the current working
+    // directory (entries are not searched via LD_LIBRARY_PATH / PATH). OverlayConfig appends to custom_ops_libraries
+    // (an empty [] overlay leaves existing entries unchanged).
     std::optional<std::string> custom_ops_library;
+    std::vector<std::string> custom_ops_libraries;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
@@ -287,12 +293,11 @@ struct Config {
       // and these values are unused.
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
-      int num_visual_tokens{0};        // Fixed visual tokens per image; must be > 0 for videochat_flash_qwen
-      int patch_size{14};              // Qwen2.5-VL uses 14, Qwen3-VL uses 16
-      int window_size{0};              // Used by CalculateWindowIndex() in QNN pipeline only.
-                                       // 0 = auto-compute as patch_size * spatial_merge_size * 2
-                                       // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
-      int num_position_embeddings{0};  // Qwen4Exp learned position-table size.
+      int num_visual_tokens{0};  // Fixed visual tokens per image; must be > 0 for videochat_flash_qwen
+      int patch_size{14};        // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+      int window_size{0};        // Used by CalculateWindowIndex() in QNN pipeline only.
+                                 // 0 = auto-compute as patch_size * spatial_merge_size * 2
+                                 // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
       // LFM2-VL: patch-sequence length every image is padded to so one batch shares a vision run.
       // 0 = pad to the longest image in the batch. Shipped models: max_image_tokens * downsample_factor^2 = 1024.
@@ -319,11 +324,6 @@ struct Config {
         std::string image_sizes{Defaults::ImageSizesName};
         std::string image_grid_thw{Defaults::ImageSizesName};          // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
-        std::string pos_embed_indices;                                 // Qwen4Exp position interpolation indices
-        std::string pos_embed_weights;                                 // Qwen4Exp position interpolation weights
-        std::string vision_cos;                                        // Qwen4Exp vision rotary cosine values
-        std::string vision_sin;                                        // Qwen4Exp vision rotary sine values
-        std::string vision_attention_bias;                             // Qwen4Exp packed vision attention bias
       } inputs;
 
       struct Outputs {
@@ -515,7 +515,8 @@ struct Config {
       // Hybrid SSM+Attention (LFM2) parameters
       std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
       int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
-      int64_t ple_token_pad_id{};
+      int64_t ple_token_pad_id{-1};
+      int indexer_compress_ratio{};  // Zero means unspecified by an older export.
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
@@ -574,6 +575,7 @@ struct Config {
         std::string engram_embeddings;
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string rotary_position_ids;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
         std::string past_key_scale_names;
@@ -723,6 +725,7 @@ struct Config {
         std::string hidden_states{Defaults::HiddenStatesName};
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
+        std::string rotary_position_ids;
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
         std::string past_indexer_names;
@@ -829,7 +832,6 @@ struct Config {
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
-    bool adaptive_chunking{};          // Select a tuned prefill chunk size when chunk_size is not explicitly set.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
     bool audio_interleaved{};          // LFM2-Audio: alternate text tokens and audio frames by count (interleaved mode) rather than switching on <|audio_start|>.
     float audio_temperature{1.0f};     // LFM2-Audio: temperature the audio codes are sampled with. 0 takes the most likely code.
@@ -858,6 +860,7 @@ struct Config {
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       bool prefix_caching{true};
       bool prefix_caching_explicitly_set{};
+      size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -895,6 +898,7 @@ struct Config {
         std::optional<size_t> num_blocks;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
+        std::optional<size_t> dflash2_max_snapshots;
       } dynamic_batching;
 
       struct Search {
@@ -925,6 +929,10 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // the main model's device, batching and paged-attention contract, but replaces model-specific
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
+// Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
+// custom_ops_library and custom_ops_libraries are inherited together only when the child sets neither; because
+// custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

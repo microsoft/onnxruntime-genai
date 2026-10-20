@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -16,7 +17,9 @@
 #include "dflash2_drafter.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
+#include "ep/webgpu/session_options.h"
 #include "models/io/kv_cache.h"
+#include "models/session_options.h"
 #include "ort_genai.h"
 #include "search.h"
 
@@ -46,6 +49,27 @@ Config MakeDflash2Config() {
   dflash2.mask_token_id = 31;
   dflash2.sliding_window = 17;
   return config;
+}
+
+TEST(ConfigTests, FullProviderNameUpdatesCanonicalOptions) {
+  Config config;
+  SetProviderOption(config, "webgpu", "validationMode", "basic");
+  SetProviderOption(config, "WebGpuExecutionProvider", "adapterIndex", "3");
+
+  ASSERT_EQ(config.model.decoder.session_options.provider_options.size(), 1u);
+  const auto& provider_options = config.model.decoder.session_options.provider_options.front();
+  EXPECT_EQ(provider_options.name, "WebGPU");
+  ASSERT_EQ(provider_options.options.size(), 2u);
+  const auto find_option = [&provider_options](std::string_view name) {
+    return std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                        [name](const auto& option) { return option.first == name; });
+  };
+  const auto validation_mode = find_option("validationMode");
+  ASSERT_NE(validation_mode, provider_options.options.end());
+  EXPECT_EQ(validation_mode->second, "basic");
+  const auto adapter_index = find_option("adapterIndex");
+  ASSERT_NE(adapter_index, provider_options.options.end());
+  EXPECT_EQ(adapter_index->second, "3");
 }
 
 struct TensorMetadata {
@@ -107,6 +131,8 @@ class FakeModelStateMetadata final : public ModelStateMetadata {
 
   bool HasInput(const std::string& name) const override { return inputs_.contains(name); }
   bool HasOutput(const std::string& name) const override { return outputs_.contains(name); }
+
+  void RemoveInput(const std::string& name) { inputs_.erase(name); }
 
   ONNXTensorElementDataType GetInputDataType(const std::string& name) const override {
     return inputs_.at(name).data_type;
@@ -450,6 +476,55 @@ TEST(Dflash2ConfigTest, PreservesTargetProviderOptions) {
             Config::NamedString("device_id", "1"));
 }
 
+TEST(Dflash2ConfigTest, WebGpuMatmulAccumulationDefaultsAndOverrides) {
+  if (FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
+    GTEST_SKIP() << "No WebGPU EP device is registered.";
+  }
+  for (const char* model_kind : {"plain", "dflash2", "dspark"}) {
+    for (const char* batching : {"none", "dynamic", "static"}) {
+      for (int max_batch_size : {1, 2}) {
+        for (const char* explicit_value : {"", "0", "1"}) {
+          SCOPED_TRACE(::testing::Message() << model_kind << " " << batching << " batch="
+                                            << max_batch_size << " override=" << explicit_value);
+          auto config = MakeDflash2Config();
+          const std::string_view kind{model_kind}, batch{batching};
+          if (kind == "plain") config.model.dflash2.filename.clear();
+          config.model.dflash2.is_dspark = kind == "dspark";
+          if (batch == "dynamic") {
+            config.engine.dynamic_batching.emplace().max_batch_size = max_batch_size;
+          } else if (batch == "static") {
+            config.engine.static_batching.emplace().max_batch_size = max_batch_size;
+          }
+          Config::ProviderOptions provider{"WebGPU", {}};
+          if (*explicit_value) {
+            provider.options.emplace_back("enableMatmulFp32Accumulation", explicit_value);
+          }
+          // Projection must retain the same default/override for the auxiliary drafter session.
+          for (bool drafter : {false, true}) {
+            if (drafter && kind != "dflash2") continue;
+            const auto projected = drafter ? CreateDflash2Config(config) : nullptr;
+            auto options = OrtSessionOptions::Create();
+            WebGPUExecutionProvider::AppendExecutionProvider(*options, provider, projected ? *projected : config);
+            const char* key = "ep.webgpuexecutionprovider.enableMatmulFp32Accumulation";
+            const bool default_enabled = kind == "dflash2" || (batch != "none" && max_batch_size > 1);
+            const bool specified = *explicit_value || default_enabled;
+            ASSERT_EQ(options->HasConfigEntry(key), specified);
+            if (specified) {
+              size_t size{};
+              Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(options.get(), key, nullptr, &size));
+              std::string value(size, '\0');
+              Ort::ThrowOnError(Ort::api->GetSessionConfigEntry(options.get(), key, value.data(), &size));
+              EXPECT_STREQ(value.c_str(), *explicit_value ? explicit_value : "1");
+            }
+          }
+          // Defaults must not mutate the user-provided options, including an explicit opt-out.
+          EXPECT_EQ(provider.options.size(), *explicit_value ? 1u : 0u);
+        }
+      }
+    }
+  }
+}
+
 TEST(Dflash2ConfigTest, DrafterSessionOverridesTargetConfigEntries) {
   auto config = MakeDflash2Config();
   config.model.decoder.session_options.config_entries.push_back(
@@ -467,6 +542,14 @@ TEST(Dflash2ConfigTest, DrafterSessionOverridesTargetConfigEntries) {
 TEST(Dflash2ConfigTest, AcceptsCompatibleAuxiliaryHiddenStates) {
   const auto config = MakeDflash2Config();
   const auto [target, drafter] = MakeCompatibleMetadata();
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
+}
+
+TEST(Dflash2ConfigTest, AcceptsOmittedAttentionMetadata) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.inputs.attention_metadata.clear();
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.RemoveInput("attention_metadata");
   EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
 }
 
@@ -742,6 +825,22 @@ TEST(Dflash2ConfigTest, RejectsWindowedPoolByteOverflow) {
           config, 8, std::numeric_limits<size_t>::max(),
           ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
       std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, SnapshotCapacityHonorsConfiguredLimitAndMemoryBudget) {
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 0), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 1), 1u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 4), 4u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 32), 7u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(199, 40, 20, 20, 32), 6u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(79, 40, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 100, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 101, 20, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 0, 20, 32), 0u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 20, 0, 32), 0u);
+  const size_t maximum = std::numeric_limits<size_t>::max();
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, 0, maximum / 2, 1, maximum), 2u);
+  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, maximum - 1, maximum, 1, maximum), 0u);
 }
 
 TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
@@ -1071,6 +1170,82 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   invalid->caches.resize(checkpoint->caches.size());
   damaged.front().prefix_checkpoint = std::move(invalid);
   EXPECT_THROW(drafter.Propose(next_aux, damaged, proposals), std::logic_error);
+}
+
+TEST(Dflash2ConfigTest, SnapshotPoolRetainsAndRestoresMoreThanTwoBoundaries) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.sliding_window = 8;
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 1u);
+  drafter.SetPrefixCheckpointCapacity(0);
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+  int request_id = 0;
+  auto* request = reinterpret_cast<Request*>(&request_id);
+  Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  aux.CreateTensor(std::array<int64_t, 2>{8, 1});
+  aux.GetByteSpan().Zero();
+  std::vector<std::vector<int32_t>> proposals;
+  const std::array initial{Dflash2Drafter::Feed{
+      .request = request, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_TRUE(drafter.Propose(aux, initial, proposals));
+  EXPECT_EQ(drafter.CapturePrefix(request, 8), nullptr);
+  drafter.SetPrefixCheckpointCapacity(3);
+
+  std::vector<std::shared_ptr<const Dflash2PrefixCheckpoint>> checkpoints;
+  std::vector<std::vector<int32_t>> expected;
+  for (size_t position = 8; position <= 24; position += 8) {
+    auto checkpoint = drafter.CapturePrefix(request, position);
+    ASSERT_NE(checkpoint, nullptr);
+    checkpoints.push_back(std::move(checkpoint));
+    Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+    next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+    next_aux.GetByteSpan().Zero();
+    const std::array next{Dflash2Drafter::Feed{
+        .request = request, .aux_row_count = 1, .first_position = position, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+    ASSERT_TRUE(drafter.Propose(next_aux, next, proposals));
+    ASSERT_FALSE(proposals.front().empty());
+    expected.push_back(proposals.front());
+    if (position < 24) {
+      Tensor remaining{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+      remaining.CreateTensor(std::array<int64_t, 2>{7, 1});
+      remaining.GetByteSpan().Zero();
+      const std::array advance{Dflash2Drafter::Feed{
+          .request = request, .aux_row_count = 7, .first_position = position + 1, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+      ASSERT_TRUE(drafter.Propose(remaining, advance, proposals));
+    }
+  }
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+  EXPECT_EQ(drafter.CapturePrefix(request, 25), nullptr);
+  EXPECT_THROW(drafter.SetPrefixCheckpointCapacity(0), std::logic_error);
+  for (size_t index = 0; index < checkpoints.size(); ++index) {
+    drafter.ReleaseAll();
+    Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+    next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+    next_aux.GetByteSpan().Zero();
+    const std::array restored{Dflash2Drafter::Feed{
+        .request = request, .prefix_checkpoint = checkpoints[index], .aux_row_count = 1, .first_position = checkpoints[index]->token_count, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+    ASSERT_TRUE(drafter.Propose(next_aux, restored, proposals));
+    EXPECT_EQ(proposals.front(), expected[index]);
+  }
+  checkpoints[1].reset();
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 1u);
+  auto reused = drafter.CapturePrefix(request, 25);
+  ASSERT_NE(reused, nullptr);
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+  checkpoints.clear();
+  reused.reset();
+  drafter.SetPrefixCheckpointCapacity(0);
+  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
 }
 
 TEST(Dflash2ConfigTest, MissingWindowedPrefixRebuildsBeforeDraftingOrCheckpointing) {

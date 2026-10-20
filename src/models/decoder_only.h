@@ -1,4 +1,5 @@
 #pragma once
+#include <mutex>
 #include "model.h"
 #include "cpu_embedding.h"
 #include "models/io/input_ids.h"
@@ -14,6 +15,7 @@
 
 namespace Generators {
 struct EngramState;
+struct CpuEngram;
 
 struct DecoderOnly_Model : Model {
   DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
@@ -27,6 +29,8 @@ struct DecoderOnly_Model : Model {
   std::unique_ptr<OrtSession> session_engram_;
   std::unique_ptr<OrtSessionOptions> engram_session_options_;
   std::shared_ptr<CpuEmbedding> cpu_embedding_;
+  std::shared_ptr<const CpuEngram> cpu_engram_;
+  std::once_flag cpu_engram_init_;
 };
 
 struct DecoderOnly_State : State {
@@ -38,16 +42,24 @@ struct DecoderOnly_State : State {
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
   void RewindTo(size_t index) override;
+  void ValidateRewindTo(size_t index) const override;
 
   void SnapshotState(size_t position) override;
 
   bool HasCroppableRecurrentState() const override;
+  bool CropRequiresSnapshot() const override {
+    return (recurrent_state_ && recurrent_state_->CropRequiresSnapshot()) ||
+           (indexer_cache_ && indexer_cache_->HasStateUpdates());
+  }
   int64_t RecurrentStateWindow() const override;
   void CropToAccepted(size_t new_length, size_t recurrent_position) override;
+  void ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const override;
 
   // Stage the hidden_states values for the next Run (for models with a hidden_states input,
   // e.g. the MTP self-speculative head). No-op if the model has no hidden_states input.
   void SetHiddenStates(OrtValue* hidden_states) override;
+  OrtValue* GetRotaryPositionIds() override { return position_inputs_->GetRotaryPositionIds(); }
+  void SetRotaryPositionIds(OrtValue* positions) override { position_inputs_->SetRotaryPositionIds(positions); }
 
  private:
   DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
@@ -67,8 +79,7 @@ struct DecoderOnly_State : State {
   std::unique_ptr<HiddenStatesInputs> hidden_states_;          // Only for models with a hidden_states input (MTP head).
   std::unique_ptr<HiddenStatesOutputs> hidden_states_output_;  // Only for models that emit a hidden_states output (CUDA-graph-safe).
   std::unique_ptr<EngramState> engram_state_;
-  std::unique_ptr<OrtValue> engram_embeddings_;
-  size_t engram_input_index_{};
+  std::unique_ptr<Embeddings> engram_embeddings_;
   ExtraInputs extra_inputs_{*this};
 };
 

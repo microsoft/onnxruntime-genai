@@ -135,6 +135,9 @@ void SimpleDecoder::LogGraphDecision(size_t batch_size, size_t tokens_per_reques
              << " max_query_tokens=" << graph_buffers_->max_query_tokens
              << " max_token_rows=" << graph_buffers_->max_token_rows << ")";
       break;
+    case GraphFallback::kUnknownBindingLayout:
+      stream << "eager (extra or fixed bindings have no persistent layout identity)";
+      break;
     case GraphFallback::kUncapturableShape:
       stream << "eager ("
              << (shapes >= GraphAnnotationIds::kMaxCapturedShapes ? "shape budget exhausted"
@@ -144,6 +147,22 @@ void SimpleDecoder::LogGraphDecision(size_t batch_size, size_t tokens_per_reques
   }
   stream << " [" << shapes << "/" << GraphAnnotationIds::kMaxCapturedShapes << " shapes assigned]"
          << std::endl;
+}
+
+std::optional<GraphAnnotationIds::Key> SimpleDecoder::GraphKeyForContext(
+    size_t batch_size, size_t tokens_per_request, const ExecutionContext& context,
+    const OrtSession* default_session) {
+  const bool has_extras = !context.extra_inputs.empty() || !context.extra_outputs.empty() ||
+                          !context.extra_input_names.empty() || !context.extra_output_names.empty();
+  if ((has_extras && context.extra_binding_layout_key == 0) ||
+      (!context.fixed_state_bindings.empty() && context.fixed_state_binding_key == 0 &&
+       context.extra_binding_layout_key == 0)) {
+    return std::nullopt;
+  }
+  return DecodeGraphKey(batch_size, tokens_per_request, context.block_table_columns,
+                        context.fixed_state_binding_key, context.fixed_state_binding_domain,
+                        context.decoder_session ? context.decoder_session : default_session,
+                        context.indexshare_decode, context.extra_binding_layout_key);
 }
 
 void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
@@ -165,29 +184,15 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
   } else if (!graph_buffers_->Fits(scheduled_requests.size(), tokens_per_request)) {
     fallback = GraphFallback::kStepTooWide;
   } else {
-    size_t binding_key = context.fixed_state_binding_key;
-    if (context.decoder_session || !context.extra_inputs.empty() || !context.extra_outputs.empty()) {
-      const auto combine = [&](size_t value) {
-        binding_key ^= value + size_t{0x9e3779b9} + (binding_key << 6) + (binding_key >> 2);
-      };
-      combine(reinterpret_cast<size_t>(context.decoder_session));
-      combine(static_cast<size_t>(context.indexshare_decode));
-      const auto combine_tensor = [&](OrtValue* tensor) {
-        combine(reinterpret_cast<size_t>(tensor->GetTensorMutableData<void>()));
-        for (int64_t dimension : tensor->GetTensorTypeAndShapeInfo()->GetShape()) combine(static_cast<size_t>(dimension));
-      };
-      for (auto* tensor : context.extra_inputs) combine_tensor(tensor);
-      for (auto* tensor : context.extra_outputs) combine_tensor(tensor);
-      for (const auto& binding : context.fixed_state_bindings) {
-        combine_tensor(binding.input);
-        combine_tensor(binding.output);
-      }
+    const auto key = GraphKeyForContext(scheduled_requests.size(), tokens_per_request,
+                                        context, model_->session_decoder_.get());
+    if (key) {
+      annotation_id = graph_buffers_->graph_ids.Id(*key);
+    } else if ((!context.extra_inputs.empty() || !context.extra_outputs.empty() ||
+                !context.fixed_state_bindings.empty())) {
+      fallback = GraphFallback::kUnknownBindingLayout;
     }
-    annotation_id = graph_buffers_->GraphId(scheduled_requests.size(), tokens_per_request,
-                                            context.block_table_columns,
-                                            binding_key,
-                                            context.fixed_state_binding_domain);
-    if (annotation_id <= 0) {
+    if (annotation_id <= 0 && fallback != GraphFallback::kUnknownBindingLayout) {
       fallback = GraphFallback::kUncapturableShape;
     }
   }

@@ -63,6 +63,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
+  bool literal_ = false;
   int32_t bos_token_id_;
   std::vector<int32_t> eos_token_id_;
   int32_t pad_token_id_;

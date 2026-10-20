@@ -44,10 +44,11 @@ class FakeComponent:
 
 
 class FakeQwen4ExpComponent(FakeComponent):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options, multimodal_rotary=False):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.multimodal_rotary = multimodal_rotary
         self.model_type = "qwen4_exp"
-        self.hc_hidden_size = 8
+        self.hyper_connection_attrs = {"hidden_size": 8}
         self.output_shapes = {"hidden_states": ["batch_size", "sequence_length", 2]}
         self.filename = extra_options.get("filename", "text.onnx")
 
@@ -124,7 +125,7 @@ def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch, ep, prune_lm_head)
     assert model.decoder.model_type == "qwen3_5"
     assert model.decoder.extra_options["external_engram"] is True
     assert model.decoder.extra_options["include_hidden_states"] is True
-    assert model.decoder.emit_pre_final_hidden_states is True
+    assert model.decoder.hyper_connection_attrs["emit_pre_final_hidden_states"] is True
     assert model.decoder.output_shapes["hidden_states"] == ["batch_size", "sequence_length", 8]
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
     assert model.decoder.extra_options["prune_lm_head"] is prune_lm_head
@@ -184,7 +185,7 @@ def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):
 
 
 def test_qwen4_exp_text_only_dispatches_composite_builder(monkeypatch, tmp_path):
-    from models import builder as builder_module
+    from models import builder as builder_module  # noqa: PLC0415
 
     captured = {}
 
@@ -910,6 +911,7 @@ def test_qwen4_exp_mtp_state_uses_residual_linear_shared_schema(monkeypatch):
 
     assert mtp.fc_embedding.weight is mtp_state["mtp.fc_embedding.weight"]
     assert mtp.fc_hidden.weight is mtp_state["mtp.fc_hidden.weight"]
+    assert mtp.layers[0].config.layer_types == ["indexed_attention"]
     assert mtp.layers[0].state == {"marker": mtp_state["mtp.layers.0.marker"]}
     assert mtp.hyper_connection_mixer.state == {
         "marker": mtp_state["mtp.hyper_connection_mixer.marker"]

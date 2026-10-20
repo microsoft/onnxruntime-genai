@@ -142,5 +142,3 @@ jobs:
         core_artifact: $(coreArtifact)
         python_versions: ${{ parameters.python_versions }}
         python_dependency_version: ${{ parameters.python_dependency_version }}
-
-  - template: steps/compliant-and-cleanup-step.yml

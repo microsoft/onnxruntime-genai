@@ -52,11 +52,7 @@ def webgpu_model(tmp_path):
     decoder = onnx.load(_MODEL_DIR / "decoder.onnx")
     logits = next(value for value in decoder.graph.output if value.name == "logits")
     logits.type.tensor_type.shape.dim[0].dim_param = "batch_size"
-    inputs = [
-        value
-        for value in decoder.graph.input
-        if value.name != "state_update_capture_count"
-    ]
+    inputs = [value for value in decoder.graph.input if value.name != "state_update_capture_count"]
     decoder.graph.ClearField("input")
     decoder.graph.input.extend(inputs)
     onnx.save(decoder, model_dir / "decoder.onnx")
@@ -99,8 +95,13 @@ def test_fixture_declares_sparse_paged_and_fixed_groups():
     assert [group["layer_ids"] for group in groups] == [[0, 3], [1, 4], [2, 5]]
 
 
+@pytest.fixture(params=[False, True], ids=["engram_only", "engram_and_token_embedding"])
+def token_embedding_enabled(request):
+    return request.param
+
+
 @pytest.fixture(params=_DEVICES + (["cuda_graph"] if og.is_cuda_available() else []))
-def external_engram_model(tmp_path, request):
+def external_engram_model(tmp_path, request, token_embedding_enabled):
     config_data = json.loads((_MODEL_DIR / "genai_config.json").read_text())
     vocab_size = config_data["model"]["vocab_size"]
     config_data["model"]["decoder"]["inputs"]["engram_embeddings"] = "engram_embeddings"
@@ -118,12 +119,16 @@ def external_engram_model(tmp_path, request):
     for node in decoder.graph.node:
         if node.op_type == "Range" and list(node.output) == ["token_index"]:
             input_ids = config_data["model"]["decoder"]["inputs"]["input_ids"]
-            decoder_nodes.extend([
-                onnx.helper.make_node("Equal", [input_ids, input_ids], ["token_index_mask"]),
-                onnx.helper.make_node("Cast", ["token_index_mask"], ["token_index_ones"], to=onnx.TensorProto.INT64),
-                onnx.helper.make_node("CumSum", ["token_index_ones", node.input[0]], ["token_index_offsets"]),
-                onnx.helper.make_node("Sub", ["token_index_offsets", node.input[2]], ["token_index"]),
-            ])
+            decoder_nodes.extend(
+                [
+                    onnx.helper.make_node("Equal", [input_ids, input_ids], ["token_index_mask"]),
+                    onnx.helper.make_node(
+                        "Cast", ["token_index_mask"], ["token_index_ones"], to=onnx.TensorProto.INT64
+                    ),
+                    onnx.helper.make_node("CumSum", ["token_index_ones", node.input[0]], ["token_index_offsets"]),
+                    onnx.helper.make_node("Sub", ["token_index_offsets", node.input[2]], ["token_index"]),
+                ]
+            )
             continue
         for index, output in enumerate(node.output):
             if output == "logits":
@@ -131,10 +136,12 @@ def external_engram_model(tmp_path, request):
         decoder_nodes.append(node)
     decoder.graph.ClearField("node")
     decoder.graph.node.extend(decoder_nodes)
-    decoder.graph.input.extend([
-        onnx.helper.make_tensor_value_info("engram_embeddings", onnx.TensorProto.FLOAT, ["num_tokens", 1]),
-        onnx.helper.make_tensor_value_info("present_ple_tokens", onnx.TensorProto.INT64, ["batch_size", 2]),
-    ])
+    decoder.graph.input.extend(
+        [
+            onnx.helper.make_tensor_value_info("engram_embeddings", onnx.TensorProto.FLOAT, ["num_tokens", 1]),
+            onnx.helper.make_tensor_value_info("present_ple_tokens", onnx.TensorProto.INT64, ["batch_size", 2]),
+        ]
+    )
     constants = {
         "engram_slice_start": np.array([1], dtype=np.int64),
         "engram_slice_end": np.array([2**63 - 1], dtype=np.int64),
@@ -145,19 +152,86 @@ def external_engram_model(tmp_path, request):
     }
     decoder.graph.initializer.extend(onnx.numpy_helper.from_array(value, name) for name, value in constants.items())
     cumulative = config_data["model"]["decoder"]["inputs"]["cumulative_sequence_lengths"]
-    decoder.graph.node.extend([
-        onnx.helper.make_node("Slice", [cumulative, "engram_slice_start", "engram_slice_end"], ["engram_ends"]),
-        onnx.helper.make_node("Sub", ["engram_ends", "engram_one"], ["engram_last_rows"]),
-        onnx.helper.make_node("Gather", ["engram_embeddings", "engram_last_rows"], ["engram_last"], axis=0),
-        onnx.helper.make_node("Squeeze", ["engram_last", "engram_axis"], ["engram_last_ids"]),
-        onnx.helper.make_node("Cast", ["present_ple_tokens"], ["engram_tokens_float"], to=onnx.TensorProto.FLOAT),
-        onnx.helper.make_node("ReduceSum", ["engram_tokens_float", "engram_axis"], ["engram_history_float"], keepdims=0),
-        onnx.helper.make_node("Add", ["engram_last_ids", "engram_history_float"], ["engram_score"]),
-        onnx.helper.make_node("Mod", ["engram_score", "engram_vocab"], ["engram_label"], fmod=1),
-        onnx.helper.make_node("Unsqueeze", ["engram_label", "engram_axis"], ["engram_label_column"]),
-        onnx.helper.make_node("Equal", ["engram_label_column", "engram_classes"], ["engram_selected"]),
-        onnx.helper.make_node("Cast", ["engram_selected"], ["logits"], to=onnx.TensorProto.FLOAT16),
-    ])
+    decoder.graph.node.extend(
+        [
+            onnx.helper.make_node("Slice", [cumulative, "engram_slice_start", "engram_slice_end"], ["engram_ends"]),
+            onnx.helper.make_node("Sub", ["engram_ends", "engram_one"], ["engram_last_rows"]),
+            onnx.helper.make_node("Gather", ["engram_embeddings", "engram_last_rows"], ["engram_last"], axis=0),
+            onnx.helper.make_node("Squeeze", ["engram_last", "engram_axis"], ["engram_last_ids"]),
+            onnx.helper.make_node("Cast", ["present_ple_tokens"], ["engram_tokens_float"], to=onnx.TensorProto.FLOAT),
+            onnx.helper.make_node(
+                "ReduceSum", ["engram_tokens_float", "engram_axis"], ["engram_history_float"], keepdims=0
+            ),
+            onnx.helper.make_node("Add", ["engram_last_ids", "engram_history_float"], ["engram_score"]),
+            onnx.helper.make_node("Mod", ["engram_score", "engram_vocab"], ["engram_label"], fmod=1),
+            onnx.helper.make_node("Unsqueeze", ["engram_label", "engram_axis"], ["engram_label_column"]),
+            onnx.helper.make_node("Equal", ["engram_label_column", "engram_classes"], ["engram_selected"]),
+            onnx.helper.make_node("Cast", ["engram_selected"], ["logits"], to=onnx.TensorProto.FLOAT16),
+        ]
+    )
+    # ORT assigns unused feeds to CPU, making a GPU feed require a D2H copy during capture.
+    capture_inputs = [
+        value for value in decoder.graph.input if value.name in {"position_ids", "state_update_capture_count"}
+    ]
+    for index, node in enumerate(decoder.graph.node):
+        if list(node.output) != ["engram_score"] or not capture_inputs:
+            continue
+        node.output[0] = "raw_engram_score"
+        dependencies = []
+        score = "raw_engram_score"
+        for feed_index, value in enumerate(capture_inputs):
+            prefix = f"capture_dependency_{feed_index}"
+            axes = np.arange(len(value.type.tensor_type.shape.dim), dtype=np.int64)
+            decoder.graph.initializer.append(onnx.numpy_helper.from_array(axes, f"{prefix}_axes"))
+            next_score = "engram_score" if feed_index == len(capture_inputs) - 1 else f"{prefix}_score"
+            dependencies.extend(
+                [
+                    onnx.helper.make_node("ReduceSum", [value.name, f"{prefix}_axes"], [f"{prefix}_sum"], keepdims=0),
+                    onnx.helper.make_node("Cast", [f"{prefix}_sum"], [f"{prefix}_float"], to=onnx.TensorProto.FLOAT),
+                    onnx.helper.make_node("Sub", [f"{prefix}_float", f"{prefix}_float"], [f"{prefix}_zero"]),
+                    onnx.helper.make_node("Add", [score, f"{prefix}_zero"], [next_score]),
+                ]
+            )
+            score = next_score
+        for offset, dependency in enumerate(dependencies, start=1):
+            decoder.graph.node.insert(index + offset, dependency)
+        break
+    if token_embedding_enabled:
+        width = config_data["model"]["decoder"]["hidden_size"]
+        config_data["model"]["embedding"] = {
+            "filename": "token_embedding.onnx",
+            "inputs": {"input_ids": "input_ids"},
+            "outputs": {"inputs_embeds": "inputs_embeds"},
+        }
+        decoder.graph.input.append(
+            onnx.helper.make_tensor_value_info("inputs_embeds", onnx.TensorProto.FLOAT, ["num_tokens", width])
+        )
+        for index, node in enumerate(decoder.graph.node):
+            if list(node.output) == ["engram_score"]:
+                node.output[0] = "base_engram_score"
+                extra_nodes = [
+                    onnx.helper.make_node(
+                        "ReduceSum", ["inputs_embeds", "engram_axis"], ["token_embedding_sum"], keepdims=0
+                    ),
+                    onnx.helper.make_node(
+                        "Gather", ["token_embedding_sum", "engram_last_rows"], ["token_embedding_last"], axis=0
+                    ),
+                    onnx.helper.make_node("Add", ["base_engram_score", "token_embedding_last"], ["engram_score"]),
+                ]
+                for offset, extra in enumerate(extra_nodes, start=1):
+                    decoder.graph.node.insert(index + offset, extra)
+                break
+        embedding = onnx.helper.make_graph(
+            [onnx.helper.make_node("Gather", ["table", "input_ids"], ["inputs_embeds"], axis=0)],
+            "token_embedding",
+            [onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT64, ["num_tokens"])],
+            [onnx.helper.make_tensor_value_info("inputs_embeds", onnx.TensorProto.FLOAT, ["num_tokens", width])],
+            [onnx.numpy_helper.from_array(np.zeros((vocab_size, width), dtype=np.float32), "table")],
+        )
+        onnx.save(
+            onnx.helper.make_model(embedding, opset_imports=[onnx.helper.make_opsetid("", 21)], ir_version=10),
+            tmp_path / "token_embedding.onnx",
+        )
     required_values = {value.name for value in decoder.graph.output}
     live_nodes = []
     for node in reversed(decoder.graph.node):
@@ -169,23 +243,33 @@ def external_engram_model(tmp_path, request):
     onnx.checker.check_model(decoder)
     onnx.save(decoder, tmp_path / "decoder.onnx")
 
-    engram = onnx.helper.make_graph([
-        onnx.helper.make_node("Cast", ["input_ids"], ["ids_float"], to=onnx.TensorProto.FLOAT),
-        onnx.helper.make_node("Unsqueeze", ["ids_float", "embedding_axis"], ["engram_embeddings"]),
-        onnx.helper.make_node("Concat", ["past_ple_tokens", "input_ids"], ["token_history"], axis=1),
-        onnx.helper.make_node("Slice", ["token_history", "tail_start", "tail_end", "history_axis"], ["present_ple_tokens"]),
-    ], "external_engram", [
-        onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT64, ["batch_size", "sequence_length"]),
-        onnx.helper.make_tensor_value_info("past_ple_tokens", onnx.TensorProto.INT64, ["batch_size", 2]),
-    ], [
-        onnx.helper.make_tensor_value_info("engram_embeddings", onnx.TensorProto.FLOAT, ["batch_size", "sequence_length", 1]),
-        onnx.helper.make_tensor_value_info("present_ple_tokens", onnx.TensorProto.INT64, ["batch_size", 2]),
-    ], [
-        onnx.numpy_helper.from_array(np.array([2], dtype=np.int64), "embedding_axis"),
-        onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), "history_axis"),
-        onnx.numpy_helper.from_array(np.array([-2], dtype=np.int64), "tail_start"),
-        onnx.numpy_helper.from_array(np.array([2**63 - 1], dtype=np.int64), "tail_end"),
-    ])
+    engram = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node("Cast", ["input_ids"], ["ids_float"], to=onnx.TensorProto.FLOAT),
+            onnx.helper.make_node("Unsqueeze", ["ids_float", "embedding_axis"], ["engram_embeddings"]),
+            onnx.helper.make_node("Concat", ["past_ple_tokens", "input_ids"], ["token_history"], axis=1),
+            onnx.helper.make_node(
+                "Slice", ["token_history", "tail_start", "tail_end", "history_axis"], ["present_ple_tokens"]
+            ),
+        ],
+        "external_engram",
+        [
+            onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT64, ["batch_size", "sequence_length"]),
+            onnx.helper.make_tensor_value_info("past_ple_tokens", onnx.TensorProto.INT64, ["batch_size", 2]),
+        ],
+        [
+            onnx.helper.make_tensor_value_info(
+                "engram_embeddings", onnx.TensorProto.FLOAT, ["batch_size", "sequence_length", 1]
+            ),
+            onnx.helper.make_tensor_value_info("present_ple_tokens", onnx.TensorProto.INT64, ["batch_size", 2]),
+        ],
+        [
+            onnx.numpy_helper.from_array(np.array([2], dtype=np.int64), "embedding_axis"),
+            onnx.numpy_helper.from_array(np.array([1], dtype=np.int64), "history_axis"),
+            onnx.numpy_helper.from_array(np.array([-2], dtype=np.int64), "tail_start"),
+            onnx.numpy_helper.from_array(np.array([2**63 - 1], dtype=np.int64), "tail_end"),
+        ],
+    )
     engram_model = onnx.helper.make_model(engram, opset_imports=[onnx.helper.make_opsetid("", 21)], ir_version=10)
     onnx.checker.check_model(engram_model)
     onnx.save(engram_model, tmp_path / "engram.onnx")

@@ -51,6 +51,8 @@ PleState::PleState(State& state) : state_{state} {
   }
   std::sort(layer_indices_.begin(), layer_indices_.end());
   if (layer_indices_.empty()) return;
+  if (model_.config_->model.decoder.ple_token_pad_id < 0)
+    throw std::runtime_error("PleState requires model.decoder.ple_token_pad_id");
 
   if (inputs.past_ple_conv_names.empty() || outputs.present_ple_token_names.empty() ||
       outputs.present_ple_conv_names.empty())
@@ -114,35 +116,31 @@ void PleState::Update() {
   if (!pasts_.empty()) graph_buffer_variant_ ^= 1;
 }
 
+void PleState::ValidateRewindTo(size_t index) const {
+  if (!layer_indices_.empty() && index != 0 && (!snapshot_valid_ || index != snapshot_position_))
+    throw std::runtime_error("PleState cannot rewind to position " + std::to_string(index) +
+                             " without a matching snapshot");
+}
+
 void PleState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (layer_indices_.empty()) return;
   if (index != 0) {
-    if (!snapshot_valid_ || index != snapshot_position_) {
-      throw std::runtime_error(
-          "PleState cannot rewind to position " + std::to_string(index) +
-          " without a matching snapshot");
-    }
     CopyStates(snapshot_, presents_);
-    if (std::getenv("ORTGENAI_MTP_DEBUG_STATE") != nullptr) {
-      auto& device = *model_.p_device_kvcache_;
-      device.Synchronize();
-      for (size_t state_index = 0; state_index < snapshot_.size(); ++state_index) {
-        auto expected_tensor = ByteWrapTensor(device, *snapshot_[state_index]);
-        auto actual_tensor = ByteWrapTensor(device, *presents_[state_index]);
-        const auto expected = expected_tensor.CopyDeviceToCpu();
-        const auto actual = actual_tensor.CopyDeviceToCpu();
-        if (!std::equal(expected.begin(), expected.end(), actual.begin())) {
-          throw std::runtime_error(
-              "PleState snapshot restore mismatch at state " +
-              std::to_string(state_index));
-        }
-      }
-    }
     return;
   }
   snapshot_valid_ = false;
   InitializeStates(pasts_);
   InitializeStates(presents_);
+  if (graph_buffer_variant_ != 0) {
+    for (size_t state_index = 0; state_index < pasts_.size(); ++state_index)
+      std::swap(pasts_[state_index], presents_[state_index]);
+  }
+  graph_buffer_variant_ = 0;
+  for (size_t state_index = 0; state_index < pasts_.size(); ++state_index) {
+    state_.inputs_[input_index_ + state_index] = pasts_[state_index].get();
+    state_.outputs_[output_index_ + state_index] = presents_[state_index].get();
+  }
 }
 
 void PleState::Snapshot(size_t position) {
@@ -155,14 +153,13 @@ void PleState::Snapshot(size_t position) {
           OrtValue::CreateTensor(allocator, token_shape_, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64));
       snapshot_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
     }
-
   }
   CopyStates(presents_, snapshot_);
   snapshot_position_ = position;
   snapshot_valid_ = true;
 }
 
-void PleState::CropToPosition(size_t position) {
+void PleState::ValidateCropPosition(size_t position) const {
   if (!IsWindowed()) {
     throw std::runtime_error("PleState::CropToPosition requires windowed convolution state");
   }
@@ -171,6 +168,11 @@ void PleState::CropToPosition(size_t position) {
   if (signed_slot < 0 || signed_slot >= state_window_) {
     throw std::runtime_error("PleState crop position is outside the retained state window");
   }
+}
+
+void PleState::CropToPosition(size_t position) {
+  ValidateCropPosition(position);
+  const int64_t signed_slot = static_cast<int64_t>(position) + state_window_ - forward_length_;
   const size_t slot = static_cast<size_t>(signed_slot);
   if (slot + 1 == static_cast<size_t>(state_window_)) return;
 
@@ -188,8 +190,7 @@ void PleState::CopyStates(
     std::vector<std::unique_ptr<OrtValue>>& destination) {
   auto& device = *model_.p_device_kvcache_;
   for (size_t index = 0; index < source.size(); ++index) {
-    ByteWrapTensor(device, *destination[index]).CopyFrom(
-        ByteWrapTensor(device, *source[index]));
+    ByteWrapTensor(device, *destination[index]).CopyFrom(ByteWrapTensor(device, *source[index]));
   }
 }
 

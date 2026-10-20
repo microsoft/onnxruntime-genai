@@ -37,6 +37,19 @@ IndexerCache::IndexerCache(State& state) : state_{state} {
   }
   std::sort(layer_indices_.begin(), layer_indices_.end());
   if (layer_indices_.empty()) return;
+  compress_ratio_ = model_.config_->model.decoder.indexer_compress_ratio;
+  if (model_.config_->model.decoder.state_groups) {
+    for (const auto& group : *model_.config_->model.decoder.state_groups) {
+      if (group.kind == Config::Model::Decoder::StateGroupKind::FixedIndexer &&
+          group.state_update && group.state_update->compress_ratio > 0) {
+        const size_t ratio = static_cast<size_t>(group.state_update->compress_ratio);
+        if (compress_ratio_ != 0 && compress_ratio_ != ratio)
+          throw std::runtime_error("IndexerCache compression metadata disagrees between decoder state groups");
+        compress_ratio_ = ratio;
+      }
+    }
+  }
+  if (compress_ratio_ == 0) compress_ratio_ = 4;  // Legacy dense Qwen3.8 cache contract.
   if (outputs.present_indexer_names.empty())
     throw std::runtime_error("IndexerCache: present indexer name template must be configured");
 
@@ -109,6 +122,9 @@ IndexerCache::IndexerCache(State& state) : state_{state} {
         model_.allocator_cpu_, std::array<int64_t, 1>{1}, Ort::TypeToTensorType<int32_t>);
   } else if (share_buffer_) {
     throw std::runtime_error("IndexerCache: shared caches require an int32 past_sequence_length input");
+  }
+  if (past_sequence_length_ && state_.params_->use_graph_capture) {
+    Log("warning", "Dense sparse-indexer execution runs eagerly because past_sequence_length is read on the host. Use paged execution for graph capture.");
   }
 }
 
@@ -194,15 +210,27 @@ void IndexerCache::Update(DeviceSpan<int32_t> beam_indices, int total_length, in
   first_update_ = false;
 }
 
-void IndexerCache::CommitAcceptedPrefix(size_t token_count) {
-  if (!HasStateUpdates() || token_count > state_update_length_) {
+void IndexerCache::ValidateAcceptedPrefix(size_t token_count) const {
+  if (!HasStateUpdates() || snapshot_rows_.empty() || token_count > state_update_length_) {
     throw std::runtime_error(
         "IndexerCache accepted-prefix commit exceeds captured state updates");
   }
+  const size_t representative_capacity = static_cast<size_t>(shape_[1]) / compress_ratio_;
+  for (size_t token = 0; token < token_count; ++token) {
+    const size_t position = snapshot_position_ + token;
+    const size_t row = position % compress_ratio_ == compress_ratio_ - 1
+                           ? position / compress_ratio_
+                           : representative_capacity + position % compress_ratio_;
+    if (row >= static_cast<size_t>(shape_[1]))
+      throw std::runtime_error("IndexerCache accepted-prefix row exceeds the cache capacity");
+  }
+}
+
+void IndexerCache::CommitAcceptedPrefix(size_t token_count) {
+  ValidateAcceptedPrefix(token_count);
   RewindTo(snapshot_position_);
   auto& device = *model_.p_device_kvcache_;
-  const size_t representative_capacity =
-      static_cast<size_t>(shape_[1]) / 4;
+  const size_t representative_capacity = static_cast<size_t>(shape_[1]) / compress_ratio_;
 
   for (size_t layer = 0; layer < layer_indices_.size(); ++layer) {
     auto cache = ByteWrapTensor(device, *empty_pasts_[layer]);
@@ -210,8 +238,8 @@ void IndexerCache::CommitAcceptedPrefix(size_t token_count) {
     for (size_t token = 0; token < token_count; ++token) {
       const size_t position = snapshot_position_ + token;
       const size_t row =
-          position % 4 == 3 ? position / 4
-                            : representative_capacity + position % 4;
+          position % compress_ratio_ == compress_ratio_ - 1 ? position / compress_ratio_
+                                                            : representative_capacity + position % compress_ratio_;
       if (row >= static_cast<size_t>(shape_[1])) {
         throw std::runtime_error(
             "IndexerCache state update contains invalid cache row " +
@@ -242,9 +270,11 @@ void IndexerCache::Snapshot(size_t position) {
 
   // Qwen's compressed indexer cache stores completed block representatives in the first quarter
   // and the current four raw keys in scratch rows immediately after that prefix.
-  const size_t representative_capacity = capacity / 4;
-  add_row(position / 4);
-  for (size_t row = 0; row < 4; ++row) {
+  const size_t representative_capacity = capacity / compress_ratio_;
+  for (size_t token = 0; token <= Config::Model::Decoder::MaxStateUpdateCapacity; ++token) {
+    add_row((position + token) / compress_ratio_);
+  }
+  for (size_t row = 0; row < compress_ratio_; ++row) {
     add_row(representative_capacity + row);
   }
   // Also preserve ordinary append positions for non-compressed/fallback layouts.
@@ -276,11 +306,25 @@ void IndexerCache::Snapshot(size_t position) {
   snapshot_position_ = position;
 }
 
+void IndexerCache::ValidateRewindTo(size_t index) const {
+  if (layer_indices_.empty()) return;
+  if (share_buffer_ && index > static_cast<size_t>(shape_[1]))
+    throw std::runtime_error("IndexerCache rewind exceeds the shared cache capacity");
+  if (index != 0 && (!share_buffer_ || snapshot_rows_.empty() || index != snapshot_position_))
+    throw std::runtime_error("IndexerCache can only rewind to zero or its saved snapshot position");
+}
+
 void IndexerCache::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   if (layer_indices_.empty()) return;
   if (share_buffer_) {
-    if (index > static_cast<size_t>(shape_[1]))
-      throw std::runtime_error("IndexerCache rewind exceeds the shared cache capacity");
+    if (index == 0) {
+      for (auto& cache : empty_pasts_)
+        ByteWrapTensor(*model_.p_device_kvcache_, *cache).Zero();
+      snapshot_rows_.clear();
+      snapshot_position_ = 0;
+      return;
+    }
     if (!snapshot_rows_.empty() && index == snapshot_position_) {
       auto& device = *model_.p_device_kvcache_;
       for (size_t layer = 0; layer < empty_pasts_.size(); ++layer) {
@@ -299,8 +343,6 @@ void IndexerCache::RewindTo(size_t index) {
     }
     return;
   }
-  if (index != 0)
-    throw std::runtime_error("IndexerCache only supports rewinding to zero");
   first_update_ = true;
   for (size_t cache_index = 0; cache_index < layer_indices_.size(); ++cache_index) {
     pasts_[cache_index].reset();

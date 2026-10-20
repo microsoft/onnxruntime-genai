@@ -26,6 +26,10 @@ for source formats whose packed weights require a format-specific operator.
 ## Loaders
 
 - `gguf.py` maps GGUF tensors and metadata to the common model structure.
+- `resolver.py` resolves URI model sources (e.g. `oci://`) to local paths by
+	scheme. Other inputs pass through unchanged.
+- `llmman.py` pulls `oci://` (CNCF ModelPack) sources through a running
+	`llmman serve` daemon, for `resolver.py`.
 - `base.py` defines the shared quantized-model IR and base loading,
 	unpacking, and repacking behavior.
 - `awq.py`, `gptq.py`, `quark.py`, `olive.py`, `modelopt.py`, and `quant_auto.py`
@@ -34,6 +38,15 @@ for source formats whose packed weights require a format-specific operator.
 	tied-embedding design.
 - `quant_model.py` selects the concrete quantized loader for the requested
 	quantization format.
+- `qwen3_8.py` loads native Qwen3.8 FP8/NVFP4 checkpoints. `engram.py`,
+	`vision.py`, and `mtp.py` own the corresponding component-loading helpers;
+	`qwen.py` preserves the existing MTP loader import paths.
+
+CUDA packing settings are loader inputs, not properties inferred from the
+export host GPU. Integer QMoE and NVFP4 have different `weights_prepacked`
+contracts: NVFP4 defaults to legacy N-packed storage, and only explicit mode
+`1` preserves the newer K-packed layout. Synthetic loader instances in tests
+must initialize `quant_attrs` just as normal loader construction does.
 
 New source formats should be implemented here and should expose the same model
 structure consumed by the builders, keeping source-specific logic out of the

@@ -23,7 +23,7 @@ TEST(ConfigTest, ParsesDeterministicCompute) {
   OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":false}}}})");
   EXPECT_EQ(config.model.decoder.session_options.use_deterministic_compute, false);
   EXPECT_THROW(OverlayConfig(config,
-                            R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":"true"}}}})"),
+                             R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":"true"}}}})"),
                std::exception);
 }
 
@@ -43,6 +43,68 @@ TEST(ConfigTest, ParsesSelectedLogitsInput) {
   OverlayConfig(config, R"({"model":{"decoder":{"inputs":{"logits_indices":"selected_rows"}}}})");
 
   EXPECT_EQ(config.model.decoder.inputs.logits_indices, "selected_rows");
+}
+
+TEST(ConfigTest, ParsesRotaryHistoryAndIndexerCompressionMetadata) {
+  Config config;
+  OverlayConfig(config, R"({"model":{
+    "decoder":{"hidden_size":16,"indexer_compress_ratio":8,"ple_token_pad_id":7,
+               "inputs":{"rotary_position_ids":"main_rotary_history"}},
+    "mtp":{"filename":"mtp.onnx","num_hidden_layers":1,"num_key_value_heads":1,"head_size":16,
+           "inputs":{"rotary_position_ids":"head_rotary_history"}}
+  }})");
+  EXPECT_EQ(config.model.decoder.inputs.rotary_position_ids, "main_rotary_history");
+  EXPECT_EQ(config.model.decoder.indexer_compress_ratio, 8);
+  EXPECT_EQ(config.model.decoder.ple_token_pad_id, 7);
+  auto head = CreateMtpDecoderConfig(config);
+  EXPECT_EQ(head->model.decoder.inputs.rotary_position_ids, "head_rotary_history");
+  EXPECT_EQ(head->model.decoder.indexer_compress_ratio, 8);
+}
+
+TEST(ConfigTest, RejectsInvalidPlePadIdsAndCompressionRatios) {
+  for (const auto* value : {"1.5", "-1", "1e100"}) {
+    Config config;
+    const std::string overlay = std::string{R"({"model":{"decoder":{"ple_token_pad_id":)"} + value + "}}}";
+    EXPECT_THROW(OverlayConfig(config, overlay), std::exception);
+  }
+  for (const auto* value : {"0", "-1", "1.5", "1e100"}) {
+    Config config;
+    const std::string overlay = std::string{R"({"model":{"decoder":{"indexer_compress_ratio":)"} + value + "}}}";
+    EXPECT_THROW(OverlayConfig(config, overlay), std::exception);
+  }
+}
+
+TEST(ConfigTest, EngramRequiresExplicitPaddingAndRetainsItsOwnProviders) {
+  const auto root = fs::path{MODEL_PATH "engine/dummy-decoder"};
+  EXPECT_THROW((Config{root, R"({"model":{"engram":{"filename":"engram.onnx"}}})"}), std::runtime_error);
+  EXPECT_THROW((Config{root, R"({"model":{"decoder":{"inputs":{"past_ple_token_names":"past.%d.ple_tokens"}}}})"}),
+               std::runtime_error);
+  Config config{root, R"({"model":{
+    "decoder":{"ple_token_pad_id":7},
+    "engram":{"filename":"engram.onnx","session_options":{"provider_options":[{"cuda":{}}]}}
+  }})"};
+  ASSERT_TRUE(config.model.engram.session_options);
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"cuda"}));
+}
+
+TEST(ConfigTest, EngramProviderOverridesAreAppliedAndUnknownProvidersFailExplicitly) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{"session_options":{"provider_options":[{"cpu":{}}]}}}})");
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"CPU"}));
+  OverlayConfig(config, R"({"search":{"max_length":8}})");
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"CPU"}));
+  auto unknown = std::make_unique<Config>(
+      fs::path{MODEL_PATH "engine/dummy-decoder"}, R"({"model":{
+        "type":"qwen4_exp_text",
+        "decoder":{"ple_token_pad_id":7},
+        "engram":{"filename":"engram.onnx","session_options":{"provider_options":[{"nonexistent_provider":{}}]}}
+      }})");
+  try {
+    CreateModel(GetOrtEnv(), std::move(unknown));
+    FAIL() << "Unknown Engram provider must not silently fall back to CPU";
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string{error.what()}.find("nonexistent_provider"), std::string::npos) << error.what();
+  }
 }
 
 TEST(ConfigTest, ParsesEngramPleTokenNames) {
@@ -122,6 +184,58 @@ TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
 
   ASSERT_TRUE(config.engine.dynamic_batching->num_blocks);
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
+}
+
+TEST(ConfigTest, Dflash2SnapshotsDefaultToOneAndAllowZeroOrLargerPools) {
+  Config defaults;
+  OverlayConfig(defaults, R"({"engine":{"dynamic_batching":{"num_blocks":32}}})");
+  ASSERT_TRUE(defaults.engine.dynamic_batching);
+  EXPECT_EQ(defaults.engine.dynamic_batching->dflash2_max_snapshots, 1u);
+
+  for (const size_t capacity : {size_t{0}, size_t{1}, size_t{3}, size_t{2147483647}}) {
+    Config config;
+    OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                              std::to_string(capacity) + "}}}");
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity);
+    OverlayConfig(config, R"({"runtime_profiles":[{
+      "id":"snapshot-pool",
+      "eligibility":{"minimum_total_device_memory_bytes":100},
+      "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                              std::to_string(capacity == 0 ? 3 : 0) + "}}}}]}");
+    ApplyRuntimeProfile(config, 99);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity);
+    ApplyRuntimeProfile(config, 100);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity == 0 ? 3u : 0u);
+  }
+}
+
+TEST(ConfigTest, Dflash2SnapshotLimitRejectsInvalidValuesTransactionally) {
+  for (const auto* value : {"-1", "1.5", "2147483648", "true", "\"3\"", "null"}) {
+    Config config;
+    OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":3}}})");
+    EXPECT_THROW(OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                                           std::string{value} + "}}}"),
+                 std::runtime_error);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, 3u);
+    EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+      "id":"invalid",
+      "eligibility":{"minimum_total_device_memory_bytes":0},
+      "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                                           std::string{value} + "}}}}]}"),
+                 std::runtime_error);
+    EXPECT_TRUE(config.runtime_profiles.empty());
+  }
+}
+
+TEST(ConfigTest, Dflash2SnapshotOnlyProfileRequiresDynamicBatchingEvenWhenDisabled) {
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"disabled",
+    "eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":0}}}
+  }]})");
+  EXPECT_THROW(ApplyRuntimeProfile(config, 0), std::runtime_error);
+  EXPECT_FALSE(config.engine.dynamic_batching);
 }
 
 TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
@@ -677,6 +791,96 @@ TEST(ConfigTest, RejectsMtpScaleBindings) {
     Config config;
     EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << json;
   }
+}
+
+template <typename PipelineModels>
+void ExpectPipelineOverlayMerged(const PipelineModels& pipeline) {
+  ASSERT_EQ(pipeline.size(), 3u);
+
+  const auto& untouched_model = pipeline[0];
+  EXPECT_EQ(untouched_model.model_id, "untouched_model");
+  EXPECT_EQ(untouched_model.filename, "untouched.onnx");
+  ASSERT_TRUE(untouched_model.session_options);
+  ASSERT_TRUE(untouched_model.session_options->log_id);
+  EXPECT_EQ(*untouched_model.session_options->log_id, "untouched");
+  EXPECT_FALSE(untouched_model.session_options->enable_profiling);
+
+  const auto& existing_model = pipeline[1];
+  EXPECT_EQ(existing_model.model_id, "existing_model");
+  EXPECT_EQ(existing_model.filename, "existing.onnx");
+  ASSERT_TRUE(existing_model.session_options);
+  ASSERT_TRUE(existing_model.session_options->log_id);
+  EXPECT_EQ(*existing_model.session_options->log_id, "original");
+  ASSERT_TRUE(existing_model.session_options->enable_profiling);
+  EXPECT_EQ(*existing_model.session_options->enable_profiling, "profile");
+  ASSERT_EQ(existing_model.session_options->provider_options.size(), 1u);
+  EXPECT_EQ(existing_model.session_options->provider_options[0].name, "CPU");
+
+  const auto& new_model = pipeline[2];
+  EXPECT_EQ(new_model.model_id, "new_model");
+  EXPECT_EQ(new_model.filename, "new.onnx");
+}
+
+TEST(ConfigTest, PipelineOverlayMergesByModelId) {
+  Config config;
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "pipeline": [{
+          "untouched_model": {
+            "filename": "untouched.onnx",
+            "session_options": {"log_id": "untouched"}
+          },
+          "existing_model": {
+            "filename": "existing.onnx",
+            "session_options": {
+              "log_id": "original",
+              "provider_options": [{"CPU": {}}]
+            }
+          }
+        }]
+      },
+      "vision": {
+        "pipeline": [{
+          "untouched_model": {
+            "filename": "untouched.onnx",
+            "session_options": {"log_id": "untouched"}
+          },
+          "existing_model": {
+            "filename": "existing.onnx",
+            "session_options": {
+              "log_id": "original",
+              "provider_options": [{"CPU": {}}]
+            }
+          }
+        }]
+      }
+    }
+  })");
+
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "pipeline": [{
+          "existing_model": {
+            "session_options": {"enable_profiling": "profile"}
+          },
+          "new_model": {"filename": "new.onnx"}
+        }]
+      },
+      "vision": {
+        "pipeline": [{
+          "existing_model": {
+            "session_options": {"enable_profiling": "profile"}
+          },
+          "new_model": {"filename": "new.onnx"}
+        }]
+      }
+    }
+  })");
+
+  ExpectPipelineOverlayMerged(config.model.decoder.pipeline);
+  ExpectPipelineOverlayMerged(config.model.vision.pipeline);
 }
 
 }  // namespace Generators::test

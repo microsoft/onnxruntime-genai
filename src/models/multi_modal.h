@@ -177,10 +177,18 @@ struct DecoderState : State {
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   void RewindTo(size_t index) override;
+  void ValidateRewindTo(size_t index) const override;
   void SnapshotState(size_t position) override;
+  OrtValue* GetRotaryPositionIds() override { return position_inputs_->GetRotaryPositionIds(); }
+  void SetRotaryPositionIds(OrtValue* positions) override { position_inputs_->SetRotaryPositionIds(positions); }
   bool HasCroppableRecurrentState() const override;
+  bool CropRequiresSnapshot() const override {
+    return (recurrent_state_ && recurrent_state_->CropRequiresSnapshot()) ||
+           (indexer_cache_ && indexer_cache_->HasStateUpdates());
+  }
   int64_t RecurrentStateWindow() const override;
   void CropToAccepted(size_t new_length, size_t recurrent_position) override;
+  void ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const override;
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
 
   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
@@ -206,10 +214,10 @@ struct DecoderState : State {
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
   std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
-  std::unique_ptr<PleState> ple_state_;                  // Model input (Qwen4-Exp PLE)
-  std::unique_ptr<IndexerCache> indexer_cache_;          // Model input (Qwen4-Exp QSA)
+  std::unique_ptr<PleState> ple_state_;                 // Model input (Qwen4-Exp PLE)
+  std::unique_ptr<IndexerCache> indexer_cache_;         // Model input (Qwen4-Exp QSA)
   std::unique_ptr<HiddenStatesOutputs> hidden_states_output_;
-  Logits logits_{*this};                                // Model output
+  Logits logits_{*this};  // Model output
 };
 
 struct MultiModalPipelineState : State {
@@ -223,10 +231,17 @@ struct MultiModalPipelineState : State {
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
   void RewindTo(size_t index) override;
+  void ValidateRewindTo(size_t index) const override;
   void SnapshotState(size_t position) override;
+  OrtValue* GetRotaryPositionIds() override { return decoder_state_->GetRotaryPositionIds(); }
+  void SetRotaryPositionIds(OrtValue* positions) override { decoder_state_->SetRotaryPositionIds(positions); }
   bool HasCroppableRecurrentState() const override;
+  bool CropRequiresSnapshot() const override {
+    return decoder_state_->CropRequiresSnapshot() || engram_state_ != nullptr;
+  }
   int64_t RecurrentStateWindow() const override;
   void CropToAccepted(size_t new_length, size_t recurrent_position) override;
+  void ValidateCropToAccepted(size_t new_length, size_t recurrent_position) const override;
 
   OrtValue* GetInput(const char* name) override;
 
