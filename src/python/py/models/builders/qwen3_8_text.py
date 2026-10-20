@@ -37,6 +37,10 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
         extra_options["exclude_embeds"] = not text_only
         extra_options.setdefault("filename", "model.onnx" if text_only else "text.onnx")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layer_types = [
+            "qwen_sparse_attention" if layer_type == "indexed_attention" else layer_type
+            for layer_type in self.layer_types
+        ]
         if not hasattr(self, "context_length_attrs"):
             self.context_length_attrs = {"state_window": 0, "state_window_dims": []}
         self.use_cpu_embedding_gather = False
