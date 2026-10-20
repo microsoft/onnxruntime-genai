@@ -3756,11 +3756,21 @@ class Model(PagedAttention):
         new_io_dtype = ir.DataType.FLOAT if self.layernorm_attrs["cast"]["use_fp32"] else self.io_dtype
         cast = old_io_dtype != new_io_dtype
 
+        q_norm_shape = (
+            ["num_tokens", self.q_size // self.head_size, self.head_size]
+            if self.use_paged_attention
+            else ["batch_size", "sequence_length * num_attention_heads", self.head_size]
+        )
+        k_norm_shape = (
+            ["num_tokens", self.kv_size // self.head_size, self.head_size]
+            if self.use_paged_attention
+            else ["batch_size", "sequence_length * num_key_value_heads", self.head_size]
+        )
         # Reshape Q MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
         q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/INT64/[0, -1, {self.head_size}]"]
         q_reshape_1_output = f"{q_reshape_1_name}/output_0"
-        self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length * num_attention_heads", self.head_size])
+        self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=q_norm_shape)
 
         # Make Q LayerNorm
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
@@ -3784,7 +3794,7 @@ class Model(PagedAttention):
         self.make_value(
             q_layernorm_outputs[0],
             dtype=new_io_dtype,
-            shape=["batch_size", "sequence_length * num_attention_heads", self.head_size],
+            shape=q_norm_shape,
         )
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD.
@@ -3809,7 +3819,7 @@ class Model(PagedAttention):
             k_reshape_1_name,
             k_reshape_1_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length * num_key_value_heads", self.head_size],
+            shape=k_norm_shape,
         )
 
         # Make K LayerNorm
@@ -3838,7 +3848,7 @@ class Model(PagedAttention):
         self.make_value(
             k_layernorm_outputs[0],
             dtype=new_io_dtype,
-            shape=["batch_size", "sequence_length * num_key_value_heads", self.head_size],
+            shape=k_norm_shape,
         )
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD.
