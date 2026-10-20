@@ -326,6 +326,46 @@ TEST_F(PagedKeyValueCacheTest, GlobalOnlyPrefillChunkReservesWholePrompt) {
   EXPECT_EQ(reservation.ReservedBlockCount(), 3u);
 }
 
+TEST_F(PagedKeyValueCacheTest, SharedReclaimablePrefixIsChargedOnceAcrossAdmissions) {
+  model_->config_->engine.dynamic_batching->num_blocks = 3;
+  model_->config_->engine.dynamic_batching->max_batch_size = 3;
+  model_->config_->engine.dynamic_batching->prefix_caching = true;
+  cache_ = MakePagedCache(model_);
+
+  const std::array<int32_t, 4> prefix{2, 3, 4, 5};
+  auto source = AddCommittedRequest(prefix);
+  cache_->SealCommittedBlocks(source.get(), prefix);
+  cache_->Remove(source);
+  const auto retained = cache_->Snapshot();
+  ASSERT_EQ(retained.free_blocks, 2u);
+  ASSERT_EQ(retained.blocks.size(), 1u);
+  EXPECT_EQ(retained.blocks.front().ref_count, 1u);
+
+  const std::array<int32_t, 5> prompt{2, 3, 4, 5, 6};
+  StepPlan plan;
+  std::array<std::shared_ptr<Request>, 3> pending;
+  for (size_t index = 0; index < pending.size(); ++index) {
+    pending[index] = CreateRequestWithPrompt(assign_target_, prompt);
+    auto entry = PlanEntry(pending[index], /*target_cache_slots=*/5,
+                           /*newly_admitted=*/true,
+                           /*whole_sequence_cache_slots=*/5);
+    auto match = cache_->MatchPrefix(prompt, prompt.size() - 1);
+    ASSERT_EQ(match.token_count, prefix.size());
+    entry.prefix_match =
+        std::make_shared<const PrefixCacheMatch>(std::move(match));
+    plan.requests.push_back(std::move(entry));
+  }
+
+  const auto result = cache_->PlanStepResources(plan);
+
+  ASSERT_TRUE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  ASSERT_EQ(plan.requests.size(), 2u);
+  EXPECT_EQ(plan.requests[0].request, pending[0]);
+  EXPECT_EQ(plan.requests[1].request, pending[1]);
+  EXPECT_TRUE(ValidateCacheInvariants(cache_->Snapshot()).empty());
+}
+
 TEST(PagedKeyValueCacheManifestTest, AllocatesOnlySparseLogicalLayersUsingDecoderBindings) {
   auto model = LoadSyntheticPagedModel();
   ASSERT_TRUE(model->config_->model.decoder.state_groups.has_value());
@@ -464,6 +504,122 @@ TEST(PagedKeyValueCacheManifestTest, RunsPrefillAndDecodeStepsWithAliasedScaleBu
   EXPECT_TRUE(request->IsTurnComplete());
   EXPECT_EQ(generated.size(), 4u);
   EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
+}
+
+// This executes the hybrid graph rather than an executor double. Two four-token target blocks are
+// enough for the retained four-token prefix and the private suffix of a five-token prompt. The
+// matching fixed-state checkpoint leases the retained block while planning; that protection must
+// not make the planner charge the already-resident block a second time.
+TEST(PagedKeyValueCacheManifestTest, HybridExactFitPrefixAdmissionMakesBoundedEngineProgress) {
+  const std::array<int32_t, 5> prompt{5, 9, 13, 7, 8};
+  const auto load_model = [](bool prefix_caching) {
+    auto config = CreateConfig(
+        GetOrtEnv(), MODEL_PATH "engine/synthetic-composite-exact-fit");
+    config->search.chunk_size = 4;
+    auto& batching = *config->engine.dynamic_batching;
+    batching.block_size = 4;
+    batching.num_blocks = 2;
+    batching.max_batch_size = 3;
+    batching.prefix_caching = prefix_caching;
+    batching.prefix_caching_explicitly_set = true;
+    return CreateModel(GetOrtEnv(), std::move(config));
+  };
+  const auto begin = [&](const std::shared_ptr<Engine>& engine) {
+    auto request = CreateEngineRequest(engine);
+    TurnOptions options;
+    options.min_generated_tokens = 1;
+    options.max_generated_tokens = 1;
+    request->BeginTurn(prompt, options);
+    return request;
+  };
+  const auto drain_one = [](Engine& engine, const std::shared_ptr<Request>& request) {
+    std::vector<int32_t> output;
+    std::array<EngineEvent, 8> events;
+    for (size_t attempt = 0; attempt < 8 && !request->IsTurnComplete(); ++attempt) {
+      const size_t count = engine.Run(events);
+      for (size_t index = 0; index < count; ++index) {
+        EXPECT_EQ(events[index].flags & EngineEventFlagFailed, 0u);
+        if (events[index].request == request &&
+            (events[index].flags & EngineEventFlagToken)) {
+          output.push_back(events[index].token);
+        }
+      }
+    }
+    EXPECT_TRUE(request->IsTurnComplete());
+    EXPECT_EQ(output.size(), 1u);
+    return output;
+  };
+
+  auto baseline_engine = std::make_shared<Engine>(load_model(false));
+  auto baseline_request = begin(baseline_engine);
+  const auto baseline = drain_one(*baseline_engine, baseline_request);
+
+  auto model = load_model(true);
+  auto dependencies = Engine::CreateDependencies(model);
+  auto cache = dependencies.cache_manager;
+  auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+  auto cold = begin(engine);
+  EXPECT_EQ(drain_one(*engine, cold), baseline);
+  cold->Close();
+  std::array<EngineEvent, 8> events;
+  EXPECT_EQ(engine->Run(events), 0u);
+
+  const auto retained = cache->Snapshot();
+  ASSERT_EQ(retained.total_blocks, 2u);
+  EXPECT_EQ(retained.free_blocks, 1u);
+  ASSERT_EQ(retained.blocks.size(), 1u);
+  EXPECT_TRUE(retained.blocks.front().indexed);
+  EXPECT_EQ(retained.blocks.front().ref_count, 1u);
+  EXPECT_TRUE(ValidateCacheInvariants(retained).empty());
+
+  // Keep substantially more fixed-checkpoint hits queued than the batch limit. Planning must not
+  // rebuild global leased ancestry for every deferred candidate, while the two-block pool still
+  // admits only the one request whose private suffix fits.
+  std::vector<std::shared_ptr<Request>> warm;
+  constexpr size_t kQueuedWarmRequests = 16;
+  warm.reserve(kQueuedWarmRequests);
+  for (size_t index = 0; index < kQueuedWarmRequests; ++index) {
+    warm.push_back(begin(engine));
+  }
+  const size_t first_count = engine->Run(events);
+  ASSERT_GT(first_count, 0u) << "An exact-fit prefix hit must not loop CapacityDeferred.";
+  EXPECT_TRUE(warm[0]->IsTurnComplete());
+  EXPECT_EQ(warm[0]->TurnCachedPromptTokens(), 4u);
+  std::vector<int32_t> first_output;
+  for (size_t index = 0; index < first_count; ++index) {
+    EXPECT_EQ(events[index].flags & EngineEventFlagFailed, 0u);
+    if (events[index].request == warm[0] &&
+        (events[index].flags & EngineEventFlagToken)) {
+      first_output.push_back(events[index].token);
+    }
+  }
+  EXPECT_EQ(first_output, baseline);
+
+  const auto occupied = cache->Snapshot();
+  EXPECT_EQ(occupied.free_blocks, 0u);
+  EXPECT_TRUE(ValidateCacheInvariants(occupied).empty());
+  const size_t deferred_count = engine->Run(events);
+  ASSERT_GT(deferred_count, 0u);
+  EXPECT_EQ(events[0].flags, EngineEventFlagCapacityBlocked);
+  EXPECT_EQ(events[0].error_code, EngineErrorCode::CapacityDeferred);
+  EXPECT_EQ(warm[1]->ProcessedSequenceLength(), 0);
+  EXPECT_EQ(warm[2]->ProcessedSequenceLength(), 0);
+
+  warm[0]->Close();
+  for (size_t request_index = 1; request_index < warm.size(); ++request_index) {
+    const auto output = drain_one(*engine, warm[request_index]);
+    EXPECT_EQ(output, baseline);
+    EXPECT_EQ(warm[request_index]->TurnCachedPromptTokens(), 4u);
+    EXPECT_TRUE(ValidateCacheInvariants(cache->Snapshot()).empty());
+    warm[request_index]->Close();
+  }
+  EXPECT_EQ(engine->Run(events), 0u);
+  const auto final = cache->Snapshot();
+  EXPECT_EQ(final.free_blocks, 1u);
+  ASSERT_EQ(final.blocks.size(), 1u);
+  EXPECT_TRUE(final.blocks.front().indexed);
+  EXPECT_EQ(final.blocks.front().ref_count, 1u);
+  EXPECT_TRUE(ValidateCacheInvariants(final).empty());
 }
 
 // The scale buffers are Engine-owned and updated in place, so both sides of the binding must point
