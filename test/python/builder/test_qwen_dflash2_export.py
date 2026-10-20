@@ -12,14 +12,13 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
-from safetensors.torch import save_file
-
 from models.builders.base import Model
 from models.builders.block_drafter import BlockDrafterBuilder
 from models.builders.dflash2 import DFlash2Builder
 from models.builders.mtp import MTPModel
 from models.builders.qwen import Qwen35MoEModel
 from models.quantization.quant_config import QuantConfig
+from safetensors.torch import save_file
 
 TARGET_LAYER_IDS = [1, 11, 21]
 AUX_LAYERS = [layer_id + 1 for layer_id in TARGET_LAYER_IDS]
