@@ -277,6 +277,149 @@ TEST(RecomputePreemptionTest, StalledResidentsCanProgressBeforePayingTheFullQuan
   EXPECT_TRUE(second->IsTurnComplete());
 }
 
+TEST(RecomputePreemptionTest, IneffectiveIdleVictimDoesNotHideAFeasibleSingleton) {
+  auto model = PreemptionModel(3, true, 0, 8, 1, 4);
+  model->config_->engine.dynamic_batching->prefix_caching = true;
+  auto test = MakeCompositeDoublesEngine(model, 5);
+  const std::array<int32_t, 4> prompt{2, 3, 4, 5};
+  auto idle = Queue(test.engine, prompt, 1);
+  ModelSteps(test, 1);
+  ASSERT_TRUE(idle->IsTurnComplete());
+  ASSERT_EQ(idle->ProcessedSequenceLength(), 4);
+  auto newer = Queue(test.engine, idle->TokensCpu(), 6);
+  ModelSteps(test, 1);
+  ASSERT_EQ(newer->TurnCachedPromptTokens(), 4u);
+  const std::array<int32_t, 4> other_prompt{10, 11, 12, 13};
+  auto older = Queue(test.engine, other_prompt, 4);
+  ModelSteps(test, 3);
+  ASSERT_EQ(newer->ProcessedSequenceLength(), 8);
+  ASSERT_EQ(newer->CurrentSequenceLength(), 9);
+  ASSERT_EQ(older->ProcessedSequenceLength(), 4);
+  ASSERT_EQ(older->CurrentSequenceLength(), 5);
+  ASSERT_EQ(test.cache->Snapshot().free_blocks, 0u);
+  ASSERT_EQ(idle->PreemptionCount() + newer->PreemptionCount() + older->PreemptionCount(), 0u);
+
+  const size_t generated = older->TurnGeneratedTokens();
+  const int decode_calls = test.executor->decode_calls;
+  std::array<EngineEvent, 8> events;
+  const size_t count = test.engine->Run(events);
+
+  EXPECT_EQ(test.executor->decode_calls, decode_calls + 1);
+  EXPECT_EQ(older->TurnGeneratedTokens(), generated + 1);
+  EXPECT_EQ(older->ProcessedSequenceLength(), 5);
+  EXPECT_EQ(newer->Status(), RequestStatus::Suspended);
+  EXPECT_EQ(newer->PreemptionCount(), 1u);
+  EXPECT_EQ(idle->PreemptionCount(), 0u);
+  EXPECT_TRUE(idle->IsTurnComplete());
+  EXPECT_TRUE(test.cache->IsResident(idle));
+  EXPECT_EQ(older->PreemptionCount(), 0u);
+  for (const auto& event : std::span{events}.first(count)) {
+    EXPECT_EQ(event.flags & (EngineEventFlagCapacityBlocked | EngineEventFlagFailed), 0u);
+  }
+  CheckState(test, std::array{idle, newer, older});
+}
+
+TEST(RecomputePreemptionTest, AlternativeVictimSetsPreserveJointSharedOwnerReclamation) {
+  auto model = PreemptionModel(3, true, 0, 1, 2, 4);
+  model->config_->engine.dynamic_batching->prefix_caching = true;
+  auto test = MakeCompositeDoublesEngine(model, 5);
+  const std::array<int32_t, 4> prompt{2, 3, 4, 5};
+  auto first_idle = Queue(test.engine, prompt, 1);
+  ModelSteps(test, 1);
+  auto shared_owner = Queue(test.engine, first_idle->TokensCpu(), 4);
+  ModelSteps(test, 4);
+  ASSERT_TRUE(shared_owner->IsTurnComplete());
+  ASSERT_EQ(shared_owner->ProcessedSequenceLength(), 8);
+  auto active = Queue(test.engine, shared_owner->TokensCpu(), 4);
+  ModelSteps(test, 2);
+  ASSERT_EQ(active->TurnCachedPromptTokens(), 8u);
+  ASSERT_EQ(test.cache->Snapshot().free_blocks, 0u);
+  const std::array<int32_t, 5> other_prompt{10, 11, 12, 13, 14};
+  auto waiting = Queue(test.engine, other_prompt, 1);
+
+  StepPlan shared_only;
+  shared_only.requests.push_back(Admission(waiting));
+  EXPECT_FALSE(test.cache->PlanStepAfterReleasing(shared_only, std::array{shared_owner}).executable);
+  StepPlan active_only;
+  active_only.requests.push_back(Admission(waiting));
+  EXPECT_FALSE(test.cache->PlanStepAfterReleasing(active_only, std::array{active}).executable);
+  StepPlan jointly;
+  jointly.requests.push_back(Admission(waiting));
+  ASSERT_TRUE(test.cache->PlanStepAfterReleasing(jointly, std::array{shared_owner, active}).executable);
+
+  const int decode_calls = test.executor->decode_calls;
+  std::array<EngineEvent, 8> events;
+  const size_t count = test.engine->Run(events);
+
+  EXPECT_EQ(test.executor->decode_calls, decode_calls + 1);
+  EXPECT_TRUE(waiting->IsTurnComplete());
+  EXPECT_EQ(waiting->TurnGeneratedTokens(), 1u);
+  EXPECT_EQ(first_idle->PreemptionCount(), 0u);
+  EXPECT_TRUE(test.cache->IsResident(first_idle));
+  EXPECT_EQ(shared_owner->PreemptionCount(), 1u);
+  EXPECT_TRUE(shared_owner->IsTurnComplete());
+  EXPECT_TRUE(shared_owner->NeedsCacheReplay());
+  EXPECT_EQ(active->PreemptionCount(), 1u);
+  EXPECT_EQ(active->Status(), RequestStatus::Suspended);
+  for (const auto& event : std::span{events}.first(count)) {
+    EXPECT_EQ(event.flags & (EngineEventFlagCapacityBlocked | EngineEventFlagFailed), 0u);
+  }
+  CheckState(test, std::array{first_idle, shared_owner, active, waiting});
+}
+
+struct CountingPreemptionProbeCache final : PagedCacheManager {
+  using PagedCacheManager::PagedCacheManager;
+
+  StepPlanningResult PlanStepAfterReleasing(
+      StepPlan& plan, std::span<const std::shared_ptr<Request>> requests) const override {
+    ++probe_calls;
+    largest_release_set = std::max(largest_release_set, requests.size());
+    return PagedCacheManager::PlanStepAfterReleasing(plan, requests);
+  }
+
+  mutable size_t probe_calls{};
+  mutable size_t largest_release_set{};
+};
+
+TEST(RecomputePreemptionTest, InfeasibleAlternativeSearchHasAResidentBoundedProbeCount) {
+  constexpr size_t kResidents = 4;
+  constexpr size_t kBlockSize = 16;
+  for (size_t limit : {1u, 2u, 3u}) {
+    SCOPED_TRACE(limit);
+    auto model = PreemptionModel(kResidents, true, 0, 1, limit, kBlockSize);
+    auto cache = std::make_shared<CountingPreemptionProbeCache>(model);
+    auto executor = std::make_unique<RecordingModelExecutor>(model, cache, 5);
+    auto* recording = executor.get();
+    auto engine = std::make_shared<Engine>(
+        model, EngineDependencies{cache, Scheduler::Create(model, cache), std::move(executor)});
+    CompositeDoublesEngine test{engine, cache.get(), recording};
+    std::vector<std::shared_ptr<Request>> residents;
+    for (size_t index = 0; index < kResidents; ++index) {
+      residents.push_back(Queue(engine));
+    }
+    std::array<EngineEvent, 8> events;
+    for (size_t step = 0; step < 2; ++step) {
+      ASSERT_EQ(engine->Run(events), kResidents);
+    }
+    ASSERT_EQ(cache->Snapshot().free_blocks, 0u);
+    ASSERT_EQ(cache->probe_calls, 0u);
+    const std::vector<int32_t> prompt((kResidents - 1) * kBlockSize + 1, 9);
+    auto waiting = Queue(engine, prompt, 1);
+
+    EXPECT_EQ(engine->Run(events), kResidents);
+
+    EXPECT_EQ(cache->probe_calls, kResidents * limit);
+    EXPECT_EQ(cache->largest_release_set, limit);
+    EXPECT_EQ(waiting->Status(), RequestStatus::Assigned);
+    for (const auto& request : residents) {
+      EXPECT_EQ(request->PreemptionCount(), 0u);
+      EXPECT_TRUE(cache->IsResident(request));
+    }
+    residents.push_back(waiting);
+    CheckState(test, residents);
+  }
+}
+
 TEST(RecomputePreemptionTest, NewArrivalsDoNotStarveASuspendedTurn) {
   auto test = MakeCompositeDoublesEngine(PreemptionModel(1, true, 0, 2), 5);
   auto victim = Queue(test.engine, kPrompt, 12);

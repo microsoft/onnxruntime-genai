@@ -2067,9 +2067,14 @@ The scheduler first builds the normal feasible plan. For omitted work, it probes
 beneficiary first without releasing anything. If ordering alone could run it, no KV is discarded.
 Otherwise it tries a bounded, deterministic victim set: idle Turn-complete residents first, then
 the most recently serviced eligible residents, breaking ties by latest residency order.
+If that preferred set cannot help, each eligible resident is tried as the first victim, growing
+the set in cyclic policy order up to `max_preemptions_per_step`. This tries every eligible singleton
+and retains cumulative shared-owner sets rather than discarding an individually ineffective owner.
+Per beneficiary, release probes are bounded by eligible resident count times the smaller of that
+count and the victim limit; the search does not enumerate all subsets.
 Active victims must have earned their decode quantum and must not still be rebuilding KV. If
 the entire batch is stalled, one committed generated token since admission is sufficient to permit
-a suspension before the full quantum, so finite KV capacity cannot prevent all progress.
+a suspension before the full quantum rather than requiring KV progress to earn eligibility.
 
 `CacheManager::PlanStepAfterReleasing()` dry-runs the current resource planner. It subtracts the
 proposed residency and reference counts without mutating physical ownership. A shared block is
@@ -2111,7 +2116,8 @@ CPU/disk nor shifts context or discards prompt tokens.
 
 `test/cpp/engine/recompute_preemption_tests.cpp` covers shared-reference planning, bounded replay,
 seeded RNG continuity, executed synthetic-graph output, aging, cancellation/continuation/rewind,
-idle residency, preflight allocation failure, and retryable/execution-capacity aborts.
+idle residency, alternative victim search and its probe bound, preflight allocation failure,
+and retryable/execution-capacity aborts.
 The disabled `RecomputePreemptionBenchmark` lives alongside the existing prefix-cache and scheduler
 microbenchmarks. It measures staggered concurrent serving under a fixed KV budget with production
 policy/cache/Search/event code and scripted logits. Model-step latency excludes event-drain-only

@@ -686,13 +686,16 @@ still returns its stored fatal error.
 RequestCreated/Unassigned
    | BeginTurn -> turn_id
    v
-Assigned/Active -- Token event -------------------------------+
-   |                                                          |
-   +-- Token | TurnFinished(reason) --> TurnComplete           |
-   |                                      |                   |
-   +-- CancelTurn(same turn_id) -----------+                   |
-                                          | BeginTurn          |
-                                          +-------------------+
+Assigned -- admission --> Active -- Token event --> Active
+
+Active -- internal preemption --> Suspended
+Active <-- automatic re-admission/replay (same turn_id) -- Suspended
+
+Assigned/Active/Suspended -- CancelTurn(same turn_id) --> TurnComplete
+Active -- Token | TurnFinished(reason) --> TurnComplete
+
+TurnComplete -- internal idle eviction --> TurnComplete/CacheReplay
+TurnComplete[/CacheReplay] -- BeginTurn -> next turn_id --> Assigned
 
 TurnComplete -- RewindToStartOfTurn(turn_id) --> TurnComplete/Replaying
                                                        |
@@ -702,6 +705,13 @@ TurnComplete -- RewindToStartOfTurn(turn_id) --> TurnComplete/Replaying
 
 Any state -- Close --> Closed
 ```
+
+`Suspended` is an internal state of an unfinished Turn. Automatic re-admission and cache replay
+resume that same Turn without `BeginTurn`; `BeginTurn` remains invalid until the Turn completes
+or is canceled and its terminal event is drained. Cancellation completes the same suspended Turn
+and preserves its cache-replay marker. Idle eviction never reopens a completed Turn: the Request
+remains `TurnComplete` with a cache-replay marker, and a later `BeginTurn` starts a new Turn.
+`CacheReplay` in the diagram denotes that marker, not a separate Request status.
 
 There is no Request `Continue` operation. Initial input, tool results, and later user input all use
 `BeginTurn`.

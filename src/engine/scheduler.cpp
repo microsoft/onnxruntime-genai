@@ -266,8 +266,8 @@ std::vector<std::shared_ptr<Request>> DynamicBatchScheduler::PlanPreemption(
       continue;
     }
 
-    std::vector<std::shared_ptr<Request>> victims;
-    victims.reserve(std::min(config.max_preemptions_per_step, residents.size()));
+    std::vector<std::shared_ptr<Request>> eligible_victims;
+    eligible_victims.reserve(residents.size());
     for (size_t index : victim_order) {
       const auto& victim = residents[index];
       if (victim.get() == beneficiary.request_id || !victim->CanSuspendForRecompute()) {
@@ -285,24 +285,34 @@ std::vector<std::shared_ptr<Request>> DynamicBatchScheduler::PlanPreemption(
           continue;
         }
       }
-      victims.push_back(victim);
-      probe = probe_builder.Build(plan, beneficiary);
-      probe.requests.erase(
-          std::remove_if(probe.requests.begin(), probe.requests.end(), [&](const RequestStepPlan& entry) {
-            return std::any_of(victims.begin(), victims.end(), [&](const auto& request) {
-              return request.get() == entry.request_id;
-            });
-          }),
-          probe.requests.end());
-      probe_result = cache_manager_->PlanStepAfterReleasing(probe, victims);
-      if (contains(probe, beneficiary.request_id) && !probe_result.unserviceable_request_id) {
-        plan = std::move(probe);
-        result = probe_result;
-        result.capacity_deferred = true;
-        return victims;
-      }
-      if (victims.size() >= config.max_preemptions_per_step) {
-        break;
+      eligible_victims.push_back(victim);
+    }
+    const size_t victim_limit =
+        std::min(config.max_preemptions_per_step, eligible_victims.size());
+    std::vector<std::shared_ptr<Request>> victims;
+    victims.reserve(victim_limit);
+    // A useless early owner must not hide a useful later victim. Rotate the policy order rather
+    // than enumerate subsets: at most eligible_victims.size() * victim_limit release probes.
+    // Keep cumulative sets because shared owners may reclaim capacity only when released jointly.
+    for (size_t first = 0; first < eligible_victims.size(); ++first) {
+      victims.clear();
+      for (size_t offset = 0; offset < victim_limit; ++offset) {
+        victims.push_back(eligible_victims[(first + offset) % eligible_victims.size()]);
+        probe = probe_builder.Build(plan, beneficiary);
+        probe.requests.erase(
+            std::remove_if(probe.requests.begin(), probe.requests.end(), [&](const RequestStepPlan& entry) {
+              return std::any_of(victims.begin(), victims.end(), [&](const auto& request) {
+                return request.get() == entry.request_id;
+              });
+            }),
+            probe.requests.end());
+        probe_result = cache_manager_->PlanStepAfterReleasing(probe, victims);
+        if (contains(probe, beneficiary.request_id) && !probe_result.unserviceable_request_id) {
+          plan = std::move(probe);
+          result = probe_result;
+          result.capacity_deferred = true;
+          return victims;
+        }
       }
     }
   }
