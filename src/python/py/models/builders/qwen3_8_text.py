@@ -37,10 +37,6 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
         extra_options["exclude_embeds"] = not text_only
         extra_options.setdefault("filename", "model.onnx" if text_only else "text.onnx")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.layer_types = [
-            "qwen_sparse_attention" if layer_type == "indexed_attention" else layer_type
-            for layer_type in self.layer_types
-        ]
         if not hasattr(self, "context_length_attrs"):
             self.context_length_attrs = {"state_window": 0, "state_window_dims": []}
         self.use_cpu_embedding_gather = False
@@ -90,21 +86,21 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
         qsa_layers = {
             layer_id: f"past.{layer_id}.indexer_key"
             for layer_id, layer_type in enumerate(self.layer_types)
-            if layer_type == "qwen_sparse_attention"
+            if layer_type == "indexed_attention"
         }
         qsa_outputs = {
             layer_id: f"present.{layer_id}.indexer_key"
             for layer_id, layer_type in enumerate(self.layer_types)
-            if layer_type == "qwen_sparse_attention"
+            if layer_type == "indexed_attention"
         }
         self.input_names["past_key_values.key"] = self.make_cache_names(
-            ["qwen_sparse_attention"], "past_key_values.key"
+            ["indexed_attention"], "past_key_values.key"
         )
         self.input_names["past_key_values.value"] = self.make_cache_names(
-            ["qwen_sparse_attention"], "past_key_values.value"
+            ["indexed_attention"], "past_key_values.value"
         )
-        self.output_names["present.key"] = self.make_cache_names(["qwen_sparse_attention"], "present.key")
-        self.output_names["present.value"] = self.make_cache_names(["qwen_sparse_attention"], "present.value")
+        self.output_names["present.key"] = self.make_cache_names(["indexed_attention"], "present.key")
+        self.output_names["present.value"] = self.make_cache_names(["indexed_attention"], "present.value")
         self.input_names["past.indexer"] = qsa_layers
         self.input_types["past.indexer"] = self.io_dtype
         self.output_names["present.indexer"] = qsa_outputs
@@ -269,7 +265,7 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
             return state_groups
 
         qsa_layers = [
-            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "qwen_sparse_attention"
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "indexed_attention"
         ]
         if qsa_layers:
             paged_group = next((group for group in state_groups if group["kind"] == "paged_kv"), None)

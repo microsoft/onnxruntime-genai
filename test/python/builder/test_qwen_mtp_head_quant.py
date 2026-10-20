@@ -911,6 +911,7 @@ def test_qwen4_exp_mtp_state_uses_residual_linear_shared_schema(monkeypatch):
 
     assert mtp.fc_embedding.weight is mtp_state["mtp.fc_embedding.weight"]
     assert mtp.fc_hidden.weight is mtp_state["mtp.fc_hidden.weight"]
+    assert mtp.layers[0].config.layer_types == ["indexed_attention"]
     assert mtp.layers[0].state == {"marker": mtp_state["mtp.layers.0.marker"]}
     assert mtp.hyper_connection_mixer.state == {
         "marker": mtp_state["mtp.hyper_connection_mixer.marker"]

@@ -135,7 +135,7 @@ def test_dense_cuda_indexer_cache_shapes_are_symbolic(monkeypatch):
         self.ep = ep
         self.use_paged_attention = False
         self.hidden_size = 16
-        self.layer_types = ["qwen_sparse_attention"]
+        self.layer_types = ["indexed_attention"]
         self.input_names = {"position_ids": "position_ids"}
         self.input_types = {}
         self.input_shapes = {}
@@ -180,7 +180,7 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
         self.hidden_rows_dim = "num_tokens"
         self.context_length = 128
         self.hidden_size = 16
-        self.layer_types = ["qwen_sparse_attention"]
+        self.layer_types = ["indexed_attention"]
         self.context_length_attrs = {"state_window": 0, "state_window_dims": [], "state_update_capacity": 0}
         self.input_names = {}
         self.input_types = {}
@@ -297,8 +297,7 @@ def test_qwen38_ple_conv_state_layout_tracks_packed_execution(monkeypatch):
 
 
 @pytest.mark.parametrize("linear_layers", [False, True])
-@pytest.mark.parametrize("sparse_layer_type", ["qwen_sparse_attention", "indexed_attention"])
-def test_paged_qwen38_resolves_compact_capacity_for_ple_and_indexer(linear_layers, sparse_layer_type):
+def test_paged_qwen38_resolves_compact_capacity_for_ple_and_indexer(linear_layers):
     config = LlamaConfig(
         hidden_size=8,
         intermediate_size=16,
@@ -309,7 +308,6 @@ def test_paged_qwen38_resolves_compact_capacity_for_ple_and_indexer(linear_layer
         vocab_size=32,
         max_position_embeddings=128,
         architectures=["Qwen4ExpForConditionalGeneration"],
-        layer_types=["linear_attention" if linear_layers else "qwen_sparse_attention", "qwen_sparse_attention"],
         hc_count=2,
         ple_layer_ids=[2],
         ple_embed_dim=8,
@@ -323,16 +321,15 @@ def test_paged_qwen38_resolves_compact_capacity_for_ple_and_indexer(linear_layer
         indexer_compress_ratio=4,
         output_gate_type=None,
     )
-    if sparse_layer_type == "indexed_attention":
-        # Older Transformers releases do not yet accept the canonical name in their config validator.
-        config.layer_types = ["linear_attention" if linear_layers else sparse_layer_type, sparse_layer_type]
+    # Set after construction so this fixture also works with older Transformers config validators.
+    config.layer_types = ["linear_attention" if linear_layers else "indexed_attention", "indexed_attention"]
     options = {"use_paged_attention": True, "text_only": True}
     options.update({"state_window": 8} if linear_layers else {"state_update_capacity": 7})
     model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", "", options)
 
     assert model.layer_types == [
-        "linear_attention" if linear_layers else "qwen_sparse_attention",
-        "qwen_sparse_attention",
+        "linear_attention" if linear_layers else "indexed_attention",
+        "indexed_attention",
     ]
     assert model.context_length_attrs["state_update_capacity"] == 7
     assert model.output_shapes["state_update.ple_tokens"] == ["batch_size", 7, 2]
@@ -944,7 +941,7 @@ def test_final_hidden_states_output_connects_to_post_mix(paged, pre_final):
     }
     model.hidden_size = 8
     model.num_layers = 1
-    model.layer_types = ["qwen_sparse_attention"]
+    model.layer_types = ["indexed_attention"]
     model.ple_attrs = {"layer_ids": set()}
     model.include_hidden_states = True
     model.exclude_lm_head = False
