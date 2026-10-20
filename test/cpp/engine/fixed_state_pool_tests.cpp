@@ -2920,7 +2920,7 @@ TEST(WebGpuFixedStatePoolTest, ConvolutionSharedMirrorsObserveEarlierDescriptorW
   }
 }
 
-TEST(WebGpuFixedStatePoolTest, GpuRunFailureDoesNotPublish) {
+TEST(WebGpuFixedStatePoolTest, DeferredGpuRunFailurePoisonsPoolBeforeNextReader) {
   GetOrtEnv();
   if (!HasWebGpuProvider()) {
     GTEST_SKIP() << "No native or registered WebGPU EP is available.";
@@ -2946,40 +2946,55 @@ TEST(WebGpuFixedStatePoolTest, GpuRunFailureDoesNotPublish) {
   }
   const auto handle = pool.HandleFor(kRequestA);
   const auto generation = pool.StateGeneration(handle);
-  const std::array<Request, 2> requests{Request{kRequestA, 6, 3}, Request{kRequestB, 4, 3}};
-  auto reservation = pool.Reserve(requests);
-  for (const auto& binding : reservation.Bindings()) {
-    fill(*binding.output, 99.0f);
-    if (binding.state_update_value) fill(*binding.state_update_value, 1.0f);
-    if (binding.state_update_capsule) fill(*binding.state_update_capsule, 1.0f);
+  {
+    const std::array<Request, 2> requests{Request{kRequestA, 6, 3}, Request{kRequestB, 4, 3}};
+    auto reservation = pool.Reserve(requests);
+    for (const auto& binding : reservation.Bindings()) {
+      fill(*binding.output, 99.0f);
+      if (binding.state_update_value) fill(*binding.state_update_value, 1.0f);
+      if (binding.state_update_capsule) fill(*binding.state_update_capsule, 1.0f);
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    reservation.CommitPrefix(1, 4, 2);
+    device.invalidate_second_gdn = true;
+    reservation.PrepareCommit();
+    EXPECT_EQ(reservation.State(), FixedStateReservationState::Prepared);
+    EXPECT_EQ(device.gdn_replay_count, 0u);
+    EXPECT_EQ(pool.StateGeneration(handle), generation);
+    EXPECT_EQ(pool.CommittedTokens(handle), 2u);
+    EXPECT_FALSE(pool.OwnsCommittedSlot(kRequestB));
+    reservation.PublishCommit();
+    EXPECT_EQ(reservation.State(), FixedStateReservationState::Committed);
+    EXPECT_EQ(pool.StateGeneration(handle), generation + 1);
+    EXPECT_EQ(pool.CommittedTokens(handle), 4u);
+    EXPECT_TRUE(pool.OwnsCommittedSlot(kRequestB));
+    EXPECT_EQ(pool.Snapshot().reserved_slots, 0u);
+    EXPECT_EQ(pool.Snapshot().committed_slots, 2u);
+    EXPECT_TRUE(pool.Snapshot().healthy);
   }
-  reservation.CommitPrefix(0, 4, 2);
-  reservation.CommitPrefix(1, 4, 2);
-  device.invalidate_second_gdn = true;
   try {
-    reservation.Commit();
+    pool.Reserve(One(kRequestA, 5));
     FAIL() << "Expected the second ORT recurrent replay run to fail.";
   } catch (const Ort::Exception& error) {
     EXPECT_NE(std::string(error.what()).find("kept_count must be in [1, capacity]"), std::string::npos)
         << error.what();
   }
   EXPECT_EQ(device.gdn_replay_count, 2u);
-  EXPECT_EQ(reservation.State(), FixedStateReservationState::Failed);
-  EXPECT_EQ(pool.StateGeneration(handle), generation);
-  EXPECT_EQ(pool.CommittedTokens(handle), 2u);
-  EXPECT_FALSE(pool.OwnsCommittedSlot(kRequestB));
+  EXPECT_EQ(pool.StateGeneration(handle), generation + 1);
+  EXPECT_EQ(pool.CommittedTokens(handle), 4u);
+  EXPECT_TRUE(pool.OwnsCommittedSlot(kRequestB));
   EXPECT_EQ(pool.Snapshot().reserved_slots, 0u);
-  EXPECT_EQ(pool.Snapshot().committed_slots, 1u);
+  EXPECT_EQ(pool.Snapshot().committed_slots, 2u);
   EXPECT_FALSE(pool.Snapshot().healthy);
-  // An inactive recurrent row was really written, but Commit never reached bank publication.
+  // One published row was really replayed; failure blocks readers of the incomplete state.
   ASSERT_FALSE(device.replayed_destination.empty());
   auto actual = device.replayed_destination.CopyDeviceToCpu();
   std::array<float, 8> replayed{};
   ASSERT_EQ(actual.size(), sizeof(replayed));
   std::memcpy(replayed.data(), actual.data(), actual.size());
   for (const auto value : replayed) EXPECT_FLOAT_EQ(value, 6.0f);
-  EXPECT_THROW(reservation.Commit(), std::logic_error);
-  EXPECT_THROW(pool.Reserve(One(kRequestA, 3)), std::logic_error);
+  EXPECT_THROW(pool.Reserve(One(kRequestA, 5)), std::logic_error);
+  EXPECT_THROW(pool.CapturePrefixCheckpoint(kRequestA), std::logic_error);
 }
 
 TEST_F(FixedStatePoolTest, CapacityOverflowLeavesPoolUntouched) {

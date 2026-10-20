@@ -1641,8 +1641,8 @@ they qualify the allocation, fill, ranged-copy, tensor-binding, and synchronizat
 semantics needed to publish state transactionally. CPU, CUDA, and WebGPU satisfy
 that contract. CPU and CUDA bind offset tensor views directly; WebGPU uses staging
 bindings. Compact partial-acceptance replay is device-native on CUDA. WebGPU's
-`ReplayStateUpdates`, called by `PrepareCommit`, processes descriptors in their supplied
-order: FP32 GatedDeltaNet descriptors with one shared backing owner for their
+`ReplayStateUpdates` processes descriptors in their supplied order: FP32
+GatedDeltaNet descriptors with one shared backing owner for their
 decay/key/delta capsule sections invoke ORT's `com.microsoft::GatedDeltaNetStateReplay`
 (version 1). Convolution descriptors and FP32 recurrent descriptors with separate
 capsule backing owners retain CPU staging, `ReplayStateUpdatesOnCpu`, and upload.
@@ -1666,8 +1666,12 @@ boundary; ORT failures propagate to the caller. The helper serializes its own ru
 but callers must order target-session work before replay and keep borrowed
 buffer owners alive through the call. There is one helper `Session::Run` and one
 checked-completion boundary per recurrent descriptor, with no batching or GPU
-convolution replay. It does not publish or flip a state bank; `PrepareCommit` failures
-leave active banks unchanged, fail the reservation, and mark the pool unhealthy.
+convolution replay. It does not publish or flip a state bank. `PrepareCommit` queues
+compact replay, and `PublishCommit` publishes bank metadata before the next pool
+operation flushes that replay ahead of all state readers. Preparation failures leave
+active banks unchanged and fail the reservation. A deferred replay error propagates
+from the next reader and marks the pool unhealthy, preventing further reservations
+or checkpoint capture from observing incomplete state.
 The source must be the incoming state before capsule capture, and capsule geometry
 and original capture capacity must match the producer; `kept_count` selects only
 the leading transitions, not a different capsule layout.
