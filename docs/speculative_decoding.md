@@ -291,8 +291,8 @@ Because the add-on is loaded dynamically, `kDeviceInterfaceVersion` in
 [src/smartptrs.h](../src/smartptrs.h) is exported as `GetInterfaceVersion` and checked in
 `OrtGlobals::LoadCudaInterface` *before* `GetInterface` is resolved, so a mismatched
 `onnxruntime-genai-cuda` package fails loudly instead of calling through a shifted vtable.
-The rotary-history/configuration interface changes use device-interface version
-12. Rebuild provider add-ons against the matching core; do not reuse a binary
+The rotary-history/configuration and device-span replay interface changes use device-interface version
+13. Rebuild provider add-ons against the matching core; do not reuse a binary
 compiled against the earlier layout.
 
 ### Hybrid (linear-attention) models

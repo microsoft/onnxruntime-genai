@@ -359,10 +359,8 @@ class Qwen35:
 
     def make_linear_attention_qkv_z_proj(self, layer_id, attention, root_input):
         basename = f"/model/layers.{layer_id}/linear_attn"
-        qkv_name = f"{basename}/qkv_proj/MatMul"
-        z_name = f"{basename}/z_proj/MatMul"
-        self.make_matmul(attention.in_proj_qkv, qkv_name, root_input)
-        self.make_matmul(attention.in_proj_z, z_name, root_input)
+        qkv_name = self.make_matmul(attention.in_proj_qkv, f"{basename}/qkv_proj/MatMul", root_input)
+        z_name = self.make_matmul(attention.in_proj_z, f"{basename}/z_proj/MatMul", root_input)
         return qkv_name, z_name
 
     def make_linear_attention_a_b_proj(self, layer_id, attention, root_input):
@@ -372,12 +370,12 @@ class Qwen35:
         b_name = f"{basename}/b_proj/MatMul"
         self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
         self.exclude_node_from_quantization(b_name)
-        self.make_matmul(attention.in_proj_b, b_name, root_input)
+        b_name = self.make_matmul(attention.in_proj_b, b_name, root_input)
 
         a_name = f"{basename}/a_proj/MatMul"
         self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
         self.exclude_node_from_quantization(a_name)
-        self.make_matmul(attention.in_proj_a, a_name, root_input)
+        a_name = self.make_matmul(attention.in_proj_a, a_name, root_input)
         return b_name, a_name
 
     def require_dense_linear_attention_gate(self, projection, name):
@@ -413,8 +411,7 @@ class Qwen35:
             epsilon=self.layernorm_attrs["epsilon"],
         )
 
-        o_name = f"{basename}/out_proj/MatMul"
-        self.make_matmul(attention.out_proj, o_name, f"{gated_norm_name}/output_0")
+        o_name = self.make_matmul(attention.out_proj, f"{basename}/out_proj/MatMul", f"{gated_norm_name}/output_0")
 
         self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
 

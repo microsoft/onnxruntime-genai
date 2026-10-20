@@ -16,7 +16,9 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   auto device = GetDeviceInterface(DeviceType::WEBGPU);
   auto session_provider_options = provider_options;
   // Batching config must be final here; overrides after provider registration cannot update this option.
+  // DFlash2 verification widens queries even at batch size one, which can otherwise select FP16 accumulation.
   const bool enable_fp32_accumulation =
+      (!config.model.dflash2.filename.empty() && !config.model.dflash2.is_dspark) ||
       (config.engine.dynamic_batching &&
        config.engine.dynamic_batching->max_batch_size > 1) ||
       (config.engine.static_batching &&

@@ -288,32 +288,28 @@ void RecurrentState::CropToPosition(size_t position) {
   std::vector<StateUpdateReplayDesc> descriptors;
   descriptors.reserve(layer_indices_.size());
   for (size_t layer = 0; layer < layer_indices_.size(); ++layer) {
-    auto capsule = WrapTensor<float>(device, *state_update_capsules_[layer]).Span();
+    auto capsule = ByteWrapTensor(device, *state_update_capsules_[layer]);
     const size_t channels = static_cast<size_t>(recurrent_shape_[1]);
     const size_t state_width = static_cast<size_t>(recurrent_shape_[2]);
     const size_t key_width = static_cast<size_t>(recurrent_shape_[3]);
     const size_t key_heads = state_update_key_head_counts_[layer];
+    const size_t decay_bytes = state_update_capacity_ * channels * sizeof(float);
+    const size_t key_bytes = state_update_capacity_ * key_heads * key_width * sizeof(float);
     descriptors.push_back(StateUpdateReplayDesc{
-        ByteWrapTensor(device, *snapshot_[layer * 2 + 1]).Span().data(),
-        ByteWrapTensor(device, *presents_[layer * 2 + 1]).Span().data(),
-        nullptr,
-        capsule.data(),
-        capsule.data() + state_update_capacity_ * channels,
-        capsule.data() + state_update_capacity_ * (channels + key_heads * key_width),
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
+        ByteWrapTensor(device, *snapshot_[layer * 2 + 1]),
+        ByteWrapTensor(device, *presents_[layer * 2 + 1]),
+        {},
+        capsule.subspan(0, decay_bytes),
+        capsule.subspan(decay_bytes, key_bytes),
+        capsule.subspan(decay_bytes + key_bytes,
+                        state_update_capacity_ * channels * state_width * sizeof(float)),
         static_cast<uint64_t>(channels),
         static_cast<uint64_t>(state_width),
         static_cast<uint64_t>(key_width),
         static_cast<uint64_t>(key_heads),
-        0,
-        0,
         static_cast<uint32_t>(state_update_capacity_),
         static_cast<uint32_t>(kept_count),
         static_cast<uint32_t>(sizeof(float)),
-        0,
         StateUpdateReplayKind::GatedDeltaNet,
     });
   }

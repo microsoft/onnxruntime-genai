@@ -163,11 +163,17 @@ class ScopedFailingCheckpointDevice final : public DeviceInterface {
     return inner_.CreateKeyValueCache(state);
   }
   void Synchronize() override { inner_.Synchronize(); }
+  void ReplayStateUpdates(const StateUpdateReplayDesc* descs, size_t count) override {
+    inner_.ReplayStateUpdates(descs, count);
+  }
   bool SupportsOffsetTensorViews() const override {
     return inner_.SupportsOffsetTensorViews();
   }
   bool SupportsTransactionalFixedState() const override {
     return inner_.SupportsTransactionalFixedState();
+  }
+  bool SupportsCompactStateReplay() const override {
+    return inner_.SupportsCompactStateReplay();
   }
 
  private:
