@@ -49,6 +49,11 @@ VideoChatFlash's direct small-input paths share
 The correctness tests also cover temporal replication, non-square shapes, empty
 video inputs, and padded LFM2 images.
 
+LFM2's RGB path keeps the three channels explicit for vectorization while
+preserving the generic-channel fallback and padded source strides. Keep the
+64/128/512-square old-loop, null-pool, and pooled benchmark controls when
+changing this kernel.
+
 Each image performance check also prints a caller-only control for the current
 implementation and checks its output against the independent pre-PR loops.
 Worker utility tests include inputs above the dispatch threshold, observe a
@@ -60,7 +65,9 @@ Nemotron streaming mel population retains its pre-pool frame/mel loops for both
 FP32 and FP16, including small chunks. Whisper opts out of preprocessing pool
 creation and uses the direct sequential tensor-copy path (its FP16 cast is
 unchanged). Other processors continue to use the shared pool. Nemotron checks
-cover empty, short, and larger chunks and ring-cache wrapping.
+cover empty, short, and larger chunks and ring-cache wrapping. The cache-update
+test checks literal frame values after each update, including a write across
+the ring boundary, and builds FP32/FP16 expectations independently of the cache.
 
 Set `ORTGENAI_PREPROCESSING_THREADS` before creating the first multimodal
 processor for a model to select 0 through 3 worker threads. `0` disables pool

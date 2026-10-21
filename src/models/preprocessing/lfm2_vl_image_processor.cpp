@@ -115,6 +115,19 @@ void WriteLfm2VlImagePatches(ThreadPool* thread_pool, const float* image, int64_
     for (auto row = first; row < last; ++row) {
       for (int64_t col = 0; col < patch_cols; ++col) {
         float* patch = destination + (row * patch_cols + col) * patch_dim;
+        if (channels == 3) {
+          // Explicit RGB channels let the compiler vectorize the interleaved stores.
+          const float* source = image + row * encoder_patch_size * padded_width + col * encoder_patch_size;
+          for (int64_t y = 0; y < encoder_patch_size; ++y) {
+            for (int64_t x = 0; x < encoder_patch_size; ++x) {
+              *patch++ = source[x];
+              *patch++ = source[channel_stride + x];
+              *patch++ = source[2 * channel_stride + x];
+            }
+            source += padded_width;
+          }
+          continue;
+        }
         for (int64_t y = 0; y < encoder_patch_size; ++y) {
           const int64_t source_row = row * encoder_patch_size + y;
           for (int64_t x = 0; x < encoder_patch_size; ++x) {

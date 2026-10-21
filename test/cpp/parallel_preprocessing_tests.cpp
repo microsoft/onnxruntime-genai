@@ -503,17 +503,29 @@ TEST(ParallelPreprocessingTests, NemotronCacheUpdateWrapsAcrossChunks) {
   std::vector<float> first = {1, 2, 3, 4, 10, 20, 30, 40, 100, 200, 300, 400};
   UpdateMelCache(cache, cache_pos, first, 4, mels);
   EXPECT_EQ(cache_pos, 0);
+  EXPECT_EQ(cache, (std::vector<float>{1, 10, 100, 2, 20, 200, 3, 30, 300, 4, 40, 400}));
   std::vector<float> second = {5, 6, 50, 60, 500, 600};
   UpdateMelCache(cache, cache_pos, second, 2, mels);
   EXPECT_EQ(cache_pos, 2);
+  EXPECT_EQ(cache, (std::vector<float>{5, 50, 500, 6, 60, 600, 3, 30, 300, 4, 40, 400}));
 
+  std::vector<float> third = {7, 8, 9, 70, 80, 90, 700, 800, 900};
+  UpdateMelCache(cache, cache_pos, third, 3, mels);
+  EXPECT_EQ(cache_pos, 1);
+  EXPECT_EQ(cache, (std::vector<float>{9, 90, 900, 6, 60, 600, 7, 70, 700, 8, 80, 800}));
+
+  const std::vector<float> expected = {
+      6, 60, 600, 7, 70, 700, 8, 80, 800, 9, 90, 900,
+      7, 70, 700, 8, 80, 800, 9, 90, 900};
   auto& allocator = Ort::Allocator::GetWithDefaultOptions();
-  auto output = OrtValue::CreateTensor<float>(
-      allocator, std::array<int64_t, 3>{1, 6, mels});
-  PopulateMelTensor(*output, cache, cache_pos, second, 2, mels);
-  const auto expected =
-      ScalarMel<float>(cache, cache_pos, second, 2, mels, [](float value) { return value; });
-  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), output->GetTensorData<float>()));
+  auto fp32 = OrtValue::CreateTensor<float>(allocator, std::array<int64_t, 3>{1, 7, mels});
+  PopulateMelTensor(*fp32, cache, cache_pos, third, 3, mels);
+  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), fp32->GetTensorData<float>()));
+  auto fp16 = OrtValue::CreateTensor<Ort::Float16_t>(allocator, std::array<int64_t, 3>{1, 7, mels});
+  PopulateMelTensor(*fp16, cache, cache_pos, third, 3, mels);
+  for (size_t i = 0; i < expected.size(); ++i)
+    EXPECT_EQ(fp16->GetTensorData<Ort::Float16_t>()[i],
+              Ort::Float16_t{FastFloat32ToFloat16(expected[i])});
 }
 
 }  // namespace
