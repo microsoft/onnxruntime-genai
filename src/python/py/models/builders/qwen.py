@@ -13,7 +13,6 @@ import os
 import numpy as np
 import onnx_ir as ir
 import torch
-from transformers import Qwen2ForCausalLM
 
 from .base import Model
 from .mtp import MTPModel
@@ -105,8 +104,10 @@ class VideoChatFlashQwenModel(QwenModel):
     def load_weights(self, input_path):
         # Load the standard Qwen2 backbone without importing the checkpoint's
         # custom video modeling code and its optional dependencies.
+        model_class = self.resolve_transformers_class("Qwen2ForCausalLM")
+
         extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
-        return Qwen2ForCausalLM.from_pretrained(
+        return model_class.from_pretrained(
             self.model_name_or_path,
             token=self.hf_token,
             **extra_kwargs,
@@ -114,10 +115,19 @@ class VideoChatFlashQwenModel(QwenModel):
 
 
 class Qwen35TextModel(Model):
-    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep):
+    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep, io_dtype):
         uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
-        if uses_gated_delta_net and ep != "cuda":
-            raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
+        if uses_gated_delta_net and ep not in ("cuda", "webgpu"):
+            raise ValueError("GatedDeltaNet exports require the CUDA or WebGPU execution provider")
+        if uses_gated_delta_net and ep == "webgpu":
+            supported_dtypes = (
+                (ir.DataType.FLOAT16,) if use_paged_attention else (ir.DataType.FLOAT16, ir.DataType.FLOAT)
+            )
+            if io_dtype not in supported_dtypes:
+                raise ValueError(
+                    "GatedDeltaNet exports on WebGPU require FP16 for paged attention "
+                    "or FP16/FP32 for non-paged attention"
+                )
         if uses_gated_delta_net and state_window:
             raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
 
@@ -155,6 +165,7 @@ class Qwen35TextModel(Model):
             self.linear_attn_op,
             self.context_length_attrs["state_window"],
             self.ep,
+            self.io_dtype,
         )
 
         if self.use_paged_attention:
@@ -542,23 +553,21 @@ class Qwen35TextModel(Model):
         """
         basename = f"/model/layers.{layer_id}/linear_attn"
 
-        qkv_name = f"{basename}/qkv_proj/MatMul"
-        self.make_matmul(attention.in_proj_qkv, qkv_name, root_input)
+        qkv_name = self.make_matmul(attention.in_proj_qkv, f"{basename}/qkv_proj/MatMul", root_input)
 
-        z_name = f"{basename}/z_proj/MatMul"
-        self.make_matmul(attention.in_proj_z, z_name, root_input)
+        z_name = self.make_matmul(attention.in_proj_z, f"{basename}/z_proj/MatMul", root_input)
 
         # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
         # ~0.1% of the model, so they stay dense regardless of which loader supplied them.
         b_name = f"{basename}/b_proj/MatMul"
         self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
         self.exclude_node_from_quantization(b_name)
-        self.make_matmul(attention.in_proj_b, b_name, root_input)
+        b_name = self.make_matmul(attention.in_proj_b, b_name, root_input)
 
         a_name = f"{basename}/a_proj/MatMul"
         self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
         self.exclude_node_from_quantization(a_name)
-        self.make_matmul(attention.in_proj_a, a_name, root_input)
+        a_name = self.make_matmul(attention.in_proj_a, a_name, root_input)
 
         conv_input = f"{qkv_name}/output_0"
         if not self.use_paged_attention:
@@ -682,8 +691,7 @@ class Qwen35TextModel(Model):
             epsilon=self.layernorm_attrs["epsilon"],
         )
 
-        o_name = f"{basename}/out_proj/MatMul"
-        self.make_matmul(attention.out_proj, o_name, f"{gated_norm_name}/output_0")
+        o_name = self.make_matmul(attention.out_proj, f"{basename}/out_proj/MatMul", f"{gated_norm_name}/output_0")
 
         self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
 
@@ -944,6 +952,11 @@ class Qwen35MoEModel(MTPModel):
 
         if self.mtp_attrs["build"] and extra_options.get("exclude_mtp", False):
             print("Skipping the MTP head: exclude_mtp is set.")
+            self.mtp_attrs["build"] = False
+
+        quant_method = getattr(config, "quantization_config", {}).get("quant_method", "")
+        if self.mtp_attrs["build"] and quant_method == "quark":
+            print("Skipping the MTP head: Quark pre-quantized checkpoints do not include MTP weights.")
             self.mtp_attrs["build"] = False
 
         if not self.mtp_attrs["build"]:
@@ -1235,8 +1248,12 @@ class Qwen35MoEModel(MTPModel):
         )
         drafter_quant_config = extra_options.get("_drafter_quant_config")
         drafter_io_dtype = (
-            drafter_quant_config.to_onnx_dtypes()[0] if drafter_quant_config is not None else ir.DataType.BFLOAT16
+            drafter_quant_config.to_onnx_dtypes()[0]
+            if drafter_quant_config is not None
+            else io_dtype if self.decoder.ep == "webgpu" else ir.DataType.BFLOAT16
         )
+        if self.decoder.ep == "webgpu" and drafter_io_dtype != ir.DataType.FLOAT16:
+            raise ValueError("WebGPU DFlash2 requires FP16 body activations and KV caches.")
 
         num_draft_tokens = None
         if "dflash2_num_draft_tokens" in extra_options:
@@ -1303,6 +1320,8 @@ class Qwen35MoEModel(MTPModel):
             lm_head_quant=self.block_drafter_lm_head_quant(),
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
+            include_attention_metadata=True,
+            ep=self.decoder.ep,
             compute_dtype=self.dflash2_attrs["compute_dtype"],
             fuse_qkv=self.dflash2_attrs["fuse_qkv"],
         )
@@ -1452,6 +1471,11 @@ class Qwen35MoEModel(MTPModel):
             raise ValueError("dspark_path and dflash2_path are mutually exclusive.")
         if not self.decoder.use_paged_attention:
             raise ValueError("dspark_path requires use_paged_attention=true.")
+        if self.decoder.ep == "webgpu":
+            raise ValueError(
+                "dspark_path is not supported on WebGPU: the DSpark drafter requires "
+                "BF16 activations and KV caches, but WebGPU PagedAttention supports only FP16."
+            )
 
         num_draft_tokens = None
         if "dspark_num_draft_tokens" in extra_options:
@@ -1503,6 +1527,7 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
+            include_attention_metadata=True,
             embed_quant=self.block_drafter_embed_quant(),
             lm_head_quant=self.block_drafter_lm_head_quant(),
         )

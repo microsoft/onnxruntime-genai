@@ -29,6 +29,8 @@
 
 namespace Generators {
 
+static_assert(std::is_trivially_copyable_v<cuda::StateUpdateReplayDescGpu>);
+
 GenaiInterface* gp_genai{};
 Ort::Allocator* ort_allocator_{};
 const char* device_label = "cuda";
@@ -828,22 +830,48 @@ struct CudaInterfaceImplBase : DeviceInterface {
     }
     std::scoped_lock lock{state_update_replay_mutex_};
     cudaStream_t stream = GetStream();
+    ordered_replay_descriptors_.resize(count);
+    for (size_t index = 0; index < count; ++index) {
+      const auto& source = descriptors[index];
+      auto& destination = ordered_replay_descriptors_[index];
+      destination = cuda::StateUpdateReplayDescGpu{
+          source.source_state.Span().data(),
+          source.destination_state.Span().data(),
+          source.value.empty() ? nullptr : source.value.Span().data(),
+          source.decay.empty()
+              ? nullptr
+              : reinterpret_cast<const float*>(source.decay.Span().data()),
+          source.key.empty()
+              ? nullptr
+              : reinterpret_cast<const float*>(source.key.Span().data()),
+          source.delta.empty()
+              ? nullptr
+              : reinterpret_cast<const float*>(source.delta.Span().data()),
+          source.channel_count,
+          source.state_width,
+          source.key_width,
+          source.key_head_count,
+          source.capacity,
+          source.kept_count,
+          source.element_size,
+          static_cast<uint32_t>(source.kind),
+      };
+    }
     if (state_update_replay_capacity_ < count) {
       // An earlier replay launched without waiting may still read the buffer being replaced.
       if (state_update_replay_descriptors_) CUDA_CHECK(cudaStreamSynchronize(stream));
-      state_update_replay_descriptors_ = CudaMallocArray<StateUpdateReplayDesc>(count);
+      state_update_replay_descriptors_ = CudaMallocArray<cuda::StateUpdateReplayDescGpu>(count);
       state_update_replay_capacity_ = count;
     }
     // Gated-delta-net descriptors the fast kernel can take go first; the rest keep the generic one.
-    const auto fast = [](const StateUpdateReplayDesc& d) {
-      return d.kind == StateUpdateReplayKind::GatedDeltaNet && d.element_size == sizeof(float) &&
+    const auto fast = [](const cuda::StateUpdateReplayDescGpu& d) {
+      return d.kind == static_cast<uint32_t>(StateUpdateReplayKind::GatedDeltaNet) && d.element_size == sizeof(float) &&
              d.kept_count <= static_cast<uint32_t>(cuda::kMaxFastReplayTransitions) &&
              d.key_width % 4 == 0 && d.key_width <= static_cast<uint64_t>(cuda::kMaxFastReplayKeyWidth) &&
              d.channel_count * d.state_width <= static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
              (reinterpret_cast<uintptr_t>(d.source_state) & 0xF) == 0 &&
              (reinterpret_cast<uintptr_t>(d.destination_state) & 0xF) == 0;
     };
-    ordered_replay_descriptors_.assign(descriptors, descriptors + count);
     const auto generic_begin = std::stable_partition(
         ordered_replay_descriptors_.begin(), ordered_replay_descriptors_.end(), fast);
     const int fast_count = static_cast<int>(generic_begin - ordered_replay_descriptors_.begin());
@@ -856,7 +884,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
     // and the device buffer is only reused behind this launch on the same stream. Nothing here waits
     // for the device.
     const auto* bytes = reinterpret_cast<const uint8_t*>(ordered_replay_descriptors_.data());
-    const size_t total = count * sizeof(StateUpdateReplayDesc);
+    const size_t total = count * sizeof(cuda::StateUpdateReplayDescGpu);
     for (size_t offset = 0; offset < total; offset += cuda::kMaxStoreBytes) {
       cuda::LaunchStoreBytes(reinterpret_cast<uint8_t*>(state_update_replay_descriptors_.get()) + offset,
                              bytes + offset, std::min(cuda::kMaxStoreBytes, total - offset), stream);
@@ -979,13 +1007,22 @@ struct CudaInterfaceImplBase : DeviceInterface {
   cuda_host_unique_ptr<float> topk_scores_host_;     // pinned host buffer for the top-k score copy
   size_t topk_host_count_{0};
   std::mutex state_update_replay_mutex_;
-  cuda_unique_ptr<StateUpdateReplayDesc> state_update_replay_descriptors_;
+  cuda_unique_ptr<cuda::StateUpdateReplayDescGpu> state_update_replay_descriptors_;
   size_t state_update_replay_capacity_{0};
-  std::vector<StateUpdateReplayDesc> ordered_replay_descriptors_;  // host scratch, fast kernel first
+  std::vector<cuda::StateUpdateReplayDescGpu> ordered_replay_descriptors_;  // host scratch, fast kernel first
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::CUDA; }
+  std::optional<bool> GetIsIntegrated(std::string& error) override {
+    int integrated{};
+    const auto result = cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, 0);
+    if (result != cudaSuccess) {
+      error = cudaGetErrorString(result);
+      return std::nullopt;
+    }
+    return integrated != 0;
+  }
   int GetDeviceId(const ProviderOptions*) override {
     int device_id{};
     CUDA_CHECK(cudaGetDevice(&device_id));
@@ -996,6 +1033,7 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
   bool RecyclesHostMirrorsAfterUpload(size_t bytes) const override {
     return PinnedHostPool::Pooled(bytes);
   }
+  bool SupportsCompactStateReplay() const override { return true; }
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& search,
                                    int max_length) const override {

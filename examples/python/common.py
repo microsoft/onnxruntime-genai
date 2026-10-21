@@ -129,7 +129,24 @@ def get_config(
         search_options = {}
     if ep_options is None:
         ep_options = {}
+    # Match the generator's limits before providers use these values for model profiles.
+    max_length = search_options.get("max_length")
+    if max_length is not None and max_length <= 0:
+        raise ValueError("max_length must be greater than 0")
+    for name in ("batch_size", "num_beams"):
+        value = search_options.get(name, 1)
+        if not 1 <= value <= 32:
+            raise ValueError(f"{name} ({value}) must be in [1, 32]")
+
     config = og.Config(path)
+    if max_length is not None:
+        # Config has no context_length getter. Check before constructing the model.
+        with open(os.path.join(path, "genai_config.json"), encoding="utf-8") as config_file:
+            context_length = json.load(config_file)["model"]["context_length"]
+        if max_length > context_length:
+            raise ValueError(
+                f"max_length ({max_length}) cannot be greater than model context_length ({context_length})"
+            )
     if not ep_path and ep != "follow_config":
         config.clear_providers()
         model_provider_overlay = get_model_session_options_overlay(path, ep, ep_options)
@@ -183,7 +200,7 @@ def get_search_options(args: argparse.Namespace):
         "top_p",
     ]
     for name in names:
-        if name in args:
+        if name in args and getattr(args, name) is not None:
             search_options[name] = getattr(args, name)
 
     # In case the user doesn't provide the batch size, set it to 1

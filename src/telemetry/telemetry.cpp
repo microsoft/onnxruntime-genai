@@ -7,9 +7,11 @@
 #include "telemetry_environment.h"
 #include "telemetry_redaction.h"
 #include "telemetry_sampling.h"
+#include "telemetry-windows-shutdown.h"
 #include "../logging.h"
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
+#include "DebugEvents.hpp"
 #include "Enums.hpp"
 #include "ILogConfiguration.hpp"
 #include "LogManager.hpp"
@@ -110,9 +112,13 @@ bool PrepareSampledEvent(MAT::EventProperties& event, std::string_view app_sessi
 
 #if defined(__linux__) && !defined(__ANDROID__)
 std::string GetCertificateAuthorityBundlePath() {
-  if (const char* ssl_cert_file = std::getenv("SSL_CERT_FILE");
-      ssl_cert_file != nullptr && access(ssl_cert_file, R_OK) == 0) {
-    return ssl_cert_file;
+  const auto ssl_cert_file = GetEnv("SSL_CERT_FILE", kMaxTelemetryInputBytes);
+  if (!ssl_cert_file) {
+    if (g_log.enabled && g_log.warning) {
+      Log("warning", "Ignoring oversized or unstable telemetry SSL_CERT_FILE");
+    }
+  } else if (!ssl_cert_file->empty() && access(ssl_cert_file->c_str(), R_OK) == 0) {
+    return *ssl_cert_file;
   }
 
   constexpr const char* kCertificateAuthorityBundlePaths[] = {
@@ -174,12 +180,38 @@ struct GenAiTelemetry::Impl {};
 // Guard against access after static destruction
 static std::atomic<bool> s_instance_destroyed{false};
 
+GenAiTelemetry::GenAiTelemetry() {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  // Initialize the SDK diagnostic mutex before this singleton's destructor is registered.
+  // An empty source starts no uploader and sends no telemetry, including when fully suppressed.
+  try {
+    MAT::DebugEventSource source;
+    source.DispatchEvent({});
+  } catch (const std::exception& error) {
+    // Retrying after construction could register the SDK mutex after its owner.
+    telemetry_disabled_.store(true);
+    enabled_.store(false);
+    if (g_log.enabled && g_log.warning) {
+      try {
+        Log("warning", "Telemetry disabled because SDK lifetime initialization failed: %s", error.what());
+      } catch (const std::exception&) {
+        std::fputs("WARNING: telemetry SDK lifetime initialization and diagnostic logging failed\n", stderr);
+      }
+    }
+  }
+#endif
+}
+
 GenAiTelemetry& GenAiTelemetry::Instance() {
   static GenAiTelemetry instance;
   return instance;
 }
 
 bool GenAiTelemetry::IsDestroyed() {
+#if defined(_WIN32)
+  // OgaShutdown must not construct the singleton for the first time during DLL process detach.
+  if (TelemetryInternal::IsDllShutdownInProgress()) return true;
+#endif
   return s_instance_destroyed.load();
 }
 
@@ -191,9 +223,7 @@ void GenAiTelemetry::Initialize() {
   // Full suppression is process-wide and irreversible: never create the uploader, emit an event, or
   // persist a device id. Latching also covers later GenAI reinitialization after an environment change.
   if (telemetry_disabled_.load() ||
-      TelemetryInternal::IsRunningInCI() ||
-      TelemetryInternal::IsRunningUnitTests() ||
-      TelemetryInternal::IsTelemetryDisabledByEnvironment()) {
+      TelemetryInternal::ShouldSuppressTelemetryFromEnvironment()) {
     telemetry_disabled_.store(true);
     enabled_.store(false);
     return;
@@ -237,7 +267,14 @@ void GenAiTelemetry::Initialize() {
     // Ingestion token: an official build's override from the generated header
     // (ORTGENAI_TELEMETRY_TENANT_TOKEN) if present, otherwise the encoded in-repo default.
 #if defined(ORTGENAI_TELEMETRY_TENANT_TOKEN)
-    const std::string ikey = ORTGENAI_TELEMETRY_TENANT_TOKEN;
+    constexpr std::string_view configured_token = ORTGENAI_TELEMETRY_TENANT_TOKEN;
+    if (configured_token.size() > kMaxTelemetryStringLength) {
+      if (g_log.enabled && g_log.warning) {
+        Log("warning", "Telemetry ingestion token exceeds its byte limit");
+      }
+      return;
+    }
+    const std::string ikey{configured_token};
 #else
     const std::string ikey = GetToken();
 #endif
@@ -268,8 +305,8 @@ void GenAiTelemetry::Initialize() {
     }
 #endif
 
-    // Do not block process teardown to upload: persisted events are sent on the next
-    // run. 0 keeps Shutdown non-blocking and avoids adding exit latency to host apps.
+    // Do not wait for delivery at exit: persisted events can be sent on a later run.
+    // Normal SDK cleanup still joins workers; Windows process termination skips that cleanup.
     config[MAT::CFG_INT_MAX_TEARDOWN_TIME] = 0;
 
 #if !defined(__ANDROID__)
@@ -318,7 +355,7 @@ void GenAiTelemetry::Initialize() {
     // per-event sessionId / generatorId counters globally unique.
     if (app_session_guid_.empty()) app_session_guid_ = GenerateGuidV4();
     pending_impl->logger->SetContext("AppSessionGuid", app_session_guid_);
-    pending_impl->logger->SetContext("LibraryVersion", ORTGENAI_VERSION);
+    pending_impl->logger->SetContext("LibraryVersion", BoundTelemetryString(ORTGENAI_VERSION));
 
     const auto& device = GetDeviceInfo();
     // Desktop builds override the 1DS SDK's device id with a privacy-preserving generated-id hash.
@@ -338,6 +375,11 @@ void GenAiTelemetry::Initialize() {
 
 void GenAiTelemetry::Shutdown() {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
+#if defined(_WIN32)
+  // ExitProcess has terminated other threads, possibly while they owned this mutex or an SDK lock.
+  // Explicit Shutdown and FreeLibrary with a live process still drain and release the uploader.
+  if (TelemetryInternal::IsDllShutdownInProgress()) return;
+#endif
   std::unique_lock<std::shared_mutex> lock(mutex_);
   if (!initialized_.load()) return;
 
@@ -368,6 +410,14 @@ void GenAiTelemetry::Shutdown() {
 }
 GenAiTelemetry::~GenAiTelemetry() {
   s_instance_destroyed.store(true);
+#if defined(_WIN32) && defined(ORTGENAI_ENABLE_TELEMETRY)
+  if (TelemetryInternal::IsDllShutdownInProgress()) {
+    // Returning alone would still destroy config and its SDK-owned values. Abandon the entire
+    // process-lifetime state; Windows reclaims it without running SDK teardown under the loader lock.
+    (void)impl_.release();
+    return;
+  }
+#endif
   Shutdown();
 }
 
@@ -435,23 +485,23 @@ void GenAiTelemetry::LogProcessInfo() {
     // sessionId 0 = process scope (model sessions are numbered from 1); ProcessInfo
     // correlates with model/generate events via the AppSessionGuid logger context.
     event.SetProperty("sessionId", static_cast<int64_t>(0));
-    event.SetProperty("libraryVersion", ORTGENAI_VERSION);
+    SetTelemetryStringProperty(event, "libraryVersion", ORTGENAI_VERSION);
     // Device id is sent as ext.device.localId by the SDK (desktop override in Initialize, platform id
     // on Android/iOS), so it is not duplicated as a custom property here.
-    event.SetProperty("osArchitecture", device.os_architecture);
+    SetTelemetryStringProperty(event, "osArchitecture", device.os_architecture);
     event.SetProperty("processorCount", static_cast<int64_t>(device.processor_count));
     event.SetProperty("totalMemoryMB", static_cast<int64_t>(device.total_memory_mb));
-    event.SetProperty("cpuModel", device.cpu_model);
-    event.SetProperty("deviceIdStatus", device.device_id_status);
+    SetTelemetryStringProperty(event, "cpuModel", device.cpu_model);
+    SetTelemetryStringProperty(event, "deviceIdStatus", device.device_id_status);
     event.SetProperty("isContainer", device.is_container);
-    event.SetProperty("containerType", device.container_type);
+    SetTelemetryStringProperty(event, "containerType", device.container_type);
     event.SetProperty("isVirtualMachine", device.is_virtual_machine);
-    event.SetProperty("virtualizationType", device.virtualization_type);
+    SetTelemetryStringProperty(event, "virtualizationType", device.virtualization_type);
     event.SetProperty("isEmulator", device.is_emulator);
-    event.SetProperty("hostEnvironment", device.host_environment);
-    event.SetProperty("environmentDetectionConfidence",
-                      device.environment_detection_confidence);
-    event.SetProperty("deviceIdScope", device.device_id_scope);
+    SetTelemetryStringProperty(event, "hostEnvironment", device.host_environment);
+    SetTelemetryStringProperty(event, "environmentDetectionConfidence",
+                               device.environment_detection_confidence);
+    SetTelemetryStringProperty(event, "deviceIdScope", device.device_id_scope);
 
     impl_->logger->LogEvent(event);
     // ProcessInfo captures PAL network context. Clearing it afterward is best effort.
@@ -492,11 +542,11 @@ void GenAiTelemetry::LogModelLoad(uint32_t session_id, const ModelLoadInfo& info
     auto event = MakeEvent("ModelLoad", EventPriority::Normal);
     if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
-    event.SetProperty("modelType", info.model_type);
-    event.SetProperty("modelFamily", info.model_family);
-    event.SetProperty("modality", info.modality);
-    event.SetProperty("executionProviders", info.execution_providers);
-    event.SetProperty("selectedDevice", info.selected_device);
+    SetTelemetryStringProperty(event, "modelType", info.model_type);
+    SetTelemetryStringProperty(event, "modelFamily", info.model_family);
+    SetTelemetryStringProperty(event, "modality", info.modality);
+    SetTelemetryStringProperty(event, "executionProviders", info.execution_providers);
+    SetTelemetryStringProperty(event, "selectedDevice", info.selected_device);
     event.SetProperty("vocabSize", static_cast<int64_t>(info.vocab_size));
     event.SetProperty("contextLength", static_cast<int64_t>(info.context_length));
     event.SetProperty("numHiddenLayers", static_cast<int64_t>(info.num_hidden_layers));
@@ -515,7 +565,7 @@ void GenAiTelemetry::LogModelLoad(uint32_t session_id, const ModelLoadInfo& info
 
 void GenAiTelemetry::LogModelLoadEnd(uint32_t session_id, bool is_success,
                                      double load_time_ms,
-                                     const std::string& error_message) {
+                                     std::string_view error_message) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     auto event = MakeEvent("ModelLoadEnd", EventPriority::Normal);
@@ -558,7 +608,7 @@ void GenAiTelemetry::LogGeneratorCreate(uint32_t session_id, uint32_t generator_
 }
 
 void GenAiTelemetry::LogGeneration(uint32_t session_id, uint32_t generator_id,
-                                   int64_t prompt_tokens, const std::string& input_modality,
+                                   int64_t prompt_tokens, std::string_view input_modality,
                                    const GenerateEndInfo& info,
                                    int64_t start_timestamp_ms, int64_t end_timestamp_ms) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
@@ -569,7 +619,7 @@ void GenAiTelemetry::LogGeneration(uint32_t session_id, uint32_t generator_id,
     start_event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     start_event.SetProperty("generatorId", static_cast<int64_t>(generator_id));
     start_event.SetProperty("promptTokens", prompt_tokens);
-    start_event.SetProperty("inputModality", input_modality);
+    SetTelemetryStringProperty(start_event, "inputModality", input_modality);
     impl_->logger->LogEvent(start_event);
 
     auto end_event = MakeEvent("GenerateEnd", EventPriority::Normal);
@@ -603,9 +653,9 @@ void GenAiTelemetry::LogAdapterActivated(uint32_t session_id, uint32_t generator
 }
 
 void GenAiTelemetry::LogRuntimeError(uint32_t session_id,
-                                     const std::string& error_type,
-                                     const std::string& error_message,
-                                     const std::string& context) {
+                                     std::string_view error_type,
+                                     std::string_view error_message,
+                                     std::string_view context) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     auto event = MakeEvent("RuntimeError", EventPriority::High);
@@ -614,9 +664,9 @@ void GenAiTelemetry::LogRuntimeError(uint32_t session_id,
       return;
     }
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
-    event.SetProperty("errorType", error_type);
+    SetTelemetryStringProperty(event, "errorType", error_type);
     event.SetProperty("errorMessage", ScrubStringForTelemetry(error_message));
-    event.SetProperty("context", context);
+    SetTelemetryStringProperty(event, "context", context);
 
     impl_->logger->LogEvent(event);
   });

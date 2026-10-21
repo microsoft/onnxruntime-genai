@@ -62,7 +62,9 @@ from builders import (
     VideoChatFlashQwenModel,
     WhisperModel,
 )
+from builders.expansions.trt_rtx_qwen35_vlm_export import export_qwen35_vlm_components, maybe_load_qwen35_config
 from builders.qwen import Qwen35Model, Qwen35MoEModel
+from loaders.resolver import resolve_input
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
@@ -108,6 +110,9 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     """
     Get Hugging Face details based on the provided inputs
     """
+    # Resolve URI sources (e.g. oci://) to local paths, once
+    model_name, input_path = resolve_input(model_name), resolve_input(input_path)
+
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
@@ -119,8 +124,6 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     except (KeyError, ValueError) as error:
         config = None
         if extra_options.get("qwen_vlm", False):
-            from builders.expansions.trt_rtx_qwen35_vlm_export import maybe_load_qwen35_config
-
             config = maybe_load_qwen35_config(
                 hf_name, token=hf_token, cache_dir=extra_kwargs.get("cache_dir"), error=error
             )
@@ -147,8 +150,19 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
         "extra_kwargs": extra_kwargs,
         "hf_name": hf_name,
         "hf_config": config,
+        "input_path": input_path,
     }
     return hf_details
+
+
+def validate_paged_cache_config(dynamic_batching, execution_provider):
+    # An explicit capacity and a utilization factor select incompatible cache-sizing policies.
+    if "num_blocks" in dynamic_batching and "gpu_utilization_factor" in dynamic_batching:
+        raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+    if execution_provider == "webgpu":
+        num_blocks = dynamic_batching.get("num_blocks")
+        if isinstance(num_blocks, bool) or not isinstance(num_blocks, int) or num_blocks <= 0:
+            raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
 
 
 def check_extra_options(
@@ -292,7 +306,6 @@ def check_extra_options(
             raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
-
         if "gpu_utilization_factor" in extra_options:
             try:
                 gpu_utilization_factor = float(extra_options["gpu_utilization_factor"])
@@ -302,10 +315,12 @@ def check_extra_options(
                 raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.")
             extra_options["gpu_utilization_factor"] = gpu_utilization_factor
 
-        # `num_blocks` pins the cache instead of deriving it from free memory, so a
-        # utilization factor would be silently ignored.
-        if "num_blocks" in extra_options and "gpu_utilization_factor" in extra_options:
-            raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+        runtime_batching = extra_options.get("_runtime_config", {}).get("engine", {}).get("dynamic_batching", {})
+        cache_config = {
+            key: extra_options[key] for key in ("num_blocks", "gpu_utilization_factor") if key in extra_options
+        }
+        cache_config.update(runtime_batching)
+        validate_paged_cache_config(cache_config, execution_provider)
     else:
         engine_only_options = [
             key for key in ("max_scheduled_tokens", "num_blocks") if key in extra_options
@@ -421,6 +436,13 @@ def check_extra_options(
         if extra_options.get("exclude_embeds") is False:
             raise ValueError("qwen_vlm=true requires exclude_embeds=true so the decoder consumes inputs_embeds.")
         extra_options["exclude_embeds"] = True
+
+    if (
+        execution_provider == "webgpu"
+        and extra_options.get("use_paged_attention", False)
+        and getattr(config, "attn_logit_softcapping", 0.0) not in (None, 0.0)
+    ):
+        raise ValueError("WebGPU paged attention does not support non-zero attention softcap.")
 
     if "num_hidden_layers" in extra_options:
         num_hidden_layers = int(extra_options["num_hidden_layers"])
@@ -679,6 +701,8 @@ def create_model(
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
+    # Local path from `get_hf_details`, after any URI resolution
+    input_path = hf_details.pop("input_path", input_path)
     if effective_config is not None:
         validate_model_dependent_config(effective_config, config)
 
@@ -847,6 +871,10 @@ def create_model(
         with open(config_path, encoding="utf-8") as config_file:
             genai_config = json.load(config_file)
         genai_config = apply_runtime_config(genai_config, runtime_config)
+        if extra_options.get("use_paged_attention", False):
+            validate_paged_cache_config(
+                genai_config.get("engine", {}).get("dynamic_batching", {}), execution_provider
+            )
         with open(config_path, "w", encoding="utf-8") as config_file:
             json.dump(genai_config, config_file, indent=4)
 
@@ -856,8 +884,6 @@ def create_model(
     if not config_only and extra_options.get("qwen_vlm", False):
         if config.architectures[0] not in _QWEN_VLM_ARCHITECTURES:
             raise ValueError("qwen_vlm=true currently supports Qwen3.5/Qwen3.6 VLM architectures only.")
-        from builders.expansions.trt_rtx_qwen35_vlm_export import export_qwen35_vlm_components
-
         export_qwen35_vlm_components(
             hf_name,
             output_dir,
@@ -876,7 +902,7 @@ def get_args():
         "--model_name",
         required=False,
         default=None,
-        help="Model name in Hugging Face. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
+        help="Model name in Hugging Face, or an oci://<registry>/<repo>:<tag> reference. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
     )
 
     parser.add_argument(
@@ -888,6 +914,7 @@ def get_args():
             Input model source. Currently supported options are:
                 hf_path: Path to folder on disk containing the Hugging Face config, model, tokenizer, etc.
                 gguf_path: Path to float16/float32 GGUF file on disk containing the GGUF model
+                oci://<registry>/<repo>:<tag>: CNCF ModelPack artifact, pulled via an llmman daemon
             """),
     )
 
@@ -1016,9 +1043,12 @@ def get_args():
                     exclude_lm_head. A block drafter (dflash2_path/dspark_path) already supersedes the head
                     and does not need this option.
                 prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
-                    When enabled for standard models, inserts Gather+Unsqueeze so the MatMul input is [B,1,H] instead
-                    of [B,S,H]. For paged-attention models, gathers the final packed hidden state for each sequence so
-                    the MatMul input is [B,H] instead of [num_tokens,H].
+                    When enabled for standard models, takes each row's last real token (the last 1 in
+                    attention_mask), so padded batches work, and the MatMul input is [B,1,H] instead of [B,S,H].
+                    Pruned models exported by older builders take the last column instead, which is wrong for
+                    the shorter rows of a right-padded batch, so export them again if you run padded batches.
+                    For paged-attention models, gathers the final packed hidden state for each sequence so the
+                    MatMul input is [B,H] instead of [num_tokens,H].
                     Ignored when exclude_lm_head is true.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
@@ -1042,7 +1072,7 @@ def get_args():
                     default of 4 in effect.
                 dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
                     Accepts true or false (default). Requires dflash2_path. Combines gate/up
-                    weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
+                    weights into one MatMul or MatMulNBits followed by Split. Preserves EP-specific
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
                 dflash2_fuse_qkv = Experimental DFlash 2 attention Q/K/V projection fusion.
@@ -1064,15 +1094,19 @@ def get_args():
                     format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
                     projections the kernel supports (N % 64 for int4, N % 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
-                    Body activations and KV caches remain bf16; this option does not quantize the
-                    drafter's KV cache. When the target LM head uses a reproducible symmetric default
+                    CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
+                    with FP32 residual/skip normalization and convolution-finish accumulation for FP16
+                    models. Finish outputs stay FP32 until after normalization; normalized outputs
+                    return to FP16. This option does not quantize the drafter's KV cache.
+                    When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
                     and prepack mode when eligible so `share_initializers` can fold it onto the target's
                     copy. Dense or unsupported target LM-head layouts keep the drafter head dense.
                 dspark_path = Path to a DSpark draft checkpoint. Exports an auxiliary `dspark.onnx`
                     block drafter beside the target model and adds a `dspark` section to
                     genai_config.json. Mutually exclusive with dflash2_path. Requires
-                    use_paged_attention=true. SpecForge taps each target layer's output, so
+                    use_paged_attention=true. Unsupported on WebGPU because the drafter requires BF16.
+                    SpecForge taps each target layer's output, so
                     aux_hidden_state_layers must be the drafter's `target_layer_ids` each plus one.
                 dspark_num_draft_tokens = Override the number of draft tokens the DSpark block
                     drafter proposes per step. Must be at least 2 and no greater than the draft checkpoint's
@@ -1084,11 +1118,11 @@ def get_args():
                     structured QuantConfig schema independently from the main model.
                 linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
                     Qwen3.5/3.8 exports. Default is linear_attention. Paged exports always use GatedDeltaNet and
-                    ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and supports fp16
-                    or bf16 I/O.
+                    ignore this option. gated_delta_net requires CUDA or WebGPU and state_window=0. CUDA supports
+                    fp16 or bf16 I/O; non-paged WebGPU supports fp16 or fp32.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
-                    Must be an integer from 0 through 8 and requires use_paged_attention=true. This experimental
-                    contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
+                    Must be an integer from 0 through 8 and requires use_paged_attention=true. Engine compact
+                    replay supports CPU, CUDA, and WebGPU; WebGPU stages partial-acceptance replay through CPU.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
                     Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require
@@ -1108,8 +1142,10 @@ def get_args():
                     prune_lm_head=true, adds a logits_indices input that selects the packed hidden states consumed
                     by generation or draft verification, so the model outputs [num_logits, vocab_size] logits.
                     By default, the model outputs [num_tokens, vocab_size] logits.
-                    Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
-                    combined with exclude_embeds or exclude_lm_head.
+                    Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
+                    attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
+                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
+                    exclude_lm_head.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
                     accepts. Default is 256. Also written to the `engine.dynamic_batching` section of

@@ -65,15 +65,20 @@ struct DeviceSpan {
   bool empty() const { return length_ == 0; }
   size_t size() const { return length_; }
 
-  operator DeviceSpan<const T>() const { return DeviceSpan<const T>(*p_device_memory_, begin_, length_); }
+  operator DeviceSpan<const T>() const {
+    return p_device_memory_ ? DeviceSpan<const T>(*p_device_memory_, begin_, length_) : DeviceSpan<const T>{};
+  }
 
   DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
 
   // True if both spans are views of the same allocation, so that pointer arithmetic between them is meaningful
   bool SameBufferAs(const DeviceSpan<T>& other) const { return p_device_memory_ == other.p_device_memory_; }
 
+  DeviceBuffer& GetBuffer() const { return *p_device_memory_; }
+  size_t ByteOffset() const { return begin_ * sizeof(T); }
+
   // Return the device accessible memory. Should only be done in device specific code, as it's not CPU accessible
-  std::span<T> Span() { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
+  std::span<T> Span() const { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
 
   // Return the CPU accessible memory, allocating if necessary (note, to get the current device memory on CPU, use 'CopyDeviceToCpu' instead)
   std::span<T> CpuSpan() {
@@ -194,12 +199,14 @@ enum class StateUpdateReplayKind : uint32_t {
 };
 
 struct StateUpdateReplayDesc {
-  const void* source_state;
-  void* destination_state;
-  const void* value;
-  const float* decay;
-  const float* key;
-  const float* delta;
+  // DeviceSpan preserves the backing-buffer identity, byte offset, byte length, and lifetime
+  // without assuming that the device exposes an addressable pointer.
+  DeviceSpan<const uint8_t> source_state;
+  DeviceSpan<uint8_t> destination_state;
+  DeviceSpan<const uint8_t> value;
+  DeviceSpan<const uint8_t> decay;
+  DeviceSpan<const uint8_t> key;
+  DeviceSpan<const uint8_t> delta;
   uint64_t channel_count;
   uint64_t state_width;
   uint64_t key_width;
@@ -210,14 +217,12 @@ struct StateUpdateReplayDesc {
   StateUpdateReplayKind kind;
 };
 
-static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
-
 // Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
 // layout, or the virtual or data layout of any type constructed by, passed to, or returned across
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 7;
+inline constexpr uint32_t kDeviceInterfaceVersion = 10;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -277,6 +282,10 @@ struct DeviceInterface {
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const float* /*cross_qk_buffer_data*/, float* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const Ort::Float16_t* /*cross_qk_buffer_data*/, Ort::Float16_t* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void GetAvailableMemory(size_t& /* free_bytes */, size_t& /* total_bytes */) { assert(false); }
+  virtual std::optional<bool> GetIsIntegrated(std::string& error) {
+    error = "CUDA integrated-device detection is unavailable";
+    return std::nullopt;
+  }
 
   // Allow each EP to shape the trivial init-session ProviderOptions used by EnsureDeviceOrtInit.
   // The default does nothing; EPs that need global singletons configured (e.g. WebGPU) or
@@ -354,17 +363,23 @@ struct DeviceInterface {
     throw std::logic_error("Device does not support compact fixed-state replay.");
   }
   // True for EPs where an OrtValue can bind a tensor view formed by adding a byte offset to the base
-  // address returned for persistent device storage. Keep last for vtable ABI stability.
+  // address returned for persistent device storage.
   virtual bool SupportsOffsetTensorViews() const { return false; }
   // True when allocation, zeroing, ranged copies, tensor binding, and synchronization are qualified
   // to complete fixed-state device work before FixedStatePool publishes a bank flip.
-  // Keep last for vtable ABI stability.
   virtual bool SupportsTransactionalFixedState() const { return false; }
   // True when a `bytes`-sized host mirror of this device's buffers returns to a pool that hands it
   // out again only after its pending host-to-device copy completes. Dropping such a mirror right
   // after an upload never waits for the device, so a caller can take a fresh mirror per upload
   // instead of synchronizing before it reuses one. Keep last for vtable ABI stability.
   virtual bool RecyclesHostMirrorsAfterUpload(size_t /*bytes*/) const { return false; }
+  // Default false: no effect — encoder / control-flow graph capture follows the normal per-EP config
+  // default. An EP overrides to true to defensively force encoder capture off (see the AMDGPU
+  // override for rationale). Keep last for vtable ABI stability.
+  virtual bool DisablesEncoderGraphCapture() const { return false; }
+  // True when ReplayStateUpdates can reconstruct a partially accepted fixed-state transition.
+  // Keep last for vtable ABI stability.
+  virtual bool SupportsCompactStateReplay() const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

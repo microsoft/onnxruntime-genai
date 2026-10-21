@@ -15,13 +15,15 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cpu_cast_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
-list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -65,6 +67,20 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
   add_dependencies(unit_tests onnxruntime-genai-cuda)
 
+  # Header-only helper regression tests: no GenAI/ORT dependency or production CUDA rebuild.
+  foreach(warp_sort_target IN ITEMS cuda_warp_sort_tests cuda_warp_sort_stable_tests)
+    add_executable(${warp_sort_target} "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cuda_kernel/warp_sort_tests.cu")
+    target_include_directories(${warp_sort_target} PRIVATE
+      "${CMAKE_SOURCE_DIR}/src"
+      "${CMAKE_SOURCE_DIR}/src/ep/cuda"
+    )
+    target_link_libraries(${warp_sort_target} PRIVATE GTest::gtest_main cudart)
+    set_target_properties(${warp_sort_target} PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON FOLDER "Tests")
+    target_compile_options(${warp_sort_target} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>")
+    add_test(NAME ${warp_sort_target} COMMAND ${warp_sort_target})
+  endforeach()
+  target_compile_definitions(cuda_warp_sort_stable_tests PRIVATE STABLE_TOPK)
+
   # These tests exercise the internal BatchedSampler interface, so keep them out of unit_tests,
   # which deliberately links only the public shared-library API.
   add_executable(cuda_batched_sampler_tests
@@ -107,10 +123,45 @@ endif()
 
 add_test(NAME UnitTests COMMAND unit_tests)
 
+if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
+  add_test(NAME SharedLibraryExports
+    COMMAND ${CMAKE_COMMAND}
+      "-DLIBRARY=$<TARGET_FILE:onnxruntime-genai>"
+      "-DNM=${CMAKE_NM}"
+      "-DAPI_HEADER=${CMAKE_SOURCE_DIR}/src/ort_genai_c.h"
+      "-DAPPLE_EXPORTS=${APPLE}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check-shared-library-exports.cmake")
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_library(export_isolation_dependency STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-isolation/dependency.cpp")
+  set_target_properties(export_isolation_dependency PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  add_library(export_isolation_fixture SHARED
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-isolation/fixture.cpp")
+  target_link_libraries(export_isolation_fixture PRIVATE export_isolation_dependency)
+  ortgenai_configure_shared_library_exports(export_isolation_fixture)
+  add_test(NAME SharedLibraryArchiveExports
+    COMMAND ${CMAKE_COMMAND}
+      "-DLIBRARY=$<TARGET_FILE:export_isolation_fixture>"
+      "-DNM=${CMAKE_NM}"
+      "-DAPI_HEADER=${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-isolation/fixture.h"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check-shared-library-exports.cmake")
+  add_executable(export_isolation_runtime
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-isolation/runtime.cpp")
+  target_link_libraries(export_isolation_runtime PRIVATE export_isolation_fixture)
+  add_test(NAME SharedLibraryArchiveRuntime COMMAND export_isolation_runtime)
+endif()
+
 add_executable(telemetry_helpers_tests
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry_helpers_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry_environment_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry_redaction_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp"
+  "${CMAKE_SOURCE_DIR}/src/models/env_utils.cpp")
 target_include_directories(telemetry_helpers_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/cpp
 )
 target_link_libraries(telemetry_helpers_tests PRIVATE GTest::gtest)
 set_target_properties(telemetry_helpers_tests PROPERTIES
@@ -148,6 +199,8 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/telemetry-shutdown-tests.cmake")
 
 add_executable(kv_cache_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 target_include_directories(kv_cache_unit_tests PRIVATE
@@ -190,9 +243,14 @@ if (NOT MSVC)
 endif()
 add_test(NAME CpuCastTests COMMAND cpu_cast_tests)
 
-if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+if (ENABLE_TELEMETRY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  if (WIN32)
+    set(telemetry_device_info_test_source "device-info-windows-tests.cpp")
+  else()
+    set(telemetry_device_info_test_source "device_info_tests.cpp")
+  endif()
   add_executable(telemetry_device_info_tests
-    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/device_info_tests.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/${telemetry_device_info_test_source}")
   target_include_directories(telemetry_device_info_tests PRIVATE
     ${ORT_HEADER_DIR}
     ${onnxruntime_extensions_SOURCE_DIR}/shared/api
@@ -203,6 +261,9 @@ if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STR
     onnxruntime-genai-obj
     GTest::gtest
   )
+  if (WIN32)
+    target_link_libraries(telemetry_device_info_tests PRIVATE advapi32)
+  endif()
   add_dependencies(telemetry_device_info_tests onnxruntime-genai)
   set_target_properties(telemetry_device_info_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
@@ -228,9 +289,11 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
 )
 list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})
@@ -249,6 +312,37 @@ target_link_libraries(engine_unit_tests PRIVATE
 # The shared library stages the ORT runtime (and CUDA add-on) next to itself; depend on it so those
 # are present in engine_unit_tests' output directory at run time.
 add_dependencies(engine_unit_tests onnxruntime-genai)
+set(CUSTOM_OPS_TEST_LIB_DIR "${CMAKE_CURRENT_BINARY_DIR}/custom_ops_test_libs")
+foreach(custom_ops_test_tag IN ITEMS first second)
+  set(custom_ops_test_target "custom_ops_test_${custom_ops_test_tag}")
+  add_library(${custom_ops_test_target} SHARED
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/custom_ops_test_lib/custom_ops_test_lib.cpp")
+  target_include_directories(${custom_ops_test_target} PRIVATE ${ORT_HEADER_DIR})
+  target_compile_definitions(${custom_ops_test_target} PRIVATE
+    ORTGENAI_TEST_CUSTOM_OPS_TAG="${custom_ops_test_tag}")
+  set_target_properties(${custom_ops_test_target} PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CUSTOM_OPS_TEST_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY "${CUSTOM_OPS_TEST_LIB_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CUSTOM_OPS_TEST_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CUSTOM_OPS_TEST_LIB_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CUSTOM_OPS_TEST_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CUSTOM_OPS_TEST_LIB_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CUSTOM_OPS_TEST_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CUSTOM_OPS_TEST_LIB_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL "${CUSTOM_OPS_TEST_LIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CUSTOM_OPS_TEST_LIB_DIR}"
+    FOLDER "Tests"
+  )
+  if (NOT MSVC)
+    target_compile_options(${custom_ops_test_target} PRIVATE "-fvisibility=hidden")
+  endif()
+endforeach()
+target_compile_definitions(engine_unit_tests PRIVATE
+  ORTGENAI_TEST_CUSTOM_OPS_LIB_DIR="${CUSTOM_OPS_TEST_LIB_DIR}"
+  ORTGENAI_TEST_CUSTOM_OPS_FIRST_FILENAME="$<TARGET_FILE_NAME:custom_ops_test_first>"
+  ORTGENAI_TEST_CUSTOM_OPS_SECOND_FILENAME="$<TARGET_FILE_NAME:custom_ops_test_second>"
+)
+add_dependencies(engine_unit_tests custom_ops_test_first custom_ops_test_second)
 set_target_properties(engine_unit_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
     FOLDER "Tests"

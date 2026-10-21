@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -57,6 +58,39 @@ struct ConstrainedLogitsProcessor {
   // Clone as an independent grammar cursor at the current state. Speculative decoding uses this to
   // mask a draft's proposals without disturbing the verify cursor.
   virtual std::unique_ptr<ConstrainedLogitsProcessor> Clone() const = 0;
+
+  virtual bool IsDelimitedActive() const { return false; }
+  virtual std::optional<int32_t> DelimitedOpeningToken() const { return std::nullopt; }
+};
+
+// A dormant grammar cursor does no masking; the marker tokens are transitions on committed
+// output, never on unverified proposals. The wrapped grammar is cloned for rollback.
+struct DelimitedGuidanceLogitsProcessor final : ConstrainedLogitsProcessor {
+  DelimitedGuidanceLogitsProcessor(std::unique_ptr<ConstrainedLogitsProcessor> body,
+                                   DeviceInterface& device, size_t vocab_size,
+                                   std::vector<int32_t> eos_tokens, int32_t opening_token,
+                                   int32_t closing_token);
+  void CommitTokens(std::span<int32_t> tokens) override;
+  void ProcessLogits(DeviceSpan<float> logits) override;
+  std::span<const uint32_t> GetReadyMask() override;
+  bool AllowsOnlyTokens(size_t index, std::span<const int> tokens) override;
+  void Reset() override;
+  std::vector<int32_t> GetFFTokens(size_t) override { return {}; }
+  std::unique_ptr<ConstrainedLogitsProcessor> Clone() const override;
+  bool IsDelimitedActive() const override { return active_; }
+  std::optional<int32_t> DelimitedOpeningToken() const override { return opening_token_; }
+  ConstrainedLogitsProcessor* ActiveBody() const noexcept { return active_ ? body_.get() : nullptr; }
+
+ private:
+  std::unique_ptr<ConstrainedLogitsProcessor> body_;
+  DeviceInterface* device_;
+  size_t vocab_size_;
+  std::vector<int32_t> eos_tokens_;
+  int32_t opening_token_;
+  int32_t closing_token_;
+  bool active_{};
+  std::vector<uint32_t> mask_;
+  DeviceSpan<uint32_t> device_mask_;
 };
 
 #if USE_GUIDANCE

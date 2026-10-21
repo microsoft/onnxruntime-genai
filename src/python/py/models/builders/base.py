@@ -14,10 +14,12 @@ import os
 import subprocess
 import types
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import onnx_ir as ir
 import torch
+import transformers
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -25,22 +27,9 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     QuantFormat,
     RTNWeightOnlyQuantConfig,
 )
-from tqdm import tqdm
-from transformers import (
-    AutoModelForCausalLM,
-    AutoModelForSpeechSeq2Seq,
-    AutoTokenizer,
-    Gemma3ForConditionalGeneration,
-    GenerationConfig,
-    Lfm2VlForConditionalGeneration,
-    Mistral3ForConditionalGeneration,
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen3_5ForConditionalGeneration,
-    Qwen3_5MoeForConditionalGeneration,
-    Qwen3VLForConditionalGeneration,
-)
-
 from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
+from tqdm import tqdm
+from transformers import AutoTokenizer, GenerationConfig
 
 
 class Model:
@@ -1328,7 +1317,8 @@ class Model:
                 inputs["block_table_windowed"] = self.input_names["block_table_windowed"]
             inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
             inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
-            inputs["attention_metadata"] = self.input_names["attention_metadata"]
+            if "attention_metadata" in self.input_names:
+                inputs["attention_metadata"] = self.input_names["attention_metadata"]
             if "logits_indices" in self.input_names:
                 inputs["logits_indices"] = self.input_names["logits_indices"]
         if "past_key_values.key" in self.input_names:
@@ -2258,8 +2248,9 @@ class Model:
         self.make_node("Gather", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
 
-    def make_gather_elements(self, name, inputs, dtype, shape, axis):
-        output = f"{name}/output_0"
+    def make_gather_elements(self, name, inputs, dtype, shape, axis, output=None):
+        # output is the name of the result. It defaults to {name}/output_0; pass a graph output name to write it directly.
+        output = output or f"{name}/output_0"
         self.make_node("GatherElements", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
 
@@ -2280,9 +2271,9 @@ class Model:
         self.make_node("Reshape", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
-    def make_shape(self, name, root_input, shape):
+    def make_shape(self, name, root_input, shape, **kwargs):
         output = f"{name}/output_0"
-        self.make_node("Shape", inputs=[root_input], outputs=[output], name=name)
+        self.make_node("Shape", inputs=[root_input], outputs=[output], name=name, **kwargs)
         self.make_value(output, ir.DataType.INT64, shape=shape)
 
     def make_constant_of_shape(self, name, root_input, value, dtype, shape):
@@ -2360,6 +2351,11 @@ class Model:
         self.make_node("ReduceMax", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
 
+    def make_cumsum(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("CumSum", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
     def make_reduce_mean(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
         self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
@@ -2391,6 +2387,16 @@ class Model:
     def make_sub(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Sub", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_min(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Min", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_max(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Max", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
     def make_less(self, name, inputs):
@@ -2519,6 +2525,59 @@ class Model:
             state_window=self.context_length_attrs["state_window"],
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
+
+    def make_causal_conv_state_at_last_real_token(self, name, **kwargs):
+        """Write each row's conv state from the K-1 columns that end at its last real token.
+
+        CausalConvWithState returns its last K-1 input columns as the state. In a right-padded batch
+        those are pads for the shorter rows. Here row b reads columns n_b .. n_b + K-2 of
+        Concat(past_conv_state, conv_input), where n_b comes from make_last_real_token_position: the row's
+        last real token in this step is at index n_b - 1. Later steps then see the same state as a run of
+        that row alone. A row with n_b = 0 keeps its past state. An unpadded or left-padded row has
+        n_b = S, which gives the op's own state.
+
+        The Generator API pads only on the right and only in the first prefill, which this covers. The
+        Engine's static batching pads every step with a mask of ones, so its shorter rows still get pad
+        columns, as before. The index nodes are named by (C, K-1), so all layers of the same size share them.
+        """
+        #   n (make_last_real_token_position)
+        #         |
+        #   Add([0 .. K-2])         past_conv_state   conv_input
+        #         |                         \           /
+        #   Unsqueeze(1)                     +- Concat -+
+        #         |                               |
+        #   Expand([1, C, 1]) ----------- GatherElements(axis=2)
+        #                                         |
+        #                                 present_conv_state
+        channels = kwargs["channels"]
+        state_size = kwargs["state_size"]
+
+        indices_basename = f"/model/conv_state/indices_{channels}x{state_size}"
+        add_name = f"{indices_basename}/Add"
+        add_inputs = [self.make_last_real_token_position(kwargs["root_input"]), f"/model/constants/INT32/{list(range(state_size))}"]
+        self.make_add(add_name, add_inputs, dtype=ir.DataType.INT32, shape=["batch_size", state_size])
+        unsqueeze_name = f"{indices_basename}/Unsqueeze"
+        unsqueeze_inputs = [f"{add_name}/output_0", "/model/constants/INT64/[1]"]
+        self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1, state_size])
+        expand_name = f"{indices_basename}/Expand"
+        expand_inputs = [f"{unsqueeze_name}/output_0", f"/model/constants/INT64/{[1, channels, 1]}"]
+        self.make_expand(expand_name, expand_inputs, dtype=ir.DataType.INT32, shape=["batch_size", channels, state_size])
+
+        concat_name = f"{name}/Concat"
+        concat_inputs = [kwargs["past_conv_state"], kwargs["conv_input"]]
+        self.make_concat(concat_name, concat_inputs, dtype=self.io_dtype, shape=["batch_size", channels, None], axis=2)
+
+        # genai keeps separate past and present conv buffers, so reading past while writing present is safe.
+        gather_name = f"{name}/GatherElements"
+        gather_inputs = [f"{concat_name}/output_0", f"{expand_name}/output_0"]
+        self.make_gather_elements(
+            gather_name,
+            gather_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", channels, state_size],
+            axis=2,
+            output=kwargs["present_conv_state"],
+        )
 
     def make_varlen_causal_conv_with_state(self, name, **kwargs):
         """Emit packed causal convolution with optional compact state updates."""
@@ -4166,7 +4225,7 @@ class Model:
                 cumulative_sequence_lengths=self.input_names["cumulative_sequence_lengths"],
                 past_sequence_lengths=self.input_names["past_sequence_lengths"],
                 block_table=block_table,
-                attention_metadata=self.input_names["attention_metadata"],
+                attention_metadata=self.input_names.get("attention_metadata", ""),
                 **kwargs,
             )
         else:
@@ -5952,6 +6011,109 @@ class Model:
             self.layernorm_attrs[key] = selected[name]
         self.hidden_rows_dim = "num_logits"
 
+    def make_last_real_token_position(self, root_input):
+        """Find where each row's real tokens end in this step and return the [B, 1] int32 output name.
+
+        The result is n = min(p, S). p is the position after the last 1 in the row's attention_mask (0 when
+        the row has no 1), and S is the sequence length of root_input, any [B, S, ...] tensor of this step.
+        The row's last real token in this step is at index n - 1. When n is 0, this step has none.
+
+        This is right for every mask onnxruntime-genai's Generator API makes, and for other common ones:
+        - a right-padded first prefill: p is the row's real length (genai pads batches on the right);
+        - a left-padded prefill: p is S;
+        - zeros inside the row: the Qwen-VL mask is 0 at every pad-id token, also inside a prompt;
+        - a static mask, zero-filled to max_length for graph capture: the zeros come after p;
+        - decode: S is 1, so n is 1;
+        - a batch-1 continuation: the mask also counts past tokens, so n is S;
+        - a row with no 1: n is 0.
+        After the first prefill, every row must add the same number of new tokens, with no padding at the
+        end of the new chunk. og.Generator does this.
+
+        The nodes have fixed names, so every caller shares them: make_node skips names that already exist.
+        S then comes from the first caller's root_input, which is fine because every caller passes a
+        tensor of the same step.
+        """
+        #   attention_mask
+        #         |
+        #   Cast(int32) ---------------------+                root_input
+        #         |                          |                    |
+        #   Shape(start=1, end=2)            |            Shape(start=1, end=2)
+        #         |                          |                    |
+        #     Expand(1)                      |                Expand(1)
+        #         |                          |                    |
+        #    CumSum(axis=0)                  |                ReduceSum
+        #    [1, 2, ..., T]                  |                    |
+        #          \                         |                    |
+        #           +--------- Mul ----------+                    |
+        #                       |                                 |
+        #                ReduceMax(axis=1)                        |
+        #                        \                               /
+        #                         +------------ Min ------------+
+        #
+        # Shape writes its output on the CPU, and Expand reads its shape input on the CPU, so T and S reach
+        # the device as rows of ones. With CUDA, and with WebGPU when its graph capture is on, this adds no
+        # copy node; a copy node would block graph capture. Shape -> Gather -> Sub feeding a device op
+        # (measured with Clip) added one on CUDA. The math is int32 because WebGPU has no int64 CumSum or
+        # ReduceMax, and its Shape does not take an int64 input. WebGPU exports built without
+        # enable_webgpu_graph run the Cast on the CPU and copy the int32 mask to the device on each run.
+        basename = "/model/last_real_token"
+
+        mask_name = f"{basename}/Cast"
+        self.make_cast(mask_name, self.input_names["attention_mask"], dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+        mask = f"{mask_name}/output_0"
+        total_shape_name = f"{basename}/positions/Shape"
+        self.make_shape(total_shape_name, mask, shape=[1], start=1, end=2)
+        total_ones_name = f"{basename}/positions/Expand"
+        total_ones_inputs = ["/model/constants/INT32/[1]", f"{total_shape_name}/output_0"]
+        self.make_expand(total_ones_name, total_ones_inputs, dtype=ir.DataType.INT32, shape=["total_sequence_length"])
+        positions_name = f"{basename}/positions/CumSum"
+        self.make_cumsum(positions_name, [f"{total_ones_name}/output_0", "/model/constants/INT64/0"], dtype=ir.DataType.INT32, shape=["total_sequence_length"])
+        mul_name = f"{basename}/Mul"
+        self.make_mul(mul_name, [mask, f"{positions_name}/output_0"], dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+        end_name = f"{basename}/ReduceMax"
+        end_inputs = [f"{mul_name}/output_0", "/model/constants/INT64/[1]"]
+        self.make_reduce_max(end_name, end_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1], keepdims=True)
+
+        seq_shape_name = f"{basename}/seq_len/Shape"
+        self.make_shape(seq_shape_name, root_input, shape=[1], start=1, end=2)
+        seq_ones_name = f"{basename}/seq_len/Expand"
+        seq_ones_inputs = ["/model/constants/INT32/[1]", f"{seq_shape_name}/output_0"]
+        self.make_expand(seq_ones_name, seq_ones_inputs, dtype=ir.DataType.INT32, shape=["sequence_length"])
+        seq_len_name = f"{basename}/seq_len/ReduceSum"
+        self.make_reduce_sum(seq_len_name, [f"{seq_ones_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT32, shape=[1], keepdims=True)
+
+        min_name = f"{basename}/Min"
+        self.make_min(min_name, [f"{end_name}/output_0", f"{seq_len_name}/output_0"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        return f"{min_name}/output_0"
+
+    def make_last_real_token_selection(self, basename, root_input):
+        """Pick each row's last real token from [B, S, H] hidden states and return the [B, 1, H] output name.
+
+        The index is n - 1, with n from make_last_real_token_position. A row with no real token reads
+        column 0.
+        """
+        #   n (make_last_real_token_position)       root_input
+        #         |                                     |
+        #   Sub(1) --> Max(0) --> Unsqueeze --> Expand  |
+        #                                         |     |
+        #                               GatherElements(axis=1)
+        sub_name = f"{basename}/Sub"
+        sub_inputs = [self.make_last_real_token_position(root_input), "/model/constants/INT32/1"]
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        # A row with no real token would give -1, so keep the index at 0 or more.
+        max_name = f"{basename}/Max"
+        self.make_max(max_name, [f"{sub_name}/output_0", "/model/constants/INT32/0"], dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        unsqueeze_name = f"{basename}/Unsqueeze"
+        self.make_unsqueeze(unsqueeze_name, [f"{max_name}/output_0", "/model/constants/INT64/[2]"], dtype=ir.DataType.INT32, shape=["batch_size", 1, 1])
+        # GatherElements returns the shape of its indices, so this assumes the LM head input is hidden_size wide.
+        expand_name = f"{basename}/Expand"
+        expand_inputs = [f"{unsqueeze_name}/output_0", f"/model/constants/INT64/[1, 1, {self.hidden_size}]"]
+        self.make_expand(expand_name, expand_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1, self.hidden_size])
+
+        gather_name = f"{basename}/GatherElements"
+        self.make_gather_elements(gather_name, [root_input, f"{expand_name}/output_0"], dtype=self.io_dtype, shape=["batch_size", 1, self.hidden_size], axis=1)
+        return f"{gather_name}/output_0"
+
     def make_lm_head(self, lm_head):
         basename = "/lm_head"
 
@@ -5993,20 +6155,25 @@ class Model:
             self.output_shapes["logits"] = ["num_logits", self.vocab_size]
 
         elif self.prune_lm_head:
-            # Insert Gather(axis=1, idx=-1) + Unsqueeze(axis=1) to select only the last token's
-            # hidden state before the LM head. This avoids the expensive MatMul for all S tokens
-            # during prefill, reducing compute by ~S×.
+            # Select one hidden state per row before the LM head. This avoids the expensive MatMul
+            # for all S tokens during prefill, reducing compute by ~S×.
             seq_dim = 1
 
-            # Gather: [B, S, H] + scalar(-1) -> [B, H]
-            gather_name = f"{basename}/prune/Gather"
-            self.make_gather(gather_name, inputs=[root_input, "/model/constants/INT64/-1"], dtype=self.io_dtype, shape=["batch_size", self.hidden_size], axis=1)
+            if "attention_mask" in self.input_names:
+                root_input = self.make_last_real_token_selection(f"{basename}/prune", root_input)
+            else:
+                # Without a mask, take the last column, as before. Among non-paged exports only the Whisper
+                # decoder gets here. Its decoder prompts usually have the same length in every row, but they
+                # can differ, and then the shorter rows read a pad column, as they did before.
+                # Gather: [B, S, H] + scalar(-1) -> [B, H]
+                gather_name = f"{basename}/prune/Gather"
+                self.make_gather(gather_name, inputs=[root_input, "/model/constants/INT64/-1"], dtype=self.io_dtype, shape=["batch_size", self.hidden_size], axis=1)
 
-            # Unsqueeze: [B, H] -> [B, 1, H]
-            unsqueeze_name = f"{basename}/prune/Unsqueeze"
-            self.make_unsqueeze(unsqueeze_name, inputs=[f"{gather_name}/output_0", "/model/constants/INT64/[1]"], dtype=self.io_dtype, shape=["batch_size", 1, self.hidden_size])
+                # Unsqueeze: [B, H] -> [B, 1, H]
+                unsqueeze_name = f"{basename}/prune/Unsqueeze"
+                self.make_unsqueeze(unsqueeze_name, inputs=[f"{gather_name}/output_0", "/model/constants/INT64/[1]"], dtype=self.io_dtype, shape=["batch_size", 1, self.hidden_size])
 
-            root_input = f"{unsqueeze_name}/output_0"
+                root_input = f"{unsqueeze_name}/output_0"
 
             # Update logits output shape
             self.output_shapes["logits"] = ["batch_size", 1, self.vocab_size]
@@ -6117,6 +6284,39 @@ class Model:
     def get_moe_module(self, layer_id, layer):
         return layer.moe
 
+    def resolve_transformers_class(self, class_name: str) -> type[Any]:
+        """Resolve only the selected Transformers class, without requiring newer architectures."""
+        try:
+            return getattr(transformers, class_name)
+        except AttributeError as error:
+            version = getattr(transformers, "__version__", "unknown")
+            raise ImportError(
+                f"The selected model requires transformers.{class_name}, but "
+                f"Transformers {version} does not provide that class. Upgrade "
+                "Transformers to use this model architecture."
+            ) from error
+
+    def resolve_model_loader(self) -> type[Any]:
+        """Resolve the Transformers weight loader for this model's architecture."""
+        # More specific markers must precede overlapping general markers (e.g. Qwen3.5 MoE before dense).
+        model_loader_rules = (
+            ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
+            ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
+            ("qwen3_vl_text", "Qwen3VLForConditionalGeneration"),
+            ("Qwen3VL", "Qwen3VLForConditionalGeneration"),
+            ("qwen2_5_vl_text", "Qwen2_5_VLForConditionalGeneration"),
+            ("Qwen2_5_VL", "Qwen2_5_VLForConditionalGeneration"),
+            ("gemma3_vl_text", "Gemma3ForConditionalGeneration"),
+            ("lfm2_vl", "Lfm2VlForConditionalGeneration"),
+            ("mistral3_text", "Mistral3ForConditionalGeneration"),
+            ("Mistral3", "Mistral3ForConditionalGeneration"),
+            ("Whisper", "AutoModelForSpeechSeq2Seq"),
+        )
+        for model_type_marker, class_name in model_loader_rules:
+            if model_type_marker in self.model_type:
+                return self.resolve_transformers_class(class_name)
+        return self.resolve_transformers_class("AutoModelForCausalLM")
+
     def load_weights(self, input_path):
         # Load weights of original model
         if input_path.endswith(".gguf"):
@@ -6158,29 +6358,7 @@ class Model:
 
         else:
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
-
-            # Get auto class to load PyTorch model based on model type
-            auto_class_map = {
-                "ForCausalLM": AutoModelForCausalLM,
-                "gemma3_vl_text": Gemma3ForConditionalGeneration,
-                "lfm2_vl": Lfm2VlForConditionalGeneration,
-                "mistral3_text": Mistral3ForConditionalGeneration,
-                "Mistral3": Mistral3ForConditionalGeneration,
-                "qwen2_5_vl_text": Qwen2_5_VLForConditionalGeneration,
-                "Qwen2_5_VL": Qwen2_5_VLForConditionalGeneration,
-                "qwen3_vl_text": Qwen3VLForConditionalGeneration,
-                "Qwen3VL": Qwen3VLForConditionalGeneration,
-                "qwen3_5_moe_text": Qwen3_5MoeForConditionalGeneration,
-                "qwen3_5_moe": Qwen3_5MoeForConditionalGeneration,
-                "qwen3_5_text": Qwen3_5ForConditionalGeneration,
-                "qwen3_5": Qwen3_5ForConditionalGeneration,
-                "Whisper": AutoModelForSpeechSeq2Seq,
-            }
-            auto_class = AutoModelForCausalLM
-            for k, v in auto_class_map.items():
-                if k in self.model_type:
-                    auto_class = v
-                    break
+            auto_class = self.resolve_model_loader()
 
             # Load PyTorch model
             model = auto_class.from_pretrained(
