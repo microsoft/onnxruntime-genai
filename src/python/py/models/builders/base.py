@@ -35,6 +35,51 @@ from transformers import AutoTokenizer, GenerationConfig
 
 from .expansions.paged_attention import PagedAttention
 
+def load_text_backbone_adapter(
+    base_container, source, cache_dir=None, token=None
+):
+    """Load and merge an adapter whose keys target the nested text backbone."""
+    from peft import PeftConfig, get_peft_model
+    from peft.utils.save_and_load import (
+        load_peft_weights,
+        set_peft_model_state_dict,
+    )
+
+    if not hasattr(base_container, "model"):
+        raise ValueError(
+            "model-specific adapter base must expose its text backbone as model"
+        )
+    parent = base_container.model
+    attribute = "language_model" if hasattr(parent, "language_model") else None
+    text_backbone = (
+        parent.language_model if attribute is not None else parent
+    )
+    config = PeftConfig.from_pretrained(
+        source, cache_dir=cache_dir, token=token
+    )
+    adapted = get_peft_model(text_backbone, config)
+    weights = load_peft_weights(source, device="cpu")
+    load_result = set_peft_model_state_dict(
+        adapted, weights, adapter_name="default"
+    )
+    missing_adapter_keys = [
+        key
+        for key in load_result.missing_keys
+        if "lora_" in key or "modules_to_save" in key
+    ]
+    if missing_adapter_keys or load_result.unexpected_keys:
+        raise ValueError(
+            "model-specific adapter weights did not load exactly: "
+            f"missing={missing_adapter_keys}, "
+            f"unexpected={load_result.unexpected_keys}"
+        )
+    merged = adapted.merge_and_unload()
+    if attribute is None:
+        base_container.model = merged
+    else:
+        parent.language_model = merged
+    return base_container
+
 
 class Model(PagedAttention):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -124,6 +169,7 @@ class Model(PagedAttention):
         self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = extra_options.get("hf_token", True)
         self.hf_remote = extra_options.get("hf_remote", False)
+        self.revision = extra_options.get("base_revision")
 
         # States for building the model
         self.graph = ir.Graph(
@@ -6168,6 +6214,9 @@ class Model(PagedAttention):
             auto_class = self.resolve_model_loader()
 
             # Load PyTorch model
+            revision = getattr(self, "revision", None)
+            if revision is not None:
+                extra_kwargs["revision"] = revision
             model = auto_class.from_pretrained(
                 self.model_name_or_path,
                 cache_dir=self.cache_dir,
@@ -6177,11 +6226,19 @@ class Model(PagedAttention):
             )
 
         if "adapter_path" in self.extra_options:
-            from peft import PeftModel
+            if self.extra_options.get("_model_specific_hf", {}).get("adapter"):
+                model = load_text_backbone_adapter(
+                    model,
+                    self.extra_options["adapter_path"],
+                    cache_dir=self.cache_dir,
+                    token=self.hf_token,
+                )
+            else:
+                from peft import PeftModel
 
-            model = PeftModel.from_pretrained(
-                model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token
-            )
+                model = PeftModel.from_pretrained(
+                    model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token
+                )
 
         return model
 
