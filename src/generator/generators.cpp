@@ -499,12 +499,6 @@ bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_t
          (search.num_beams == 1 || model_type == "whisper");
 }
 
-bool GeneratorParams::HasEncoderPromptTokens() const {
-  if (model_)
-    return model_->HasEncoderPromptTokens();
-  return !config.model.encoder.filename.empty() && !ModelType::IsALM(config.model.type);
-}
-
 double GeneratorParams::GetSearchNumber(std::string_view name) const {
   if (name == "batch_size") {
     return static_cast<double>(search.batch_size);
