@@ -8,7 +8,7 @@ jobs:
   pool:
     name: 'onnx-publish-Linux-GPU-H100'
     demands:
-      - 1ES.ImageOverride -equals onnxruntime-ubuntu2404-A10
+      - ImageOverride -equals onnxruntime-ubuntu2404-A10
   ${{ if eq(parameters.run_full_engine_benchmark, true) }}:
     timeoutInMinutes: 120
   workspace:

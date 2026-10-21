@@ -25,7 +25,7 @@ jobs:
   pool:
     name: 'onnxruntime-ado-ubuntu-A10-NV32'
     demands:
-      - 1ES.ImageOverride -equals onnxruntime-ubuntu2404-A10
+      - ImageOverride -equals onnxruntime-ubuntu2404-A10
 
   timeoutInMinutes: 60
   workspace:

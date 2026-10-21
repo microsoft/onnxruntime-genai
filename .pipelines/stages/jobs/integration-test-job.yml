@@ -27,7 +27,7 @@ jobs:
       pool:
         name: 'onnxruntime-ado-ubuntu-A10-NV32'
         demands:
-          - 1ES.ImageOverride -equals onnxruntime-ubuntu2404-A10
+          - ImageOverride -equals onnxruntime-ubuntu2404-A10
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
