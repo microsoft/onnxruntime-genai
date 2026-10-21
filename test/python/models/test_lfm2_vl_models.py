@@ -471,6 +471,14 @@ def test_lfm2_vl_builder_makes_a_working_pipeline(test_data_path, tmp_path):
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("onnx_ir")
+    builder_tests_dir = str(Path(__file__).resolve().parents[1] / "builder")
+    if builder_tests_dir not in sys.path:
+        sys.path.insert(0, builder_tests_dir)
+    from _builder_test_utils import ort_runs_causal_conv_with_state  # noqa: PLC0415
+
+    # The DirectML CI job pins an onnxruntime without the CausalConvWithState op that LFM2 decoders use.
+    if not ort_runs_causal_conv_with_state():
+        pytest.skip("this onnxruntime cannot run com.microsoft:CausalConvWithState")
     models_dir = Path(__file__).resolve().parents[3] / "src" / "python" / "py" / "models"
     if str(models_dir) not in sys.path:
         sys.path.insert(0, str(models_dir))

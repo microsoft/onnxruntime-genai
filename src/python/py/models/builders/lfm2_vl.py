@@ -42,9 +42,10 @@ class LFM2VLVisionEncoder(Model):
         self.text_hidden_size = config.text_config.hidden_size
 
         extra_options["filename"] = "vision.onnx"
+        # Model sets model_type from this, and "lfm2_vl" loads the weights through Lfm2VlForConditionalGeneration
+        config.architectures = ["lfm2_vl"]
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.model_type = "lfm2_vl"  # Loads the weights through Lfm2VlForConditionalGeneration
         self.layernorm_attrs["simple"] = False
         self.layernorm_attrs["epsilon"] = vision_config.layer_norm_eps
         self.attention_attrs["rope"] = False
@@ -447,9 +448,10 @@ class LFM2VLEmbedding(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         config.hidden_act = None  # Model reads the decoder's activation, which this model does not have
         extra_options["filename"] = "embeddings.onnx"
+        # Model sets model_type from this, and "lfm2_vl" loads the weights through Lfm2VlForConditionalGeneration
+        config.architectures = ["lfm2_vl"]
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.model_type = "lfm2_vl"  # Loads the weights through Lfm2VlForConditionalGeneration
         self.embed_attrs["image_token_id"] = config.image_token_id  # Token whose embeddings the image features replace
         self.embed_attrs["image_features_dtype"] = self.io_dtype  # Type of the vision model's image_features
 
@@ -527,7 +529,7 @@ class LFM2VLEmbedding(Model):
         )
 
 
-class LFM2VLModel(Model):
+class LFM2VLModel:
     # The lfm2_vl pipeline (exclude_embeds=true): the LFM2 decoder, plus the vision and embedding models
     # that turn images and token ids into its inputs_embeds
 
@@ -549,13 +551,9 @@ class LFM2VLModel(Model):
                 f"The decoder cannot be named {self.decoder.filename}: the vision or embedding model has that name"
             )
 
-        self.hf_token = self.decoder.hf_token
-        self.hf_remote = self.decoder.hf_remote
-        self.context_length = self.decoder.context_length
-
         # Read the image processor settings before the build, so an unsupported checkpoint fails early
         self.image_processor, _ = ImageProcessingMixin.get_image_processor_dict(
-            self.decoder.model_name_or_path, cache_dir=cache_dir, token=self.hf_token
+            self.decoder.model_name_or_path, cache_dir=cache_dir, token=self.decoder.hf_token
         )
         self.processor_config = self.make_processor_config(self.image_processor)
 
@@ -645,3 +643,6 @@ class LFM2VLModel(Model):
             json.dump(genai_config, f, indent=4)
         with open(os.path.join(out_dir, "processor_config.json"), "w") as f:
             json.dump(self.processor_config, f, indent=2)
+
+    def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
+        self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
