@@ -16,6 +16,7 @@
 #include "models/io/kv_cache.h"
 #include "interface.h"
 
+#include <mutex>
 #include <stdexcept>
 
 namespace Generators {
@@ -23,6 +24,40 @@ namespace AMDGPU {
 
 const char* device_label = "amdgpu";
 const char* label_cpu = "cpu";
+
+// Device-resident zeros that GpuMemory::Zero copies from, so clearing a buffer is a
+// device-to-device copy rather than an upload from a host staging buffer. Grown to the largest
+// buffer cleared so far. It belongs to the device allocator, which releases it on teardown, so
+// binding a new allocator only forgets it.
+struct ZeroSource {
+  std::mutex mutex;
+  void* p{};
+  size_t size{};
+
+  void Forget() {
+    std::lock_guard<std::mutex> lock{mutex};
+    p = nullptr;
+    size = 0;
+  }
+};
+
+static ZeroSource g_zero_source;
+
+static void CopyBytes(const OrtMemoryInfo& src_info, void* src, const OrtMemoryInfo& dst_info, void* dst, size_t size) {
+  int64_t shape_val = static_cast<int64_t>(size);
+  std::span<const int64_t> shape{&shape_val, 1};
+  auto src_tensor = OrtValue::CreateTensor(src_info, src, size, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+  auto dst_tensor = OrtValue::CreateTensor(dst_info, dst, size, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+  const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+  const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+  GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+}
+
+static void UploadZeros(const OrtMemoryInfo& dst_info, void* dst, size_t size) {
+  std::vector<uint8_t> zero_buffer(size, 0);
+  auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+  CopyBytes(*cpu_mem_info, zero_buffer.data(), dst_info, dst, size);
+}
 
 struct GpuMemory final : DeviceBuffer {
   GpuMemory(size_t size, Ort::Allocator* allocator, const OrtMemoryInfo* memory_info)
@@ -122,19 +157,18 @@ struct GpuMemory final : DeviceBuffer {
     if (!ort_allocator_)
       throw std::runtime_error("AMDGPU allocator not initialized");
 
-    // TODO: device-side zero to avoid the host staging buffer. Off the decode hot path for now.
-    std::vector<uint8_t> zero_buffer(size_in_bytes_, 0);
-
-    int64_t shape_val = static_cast<int64_t>(size_in_bytes_);
-    std::span<const int64_t> shape{&shape_val, 1};
-    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
-    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, zero_buffer.data(), size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-
-    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-
-    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
-    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
-    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+    // The KV cache clears every present buffer for each new generator. Uploading from a host
+    // buffer costs a pageable host-to-device copy of the whole cache every time.
+    std::lock_guard<std::mutex> lock{g_zero_source.mutex};
+    if (g_zero_source.size < size_in_bytes_) {
+      void* p = ort_allocator_->Alloc(size_in_bytes_);
+      UploadZeros(*ort_memory_info_, p, size_in_bytes_);
+      if (g_zero_source.p)
+        ort_allocator_->Free(g_zero_source.p);
+      g_zero_source.p = p;
+      g_zero_source.size = size_in_bytes_;
+    }
+    CopyBytes(*ort_memory_info_, g_zero_source.p, *ort_memory_info_, p_device_, size_in_bytes_);
   }
 
   bool owned_;  // If we own the memory, we free it on destruction
@@ -188,6 +222,7 @@ struct InterfaceImpl : DeviceInterface {
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     Ort::api = &api;
     assert(!ort_allocator_);
+    g_zero_source.Forget();
     ort_allocator_ = &allocator;
     // Cache the memory info so tensors wrapping p_device_ carry the allocator's device attributes.
     ort_memory_info_ = &ort_allocator_->GetInfo();
