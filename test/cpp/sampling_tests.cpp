@@ -556,6 +556,26 @@ TEST(SamplingTests, NoRepeatNgramCorrectnessCpu) {
   // must be banned, so greedy falls back to the next-best allowed token (42).
   EXPECT_EQ(first_token(3), 42)
       << "Token 7 should be banned (repeats 3-gram 5,6,7); expected fallback to token 42.";
+
+  // Also verify prefill chunking across multiple AppendTokens calls before
+  // GenerateNextToken accumulates the full decoder prompt length.
+  {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 32);
+    params->SetSearchOptionBool("do_sample", false);
+    params->SetSearchOption("batch_size", batch_size);
+    params->SetSearchOption("repetition_penalty", 1.0);
+    params->SetSearchOption("no_repeat_ngram_size", 3.0);
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    const std::array<int32_t, 3> chunk1{5, 6, 7};
+    const std::array<int32_t, 3> chunk2{8, 5, 6};
+    generator->AppendTokens(chunk1.data(), chunk1.size());
+    generator->AppendTokens(chunk2.data(), chunk2.size());
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), shape));
+    generator->GenerateNextToken();
+    EXPECT_EQ(generator->GetNextTokens()[0], 42);
+  }
 }
 
 // For encoder-decoder models (e.g. marian-ssru), AppendTokenSequences supplies

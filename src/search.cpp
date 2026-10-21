@@ -187,6 +187,7 @@ void GreedySearch_Cpu::SelectTop() {
     SetNextToken(batch_id, token);
   }
 
+  sequences_.MarkGenerationStarted();
   if (!done_)
     AppendNextTokensToSequences();
 }
@@ -196,6 +197,7 @@ void GreedySearch_Cpu::CommitToken(int32_t token) {
   // (SetNextToken handles EOS/done accounting, AppendNextTokensToSequences appends + checks
   // max_length) but skip the argmax since the id is known. batch_size is always 1 here.
   SetNextToken(0, token);
+  sequences_.MarkGenerationStarted();
   if (!done_)
     AppendNextTokensToSequences();
 }
@@ -212,6 +214,7 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature, std::mt19937& rng) {
     ComputeSampledCategorical({scores.data(), scores.size()}, k, /*top_p=*/0.0f, temperature, dist);
     SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
+  sequences_.MarkGenerationStarted();
   if (!done_)
     AppendNextTokensToSequences();
 }
@@ -231,6 +234,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature, std::mt19937& rng)
     ComputeSampledCategorical({scores.data(), scores.size()}, /*top_k=*/0, p, temperature, dist);
     SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
+  sequences_.MarkGenerationStarted();
   if (!done_)
     AppendNextTokensToSequences();
 }
@@ -249,6 +253,7 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature, std::mt
     ComputeSampledCategorical({scores.data(), scores.size()}, k, p, temperature, dist);
     SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
+  sequences_.MarkGenerationStarted();
   if (!done_)
     AppendNextTokensToSequences();
 }
@@ -307,7 +312,7 @@ void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
     AppendNextTokensToSequences();
   }
 
-  sequences_.RecordPromptLength();
+  sequences_.RecordPromptLength(params_->HasEncoderPromptTokens());
   ResetDone();
 }
 
@@ -341,7 +346,7 @@ void BeamSearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
     copy(source, target);
   }
   sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size);  // next_tokens is not expanded
-  sequences_.RecordPromptLength();
+  sequences_.RecordPromptLength(params_->HasEncoderPromptTokens());
 }
 
 bool BeamSearch_Cpu::IsDone() const {
@@ -354,6 +359,7 @@ bool BeamSearch_Cpu::IsDone() const {
 }
 
 void BeamSearch_Cpu::AppendNextTokensToSequences() {
+  sequences_.MarkGenerationStarted();
   auto sequences_span = sequences_.GetSequences().CpuSpan();
   auto sequences_next_span = sequences_.GetNextSequences().CpuSpan();
   auto max_length = sequences_.max_length_;
@@ -436,23 +442,14 @@ void Search_Cpu::ApplyNoRepeatNgram(int ngram_size) {
   if (ngram_size <= 0)
     return;
 
-  const int sequence_length = sequences_.GetSequenceLength();
-  // For marian-ssru encoder-decoder models, sequences_ begins with the
-  // encoder's source prompt tokens (whereas Whisper stores decoder prompt
-  // tokens in sequences_). Only generated decoder tokens after prompt_length
-  // should be scanned for repeated n-grams.
-  const int start_offset =
-      params_->config.model.type == "marian-ssru" ? sequences_.GetPromptLength() : 0;
-  const int active_length = sequence_length - start_offset;
-  // Need at least one complete n-gram in history before anything can be banned.
-  if (active_length < ngram_size)
+  // Need at least one complete n-gram in decoder history before anything can be banned.
+  if (sequences_.GetDecoderSequenceLength() < ngram_size)
     return;
 
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    std::span<const int32_t> const sequence =
-        sequences_.GetSequence(i).CpuSpan().subspan(start_offset, active_length);
+    std::span<const int32_t> const sequence = sequences_.GetDecoderSequence(i).CpuSpan();
     ApplyNoRepeatNgramToLogits(beam_token_scores, sequence, ngram_size);
   }
 }

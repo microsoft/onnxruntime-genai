@@ -166,6 +166,9 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   virtual std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
 
+  // True when initial AppendTokens supplies encoder input_ids rather than decoder prompt tokens.
+  virtual bool HasEncoderPromptTokens() const { return false; }
+
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
