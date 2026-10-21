@@ -1134,9 +1134,43 @@ TEST(PagedKeyValueCacheManifestTest, DraftSnapshotCountIsLimitedByConfigBudgetAn
 
   batching.dflash2_max_snapshots = 3;
   batching.snapshot_cache.ram_bytes = 0;
+  batching.snapshot_cache.explicitly_set = true;
   auto budgets_disabled = CacheManager::Create(model, 0, 0, block_bytes);
   EXPECT_EQ(budgets_disabled->DraftCheckpointCapacity(), 0u);
   EXPECT_EQ(budgets_disabled->Snapshot().total_blocks, 8u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, LegacySnapshotReservationRequiresNoNewBudgetFields) {
+  auto model = LoadSyntheticCompositeModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 4;
+  batching.num_blocks = 8;
+  const size_t snapshot_bytes = 2 * PagedKeyValueCacheBytesPerBlock(model);
+  auto legacy = CacheManager::Create(model, 0, 0, snapshot_bytes);
+  EXPECT_EQ(legacy->DraftCheckpointCapacity(), 1u);
+  EXPECT_EQ(legacy->Snapshot().total_blocks, 6u);
+  legacy.reset();
+
+  OverlayConfig(*model->config_, R"({"engine":{"dynamic_batching":{"snapshot_cache":{}}}})");
+  auto disabled = CacheManager::Create(model, 0, 0, snapshot_bytes);
+  EXPECT_EQ(disabled->DraftCheckpointCapacity(), 0u);
+  EXPECT_EQ(disabled->Snapshot().total_blocks, 8u);
+  disabled.reset();
+
+  OverlayConfig(*model->config_, R"({"engine":{"dynamic_batching":{"snapshot_cache":{"ram_bytes":1048576}}}})");
+  auto host = CacheManager::Create(model, 0, 0, snapshot_bytes);
+  EXPECT_EQ(host->DraftCheckpointCapacity(), 1u);
+  EXPECT_EQ(host->Snapshot().total_blocks, 8u);
+  host.reset();
+
+  OverlayConfig(*model->config_, R"({"runtime_profiles":[{
+    "id":"disable-snapshots","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"snapshot_cache":{}}}}
+  }]})");
+  ApplyRuntimeProfile(*model->config_, uint64_t{0});
+  auto profile_disabled = CacheManager::Create(model, 0, 0, snapshot_bytes);
+  EXPECT_EQ(profile_disabled->DraftCheckpointCapacity(), 0u);
 }
 
 TEST(PagedKeyValueCacheManifestTest, SnapshotRuntimeProfileOverridesBaseConfiguration) {

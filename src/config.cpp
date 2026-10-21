@@ -2624,6 +2624,7 @@ struct DynamicBatching_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     if (name != "snapshot_cache") throw JSON::unknown_value_error{};
     if (!v_) v_ = Config::Engine::DynamicBatching{};
+    v_->snapshot_cache.explicitly_set = true;
     snapshot_cache_ = std::make_unique<SnapshotCache_Element>(v_->snapshot_cache);
     return *snapshot_cache_;
   }
@@ -2743,6 +2744,7 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     if (name != "snapshot_cache") throw JSON::unknown_value_error{};
     v_.snapshot_cache.emplace();
+    v_.snapshot_cache->explicitly_set = true;
     snapshot_cache_ = std::make_unique<SnapshotCache_Element>(*v_.snapshot_cache);
     return *snapshot_cache_;
   }

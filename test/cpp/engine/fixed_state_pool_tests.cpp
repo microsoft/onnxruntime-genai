@@ -518,6 +518,46 @@ TEST_F(FixedStatePoolTest, DraftAttachmentRequiresExactFixedBoundaryAndRetainsLe
                                            std::make_shared<Dflash2PrefixCheckpoint>()));
 }
 
+TEST_F(FixedStatePoolTest, LongerPrefixWithoutDraftDoesNotLeaseAShorterDraft) {
+  for (const bool evicted : {false, true}) {
+    BlockPool blocks{4, 2};
+    PrefixCacheOptions options;
+    options.enabled = true;
+    options.max_blocks = 2;
+    options.requires_checkpoint = true;
+    options.max_checkpoints = 2;
+    FixedStatePool pool{model_, 2, 2};
+    PrefixCache index{blocks, options};
+    MakeResident(pool, kRequestA, 3.0f, 4);
+    MakeResident(pool, kRequestB, 7.0f, 8);
+    auto shorter = pool.CapturePrefixCheckpoint(kRequestA);
+    auto longer = pool.CapturePrefixCheckpoint(kRequestB);
+    const std::array<int32_t, 8> tokens{1, 2, 3, 4, 5, 6, 7, 8};
+    auto history = blocks.AllocateBlocks(tokens.size());
+    const auto endpoint = index.RegisterCheckpointedPrefix(history, tokens, {}, longer).identity;
+    ASSERT_NE(endpoint, nullptr);
+    const auto first = history.front()->IdentityPtr();
+    ASSERT_TRUE(index.AttachCheckpoint(first, shorter));
+    auto draft = std::make_shared<Dflash2PrefixCheckpoint>();
+    draft->token_count = 4;
+    draft->state = PrefixSnapshotCache::State::Resident;
+    ASSERT_TRUE(index.AttachDraftCheckpoint(first, shorter, std::move(draft)));
+    if (evicted) {
+      auto missing = std::make_shared<Dflash2PrefixCheckpoint>();
+      missing->token_count = 8;
+      missing->state = PrefixSnapshotCache::State::Evicted;
+      ASSERT_TRUE(index.AttachDraftCheckpoint(endpoint, longer, std::move(missing)));
+    }
+    const auto match = index.Match(tokens, tokens.size());
+    EXPECT_EQ(match.token_count, 8u);
+    EXPECT_EQ(match.fixed_state_checkpoint, longer);
+    EXPECT_EQ(match.draft_checkpoint, nullptr);
+    index.DropUnleasedDraftCheckpoints();
+    EXPECT_TRUE(index.CanAttachDraftCheckpoint(first, 4));
+    blocks.Free(history);
+  }
+}
+
 TEST_F(FixedStatePoolTest, HybridPublicationRollsBackCapacityRefusalAndRetries) {
   BlockPool blocks{4, 3};
   PrefixCacheOptions options;

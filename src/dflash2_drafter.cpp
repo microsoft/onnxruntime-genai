@@ -16,12 +16,23 @@
 #include <numeric>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <unordered_set>
 #include <utility>
 
 namespace Generators {
 
 namespace {
+
+void WarnSnapshotFailure(const char* operation, const std::system_error& error) noexcept {
+  if (!g_log.enabled || !g_log.warning) return;
+  try {
+    Log("warning", "DFlash prefix snapshot %s failed; continuing without that snapshot: %s",
+        operation, error.what());
+  } catch (...) {
+    // Diagnostics must not turn optional storage failures into drafter failures.
+  }
+}
 
 // The drafter's packed stream is [context rows of request 0, its block rows, context rows of
 // request 1, ...]. PagedAttention derives each row's position from past_sequence_lengths plus its
@@ -743,7 +754,8 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   if (feed.draft_eligible && feed.first_position != 0 && RestorePrefix(feed)) {
     return true;
   }
-  if (feed.first_position != 0 && feed.prefix_checkpoint) {
+  if (feed.first_position != 0 && feed.prefix_checkpoint &&
+      feed.prefix_checkpoint->state != PrefixSnapshotCache::State::Evicted) {
     return false;
   }
   if (!Dflash2CanJoin(feed.draft_eligible, feed.first_position,
@@ -810,18 +822,25 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
   }
   const size_t component_limit =
       std::min(batching->dflash2_max_snapshots, batching->max_batch_size);
-  if (!prefix_snapshot_cache_->Allocate(
-          checkpoint, model_->p_device_kvcache_, "dflash2", component_limit)) {
-    return nullptr;
-  }
   try {
+    if (!prefix_snapshot_cache_->Allocate(
+            checkpoint, model_->p_device_kvcache_, "dflash2", component_limit)) {
+      return nullptr;
+    }
+    std::vector<PrefixSnapshotCache::Entry::Range> ranges(ring_blocks_);
     for (size_t layer = 0; layer < caches_.size(); ++layer) {
       const size_t block_bytes = caches_[layer]->GetByteSpan().size() / num_blocks_;
       for (size_t block = 0; block < ring_blocks_; ++block) {
-        checkpoint->Write(layer, block * block_bytes, *caches_[layer],
-                          static_cast<size_t>(it->second.blocks[block]) * block_bytes, block_bytes);
+        ranges[block] = {block * block_bytes,
+                         static_cast<size_t>(it->second.blocks[block]) * block_bytes, block_bytes};
       }
+      checkpoint->Write(layer, *caches_[layer], ranges);
     }
+    checkpoint->Flush();
+  } catch (const std::system_error& error) {
+    model_->p_device_kvcache_->Synchronize();
+    WarnSnapshotFailure("capture", error);
+    return nullptr;
   } catch (...) {
     model_->p_device_kvcache_->Synchronize();
     throw;
@@ -860,12 +879,14 @@ bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
     for (size_t i = 0; i < ring_blocks_; ++i) {
       state.blocks.push_back(free_blocks_[free_blocks_.size() - ring_blocks_ + i]);
     }
+    std::vector<PrefixSnapshotCache::Entry::Range> ranges(ring_blocks_);
     for (size_t layer = 0; layer < caches_.size(); ++layer) {
       const size_t block_bytes = caches_[layer]->GetByteSpan().size() / num_blocks_;
       for (size_t block = 0; block < ring_blocks_; ++block) {
-        checkpoint->Read(layer, block * block_bytes, *caches_[layer],
-                         static_cast<size_t>(state.blocks[block]) * block_bytes, block_bytes);
+        ranges[block] = {block * block_bytes,
+                         static_cast<size_t>(state.blocks[block]) * block_bytes, block_bytes};
       }
+      checkpoint->Read(layer, *caches_[layer], ranges);
     }
     model_->p_device_kvcache_->Synchronize();
     if (prefix_snapshot_cache_) prefix_snapshot_cache_->Touch(*checkpoint);
@@ -873,10 +894,19 @@ bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
     requests_.emplace(feed.request, std::move(state));
     free_blocks_.resize(free_blocks_.size() - ring_blocks_);
     return true;
+  } catch (const std::system_error& error) {
+    model_->p_device_kvcache_->Synchronize();
+    if (prefix_snapshot_cache_) prefix_snapshot_cache_->Discard(*checkpoint);
+    WarnSnapshotFailure("restore", error);
+    ++admission_misses_;
+    return false;
   } catch (const std::bad_alloc&) {
     model_->p_device_kvcache_->Synchronize();
     ++admission_misses_;
     return false;
+  } catch (...) {
+    model_->p_device_kvcache_->Synchronize();
+    throw;
   }
 }
 

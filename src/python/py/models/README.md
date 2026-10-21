@@ -175,7 +175,12 @@ through `2147483647`, and adds a DFlash-only count ceiling after the byte budget
 zero disables DFlash snapshots without disabling target prefix caching.
 `max_snapshots` is an optional additional Engine-wide count ceiling and is
 unbounded when omitted. Neither count can increase a byte budget or enable a
-storage tier. The same fields are accepted in runtime-profile overlays. See
+storage tier. Omitting `snapshot_cache` preserves legacy device-resident snapshots
+under the existing cache reservation; an explicit empty object or zero budgets
+disable snapshot storage on CPU/CUDA. WebGPU ignores tier byte budgets and
+retains count-limited device-resident snapshots. The same fields are accepted in
+runtime-profile overlays; a profile's `snapshot_cache` replaces the base object
+completely rather than merging omitted tiers. See
 [tiered snapshot configuration](../../../../docs/paged_attention_engine.md#tiered-snapshot-cache)
 for limits, policy, and a complete runtime JSON example.
 
@@ -414,8 +419,9 @@ disable it. The builder writes an explicit `false` for paged
 sliding-window KV rings, MTP, DSpark, and full-attention DFlash 2 because those
 layouts mirror auxiliary state per target block and do not yet support prefix
 caching. DFlash 2 with a positive sliding window uses a fixed-size auxiliary pool
-and supports default-enabled target prefix caching. Retaining its draft snapshots also
-requires a nonzero snapshot tier budget as described above.
+and supports default-enabled target prefix caching and device-resident draft
+snapshots. Explicit tiered snapshot policies require a nonzero tier budget on
+CPU/CUDA as described above.
 
 `max_scheduled_tokens` and `num_blocks` are additional `engine.dynamic_batching` knobs and are written only when passed. `max_scheduled_tokens` caps the tokens in one dynamically batched forward pass and therefore caps the peak prefill activation, which is the largest transient in a long-context deployment. `num_blocks` sets the total block budget before auxiliary-cache reservations. The target's resolved pool can be smaller when MTP or a full-attention block drafter reserves cache memory, and all resident requests share that pool, so `num_blocks * paged_block_size` is only the single-request upper bound when the target owns every configured block. `num_blocks` is mutually exclusive with `gpu_utilization_factor`, which is omitted from the config when `num_blocks` is set.
 

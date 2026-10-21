@@ -809,7 +809,9 @@ struct Config {
         size_t ram_bytes{};
         size_t disk_bytes{};
         std::string directory;
+        bool explicitly_set{};
         bool Enabled() const noexcept { return vram_bytes != 0 || ram_bytes != 0 || disk_bytes != 0; }
+        bool Configured() const noexcept { return explicitly_set || Enabled() || !directory.empty(); }
       } snapshot_cache;
       size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };

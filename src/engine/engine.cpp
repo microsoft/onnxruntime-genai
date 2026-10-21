@@ -439,15 +439,25 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
                            &dflash2_prefix_checkpoints_enabled);
   std::shared_ptr<PrefixSnapshotCache> snapshot_cache;
   const auto& batching = model->config_->engine.dynamic_batching;
+  const bool webgpu = model->p_device_kvcache_->GetType() == DeviceType::WEBGPU;
+  const bool device_resident = webgpu || (batching && !batching->snapshot_cache.Configured());
+  if (webgpu && batching && batching->snapshot_cache.Enabled() && g_log.enabled && g_log.warning) {
+    Log("warning",
+        "WebGPU does not support tiered prefix snapshot byte budgets; ignoring these limits "
+        "and retaining device-resident snapshots subject to count limits.");
+  }
   if (batching && batching->prefix_caching && batching->dflash2_max_snapshots != 0 &&
       (!batching->max_snapshots || *batching->max_snapshots != 0) &&
-      batching->snapshot_cache.Enabled()) {
+      (device_resident || batching->snapshot_cache.Enabled())) {
     const auto& limits = batching->snapshot_cache;
     snapshot_cache = std::make_shared<PrefixSnapshotCache>(
         std::array<size_t, 3>{cache_manager->DraftCheckpointVramBytes(),
                               limits.ram_bytes, limits.disk_bytes},
-        batching->max_snapshots.value_or(std::numeric_limits<size_t>::max()),
-        std::filesystem::path{fs::path{limits.directory}.c_str()});
+        device_resident ? cache_manager->DraftCheckpointCapacity()
+                        : batching->max_snapshots.value_or(std::numeric_limits<size_t>::max()),
+        device_resident ? std::filesystem::path{}
+                        : std::filesystem::path{fs::path{limits.directory}.c_str()},
+        device_resident);
   }
   if (dflash2_model && !dflash2_drafter) {
     const size_t paged_block_size =

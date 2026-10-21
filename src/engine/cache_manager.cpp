@@ -400,11 +400,13 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
       auxiliary_bytes_per_block == 0) {
     const auto& batching = *model_->config_->engine.dynamic_batching;
     const auto& limits = batching.snapshot_cache;
+    const bool device_resident = model_->p_device_kvcache_->GetType() == DeviceType::WEBGPU ||
+                                 !limits.Configured();
     size_t count = std::min(batching.dflash2_max_snapshots, prefix_checkpoint_capacity);
     if (batching.max_snapshots) {
       count = std::min(count, *batching.max_snapshots);
     }
-    if (limits.vram_bytes != 0 && model_->p_device_kvcache_->GetType() != DeviceType::CUDA) {
+    if (!device_resident && limits.vram_bytes != 0 && model_->p_device_kvcache_->GetType() != DeviceType::CUDA) {
       throw std::runtime_error("A VRAM prefix snapshot budget requires a CUDA device.");
     }
     const size_t target_block_bytes = PagedKeyValueCacheBytesPerBlock(model_);
@@ -422,8 +424,9 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
                                      budget - auxiliary_reserved_memory_bytes >= target_block_bytes
                                  ? budget - auxiliary_reserved_memory_bytes - target_block_bytes
                                  : 0;
-    const size_t vram_count = std::min({count, limits.vram_bytes / optional_draft_checkpoint_bytes,
-                                        available / optional_draft_checkpoint_bytes});
+    const size_t device_count = std::min(count, available / optional_draft_checkpoint_bytes);
+    const size_t vram_count = device_resident ? device_count
+                                              : std::min(device_count, limits.vram_bytes / optional_draft_checkpoint_bytes);
     draft_checkpoint_vram_bytes_ = vram_count * optional_draft_checkpoint_bytes;
     auxiliary_reserved_memory_bytes += draft_checkpoint_vram_bytes_;
     const size_t ram_count = limits.ram_bytes / optional_draft_checkpoint_bytes;
@@ -436,7 +439,7 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
         vram_count > std::numeric_limits<size_t>::max() - host_count
             ? std::numeric_limits<size_t>::max()
             : vram_count + host_count;
-    draft_checkpoint_capacity_ = std::min(count, tier_count);
+    draft_checkpoint_capacity_ = device_resident ? vram_count : std::min(count, tier_count);
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.

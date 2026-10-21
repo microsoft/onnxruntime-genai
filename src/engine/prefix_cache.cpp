@@ -134,6 +134,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
       match.token_count = token_count;
       match.blocks = std::move(blocks);
       match.fixed_state_checkpoint = endpoint->checkpoint;
+      match.draft_checkpoint.reset();
       if (endpoint->draft_checkpoint &&
           endpoint->draft_checkpoint->state != PrefixSnapshotCache::State::Evicted) {
         match.draft_checkpoint = endpoint->draft_checkpoint;

@@ -486,12 +486,15 @@ class EngineRunTest : public ::testing::Test {
   std::shared_ptr<Model> model_;
 };
 
-TEST(EngineSnapshotCacheTest, PolicyIsOptInAndOwnedByTheEngineRatherThanTheModel) {
+TEST(EngineSnapshotCacheTest, PolicyPreservesLegacyDefaultsAndIsOwnedByTheEngine) {
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   auto& batching = *model->config_->engine.dynamic_batching;
   EXPECT_TRUE(batching.prefix_caching);
   auto no_budget = Engine::CreateDependencies(model);
-  EXPECT_EQ(no_budget.snapshot_cache, nullptr);
+  EXPECT_NE(no_budget.snapshot_cache, nullptr);
+  batching.snapshot_cache.explicitly_set = true;
+  auto explicit_zero = Engine::CreateDependencies(model);
+  EXPECT_EQ(explicit_zero.snapshot_cache, nullptr);
   batching.prefix_caching = false;
   batching.snapshot_cache.ram_bytes = 1024;
   auto disabled = Engine::CreateDependencies(model);

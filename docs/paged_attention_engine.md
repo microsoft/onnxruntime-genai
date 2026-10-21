@@ -226,8 +226,12 @@ joins at a nonzero position.
 Snapshot storage uses one Engine-owned policy, not separate limits keyed by
 `decoder`, `dflash2`, `mtp`, or other component names. Configure
 `engine.dynamic_batching.snapshot_cache` with any combination of
-`vram_bytes`, `ram_bytes`, and `disk_bytes`; omitted limits default to zero and
-disable that tier. `max_snapshots`, when present, is the shared count cap, not a per-component
+`vram_bytes`, `ram_bytes`, and `disk_bytes`; within an explicit object, omitted
+limits default to zero and disable that tier. Omitting the entire object preserves
+legacy device-resident DFlash snapshots, count-limited and reserved from the
+existing cache budget. An explicit empty object or all-zero budgets disable
+snapshot storage on CPU/CUDA without disabling target prefix caching.
+`max_snapshots`, when present, is the shared count cap, not a per-component
 allowance. It is unbounded when omitted. Separate Engine instances have
 independent policies; these are not process-wide limits.
 
@@ -235,7 +239,15 @@ independent policies; these are not process-wide limits.
 only component registered with this policy today. These limits do not cover retained
 target KV, hybrid fixed-state checkpoints, active drafter rings, or total process
 memory. Target KV and fixed state remain device-resident under their existing
-budgets. CPU execution supports RAM and disk; VRAM storage requires CUDA.
+budgets. CPU execution supports explicit RAM and disk tiers; explicit VRAM
+storage requires CUDA.
+
+WebGPU keeps snapshots device-resident and ignores all three tier byte budgets.
+When nonzero byte budgets are configured, each Engine logs one warning if warning
+logging is enabled. The byte limits are not enforced on WebGPU; `prefix_caching`,
+`dflash2_max_snapshots`, and `max_snapshots` still apply. Snapshot capacity remains
+bounded by the existing device cache reservation, and unleased snapshots are
+reclaimed at the count limit. Target KV and fixed-state reclamation are unchanged.
 
 ```json
 {
@@ -259,7 +271,9 @@ across all tiers. Zero disables DFlash snapshots without disabling target prefix
 caching. The DFlash count is also capped by the hybrid fixed-state checkpoint
 capacity (`max_batch_size`). `max_snapshots` is an optional additional count cap
 shared by every producer; zero disables all snapshot publication. Neither count
-increases a tier budget or enables storage when all byte budgets are zero.
+increases a tier budget or enables storage when an explicit policy sets all byte
+budgets to zero on CPU or CUDA. Without an explicit policy, legacy device-resident
+snapshots remain enabled. WebGPU does not require byte budgets.
 Snapshot counts must be integers from zero through 2147483647; byte limits must
 be non-negative exact integers no greater than 9007199254740991 and fit the
 platform's `size_t`. Prefix caching may be enabled without enabling any draft
@@ -281,8 +295,9 @@ VRAM snapshot capacity is rounded down to whole rings and reserved from the
 shared target/drafter KV budget before target sizing. It is reduced when necessary
 to preserve at least one target block, for both `num_blocks` and automatic sizing.
 RAM and disk do not consume that GPU reserve. CUDA RAM payloads use pinned memory.
-Capture and restore transfer only selected ring blocks and synchronize before
-publication. Tier moves copy into separately budgeted destination storage before
+CPU/CUDA capture and restore transfer only selected ring blocks and synchronize before
+publication. WebGPU stages each backing buffer once per layer, gathers/scatters
+the selected blocks on the CPU, and uploads the destination once. Tier moves copy into separately budgeted destination storage before
 releasing the source. A failed move leaves its source intact; completed independent
 demotions remain valid even if a later operation fails.
 
@@ -293,7 +308,14 @@ directories are removed after their final owners release them. A lease may outli
 the drafter, including its disk storage. Disk transfer scratch is bounded to
 one reusable 1 MiB buffer per cache manager and is separate from retained payload budgets;
 tensor/index metadata and filesystem allocation overhead are also excluded.
-Disk I/O failures propagate explicitly; cleanup failures are logged as warnings.
+Adjacent disk ranges share transfer-buffer batches instead of synchronizing per
+ring block, and capture flushes once before publishing the complete snapshot.
+Disk I/O remains synchronous and can increase inference-loop latency; budgets
+are capacity limits, not latency guarantees.
+Operational disk failures are logged and refuse capture or discard the failed
+restore snapshot, without clearing healthy drafter context or spending its
+proposal-failure budget. Contract violations and device failures still propagate.
+Cleanup failures are logged as warnings.
 Spill directories request owner-only filesystem permissions. Windows inherits
 the parent directory's ACL, so a custom parent must restrict access appropriately.
 
@@ -301,6 +323,10 @@ Runtime-profile overlays accept `prefix_caching`, `dflash2_max_snapshots`,
 `max_snapshots`, and `snapshot_cache`. A profile's snapshot-cache object replaces
 the base object completely, so omitted tier limits disable those tiers in that
 profile.
+
+CUDA add-ons must be built for the same device-interface version as the core
+library. Install matching core/add-on packages together; older add-on binaries
+are rejected rather than loaded with an incompatible C++ layout.
 
 The generic configuration and shared Engine ownership establish the policy for
 future snapshot-producing components without creating component-specific controls.
