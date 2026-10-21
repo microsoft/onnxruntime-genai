@@ -227,6 +227,7 @@ void BeamSearch_Cuda::SelectTop() {
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
   auto next_tokens_device = beam_scorer_->GetNextTokens();
   next_tokens_ = gpu_span<int32_t>(next_tokens_device.Span());
+  sequences_.MarkGenerationStarted();
   sequences_.AfterAppendNextTokens(next_tokens_device, params_->BatchBeamSize());
 }
 
@@ -302,6 +303,7 @@ void GreedySearch_Cuda::CompleteGeneration() {
   completion_pending_ = false;
   done_pending_ = false;
 
+  sequences_.MarkGenerationStarted();
   if (!*done_cpu_) {
     sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
   }
@@ -340,6 +342,7 @@ void GreedySearch_Cuda::CommitToken(int32_t token) {
       cuda::LaunchStoreBytes(destination, &token, sizeof(int32_t), GetStream());
     }
     next_tokens_buffer_.CpuSpan()[0] = token;
+    sequences_.MarkGenerationStarted();
     sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
     MarkDoneAtMaxLength();
     return;
@@ -396,6 +399,7 @@ void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   // not run generated-token EOS/padding handling, and done state is reset when capacity remains.
   ResetDone();
   AppendTokensToSequences(next_tokens);
+  sequences_.RecordPromptLength(params_->HasEncoderPromptTokens());
   MarkDoneAtMaxLength();
   if (*done_cpu_)
     return;
@@ -408,6 +412,7 @@ void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetNextSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
   cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
   sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size);  // next_tokens is batch_size
+  sequences_.RecordPromptLength(params_->HasEncoderPromptTokens());
   CUDA_CHECK(cudaStreamSynchronize(GetStream()));
 }
 

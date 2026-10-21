@@ -56,7 +56,6 @@ struct MarianModel : Model {
   MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
-  bool HasEncoderPromptTokens() const override { return true; }
 
   std::unique_ptr<OrtSessionOptions> encoder_session_options_;
   std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
