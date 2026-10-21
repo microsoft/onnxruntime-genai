@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <new>
@@ -31,6 +32,20 @@ void WarnSnapshotFailure(const char* operation, const std::system_error& error) 
         operation, error.what());
   } catch (...) {
     // Diagnostics must not turn optional storage failures into drafter failures.
+  }
+}
+
+void LogSnapshotTransfer(const char* operation, const PrefixSnapshotCache::Entry& entry,
+                         std::chrono::steady_clock::time_point start) noexcept {
+  if (!g_log.enabled) return;
+  const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - start)
+                           .count();
+  try {
+    Log("engine_snapshot_cache", "action=%s tier=%zu bytes=%zu elapsed_us=%lld",
+        operation, static_cast<size_t>(entry.tier), entry.bytes, static_cast<long long>(elapsed));
+  } catch (...) {
+    // Diagnostics must not turn successful optional transfers into request failures.
   }
 }
 
@@ -822,6 +837,7 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
   }
   const size_t component_limit =
       std::min(batching->dflash2_max_snapshots, batching->max_batch_size);
+  const auto start = std::chrono::steady_clock::now();
   try {
     if (!prefix_snapshot_cache_->Allocate(
             checkpoint, model_->p_device_kvcache_, "dflash2", component_limit)) {
@@ -846,6 +862,7 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
     throw;
   }
   model_->p_device_kvcache_->Synchronize();
+  LogSnapshotTransfer("capture", *checkpoint, start);
   return checkpoint;
 }
 
@@ -873,6 +890,7 @@ bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
       throw std::logic_error("DFlash 2 prefix checkpoint has an invalid cache tensor.");
     }
   }
+  const auto start = std::chrono::steady_clock::now();
   try {
     RequestState state;
     state.blocks.reserve(ring_blocks_);
@@ -893,6 +911,7 @@ bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
     state.cached_positions = feed.first_position;
     requests_.emplace(feed.request, std::move(state));
     free_blocks_.resize(free_blocks_.size() - ring_blocks_);
+    LogSnapshotTransfer("restore", *checkpoint, start);
     return true;
   } catch (const std::system_error& error) {
     model_->p_device_kvcache_->Synchronize();

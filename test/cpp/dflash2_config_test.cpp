@@ -1915,6 +1915,72 @@ TEST(PrefixSnapshotCacheTest, ZeroAndUndersizedBudgetsRefuseStorage) {
   EXPECT_THROW(MakeStorageEntry(invalid_vram, cpu), std::runtime_error);
 }
 
+TEST(PrefixSnapshotCacheTest, DiagnosticsReportTierMovesAndLeasedCapacityOnlyWhenEnabled) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, true};
+  for (bool enabled : {false, true}) {
+    const auto previous_logging = g_log;
+    SetLogBool("enabled", enabled);
+    testing::internal::CaptureStderr();
+    PrefixSnapshotCache cache{{16, 16, 16}, 8};
+    auto first = MakeStorageEntry(cache, &device);
+    auto second = MakeStorageEntry(cache, &device);
+    auto third = MakeStorageEntry(cache, &device);
+    auto fourth = MakeStorageEntry(cache, &device);
+    auto second_lease = second;
+    auto third_lease = third;
+    auto fourth_lease = fourth;
+    auto refused = MakeStorageEntry(cache, &device);
+    const auto log = testing::internal::GetCapturedStderr();
+    g_log = previous_logging;
+    EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+    EXPECT_EQ(refused, nullptr);
+    CheckStorageEntry(*second_lease);
+    CheckStorageEntry(*third_lease);
+    CheckStorageEntry(*fourth_lease);
+    if (!enabled) {
+      EXPECT_EQ(log.find("engine_snapshot_cache"), std::string::npos);
+      continue;
+    }
+    EXPECT_NE(log.find("action=configured"), std::string::npos);
+    EXPECT_NE(log.find("action=demoted reason=tier_capacity tier=1 bytes=16"), std::string::npos);
+    EXPECT_NE(log.find("action=demoted reason=tier_capacity tier=2 bytes=16"), std::string::npos);
+    EXPECT_NE(log.find("action=move_staged"), std::string::npos);
+    EXPECT_NE(log.find("used_vram_bytes=16 used_ram_bytes=16 used_disk_bytes=16"), std::string::npos);
+    EXPECT_NE(log.find("limit_vram_bytes=16 limit_ram_bytes=16 limit_disk_bytes=16"), std::string::npos);
+    EXPECT_NE(log.find("action=evicted reason=tier_capacity"), std::string::npos);
+    EXPECT_NE(log.find("action=refused reason=tier_capacity_leased"), std::string::npos);
+    EXPECT_NE(log.find("elapsed_us="), std::string::npos);
+  }
+}
+
+TEST(PrefixSnapshotCacheTest, DiagnosticsDistinguishBudgetAndCountRefusals) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  const auto previous_logging = g_log;
+  SetLogBool("enabled", true);
+  testing::internal::CaptureStderr();
+  PrefixSnapshotCache undersized{{0, 15, 0}, 8};
+  auto too_large = MakeStorageEntry(undersized, cpu);
+  PrefixSnapshotCache count_limited{{0, 64, 0}, 1};
+  auto first = MakeStorageEntry(count_limited, cpu, "dflash2", 1);
+  auto lease = first;
+  auto component_refused = MakeStorageEntry(count_limited, cpu, "dflash2", 1);
+  auto shared_refused = MakeStorageEntry(count_limited, cpu, "other");
+  lease.reset();
+  auto replacement = MakeStorageEntry(count_limited, cpu, "other");
+  const auto log = testing::internal::GetCapturedStderr();
+  g_log = previous_logging;
+  EXPECT_EQ(too_large, nullptr);
+  EXPECT_EQ(component_refused, nullptr);
+  EXPECT_EQ(shared_refused, nullptr);
+  ASSERT_NE(replacement, nullptr);
+  CheckStorageEntry(*replacement);
+  EXPECT_NE(log.find("action=refused reason=payload_exceeds_tiers"), std::string::npos);
+  EXPECT_NE(log.find("action=refused reason=component_count_leased"), std::string::npos);
+  EXPECT_NE(log.find("action=refused reason=shared_count_leased"), std::string::npos);
+  EXPECT_NE(log.find("action=reused reason=count"), std::string::npos);
+}
+
 TEST(PrefixSnapshotCacheTest, WebGpuIgnoresByteBudgetsButProtectsLeasesAndCountLimits) {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
   CheckpointAllocationDevice device{*cpu, DeviceType::WEBGPU};

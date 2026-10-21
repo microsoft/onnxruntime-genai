@@ -4,6 +4,7 @@
 #include "prefix-snapshot-cache.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <limits>
 #include <random>
@@ -246,7 +247,27 @@ void PrefixSnapshotCache::Entry::Flush() {
 PrefixSnapshotCache::PrefixSnapshotCache(
     std::array<size_t, 3> limits, size_t max_entries, std::filesystem::path directory,
     bool device_resident)
-    : limits_{limits}, max_entries_{max_entries}, directory_{std::move(directory)}, device_resident_{device_resident} {}
+    : limits_{limits}, max_entries_{max_entries}, directory_{std::move(directory)}, device_resident_{device_resident} {
+  LogEvent("configured");
+}
+
+void PrefixSnapshotCache::LogEvent(
+    const char* action, const Entry* entry, const char* reason, int64_t elapsed_us) const noexcept {
+  if (!g_log.enabled) return;
+  try {
+    Log("engine_snapshot_cache",
+        "action=%s reason=%s tier=%zu bytes=%zu used_vram_bytes=%zu used_ram_bytes=%zu "
+        "used_disk_bytes=%zu limit_vram_bytes=%zu limit_ram_bytes=%zu limit_disk_bytes=%zu "
+        "max_entries=%zu device_resident=%d elapsed_us=%lld",
+        action, reason, entry ? static_cast<size_t>(entry->tier) : limits_.size(),
+        entry ? entry->bytes : size_t{0},
+        accounting_->used[0], accounting_->used[1], accounting_->used[2],
+        limits_[0], limits_[1], limits_[2], max_entries_,
+        static_cast<int>(device_resident_), static_cast<long long>(elapsed_us));
+  } catch (...) {
+    // Diagnostics must not change cache publication or cleanup outcomes.
+  }
+}
 
 void PrefixSnapshotCache::Prune() {
   entries_.erase(std::remove_if(entries_.begin(), entries_.end(), [](const auto& weak) {
@@ -280,6 +301,7 @@ bool PrefixSnapshotCache::EvictOldest(std::string_view component) {
   auto entry = selected->lock();
   entry->Release();
   entry->state = State::Evicted;
+  LogEvent("evicted", entry.get(), "count");
   Prune();
   return true;
 }
@@ -301,6 +323,7 @@ bool PrefixSnapshotCache::ReuseOldest(Entry& destination, std::string_view compo
   if (source->type != destination.type || source->shapes != destination.shapes) return false;
   destination.TakeStorage(*source);
   source->state = State::Evicted;
+  LogEvent("reused", &destination, "count");
   Prune();
   return true;
 }
@@ -332,6 +355,7 @@ bool PrefixSnapshotCache::MakeRoom(Tier tier, size_t bytes, DeviceInterface* dev
     if (!moved) {
       victim->Release();
       victim->state = State::Evicted;
+      LogEvent("evicted", victim.get(), "tier_capacity");
     }
   }
   return true;
@@ -395,12 +419,14 @@ void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterfa
 }
 
 void PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device) {
+  const auto start = std::chrono::steady_clock::now();
   Entry staged;
   staged.shapes = entry.shapes;
   staged.type = entry.type;
   staged.bytes = entry.bytes;
   staged.layer_offsets = entry.layer_offsets;
   AllocateStorage(staged, tier, device);
+  LogEvent("move_staged", &staged);
   // A move only proceeds toward a slower tier, so disk is always the destination, never the source.
   try {
     for (size_t layer = 0; layer < entry.caches.size(); ++layer) {
@@ -414,6 +440,10 @@ void PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device)
     throw;
   }
   entry.TakeStorage(staged);
+  LogEvent("demoted", &entry, "tier_capacity",
+           std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now() - start)
+               .count());
 }
 
 bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
@@ -441,9 +471,16 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     entry->bytes += bytes;
     entry->layer_offsets.push_back(entry->bytes);
   }
-  if (entry->bytes == 0 || max_entries_ == 0 || component_max_entries == 0 ||
-      (!device_resident && std::none_of(limits_.begin(), limits_.end(),
-                                        [&](size_t limit) { return limit >= entry->bytes; }))) return false;
+  const auto refuse = [&](const char* reason) {
+    LogEvent("refused", entry.get(), reason);
+    return false;
+  };
+  if (entry->bytes == 0) return refuse("empty_payload");
+  if (max_entries_ == 0 || component_max_entries == 0) return refuse("count_disabled");
+  if (!device_resident && std::none_of(limits_.begin(), limits_.end(),
+                                       [&](size_t limit) { return limit >= entry->bytes; })) {
+    return refuse("payload_exceeds_tiers");
+  }
   Prune();
   entries_.reserve(entries_.size() + 1);
   const auto publish = [&] {
@@ -451,19 +488,20 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     entry->state = State::Resident;
     entry->recency = ++clock_;
     entries_.push_back(entry);
+    LogEvent("allocated", entry.get());
     return true;
   };
   while (!component.empty() && Count(component) >= component_max_entries) {
     if (ReuseOldest(*entry, component)) {
       return publish();
     }
-    if (!EvictOldest(component)) return false;
+    if (!EvictOldest(component)) return refuse("component_count_leased");
   }
   while (entries_.size() >= max_entries_) {
     if (ReuseOldest(*entry)) {
       return publish();
     }
-    if (!EvictOldest()) return false;
+    if (!EvictOldest()) return refuse("shared_count_leased");
   }
   for (size_t index = 0; index < limits_.size(); ++index) {
     if (!device_resident && !MakeRoom(static_cast<Tier>(index), entry->bytes, device)) continue;
@@ -476,7 +514,7 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     entry->TakeStorage(staged);
     return publish();
   }
-  return false;
+  return refuse("tier_capacity_leased");
 }
 
 void PrefixSnapshotCache::Touch(const Entry& entry) noexcept {
@@ -495,6 +533,7 @@ void PrefixSnapshotCache::Discard(const Entry& entry) noexcept {
     if (candidate.get() == &entry) {
       candidate->Release();
       candidate->state = State::Evicted;
+      LogEvent("discarded", candidate.get());
       return;
     }
   }

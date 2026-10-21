@@ -80,6 +80,8 @@ class PrefixSnapshotCache {
   const std::array<size_t, 3>& Used() const noexcept { return accounting_->used; }
 
  private:
+  void LogEvent(const char* action, const Entry* entry = nullptr,
+                const char* reason = "none", int64_t elapsed_us = 0) const noexcept;
   bool MakeRoom(Tier tier, size_t bytes, DeviceInterface* device);
   void Move(Entry& entry, Tier tier, DeviceInterface* device);
   void AllocateStorage(Entry& entry, Tier tier, DeviceInterface* device);

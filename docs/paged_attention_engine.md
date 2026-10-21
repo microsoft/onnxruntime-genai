@@ -328,6 +328,38 @@ CUDA add-ons must be built for the same device-interface version as the core
 library. Install matching core/add-on packages together; older add-on binaries
 are rejected rather than loaded with an incompatible C++ layout.
 
+#### Snapshot diagnostics and qualification
+
+Enable the existing GenAI logger with `SetLogBool("enabled", true)` to receive
+`engine_snapshot_cache` events. No separate logging option or public metrics
+interface is required. Storage events report effective tier limits, current
+retained payload bytes, the shared count ceiling, and whether legacy
+device-resident storage is selected. Tier numbers are `0` for VRAM, `1` for RAM,
+`2` for disk, and `3` when no entry is associated with an event.
+For device-resident storage, count limits and the existing cache reservation
+apply instead of the tier byte limits.
+
+`allocated`, `reused`, `demoted`, `evicted`, and `discarded` describe storage
+decisions. `refused` distinguishes disabled counts, payloads too large for any
+tier, and capacity protected by component-count, shared-count, or tier leases.
+`move_staged` reports occupancy while both source and destination are charged;
+`demoted` reports occupancy after source release. These bytes exclude transfer
+scratch, metadata, allocator overhead, and active inference memory.
+Successful DFlash `capture` and `restore`, and storage `demoted` events, include
+host elapsed microseconds through transfer synchronization. Capture timing also
+includes admission and any required demotions; these are synchronous operation
+times, not independent disk bandwidth or end-to-end request latency measures.
+
+Qualify the exact core/add-on build on the intended CUDA stack before relying
+on tiered-cache performance. Check output against cache-disabled controls,
+exercise simultaneous adoption leases and all-leased refusal, then release
+owners and verify progress. Include tier demotion, disk failure/retry,
+cancellation, CUDA graph restore, and final-owner spill cleanup. Record
+configured and effective budgets, staged peak payload occupancy, transfer
+latencies, and request latency with logging disabled for timing measurements.
+CPU results and measurements from an earlier storage implementation do not
+qualify CUDA transfers or the revised policy.
+
 The generic configuration and shared Engine ownership establish the policy for
 future snapshot-producing components without creating component-specific controls.
 The storage manager is deliberately independent of token identity and tensor
