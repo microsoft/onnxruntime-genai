@@ -68,7 +68,6 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
         onnx_dtype=ir.DataType.FLOAT16,
         quantization_algo="default",
         tied_quantized_embeddings=False,
-        embedding_reads_quantized_lm_head=False,
         quant_attrs={
             "op_types_to_quantize": ("MatMul",),
             "nodes_to_exclude": [],
@@ -929,7 +928,7 @@ def test_prepacked_bf16_target_keeps_a_private_raw_quantized_drafter_head():
 def test_tied_prepacked_target_shares_its_raw_lm_head_with_the_drafter(io_dtype):
     # The prepack pass leaves an LM head the tied embedding also reads raw, so any drafter can adopt it.
     model = _quant_composite(io_dtype=io_dtype)
-    model.decoder.embedding_reads_quantized_lm_head = True
+    model.decoder.tied_quantized_embeddings = True
 
     assert model.block_drafter_lm_head_quant() == {
         "bits": 4,

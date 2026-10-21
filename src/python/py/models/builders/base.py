@@ -1190,8 +1190,7 @@ class Model:
         else:
             self.tied_quantized_embeddings = False
             self.tied_unquantized_embeddings = False
-        # Set by make_embedding_lookup once the lookup is wired to the quantized LM head weight.
-        self.embedding_reads_quantized_lm_head = False
+        # make_embedding_lookup clears both flags if the loaded LM head cannot back the lookup.
 
     def is_lm_head_quantized(self):
         return (
@@ -3021,12 +3020,14 @@ class Model:
         # Tied quantized: lm_head weight -> Reshape -> GatherBlockQuantized [-> Slice]
         # Tied float:     lm_head weight -> Transpose -> Gather
         # Separate:       embedding weight -------------> Gather
-        can_reuse_lm_head = getattr(lm_head, "can_reuse_as_embedding", True)
+        if not getattr(lm_head, "can_reuse_as_embedding", True):
+            # The loader's LM head cannot back a lookup, so the graph is untied after all.
+            self.tied_quantized_embeddings = False
+            self.tied_unquantized_embeddings = False
 
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and the export model
         # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
-        if self.tied_quantized_embeddings and can_reuse_lm_head:
-            self.embedding_reads_quantized_lm_head = True
+        if self.tied_quantized_embeddings:
             bits, block_size, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = (
                 self.make_tied_quantized_embedding_input_names(lm_head)
             )
@@ -3079,7 +3080,7 @@ class Model:
                 gather_output = f"{slice_name}/output_0"
 
         # Use Transpose + Gather for tied embeddings for float embedding layers
-        elif self.tied_unquantized_embeddings and can_reuse_lm_head:
+        elif self.tied_unquantized_embeddings:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(

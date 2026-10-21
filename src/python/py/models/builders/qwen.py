@@ -1151,9 +1151,9 @@ class Qwen35MoEModel(MTPModel):
                 "DequantizeLinear/MatMul pair instead of the MatMulNBits this exporter can reuse."
             )
             return None
-        target_lm_head = getattr(getattr(decoder, "weights", None), "lm_head", None)
+        # decoder.make_model has already dropped its weights, so this predicts the to_nbits names.
         head_bits, head_block_size, weight_name, scales_name, zero_point_name = (
-            decoder.make_tied_quantized_embedding_input_names(target_lm_head)
+            decoder.make_tied_quantized_embedding_input_names(None)
         )
         if head_bits != 4:
             print(
@@ -1173,7 +1173,7 @@ class Qwen35MoEModel(MTPModel):
             )
             return None
         prepack = int(decoder.matmul_attrs["weights_prepacked"]) if decoder.ep == "cuda" else 0
-        if decoder.embedding_reads_quantized_lm_head:
+        if decoder.tied_quantized_embeddings:
             # The prepack pass leaves a weight the tied embedding also reads in the raw layout.
             prepack = 0
         adopt_target = not (prepack and decoder.io_dtype != ir.DataType.FLOAT16)
