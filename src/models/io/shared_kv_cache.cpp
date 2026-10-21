@@ -31,6 +31,7 @@ std::unique_ptr<OrtValue> CreateLogicalKeyValueCacheOutputView(OrtValue& backing
 }
 
 int64_t GetLogicalKeyValueCacheOutputLength(OrtValue& backing_tensor,
+                                            int64_t output_sequence_dimension,
                                             int total_length,
                                             bool use_graph_capture) {
   const auto shape = backing_tensor.GetTensorTypeAndShapeInfo()->GetShape();
@@ -39,10 +40,25 @@ int64_t GetLogicalKeyValueCacheOutputLength(OrtValue& backing_tensor,
   }
 
   const int64_t capacity = shape[2];
+  if (output_sequence_dimension > 0) {
+    return output_sequence_dimension;
+  }
   return use_graph_capture ? capacity : std::min<int64_t>(total_length, capacity);
 }
 
 }  // namespace KeyValueCacheDetail
+
+SharedKeyValueCache::SharedKeyValueCache(State& state)
+    : DefaultKeyValueCacheBase{state} {
+  output_sequence_dimensions_.reserve(output_name_strings_.size());
+  for (const auto& output_name : output_name_strings_) {
+    const auto output_shape = model_.session_info_.GetOutputShape(output_name);
+    if (output_shape.size() != 4) {
+      throw std::runtime_error("Shared KV-cache outputs must have rank 4.");
+    }
+    output_sequence_dimensions_.push_back(output_shape[2]);
+  }
+}
 
 void SharedKeyValueCache::Update(DeviceSpan<int32_t> /*beam_indices*/, int total_length) {
   current_length_ = total_length;
@@ -52,9 +68,10 @@ void SharedKeyValueCache::Update(DeviceSpan<int32_t> /*beam_indices*/, int total
 
   std::vector<int64_t> output_lengths;
   output_lengths.reserve(presents_.size());
-  for (const auto& present : presents_) {
+  for (size_t i = 0; i < presents_.size(); ++i) {
     output_lengths.push_back(KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
-        *present, total_length, state_.params_->use_graph_capture));
+        *presents_[i], output_sequence_dimensions_[i], total_length,
+        state_.params_->use_graph_capture));
   }
 
   if (output_lengths == output_view_lengths_)

@@ -203,6 +203,41 @@ TEST_F(StandardPositionInputsTest, Qwen3DGraphCaptureUsesStableDecodeBuffers) {
   EXPECT_EQ(resumed_position_ids->GetTensorRawData(), position_ids_data);
 }
 
+TEST_F(StandardPositionInputsTest, Qwen3DGraphCaptureRewindPreservesPadding) {
+  Use3DPositionIds();
+  model_->config_->model.type = "qwen3_5_moe_text";
+  model_->config_->model.pad_token_id = 0;
+  model_->config_->model.image_token_id = 151655;
+  model_->config_->model.video_token_id = 151656;
+  model_->config_->model.vision_start_token_id = 151652;
+  params_->use_graph_capture = true;
+  params_->max_graph_capture_length = 1;
+  params_->search.max_length = 8;
+
+  auto inputs = CreatePositionInputs();
+  inputs->Add();
+
+  auto prompt_tokens = model_->p_device_inputs_->Allocate<int32_t>(3);
+  auto prompt_span = prompt_tokens.CpuSpan();
+  prompt_span[0] = 0;
+  prompt_span[1] = 0;
+  prompt_span[2] = 3;
+  prompt_tokens.CopyCpuToDevice();
+  inputs->Update(prompt_tokens, 3, 3);
+
+  auto decode_token = model_->p_device_inputs_->Allocate<int32_t>(1);
+  decode_token.CpuSpan()[0] = 4;
+  decode_token.CopyCpuToDevice();
+  inputs->Update(decode_token, 4, 1);
+  inputs->RewindTo(3);
+
+  auto* attention_mask = state_->GetInput(model_->config_->model.decoder.inputs.attention_mask.c_str());
+  ASSERT_NE(attention_mask, nullptr);
+  const auto mask = attention_mask->GetTensorData<int64_t>();
+  EXPECT_EQ(std::vector<int64_t>(mask, mask + 8),
+            (std::vector<int64_t>{0, 0, 1, 0, 0, 0, 0, 0}));
+}
+
 TEST(Qwen2VLPositionInputsTest, RejectsNegativeGridDimensions) {
   const std::vector<int64_t> grid{1, -1, 2};
   const std::string message = CaptureThrowMessage([&] {

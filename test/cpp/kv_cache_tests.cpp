@@ -80,17 +80,33 @@ TEST(KvCacheTests, LogicalOutputLengthsRespectPerTensorCapacity) {
       model.allocator_cpu_, sliding_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
   EXPECT_EQ(Generators::KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
-                *full_cache, 80, false),
+                *full_cache, -1, 80, false),
             80);
   EXPECT_EQ(Generators::KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
-                *sliding_cache, 80, false),
+                *sliding_cache, -1, 80, false),
             64);
   EXPECT_EQ(Generators::KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
-                *full_cache, 80, true),
+                *full_cache, -1, 80, true),
             96);
   EXPECT_EQ(Generators::KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
-                *sliding_cache, 80, true),
+                *sliding_cache, -1, 80, true),
             64);
+}
+
+TEST(KvCacheTests, LogicalOutputLengthPreservesFixedOnnxDimension) {
+  CacheTestModel model{false};
+  constexpr std::array<int64_t, 4> backing_shape{1, 2, 96, 4};
+  auto backing = OrtValue::CreateTensor(
+      model.allocator_cpu_, backing_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+
+  const int64_t output_length = Generators::KeyValueCacheDetail::GetLogicalKeyValueCacheOutputLength(
+      *backing, 96, 3, false);
+  auto output_view = Generators::KeyValueCacheDetail::CreateLogicalKeyValueCacheOutputView(
+      *backing, output_length);
+
+  EXPECT_EQ(output_length, 96);
+  EXPECT_EQ(output_view->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{1, 2, 96, 4}));
 }
 
 }  // namespace

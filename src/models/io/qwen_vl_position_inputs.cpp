@@ -54,6 +54,21 @@ struct FillMaskFunctor {
   }
 };
 
+struct ClearAttentionMaskSuffixFunctor {
+  uint8_t* mask_data;
+  int64_t batch_size;
+  size_t max_length;
+  size_t index;
+
+  template <typename T>
+  void operator()() {
+    auto* data = reinterpret_cast<T*>(mask_data);
+    for (int64_t batch = 0; batch < batch_size; ++batch) {
+      std::fill_n(data + batch * max_length + index, max_length - index, static_cast<T>(0));
+    }
+  }
+};
+
 struct InitPositionIdsFunctor {
   Qwen2VLPositionInputs* self;
   DeviceSpan<int32_t> next_tokens;
@@ -505,13 +520,8 @@ void Qwen2VLPositionInputs::RewindTo(size_t index) {
       if (index > max_length) {
         throw std::runtime_error("Qwen attention mask rewind index exceeds search.max_length.");
       }
-      DispatchOnType(type_, [&]<typename T>() {
-        auto* data = reinterpret_cast<T*>(cpu_data.data());
-        for (int64_t batch = 0; batch < attention_mask_shape_[0]; ++batch) {
-          std::fill_n(data + batch * max_length, index, static_cast<T>(1));
-          std::fill_n(data + batch * max_length + index, max_length - index, static_cast<T>(0));
-        }
-      });
+      DispatchOnType(type_, ClearAttentionMaskSuffixFunctor{
+                                cpu_data.data(), attention_mask_shape_[0], max_length, index});
       mask_span.CopyCpuToDevice();
     } else {
       attention_mask_shape_[1] = static_cast<int64_t>(index);
