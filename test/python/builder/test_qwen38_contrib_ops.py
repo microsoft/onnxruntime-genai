@@ -541,8 +541,8 @@ def test_qwen_linear_attention_packs_qkv_and_z():
         "/model/layers.3/linear_attn/qkv_proj/MatMul/output_0",
         "/model/layers.3/linear_attn/z_proj/MatMul/output_0",
     ]
-    assert qkv_name == "/model/layers.3/linear_attn/qkv_proj/MatMul"
-    assert z_name == "/model/layers.3/linear_attn/z_proj/MatMul"
+    assert qkv_name == "/model/layers.3/linear_attn/qkv_proj/MatMul/output_0"
+    assert z_name == "/model/layers.3/linear_attn/z_proj/MatMul/output_0"
 
 
 def test_qwen_linear_attention_packs_prequantized_qkv_and_z():
@@ -605,8 +605,8 @@ def test_qwen_linear_attention_packs_a_and_b():
         "/model/layers.3/linear_attn/b_proj/MatMul/output_0",
     ]
     assert not any(call[0] == "exclude_node_from_quantization" for call in model.calls)
-    assert b_name == "/model/layers.3/linear_attn/b_proj/MatMul"
-    assert a_name == "/model/layers.3/linear_attn/a_proj/MatMul"
+    assert b_name == "/model/layers.3/linear_attn/b_proj/MatMul/output_0"
+    assert a_name == "/model/layers.3/linear_attn/a_proj/MatMul/output_0"
 
 
 def test_qwen_attention_emits_packed_qkv_with_separate_gate_and_indexer_qk():
