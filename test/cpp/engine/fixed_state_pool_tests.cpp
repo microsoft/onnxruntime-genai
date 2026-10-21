@@ -4,9 +4,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -16,6 +18,8 @@
 #include "dflash2_drafter.h"
 #include "engine_test_helpers.h"
 #include "models/model_state_manifest.h"
+#include "models/session_options.h"
+#include "models/utils.h"
 
 namespace Generators {
 namespace test {
@@ -30,14 +34,16 @@ const void* const kRequestC = &kRequestStorageC;
 
 using Request = FixedStateReservationRequest;
 
-class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
+class OffsetTensorViewsUnsupportedDevice : public DeviceInterface {
  public:
   explicit OffsetTensorViewsUnsupportedDevice(
       DeviceInterface& inner, DeviceType type = DeviceType::CPU,
-      bool supports_transactional_fixed_state = true)
+      bool supports_transactional_fixed_state = true,
+      bool supports_compact_state_replay = true)
       : inner_{inner},
         type_{type},
-        supports_transactional_fixed_state_{supports_transactional_fixed_state} {}
+        supports_transactional_fixed_state_{supports_transactional_fixed_state},
+        supports_compact_state_replay_{supports_compact_state_replay} {}
 
   DeviceType GetType() const override { return type_; }
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
@@ -66,15 +72,100 @@ class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
     return inner_.CreateKeyValueCache(state);
   }
   void Synchronize() override { inner_.Synchronize(); }
-  bool SupportsOffsetTensorViews() const override { return false; }
+  bool SupportsOffsetTensorViews() const override { return allow_offset_views; }
+  void ReplayStateUpdates(const StateUpdateReplayDesc* descs, size_t count) override {
+    if (fail_replay && count > 0) {
+      inner_.ReplayStateUpdates(descs, 1);
+      inner_.Synchronize();
+      replayed_destination = descs[0].destination_state;
+      throw std::runtime_error("Injected failure after first replay write");
+    }
+    inner_.ReplayStateUpdates(descs, count);
+  }
+  bool allow_offset_views{false};
+  bool fail_replay{false};
+  DeviceSpan<uint8_t> replayed_destination;
   bool SupportsTransactionalFixedState() const override {
     return supports_transactional_fixed_state_;
+  }
+  bool SupportsCompactStateReplay() const override {
+    return supports_compact_state_replay_;
   }
 
  private:
   DeviceInterface& inner_;
   DeviceType type_;
   bool supports_transactional_fixed_state_;
+  bool supports_compact_state_replay_;
+};
+
+struct ReplayTransferBuffer final : DeviceBuffer {
+  explicit ReplayTransferBuffer(std::shared_ptr<DeviceBuffer> buffer)
+      : inner{std::move(buffer)} {
+    p_device_ = inner->p_device_;
+    size_in_bytes_ = inner->size_in_bytes_;
+  }
+
+  const char* GetType() const override { return inner->GetType(); }
+  void AllocateCpu() override {
+    const bool allocates = !inner->p_cpu_;
+    inner->AllocateCpu();
+    p_cpu_ = inner->p_cpu_;
+    if (allocates) allocated_bytes += size_in_bytes_;
+  }
+  void CopyDeviceToCpu() override {
+    AllocateCpu();
+    inner->CopyDeviceToCpu();
+    ++downloads;
+  }
+  void CopyCpuToDevice() override {
+    inner->CopyCpuToDevice();
+    ++uploads;
+  }
+  void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t bytes) override {
+    CopyThroughCpu(*this, begin_dest, source, begin_source, bytes);
+  }
+  void Zero() override { inner->Zero(); }
+
+  std::shared_ptr<DeviceBuffer> inner;
+  size_t downloads{}, uploads{}, allocated_bytes{};
+};
+
+class ReplayCountingDevice final : public OffsetTensorViewsUnsupportedDevice {
+ public:
+  explicit ReplayCountingDevice(DeviceInterface& inner)
+      : OffsetTensorViewsUnsupportedDevice{inner, inner.GetType()}, inner_{inner} {}
+
+  void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
+    buffers.clear();
+    std::unordered_map<DeviceBuffer*, std::shared_ptr<ReplayTransferBuffer>> owners;
+    const auto instrument = [&](DeviceSpan<const uint8_t> view) {
+      if (view.empty()) return DeviceSpan<uint8_t>{};
+      auto& buffer = view.GetBuffer();
+      auto& owner = owners[&buffer];
+      if (!owner) {
+        owner = std::make_shared<ReplayTransferBuffer>(buffer.shared_from_this());
+        buffers.push_back(owner);
+      }
+      return DeviceSpan<uint8_t>{std::shared_ptr<DeviceBuffer>{owner}}
+          .subspan(view.ByteOffset(), view.size());
+    };
+    std::vector<StateUpdateReplayDesc> counted(descriptors, descriptors + count);
+    for (auto& descriptor : counted) {
+      descriptor.source_state = instrument(descriptor.source_state);
+      descriptor.destination_state = instrument(descriptor.destination_state);
+      descriptor.value = instrument(descriptor.value);
+      descriptor.decay = instrument(descriptor.decay);
+      descriptor.key = instrument(descriptor.key);
+      descriptor.delta = instrument(descriptor.delta);
+    }
+    inner_.ReplayStateUpdates(counted.data(), counted.size());
+  }
+
+  std::vector<std::shared_ptr<ReplayTransferBuffer>> buffers;
+
+ private:
+  DeviceInterface& inner_;
 };
 
 class ScopedKeyValueCacheDevice {
@@ -737,6 +828,53 @@ TEST_F(FixedStatePoolTest, LeasedOrphanAncestryDoesNotProtectAReusedPhysicalBloc
   lease.reset();
   EXPECT_EQ(index.ReclaimableBlocks(), 1u);
   EXPECT_EQ(index.Reclaim(1), 1u);
+}
+
+TEST_F(FixedStatePoolTest, ReclaimableBlockQueryRefreshesAfterLeaseAndCheckpointRelease) {
+  BlockPool blocks{4, 1};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 1;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 1;
+  FixedStatePool pool{model_, 1, 1};
+  PrefixCache index{blocks, options};
+  MakeResident(pool, kRequestA, 7.0f, 4);
+  const std::array<int32_t, 4> tokens{1, 2, 3, 4};
+  auto history = blocks.AllocateBlocks(4);
+  ASSERT_NE(index.RegisterCheckpointedPrefix(
+                     history, tokens, {}, pool.CapturePrefixCheckpoint(kRequestA))
+                .identity,
+            nullptr);
+  blocks.Free(history);
+
+  auto lease = index.Match(tokens, tokens.size());
+  ASSERT_EQ(lease.blocks.size(), 1u);
+  const auto retained = lease.blocks;
+  const auto retained_id = retained.front()->Id();
+  const auto* checkpoint = lease.fixed_state_checkpoint.get();
+  EXPECT_TRUE(index.ReclaimableBlockIds(retained).empty());
+
+  lease = {};
+  EXPECT_EQ(index.ReclaimableBlocks(), 1u);
+  EXPECT_EQ(index.ReclaimableBlockIds(retained),
+            std::vector<size_t>{retained_id});
+  ASSERT_TRUE(index.ReclaimCheckpoint(checkpoint));
+  EXPECT_EQ(index.ReclaimableBlockIds(retained),
+            std::vector<size_t>{retained_id});
+
+  ASSERT_EQ(index.Reclaim(1), 1u);
+  auto unrelated = blocks.AllocateBlocks(4);
+  ASSERT_EQ(unrelated.front()->Id(), retained_id);
+  const std::array<int32_t, 4> unrelated_tokens{20, 21, 22, 23};
+  ASSERT_NE(index.Register(unrelated.front(), unrelated_tokens, {}).identity,
+            nullptr);
+  blocks.Free(unrelated);
+  EXPECT_TRUE(index.ReclaimableBlockIds(retained).empty());
+  EXPECT_EQ(index.ReclaimableBlockIds(unrelated),
+            std::vector<size_t>{retained_id});
+  EXPECT_TRUE(index.Match(tokens, tokens.size()).Empty());
+  EXPECT_TRUE(index.Match(unrelated_tokens, unrelated_tokens.size()).Empty());
 }
 
 TEST_F(FixedStatePoolTest, ManyLongHistoriesProtectOnlyTheirCurrentFixedOrDraftLeases) {
@@ -1686,7 +1824,7 @@ TEST_F(FixedStatePoolTest, RejectsGenericDeviceWithoutTransactionalFixedStateSup
 TEST_F(FixedStatePoolTest, GenericDeviceRejectsCompactStateReplay) {
   auto replay_model = LoadSyntheticHybridModel();
   OffsetTensorViewsUnsupportedDevice generic_device{
-      *replay_model->p_device_kvcache_, DeviceType::DML};
+      *replay_model->p_device_kvcache_, DeviceType::DML, true, false};
   ScopedKeyValueCacheDevice scoped_device{*replay_model, generic_device};
 
   try {
@@ -1695,7 +1833,7 @@ TEST_F(FixedStatePoolTest, GenericDeviceRejectsCompactStateReplay) {
   } catch (const std::runtime_error& error) {
     EXPECT_STREQ(
         error.what(),
-        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+        "Compact fixed state replay is not supported by this device.");
   }
 }
 
@@ -2092,14 +2230,63 @@ TEST_F(FixedStatePoolTest, DirectBindingStorageOutlivesPool) {
   }
 }
 
-#if USE_CUDA
-TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
-  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
-  ClearProviders(*config);
-  SetProviderOption(*config, "cuda", {}, {});
-  auto model = CreateModel(GetOrtEnv(), std::move(config));
+TEST_F(FixedStatePoolTest, DeferredReplayFailurePoisonsPool) {
+  OffsetTensorViewsUnsupportedDevice device{*model_->p_device_kvcache_};
+  device.allow_offset_views = true;
+  ScopedKeyValueCacheDevice guard{*model_, device};
+  FixedStatePool pool{model_, 2};
+  MakeResident(pool, kRequestA, 4.0f, 2);
+  const auto handle = pool.HandleFor(kRequestA);
+  const auto generation = pool.StateGeneration(handle);
+  std::vector<DeviceSpan<float>> authoritative_state;
+  {
+    auto reservation = pool.Reserve(One(kRequestA, 2));
+    ASSERT_TRUE(reservation.UsesDirectBindings());
+    for (const auto& binding : reservation.Bindings()) {
+      authoritative_state.push_back(WrapTensor<float>(device, *binding.input));
+    }
+  }
+  {
+    const std::array<Request, 2> requests{Request{kRequestA, 6, 3}, Request{kRequestB, 4, 3}};
+    auto reservation = pool.Reserve(requests);
+    FillStagedRows(reservation, 0, 99.0f);
+    FillStagedRows(reservation, 1, 77.0f);
+    const std::array<float, 6> updates{10, 11, 20, 21, 30, 31};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_value) FillConvUpdates(binding, 0, updates);
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    device.fail_replay = true;
+    reservation.PrepareCommit();
+    EXPECT_EQ(reservation.State(), FixedStateReservationState::Prepared);
+    for (auto& state : authoritative_state) {
+      for (float value : state.CopyDeviceToCpu()) EXPECT_FLOAT_EQ(value, 4.0f);
+    }
+    EXPECT_EQ(pool.StateGeneration(handle), generation);
+    EXPECT_EQ(pool.CommittedTokens(handle), 2u);
+    EXPECT_FALSE(pool.OwnsCommittedSlot(kRequestB));
+    reservation.PublishCommit();
+    EXPECT_EQ(pool.StateGeneration(handle), generation + 1);
+    EXPECT_EQ(pool.CommittedTokens(handle), 4u);
+    EXPECT_TRUE(pool.OwnsCommittedSlot(kRequestB));
+    EXPECT_EQ(pool.Snapshot().reserved_slots, 0u);
+  }
+  EXPECT_THROW(pool.Reserve(One(kRequestA, 5)), std::runtime_error);
+  EXPECT_FALSE(pool.Snapshot().healthy);
+  // The next reservation flushes deferred replay, which fails after a real bank write.
+  const std::array<float, 6> replayed{4, 10, 20, 4, 11, 21};
+  ASSERT_FALSE(device.replayed_destination.empty());
+  const auto actual = device.replayed_destination.CopyDeviceToCpu();
+  ASSERT_EQ(actual.size_bytes(), sizeof(replayed));
+  EXPECT_EQ(std::memcmp(actual.data(), replayed.data(), sizeof(replayed)), 0);
+  EXPECT_THROW(pool.Reserve(One(kRequestA, 5)), std::logic_error);
+}
+
+void RunDeviceCompactPartialAcceptanceReplay(
+    const std::shared_ptr<Model>& model, bool expect_direct_bindings) {
   auto& device = *model->p_device_kvcache_;
   FixedStatePool pool{model, 1};
+  EXPECT_TRUE(device.SupportsCompactStateReplay());
 
   const auto fill_tensor = [&](OrtValue& tensor, std::span<const float> values) {
     auto tensor_span = WrapTensor<float>(device, tensor);
@@ -2129,7 +2316,7 @@ TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   }
   {
     auto reservation = pool.Reserve(One(kRequestA, 4, 3));
-    ASSERT_TRUE(reservation.UsesDirectBindings());
+    EXPECT_EQ(reservation.UsesDirectBindings(), expect_direct_bindings);
     for (const auto& binding : reservation.Bindings()) {
       fill_tensor_value(*binding.output, 99.0f);
     }
@@ -2166,6 +2353,205 @@ TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   expect_tensor(*reservation.Bindings()[3].input, expected_gdn);
 }
 
+void RunDeviceAdversarialReplay(const std::shared_ptr<Model>& model) {
+  auto& device = *model->p_device_kvcache_;
+  FixedStatePool pool{model, 3};
+  const std::array<const void*, 3> ids{kRequestA, kRequestB, kRequestC};
+  std::array<std::array<std::vector<float>, 4>, 3> expected;
+  const auto write_row = [&](OrtValue& tensor, size_t row, std::span<const float> values) {
+    auto data = WrapTensor<float>(device, tensor);
+    ASSERT_EQ(RowElements(tensor), values.size());
+    auto cpu = data.CopyDeviceToCpu();
+    std::copy(values.begin(), values.end(), cpu.begin() + row * values.size());
+    data.CopyCpuToDevice();
+  };
+  const auto check_rows = [&](FixedStateReservation& reservation, std::span<const size_t> order) {
+    for (size_t row = 0; row < order.size(); ++row) {
+      for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+        const auto& values = expected[order[row]][layer];
+        auto data = WrapTensor<float>(device, *reservation.Bindings()[layer].input);
+        const auto actual = data.subspan(row * values.size(), values.size()).CopyDeviceToCpu();
+        ASSERT_EQ(actual.size(), values.size());
+        for (size_t index = 0; index < values.size(); ++index) {
+          EXPECT_FLOAT_EQ(actual[index], values[index])
+              << "request=" << order[row] << " binding=" << layer << " element=" << index;
+        }
+      }
+    }
+  };
+  for (size_t id = 0; id < ids.size(); ++id) {
+    auto reservation = pool.Reserve(One(ids[id], 1));
+    for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+      auto& values = expected[id][layer];
+      values.resize(RowElements(*reservation.Bindings()[layer].output));
+      for (size_t index = 0; index < values.size(); ++index) {
+        values[index] = static_cast<float>(1 + 32 * id + 8 * layer + index) / 8;
+      }
+      write_row(*reservation.Bindings()[layer].output, 0, values);
+    }
+    reservation.Commit();
+  }
+  ASSERT_GT(pool.HandleFor(kRequestB).slot, 0u);
+  ASSERT_GT(pool.HandleFor(kRequestC).slot, 0u);
+
+  const std::array<size_t, 2> reversed{2, 1};
+  const std::array<Request, 2> requests{Request{kRequestC, 5, 3}, Request{kRequestB, 5, 3}};
+  {
+    auto reservation = pool.Reserve(requests);
+    ASSERT_FALSE(reservation.UsesDirectBindings());
+    check_rows(reservation, reversed);
+    for (size_t row = 0; row < reversed.size(); ++row) {
+      const size_t id = reversed[row];
+      for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+        const auto& binding = reservation.Bindings()[layer];
+        auto& values = expected[id][layer];
+        std::vector<float> full_output(values.size());
+        for (size_t index = 0; index < values.size(); ++index) {
+          full_output[index] = static_cast<float>(80 + id * 16 + layer * 8 + index);
+        }
+        write_row(*binding.output, row, full_output);
+        if (binding.state_update_value) {
+          std::array<float, 6> updates;
+          for (size_t index = 0; index < updates.size(); ++index) {
+            updates[index] = static_cast<float>(10 + id * 8 + layer * 4 + index);
+          }
+          write_row(*binding.state_update_value, row, updates);
+          if (row == 0) {
+            for (size_t token = 0; token < 2; ++token) {
+              for (size_t channel = 0; channel < 2; ++channel) {
+                values[channel * 3] = values[channel * 3 + 1];
+                values[channel * 3 + 1] = values[channel * 3 + 2];
+                values[channel * 3 + 2] = updates[token * 2 + channel];
+              }
+            }
+          }
+        } else {
+          std::array<float, 24> capsule;
+          for (size_t token = 0; token < 3; ++token) {
+            for (size_t head = 0; head < 2; ++head) {
+              capsule[token * 2 + head] = head == 0 ? 0.5f : 0.25f;
+              capsule[6 + token * 2 + head] = static_cast<float>(1 + token + head + id);
+            }
+            for (size_t index = 0; index < 4; ++index) {
+              capsule[12 + token * 4 + index] = static_cast<float>(1 + layer + token + index) / 8;
+            }
+          }
+          write_row(*binding.state_update_capsule, row, capsule);
+          if (row == 0) {
+            for (size_t token = 0; token < 2; ++token) {
+              for (size_t head = 0; head < 2; ++head) {
+                for (size_t key = 0; key < 2; ++key) {
+                  for (size_t value = 0; value < 2; ++value) {
+                    auto& state = values[head * 4 + value * 2 + key];
+                    state = state * capsule[token * 2 + head] +
+                            capsule[6 + token * 2 + key] * capsule[12 + token * 4 + head * 2 + value];
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (row == 1) values = full_output;
+      }
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    reservation.CommitPrefix(1, 4, 4);
+    reservation.Commit();
+  }
+  EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestC)), 3u);
+  EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestB)), 5u);
+  EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestA)), 1u);
+  EXPECT_EQ(pool.StateGeneration(pool.HandleFor(kRequestA)), 1u);
+  EXPECT_EQ(pool.StateGeneration(pool.HandleFor(kRequestB)), 2u);
+  EXPECT_EQ(pool.StateGeneration(pool.HandleFor(kRequestC)), 2u);
+  const std::array<size_t, 3> order{0, 1, 2};
+  const std::array<Request, 3> all{Request{kRequestA, 2}, Request{kRequestB, 6}, Request{kRequestC, 4}};
+  {
+    auto reservation = pool.Reserve(all);
+    check_rows(reservation, order);
+    for (size_t row = 0; row < order.size(); ++row) {
+      for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+        auto& values = expected[row][layer];
+        for (auto& value : values) value += 0.5f;
+        write_row(*reservation.Bindings()[layer].output, row, values);
+      }
+    }
+    reservation.Commit();
+  }
+  {
+    auto reservation = pool.Reserve(all);
+    check_rows(reservation, order);
+    for (size_t row = 0; row < order.size(); ++row) {
+      for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+        std::vector<float> poison(expected[row][layer].size(), -999.0f);
+        write_row(*reservation.Bindings()[layer].output, row, poison);
+      }
+    }
+    reservation.PrepareCommit();
+    reservation.Discard();
+  }
+  {
+    auto reservation = pool.Reserve(all);
+    check_rows(reservation, order);
+
+    // Two-byte-aligned subviews exercise FP16 convolution replay without changing the FP32 fixture.
+    std::array<Ort::Float16_t, 10> source, updates, destination;
+    for (size_t index = 0; index < source.size(); ++index) {
+      source[index] = Ort::Float16_t{FastFloat32ToFloat16(static_cast<float>(index))};
+      updates[index] = Ort::Float16_t{FastFloat32ToFloat16(-20.0f)};
+      destination[index] = Ort::Float16_t{FastFloat32ToFloat16(-10.0f - static_cast<float>(index))};
+    }
+    for (size_t token = 0; token < 3; ++token) {
+      for (size_t channel = 0; channel < 2; ++channel) {
+        updates[2 + token * 2 + channel] = Ort::Float16_t{FastFloat32ToFloat16(static_cast<float>(10 + token * 10 + channel))};
+      }
+    }
+    const auto upload = [&](const auto& values) {
+      auto buffer = device.Allocate<uint8_t>(sizeof(values));
+      std::memcpy(buffer.CpuSpan().data(), values.data(), sizeof(values));
+      buffer.CopyCpuToDevice();
+      return buffer;
+    };
+    auto source_buffer = upload(source);
+    auto update_buffer = upload(updates);
+    auto destination_buffer = upload(destination);
+    StateUpdateReplayDesc half_replay{
+        source_buffer.subspan(2, 12), destination_buffer.subspan(6, 12), update_buffer.subspan(4, 12), {}, {}, {}, 2, 3, 0, 0, 3, 2, sizeof(Ort::Float16_t), StateUpdateReplayKind::CausalConv};
+    device.ReplayStateUpdates(&half_replay, 1);
+    device.Synchronize();
+    const std::array<float, 6> half_expected{3, 10, 20, 6, 11, 21};
+    for (size_t index = 0; index < half_expected.size(); ++index) {
+      destination[3 + index] = Ort::Float16_t{FastFloat32ToFloat16(half_expected[index])};
+    }
+    const auto actual_destination = destination_buffer.CopyDeviceToCpu();
+    EXPECT_EQ(std::memcmp(actual_destination.data(), destination.data(), sizeof(destination)), 0);
+    const auto actual_source = source_buffer.CopyDeviceToCpu();
+    EXPECT_EQ(std::memcmp(actual_source.data(), source.data(), sizeof(source)), 0);
+    const auto actual_updates = update_buffer.CopyDeviceToCpu();
+    EXPECT_EQ(std::memcmp(actual_updates.data(), updates.data(), sizeof(updates)), 0);
+  }
+  const auto old_handle = pool.HandleFor(kRequestC);
+  pool.Release(old_handle);
+  {
+    auto reservation = pool.Reserve(One(kRequestC));
+    EXPECT_EQ(reservation.Handles()[0].slot, old_handle.slot);
+    EXPECT_NE(reservation.Handles()[0].generation, old_handle.generation);
+    for (auto& values : expected[2]) std::fill(values.begin(), values.end(), 0.0f);
+    const std::array<size_t, 1> reused{2};
+    check_rows(reservation, reused);
+    for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+      for (size_t index = 0; index < expected[2][layer].size(); ++index) {
+        expected[2][layer][index] = static_cast<float>(layer * 8 + index + 1);
+      }
+      write_row(*reservation.Bindings()[layer].output, 0, expected[2][layer]);
+    }
+    reservation.Commit();
+  }
+  auto reservation = pool.Reserve(all);
+  check_rows(reservation, order);
+}
+
+#if USE_CUDA
 // Realistic gated-delta-net geometries take the fast replay kernel, and a key width that is not a
 // multiple of 4 keeps the generic one; both must match the sequential host recurrence exactly.
 TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
@@ -2222,14 +2608,21 @@ TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
     auto capsule_device = device.Allocate<float>(capsule_count);
     source.CopyFromCpu(state);
     capsule_device.CopyFromCpu(capsule);
-    const float* capsule_base = capsule_device.Span().data();
+    auto source_bytes = device.WrapMemory<uint8_t>(
+        {reinterpret_cast<uint8_t*>(source.Span().data()), state_count * sizeof(float)});
+    auto destination_bytes = device.WrapMemory<uint8_t>(
+        {reinterpret_cast<uint8_t*>(destination.Span().data()), state_count * sizeof(float)});
+    auto capsule_bytes = device.WrapMemory<uint8_t>(
+        {reinterpret_cast<uint8_t*>(capsule_device.Span().data()), capsule_count * sizeof(float)});
+    const size_t decay_bytes = g.capacity * g.heads * sizeof(float);
+    const size_t key_bytes = g.capacity * g.key_heads * g.key_width * sizeof(float);
     descriptors.push_back(StateUpdateReplayDesc{
-        source.Span().data(),
-        destination.Span().data(),
-        nullptr,
-        capsule_base,
-        capsule_base + g.capacity * g.heads,
-        capsule_base + g.capacity * (g.heads + g.key_heads * g.key_width),
+        source_bytes,
+        destination_bytes,
+        {},
+        capsule_bytes.subspan(0, decay_bytes),
+        capsule_bytes.subspan(decay_bytes, key_bytes),
+        capsule_bytes.subspan(decay_bytes + key_bytes, g.capacity * g.heads * g.value_width * sizeof(float)),
         g.heads,
         g.value_width,
         g.key_width,
@@ -2255,7 +2648,267 @@ TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
     }
   }
 }
+
+TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  RunDeviceCompactPartialAcceptanceReplay(
+      CreateModel(GetOrtEnv(), std::move(config)), true);
+}
+
+TEST(CudaFixedStatePoolTest, AdversarialReplayPreservesRequestState) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  RunDeviceAdversarialReplay(CreateModel(GetOrtEnv(), std::move(config)));
+}
 #endif
+
+TEST(WebGpuFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
+  if (FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
+    GTEST_SKIP() << "No WebGPU EP device is registered.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "webgpu", {}, {});
+  RunDeviceCompactPartialAcceptanceReplay(
+      CreateModel(GetOrtEnv(), std::move(config)), false);
+}
+
+TEST(WebGpuFixedStatePoolTest, AdversarialReplayPreservesRequestState) {
+  if (FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
+    GTEST_SKIP() << "No WebGPU EP device is registered.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "webgpu", {}, {});
+  RunDeviceAdversarialReplay(CreateModel(GetOrtEnv(), std::move(config)));
+}
+
+TEST(WebGpuFixedStatePoolTest, PartialRequestsShareBackingTransfers) {
+  if (FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
+    GTEST_SKIP() << "No WebGPU EP device is registered.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "webgpu", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  ReplayCountingDevice device{*model->p_device_kvcache_};
+  ScopedKeyValueCacheDevice guard{*model, device};
+  FixedStatePool pool{model, 6};
+  std::array<int, 6> ids{};
+  for (size_t slot = 0; slot < ids.size(); ++slot) {
+    auto reservation = pool.Reserve(One(&ids[slot], 1));
+    for (const auto& binding : reservation.Bindings()) {
+      auto data = WrapTensor<float>(device, *binding.output);
+      std::vector<float> values(data.size(), static_cast<float>(slot + 1));
+      data.CopyFromCpu(values);
+    }
+    reservation.Commit();
+  }
+
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  const std::array<size_t, 3> order{5, 1, 3};
+  const std::array<size_t, 3> kept{1, 2, 3};
+  std::array<std::array<std::vector<float>, 4>, 6> expected;
+  for (size_t slot = 0; slot < ids.size(); ++slot) {
+    for (size_t layer = 0; layer < 4; ++layer) {
+      expected[slot][layer].assign(layer < 2 ? 6 : 8, static_cast<float>(slot + 1));
+    }
+  }
+  const std::array<Request, 3> requests{
+      Request{&ids[5], 5, 3}, Request{&ids[1], 5, 3}, Request{&ids[3], 5, 3}};
+  {
+    auto reservation = pool.Reserve(requests);
+    for (size_t row = 0; row < order.size(); ++row) {
+      ASSERT_GT(reservation.Handles()[row].slot, 0u);
+      for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+        const auto& binding = reservation.Bindings()[layer];
+        auto output = WrapTensor<float>(device, *binding.output);
+        std::fill(output.CpuSpan().begin(), output.CpuSpan().end(), -999.0f);
+        output.CopyCpuToDevice();
+        OrtValue& update = binding.state_update_value
+                               ? *binding.state_update_value
+                               : *binding.state_update_capsule;
+        auto data = WrapTensor<float>(device, update);
+        auto values = data.CopyDeviceToCpu();
+        const size_t row_elements = RowElements(update);
+        for (size_t index = 0; index < row_elements; ++index) {
+          values[row * row_elements + index] = static_cast<float>(row + index + 1) / 8;
+        }
+        data.CopyCpuToDevice();
+        auto source = std::vector<float>(expected[order[row]][layer]);
+        auto source_bytes = cpu->WrapMemory<uint8_t>(
+            {reinterpret_cast<uint8_t*>(source.data()), source.size() * sizeof(float)});
+        auto destination_bytes = cpu->WrapMemory<uint8_t>(
+            {reinterpret_cast<uint8_t*>(expected[order[row]][layer].data()), source.size() * sizeof(float)});
+        auto update_bytes = cpu->WrapMemory<uint8_t>(
+            {reinterpret_cast<uint8_t*>(values.data() + row * row_elements), row_elements * sizeof(float)});
+        const bool conv = binding.state_update_value != nullptr;
+        StateUpdateReplayDesc reference{
+            source_bytes, destination_bytes,
+            conv ? update_bytes : DeviceSpan<uint8_t>{},
+            conv ? DeviceSpan<uint8_t>{} : update_bytes.subspan(0, 24),
+            conv ? DeviceSpan<uint8_t>{} : update_bytes.subspan(24, 24),
+            conv ? DeviceSpan<uint8_t>{} : update_bytes.subspan(48, 48),
+            2, conv ? 3u : 2u, conv ? 0u : 2u, conv ? 0u : 1u,
+            3, static_cast<uint32_t>(kept[row]), sizeof(float),
+            conv ? StateUpdateReplayKind::CausalConv : StateUpdateReplayKind::GatedDeltaNet};
+        cpu->ReplayStateUpdates(&reference, 1);
+      }
+      reservation.CommitPrefix(row, 4, kept[row]);
+    }
+    reservation.Commit();
+  }
+
+  std::array<Request, 6> all;
+  for (size_t slot = 0; slot < ids.size(); ++slot) {
+    all[slot] = Request{&ids[slot], 6};
+  }
+  auto reservation = pool.Reserve(all);   // Materializes the queued replay before gathering.
+  ASSERT_EQ(device.buffers.size(), 12u);  // Four tensors, each with input, updates, and one bank.
+  size_t downloads = 0, uploads = 0, staged_bytes = 0;
+  for (const auto& buffer : device.buffers) {
+    EXPECT_EQ(buffer->downloads, 1u);
+    EXPECT_LE(buffer->uploads, 1u);
+    downloads += buffer->downloads;
+    uploads += buffer->uploads;
+    staged_bytes += buffer->allocated_bytes;
+  }
+  EXPECT_EQ(downloads, 12u);
+  EXPECT_EQ(uploads, 4u);
+  EXPECT_EQ(staged_bytes, 1728u);
+  for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+    auto data = WrapTensor<float>(device, *reservation.Bindings()[layer].input);
+    const auto actual = data.CopyDeviceToCpu();
+    for (size_t slot = 0; slot < ids.size(); ++slot) {
+      const auto& values = expected[slot][layer];
+      EXPECT_EQ(std::memcmp(actual.data() + slot * values.size(), values.data(),
+                            values.size() * sizeof(float)),
+                0);
+    }
+  }
+  RecordProperty("replay_downloads", static_cast<int>(downloads));
+  RecordProperty("replay_uploads", static_cast<int>(uploads));
+  RecordProperty("peak_host_mirror_bytes", static_cast<int>(staged_bytes));
+}
+
+TEST(WebGpuFixedStatePoolTest, SharedMirrorsObserveEarlierDescriptorWrites) {
+  if (FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
+    GTEST_SKIP() << "No WebGPU EP device is registered.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "webgpu", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto& gpu = *model->p_device_kvcache_;
+  ReplayCountingDevice device{gpu};
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  for (size_t repetitions : {1u, 4u}) {
+    constexpr size_t slots = 8, guard = 4, conv_row = 6, gdn_row = 8, capsule_row = 24;
+    constexpr size_t conv_source = guard, gdn_source = conv_source + slots * conv_row;
+    constexpr size_t conv_values = gdn_source + slots * gdn_row;
+    constexpr size_t capsules = conv_values + slots * conv_row;
+    constexpr size_t conv_bank = guard, gdn_bank = conv_bank + slots * conv_row;
+    std::vector<float> inputs(capsules + slots * capsule_row + guard);
+    std::vector<float> bank(gdn_bank + slots * gdn_row + guard);
+    for (size_t index = 0; index < inputs.size(); ++index) {
+      inputs[index] = static_cast<float>(index % 13 + 1) / 16;
+    }
+    for (size_t index = 0; index < bank.size(); ++index) {
+      bank[index] = -static_cast<float>(index + 1);
+    }
+    const auto upload = [&](std::vector<float>& values) {
+      auto buffer = gpu.Allocate<uint8_t>(values.size() * sizeof(float));
+      auto host = cpu->WrapMemory<uint8_t>(
+          {reinterpret_cast<uint8_t*>(values.data()), values.size() * sizeof(float)});
+      buffer.CopyFrom(host);  // Zero-offset upload does not allocate a host mirror.
+      return buffer;
+    };
+    auto input_buffer = upload(inputs);
+    auto bank_buffer = upload(bank);
+    auto expected = bank;
+    auto host_inputs = cpu->WrapMemory<uint8_t>(
+        {reinterpret_cast<uint8_t*>(inputs.data()), inputs.size() * sizeof(float)});
+    auto host_bank = cpu->WrapMemory<uint8_t>(
+        {reinterpret_cast<uint8_t*>(expected.data()), expected.size() * sizeof(float)});
+    const auto make_descriptors = [&](DeviceSpan<uint8_t> in, DeviceSpan<uint8_t> out) {
+      const auto view = [](DeviceSpan<uint8_t> buffer, size_t offset, size_t elements) {
+        return buffer.subspan(offset * sizeof(float), elements * sizeof(float));
+      };
+      std::vector<StateUpdateReplayDesc> descriptors;
+      const std::array<size_t, 3> order{6, 1, 3};
+      for (size_t repeat = 0; repeat < repetitions; ++repeat) {
+        for (size_t row = 0; row < order.size(); ++row) {
+          const size_t slot = order[row];
+          descriptors.push_back(StateUpdateReplayDesc{
+              view(in, conv_source + slot * conv_row, conv_row),
+              view(out, conv_bank + slot * conv_row, conv_row),
+              view(in, conv_values + slot * conv_row, conv_row),
+              {},
+              {},
+              {},
+              2,
+              3,
+              0,
+              0,
+              3,
+              static_cast<uint32_t>(row + 1),
+              sizeof(float),
+              StateUpdateReplayKind::CausalConv});
+          const size_t capsule = capsules + slot * capsule_row;
+          descriptors.push_back(StateUpdateReplayDesc{
+              view(in, gdn_source + slot * gdn_row, gdn_row),
+              view(out, gdn_bank + slot * gdn_row, gdn_row),
+              {},
+              view(in, capsule, 6),
+              view(in, capsule + 6, 6),
+              view(in, capsule + 12, 12),
+              2,
+              2,
+              2,
+              1,
+              3,
+              static_cast<uint32_t>(row + 1),
+              sizeof(float),
+              StateUpdateReplayKind::GatedDeltaNet});
+        }
+        // This source is a destination written earlier in this same replay call.
+        descriptors.push_back(StateUpdateReplayDesc{
+            view(out, conv_bank + 6 * conv_row, conv_row),
+            view(out, conv_bank + 5 * conv_row, conv_row),
+            view(in, conv_values + 5 * conv_row, conv_row),
+            {},
+            {},
+            {},
+            2,
+            3,
+            0,
+            0,
+            3,
+            2,
+            sizeof(float),
+            StateUpdateReplayKind::CausalConv});
+      }
+      return descriptors;
+    };
+    auto reference = make_descriptors(host_inputs, host_bank);
+    cpu->ReplayStateUpdates(reference.data(), reference.size());
+    auto descriptors = make_descriptors(input_buffer, bank_buffer);
+    device.ReplayStateUpdates(descriptors.data(), descriptors.size());
+    ASSERT_EQ(device.buffers.size(), 2u);
+    EXPECT_EQ(device.buffers[0]->downloads, 1u);
+    EXPECT_EQ(device.buffers[0]->uploads, 0u);
+    EXPECT_EQ(device.buffers[1]->downloads, 1u);
+    EXPECT_EQ(device.buffers[1]->uploads, 1u);
+    EXPECT_EQ(device.buffers[0]->allocated_bytes + device.buffers[1]->allocated_bytes, 1920u);
+    const auto actual = bank_buffer.CopyDeviceToCpu();
+    EXPECT_EQ(std::memcmp(actual.data(), expected.data(), expected.size() * sizeof(float)), 0);
+    const auto unchanged_inputs = input_buffer.CopyDeviceToCpu();
+    EXPECT_EQ(std::memcmp(unchanged_inputs.data(), inputs.data(), inputs.size() * sizeof(float)), 0);
+  }
+}
 
 TEST_F(FixedStatePoolTest, CapacityOverflowLeavesPoolUntouched) {
   auto pool = MakePool(1);

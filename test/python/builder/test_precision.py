@@ -190,21 +190,6 @@ def test_webgpu_paged_attention_rejects_unsupported_io_dtype(io_dtype):
 
 
 def _load_builder_entrypoint_module():
-    # `builder.py` imports the concrete model classes via `from builders import (...)`.
-    # Provide a stub `builders` module so we can import the lightweight precision helpers
-    # (`set_onnx_dtype` / `set_io_dtype` / `check_extra_options`) without pulling in every
-    # model builder.
-    builders_stub = types.ModuleType("builders")
-
-    def _stub_getattr(name):  # PEP 562: satisfies `from builders import <ModelClass>`
-        return type(name, (), {})
-
-    builders_stub.__getattr__ = _stub_getattr
-    # Submodule imports (e.g. `from quantization import ...`) must resolve to the
-    # real, dependency-free modules rather than the catch-all above.
-    builders_stub.__path__ = [str(BUILDERS_DIR)]
-    sys.modules["builders"] = builders_stub
-
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -679,14 +664,11 @@ def test_state_update_capacity_is_normalized(monkeypatch):
 
 
 @pytest.mark.parametrize("capacity", ["1", "8", 3])
-def test_webgpu_rejects_compact_state_updates(monkeypatch, capacity):
-    with pytest.raises(ValueError, match="Engine compact state replay is not implemented"):
-        _run_check_extra_options(
-            monkeypatch,
-            {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": capacity},
-            precision="fp16",
-            execution_provider="webgpu",
-        )
+def test_webgpu_accepts_compact_state_updates(monkeypatch, capacity):
+    options = {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": capacity}
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    assert options["state_update_capacity"] == int(capacity)
 
 
 def test_webgpu_allows_disabled_compact_state_updates(monkeypatch):
@@ -1214,6 +1196,62 @@ def test_paged_attention_rejects_merged_cache_sizing_conflicts(
     }
     with pytest.raises(ValueError, match="num_blocks and gpu_utilization_factor are mutually exclusive"):
         _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider=execution_provider)
+
+
+@pytest.mark.parametrize(
+    "legacy_allocation,runtime_allocation,expected_blocks",
+    [
+        ({}, {"num_blocks": 8}, 8),
+        ({"num_blocks": "16"}, {}, 16),
+        ({"num_blocks": "16"}, {"num_blocks": 8}, 8),
+    ],
+)
+def test_webgpu_paged_attention_effective_block_budget(
+    monkeypatch, legacy_allocation, runtime_allocation, expected_blocks
+):
+    effective = builder_module.normalize_builder_config(
+        "fp16",
+        "webgpu",
+        {"use_paged_attention": "true", **legacy_allocation},
+        runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
+    )
+    options = effective.extra_options
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    generated = {
+        "engine": {
+            "dynamic_batching": {
+                key: options[key]
+                for key in ("num_blocks", "gpu_utilization_factor")
+                if key in options
+            }
+        }
+    }
+    merged = builder_module.apply_runtime_config(generated, effective.runtime_config)
+    assert merged["engine"]["dynamic_batching"] == {"num_blocks": expected_blocks}
+
+
+@pytest.mark.parametrize(
+    "runtime_allocation,error",
+    [
+        ({"gpu_utilization_factor": 0.6}, "num_blocks and gpu_utilization_factor are mutually exclusive"),
+        ({"num_blocks": 0}, "num_blocks.*positive integer"),
+        ({"num_blocks": None}, "num_blocks.*must not contain null"),
+    ],
+)
+def test_webgpu_paged_attention_rejects_runtime_removal_of_block_budget(
+    monkeypatch, runtime_allocation, error
+):
+    with pytest.raises(ValueError, match=error):
+        effective = builder_module.normalize_builder_config(
+            "fp16",
+            "webgpu",
+            {"use_paged_attention": "true", "num_blocks": "16"},
+            runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
+        )
+        _run_check_extra_options(
+            monkeypatch, effective.extra_options, precision="fp16", execution_provider="webgpu"
+        )
 
 
 def test_paged_attention_normalizes_engine_options(monkeypatch):
