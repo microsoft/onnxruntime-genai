@@ -109,6 +109,7 @@ struct State {
   // Capture identity includes input length, execution variant, and active adapters.
   // IDs are unique across states sharing a session and stay owned until destruction.
   GraphAnnotationIds graph_ids_;
+  bool graph_capture_fallback_logged_{};
   // Session used for graph capture; not owned. Lifetime invariant: the OrtSession
   // outlives this State because State is owned by Generator, and Generator is
   // destroyed before the Model (and its session) that produced it.

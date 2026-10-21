@@ -279,6 +279,7 @@ list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})
 target_include_directories(engine_unit_tests PRIVATE

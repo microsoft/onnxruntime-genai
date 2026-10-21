@@ -104,9 +104,19 @@ int State::GraphIdForLength(int graph_capture_length, int graph_capture_variant)
   const auto known_ids = graph_ids_.size();
   const int id = graph_ids_.Id({static_cast<size_t>(graph_capture_length), static_cast<size_t>(graph_capture_variant),
                                 adapter_names_.size()});
-  if (graph_ids_.size() != known_ids && g_log.enabled && g_log.graph_capture) {
-    Log("graph_capture") << "State graph id=" << id << " length=" << graph_capture_length
-                         << " variant=" << graph_capture_variant << " adapters=" << adapter_names_.size() << std::endl;
+  if (g_log.enabled && g_log.graph_capture) {
+    if (graph_ids_.size() != known_ids) {
+      Log("graph_capture") << "State graph id=" << id << " length=" << graph_capture_length
+                           << " variant=" << graph_capture_variant << " adapters=" << adapter_names_.size() << std::endl;
+    } else if (id < 0 && !graph_capture_fallback_logged_) {
+      Log("graph_capture") << "State graph capture fallback: "
+                           << (graph_ids_.size() >= GraphAnnotationIds::kMaxCapturedShapes
+                                   ? "capture budget exhausted"
+                                   : "annotation IDs exhausted")
+                           << "; running new keys without capture (" << graph_ids_.size() << "/"
+                           << GraphAnnotationIds::kMaxCapturedShapes << " keys assigned)" << std::endl;
+      graph_capture_fallback_logged_ = true;
+    }
   }
   return id;
 }
