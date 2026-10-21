@@ -553,7 +553,9 @@ __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restr
         state_index / (descriptor.state_width * descriptor.key_width);
     const uint64_t key_head =
         value_head * descriptor.key_head_count / descriptor.channel_count;
-    float state = static_cast<const float*>(descriptor.source_state)[state_index];
+    const bool fp16 = descriptor.element_size == sizeof(half);
+    float state = fp16 ? __half2float(static_cast<const half*>(descriptor.source_state)[state_index])
+                       : static_cast<const float*>(descriptor.source_state)[state_index];
     for (uint32_t transition = 0; transition < descriptor.kept_count; ++transition) {
       state = __fmul_rn(
           state,
@@ -566,8 +568,13 @@ __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restr
                                descriptor.state_width +
                            value_index],
           state);
+      if (fp16) state = __half2float(__float2half_rn(state));
     }
-    static_cast<float*>(descriptor.destination_state)[state_index] = state;
+    if (fp16) {
+      static_cast<half*>(descriptor.destination_state)[state_index] = __float2half_rn(state);
+    } else {
+      static_cast<float*>(descriptor.destination_state)[state_index] = state;
+    }
   }
 }
 
@@ -620,14 +627,20 @@ __global__ void __launch_bounds__(kReplayThreads) ReplayGatedDeltaNetKernel(
 
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
-  const auto* source = static_cast<const float*>(d.source_state);
-  auto* destination = static_cast<float*>(d.destination_state);
+  const bool fp16 = d.element_size == sizeof(half);
   for (int r = warp; r < kReplayRows; r += kReplayThreads / 32) {
     const int v = first_row + r;
     if (v >= value_width) break;
     const size_t row = (static_cast<size_t>(head) * value_width + v) * key_width;
     for (int k = lane * 4; k < key_width; k += 128) {
-      float4 s = *reinterpret_cast<const float4*>(source + row + k);
+      float4 s;
+      if (fp16) {
+        const auto* source = static_cast<const half*>(d.source_state) + row + k;
+        s = make_float4(__half2float(source[0]), __half2float(source[1]),
+                        __half2float(source[2]), __half2float(source[3]));
+      } else {
+        s = *reinterpret_cast<const float4*>(static_cast<const float*>(d.source_state) + row + k);
+      }
       for (int t = 0; t < kept; ++t) {
         const float decay = decay_tile[t];
         const float delta = delta_tile[t * kReplayRows + r];
@@ -636,8 +649,22 @@ __global__ void __launch_bounds__(kReplayThreads) ReplayGatedDeltaNetKernel(
         s.y = __fmaf_rn(key[1], delta, __fmul_rn(s.y, decay));
         s.z = __fmaf_rn(key[2], delta, __fmul_rn(s.z, decay));
         s.w = __fmaf_rn(key[3], delta, __fmul_rn(s.w, decay));
+        if (fp16) {
+          s.x = __half2float(__float2half_rn(s.x));
+          s.y = __half2float(__float2half_rn(s.y));
+          s.z = __half2float(__float2half_rn(s.z));
+          s.w = __half2float(__float2half_rn(s.w));
+        }
       }
-      *reinterpret_cast<float4*>(destination + row + k) = s;
+      if (fp16) {
+        auto* destination = static_cast<half*>(d.destination_state) + row + k;
+        destination[0] = __float2half_rn(s.x);
+        destination[1] = __float2half_rn(s.y);
+        destination[2] = __float2half_rn(s.z);
+        destination[3] = __float2half_rn(s.w);
+      } else {
+        *reinterpret_cast<float4*>(static_cast<float*>(d.destination_state) + row + k) = s;
+      }
     }
   }
 }

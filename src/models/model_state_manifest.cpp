@@ -281,11 +281,12 @@ void ValidateStateUpdateSession(std::string_view group_label,
       const auto capsule = get_output(
           "capsule", outputs.state_update_recurrent_capsule_names, layer_id);
       ValidateRank(group_label, "state_update capsule output", capsule, 2);
-      if (state.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+      if ((state.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+           state.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) ||
           capsule.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
         throw std::runtime_error(
             std::string{group_label} +
-            " gated_delta_net state and state_update capsule must have float dtype");
+            " gated_delta_net state must have float or float16 dtype and state_update capsule must have float dtype");
       }
       if (!DimensionsCompatible(state.shape[0], capsule.shape[0])) {
         throw std::runtime_error(

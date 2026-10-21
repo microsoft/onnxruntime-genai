@@ -1651,6 +1651,20 @@ including reads of earlier writes, then each modified destination backing is upl
 Untouched destination rows and bytes are preserved. Host mirrors and transfers scale with
 the unique backings, not the number of replay descriptors; full-backing transfers remain.
 
+For GatedDeltaNet compact replay, recurrent-state tensors may use `float32` or
+`float16`; the decay/key/delta capsule remains `float32`. The dtype is inferred
+from the decoder's input/output metadata, so no additional configuration key is
+needed. FP16 replay widens the source state, applies each transition in FP32,
+and rounds to FP16 (nearest, ties to even) after **each token**, matching the
+producer's recurrent path. CUDA supports both the optimized and generic replay
+geometries, and host replay uses the same FP16 rounding contract. The producer
+operator must support the selected storage type: the ORT CUDA GatedDeltaNet
+operator supports FP16 state, while its WebGPU implementation still requires
+FP32 state. Reduced state storage changes numerical behavior; validate
+long-context accuracy and speculative/target-only parity separately.
+Allocator reservations can mask the logical storage reduction in device-wide
+peak-memory measurements.
+
 Each resident request owns a stable slot identified by request identity and an
 allocation generation. A released and reused slot receives a new generation, so
 old handles are rejected. Each slot also tracks a `state_generation` (bumped on

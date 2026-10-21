@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -20,6 +21,7 @@
 #include "models/model_state_manifest.h"
 #include "models/session_options.h"
 #include "models/utils.h"
+#include "state_update_replay.h"
 
 namespace Generators {
 namespace test {
@@ -33,6 +35,19 @@ const void* const kRequestB = &kRequestStorageB;
 const void* const kRequestC = &kRequestStorageC;
 
 using Request = FixedStateReservationRequest;
+
+TEST(FixedStatePoolFp16ConversionTest, UsesIeeeRounding) {
+  EXPECT_EQ(RecurrentStateToFp16(1.0f + std::ldexp(1.0f, -11)), 0x3c00);
+  EXPECT_EQ(RecurrentStateToFp16(1.0f + 3 * std::ldexp(1.0f, -11)), 0x3c02);
+  EXPECT_EQ(RecurrentStateToFp16(std::ldexp(1.0f, -24)), 1);
+  EXPECT_EQ(RecurrentStateToFp16(std::ldexp(1.0f, -25)), 0);
+  EXPECT_EQ(RecurrentStateToFp16(-0.0f), 0x8000);
+  EXPECT_EQ(RecurrentStateToFp16(65504.0f), 0x7bff);
+  EXPECT_EQ(RecurrentStateToFp16(65520.0f), 0x7c00);
+  EXPECT_EQ(RecurrentStateToFp16(std::numeric_limits<float>::infinity()), 0x7c00);
+  EXPECT_EQ(RecurrentStateToFp16(-std::numeric_limits<float>::infinity()), 0xfc00);
+  EXPECT_EQ(RecurrentStateToFp16(std::numeric_limits<float>::quiet_NaN()) & 0x7fff, 0x7e00);
+}
 
 class OffsetTensorViewsUnsupportedDevice : public DeviceInterface {
  public:
@@ -2645,6 +2660,78 @@ TEST(CudaFixedStatePoolTest, GatedDeltaNetReplayMatchesHostRecurrence) {
     ASSERT_EQ(actual.size(), expected[i].size());
     for (size_t j = 0; j < actual.size(); ++j) {
       ASSERT_EQ(actual[j], expected[i][j]) << "descriptor " << i << " element " << j;
+    }
+  }
+}
+
+TEST(CudaFixedStatePoolTest, Fp16GatedDeltaNetReplayRoundsEveryTransition) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto& device = *model->p_device_kvcache_;
+  auto cpu = GetDeviceInterface(DeviceType::CPU);
+  for (const size_t key_width : {128u, 6u}) {
+    constexpr size_t heads = 2, key_heads = 1, width = 32, capacity = 8;
+    const size_t elements = heads * width * key_width;
+    const size_t factors = capacity * (heads + key_heads * key_width + heads * width);
+    std::vector<uint16_t> state(elements);
+    std::vector<float> capsule(factors);
+    for (size_t i = 0; i < elements; ++i) {
+      state[i] = FastFloat32ToFloat16(static_cast<float>(i % 97) / 97.0f - 0.5f);
+    }
+    for (size_t i = 0; i < factors; ++i) {
+      capsule[i] = static_cast<float>(i % 53) / 53.0f - 0.5f;
+    }
+    auto source = device.Allocate<uint16_t>(elements);
+    auto destination = device.Allocate<uint16_t>(elements);
+    auto transitions = device.Allocate<float>(factors);
+    source.CopyFromCpu(state);
+    transitions.CopyFromCpu(capsule);
+    auto bytes = [&](auto values) {
+      return device.WrapMemory<uint8_t>(
+          {reinterpret_cast<uint8_t*>(values.Span().data()), values.Span().size_bytes()});
+    };
+    auto factors_bytes = bytes(transitions);
+    constexpr size_t decay_bytes = capacity * heads * sizeof(float);
+    const size_t key_bytes = capacity * key_heads * key_width * sizeof(float);
+    for (uint32_t kept : {0u, 1u, 3u, 7u}) {
+      std::vector<uint16_t> expected = state;
+      for (size_t h = 0; h < heads; ++h) {
+        for (size_t v = 0; v < width; ++v) {
+          for (size_t k = 0; k < key_width; ++k) {
+            const size_t index = (h * width + v) * key_width + k;
+            float s = Float16ToFloat32(state[index]);
+            for (size_t t = 0; t < kept; ++t) {
+              s = Float16ToFloat32(RecurrentStateToFp16(std::fma(
+                  capsule[capacity * heads + t * key_width + k],
+                  capsule[capacity * (heads + key_width) + (t * heads + h) * width + v],
+                  s * capsule[t * heads + h])));
+            }
+            expected[index] = RecurrentStateToFp16(s);
+          }
+        }
+      }
+      StateUpdateReplayDesc descriptor{
+          bytes(source), bytes(destination), {}, factors_bytes.subspan(0, decay_bytes), factors_bytes.subspan(decay_bytes, key_bytes), factors_bytes.subspan(decay_bytes + key_bytes, capacity * heads * width * sizeof(float)), heads, width, key_width, key_heads, capacity, kept, sizeof(uint16_t), StateUpdateReplayKind::GatedDeltaNet};
+      device.ReplayStateUpdates(&descriptor, 1);
+      device.Synchronize();
+      const auto actual_device = destination.CopyDeviceToCpu();
+      EXPECT_TRUE(std::equal(actual_device.begin(), actual_device.end(), expected.begin(), expected.end()));
+      // The CPU path also services devices that stage compact replay on the host.
+      std::vector<uint16_t> actual(elements);
+      auto wrap = [&](auto& values) {
+        return cpu->WrapMemory<uint8_t>(
+            {reinterpret_cast<uint8_t*>(values.data()), values.size() * sizeof(values[0])});
+      };
+      auto host_factors = wrap(capsule);
+      descriptor.source_state = wrap(state);
+      descriptor.destination_state = wrap(actual);
+      descriptor.decay = host_factors.subspan(0, decay_bytes);
+      descriptor.key = host_factors.subspan(decay_bytes, key_bytes);
+      descriptor.delta = host_factors.subspan(decay_bytes + key_bytes, capacity * heads * width * sizeof(float));
+      cpu->ReplayStateUpdates(&descriptor, 1);
+      EXPECT_EQ(actual, expected);
     }
   }
 }

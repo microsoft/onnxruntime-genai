@@ -865,7 +865,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
     }
     // Gated-delta-net descriptors the fast kernel can take go first; the rest keep the generic one.
     const auto fast = [](const cuda::StateUpdateReplayDescGpu& d) {
-      return d.kind == static_cast<uint32_t>(StateUpdateReplayKind::GatedDeltaNet) && d.element_size == sizeof(float) &&
+      return d.kind == static_cast<uint32_t>(StateUpdateReplayKind::GatedDeltaNet) &&
+             (d.element_size == sizeof(float) || d.element_size == sizeof(uint16_t)) &&
              d.kept_count <= static_cast<uint32_t>(cuda::kMaxFastReplayTransitions) &&
              d.key_width % 4 == 0 && d.key_width <= static_cast<uint64_t>(cuda::kMaxFastReplayKeyWidth) &&
              d.channel_count * d.state_width <= static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
