@@ -77,26 +77,6 @@ FetchContent_Declare(
 set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)
 
-# Keep memory tokenizer loading consistent with path-based loading and avoid
-# inspecting an empty filesystem path. Reverse checks make configuration idempotent.
-foreach(_ortx_memory_tokenizer_patch IN ITEMS
-    "${CMAKE_CURRENT_LIST_DIR}/onnxruntime_extensions/memory-tokenizer-json-vocab.patch"
-    "${CMAKE_CURRENT_LIST_DIR}/onnxruntime_extensions/memory-tokenizer-added-tokens.patch")
-  execute_process(
-    COMMAND git apply --reverse --check "${_ortx_memory_tokenizer_patch}"
-    WORKING_DIRECTORY "${onnxruntime_extensions_SOURCE_DIR}"
-    RESULT_VARIABLE _ortx_memory_tokenizer_patch_applied
-    OUTPUT_QUIET ERROR_QUIET
-  )
-  if(NOT _ortx_memory_tokenizer_patch_applied EQUAL 0)
-    execute_process(
-      COMMAND git apply -- "${_ortx_memory_tokenizer_patch}"
-      WORKING_DIRECTORY "${onnxruntime_extensions_SOURCE_DIR}"
-      COMMAND_ERROR_IS_FATAL ANY
-    )
-  endif()
-endforeach()
-
 list(APPEND EXTERNAL_LIBRARIES
   onnxruntime_extensions
   ocos_operators
