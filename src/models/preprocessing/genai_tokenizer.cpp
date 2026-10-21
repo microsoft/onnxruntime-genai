@@ -4,8 +4,6 @@
 #include "genai_tokenizer.h"
 
 #include "models/model.h"
-#include "models/model_type.h"
-#include "models/transducer_state.h"
 #include "models/preprocessing/tokenizer_tag_utils.h"
 #include "tensor.h"
 
