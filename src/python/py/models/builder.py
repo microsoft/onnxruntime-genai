@@ -63,6 +63,7 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35Model, Qwen35MoEModel
+from loaders.resolver import resolve_input
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
@@ -105,6 +106,9 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     """
     Get Hugging Face details based on the provided inputs
     """
+    # Resolve URI sources (e.g. oci://) to local paths, once
+    model_name, input_path = resolve_input(model_name), resolve_input(input_path)
+
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
@@ -136,6 +140,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
         "extra_kwargs": extra_kwargs,
         "hf_name": hf_name,
         "hf_config": config,
+        "input_path": input_path,
     }
     return hf_details
 
@@ -227,8 +232,6 @@ def check_extra_options(
             raise ValueError(message)
         if state_update_capacity and not extra_options.get("use_paged_attention", False):
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
-        if state_update_capacity and execution_provider == "webgpu":
-            raise ValueError("state_update_capacity > 0 is not supported on WebGPU: Engine compact state replay is not implemented.")
         extra_options["state_update_capacity"] = state_update_capacity
 
     if "max_draft_tokens" in extra_options:
@@ -680,6 +683,8 @@ def create_model(
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
+    # Local path from `get_hf_details`, after any URI resolution
+    input_path = hf_details.pop("input_path", input_path)
     if effective_config is not None:
         validate_model_dependent_config(effective_config, config)
 
@@ -867,7 +872,7 @@ def get_args():
         "--model_name",
         required=False,
         default=None,
-        help="Model name in Hugging Face. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
+        help="Model name in Hugging Face, or an oci://<registry>/<repo>:<tag> reference. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
     )
 
     parser.add_argument(
@@ -879,6 +884,7 @@ def get_args():
             Input model source. Currently supported options are:
                 hf_path: Path to folder on disk containing the Hugging Face config, model, tokenizer, etc.
                 gguf_path: Path to float16/float32 GGUF file on disk containing the GGUF model
+                oci://<registry>/<repo>:<tag>: CNCF ModelPack artifact, pulled via an llmman daemon
             """),
     )
 
@@ -1034,7 +1040,7 @@ def get_args():
                     default of 4 in effect.
                 dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
                     Accepts true or false (default). Requires dflash2_path. Combines gate/up
-                    weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
+                    weights into one MatMul or MatMulNBits followed by Split. Preserves EP-specific
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
                 dflash2_fuse_qkv = Experimental DFlash 2 attention Q/K/V projection fusion.
@@ -1056,15 +1062,19 @@ def get_args():
                     format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
                     projections the kernel supports (N % 64 for int4, N % 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
-                    Body activations and KV caches remain bf16; this option does not quantize the
-                    drafter's KV cache. When the target LM head uses a reproducible symmetric default
+                    CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
+                    with FP32 residual/skip normalization and convolution-finish accumulation for FP16
+                    models. Finish outputs stay FP32 until after normalization; normalized outputs
+                    return to FP16. This option does not quantize the drafter's KV cache.
+                    When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
                     and prepack mode when eligible so `share_initializers` can fold it onto the target's
                     copy. Dense or unsupported target LM-head layouts keep the drafter head dense.
                 dspark_path = Path to a DSpark draft checkpoint. Exports an auxiliary `dspark.onnx`
                     block drafter beside the target model and adds a `dspark` section to
                     genai_config.json. Mutually exclusive with dflash2_path. Requires
-                    use_paged_attention=true. SpecForge taps each target layer's output, so
+                    use_paged_attention=true. Unsupported on WebGPU because the drafter requires BF16.
+                    SpecForge taps each target layer's output, so
                     aux_hidden_state_layers must be the drafter's `target_layer_ids` each plus one.
                 dspark_num_draft_tokens = Override the number of draft tokens the DSpark block
                     drafter proposes per step. Must be at least 2 and no greater than the draft checkpoint's
@@ -1076,12 +1086,11 @@ def get_args():
                     structured QuantConfig schema independently from the main model.
                 linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
                     Qwen3.5/3.8 exports. Default is linear_attention. Paged exports always use GatedDeltaNet and
-                    ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and supports fp16
-                    or bf16 I/O.
+                    ignore this option. gated_delta_net requires CUDA or WebGPU and state_window=0. CUDA supports
+                    fp16 or bf16 I/O; non-paged WebGPU supports fp16 or fp32.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
-                    Must be an integer from 0 through 8 and requires use_paged_attention=true. Positive capacities
-                    are not supported on WebGPU because Engine compact state replay is not implemented. This experimental
-                    contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
+                    Must be an integer from 0 through 8 and requires use_paged_attention=true. Engine compact
+                    replay supports CPU, CUDA, and WebGPU; WebGPU stages partial-acceptance replay through CPU.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
                     Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require

@@ -70,6 +70,20 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
   add_dependencies(unit_tests onnxruntime-genai-cuda)
 
+  # Header-only helper regression tests: no GenAI/ORT dependency or production CUDA rebuild.
+  foreach(warp_sort_target IN ITEMS cuda_warp_sort_tests cuda_warp_sort_stable_tests)
+    add_executable(${warp_sort_target} "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cuda_kernel/warp_sort_tests.cu")
+    target_include_directories(${warp_sort_target} PRIVATE
+      "${CMAKE_SOURCE_DIR}/src"
+      "${CMAKE_SOURCE_DIR}/src/ep/cuda"
+    )
+    target_link_libraries(${warp_sort_target} PRIVATE GTest::gtest_main cudart)
+    set_target_properties(${warp_sort_target} PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON FOLDER "Tests")
+    target_compile_options(${warp_sort_target} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>")
+    add_test(NAME ${warp_sort_target} COMMAND ${warp_sort_target})
+  endforeach()
+  target_compile_definitions(cuda_warp_sort_stable_tests PRIVATE STABLE_TOPK)
+
   # These tests exercise the internal BatchedSampler interface, so keep them out of unit_tests,
   # which deliberately links only the public shared-library API.
   add_executable(cuda_batched_sampler_tests
