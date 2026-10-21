@@ -1983,6 +1983,31 @@ TEST(PrefixSnapshotCacheTest, CommittedUseRefreshesCountEvictionRecency) {
   EXPECT_THROW(cache.Allocate(second, cpu), std::logic_error);
 }
 
+TEST(PrefixSnapshotCacheTest, CountEvictionPrefersRecencyOverCompatibleStorage) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache cache{{0, 64, 0}, 2};
+  auto oldest = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(oldest, nullptr);
+  auto recent = std::make_shared<PrefixSnapshotCache::Entry>();
+  recent->shapes = {{8, 2}};
+  recent->type = oldest->type;
+  ASSERT_TRUE(cache.Allocate(recent, cpu));
+  Tensor source{cpu, recent->type};
+  source.CreateTensor(std::array<int64_t, 1>{16});
+  oldest->Read(0, 0, source, 0, 16);
+  recent->Write(0, 0, source, 0, 16);
+  cache.Touch(*recent);
+
+  auto replacement = std::make_shared<PrefixSnapshotCache::Entry>();
+  replacement->shapes = recent->shapes;
+  replacement->type = recent->type;
+  ASSERT_TRUE(cache.Allocate(replacement, cpu));
+  EXPECT_EQ(oldest->state, PrefixSnapshotCache::State::Evicted);
+  ASSERT_EQ(recent->state, PrefixSnapshotCache::State::Resident);
+  CheckStorageEntry(*recent);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 32, 0}));
+}
+
 TEST(PrefixSnapshotCacheTest, DiskOnlyStorageOutlivesManagerAndCleansUpAfterLastLease) {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
   const auto parent = fs_std::temp_directory_path() /

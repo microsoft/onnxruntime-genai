@@ -222,14 +222,14 @@ bool PrefixSnapshotCache::ReuseOldest(Entry& destination, std::string_view compo
     if (weak.use_count() != 1) continue;
     auto entry = weak.lock();
     if (entry && (component.empty() || entry->component == component) &&
-        entry->state == State::Resident && entry->type == destination.type &&
-        entry->shapes == destination.shapes && entry->recency < oldest) {
+        entry->state == State::Resident && entry->recency < oldest) {
       selected = &weak;
       oldest = entry->recency;
     }
   }
   if (!selected) return false;
   auto source = selected->lock();
+  if (source->type != destination.type || source->shapes != destination.shapes) return false;
   destination.TakeStorage(*source);
   source->state = State::Evicted;
   Prune();
