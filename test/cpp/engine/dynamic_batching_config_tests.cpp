@@ -58,11 +58,11 @@ TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 321u);
 }
 
-TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToDisabled) {
+TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToEnabled) {
   const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
+  EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
   EXPECT_FALSE(
       config.engine.dynamic_batching->prefix_caching_explicitly_set);
 }
@@ -79,6 +79,7 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
 
 TEST(DynamicBatchingConfigTest, SnapshotTiersDefaultOffAndAcceptIndependentBudgets) {
   const auto defaults = LoadDynamicConfig(R"({"max_batch_size":4})");
+  EXPECT_TRUE(defaults.engine.dynamic_batching->prefix_caching);
   EXPECT_FALSE(defaults.engine.dynamic_batching->snapshot_cache.Enabled());
   EXPECT_FALSE(defaults.engine.dynamic_batching->max_snapshots);
   EXPECT_EQ(defaults.engine.dynamic_batching->dflash2_max_snapshots, 1u);

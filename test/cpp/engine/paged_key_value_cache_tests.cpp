@@ -1021,7 +1021,7 @@ TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowC
   decoder.inputs.block_table_windowed = decoder.inputs.block_table;
   model->config_->search.chunk_size = 4;
 
-  EXPECT_FALSE(model->config_->engine.dynamic_batching->prefix_caching);
+  EXPECT_TRUE(model->config_->engine.dynamic_batching->prefix_caching);
   EXPECT_FALSE(ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0));
   auto cache = MakePagedCache(model);
 
@@ -1042,7 +1042,7 @@ TEST(PagedKeyValueCacheManifestTest, SingleBlockPoolKeepsPrefixCachingEnabled) {
   auto model = LoadSyntheticPagedModel();
   auto& batching = *model->config_->engine.dynamic_batching;
   batching.num_blocks = 1;
-  batching.prefix_caching = true;
+  EXPECT_TRUE(batching.prefix_caching);
 
   auto cache = MakePagedCache(model);
 

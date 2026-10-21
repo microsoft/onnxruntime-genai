@@ -117,8 +117,8 @@ to 2048. Both limits are positive and independent.
 
 ### Prefix caching
 
-Dynamic batching does not cache prefixes by default.
-Set `engine.dynamic_batching.prefix_caching` to `true` to opt in. A lookup
+Dynamic batching caches prefixes by default for supported layouts.
+Set `engine.dynamic_batching.prefix_caching` to `false` to disable it. A lookup
 compares both the token contents and the complete parent-block identity; hash
 equality alone is never accepted as a match. The final prompt token always runs
 through the model, and partial blocks are never shared.
