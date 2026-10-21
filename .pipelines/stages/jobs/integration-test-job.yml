@@ -24,7 +24,10 @@ jobs:
   displayName: '${{ parameters.ep }} · ${{ parameters.model }}'
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.ep, 'cuda') }}:
-      pool: 'onnxruntime-ado-ubuntu-A10-NV32'
+      pool:
+        name: 'onnxruntime-ado-ubuntu-A10-NV32'
+        demands:
+          - ImageOverride -equals onnxruntime-ubuntu2404-A10
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
