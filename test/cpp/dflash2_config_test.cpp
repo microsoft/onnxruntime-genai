@@ -19,6 +19,7 @@
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
 #include "ep/webgpu/session_options.h"
+#include "models/decoder_only.h"
 #include "models/io/kv_cache.h"
 #include "models/session_options.h"
 #include "ort_genai.h"
@@ -92,14 +93,15 @@ struct TensorMetadata {
 
 class CheckpointAllocationDevice final : public DeviceInterface {
  public:
-  CheckpointAllocationDevice(DeviceInterface& inner, bool host_snapshots)
-      : inner_{inner}, host_snapshots_{host_snapshots} {}
+  CheckpointAllocationDevice(DeviceInterface& inner, bool host_snapshots,
+                             Ort::Allocator* allocator = nullptr)
+      : inner_{inner}, host_snapshots_{host_snapshots}, allocator_{allocator} {}
 
   DeviceType GetType() const override { return host_snapshots_ ? DeviceType::CUDA : inner_.GetType(); }
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     inner_.InitOrt(api, allocator);
   }
-  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  Ort::Allocator& GetAllocator() override { return allocator_ ? *allocator_ : inner_.GetAllocator(); }
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     return inner_.GetMemoryInfo();
   }
@@ -157,6 +159,7 @@ class CheckpointAllocationDevice final : public DeviceInterface {
  private:
   DeviceInterface& inner_;
   bool host_snapshots_;
+  Ort::Allocator* allocator_;
 };
 
 class FakeModelStateMetadata final : public ModelStateMetadata {
@@ -1799,6 +1802,29 @@ TEST(PrefixSnapshotCacheTest, ZeroAndUndersizedBudgetsRefuseStorage) {
   EXPECT_THROW(MakeStorageEntry(invalid_vram, cpu), std::runtime_error);
 }
 
+TEST(PrefixSnapshotCacheTest, OrtAllocationFailurePreservesAccountingAndAllowsRetry) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(
+      CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite"));
+  ASSERT_NE(model, nullptr);
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  auto allocator = Ort::Allocator::Create(*model->session_decoder_, cpu->GetAllocator().GetInfo());
+  static_cast<OrtAllocator&>(*allocator).Alloc =
+      [](OrtAllocator*, size_t) -> void* { throw std::bad_alloc{}; };
+  CheckpointAllocationDevice failing_device{*cpu, true, allocator.get()};
+  PrefixSnapshotCache cache{{16, 0, 0}, 1};
+  auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
+  entry->shapes = {{16}};
+  entry->type = Ort::TypeToTensorType<uint8_t>;
+  EXPECT_THROW(cache.Allocate(entry, &failing_device), std::bad_alloc);
+  EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Empty);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 0}));
+
+  CheckpointAllocationDevice device{*cpu, true};
+  ASSERT_TRUE(cache.Allocate(entry, &device));
+  EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{16, 0, 0}));
+}
+
 TEST(PrefixSnapshotCacheTest, VramReservationPreservesTargetBlockAndConfiguredLimit) {
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   auto& batching = *model->config_->engine.dynamic_batching;
@@ -1973,6 +1999,41 @@ TEST(PrefixSnapshotCacheTest, DiskOnlyStorageOutlivesManagerAndCleansUpAfterLast
   EXPECT_FALSE(fs_std::is_empty(parent));
   entry.reset();
   EXPECT_TRUE(fs_std::is_empty(parent));
+  EXPECT_TRUE(fs_std::remove(parent));
+}
+
+TEST(PrefixSnapshotCacheTest, CleanupFailureRespectsLoggingAndWarningSettings) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  const auto parent = fs_std::temp_directory_path() /
+                      ("oga-snapshot-cleanup-" + std::to_string(reinterpret_cast<uintptr_t>(cpu)));
+  ASSERT_TRUE(fs_std::create_directory(parent));
+  for (const auto [enabled, warning] :
+       {std::pair{false, true}, std::pair{true, false}, std::pair{true, true}}) {
+    SCOPED_TRACE(testing::Message() << "enabled=" << enabled << ", warning=" << warning);
+    PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
+    auto entry = MakeStorageEntry(cache, cpu);
+    ASSERT_NE(entry, nullptr);
+    const auto directory = fs_std::directory_iterator(parent)->path();
+    ASSERT_TRUE(fs_std::create_directory(directory / "blocker"));
+
+    const auto previous_logging = g_log;
+    SetLogBool("enabled", enabled);
+    SetLogBool("warning", warning);
+    testing::internal::CaptureStderr();
+    entry.reset();
+    const auto log = testing::internal::GetCapturedStderr();
+    g_log = previous_logging;
+
+    if (enabled && warning) {
+      EXPECT_NE(log.find("Unable to remove prefix snapshot spill storage"), std::string::npos);
+    } else {
+      EXPECT_TRUE(log.empty());
+    }
+    EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 0}));
+    EXPECT_FALSE(fs_std::exists(directory / "payload"));
+    EXPECT_TRUE(fs_std::remove(directory / "blocker"));
+    EXPECT_TRUE(fs_std::remove(directory));
+  }
   EXPECT_TRUE(fs_std::remove(parent));
 }
 

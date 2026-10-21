@@ -77,7 +77,13 @@ struct PrefixSnapshotCache::Entry::DiskStorage {
     std::error_code error;
     std::filesystem::remove(directory / "payload", error);
     if (!error) std::filesystem::remove(directory, error);
-    if (error) Log("warning", "Unable to remove prefix snapshot spill storage: %s", error.message().c_str());
+    if (error && g_log.enabled && g_log.warning) {
+      try {
+        Log("warning", "Unable to remove prefix snapshot spill storage: %s", error.message().c_str());
+      } catch (...) {
+        // Cleanup diagnostics must not throw from the destructor.
+      }
+    }
   }
 };
 
@@ -298,7 +304,16 @@ void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterfa
         entry.host_buffers.push_back(std::move(buffer));
         tensor = std::make_unique<Tensor>(std::move(value));
       } else {
-        tensor->CreateTensor(shape);
+        try {
+          tensor->CreateTensor(shape);
+        } catch (const Ort::Exception& error) {
+          // ORT reports allocator failures through its status API, not std::bad_alloc.
+          if (error.GetOrtErrorCode() != ORT_FAIL &&
+              error.GetOrtErrorCode() != ORT_RUNTIME_EXCEPTION) {
+            throw;
+          }
+          throw std::bad_alloc{};
+        }
       }
       entry.caches.push_back(std::move(tensor));
     }
