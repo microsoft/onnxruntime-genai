@@ -37,6 +37,16 @@ Both tensor-attention flags and GEMM tuning are opt-in: tensor PV rounds
 probabilities to FP16, and full-model lossless equivalence or broad quality
 accuracy is not established.
 
+## Current PR stack
+
+The current GenAI sources are on `kvaishnavi/qwen-38-flash-benchmark`
+(PR #2715), which includes the updated builder (#2713) and runtime (#2714)
+targets. Use that branch instead of the historical GenAI optimization branch
+below when testing the updated stack. Rebuild the core and all provider add-ons
+together against device-interface version **13**; binaries from the recorded
+experiment are not compatible with this interface. The recorded throughput
+numbers remain historical measurements, not results rerun on the updated stack.
+
 ## 1. Check out both optimization branches
 
 Both branches were created from their respective existing
