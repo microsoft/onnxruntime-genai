@@ -365,6 +365,63 @@ OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
+                                                  size_t config_json_length,
+                                                  OgaConfig** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("Expected config JSON bytes and an output pointer.");
+  }
+  *out = nullptr;
+  if (!config_json || config_json_length == 0) {
+    throw std::invalid_argument("Expected config JSON bytes and an output pointer.");
+  }
+  auto config = std::make_unique<Generators::Config>(
+      fs::path{"."}, std::string_view{},
+      std::string_view{config_json, config_json_length});
+  *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
+    OgaConfig* config, const char* filename, const void* data, size_t length) {
+  OGA_TRY
+  if (!config || !config->memory_assets_only_ || !filename || !data || length == 0) {
+    throw std::invalid_argument("Expected external initializer bytes and a memory-only config.");
+  }
+  const std::string name{filename};
+  if (name.empty() || name == "." || name == ".." ||
+      name.find_first_of("/\\:") != std::string::npos) {
+    throw std::invalid_argument("External initializer name must be a flat relative asset name.");
+  }
+  if (!config->external_data_spans_
+           .emplace(name, std::span<const std::byte>{
+                              static_cast<const std::byte*>(data), length})
+           .second) {
+    throw std::invalid_argument("Duplicate external initializer asset: " + name);
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetTokenizerData(
+    OgaConfig* config, const char* config_json, size_t config_length,
+    const char* tokenizer_json, size_t tokenizer_length) {
+  OGA_TRY
+  if (!config || !config->memory_assets_only_ || !config_json || !tokenizer_json ||
+      config_length == 0 || tokenizer_length == 0) {
+    throw std::invalid_argument("Expected tokenizer JSON bytes and a memory-only config.");
+  }
+  config->tokenizer_memory_data_ =
+      std::make_shared<const Generators::TokenizerMemoryData>(
+          Generators::TokenizerMemoryData{
+              std::string{config_json, config_length},
+              std::string{tokenizer_json, tokenizer_length}});
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateConfigFromPackageEp(const char* config_path, const char* ep, OgaConfig** out) {
   OGA_TRY
   if (!Generators::IsModelPackage(fs::path{config_path})) {
