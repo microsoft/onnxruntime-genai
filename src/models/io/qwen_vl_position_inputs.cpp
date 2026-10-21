@@ -43,35 +43,6 @@ struct UpdatePositionIdsFunctor {
   }
 };
 
-struct FillMaskFunctor {
-  OrtValue* attention_mask;
-  int64_t total_size;
-
-  template <typename T>
-  void operator()() {
-    auto* mask_data = attention_mask->GetTensorMutableData<T>();
-    std::fill_n(mask_data, total_size, static_cast<T>(1));
-  }
-};
-
-struct UpdateCapturedMaskFunctor {
-  OrtValue* attention_mask;
-  const std::array<int64_t, 2>& shape;
-  int64_t previous_length;
-  int64_t total_length;
-
-  template <typename T>
-  void operator()() {
-    auto* mask = attention_mask->GetTensorMutableData<T>();
-    const int64_t begin = std::min(previous_length, total_length);
-    const int64_t end = std::max(previous_length, total_length);
-    const T value = total_length > previous_length ? T{1} : T{0};
-    for (int64_t b = 0; b < shape[0]; ++b) {
-      std::fill(mask + b * shape[1] + begin, mask + b * shape[1] + end, value);
-    }
-  }
-};
-
 struct InitPositionIdsFunctor {
   Qwen2VLPositionInputs* self;
   DeviceSpan<int32_t> next_tokens;
@@ -127,6 +98,8 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
     attention_mask_shape_[1] = 0;  // Will be set during first update
     attention_mask_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
   }
+  position_buffer_ = CreatePositionIdsBuffer(*state_.params_);
+  mask_buffer_ = CreateAttentionMaskBuffer(model_, *state_.params_, DynamicMaskUpdate::FillOnes);
 }
 
 void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
@@ -381,31 +354,6 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
 
 template <typename T>
 void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
-  if (state_.params_->use_graph_capture) {
-    const int64_t max_length = state_.params_->search.max_length;
-    if (shape[1] > max_length)
-      throw std::runtime_error("Qwen2VLPositionInputs: prompt exceeds max_length");
-    const int num_beams = state_.params_->search.num_beams;
-    attention_mask_shape_ = {shape[0] * num_beams, max_length};
-    captured_attention_mask_cpu_ = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
-    auto* mask = captured_attention_mask_cpu_->GetTensorMutableData<T>();
-    std::fill_n(mask, attention_mask_shape_[0] * max_length, T{0});
-    auto tokens = next_tokens.CpuSpan();
-    for (int64_t b = 0; b < shape[0]; ++b) {
-      for (int beam = 0; beam < num_beams; ++beam) {
-        for (int64_t s = 0; s < shape[1]; ++s) {
-          mask[(b * num_beams + beam) * max_length + s] =
-              tokens[b * shape[1] + s] == model_.config_->model.pad_token_id ? T{0} : T{1};
-        }
-      }
-    }
-    captured_attention_mask_length_ = shape[1];
-    attention_mask_->CreateTensor(attention_mask_shape_, true);
-    attention_mask_->GetByteSpan().CopyFrom(
-        ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *captured_attention_mask_cpu_));
-    state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
-    return;
-  }
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* mask_data = attention_mask->GetTensorMutableData<T>();
   auto input_ids_span = next_tokens.CpuSpan();
@@ -421,9 +369,7 @@ void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  // Move tensor to GPU and expand by num_beams
-  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
-  attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  mask_buffer_->Initialize(*attention_mask_, attention_mask, state_.params_->search.num_beams, attention_mask_shape_);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
@@ -444,43 +390,12 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
 }
 
 void Qwen2VLPositionInputs::SetPositionIDs(std::unique_ptr<OrtValue> position_ids, int num_beams) {
-  auto shape = position_ids->GetTensorTypeAndShapeInfo()->GetShape();
-  const int max_capture_length = state_.params_->max_graph_capture_length;
-  if (state_.params_->use_graph_capture && shape[2] >= 1 && shape[2] <= max_capture_length) {
-    // Captured graphs bind addresses, including both recurrent-buffer variants. Keep this
-    // allocation across decode lengths and intervening uncaptured prefills after rewind.
-    auto* source_device = GetDeviceInterface(DeviceType::CPU);
-    if (num_beams > 1) {
-      position_ids = model_.ExpandInputs(position_ids, num_beams);
-      shape = position_ids->GetTensorTypeAndShapeInfo()->GetShape();
-      source_device = model_.p_device_inputs_;
-    }
-    const size_t capacity = static_cast<size_t>(shape[0] * shape[1]) * max_capture_length * Ort::SizeOf(type_);
-    position_ids_->CreateTensor(shape, true, capacity);
-    position_ids_->GetByteSpan().CopyFrom(ByteWrapTensor(*source_device, *position_ids));
-  } else {
-    position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, num_beams);
-  }
+  position_buffer_->Assign(*position_ids_, model_, position_ids, num_beams);
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
-void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length) {
-  if (state_.params_->use_graph_capture) {
-    if (total_length < 0 || total_length > attention_mask_shape_[1])
-      throw std::runtime_error("Qwen2VLPositionInputs: attention mask length exceeds max_length");
-    DispatchOnType(type_, UpdateCapturedMaskFunctor{captured_attention_mask_cpu_.get(), attention_mask_shape_,
-                                                    captured_attention_mask_length_, total_length});
-    captured_attention_mask_length_ = total_length;
-    attention_mask_->GetByteSpan().CopyFrom(
-        ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *captured_attention_mask_cpu_));
-    return;
-  }
-  attention_mask_shape_[1] = total_length;
-  auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
-
-  DispatchOnType(type_, FillMaskFunctor{attention_mask.get(), attention_mask_shape_[0] * attention_mask_shape_[1]});
-
-  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, 1);
+void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_length) {
+  mask_buffer_->Update(*attention_mask_, attention_mask_shape_, total_length, new_length);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
@@ -499,7 +414,7 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       attention_mask_shape_[1] = new_length;
       DispatchOnType(type_, InitAttentionMaskFunctor{this, next_tokens, attention_mask_shape_});
     } else {
-      UpdateAttentionMask(total_length);
+      UpdateAttentionMask(total_length, new_length);
     }
   }
 
@@ -519,13 +434,7 @@ void Qwen2VLPositionInputs::RewindTo(size_t index) {
     position_ids_shape_[2] = static_cast<int64_t>(index);
   }
   if (has_mask_input_) {
-    if (state_.params_->use_graph_capture) {
-      if (index > static_cast<size_t>(state_.params_->search.max_length))
-        throw std::runtime_error("Qwen2VLPositionInputs: rewind exceeds max_length");
-      UpdateAttentionMask(static_cast<int>(index));
-    } else {
-      attention_mask_shape_[1] = static_cast<int64_t>(index);
-    }
+    mask_buffer_->Rewind(*attention_mask_, attention_mask_shape_, index);
   }
 }
 

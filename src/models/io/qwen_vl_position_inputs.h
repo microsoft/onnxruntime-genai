@@ -64,7 +64,7 @@ struct Qwen2VLPositionInputs : PositionInputs {
   void SetPositionIDs(std::unique_ptr<OrtValue> position_ids, int num_beams);
   template <typename T>
   void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
-  void UpdateAttentionMask(int total_length);
+  void UpdateAttentionMask(int total_length, int new_length);
 
   const Model& model_;
   State& state_;
@@ -77,9 +77,8 @@ struct Qwen2VLPositionInputs : PositionInputs {
   std::unique_ptr<Tensor> position_ids_;
   std::array<int64_t, 2> attention_mask_shape_{};
   std::unique_ptr<Tensor> attention_mask_;
-  // CPU staging preserves prompt padding while updating the fixed captured mask in place.
-  std::unique_ptr<OrtValue> captured_attention_mask_cpu_;
-  int64_t captured_attention_mask_length_{};
+  std::unique_ptr<PositionIdsBuffer> position_buffer_;
+  std::unique_ptr<AttentionMaskBuffer> mask_buffer_;
   bool is_first_update_{true};
   std::shared_ptr<Tensor> image_grid_thw_;
   std::shared_ptr<Tensor> video_grid_thw_;
