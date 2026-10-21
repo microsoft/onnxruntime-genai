@@ -55,6 +55,51 @@ Generated graph schemas must match the companion ORT operators:
 normalization/rotary, GDN/convolution, quantized MoE/FP8, hyper-connections,
 packed sparse-attention/indexer, and speculative fold/state operations.
 
+## Experimental native decode preset
+
+Recent native CUDA experiments are carried by the companion ORT PRs:
+
+- [GDN/convolution #33471](https://github.com/microsoft/onnxruntime/pull/33471)
+- [Sparse attention/indexer #33472](https://github.com/microsoft/onnxruntime/pull/33472)
+- [Quantized MoE/FP8 #33473](https://github.com/microsoft/onnxruntime/pull/33473)
+
+These are native dispatch changes, not additional GenAI graph-runtime features.
+Use a compatible ORT build; environment flags alone cannot add missing kernels.
+For an already qualified INT2-expert, FP8-projection package using two-token
+verification (current token plus one draft), the experimental preset is:
+
+```bash
+export ORT_GDN_DECODE_WARPS=8
+export ORT_GDN_S2_SPECIALIZE=1
+export ORT_CAUSAL_CONV_S2_SPECIALIZE=1
+export ORT_FP8_GEMV_PER_COLUMN_S2=1
+export ORT_PACKED_SPARSE_INDEXER_RADIX_TOPK=0
+export ORT_PACKED_SPARSE_INDEXER_COMPACT_TOPK=1
+export ORT_DSA_INT8_VECTOR_STAGING=1
+export ORT_DSA_SHARED_SCALE_MERGE=1
+export ORT_MOE_ROUTING_WARP_SELECT=1
+```
+
+Set options before starting the process. The specialization switches default
+to disabled and reject integer values other than 0/1. Unsupported shapes retain
+their generic paths. Compact and radix QSA selection are mutually exclusive.
+The MoE PR also fuses small-decode routing with stable expert-map construction.
+Consult the ORT operator documentation for exact eligibility and fallback rules.
+
+Keep the qualified package unchanged and evaluate a separate output bundle.
+Do not overwrite hard-linked graphs, libraries, or manifests in place: replacing
+a destination file atomically avoids modifying its source inode.
+
+These experiments do not establish model accuracy or sustained 250 TPS at 8K.
+The latest paired H200 measurements remained below the reference at 2K, 8K,
+and 16K; full accuracy qualification is deferred. The focused native suites
+pass with the new switches disabled and enabled. A broader GDN empty-request
+regression still fails in the incremental retained-dependency build, including
+with the unmodified PR-head kernel. Earlier experimental QSA/CSA
+malformed-state-length failures also preclude a blanket qualification claim.
+Do not interpret the preset or token-parity checks as a clean full-suite result
+or deployment qualification; a clean upstream build and CI remain required.
+
 ## CPU unit tests
 
 With ONNX, NumPy, and ml-dtypes available, run:
