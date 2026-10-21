@@ -567,6 +567,43 @@ TEST(FixedStatePoolComponentsTest, ReplaysPleAndIndexerUpdatesAcrossBlockBoundar
   EXPECT_EQ(lengths[1], 1);
 }
 
+TEST(FixedStatePoolComponentsTest, IndexerRowsShareReplayBackingOwners) {
+  struct ReplayDevice final : FixedStateTestDevice {
+    using FixedStateTestDevice::FixedStateTestDevice;
+    void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
+      replayed.assign(descriptors, descriptors + count);
+      FixedStateTestDevice::ReplayStateUpdates(descriptors, count);
+    }
+    std::vector<StateUpdateReplayDesc> replayed;
+  };
+  auto model = LoadSyntheticFixedComponentsModel();
+  ReplayDevice device{*model->p_device_kvcache_};
+  ScopedKeyValueCacheDevice scoped_device{*model, device};
+  FixedStatePool pool{model, 2};
+  {
+    const std::array<Request, 2> requests{Request{kRequestA, 8, 7}, Request{kRequestB, 8, 7}};
+    auto reservation = pool.Reserve(requests);
+    auto bindings = reservation.Bindings();
+    std::fill_n(bindings[0].state_update_value->GetTensorMutableData<int64_t>(), 28, 1);
+    FillHalfTensor(*bindings[1].state_update_value, 2.0f);
+    std::fill_n(bindings[2].state_update_value->GetTensorMutableData<float>(), 28, 3.0f);
+    reservation.CommitPrefix(0, 8, 5);
+    reservation.CommitPrefix(1, 8, 3);
+    reservation.Commit();
+  }
+  auto resident = pool.Reserve(One(kRequestA, 5));
+  std::vector<const StateUpdateReplayDesc*> indexers;
+  for (const auto& descriptor : device.replayed) {
+    if (descriptor.kind == StateUpdateReplayKind::Indexer) indexers.push_back(&descriptor);
+  }
+  ASSERT_EQ(indexers.size(), 2u);
+  EXPECT_EQ(&indexers[0]->source_aux_state.GetBuffer(), &indexers[1]->source_aux_state.GetBuffer());
+  EXPECT_EQ(&indexers[0]->destination_aux_state.GetBuffer(), &indexers[1]->destination_aux_state.GetBuffer());
+  EXPECT_EQ(&indexers[0]->source_lengths.GetBuffer(), &indexers[1]->source_lengths.GetBuffer());
+  EXPECT_EQ(&indexers[0]->destination_lengths.GetBuffer(), &indexers[1]->destination_lengths.GetBuffer());
+  EXPECT_NE(indexers[0]->destination_lengths.ByteOffset(), indexers[1]->destination_lengths.ByteOffset());
+}
+
 TEST(FixedStatePoolComponentsTest, ReplaysIndexerUpdateAcrossBlockBoundaryFromThree) {
   auto model = LoadSyntheticFixedComponentsModel();
   FixedStatePool pool{model, 1};

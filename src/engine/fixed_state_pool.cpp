@@ -1842,6 +1842,8 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
       // Shared wrappers let device replay coalesce host mirrors across rows of the same backing.
       DeviceSpan<uint8_t> input_backing, value_backing, capsule_backing;
       std::array<DeviceSpan<uint8_t>, 2> bank_backings;
+      DeviceSpan<uint8_t> indexer_buffer_input, indexer_lengths_input;
+      std::array<DeviceSpan<uint8_t>, 2> indexer_buffer_banks, indexer_lengths_banks;
       const auto row_view = [&](DeviceSpan<uint8_t>& backing, OrtValue* tensor,
                                 size_t row, size_t row_bytes) {
         if (!tensor) {
@@ -1908,14 +1910,15 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         }
         const auto sibling_source = [&](size_t index, const Impl::TensorSpec* sibling) {
           return sibling
-                     ? ByteWrapTensor(*impl_->device, *views.gathered_inputs[index])
-                           .subspan(row * sibling->row_bytes, sibling->row_bytes)
+                     ? row_view(index == indexer_buffer_index ? indexer_buffer_input : indexer_lengths_input,
+                                views.gathered_inputs[index].get(), row, sibling->row_bytes)
                      : DeviceSpan<uint8_t>{};
         };
         const auto sibling_destination = [&](const Impl::TensorSpec* sibling) {
           return sibling
-                     ? ByteWrapTensor(*impl_->device, *sibling->banks[inactive_bank])
-                           .subspan(storage.handles[row].slot * sibling->row_bytes, sibling->row_bytes)
+                     ? row_view(sibling == indexer_buffer_spec ? indexer_buffer_banks[inactive_bank]
+                                                               : indexer_lengths_banks[inactive_bank],
+                                sibling->banks[inactive_bank].get(), storage.handles[row].slot, sibling->row_bytes)
                      : DeviceSpan<uint8_t>{};
         };
         const auto& updates = views.state_update_tensors[tensor_index];
