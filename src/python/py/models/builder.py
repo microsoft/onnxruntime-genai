@@ -14,14 +14,18 @@ import argparse
 import json
 import os
 import textwrap
+from pathlib import Path
 from typing import Any
 
 import onnx_ir as ir
 import torch
 from builder_config import (
     apply_runtime_config,
+    export_component_package,
     load_json_object,
     normalize_builder_config,
+    plan_component_package,
+    validate_component_backbone_destination,
     validate_model_dependent_config,
 )
 from builders import (
@@ -29,8 +33,8 @@ from builders import (
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
-    Gemma4MoEModel,
     Gemma4Model,
+    Gemma4MoEModel,
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
@@ -61,6 +65,11 @@ from builders import (
     SmolLM3Model,
     VideoChatFlashQwenModel,
     WhisperModel,
+)
+from builders.non_generative import (
+    configure_model_specific_export,
+    prepare_model_specific_hf,
+    validate_model_specific_components,
 )
 from builders.qwen import Qwen35Model, Qwen35MoEModel
 from loaders.resolver import resolve_input
@@ -111,7 +120,12 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
 
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
+    if revision := extra_options.get("base_revision"):
+        extra_kwargs["revision"] = revision
     hf_name = input_path if os.path.isdir(input_path) else model_name
+    model_specific_hf = extra_options.get("_model_specific_hf", {})
+    if model_specific_hf:
+        hf_name = model_specific_hf["base_model"]
     hf_token = extra_options.get("hf_token", True)
     hf_remote = extra_options.get("hf_remote", False)
 
@@ -122,16 +136,24 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
         config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
         if config is None:
             raise
-    tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    tokenizer_name = model_specific_hf.get("tokenizer", hf_name)
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs
+    )
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
         from peft import PeftConfig
 
+        adapter_source = (
+            model_specific_hf.get("adapter")
+            or extra_options["adapter_path"]
+        )
+        adapter_kwargs = {} if os.path.isdir(adapter_source) else {"cache_dir": cache_dir}
         peft_config = PeftConfig.from_pretrained(
-            extra_options["adapter_path"],
+            adapter_source,
             token=hf_token,
             trust_remote_code=hf_remote,
-            **extra_kwargs,
+            **adapter_kwargs,
         )
         config.update(peft_config.__dict__)
 
@@ -495,6 +517,7 @@ def parse_extra_options(
     speculative_options=None,
     runtime_config=None,
     search=None,
+    component_options=None,
 ):
     """
     Parse CLI KEY=VALUE options and normalize the structured envelope.
@@ -523,8 +546,12 @@ def parse_extra_options(
         speculative_options=speculative_options,
         runtime_config=runtime_config,
         search=search,
+        component_options=component_options,
     )
     kv_pairs = effective_config.extra_options
+    if effective_config.component_options is not None and effective_config.component_options.model_source is not None:
+        base_source = input_path if os.path.isdir(input_path) else model_name
+        prepare_model_specific_hf(effective_config.component_options, kv_pairs, base_source)
     print(f"Extra options: {kv_pairs}")
     check_extra_options(
         model_name,
@@ -653,6 +680,7 @@ def create_model(
             "speculative_options",
             "runtime_config",
             "search",
+            "component_options",
         )
         if key in extra_options
     }
@@ -687,6 +715,11 @@ def create_model(
     input_path = hf_details.pop("input_path", input_path)
     if effective_config is not None:
         validate_model_dependent_config(effective_config, config)
+        if (
+            effective_config.component_options is not None
+            and effective_config.component_options.model_source is not None
+        ):
+            configure_model_specific_export(effective_config.component_options, config, extra_options)
 
     # Set input/output precision of ONNX model
     quant_config = extra_options.get("_quant_config")
@@ -834,6 +867,21 @@ def create_model(
     # metadata is dropped when the builder does not honor it.
     warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
 
+    if effective_config is not None and effective_config.component_options is not None:
+        validate_component_backbone_destination(
+            effective_config.component_options,
+            output_dir,
+            require_exists=config_only,
+        )
+        if effective_config.component_options.model_source is not None:
+            validate_model_specific_components(
+                effective_config.component_options, Path(output_dir).resolve()
+            )
+        else:
+            plan_component_package(
+                effective_config.component_options, Path(output_dir).resolve()
+            )
+
     if not config_only:
         # Make ONNX model
         onnx_model.make_model(input_path)
@@ -843,6 +891,8 @@ def create_model(
 
     # Make GenAI config
     onnx_model.make_genai_config(config, extra_kwargs, output_dir)
+    if effective_config is not None and effective_config.component_options is not None:
+        export_component_package(effective_config.component_options, output_dir)
 
     # Composite exporters append MTP/block-drafter sections after the decoder.
     # Applying a profile earlier would reject valid component names or lose it
@@ -1227,6 +1277,17 @@ def get_args():
         help="Target export options as an inline JSON object or JSON file path.",
     )
     parser.add_argument(
+        "--component_options",
+        default=None,
+        help=(
+            "Optional hidden-state backbone plus generic pre-built heads or one "
+            "pinned model_source, as inline JSON or a JSON file. Generic heads "
+            "require unique safe names/files and valid graph bindings; "
+            "model_source requires artifact_revision and base_revision. "
+            "Cannot be combined with drafter_options; omitted by default."
+        ),
+    )
+    parser.add_argument(
         "--drafter_options",
         default=None,
         help="Drafter export options as an inline JSON object or JSON file path.",
@@ -1266,6 +1327,7 @@ if __name__ == "__main__":
         args.extra_options,
         builder_config_version=args.builder_config_version,
         target_options=args.target_options,
+        component_options=args.component_options,
         drafter_options=args.drafter_options,
         speculative_options=args.speculative_options,
         runtime_config=args.runtime_config,
