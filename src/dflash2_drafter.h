@@ -24,15 +24,6 @@ struct Dflash2PrefixCheckpoint : PrefixSnapshotCache::Entry {
   size_t ring_blocks{};
 };
 
-void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destination_blocks,
-                           Tensor& source, std::span<const int32_t> source_blocks);
-
-bool CanReserveDflash2PrefixCheckpoint(size_t target_budget_bytes, size_t reserved_bytes,
-                                       size_t snapshot_bytes, size_t target_block_bytes);
-size_t Dflash2PrefixCheckpointCapacity(size_t target_budget_bytes, size_t reserved_bytes,
-                                       size_t snapshot_bytes, size_t target_block_bytes,
-                                       size_t max_checkpoints);
-
 size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
                          size_t remaining_turn_tokens_after_step);

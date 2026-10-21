@@ -131,7 +131,6 @@ struct CacheManager {
   virtual void DropUnleasedDraftCheckpoints() {}
   // Effective Engine-local reservation; the configured model limit remains unchanged.
   virtual size_t DraftCheckpointVramBytes() const noexcept { return 0; }
-  virtual bool ReclaimDraftCheckpoint() { return false; }
   virtual size_t DraftCheckpointCapacity() const noexcept { return 0; }
   virtual void RecordPrefixPublicationRefusal() noexcept {}
   virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
@@ -262,9 +261,6 @@ struct PagedCacheManager : CacheManager {
   }
   void DropUnleasedDraftCheckpoints() override {
     key_value_cache_->DropUnleasedDraftCheckpoints();
-  }
-  bool ReclaimDraftCheckpoint() override {
-    return key_value_cache_->ReclaimDraftCheckpoint();
   }
   void RecordPrefixPublicationRefusal() noexcept override {
     key_value_cache_->RecordPrefixPublicationRefusal();

@@ -1290,10 +1290,10 @@ class Dflash2SnapshotEngineTest : public ::testing::TestWithParam<size_t> {
 
 TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCancellation) {
   const size_t limit = GetParam();
-  const std::array<std::array<int32_t, 5>, 4> prompts{
-      std::array<int32_t, 5>{5, 9, 13, 7, 8}, {7, 2, 20, 4, 6}, {3, 8, 2, 15, 6}, {11, 12, 13, 14, 15}};
+  const std::array<std::array<int32_t, 5>, 5> prompts{
+      std::array<int32_t, 5>{5, 9, 13, 7, 8}, {7, 2, 20, 4, 6}, {3, 8, 2, 15, 6}, {11, 12, 13, 14, 15}, {17, 6, 18, 3, 9}};
   auto baseline = std::make_shared<Engine>(LoadModel(false));
-  std::array<std::vector<int32_t>, 4> expected;
+  std::array<std::vector<int32_t>, prompts.size()> expected;
   for (size_t i = 0; i < prompts.size(); ++i) {
     auto request = Submit(baseline, prompts[i]);
     std::vector<std::vector<int32_t>> outputs;
@@ -1337,7 +1337,8 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
     EXPECT_EQ(match->draft_checkpoint != nullptr, limit != 0);
     leases.push_back(std::move(match));
   }
-  requests.push_back(Submit(engine, prompts[2]));
+  const size_t overflow_index = std::max(size_t{2}, warm_count);
+  requests.push_back(Submit(engine, prompts[overflow_index]));
   std::vector<std::vector<int32_t>> outputs;
   std::vector<GenerationFinishReason> reasons;
   Drain(*engine, requests, outputs, reasons);
@@ -1349,7 +1350,7 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
     EXPECT_EQ(match->draft_checkpoint, leases[i]->draft_checkpoint);
     EXPECT_EQ(requests[i]->TurnCachedPromptTokens(), 4u);
   }
-  EXPECT_EQ(outputs.back(), expected[2]);
+  EXPECT_EQ(outputs.back(), expected[overflow_index]);
   {
     const auto match = cache->MatchPrefix(*requests.back());
     ASSERT_NE(match, nullptr);
@@ -1361,12 +1362,12 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
     request->Close();
   }
 
-  auto replacement = Submit(engine, prompts[3]);
+  auto replacement = Submit(engine, prompts.back());
   outputs.clear();
   reasons.clear();
   Drain(*engine, {replacement}, outputs, reasons);
   ASSERT_FALSE(HasFatalFailure());
-  EXPECT_EQ(outputs[0], expected[3]);
+  EXPECT_EQ(outputs[0], expected.back());
   {
     const auto match = cache->MatchPrefix(*replacement);
     ASSERT_NE(match, nullptr);
@@ -1409,12 +1410,12 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
   canceled_match.reset();
   canceled_replay->Close();
 
-  auto after_cancel = Submit(engine, prompts[3]);
+  auto after_cancel = Submit(engine, prompts.back());
   outputs.clear();
   reasons.clear();
   Drain(*engine, {after_cancel}, outputs, reasons);
   ASSERT_FALSE(HasFatalFailure());
-  EXPECT_EQ(outputs[0], expected[3]);
+  EXPECT_EQ(outputs[0], expected.back());
   EXPECT_EQ(after_cancel->TurnCachedPromptTokens(), 4u);
   after_cancel->Close();
   EXPECT_FALSE(engine->HasPendingRequests());
@@ -1426,7 +1427,7 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
   EXPECT_EQ(stats.dflash2_failures, 0u);
 }
 
-INSTANTIATE_TEST_SUITE_P(SnapshotLimits, Dflash2SnapshotEngineTest, ::testing::Values(0u, 1u, 2u));
+INSTANTIATE_TEST_SUITE_P(SnapshotLimits, Dflash2SnapshotEngineTest, ::testing::Values(0u, 1u, 2u, 3u));
 
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {
   auto model = LoadSyntheticPagedModel();

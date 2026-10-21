@@ -130,7 +130,6 @@ struct PagedKeyValueCache {
   bool AttachDraftCheckpoint(const DraftPrefixBoundary& boundary,
                              std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint);
   void DropUnleasedDraftCheckpoints();
-  bool ReclaimDraftCheckpoint();
   size_t ReclaimPrefixCheckpoints(size_t checkpoints_needed);
   bool ReclaimPrefixCheckpoint(const FixedStatePrefixCheckpoint* checkpoint);
   size_t ReclaimablePrefixCheckpoints() const;

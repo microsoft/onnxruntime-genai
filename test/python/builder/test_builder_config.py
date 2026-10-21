@@ -1038,11 +1038,18 @@ def test_runtime_batching_validation_is_shared_with_profiles(in_profile, engine,
 
 
 @pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "field,error",
+    [
+        ("dflash2_max_snapshots", "dflash2_max_snapshots must be an integer between"),
+        ("max_snapshots", "max_snapshots must be an integer from"),
+    ],
+)
 @pytest.mark.parametrize("value", [0, 1, 3, 2_147_483_647, -1, 1.5, 2**31, True, "3", None])
-def test_dflash2_snapshot_limits_in_runtime_config_and_profiles(in_profile, value):
+def test_snapshot_limits_in_runtime_config_and_profiles(in_profile, field, error, value):
     generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"num_blocks": 32}}}
     baseline = copy.deepcopy(generated)
-    runtime = {"engine": {"dynamic_batching": {"dflash2_max_snapshots": value}}}
+    runtime = {"engine": {"dynamic_batching": {field: value}}}
     if in_profile:
         runtime = {
             "runtime_profiles": [
@@ -1055,11 +1062,51 @@ def test_dflash2_snapshot_limits_in_runtime_config_and_profiles(in_profile, valu
             assert result["runtime_profiles"] == runtime["runtime_profiles"]
             assert result["engine"] == generated["engine"]
         else:
-            assert result["engine"]["dynamic_batching"]["dflash2_max_snapshots"] == value
+            assert result["engine"]["dynamic_batching"][field] == value
     else:
-        with pytest.raises(ValueError, match="dflash2_max_snapshots must be an integer between"):
+        with pytest.raises(ValueError, match=error):
             apply_runtime_config(generated, runtime)
     assert generated == baseline
+
+
+def test_runtime_snapshot_tiers_and_count_cap_are_preserved():
+    generated = {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+    policy = {
+        "prefix_caching": True,
+        "max_snapshots": 8,
+        "snapshot_cache": {
+            "vram_bytes": 4_294_967_296,
+            "ram_bytes": 8_589_934_592,
+            "disk_bytes": 17_179_869_184,
+            "directory": "spill",
+        },
+    }
+    runtime = {"engine": {"dynamic_batching": policy}}
+    updated = apply_runtime_config(generated, runtime)
+    assert updated["engine"]["dynamic_batching"] == {"num_blocks": 128, **policy}
+    profile = {
+        "id": "snapshot-storage",
+        "eligibility": {"minimum_total_device_memory_bytes": 0},
+        "overlay": runtime,
+    }
+    assert apply_runtime_config(generated, {"runtime_profiles": [profile]})["runtime_profiles"] == [profile]
+    assert generated == {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize("tier", ["vram_bytes", "ram_bytes", "disk_bytes"])
+@pytest.mark.parametrize("invalid", [-1, 1.5, True, "16", 9_007_199_254_740_992])
+def test_runtime_rejects_invalid_snapshot_byte_limits(in_profile, tier, invalid):
+    generated = {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+    runtime = {"engine": {"dynamic_batching": {"snapshot_cache": {tier: invalid}}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "snapshots", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    with pytest.raises(ValueError, match="non-negative integer byte count"):
+        apply_runtime_config(generated, runtime)
 
 
 @pytest.mark.parametrize("in_profile", [False, True])

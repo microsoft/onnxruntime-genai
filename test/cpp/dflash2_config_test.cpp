@@ -92,15 +92,14 @@ struct TensorMetadata {
 
 class CheckpointAllocationDevice final : public DeviceInterface {
  public:
-  CheckpointAllocationDevice(DeviceInterface& inner, Ort::Allocator& allocator,
-                             bool host_snapshots = false)
-      : inner_{inner}, allocator_{allocator}, host_snapshots_{host_snapshots} {}
+  CheckpointAllocationDevice(DeviceInterface& inner, bool host_snapshots)
+      : inner_{inner}, host_snapshots_{host_snapshots} {}
 
   DeviceType GetType() const override { return host_snapshots_ ? DeviceType::CUDA : inner_.GetType(); }
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     inner_.InitOrt(api, allocator);
   }
-  Ort::Allocator& GetAllocator() override { return allocator_; }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     return inner_.GetMemoryInfo();
   }
@@ -157,7 +156,6 @@ class CheckpointAllocationDevice final : public DeviceInterface {
 
  private:
   DeviceInterface& inner_;
-  Ort::Allocator& allocator_;
   bool host_snapshots_;
 };
 
@@ -850,20 +848,6 @@ TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
             7680u);
 }
 
-TEST(Dflash2ConfigTest, OptionalPrefixCheckpointNeverConsumesTheLastTargetBlock) {
-  EXPECT_TRUE(CanReserveDflash2PrefixCheckpoint(
-      /*target_budget_bytes=*/100, /*reserved_bytes=*/40,
-      /*snapshot_bytes=*/20, /*target_block_bytes=*/40));
-  EXPECT_FALSE(CanReserveDflash2PrefixCheckpoint(99, 40, 20, 40));
-  EXPECT_FALSE(CanReserveDflash2PrefixCheckpoint(100, 100, 20, 40));
-  EXPECT_FALSE(CanReserveDflash2PrefixCheckpoint(100, 40, 60, 1));
-  EXPECT_FALSE(CanReserveDflash2PrefixCheckpoint(100, 40, 20, 41));
-  const size_t effective_budget = PagedCacheMemoryBudget(1000, 1.0f);
-  EXPECT_TRUE(CanReserveDflash2PrefixCheckpoint(1000, 860, 40, 40));
-  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(1000, 1.0f, 860, 40), 1u);
-  EXPECT_FALSE(CanReserveDflash2PrefixCheckpoint(effective_budget, 860, 40, 40));
-}
-
 TEST(Dflash2ConfigTest, HostCheckpointDoesNotConsumeDeviceBudget) {
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   auto& batching = *model->config_->engine.dynamic_batching;
@@ -886,22 +870,6 @@ TEST(Dflash2ConfigTest, RejectsWindowedPoolByteOverflow) {
           config, 8, std::numeric_limits<size_t>::max(),
           ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
       std::runtime_error);
-}
-
-TEST(Dflash2ConfigTest, SnapshotCapacityHonorsConfiguredLimitAndMemoryBudget) {
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 0), 0u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 1), 1u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 4), 4u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 32), 7u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(199, 40, 20, 20, 32), 6u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(79, 40, 20, 20, 32), 0u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 100, 20, 20, 32), 0u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 101, 20, 20, 32), 0u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 0, 20, 32), 0u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 20, 0, 32), 0u);
-  const size_t maximum = std::numeric_limits<size_t>::max();
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, 0, maximum / 2, 1, maximum), 2u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, maximum - 1, maximum, 1, maximum), 0u);
 }
 
 TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
@@ -1100,21 +1068,6 @@ TEST_P(Dflash2StorageRestoreTest, ExecutesWindowedRestoreAcrossRingWrap) {
         .request = source, .aux_row_count = 8, .first_position = position, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
     ASSERT_TRUE(drafter.Propose(aux, feeds, proposals));
   }
-  auto* device = model->p_device_kvcache_;
-  auto failing_allocator = Ort::Allocator::Create(
-      *model->session_, device->GetAllocator().GetInfo());
-  static_cast<OrtAllocator&>(*failing_allocator).Alloc =
-      [](OrtAllocator*, size_t) -> void* { throw std::bad_alloc{}; };
-  EXPECT_THROW(
-      OrtValue::CreateTensor(
-          *failing_allocator, std::array<int64_t, 1>{1}, Ort::TypeToTensorType<float>),
-      Ort::Exception);
-  CheckpointAllocationDevice failing_device{*device, *failing_allocator, true};
-  failing_device.fail_host_allocation = true;
-  model->p_device_kvcache_ = &failing_device;
-  if (!GetParam()) EXPECT_THROW(drafter.CapturePrefix(source, 24), std::bad_alloc);
-  model->p_device_kvcache_ = device;
-
   auto checkpoint = drafter.CapturePrefix(source, 24);
   ASSERT_NE(checkpoint, nullptr);
   EXPECT_EQ(checkpoint->ring_blocks, ring_blocks);
@@ -1217,28 +1170,35 @@ TEST_P(Dflash2StorageRestoreTest, ExecutesWindowedRestoreAcrossRingWrap) {
   auto missing_state = std::make_shared<Dflash2PrefixCheckpoint>();
   missing_state->token_count = checkpoint->token_count;
   missing_state->ring_blocks = checkpoint->ring_blocks;
+  missing_state->shapes = checkpoint->shapes;
+  missing_state->type = checkpoint->type;
+  auto damaged_cache = MakeSnapshotCache(config);
+  ASSERT_TRUE(damaged_cache->Allocate(missing_state, model->p_device_kvcache_));
   for (size_t layer = 0; layer < checkpoint->shapes.size(); ++layer) {
-    auto copy = std::make_unique<Tensor>(GetDeviceInterface(DeviceType::CPU), checkpoint->type);
-    copy->CreateTensor(checkpoint->shapes[layer]);
-    checkpoint->Read(layer, 0, *copy, 0, copy->GetByteSpan().size());
-    missing_state->caches.push_back(std::move(copy));
+    Tensor copy{GetDeviceInterface(DeviceType::CPU), checkpoint->type};
+    copy.CreateTensor(checkpoint->shapes[layer]);
+    checkpoint->Read(layer, 0, copy, 0, copy.GetByteSpan().size());
+    if (layer == 0) copy.GetByteSpan().Zero();
+    missing_state->Write(layer, 0, copy, 0, copy.GetByteSpan().size());
   }
-  missing_state->caches.front()->GetByteSpan().Zero();
   drafter.ReleaseAll();
   auto damaged = resumed;
-  damaged.front().prefix_checkpoint = std::move(missing_state);
+  damaged.front().prefix_checkpoint = missing_state;
   ASSERT_TRUE(drafter.Propose(next_aux, damaged, proposals));
   ASSERT_EQ(proposals.size(), 1u);
   ASSERT_FALSE(proposals.front().empty());
   EXPECT_NE(proposals.front().front(), expected.front());
 
   drafter.ReleaseAll();
+  ++missing_state->shapes.front().back();
+  EXPECT_THROW(drafter.Propose(next_aux, damaged, proposals), std::logic_error);
+
   auto invalid = std::make_shared<Dflash2PrefixCheckpoint>();
   invalid->token_count = checkpoint->token_count;
   invalid->ring_blocks = checkpoint->ring_blocks;
-  invalid->caches.resize(checkpoint->shapes.size());
   damaged.front().prefix_checkpoint = std::move(invalid);
-  EXPECT_THROW(drafter.Propose(next_aux, damaged, proposals), std::logic_error);
+  EXPECT_FALSE(drafter.Propose(next_aux, damaged, proposals));
+  EXPECT_TRUE(proposals.front().empty());
 }
 
 INSTANTIATE_TEST_SUITE_P(RamAndDisk, Dflash2StorageRestoreTest, ::testing::Bool());
@@ -1646,60 +1606,31 @@ TEST(Dflash2ConfigTest, JoinsEligibleTurnsAtZeroOrWithWindowedContext) {
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/1, /*context_window=*/12));
 }
 
-TEST(Dflash2ConfigTest, RingCheckpointPreservesLogicalSlotsAcrossPhysicalRemapping) {
-  auto* device = GetDeviceInterface(DeviceType::CPU);
-  constexpr auto type = Ort::TypeToTensorType<uint8_t>;
-  Tensor source{device, type}, checkpoint{device, type}, restored{device, type};
-  source.CreateTensor(std::array<int64_t, 4>{6, 4, 1, 1});
-  checkpoint.CreateTensor(std::array<int64_t, 4>{3, 4, 1, 1});
-  restored.CreateTensor(std::array<int64_t, 4>{5, 4, 1, 1});
-  std::array<uint8_t, 24> values{};
-  for (size_t i = 0; i < values.size(); ++i) {
-    values[i] = static_cast<uint8_t>(i + 1);
-  }
-  source.GetByteSpan().CopyFromCpu(values);
-  restored.GetByteSpan().Zero();
+class PrefixSnapshotTransferTest : public ::testing::TestWithParam<bool> {};
 
-  const std::array<int32_t, 3> original{4, 1, 3};
-  const std::array<int32_t, 3> compact{0, 1, 2};
-  const std::array<int32_t, 3> relocated{2, 0, 4};
-  CopyDflash2RingBlocks(checkpoint, compact, source, original);
-  CopyDflash2RingBlocks(restored, relocated, checkpoint, compact);
-
-  auto restored_span = restored.GetByteSpan();
-  const auto copied = restored_span.CopyDeviceToCpu();
-  for (size_t logical_slot = 0; logical_slot < original.size(); ++logical_slot) {
-    for (size_t byte = 0; byte < 4; ++byte) {
-      EXPECT_EQ(copied[relocated[logical_slot] * 4 + byte],
-                values[original[logical_slot] * 4 + byte]);
-    }
-  }
-  // A later absolute block wraps back to logical slot zero, not physical block zero.
-  EXPECT_EQ(copied[relocated[12 % original.size()] * 4], values[original[0] * 4]);
-  const std::array<int32_t, 3> invalid{6, 1, 3};
-  EXPECT_THROW(CopyDflash2RingBlocks(checkpoint, compact, source, invalid), std::logic_error);
-  Tensor scalar{device, type};
-  scalar.CreateTensor(std::array<int64_t, 0>{});
-  EXPECT_THROW(CopyDflash2RingBlocks(checkpoint, compact, scalar, original), std::logic_error);
-}
-
-TEST(Dflash2ConfigTest, HostTransfersCopyOnlySelectedBlocksAndPreserveUntouchedBytes) {
+TEST_P(PrefixSnapshotTransferTest, RemapsSelectedBlocksAndPreservesUntouchedBytes) {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  CheckpointAllocationDevice device{*cpu, cpu->GetAllocator(), true};
+  CheckpointAllocationDevice device{*cpu, GetParam()};
+  PrefixSnapshotCache storage{{0, 12, 0}, 1};
   constexpr auto type = Ort::TypeToTensorType<uint8_t>;
-  Tensor source{&device, type}, checkpoint{cpu, type}, restored{&device, type};
+  auto checkpoint = std::make_shared<PrefixSnapshotCache::Entry>();
+  checkpoint->shapes = {{3, 4}};
+  checkpoint->type = type;
+  ASSERT_TRUE(storage.Allocate(checkpoint, &device));
+  Tensor source{&device, type}, restored{&device, type};
   source.CreateTensor(std::array<int64_t, 2>{6, 4});
-  checkpoint.CreateTensor(std::array<int64_t, 2>{3, 4});
   restored.CreateTensor(std::array<int64_t, 2>{5, 4});
   std::array<uint8_t, 24> values{};
   std::iota(values.begin(), values.end(), uint8_t{1});
   source.GetByteSpan().CopyFromCpu(values);
   std::memset(restored.GetMutableRawData(), 99, 20);
-  const std::array<int32_t, 3> original{4, 1, 3}, compact{0, 1, 2}, relocated{2, 0, 4};
-  CopyDflash2RingBlocks(checkpoint, compact, source, original);
-  CopyDflash2RingBlocks(restored, relocated, checkpoint, compact);
-  EXPECT_EQ(device.downloaded_bytes, 12u);
-  EXPECT_EQ(device.uploaded_bytes, 12u);
+  const std::array<int32_t, 3> original{4, 1, 3}, relocated{2, 0, 4};
+  for (size_t block = 0; block < original.size(); ++block) {
+    checkpoint->Write(0, block * 4, source, original[block] * 4, 4);
+    checkpoint->Read(0, block * 4, restored, relocated[block] * 4, 4);
+  }
+  EXPECT_EQ(device.downloaded_bytes, GetParam() ? 12u : 0u);
+  EXPECT_EQ(device.uploaded_bytes, GetParam() ? 12u : 0u);
   const auto* copied = restored.GetData<uint8_t>();
   for (size_t block = 0; block < original.size(); ++block) {
     for (size_t byte = 0; byte < 4; ++byte) {
@@ -1709,10 +1640,11 @@ TEST(Dflash2ConfigTest, HostTransfersCopyOnlySelectedBlocksAndPreserveUntouchedB
   for (size_t offset : {4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u}) {
     EXPECT_EQ(copied[offset], 99);
   }
-  const std::array<int32_t, 3> invalid{6, 1, 3};
-  EXPECT_THROW(CopyDflash2RingBlocks(checkpoint, compact, source, invalid), std::logic_error);
-  EXPECT_EQ(device.downloaded_bytes, 12u);
+  EXPECT_THROW(checkpoint->Write(0, 0, source, 24, 4), std::out_of_range);
+  EXPECT_EQ(device.downloaded_bytes, GetParam() ? 12u : 0u);
 }
+
+INSTANTIATE_TEST_SUITE_P(CpuAndHostTransfers, PrefixSnapshotTransferTest, ::testing::Bool());
 
 TEST(Dflash2ConfigTest, HostSnapshotProtectsLeasesAndOutlivesDrafter) {
   auto config = MakeDflash2Config();
@@ -1728,7 +1660,7 @@ TEST(Dflash2ConfigTest, HostSnapshotProtectsLeasesAndOutlivesDrafter) {
   draft.sliding_window = 8;
   auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
   auto* cpu = model->p_device_kvcache_;
-  CheckpointAllocationDevice device{*cpu, cpu->GetAllocator(), true};
+  CheckpointAllocationDevice device{*cpu, true};
   std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint;
   std::weak_ptr<void> memory;
   {
@@ -1871,36 +1803,29 @@ TEST(PrefixSnapshotCacheTest, VramReservationPreservesTargetBlockAndConfiguredLi
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   auto& batching = *model->config_->engine.dynamic_batching;
   batching.prefix_caching = true;
-  batching.num_blocks = 4;
   batching.max_batch_size = 8;
   batching.max_snapshots = 8;
   const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
   const size_t snapshot_bytes = 2 * block_bytes;
   batching.snapshot_cache.vram_bytes = 16 * block_bytes;
   auto* cpu = model->p_device_kvcache_;
-  CheckpointAllocationDevice device{*cpu, cpu->GetAllocator(), true};
+  CheckpointAllocationDevice device{*cpu, true};
   model->p_device_kvcache_ = &device;
   bool enabled = false;
-  {
+  for (const size_t blocks : {4u, 3u, 2u}) {
+    batching.num_blocks = blocks;
     auto manager = CacheManager::Create(model, 0, 0, snapshot_bytes, &enabled);
-    EXPECT_TRUE(enabled);
-    EXPECT_EQ(manager->DraftCheckpointVramBytes(), snapshot_bytes);
-    EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
+    EXPECT_EQ(enabled, blocks >= 3);
+    EXPECT_EQ(manager->DraftCheckpointVramBytes(), blocks >= 3 ? snapshot_bytes : 0u);
+    EXPECT_EQ(manager->Snapshot().total_blocks, blocks >= 3 ? blocks - 2 : blocks);
     EXPECT_EQ(batching.snapshot_cache.vram_bytes, 16 * block_bytes);
-  }
-  batching.num_blocks = 2;
-  {
-    auto manager = CacheManager::Create(model, 0, 0, snapshot_bytes, &enabled);
-    EXPECT_FALSE(enabled);
-    EXPECT_EQ(manager->DraftCheckpointVramBytes(), 0u);
-    EXPECT_EQ(manager->Snapshot().total_blocks, 2u);
   }
   model->p_device_kvcache_ = cpu;
 }
 
 TEST(PagedKeyValueCacheManifestTest, SnapshotSizingReportsOneBlockMinimumAndBudgetReduction) {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  CheckpointAllocationDevice device{*cpu, cpu->GetAllocator(), true};
+  CheckpointAllocationDevice device{*cpu, true};
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   model->p_device_kvcache_ = &device;
   auto& batching = *model->config_->engine.dynamic_batching;
@@ -1941,7 +1866,7 @@ TEST(PagedKeyValueCacheManifestTest, SnapshotSizingReportsOneBlockMinimumAndBudg
 
 TEST(PrefixSnapshotCacheTest, DemotesVramToRamToDiskAndEvictsLeastRecentlyUsed) {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  CheckpointAllocationDevice device{*cpu, cpu->GetAllocator(), true};
+  CheckpointAllocationDevice device{*cpu, true};
   PrefixSnapshotCache cache{{16, 16, 16}, 8};
   auto first = MakeStorageEntry(cache, &device);
   ASSERT_NE(first, nullptr);

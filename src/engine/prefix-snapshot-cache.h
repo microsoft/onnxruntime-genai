@@ -5,7 +5,6 @@
 
 #include <array>
 #include <filesystem>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
@@ -57,6 +56,7 @@ class PrefixSnapshotCache {
     std::unique_ptr<DiskStorage> disk;
     std::string component;
     void Release() noexcept;
+    void TakeStorage(Entry& source) noexcept;
     void* TransferBuffer(DeviceInterface* device) const;
   };
 
@@ -70,7 +70,7 @@ class PrefixSnapshotCache {
 
  private:
   bool MakeRoom(Tier tier, size_t bytes, DeviceInterface* device);
-  bool Move(Entry& entry, Tier tier, DeviceInterface* device);
+  void Move(Entry& entry, Tier tier, DeviceInterface* device);
   void AllocateStorage(Entry& entry, Tier tier, DeviceInterface* device);
   void Prune();
   size_t Count(std::string_view component) const;

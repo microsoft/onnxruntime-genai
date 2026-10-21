@@ -94,6 +94,15 @@ void PrefixSnapshotCache::Entry::Release() noexcept {
   }
 }
 
+void PrefixSnapshotCache::Entry::TakeStorage(Entry& source) noexcept {
+  Release();
+  tier = source.tier;
+  accounting = std::move(source.accounting);
+  host_buffers = std::move(source.host_buffers);
+  caches = std::move(source.caches);
+  disk = std::move(source.disk);
+}
+
 void* PrefixSnapshotCache::Entry::TransferBuffer(DeviceInterface* device) const {
   const bool pinned = device->GetType() == DeviceType::CUDA;
   if (!accounting->transfer_buffer || (pinned && !accounting->transfer_buffer_pinned)) {
@@ -215,12 +224,7 @@ bool PrefixSnapshotCache::ReuseOldest(Entry& destination, std::string_view compo
   }
   if (!selected) return false;
   auto source = selected->lock();
-  destination.tier = source->tier;
-  destination.accounting = std::move(source->accounting);
-  destination.host_buffers = std::move(source->host_buffers);
-  destination.caches = std::move(source->caches);
-  destination.disk = std::move(source->disk);
-  destination.component = std::move(source->component);
+  destination.TakeStorage(*source);
   source->state = State::Evicted;
   Prune();
   return true;
@@ -245,7 +249,8 @@ bool PrefixSnapshotCache::MakeRoom(Tier tier, size_t bytes, DeviceInterface* dev
     bool moved = false;
     for (size_t lower = index + 1; lower < limits_.size(); ++lower) {
       if (MakeRoom(static_cast<Tier>(lower), victim->bytes, device)) {
-        moved = Move(*victim, static_cast<Tier>(lower), device);
+        Move(*victim, static_cast<Tier>(lower), device);
+        moved = true;
         break;
       }
     }
@@ -302,7 +307,7 @@ void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterfa
   entry.accounting = accounting_;
 }
 
-bool PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device) {
+void PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device) {
   Entry staged;
   staged.shapes = entry.shapes;
   staged.type = entry.type;
@@ -318,13 +323,7 @@ bool PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device)
     device->Synchronize();
     throw;
   }
-  entry.Release();
-  entry.tier = staged.tier;
-  entry.accounting = std::move(staged.accounting);
-  entry.host_buffers = std::move(staged.host_buffers);
-  entry.caches = std::move(staged.caches);
-  entry.disk = std::move(staged.disk);
-  return true;
+  entry.TakeStorage(staged);
 }
 
 bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
@@ -351,23 +350,22 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
       std::none_of(limits_.begin(), limits_.end(), [&](size_t limit) { return limit >= entry->bytes; })) return false;
   Prune();
   entries_.reserve(entries_.size() + 1);
+  const auto publish = [&] {
+    entry->component = component;
+    entry->state = State::Resident;
+    entry->recency = ++clock_;
+    entries_.push_back(entry);
+    return true;
+  };
   while (!component.empty() && Count(component) >= component_max_entries) {
     if (ReuseOldest(*entry, component)) {
-      entry->component = component;
-      entry->state = State::Resident;
-      entry->recency = ++clock_;
-      entries_.push_back(entry);
-      return true;
+      return publish();
     }
     if (!EvictOldest(component)) return false;
   }
   while (entries_.size() >= max_entries_) {
     if (ReuseOldest(*entry)) {
-      entry->component = component;
-      entry->state = State::Resident;
-      entry->recency = ++clock_;
-      entries_.push_back(entry);
-      return true;
+      return publish();
     }
     if (!EvictOldest()) return false;
   }
@@ -378,16 +376,8 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     staged.type = entry->type;
     staged.bytes = entry->bytes;
     AllocateStorage(staged, static_cast<Tier>(index), device);
-    entry->tier = staged.tier;
-    entry->accounting = std::move(staged.accounting);
-    entry->host_buffers = std::move(staged.host_buffers);
-    entry->caches = std::move(staged.caches);
-    entry->disk = std::move(staged.disk);
-    entry->component = component;
-    entry->state = State::Resident;
-    entry->recency = ++clock_;
-    entries_.push_back(entry);
-    return true;
+    entry->TakeStorage(staged);
+    return publish();
   }
   return false;
 }

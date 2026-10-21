@@ -535,76 +535,6 @@ size_t Dflash2Drafter::PrefixCheckpointBytes(const Config& config, size_t paged_
   return PoolBytes(config, paged_block_size, PoolBlocks(config, paged_block_size, 1), cache_type);
 }
 
-bool CanReserveDflash2PrefixCheckpoint(size_t target_budget_bytes, size_t reserved_bytes,
-                                       size_t snapshot_bytes, size_t target_block_bytes) {
-  return Dflash2PrefixCheckpointCapacity(
-             target_budget_bytes, reserved_bytes, snapshot_bytes, target_block_bytes, 1) != 0;
-}
-
-size_t Dflash2PrefixCheckpointCapacity(size_t target_budget_bytes, size_t reserved_bytes,
-                                       size_t snapshot_bytes, size_t target_block_bytes,
-                                       size_t max_checkpoints) {
-  if (snapshot_bytes == 0 || target_block_bytes == 0 ||
-      target_budget_bytes <= reserved_bytes ||
-      target_budget_bytes - reserved_bytes < target_block_bytes) {
-    return 0;
-  }
-  const size_t available = target_budget_bytes - reserved_bytes - target_block_bytes;
-  return std::min(max_checkpoints, available / snapshot_bytes);
-}
-
-void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destination_blocks,
-                           Tensor& source, std::span<const int32_t> source_blocks) {
-  const auto source_shape = source.GetShape();
-  const auto destination_shape = destination.GetShape();
-  if (source_shape.empty() || destination_shape.size() != source_shape.size() ||
-      !std::equal(source_shape.begin() + 1, source_shape.end(), destination_shape.begin() + 1)) {
-    throw std::logic_error("DFlash 2 ring checkpoint has incompatible cache shape.");
-  }
-  auto source_bytes = source.GetByteSpan();
-  auto destination_bytes = destination.GetByteSpan();
-  const size_t source_pool_blocks = static_cast<size_t>(source_shape.front());
-  const size_t destination_pool_blocks = static_cast<size_t>(destination_shape.front());
-  if (source_blocks.size() != destination_blocks.size() ||
-      source_pool_blocks == 0 || destination_pool_blocks == 0 ||
-      source_bytes.size() % source_pool_blocks != 0 ||
-      destination_bytes.size() % destination_pool_blocks != 0 ||
-      source.GetType() != destination.GetType() ||
-      destination_bytes.size() / destination_pool_blocks != source_bytes.size() / source_pool_blocks ||
-      std::any_of(source_blocks.begin(), source_blocks.end(), [source_pool_blocks](int32_t id) {
-        return id < 0 || static_cast<size_t>(id) >= source_pool_blocks;
-      }) ||
-      std::any_of(destination_blocks.begin(), destination_blocks.end(), [destination_pool_blocks](int32_t id) {
-        return id < 0 || static_cast<size_t>(id) >= destination_pool_blocks;
-      })) {
-    throw std::logic_error("DFlash 2 ring checkpoint has incompatible cache blocks.");
-  }
-  const size_t block_bytes = source_bytes.size() / source_pool_blocks;
-  const auto source_device = source.p_device_->GetType();
-  const auto destination_device = destination.p_device_->GetType();
-  const bool to_host = source_device == DeviceType::CUDA && destination_device == DeviceType::CPU;
-  const bool to_device = source_device == DeviceType::CPU && destination_device == DeviceType::CUDA;
-  if (to_host || to_device) {
-    auto* device = to_host ? source.p_device_ : destination.p_device_;
-    auto* source_data = static_cast<const uint8_t*>(source.GetRawData());
-    auto* destination_data = static_cast<uint8_t*>(destination.GetMutableRawData());
-    for (size_t i = 0; i < source_blocks.size(); ++i) {
-      const void* from = source_data + static_cast<size_t>(source_blocks[i]) * block_bytes;
-      void* to = destination_data + static_cast<size_t>(destination_blocks[i]) * block_bytes;
-      if (to_host) {
-        device->CopyDeviceToHost(to, from, block_bytes);
-      } else {
-        device->CopyHostToDevice(to, from, block_bytes);
-      }
-    }
-    return;
-  }
-  for (size_t i = 0; i < source_blocks.size(); ++i) {
-    destination_bytes.subspan(static_cast<size_t>(destination_blocks[i]) * block_bytes, block_bytes)
-        .CopyFrom(source_bytes.subspan(static_cast<size_t>(source_blocks[i]) * block_bytes, block_bytes));
-  }
-}
-
 size_t Dflash2Drafter::FullAttentionPoolBlocks(size_t target_blocks, size_t paged_block_size,
                                                size_t query_block_size,
                                                size_t max_batch_size) {
@@ -902,12 +832,10 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
 
 bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
   const auto& checkpoint = feed.prefix_checkpoint;
-  if (!checkpoint || checkpoint->state == PrefixSnapshotCache::State::Evicted ||
+  if (!checkpoint || checkpoint->state != PrefixSnapshotCache::State::Resident ||
       checkpoint->token_count != feed.first_position ||
       checkpoint->ring_blocks != ring_blocks_ ||
-      (checkpoint->state == PrefixSnapshotCache::State::Resident
-           ? checkpoint->shapes.size() != caches_.size()
-           : checkpoint->caches.size() != caches_.size()) ||
+      checkpoint->shapes.size() != caches_.size() ||
       free_blocks_.size() < ring_blocks_) {
     if (checkpoint && free_blocks_.size() < ring_blocks_) {
       ++admission_misses_;
@@ -915,12 +843,10 @@ bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
     return false;
   }
   for (size_t layer = 0; layer < caches_.size(); ++layer) {
-    if (checkpoint->state == PrefixSnapshotCache::State::Resident) {
-      auto shape = caches_[layer]->GetShape();
-      shape.front() = static_cast<int64_t>(ring_blocks_);
-      if (checkpoint->type != cache_type_ || checkpoint->shapes[layer] != shape) {
-        throw std::logic_error("DFlash 2 prefix checkpoint has incompatible cache geometry.");
-      }
+    auto shape = caches_[layer]->GetShape();
+    shape.front() = static_cast<int64_t>(ring_blocks_);
+    if (checkpoint->type != cache_type_ || checkpoint->shapes[layer] != shape) {
+      throw std::logic_error("DFlash 2 prefix checkpoint has incompatible cache geometry.");
     }
     if (checkpoint->tier != PrefixSnapshotCache::Tier::Disk &&
         (checkpoint->caches.size() != caches_.size() || !checkpoint->caches[layer] ||
@@ -934,17 +860,11 @@ bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
     for (size_t i = 0; i < ring_blocks_; ++i) {
       state.blocks.push_back(free_blocks_[free_blocks_.size() - ring_blocks_ + i]);
     }
-    std::vector<int32_t> contiguous(ring_blocks_);
-    std::iota(contiguous.begin(), contiguous.end(), 0);
     for (size_t layer = 0; layer < caches_.size(); ++layer) {
-      if (checkpoint->state == PrefixSnapshotCache::State::Resident) {
-        const size_t block_bytes = caches_[layer]->GetByteSpan().size() / num_blocks_;
-        for (size_t block = 0; block < ring_blocks_; ++block) {
-          checkpoint->Read(layer, block * block_bytes, *caches_[layer],
-                           static_cast<size_t>(state.blocks[block]) * block_bytes, block_bytes);
-        }
-      } else {
-        CopyDflash2RingBlocks(*caches_[layer], state.blocks, *checkpoint->caches[layer], contiguous);
+      const size_t block_bytes = caches_[layer]->GetByteSpan().size() / num_blocks_;
+      for (size_t block = 0; block < ring_blocks_; ++block) {
+        checkpoint->Read(layer, block * block_bytes, *caches_[layer],
+                         static_cast<size_t>(state.blocks[block]) * block_bytes, block_bytes);
       }
     }
     model_->p_device_kvcache_->Synchronize();
