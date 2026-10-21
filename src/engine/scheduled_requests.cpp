@@ -310,6 +310,25 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
   // is comparable to the step itself, so ask the device for the token ids in one launch instead.
   const bool step_has_drafts = std::any_of(draft_token_counts_.begin(), draft_token_counts_.end(),
                                            [](size_t count) { return count != 0; });
+  // Verification bypasses Request::ApplyLogitsProcessors. Mask each row at the
+  // position it predicts, not at Search's length (which includes staged drafts).
+  size_t verify_row = 0;
+  for (size_t i = 0; step_has_drafts && i < requests_.size(); ++i) {
+    const size_t draft_count = draft_token_counts_[i];
+    auto& request = *requests_[i];
+    const int floor = request.TurnEosFloor();
+    const int64_t committed_length = request.CommittedSequenceLength();
+    if (draft_count != 0 && committed_length < floor) {
+      for (size_t stage = 0; stage <= draft_count; ++stage) {
+        const int64_t position = committed_length + static_cast<int64_t>(stage);
+        if (position >= floor)
+          break;
+        request.search_->SetLogits(verify_rows[verify_row + stage]);
+        request.search_->ApplyMinLength(floor, static_cast<int>(position));
+      }
+    }
+    verify_row += draft_count + 1;
+  }
   std::vector<int32_t> row_argmax =
       step_has_drafts ? TryDeviceArgmaxPerRow(*model_->p_device_inputs_, verify_rows)
                       : std::vector<int32_t>{};

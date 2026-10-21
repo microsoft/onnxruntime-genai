@@ -684,8 +684,11 @@ token budget. The proposal width an automatic drafter aims for is model/Engine c
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
 proposals remain deterministic. Whole-turn guidance, a `repetition_penalty` other than 1,
-no-repeat-ngram processing, or a not-yet-met minimum generated token count makes a turn
-ineligible for drafts, because the verification rows do not reproduce those logits processors.
+or no-repeat-ngram processing makes a turn ineligible for drafts, because the verification rows
+do not reproduce those logits processors. A minimum generated token count is supported:
+verification masks EOS independently for each row's predicted position, including a proposal
+that crosses the minimum. This also allows a fixed-output benchmark to set equal minimum and
+maximum generated token counts without disabling speculative decoding.
 Delimited guidance permits drafts outside its constrained regions: proposals stop before the
 opening marker, drafts pause inside the region, and resume after the closing marker. Automatic
 MTP drafting remains disabled throughout a delimited turn. Eligibility is per turn: the next turn

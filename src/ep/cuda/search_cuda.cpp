@@ -422,8 +422,8 @@ void GreedySearch_Cuda::RewindTo(size_t index) {
   sequences_.RewindTo(index);
 }
 
-void Search_Cuda::ApplyMinLength(int min_length) {
-  if (sequences_.GetSequenceLength() >= min_length)
+void Search_Cuda::ApplyMinLength(int min_length, std::optional<int> current_length) {
+  if (current_length.value_or(sequences_.GetSequenceLength()) >= min_length)
     return;
 
   for (auto eos_token_id : params_->config.model.eos_token_id) {

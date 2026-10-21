@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -2483,8 +2484,8 @@ TEST_F(EngineRunTest, FailedTurnDiscardsPendingDraftsAndTheNextTurnPolicyGoverns
   }
   EXPECT_EQ(reused->PendingDraftTokenCount(), 0u);
 
-  // The next turn masks end-of-stream until it has generated three tokens, one of the policies that
-  // makes a turn ineligible for drafting at all.
+  // The next turn masks end-of-stream and uses a repetition penalty, which makes
+  // it ineligible for drafting.
   engine.executor->SetVerifyRowTokens({});
   engine.executor->SetForcedToken(eos);
   const size_t prefix_commits_before = engine.cache->prefix_commits.size();
@@ -2492,6 +2493,7 @@ TEST_F(EngineRunTest, FailedTurnDiscardsPendingDraftsAndTheNextTurnPolicyGoverns
   floored_turn.request = reused;
   floored_turn.min_generated_tokens = 3;
   floored_turn.max_generated_tokens = 3;
+  floored_turn.repetition_penalty = 1.1f;
   reused->BeginTurn(std::vector<int32_t>{7}, floored_turn);
   EXPECT_EQ(reused->PendingDraftTokenCount(), 0u);
   EXPECT_NE(reused->DraftTokenValidationError(), nullptr);
@@ -2518,6 +2520,50 @@ TEST_F(EngineRunTest, FailedTurnDiscardsPendingDraftsAndTheNextTurnPolicyGoverns
   }
   EXPECT_EQ(reused->FinishReason(), GenerationFinishReason::TurnLimit);
   EXPECT_EQ(engine.cache->prefix_commits.size(), prefix_commits_before);
+}
+
+TEST_F(EngineRunTest, SpeculativeMinimumLengthMasksEachVerificationPosition) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  for (bool sampled : {false, true}) {
+    auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+    engine.cache->SetMaxDraftTokensPerStep(3);
+    auto request = CreateEngineRequest(engine.engine);
+    TurnOptions turn;
+    turn.request = request;
+    turn.min_generated_tokens = 3;
+    turn.max_generated_tokens = 8;
+    turn.do_sample = sampled;
+    if (sampled)
+      turn.top_k = 2;
+    request->BeginTurn(Prompt(10), turn);
+    const auto first = RunOne(*engine.engine);
+    ASSERT_EQ(first.token, filler);
+    ASSERT_EQ(request->DraftTokenValidationError(), nullptr);
+    request->SetDraftTokens(std::vector<int32_t>{filler, filler, filler});
+
+    // Rows 0 and 1 predict generated positions 1 and 2 and must suppress EOS.
+    // Row 2 predicts position 3, exactly at the floor, and may select EOS.
+    std::vector<float> logits(model_->config_->model.vocab_size,
+                              -std::numeric_limits<float>::infinity());
+    logits[eos] = 1000.0f;
+    logits[filler] = 0.0f;
+    engine.executor->SetVerifyRowLogits({logits, logits, logits, logits});
+    std::vector<int32_t> generated;
+    std::array<EngineEvent, 8> storage;
+    for (int step = 0; step < 8 && !request->IsTurnComplete(); ++step) {
+      const size_t count = engine.engine->Run(storage);
+      for (size_t index = 0; index < count; ++index) {
+        ASSERT_EQ(storage[index].error_code, EngineErrorCode::None);
+        if (storage[index].flags & EngineEventFlagToken)
+          generated.push_back(storage[index].token);
+      }
+    }
+    EXPECT_EQ(generated, (std::vector<int32_t>{filler, filler}));
+    EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+    EXPECT_EQ(engine.engine->GetSpeculativeStats().draft_tokens_accepted, 2u);
+    EXPECT_GT(engine.engine->GetSpeculativeStats().draft_tokens_evaluated, 0u);
+  }
 }
 
 TEST_F(EngineRunTest, SampledSpeculativeRunKeepsAcceptedPrefixAndCorrection) {
