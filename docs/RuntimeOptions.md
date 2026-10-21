@@ -37,6 +37,11 @@ In contrast, `enable_profiling` in runtime option provides dynamic control:
 - Each token generation produces its own profiling file when enabled
 - Useful for profiling specific portions of the generation process
 
+For a Gemma 4 decoder pipeline with split vision, generator runtime options also reach both the
+vision encoder and projector. Each stage retains its configured run options. Profiling uses
+`<prefix>_encoder` and `<prefix>_projector` for the two vision stages, so their traces cannot
+overwrite each other even when they start within the same millisecond.
+
 ## Language ID (Nemotron Speech)
 
 Language ID is a runtime option for multilingual Nemotron speech models (e.g., `nemotron_speech` with a prompt-conditioned encoder). It sets the language for transcription on a per-generator basis, allowing a single loaded model to serve generators in different languages.

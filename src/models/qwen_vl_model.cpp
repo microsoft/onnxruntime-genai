@@ -1,6 +1,7 @@
 #include "qwen_vl_model.h"
 #include "model.h"
 #include "onnxruntime_api.h"
+#include "models/io/vision_stage_io.h"
 #include "../logging.h"
 #include <iostream>
 #include <cstring>
@@ -86,6 +87,36 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
     return;
   }
 
+  if (config_->model.type == "gemma4") {
+    const auto& stages = config_->model.vision.pipeline;
+    if (stages.size() != 2) {
+      throw std::runtime_error("Gemma 4 vision.pipeline must contain exactly two ordered stages: encoder and projector");
+    }
+    const auto create_stage = [&](const Config::Model::Vision::PipelineModel& stage,
+                                  std::unique_ptr<OrtSessionOptions>& options,
+                                  DeviceInterface*& stage_device) {
+      options = OrtSessionOptions::Create();
+      static const Config::SessionOptions kDefaultSessionOptions;
+      auto settings = stage.session_options.value_or(
+          config_->model.vision.session_options.value_or(kDefaultSessionOptions));
+      if (stage.run_on_cpu) {
+        settings.providers.clear();
+        settings.provider_options.clear();
+      }
+      stage_device = CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/false,
+                                                    /*disable_graph_capture=*/true);
+      auto session = CreateSession(ort_env, stage.filename, options.get());
+      EnsureDeviceOrtInit(*stage_device, *config_, settings);
+      return session;
+    };
+    vision_session_ = create_stage(stages[0], vision_session_options_, vision_encoder_device_);
+    vision_projector_session_ = create_stage(stages[1], vision_projector_session_options_,
+                                             vision_projector_device_);
+    session_info_.Add(*vision_session_);
+    session_info_.Add(*vision_projector_session_, config_->model.vision.inputs.pixel_position_ids);
+    return;
+  }
+
   // Find vision pipeline stage paths
   auto find_stage = [&](const std::string& id) -> std::string {
     for (const auto& stage : config_->model.vision.pipeline) {
@@ -134,6 +165,19 @@ Qwen2_5_VL_PipelineState::Qwen2_5_VL_PipelineState(const Qwen2_5_VL_PipelineMode
                                                    const GeneratorParams& params)
     : DecoderOnlyPipelineState(model, sequence_lengths, params), vl_model_{model} {
   InitializeFeatureInputs();
+  if (vl_model_.vision_projector_session_) {
+    const auto& vision = vl_model_.config_->model.vision;
+    encoder_run_options_ = CreateVisionStageRunOptions(vision, 0);
+    projector_run_options_ = CreateVisionStageRunOptions(vision, 1);
+  }
+}
+
+void Qwen2_5_VL_PipelineState::SetRunOption(const char* key, const char* value) {
+  State::SetRunOption(key, value);
+  if (encoder_run_options_) {
+    ApplyVisionRunOption(*encoder_run_options_, key, value, 0);
+    ApplyVisionRunOption(*projector_run_options_, key, value, 1);
+  }
 }
 
 void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
@@ -414,34 +458,95 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   if (output_names.empty()) {
     throw std::runtime_error("Vision encoder: model has no outputs");
   }
+  const bool split_vision = vl_model_.vision_projector_session_ != nullptr;
+  const auto projector_input_names = split_vision ? vl_model_.vision_projector_session_->GetInputNames()
+                                                  : std::vector<std::string>{};
+  const auto encoder_output = std::find(projector_input_names.begin(), projector_input_names.end(),
+                                        output_names[0]);
+  if (split_vision && (output_names.size() != 1 || encoder_output == projector_input_names.end())) {
+    throw std::runtime_error("Gemma 4 vision projector must consume the encoder's single output");
+  }
+  std::vector<const char*> projector_names;
+  std::vector<const OrtValue*> projector_values;
+  std::vector<OrtValue*> projector_source_values;
+  std::vector<size_t> projector_batched_indices;
+  if (split_vision) {
+    projector_names.reserve(projector_input_names.size());
+    projector_values.reserve(projector_input_names.size());
+    projector_source_values.reserve(projector_input_names.size());
+    for (const auto& name : projector_input_names) {
+      projector_names.push_back(name.c_str());
+      OrtValue* value = nullptr;
+      if (name != output_names[0]) {
+        value = find_extra_input(name);
+        if (!value) {
+          throw std::runtime_error("Vision projector: required input '" + name +
+                                   "' was not produced by the processor or encoder");
+        }
+      }
+      projector_values.push_back(value);
+      projector_source_values.push_back(value);
+      if (num_images > 1 && value) {
+        const auto shape = value->GetTensorTypeAndShapeInfo()->GetShape();
+        if (shape.size() >= 2 && shape[0] == num_images) {
+          projector_batched_indices.push_back(projector_source_values.size() - 1);
+        }
+      }
+    }
+  }
+  const auto encoder_output_index = static_cast<size_t>(
+      std::distance(projector_input_names.begin(), encoder_output));
+  const auto final_output_names = split_vision ? vl_model_.vision_projector_session_->GetOutputNames()
+                                               : output_names;
   // Fall back to the first output only when the config names no output at all. A name that
   // is set but absent from the model is a misconfiguration: running output 0 instead would
   // inject whatever that output happens to be as if it were image features.
   const auto& features_name = vl_model_.config_->model.vision.outputs.image_features;
   size_t output_index = 0;
+  if (final_output_names.empty()) {
+    throw std::runtime_error("Vision projector: model has no outputs");
+  }
   if (!features_name.empty()) {
-    const auto found = std::find(output_names.begin(), output_names.end(), features_name);
-    if (found == output_names.end()) {
+    const auto found = std::find(final_output_names.begin(), final_output_names.end(), features_name);
+    if (found == final_output_names.end()) {
       std::string available;
-      for (const auto& name : output_names) {
+      for (const auto& name : final_output_names) {
         available += (available.empty() ? "" : ", ") + name;
       }
       throw std::runtime_error("Vision encoder: configured vision.outputs.image_features '" +
                                features_name + "' is not an output of the vision model. Available outputs: " +
                                available);
     }
-    output_index = static_cast<size_t>(std::distance(output_names.begin(), found));
+    output_index = static_cast<size_t>(std::distance(final_output_names.begin(), found));
   }
-  const char* output_name_ptrs[] = {output_names[output_index].c_str()};
+  const char* output_name_ptrs[] = {final_output_names[output_index].c_str()};
 
+  const auto& vision = vl_model_.config_->model.vision;
+  const char* encoder_output_name[] = {split_vision ? output_names[0].c_str() : output_name_ptrs[0]};
+
+  if (!split_vision && vision.run_options.has_value()) {
+    State::SetRunOptions(vision.run_options.value());
+  }
   auto run_encoder = [&]() {
-    if (vl_model_.config_->model.vision.run_options.has_value()) {
-      State::SetRunOptions(vl_model_.config_->model.vision.run_options.value());
-    }
+    std::unique_ptr<OrtValue> owned;
     OrtValue* raw_output = nullptr;
-    vl_model_.vision_session_->Run(run_options_.get(), input_name_ptrs.data(), input_values.data(),
-                                   input_name_ptrs.size(), output_name_ptrs, &raw_output, 1);
-    std::unique_ptr<OrtValue> owned(raw_output);
+    if (split_vision) {
+      owned = RunVisionEncoder(
+          *vl_model_.vision_session_, encoder_run_options_.get(), input_name_ptrs.data(),
+          input_values.data(), input_name_ptrs.size(), encoder_output_name[0],
+          *vl_model_.vision_encoder_device_);
+      auto staged = StageVisionEncoderOutput(*owned, *vl_model_.vision_encoder_device_,
+                                             *vl_model_.vision_projector_device_);
+      projector_values[encoder_output_index] = staged ? staged.get() : owned.get();
+      vl_model_.vision_projector_session_->Run(projector_run_options_.get(), projector_names.data(),
+                                               projector_values.data(), projector_names.size(),
+                                               output_name_ptrs, &raw_output, 1);
+      owned.reset(raw_output);
+    } else {
+      vl_model_.vision_session_->Run(run_options_.get(), input_name_ptrs.data(), input_values.data(),
+                                     input_name_ptrs.size(), encoder_output_name, &raw_output, 1);
+      owned.reset(raw_output);
+    }
     if (owned->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       std::unique_ptr<OrtValue> cast_output;
       // Cast allocates on the device it is handed, and p_device_inputs_ follows the decoder,
@@ -469,6 +574,10 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
       for (size_t index : batched_indices) {
         slices.push_back(SliceLeadingImage(*source_values[index], image));
         input_values[index] = slices.back().get();
+      }
+      for (size_t index : projector_batched_indices) {
+        slices.push_back(SliceLeadingImage(*projector_source_values[index], image));
+        projector_values[index] = slices.back().get();
       }
 
       auto features = run_encoder();

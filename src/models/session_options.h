@@ -36,7 +36,8 @@ DeviceInterface* SelectPrimarySessionDevice(DeviceInterface* selected_device,
 
 // Iterates over the requested providers, dispatches to provider-specific
 // AppendExecutionProvider implementations, and returns the DeviceInterface
-// for the first provider that supplies one (or nullptr if none do).
+// for the first provider that supplies one (or nullptr if none do), whether
+// the session is primary or not.
 DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            const std::vector<std::string>& providers,
                                            const std::vector<Config::ProviderOptions>& provider_options_list,
