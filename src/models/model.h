@@ -18,6 +18,7 @@ namespace Generators {
 
 struct Tokenizer;
 struct MultiModalProcessor;
+class ThreadPool;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
@@ -178,6 +179,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
   SessionInfo session_info_;
+  mutable std::once_flag preprocessing_thread_pool_once_;
+  mutable std::shared_ptr<ThreadPool> preprocessing_thread_pool_;
 
   // Lazily initialized, model-local constrained-decoding assets. The concrete state lives in
   // constrained_logits_processor.cpp so builds without llguidance do not depend on its types.
@@ -198,6 +201,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                                   bool append_providers = true);
 
  protected:
+  std::shared_ptr<ThreadPool> GetOrCreatePreprocessingThreadPool() const;
   void CreateSessionOptions();
   void AddSharedInitializers();
 
