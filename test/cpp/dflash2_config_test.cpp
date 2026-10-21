@@ -964,6 +964,71 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   EXPECT_EQ(drafter.AdmissionMisses(), 0u);
 }
 
+TEST(Dflash2ConfigTest, ReplaysCachedAuxiliaryRowsWithoutSnapshotRings) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& block_drafter = config.model.dflash2;
+  block_drafter.filename = "dflash2.onnx";
+  block_drafter.num_hidden_layers = 1;
+  block_drafter.num_key_value_heads = 1;
+  block_drafter.head_size = 1;
+  block_drafter.block_size = 4;
+  block_drafter.num_draft_tokens = 3;
+  block_drafter.sliding_window = 8;
+
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  Dflash2Drafter drafter{
+      model, 4, Dflash2Drafter::PoolBlocks(config, 4, 2), 2};
+  int source_id = 0;
+  int warm_id = 0;
+  auto* source = reinterpret_cast<Request*>(&source_id);
+  auto* warm = reinterpret_cast<Request*>(&warm_id);
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  Tensor prefix_aux{device, Ort::TypeToTensorType<float>};
+  prefix_aux.CreateTensor(std::array<int64_t, 2>{8, 1});
+  prefix_aux.GetDeviceSpan<float>().Zero();
+  std::vector<std::vector<int32_t>> drafts;
+  const std::array source_feed{
+      Dflash2Drafter::Feed{.request = source, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true},
+  };
+  ASSERT_TRUE(drafter.Propose(prefix_aux, source_feed, drafts));
+
+  auto match = std::make_shared<PrefixCacheMatch>();
+  match->token_count = 8;
+  match->blocks.push_back(std::make_shared<Block>(0, 4, 4));
+  match->blocks.push_back(std::make_shared<Block>(1, 4, 4));
+  for (size_t i = 0; i < 2; ++i) {
+    match->auxiliary_blocks.push_back(
+        std::make_shared<const std::vector<uint8_t>>(4 * sizeof(float), 0));
+  }
+  Dflash2Drafter::Feed warm_feed{
+      .request = warm, .aux_row_count = 1, .first_position = 8, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true, .adopted_prefix_match = match};
+  ASSERT_TRUE(drafter.ReplayPrefix(warm_feed));
+
+  Tensor suffix_aux{device, Ort::TypeToTensorType<float>};
+  suffix_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+  suffix_aux.GetDeviceSpan<float>().Zero();
+  const std::array warm_suffix{warm_feed};
+  ASSERT_TRUE(drafter.Propose(suffix_aux, warm_suffix, drafts));
+  const auto warm_drafts = drafts[0];
+  const std::array source_suffix{
+      Dflash2Drafter::Feed{.request = source, .aux_row_count = 1, .first_position = 8, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true},
+  };
+  ASSERT_TRUE(drafter.Propose(suffix_aux, source_suffix, drafts));
+  ASSERT_EQ(warm_drafts.size(), drafts[0].size());
+  EXPECT_TRUE(std::equal(warm_drafts.begin() + 1, warm_drafts.end(),
+                         drafts[0].begin() + 1));
+
+  int blocked_id = 0;
+  auto blocked_feed = warm_feed;
+  blocked_feed.request = reinterpret_cast<Request*>(&blocked_id);
+  const std::array blocked_suffix{blocked_feed};
+  EXPECT_FALSE(drafter.Propose(suffix_aux, blocked_suffix, drafts));
+  ASSERT_EQ(drafts.size(), 1u);
+  EXPECT_TRUE(drafts[0].empty());
+  EXPECT_EQ(drafter.AdmissionMisses(), 1u);
+}
+
 TEST(Dflash2ConfigTest, RunsPackedQkvDrafterWithoutQueryRowMap) {
   auto config = MakeDflash2Config();
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};

@@ -66,10 +66,88 @@ build/Linux/Release/engine_unit_tests \
 ```
 
 `PrefixCacheBenchmark` fills a 16,384-block cache with 128 independent 4,096-token prefixes before
-timing cold misses, partial hits, and full hits. `SchedulerBenchmark` reports the CPU time spent
+timing cold misses, short two-block hits, partial hits, and full hits. The short hit measures the
+same content-addressed lookup used when verified draft tokens complete a reusable target block;
+this model-free benchmark measures CPU lookup overhead, not end-to-end target/drafter speedup.
+`SchedulerBenchmark` reports the CPU time spent
 planning steady-state decode steps at batch sizes 1, 8, and 32. That planning time is one component
 of inter-token latency; use the model-backed `decode_baseline` scenario for end-to-end inter-token
 latency, which also includes model execution, sampling, synchronization, and event delivery.
+
+For model-backed DFlash prefix reuse, run `draft-prefix-benchmark.py` with two
+model directories containing the same model: one with
+`engine.dynamic_batching.prefix_caching` enabled and one with it disabled.
+The script runs distinct prompts sharing a prefix, verifies the same prompt
+produces identical greedy output with caching on and off, and reports cached
+prompt tokens, draft forwards, TTFT, and total time. To isolate auxiliary replay from target-prefix reuse, compare otherwise
+identical builds with and without DFlash auxiliary retention; merely disabling
+prefix caching removes both optimizations.
+
+The benchmark defaults to two distinct prompts with exactly 40,000 shared
+leading token IDs and different short suffixes. It checks output parity for
+each prompt separately and requires the warm prompt to reuse at least the
+full blocks within the shared prefix:
+
+```bash
+python benchmark/engine/draft-prefix-benchmark.py \
+  --enabled-model <prefix-enabled-model> --disabled-model <prefix-disabled-model> \
+  --shared-prefix-tokens 40000 --generated-tokens 16 --repetitions 2
+```
+
+On one A100-SXM4-80GB GPU with a Qwen3.8 27B DFlash 2 model, each prompt
+had 40,012 tokens; the second reused 39,936 tokens (156 full 256-token
+blocks). Its total time was about 20.6 s with prefix caching disabled,
+420 ms with target-only reuse (no drafting after the hit), and 307 ms
+with target and drafter checkpoints (7 draft forwards). TTFT was 110 ms
+target-only versus 117 ms with checkpoints. These numbers measure the older
+four-ring checkpoint approach, not auxiliary replay: four FP16 drafter
+checkpoint rings at this model's geometry cost about 200 MiB of extra GPU
+allocation.
+
+With auxiliary replay on the same A100 and model, a four-prompt run reused
+39,936 tokens on each of three warm prompts. All four greedy outputs matched
+the uncached runs. The warm prompts took 599-664 ms, with 7-9 draft forward
+passes and TTFT around 440 ms; the uncached runs took 20.6-21.2 s. The cold
+cached run took 25.0 s. These are single-GPU measurements of synthetic,
+repetitive prompts, not throughput or concurrency results. One earlier
+three-prompt run with checkpoint restoration failed greedy-output parity;
+other runs passed, and four passing auxiliary-replay prompts do not establish
+parity for every model and input.
+
+After a 40,000-token cold prompt, separate-process snapshots measured
+approximately 4,610 MiB host RSS and 67,740 MiB per-process GPU memory
+with auxiliary replay, versus 2,677 MiB host RSS and 68,866 MiB GPU memory
+with the four-ring checkpoint build. The observed host increase of about
+1,933 MiB exceeds the GPU decrease of about 1,126 MiB; automatic target-pool
+sizing and allocator behavior also affect the GPU figures. The packed
+auxiliary rows in this model cost roughly 50 KiB per indexed token, so
+retaining 39,936 tokens alone approaches 1,950 MiB. Its projected five-layer
+FP16 draft K/V is only 20 KiB per token based on the configured 8 KV heads
+and 128-wide heads. Thus auxiliary replay covers more prefix boundaries
+than four ring snapshots, but is **not** the smallest-total-memory
+representation for this model. Per-block projected K/V retention would need
+a separate implementation and correctness check. This target also has fixed
+state groups: a shorter prompt may adopt an earlier available fixed-state
+checkpoint rather than all matching full KV blocks. Retaining auxiliary rows
+for blocks that cannot themselves be adopted is another possible memory
+reduction, but would require keeping exactly the DFlash window preceding each
+usable fixed-state checkpoint. In a separate five-prompt run, prompts cut at
+8,192, 15,872, and 25,600 tokens adopted a 3,840-token fixed-state
+checkpoint, while a prompt cut at 39,936 adopted 39,936 tokens. All four
+warm outputs matched uncached greedy output and continued drafting. A small
+available hit does not guarantee a speedup: the 25,600-token prompt took
+12.4 s with replay versus 12.3 s uncached.
+
+For a no-restoration comparison, the original base commit's target-only
+build reused 39,936 tokens in about 420 ms on a warm prompt, with zero
+draft forward passes. A separate-process snapshot after the cold prompt
+measured approximately 2,706 MiB host RSS and 69,790 MiB GPU memory.
+Those GPU snapshots are not a fixed-pool memory comparison: the target pool
+is automatically sized from free memory and differs between builds. More
+importantly, the target-only build's third prompt in a four-prompt run
+produced different greedy tokens from the uncached control. Neither this
+timing nor four passing auxiliary-replay prompts establish universal
+correctness; the target-only mismatch needs separate investigation.
 
 ## Run
 

@@ -50,6 +50,9 @@ struct PrefixCacheOptions {
   // Hybrid target models require a fixed-state checkpoint at the same boundary as the paged
   // blocks. Paged-only models leave this false and continue matching every complete block.
   bool requires_checkpoint{};
+  // Windowed DFlash prefix hits retain the target auxiliary rows needed to reconstruct the
+  // drafter ring when no optional GPU snapshot is attached to the matched boundary.
+  bool requires_auxiliary{};
   size_t max_checkpoints{};
   // Content hash used to address a block. Left null in production, where PrefixCache::ChainHash is
   // used. Overridable so the collision-verification path -- distinct contents landing on the same
@@ -63,6 +66,7 @@ struct PrefixCacheOptions {
 struct PrefixCacheMatch {
   size_t token_count{};
   std::vector<std::shared_ptr<Block>> blocks;
+  std::vector<std::shared_ptr<const std::vector<uint8_t>>> auxiliary_blocks;
   std::shared_ptr<const FixedStatePrefixCheckpoint> fixed_state_checkpoint;
   std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint;
 
@@ -150,7 +154,8 @@ class PrefixCache final : private BlockReferenceObserver {
   PrefixCacheRegistration Register(
       const std::shared_ptr<Block>& block,
       std::span<const int32_t> tokens,
-      const std::shared_ptr<const BlockIdentity>& parent);
+      const std::shared_ptr<const BlockIdentity>& parent,
+      std::shared_ptr<const std::vector<uint8_t>> auxiliary = nullptr);
 
   // Publishes a hybrid suffix only with its checkpoint. Failed publication removes all identities
   // created by this call, leaving the physical blocks private and eligible for a later retry.
@@ -162,12 +167,14 @@ class PrefixCache final : private BlockReferenceObserver {
       std::span<const std::shared_ptr<Block>> blocks,
       std::span<const int32_t> tokens,
       const std::shared_ptr<const BlockIdentity>& parent,
-      std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+      std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint,
+      std::span<const uint8_t> auxiliary = {});
   PrefixCacheRegistration RegisterCheckpointedPrefix(
       std::span<const std::shared_ptr<Block>> blocks,
       std::span<const int32_t> tokens,
       const std::shared_ptr<const BlockIdentity>& parent,
-      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint);
+      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint,
+      std::span<const uint8_t> auxiliary = {});
 
   // Publishes and refreshes a match only after its adopting cache transaction commits.
   void RecordAdoption(
@@ -238,6 +245,7 @@ class PrefixCache final : private BlockReferenceObserver {
     std::shared_ptr<Block> block;
     std::shared_ptr<const BlockIdentity> identity;
     std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> auxiliary;
     std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint;
     std::list<Entry*>::iterator recency;
     std::list<Entry*>::iterator reference_state;
@@ -260,7 +268,8 @@ class PrefixCache final : private BlockReferenceObserver {
       std::span<const int32_t> tokens,
       const std::shared_ptr<const BlockIdentity>& parent,
       const CheckpointedPrefixPlan& plan,
-      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint);
+      const std::function<std::shared_ptr<const FixedStatePrefixCheckpoint>()>& capture_checkpoint,
+      std::span<const uint8_t> auxiliary);
 
   // Keeps `entry` ordered immediately before the entry it chains from, so a chain is always
   // evicted from its tail rather than its head.

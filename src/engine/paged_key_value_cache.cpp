@@ -555,6 +555,9 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   prefix_options.enabled = prefix_caching_enabled;
   prefix_options.max_blocks = num_blocks;
   prefix_options.requires_checkpoint = requires_prefix_checkpoint;
+  prefix_options.requires_auxiliary = prefix_caching_enabled &&
+                                      !model->config_->model.dflash2.filename.empty() &&
+                                      model->config_->model.dflash2.sliding_window > 0;
   prefix_options.max_checkpoints = max_prefix_checkpoints;
   prefix_cache_ =
       std::make_unique<PrefixCache>(*block_pool_, prefix_options);
@@ -810,22 +813,18 @@ bool PagedKeyValueCache::PrefixCachingEnabled() const {
   return prefix_cache_->Enabled();
 }
 
+bool PagedKeyValueCache::RequiresAuxiliaryPrefix() const {
+  return prefix_cache_->Enabled() && prefix_cache_->Options().requires_auxiliary;
+}
+
 const PrefixCacheMetrics& PagedKeyValueCache::PrefixMetrics() const {
   return prefix_cache_->Metrics();
 }
 
 void PagedKeyValueCache::SealCommittedBlocks(
     const void* request_id, std::span<const int32_t> tokens,
-    std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint) {
+    size_t first_position, std::span<const uint8_t> auxiliary) {
   if (!prefix_cache_->Enabled()) {
-    return;
-  }
-  if (RequiresPrefixCheckpoint()) {
-    if (checkpoint) {
-      const size_t token_count = checkpoint->TokenCount();
-      SealCheckpointedPrefix(
-          request_id, tokens, token_count, [checkpoint = std::move(checkpoint)] { return checkpoint; });
-    }
     return;
   }
   const auto table_index = block_table_index_->Find(request_id);
@@ -837,6 +836,33 @@ void PagedKeyValueCache::SealCommittedBlocks(
     return;
   }
   const size_t block_size = block_pool_->BlockSize();
+  size_t auxiliary_block_bytes = 0;
+  if (RequiresAuxiliaryPrefix()) {
+    if (first_position > table.committed_slots_ ||
+        tokens.size() < table.committed_slots_ ||
+        (table.committed_slots_ != first_position &&
+         auxiliary.size() % (table.committed_slots_ - first_position) != 0)) {
+      throw std::logic_error("DFlash auxiliary rows do not match the committed target step.");
+    }
+    const size_t row_bytes = table.committed_slots_ == first_position
+                                 ? 0
+                                 : auxiliary.size() / (table.committed_slots_ - first_position);
+    if (row_bytes == 0 && table.committed_slots_ != first_position) {
+      throw std::logic_error("A committed DFlash step is missing auxiliary hidden states.");
+    }
+    if (row_bytes != 0 &&
+        table.sealed_blocks_ * block_size +
+                table.pending_auxiliary_.size() / row_bytes !=
+            first_position) {
+      throw std::logic_error("DFlash auxiliary rows are not contiguous with the prefix.");
+    }
+    table.pending_auxiliary_.insert(
+        table.pending_auxiliary_.end(), auxiliary.begin(), auxiliary.end());
+    auxiliary_block_bytes = row_bytes * block_size;
+  }
+  if (RequiresPrefixCheckpoint()) {
+    return;
+  }
   const size_t full_blocks = table.committed_slots_ / block_size;
   if (full_blocks <= table.sealed_blocks_) {
     return;
@@ -848,13 +874,33 @@ void PagedKeyValueCache::SealCommittedBlocks(
 
   auto parent = table.sealed_identity_;
   for (size_t index = table.sealed_blocks_; index < full_blocks; ++index) {
+    std::shared_ptr<const std::vector<uint8_t>> block_auxiliary;
+    if (RequiresAuxiliaryPrefix()) {
+      if (auxiliary_block_bytes == 0 ||
+          table.pending_auxiliary_.size() < auxiliary_block_bytes) {
+        throw std::logic_error("A complete DFlash prefix block is missing auxiliary rows.");
+      }
+      block_auxiliary = std::make_shared<const std::vector<uint8_t>>(
+          table.pending_auxiliary_.begin(),
+          table.pending_auxiliary_.begin() +
+              static_cast<ptrdiff_t>(auxiliary_block_bytes));
+    }
     auto registration = prefix_cache_->Register(
         table.blocks_[index],
         tokens.subspan(index * block_size, block_size),
-        parent);
+        parent, std::move(block_auxiliary));
     if (!registration.identity) {
       table.sealing_stopped_ = registration.StopsSealing();
+      if (table.sealing_stopped_) {
+        table.pending_auxiliary_.clear();
+      }
       break;
+    }
+    if (RequiresAuxiliaryPrefix()) {
+      table.pending_auxiliary_.erase(
+          table.pending_auxiliary_.begin(),
+          table.pending_auxiliary_.begin() +
+              static_cast<ptrdiff_t>(auxiliary_block_bytes));
     }
     parent = std::move(registration.identity);
     table.sealed_blocks_ = index + 1;
@@ -872,15 +918,27 @@ void PagedKeyValueCache::SealCheckpointedPrefix(
   auto& table = block_tables_[*block_table_index_->Find(request_id)];
   const size_t block_size = block_pool_->BlockSize();
   const size_t full_blocks = token_count / block_size;
+  const size_t suffix_blocks = full_blocks - table.sealed_blocks_;
+  std::span<const uint8_t> auxiliary;
+  if (RequiresAuxiliaryPrefix()) {
+    const size_t suffix_tokens = suffix_blocks * block_size;
+    if (suffix_blocks == 0 || table.pending_auxiliary_.empty() ||
+        table.pending_auxiliary_.size() % suffix_tokens != 0) {
+      throw std::logic_error(
+          "A checkpointed DFlash prefix is missing its auxiliary suffix.");
+    }
+    auxiliary = table.pending_auxiliary_;
+  }
   auto registration = prefix_cache_->RegisterCheckpointedPrefix(
       std::span<const std::shared_ptr<Block>>{table.blocks_}.subspan(
-          table.sealed_blocks_, full_blocks - table.sealed_blocks_),
+          table.sealed_blocks_, suffix_blocks),
       tokens.subspan(table.sealed_blocks_ * block_size,
-                     (full_blocks - table.sealed_blocks_) * block_size),
-      table.sealed_identity_, capture_checkpoint);
+                     suffix_blocks * block_size),
+      table.sealed_identity_, capture_checkpoint, auxiliary);
   if (registration.identity) {
     table.sealed_blocks_ = full_blocks;
     table.sealed_identity_ = std::move(registration.identity);
+    table.pending_auxiliary_.clear();
   } else {
     // A duplicate checkpoint at this boundary is usable by a future request, but this request has
     // already computed a private physical history and may diverge before its next checkpoint. Keep
@@ -888,7 +946,28 @@ void PagedKeyValueCache::SealCheckpointedPrefix(
     // physical variant. True hash collisions remain permanently unreachable.
     table.sealing_stopped_ =
         registration.status == PrefixCacheRegistrationStatus::HashCollision;
+    if (table.sealing_stopped_) {
+      table.pending_auxiliary_.clear();
+    }
   }
+}
+
+std::shared_ptr<const BlockIdentity> PagedKeyValueCache::SealedPrefixIdentity(
+    const void* request_id, size_t token_count) const {
+  if (!prefix_cache_->Enabled() || token_count == 0) {
+    return nullptr;
+  }
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return nullptr;
+  }
+  const auto& table = block_tables_[*table_index];
+  const size_t block_size = block_pool_->BlockSize();
+  return token_count == table.committed_slots_ &&
+                 token_count % block_size == 0 &&
+                 table.sealed_blocks_ == token_count / block_size
+             ? table.sealed_identity_
+             : nullptr;
 }
 
 bool PagedKeyValueCache::CanSealPrefixCheckpoint(
