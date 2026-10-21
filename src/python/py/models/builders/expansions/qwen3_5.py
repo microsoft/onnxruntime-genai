@@ -148,10 +148,10 @@ class Qwen35:
         gate_name = f"{basename}/LinearAttentionGate"
         self.make_linear_attention_gate(
             gate_name,
-            a=f"{a_name}/output_0",
+            a=a_name,
             dt_bias=dt_bias,
             decay_scale=decay_scale,
-            b=f"{b_name}/output_0",
+            b=b_name,
             shape=["batch_size", "sequence_length", self.linear_num_value_heads],
         )
         return (
@@ -287,8 +287,8 @@ class Qwen35:
             "q_path": conv_output,
             "k_path": "",
             "v_path": "",
-            "decay": f"{a_name}/output_0",
-            "beta": f"{b_name}/output_0",
+            "decay": a_name,
+            "beta": b_name,
             "a_log": a_log_name,
             "dt_bias": dt_bias_name,
             "gate_shape": [*token_shape, value_heads],
@@ -340,13 +340,13 @@ class Qwen35:
 
         b_name, a_name = self.make_linear_attention_a_b_proj(layer_id, attention, root_input)
 
-        conv_input = f"{qkv_name}/output_0"
+        conv_input = qkv_name
         if not self.use_paged_attention:
             qkv_t_name = f"{basename}/qkv_proj/Transpose"
             conv_input = f"{qkv_t_name}/output_0"
             self.make_transpose(
                 qkv_t_name,
-                f"{qkv_name}/output_0",
+                qkv_name,
                 self.io_dtype,
                 ["batch_size", self.linear_conv_dim, "sequence_length"],
                 [0, 2, 1],
@@ -361,7 +361,7 @@ class Qwen35:
         basename = f"/model/layers.{layer_id}/linear_attn"
         qkv_name = self.make_matmul(attention.in_proj_qkv, f"{basename}/qkv_proj/MatMul", root_input)
         z_name = self.make_matmul(attention.in_proj_z, f"{basename}/z_proj/MatMul", root_input)
-        return qkv_name, z_name
+        return f"{qkv_name}/output_0", f"{z_name}/output_0"
 
     def make_linear_attention_a_b_proj(self, layer_id, attention, root_input):
         basename = f"/model/layers.{layer_id}/linear_attn"
@@ -376,7 +376,7 @@ class Qwen35:
         self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
         self.exclude_node_from_quantization(a_name)
         a_name = self.make_matmul(attention.in_proj_a, a_name, root_input)
-        return b_name, a_name
+        return f"{b_name}/output_0", f"{a_name}/output_0"
 
     def require_dense_linear_attention_gate(self, projection, name):
         if hasattr(projection, "qweight") or getattr(projection, "quant_type", "none") != "none":
@@ -390,7 +390,7 @@ class Qwen35:
 
         Args:
             attn_output_3d: Attention output [B, S, linear_value_dim] (3D packed).
-            z_name: Name of the z-gate projection MatMul node.
+            z_name: Name of the z-gate projection output.
         """
         basename = f"/model/layers.{layer_id}/linear_attn"
         output_shape = (
@@ -406,7 +406,7 @@ class Qwen35:
             gated_norm_name,
             root_input=attn_output_3d,
             scale=norm_weight,
-            gate=f"{z_name}/output_0",
+            gate=z_name,
             shape=output_shape,
             epsilon=self.layernorm_attrs["epsilon"],
         )

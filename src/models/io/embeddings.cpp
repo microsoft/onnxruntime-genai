@@ -7,15 +7,23 @@
 
 namespace Generators {
 
-Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size)
+Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size,
+                       int64_t feature_count)
     : state_{state},
-      shape_{static_cast<int64_t>(state_.params_->search.batch_size) * state_.params_->search.num_beams,
-             0, hidden_size > 0 ? hidden_size : model_.config_->model.decoder.hidden_size},
       type_{mode == Embeddings::Mode::Input
                 ? model_.session_info_.GetInputDataType(name)
                 : model_.session_info_.GetOutputDataType(name)},
       mode_{mode},
       name_{name} {
+  shape_ = {
+      static_cast<int64_t>(state_.params_->search.batch_size) * state_.params_->search.num_beams,
+      0,
+  };
+  if (feature_count > 0) {
+    shape_.push_back(feature_count);
+  }
+  shape_.push_back(hidden_size > 0 ? hidden_size : model_.config_->model.decoder.hidden_size);
+
   // Embeddings are only transient inputs and outputs.
   // They are never the user provided/requested model inputs/outputs
   // So only create the transient input and reuse that ortvalue for previous
@@ -82,13 +90,17 @@ void Embeddings::UseChunkView(size_t offset, size_t length) {
   }
 
   const size_t element_size = Ort::SizeOf(type_);
-  const size_t hidden_size = static_cast<size_t>(shape_[2]);
+  size_t feature_elements = 1;
+  for (size_t i = 2; i < shape_.size(); ++i) {
+    feature_elements *= static_cast<size_t>(shape_[i]);
+  }
   auto* raw = static_cast<uint8_t*>(embeddings_->GetMutableRawData());
 
-  std::array<int64_t, 3> chunk_shape{shape_[0], static_cast<int64_t>(length), shape_[2]};
+  auto chunk_shape = shape_;
+  chunk_shape[1] = static_cast<int64_t>(length);
   chunk_view_ = OrtValue::CreateTensor(embeddings_->GetOrtTensor()->GetTensorMemoryInfo(),
-                                       raw + offset * hidden_size * element_size,
-                                       length * hidden_size * element_size,
+                                       raw + offset * feature_elements * element_size,
+                                       length * feature_elements * element_size,
                                        std::span<const int64_t>(chunk_shape), type_);
   state_.inputs_[index_] = chunk_view_.get();
 }

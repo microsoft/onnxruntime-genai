@@ -223,7 +223,7 @@ class Qwen38(Qwen38Engram):
             ],
             axis=-1,
         )
-        return qkv_name, z_name
+        return f"{qkv_name}/output_0", f"{z_name}/output_0"
 
     def make_linear_attention_a_b_proj(self, layer_id, attention, root_input):
         basename = f"/model/layers.{layer_id}/linear_attn"
@@ -253,7 +253,7 @@ class Qwen38(Qwen38Engram):
             ],
             axis=-1,
         )
-        return b_name, a_name
+        return f"{b_name}/output_0", f"{a_name}/output_0"
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"

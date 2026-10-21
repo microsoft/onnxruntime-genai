@@ -75,6 +75,7 @@ struct DeviceSpan {
   bool SameBufferAs(const DeviceSpan<T>& other) const { return p_device_memory_ == other.p_device_memory_; }
 
   DeviceBuffer& GetBuffer() const { return *p_device_memory_; }
+  std::shared_ptr<DeviceBuffer> BackingBuffer() const { return p_device_memory_; }
   size_t ByteOffset() const { return begin_ * sizeof(T); }
 
   // Return the device accessible memory. Should only be done in device specific code, as it's not CPU accessible
