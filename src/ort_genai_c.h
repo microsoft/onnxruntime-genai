@@ -108,16 +108,13 @@ OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampGetSegmentCount(con
 OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampGetWord(const OgaTokenPostProcessorTimestamp* timestamps, size_t index);
 OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampGetSegment(const OgaTokenPostProcessorTimestamp* timestamps, size_t index);
 OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetText(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT bool OGA_API_CALL OgaTokenPostProcessorTimestampRecordHasTimestamp(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetSpeakerLabel(const OgaTokenPostProcessorTimestampRecord* record);
+/** Check HasTimestamp before reading scalar timing accessors; absent values return zero. */
 OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record);
 OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record);
 OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record);
 OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record);
-
-/** Half-open [start, stop) interval in absolute acoustic frames. */
-typedef struct OgaTokenMetadataAcousticFrameInterval {
-  int64_t start;
-  int64_t stop;
-} OgaTokenMetadataAcousticFrameInterval;
 
 /**
  * \brief Reason why an Engine Request's generation turn stopped.

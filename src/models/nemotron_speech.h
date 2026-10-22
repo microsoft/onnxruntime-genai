@@ -15,6 +15,8 @@
 
 namespace Generators {
 
+struct NemotronDiarizationState;
+
 int64_t GetNemotronChunkStartSample(const std::vector<ExtraInput>& extra_inputs);
 
 inline int64_t GetNemotronGlobalFrame(int64_t chunk_start_sample, int64_t local_frame,
@@ -73,10 +75,12 @@ struct NemotronConfig {
   int subsampling_factor{};
   int max_symbols_per_step{};
 
-  // Timestamp production; segment policy belongs to the tokenizer stream.
+  // Acoustic alignment production; segment policy belongs to TokenPostProcessor.
   Config::TimestampLevel timestamp_level{Config::TimestampLevel::Off};
+  bool diarization_enabled{};
 
   bool TimestampsEnabled() const { return timestamp_level != Config::TimestampLevel::Off; }
+  bool AlignmentEnabled() const { return TimestampsEnabled() || diarization_enabled; }
 
   // Mel spectrogram parameters
   int num_mels{};
@@ -151,6 +155,10 @@ struct NemotronSpeechModel : Model {
   std::unique_ptr<OrtSession> session_encoder_;
   std::unique_ptr<OrtSession> session_decoder_;
   std::unique_ptr<OrtSession> session_joiner_;
+  std::unique_ptr<OrtSession> session_diarization_;
+  std::unique_ptr<OrtSessionOptions> diarization_session_options_;
+  DeviceInterface* diarization_device_{};
+  SessionInfo diarization_session_info_;
 
   std::unique_ptr<OrtSessionOptions> encoder_session_options_;
   std::unique_ptr<OrtSessionOptions> decoder_session_options_;
@@ -251,6 +259,7 @@ struct NemotronSpeechState : TransducerState {
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
 
   void StepToken() override;
+  std::span<const TokenSpeakerEvidence> GetStepSpeakerEvidence() const override { return last_speaker_evidence_; }
   void ResetStreamingState();
 
   void SetLangId(int lang_id);
@@ -265,9 +274,13 @@ struct NemotronSpeechState : TransducerState {
   std::unique_ptr<NemotronEncoderSubState> encoder_state_;
   std::unique_ptr<NemotronPredictionSubState> prediction_state_;
   std::unique_ptr<NemotronJoinerSubState> joiner_state_;
+  std::unique_ptr<NemotronDiarizationState> diarization_state_;
 
   // Current mel input
   std::shared_ptr<Tensor> current_mel_;
+  std::shared_ptr<Tensor> current_diarization_features_;
+  int64_t current_diarization_lookahead_{};
+  int64_t current_valid_samples_{};
 
   // Encoder output persisted across StepToken calls
   std::unique_ptr<OrtValue> encoded_output_;
@@ -281,6 +294,7 @@ struct NemotronSpeechState : TransducerState {
   int64_t chunk_start_sample_{0};
   int symbol_step_{0};
   bool need_encoder_run_{false};
+  std::vector<TokenSpeakerEvidence> last_speaker_evidence_;
 
   void RunEncoder();
 };

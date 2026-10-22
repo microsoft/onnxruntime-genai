@@ -19,7 +19,7 @@ TEST(ConfigTest, ParsesTimestampConfiguration) {
 
   OverlayConfig(config, R"({"model":{
     "type":"nemotron_speech",
-    "timestamp_level":"all",
+    "timestamp_level":"segment",
     "sample_rate":16000,
     "hop_length":160,
     "subsampling_factor":8,
@@ -27,7 +27,7 @@ TEST(ConfigTest, ParsesTimestampConfiguration) {
     "segment_gap_threshold_seconds":1.25
   }})");
 
-  EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::All);
+  EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::Segment);
   EXPECT_EQ(config.model.segment_separators, (std::vector<std::string>{".", "!?"}));
   EXPECT_EQ(config.model.segment_gap_threshold_seconds, 1.25);
 }
@@ -41,9 +41,33 @@ TEST(ConfigTest, ParsesDisabledTimestampGap) {
   EXPECT_FALSE(config.model.segment_gap_threshold_seconds.has_value());
 }
 
+TEST(ConfigTest, ParsesDiarizationGeometry) {
+  Config config;
+  OverlayConfig(config, R"({"model":{
+    "type":"nemotron_speech","sample_rate":8000,"hop_length":80,
+    "subsampling_factor":4,"chunk_samples":4480,
+    "diarization":{"filename":"diarization.onnx","sample_rate":8000,
+      "num_mels":64,"fft_size":256,"win_length":200,"hop_length":40,
+      "subsampling_factor":4,"preemph":0.95,"log_eps":0.0000001,"right_context":5}
+  }})");
+  const auto& diar = config.model.diarization;
+  EXPECT_EQ(diar.num_mels, 64);
+  EXPECT_EQ(diar.fft_size, 256);
+  EXPECT_EQ(diar.win_length, 200);
+  EXPECT_EQ(diar.hop_length, 40);
+  EXPECT_EQ(diar.subsampling_factor, 4);
+  EXPECT_FLOAT_EQ(diar.preemph, 0.95f);
+  EXPECT_FLOAT_EQ(diar.log_eps, 1e-7f);
+  EXPECT_EQ(diar.SamplesPerEncoderFrame(), 160);
+  EXPECT_DOUBLE_EQ(diar.right_context * diar.SamplesPerEncoderFrame() /
+                       static_cast<double>(diar.sample_rate),
+                   0.1);
+}
+
 TEST(ConfigTest, RejectsInvalidTimestampConfiguration) {
   for (const char* json : {
            R"({"model":{"timestamp_level":"token"}})",
+           R"({"model":{"timestamp_level":"all"}})",
            R"({"model":{"segment_gap_threshold_frames":12}})",
            R"({"model":{"segment_gap_threshold_seconds":-1}})"}) {
     Config config;

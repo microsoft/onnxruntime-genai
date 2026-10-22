@@ -77,9 +77,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         private IntPtr Handle => _owner.GetResultHandle(_handle, _lifetime);
 
         public string GetText() => StringUtils.FromUtf8(NativeMethods.OgaTokenPostProcessorTimestampRecordGetText(Handle));
-        public long GetStartFrame() => NativeMethods.OgaTokenPostProcessorTimestampRecordGetStartFrame(Handle);
-        public long GetStopFrame() => NativeMethods.OgaTokenPostProcessorTimestampRecordGetStopFrame(Handle);
-        public double GetStartTime() => NativeMethods.OgaTokenPostProcessorTimestampRecordGetStartTime(Handle);
-        public double GetStopTime() => NativeMethods.OgaTokenPostProcessorTimestampRecordGetStopTime(Handle);
+        public bool HasTimestamp() => NativeMethods.OgaTokenPostProcessorTimestampRecordHasTimestamp(Handle);
+        public string GetSpeakerLabel()
+        {
+            var label = NativeMethods.OgaTokenPostProcessorTimestampRecordGetSpeakerLabel(Handle);
+            return label == IntPtr.Zero ? null : StringUtils.FromUtf8(label);
+        }
+        public long? GetStartFrame() => HasTimestamp() ? NativeMethods.OgaTokenPostProcessorTimestampRecordGetStartFrame(Handle) : (long?)null;
+        public long? GetStopFrame() => HasTimestamp() ? NativeMethods.OgaTokenPostProcessorTimestampRecordGetStopFrame(Handle) : (long?)null;
+        public double? GetStartTime() => HasTimestamp() ? NativeMethods.OgaTokenPostProcessorTimestampRecordGetStartTime(Handle) : (double?)null;
+        public double? GetStopTime() => HasTimestamp() ? NativeMethods.OgaTokenPostProcessorTimestampRecordGetStopTime(Handle) : (double?)null;
     }
 }

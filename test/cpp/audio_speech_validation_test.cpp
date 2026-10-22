@@ -70,7 +70,7 @@ TEST(AudioSpeechValidationTests, NemotronEncoderOutputRankValidation) {
 TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
   Generators::Config config;
   config.model.type = "nemotron_speech";
-  config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config.model.timestamp_level = Generators::Config::TimestampLevel::Segment;
   config.model.sample_rate = 16000;
   config.model.hop_length = 160;
   config.model.subsampling_factor = 8;
@@ -79,7 +79,7 @@ TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
 
   Generators::NemotronConfig nemotron_config;
   EXPECT_NO_THROW(nemotron_config.PopulateFromConfig(config));
-  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::All);
+  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::Segment);
   EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(config.model), 13);
 }
 
@@ -159,7 +159,7 @@ TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
     GTEST_SKIP() << "Streaming ASR model not found at " << model_path.string();
 
   auto config = std::make_unique<Generators::Config>(model_path, "");
-  config->model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config->model.timestamp_level = Generators::Config::TimestampLevel::Segment;
   const auto chunk_samples = static_cast<size_t>(config->model.chunk_samples);
   ASSERT_GT(chunk_samples, 1U);
   // The downloaded CUDA export uses standard ONNX operators; run this metadata test on CPU too.
@@ -289,54 +289,58 @@ TEST(TokenPostProcessorInternalTests, OfflineBatchMatchesIncrementalProcessing) 
   for (size_t index = 0; index < tokens.size(); ++index)
     intervals.push_back({static_cast<int64_t>(index), static_cast<int64_t>(index + 1)});
 
-  Generators::MetadataCoreConfig config;
-  config.timestamps.level = Generators::Config::TimestampLevel::All;
-  config.timestamps.segment_separators = {"."};
-  config.seconds_per_frame = 0.1;
-  const auto process = [&](size_t batch_size) {
-    Generators::TokenPostProcessorInternal stream{tokenizer, config};
-    Generators::PostProcessorResult transcript;
-    transcript.timestamps.emplace();
-    const auto collect = [&] {
-      for (const auto& result : stream.GetNextTokenResults()) {
-        transcript.text += result.text;
-        EXPECT_TRUE(result.timestamps.has_value());
-        if (!result.timestamps) continue;
-        const auto& timestamps = *result.timestamps;
-        auto& output = *transcript.timestamps;
-        output.words.insert(output.words.end(), timestamps.words.begin(), timestamps.words.end());
-        output.segments.insert(output.segments.end(), timestamps.segments.begin(), timestamps.segments.end());
+  for (auto level : {Generators::Config::TimestampLevel::Word, Generators::Config::TimestampLevel::Segment}) {
+    Generators::MetadataCoreConfig config;
+    config.timestamps.level = level;
+    config.timestamps.segment_separators = {"."};
+    config.seconds_per_frame = 0.1;
+    const auto process = [&](size_t batch_size) {
+      Generators::TokenPostProcessorInternal stream{tokenizer, config};
+      Generators::PostProcessorResult transcript;
+      transcript.timestamps.emplace();
+      const auto collect = [&] {
+        for (const auto& result : stream.GetNextTokenResults()) {
+          transcript.text += result.text;
+          EXPECT_TRUE(result.timestamps.has_value());
+          if (!result.timestamps) continue;
+          const auto& timestamps = *result.timestamps;
+          auto& output = *transcript.timestamps;
+          output.words.insert(output.words.end(), timestamps.words.begin(), timestamps.words.end());
+          output.segments.insert(output.segments.end(), timestamps.segments.begin(), timestamps.segments.end());
+        }
+      };
+      for (size_t offset = 0; offset < tokens.size(); offset += batch_size) {
+        const auto count = std::min(batch_size, tokens.size() - offset);
+        stream.Process(Generators::TokenOutputs{
+            std::span<const int32_t>{tokens}.subspan(offset, count),
+            std::span<const Generators::AcousticFrameInterval>{intervals}.subspan(offset, count)});
+        collect();
+      }
+      stream.Finalize();
+      collect();
+      return transcript;
+    };
+
+    const auto batch = process(tokens.size());
+    const auto incremental = process(1);
+    EXPECT_EQ(batch.text, text);
+    EXPECT_EQ(batch.text, incremental.text);
+    const auto expect_records = [](const auto& actual, const auto& expected) {
+      ASSERT_FALSE(actual.empty());
+      ASSERT_EQ(actual.size(), expected.size());
+      for (size_t index = 0; index < actual.size(); ++index) {
+        EXPECT_EQ(actual[index].text, expected[index].text);
+        EXPECT_EQ(actual[index].start_frame, expected[index].start_frame);
+        EXPECT_EQ(actual[index].stop_frame, expected[index].stop_frame);
+        EXPECT_EQ(actual[index].start_time, expected[index].start_time);
+        EXPECT_EQ(actual[index].stop_time, expected[index].stop_time);
       }
     };
-    for (size_t offset = 0; offset < tokens.size(); offset += batch_size) {
-      const auto count = std::min(batch_size, tokens.size() - offset);
-      stream.Process(Generators::TokenOutputs{
-          std::span<const int32_t>{tokens}.subspan(offset, count),
-          std::span<const Generators::AcousticFrameInterval>{intervals}.subspan(offset, count)});
-      collect();
-    }
-    stream.Finalize();
-    collect();
-    return transcript;
-  };
-
-  const auto batch = process(tokens.size());
-  const auto incremental = process(1);
-  EXPECT_EQ(batch.text, text);
-  EXPECT_EQ(batch.text, incremental.text);
-  const auto expect_records = [](const auto& actual, const auto& expected) {
-    ASSERT_FALSE(actual.empty());
-    ASSERT_EQ(actual.size(), expected.size());
-    for (size_t index = 0; index < actual.size(); ++index) {
-      EXPECT_EQ(actual[index].text, expected[index].text);
-      EXPECT_EQ(actual[index].start_frame, expected[index].start_frame);
-      EXPECT_EQ(actual[index].stop_frame, expected[index].stop_frame);
-      EXPECT_DOUBLE_EQ(actual[index].start_time, expected[index].start_time);
-      EXPECT_DOUBLE_EQ(actual[index].stop_time, expected[index].stop_time);
-    }
-  };
-  expect_records(batch.timestamps->words, incremental.timestamps->words);
-  expect_records(batch.timestamps->segments, incremental.timestamps->segments);
+    if (level == Generators::Config::TimestampLevel::Word)
+      expect_records(batch.timestamps->words, incremental.timestamps->words);
+    else
+      expect_records(batch.timestamps->segments, incremental.timestamps->segments);
+  }
 }
 
 TEST(TokenPostProcessorInternalTests, OptionalTimingAndCountValidation) {
@@ -348,6 +352,7 @@ TEST(TokenPostProcessorInternalTests, OptionalTimingAndCountValidation) {
 
   Generators::TokenOutputs untimed{tokens};
   EXPECT_EQ(untimed.GetAcousticFrameIntervals(), nullptr);
+  EXPECT_EQ(untimed.GetSpeakerEvidence(), nullptr);
   Generators::TokenPostProcessorInternal plain{tokenizer, {}};
   plain.Process(untimed);
   std::string decoded;
@@ -396,7 +401,7 @@ class MetadataCoreStateTests : public testing::Test {
   void SetUp() override {
     Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
     config.model.type = "nemotron_speech";
-    config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+    config.model.timestamp_level = Generators::Config::TimestampLevel::Word;
     config.model.sample_rate = 100;
     config.model.hop_length = 10;
     config.model.subsampling_factor = 1;
@@ -405,7 +410,7 @@ class MetadataCoreStateTests : public testing::Test {
     tokens = tokenizer->Encode("Hello world.");
     ASSERT_GT(tokens.size(), 1U);
     model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-    model->config_->model.timestamp_level = Generators::Config::TimestampLevel::All;
+    model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Word;
     params = std::make_shared<Generators::GeneratorParams>(*model);
     generator = std::make_unique<Generators::Generator>(*model, *params);
     auto transducer = std::make_unique<TestTransducerState>(*params, *model);
@@ -559,13 +564,14 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
   EXPECT_EQ(words[1].text, words[0].text);
   EXPECT_EQ(words[0].start_frame, 2);
   EXPECT_EQ(words[0].stop_frame, 7);
-  EXPECT_DOUBLE_EQ(words[0].start_time, 0.2);
-  EXPECT_DOUBLE_EQ(words[0].stop_time, 0.7);
+  EXPECT_EQ(words[0].start_time, 0.2);
+  EXPECT_EQ(words[0].stop_time, 0.7);
   EXPECT_EQ(words[1].start_frame, 20);
   EXPECT_EQ(words[1].stop_frame, 23);
 }
 
 TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
+  model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Segment;
   for (double threshold : {0.0, 0.01, 1.0}) {
     model->config_->model.segment_gap_threshold_seconds = threshold;
     Generators::TokenPostProcessor processor{*generator};
@@ -592,7 +598,7 @@ TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
 
 TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
   using Level = Generators::Config::TimestampLevel;
-  for (auto level : {Level::Off, Level::Word, Level::Segment, Level::All}) {
+  for (auto level : {Level::Off, Level::Word, Level::Segment}) {
     model->config_->model.timestamp_level = level;
     source->SetTimestampsEnabled(level != Level::Off);
     Generators::TokenPostProcessor processor{*generator};
@@ -609,8 +615,8 @@ TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
     collect();
     processor.Finalize();
     collect();
-    EXPECT_EQ(words, level == Level::Word || level == Level::All ? 2U : 0U);
-    EXPECT_EQ(segments, level == Level::Segment || level == Level::All ? 1U : 0U);
+    EXPECT_EQ(words, level == Level::Word ? 2U : 0U);
+    EXPECT_EQ(segments, level == Level::Segment ? 1U : 0U);
   }
 }
 

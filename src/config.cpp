@@ -2220,6 +2220,52 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
+struct Diarization_Element : JSON::Element {
+  explicit Diarization_Element(Config::Model::Diarization& v) : v_{v} {}
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename")
+      v_.filename = JSON::Get<std::string_view>(value);
+    else if (name == "right_context")
+      v_.right_context = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "sample_rate")
+      v_.sample_rate = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "num_mels")
+      v_.num_mels = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "fft_size")
+      v_.fft_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "win_length")
+      v_.win_length = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "hop_length")
+      v_.hop_length = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "subsampling_factor")
+      v_.subsampling_factor = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "preemph")
+      v_.preemph = static_cast<float>(JSON::Get<double>(value));
+    else if (name == "log_eps")
+      v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    else
+      throw JSON::unknown_value_error{};
+  }
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options.emplace();
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options.emplace();
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Diarization& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v)
       : v_{v}, block_drafter_alias_{v_.dflash2.configured_alias_is_dspark} {}
@@ -2293,10 +2339,8 @@ struct Model_Element : JSON::Element {
         v_.timestamp_level = Config::TimestampLevel::Word;
       } else if (level == "segment") {
         v_.timestamp_level = Config::TimestampLevel::Segment;
-      } else if (level == "all") {
-        v_.timestamp_level = Config::TimestampLevel::All;
       } else {
-        throw std::runtime_error("timestamp_level must be one of: off, word, segment, all");
+        throw std::runtime_error("timestamp_level must be one of: off, word, segment");
       }
     } else if (name == "segment_gap_threshold_seconds") {
       if (std::holds_alternative<std::nullptr_t>(value)) {
@@ -2369,6 +2413,7 @@ struct Model_Element : JSON::Element {
     if (name == "vad") {
       return vad_;
     }
+    if (name == "diarization") return diarization_;
     if (name == "moonshine") {
       return moonshine_;
     }
@@ -2403,6 +2448,7 @@ struct Model_Element : JSON::Element {
   AudioOutput_Element audio_output_{v_.audio_output};
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
+  Diarization_Element diarization_{v_.diarization};
   Moonshine_Element moonshine_{v_.moonshine};
   Mtp_Element mtp_{v_.mtp};
   Dflash2_Element dflash2_{v_.dflash2};
@@ -2444,12 +2490,37 @@ int SafeDoubleToInt(double x, std::string_view name) {
 }
 
 void ValidateTimestampConfiguration(const Config::Model& model) {
-  if (model.timestamp_level == Config::TimestampLevel::Off) return;
+  if (model.timestamp_level == Config::TimestampLevel::Off && !model.diarization.Enabled()) return;
   if (!ModelType::IsRNNT(model.type))
     throw std::runtime_error("Timestamp metadata requires a nemotron_speech model");
   if (model.sample_rate <= 0 || model.hop_length <= 0 || model.subsampling_factor <= 0)
     throw std::runtime_error("Timestamp metadata requires positive sample_rate, hop_length, and subsampling_factor");
   (void)GetSegmentGapThresholdFrames(model);
+  if (model.diarization.Enabled()) {
+    const auto& diar = model.diarization;
+    if (diar.sample_rate <= 0 || diar.sample_rate != model.sample_rate)
+      throw std::runtime_error("diarization.sample_rate must be positive and match ASR sample_rate");
+    if (diar.num_mels <= 0 || diar.hop_length <= 0 || diar.subsampling_factor <= 0)
+      throw std::runtime_error("Diarization requires positive num_mels, hop_length, and subsampling_factor");
+    if (diar.win_length <= 0 || diar.fft_size < diar.win_length)
+      throw std::runtime_error("Diarization requires 0 < win_length <= fft_size");
+    if (!std::isfinite(diar.preemph) || !std::isfinite(diar.log_eps) || diar.log_eps <= 0)
+      throw std::runtime_error("Diarization requires finite preemph and positive finite log_eps");
+
+    const int64_t asr_frame_samples = static_cast<int64_t>(model.hop_length) * model.subsampling_factor;
+    if (asr_frame_samples % diar.hop_length != 0)
+      throw std::runtime_error("ASR acoustic-frame stride must be an integer multiple of diarization.hop_length");
+    if (model.chunk_samples <= 0 || model.chunk_samples % asr_frame_samples != 0 ||
+        model.chunk_samples % diar.SamplesPerEncoderFrame() != 0)
+      throw std::runtime_error("chunk_samples must be a positive multiple of both ASR and diarization encoder strides");
+    if (diar.right_context < 0)
+      throw std::runtime_error("diarization.right_context must be non-negative encoder frames");
+
+    const int64_t window_frames = model.chunk_samples / diar.hop_length +
+                                  static_cast<int64_t>(diar.right_context) * diar.subsampling_factor;
+    if (window_frames > std::numeric_limits<int>::max() / diar.num_mels)
+      throw std::runtime_error("Diarization feature window exceeds supported tensor dimensions");
+  }
 }
 
 std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model) {
@@ -3512,6 +3583,7 @@ void ValidateModelPaths(const Config& config) {
 
   ValidateConfigPath(m.joiner.filename, "model.joiner.filename");
   ValidateConfigPath(m.vad.filename, "model.vad.filename");
+  ValidateConfigPath(m.diarization.filename, "model.diarization.filename");
 
   ValidateConfigPath(m.moonshine.frontend_filename, "model.moonshine.frontend_filename");
   ValidateConfigPath(m.moonshine.encoder_filename, "model.moonshine.encoder_filename");
