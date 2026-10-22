@@ -4,11 +4,12 @@
 import pytest
 from models.builders.base import Model
 from models.builders.expansions.engine import Engine
+from models.builders.expansions.engram import Qwen38Engram
 from models.builders.expansions.mtp import Qwen35MTP, Qwen38MTP
 from models.builders.expansions.qwen3_5 import Qwen35, Qwen35MoE
 from models.builders.expansions.qwen3_8 import Qwen38, Qwen38Graph, Qwen38Vision
 from models.builders.qwen3_5 import Qwen35MoETextModel, Qwen35MTPModel, Qwen35TextModel
-from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel
+from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel, Qwen38DenseEngram
 
 
 @pytest.mark.parametrize(
@@ -33,7 +34,6 @@ from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwe
         (Qwen4ExpTextModel, Qwen38, "make_linear_attention_qkv_z_proj"),
         (Qwen4ExpTextModel, Qwen38, "make_linear_attention_a_b_proj"),
         (Qwen4ExpTextModel, Qwen38, "make_qwen_sparse_attention"),
-        (Qwen4ExpTextModel, Qwen38, "make_ple"),
         (Qwen4ExpTextModel, Qwen38, "make_hyper_connection_mix"),
         (Qwen4ExpTextModel, Qwen35, "make_qwen_gated_delta_net"),
         (Qwen4ExpVisionModel, Qwen38Graph, "make_linear"),
@@ -58,3 +58,27 @@ def test_qwen38_super_dispatch_preserves_qwen35_projection_fallback():
 @pytest.mark.parametrize("expansion_class", [Qwen38Graph, Qwen38Vision])
 def test_qwen38_auxiliary_expansions_live_in_architecture_module(expansion_class):
     assert expansion_class.__module__ == "models.builders.expansions.qwen3_8"
+
+
+@pytest.mark.parametrize("paged", [False, True])
+def test_qwen38_engram_dispatches_to_dense_builder_or_paged_expansion(monkeypatch, paged):
+    model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = paged
+    ple = object()
+    calls = []
+
+    def dense(self, layer_id, weights, root_input):
+        calls.append(("dense", self, layer_id, weights, root_input))
+        return "dense_output"
+
+    def packed(self, layer_id, weights, root_input):
+        calls.append(("paged", self, layer_id, weights, root_input))
+        return "paged_output"
+
+    monkeypatch.setattr(Qwen38DenseEngram, "make_ple", dense)
+    monkeypatch.setattr(Qwen38Engram, "make_ple", packed)
+    kind = "paged" if paged else "dense"
+    assert model.make_ple(2, ple, "hidden_states") == f"{kind}_output"
+    assert calls == [(kind, model, 2, ple, "hidden_states")]
+    assert Qwen38DenseEngram.__module__ == "models.builders.qwen3_8"
+    assert Qwen38Engram.__module__ == "models.builders.expansions.engram"

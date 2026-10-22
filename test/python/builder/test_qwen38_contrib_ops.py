@@ -11,8 +11,6 @@ import onnxruntime as ort
 import pytest
 import torch
 from _builder_test_utils import ort_runs_engram_op
-from transformers import LlamaConfig
-
 from models.builders.base import Model
 from models.builders.qwen3_5 import Qwen35MoETextModel
 from models.builders.qwen3_8 import (
@@ -21,6 +19,7 @@ from models.builders.qwen3_8 import (
     Qwen4ExpMTPTextModel,
     Qwen4ExpTextModel,
 )
+from transformers import LlamaConfig
 
 
 def record_calls(model, method_names):
@@ -1465,8 +1464,9 @@ def test_paged_ple_emits_packed_engram_gate_shapes():
     assert value_shapes["/model/layers.1/ple/EngramGate/output_1"] == [1, "num_tokens", 2, 8]
 
 
-def test_ple_reuses_model_level_embedding_initializers():
-    model, ple = make_ple_model(paged=True, fp8_embedding=True)
+@pytest.mark.parametrize("paged", [False, True])
+def test_ple_reuses_model_level_embedding_initializers(paged):
+    model, ple = make_ple_model(paged=paged, fp8_embedding=True)
 
     model.make_ple(1, ple, "hidden_states")
     model.values.update(
