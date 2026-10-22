@@ -13,6 +13,7 @@
 #include <cstring>
 #include <algorithm>
 #include <numeric>
+#include <utility>
 
 namespace Generators {
 
@@ -431,7 +432,8 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
     }
     // OpenVINO-partitioned Gemma3 decoders declare a token_type_ids input the graph consumes for
     // image-token attention. It is absent from native decoders, so bind it only when present.
-    if (decoder_only_info.HasInput(model_.config_->model.decoder.inputs.token_type_ids)) {
+    if (AsOpenVINOMultiModalModel(model_) &&
+        decoder_only_info.HasInput(model_.config_->model.decoder.inputs.token_type_ids)) {
       AddTokenTypeIds();
     }
   }
@@ -456,6 +458,32 @@ void ZeroTokenTypeIds(OrtValue& tensor) {
 }
 }  // namespace
 
+void UpdatePendingTokenTypeIds(OrtValue& token_type_ids, std::vector<int32_t>& pending_token_type_ids) {
+  std::vector<int32_t> markers = std::move(pending_token_type_ids);
+  pending_token_type_ids.clear();
+
+  auto info = token_type_ids.GetTensorTypeAndShapeInfo();
+  const size_t count = info->GetElementCount();
+  const auto type = info->GetElementType();
+  if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 && type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+    throw std::runtime_error("token_type_ids input must be int32 or int64");
+  }
+  ZeroTokenTypeIds(token_type_ids);
+  if (markers.empty()) return;
+  if (markers.size() != count) {
+    throw std::runtime_error("pending token_type_ids has " + std::to_string(markers.size()) +
+                             " values but the decoder input has " + std::to_string(count) + " tokens");
+  }
+
+  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+    auto* dst = token_type_ids.GetTensorMutableData<int64_t>();
+    std::copy(markers.begin(), markers.end(), dst);
+  } else {
+    auto* dst = token_type_ids.GetTensorMutableData<int32_t>();
+    std::copy(markers.begin(), markers.end(), dst);
+  }
+}
+
 void DecoderState::AddTokenTypeIds() {
   const int64_t batch_size = inputs_embeds_.GetShape()[0];
   const int64_t seq_len = inputs_embeds_.GetShape()[1];
@@ -468,9 +496,8 @@ void DecoderState::AddTokenTypeIds() {
   input_names_.push_back(model_.config_->model.decoder.inputs.token_type_ids.c_str());
 }
 
-void DecoderState::SetPromptTokenTypeIds(std::span<const int32_t> token_type_ids) {
-  // Cache the prompt markers; UpdateTokenTypeIds applies them once the input is sized to the prompt.
-  prompt_token_type_ids_.assign(token_type_ids.begin(), token_type_ids.end());
+void DecoderState::SetPendingTokenTypeIds(std::span<const int32_t> token_type_ids) {
+  pending_token_type_ids_.assign(token_type_ids.begin(), token_type_ids.end());
 }
 
 void DecoderState::UpdateTokenTypeIds(size_t new_length) {
@@ -481,17 +508,7 @@ void DecoderState::UpdateTokenTypeIds(size_t new_length) {
   auto type = token_type_ids_->GetTensorTypeAndShapeInfo()->GetElementType();
   std::array<int64_t, 2> shape{batch_size, static_cast<int64_t>(new_length)};
   token_type_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type);
-  ZeroTokenTypeIds(*token_type_ids_);
-  const size_t count = token_type_ids_->GetTensorTypeAndShapeInfo()->GetElementCount();
-  if (!prompt_token_type_ids_.empty() && prompt_token_type_ids_.size() == count) {
-    if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-      auto* dst = token_type_ids_->GetTensorMutableData<int64_t>();
-      for (size_t i = 0; i < count; ++i) dst[i] = prompt_token_type_ids_[i];
-    } else {
-      auto* dst = token_type_ids_->GetTensorMutableData<int32_t>();
-      for (size_t i = 0; i < count; ++i) dst[i] = prompt_token_type_ids_[i];
-    }
-  }
+  UpdatePendingTokenTypeIds(*token_type_ids_, pending_token_type_ids_);
   inputs_[token_type_ids_index_] = token_type_ids_.get();
 }
 
@@ -519,6 +536,9 @@ bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {
   // contiguous for a single sequence. Continuous decoding of position ids/attention mask in
   // DefaultPositionInputs is likewise restricted to a batch-beam size of one.
   if (params_->BatchBeamSize() != 1)
+    return false;
+
+  if (token_type_ids_)
     return false;
 
   // DefaultPositionInputs produces position ids sequentially, so chunking is always safe.
@@ -628,8 +648,8 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
 
   // OpenVINO-partitioned VLMs run their vision graph(s) and merge image features on the host via a
   // per-family strategy, instead of fusing them inside the embedding graph.
-  if (IsOpenVINOPartitioned(*model_.config_)) {
-    vision_merger_ = CreateOpenVINOVisionMerger(static_cast<const OpenVINOMultiModalModel&>(model_), params);
+  if (const auto* openvino_model = AsOpenVINOMultiModalModel(model_)) {
+    vision_merger_ = CreateOpenVINOVisionMerger(*openvino_model, params);
   }
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
@@ -659,12 +679,14 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
   }
   // Forward the prompt's token_type_ids (image placeholder markers) to the decoder when its graph
   // consumes them (OpenVINO-partitioned Gemma3). Text-only prompts have none, so the decoder keeps zeros.
-  for (const auto& input : extra_inputs) {
-    if (input.name == Config::Defaults::TokenTypeIdsName) {
-      OrtValue* ttids = input.tensor->GetOrtTensor();
-      const size_t count = ttids->GetTensorTypeAndShapeInfo()->GetElementCount();
-      decoder_state_->SetPromptTokenTypeIds(std::span<const int32_t>(ttids->GetTensorData<int32_t>(), count));
-      break;
+  if (decoder_state_->HasTokenTypeIds()) {
+    for (const auto& input : extra_inputs) {
+      if (input.name == Config::Defaults::TokenTypeIdsName) {
+        OrtValue* ttids = input.tensor->GetOrtTensor();
+        const size_t count = ttids->GetTensorTypeAndShapeInfo()->GetElementCount();
+        decoder_state_->SetPendingTokenTypeIds(std::span<const int32_t>(ttids->GetTensorData<int32_t>(), count));
+        break;
+      }
     }
   }
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
