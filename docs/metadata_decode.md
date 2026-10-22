@@ -1,8 +1,9 @@
 # Token Post-Processing
 
-`TokenPostProcessor(generator)` owns a tokenizer, an ordinary tokenizer
-stream, `MetadataCoreState`, word grouping, acoustic interval buffers, and the
-results completed by the latest processing call. Configuration comes from the
+`TokenPostProcessor(generator)` is a generator-facing adapter around an internal
+`TokenPostProcessingStream`. That stream owns a tokenizer, an ordinary tokenizer
+stream, `MetadataCoreState`, grouping/timing state, and the current results.
+Configuration comes from the
 generator's model and its `genai_config.json`. Callers do not pass a model or
 create token metadata records.
 
@@ -59,42 +60,61 @@ configuration for a fresh sequence. It does not reset the generator.
 
 ## Internal Flow
 
-The following native method flow starts after `Generator::GenerateNextToken()`
-has produced a step's token IDs and acoustic intervals. It shows timestamps
-enabled; the processor handles every emission in order, including empty decoded
-fragments. The language bindings forward processing to this same native path.
+The following native method flow starts after generation. It shows timestamps
+enabled; the internal stream handles the supplied tokens in order, including empty
+decoded fragments. The language bindings forward processing to this same native path.
 
-```mermaid
-flowchart TD
-  process["TokenPostProcessor::ProcessNextTokens()"] --> clear["Clear previous results"]
-  clear --> outputs["Generator::GetTokenOutputs() - private"]
-  outputs --> tokens["TransducerState::GetStepTokens()"]
-  tokens --> config["Check generator model timestamp_level != Off"]
-  config --> intervals["TransducerState::GetStepTokenIntervals()<br/>Validate interval count equals token count"]
-  intervals --> set["TokenOutputs::SetTimestamps()"]
-  set --> access["TokenOutputs::GetTokens() / GetTimestamps()"]
-  access --> each{"Another emitted token?"}
-  each -->|Yes| validate["MetadataCoreState::ValidateInput()<br/>TimestampsEnabled(): require 0 <= start < stop"]
-  validate --> enabled["MetadataCoreState::TimestampsEnabled()"]
-  enabled --> facts["Tokenizer::GetWordPieceInfo(token_id)"]
-  facts --> lookup["Extensions: OrtxGetTokenWordPieceInfo()"]
-  lookup --> decode["TokenizerStream::Decode(token_id)"]
-  decode --> cache["Extensions: OrtxDetokenizeCached()"]
-  cache --> result["Create processor-owned result<br/>Store exact decoded text"]
-  result --> metadata["MetadataCoreState::ProcessDecoded(token, piece, result)<br/>Detailed flow below"]
-  metadata --> each
-  each -->|No| done["ProcessNextTokens() returns"]
-  done -.->|Caller reads| read["TokenPostProcessor::GetNextTokenResults()<br/>GetText() / nullable GetTimestamps()"]
+```text
+TokenPostProcessor.ProcessNextTokens()
+  -> Generator.GetTokenOutputs(): view existing output without advancing generation
+      -> transducer: GetStepTokens() and optional GetStepTokenIntervals()
+          -> validate token/interval counts
+      -> search: GetNextTokens().CopyDeviceToCpu()
+  -> TokenPostProcessingStream.Process(outputs)
+      -> clear previous processing results
+      -> TokenOutputs.GetTokens() / GetTimestamps()
+      -> validate token/interval counts
+      -> for each emission, in order:
+          -> MetadataCoreState.ValidateInput(token)
+          -> if timestamps enabled: Tokenizer.GetWordPieceInfo(token_id)
+              -> OrtxGetTokenWordPieceInfo(...)
+          -> TokenizerStream.Decode(token_id)
+              -> OrtxDetokenizeCached(...)
+          -> store exact decoded text in a result
+          -> MetadataCoreState.ProcessDecoded(token, lexical facts, result)
+  -> return to application
+
+TokenPostProcessor.GetNextTokenResults()
+  -> TokenPostProcessingStream.GetNextTokenResults(): read only
+  -> GetText() / nullable GetTimestamps()
 ```
 
-The private generator getter views existing token and interval storage without
-advancing generation. It is accessible only to the native processor, not through
-the public C, C++, C#, or Python generator APIs. `GenerateNextToken()` is unchanged.
-`TokenOutputs` hides its storage behind accessors; disabled timestamp data is null.
-The getter selects optional timestamp output from
-`model_->config_->model.timestamp_level` directly. The transducer's cached
-timestamp flag controls interval production only; it does not select the getter's
-output fields. A token/interval count mismatch fails before per-token decoding.
+The private generator getter borrows existing transducer token and interval storage,
+or reads the existing search-selected token buffer. It does not change generation
+or token selection. Nemotron continues to supply zero or one token per step, without
+copying its token or interval buffers. Optional timing is selected from the model's
+timestamp configuration. `GenerateNextToken()` and the decoding strategies are
+unchanged.
+
+The private getter returns an internal `TokenOutputs` with inline private spans,
+not a heap-allocated PImpl. Token IDs and optional timing are separate collections;
+`GetTimestamps()` returns null when timing is absent. The spans borrow their
+producer's storage and must remain valid for `Process()`. Native timing uses
+`AcousticFrameInterval` and `std::optional`, not the public C interval layout or an
+integer presence flag. Public C declarations and result handles are unchanged.
+
+### Batch and Offline Input
+
+The internal stream accepts only token/timing values, a tokenizer, and processing
+configuration. It has no Generator, model-State, audio-chunk, or arrival-time
+dependency. It can process one token, a batch, or all tokens from an offline
+producer, followed by `Finalize()` to flush trailing records. Batch and incremental
+processing preserve the same text and timestamps for identical ordered inputs.
+
+This does not add a public offline factory or another producer API. The public
+wrapper remains `TokenPostProcessor(generator)`. A different offline producer
+would need an adapter and must supply timing to obtain timestamps. Stateful
+grouping does not imply an online-only input source.
 
 Extensions owns vocabulary-specific facts: `is_special`, `starts_word`,
 `ends_word`, and `boundary_style`. Its standalone lookup is independent of decoder
@@ -134,7 +154,7 @@ flowchart TD
   pending --> separator["EndsWithSeparator() for configured suffixes"]
   separator -->|Suffix completes segment| finish["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
   completed --> release["After all completed words:<br/>TokenWordGroupingState::FirstPendingTokenIndex()<br/>Release intervals before that watermark"]
-  release --> returned["Return to TokenPostProcessor with result populated"]
+  release --> returned["Return to TokenPostProcessingStream with result populated"]
 ```
 
 The grouper buffers incomplete words, whitespace, and UTF-8 output. It may
@@ -148,7 +168,8 @@ After the last generation step, flush pending work without decoding a token:
 
 ```mermaid
 flowchart TD
-  finalize["TokenPostProcessor::Finalize()<br/>Clear previous results; create final result"] --> state["MetadataCoreState::ProcessFinalized()"]
+  finalize["TokenPostProcessor::Finalize()"] --> stream["TokenPostProcessingStream::Finalize()<br/>Clear previous results; create final result"]
+  stream --> state["MetadataCoreState::ProcessFinalized()"]
   state --> enabled["TimestampsEnabled()"]
   enabled --> group["TokenWordGroupingState::Finalize()<br/>Append() pending delimiter; CompleteWord()"]
   group --> words["MetadataCoreState::ProcessCompletedWords()<br/>Same alignment/publication path as above"]
@@ -163,6 +184,13 @@ timestamps require a model that produces acoustic intervals, currently
 `nemotron_speech`, with positive `sample_rate`, `hop_length`, and
 `subsampling_factor`. Being an ASR model alone is not sufficient. Missing or
 invalid intervals fail before decoding the affected token.
+
+The generator-facing setup reads these existing model fields once and derives
+`seconds_per_frame` and the rounded segment-gap frame threshold. The internal
+stream receives that optional timebase separately from word/segment output
+settings. Neither it nor `MetadataCoreState` stores another set of sample rate,
+hop length, and subsampling factor values. Missing or non-positive/non-finite
+timebases are rejected when timestamps are enabled.
 
 `segment_separators` defaults to `.`, `?`, and `!`. The optional
 `segment_gap_threshold_seconds` is non-negative or `null`; it is rounded to the
@@ -189,7 +217,7 @@ must be externally serialized. Independent processors have independent state.
 
 `MetadataCoreState` populates the processor's canonical results directly. There
 is no intermediate metadata output or conversion to a second result model. The
-processor owns one immutable configuration; metadata state reads that same object.
+internal stream owns one immutable configuration; metadata state reads that same object.
 
 Python uses `TokenPostProcessor(generator)`, `process_next_tokens()`,
 `get_next_token_results()`, `finalize()`, and `reset()`. Borrowed

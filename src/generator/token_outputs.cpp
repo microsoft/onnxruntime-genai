@@ -1,31 +1,18 @@
 #include "token_outputs.h"
 
-#include <optional>
-
 namespace Generators {
 
-struct TokenOutputs::Impl {
-  std::span<const int32_t> tokens;
-  std::optional<std::span<const OgaTokenMetadataAcousticFrameInterval>> timestamps;
-};
-
-TokenOutputs::TokenOutputs(std::span<const int32_t> tokens)
-    : impl_{std::make_unique<Impl>(Impl{tokens, std::nullopt})} {}
-
-TokenOutputs::~TokenOutputs() = default;
-TokenOutputs::TokenOutputs(TokenOutputs&&) noexcept = default;
+TokenOutputs::TokenOutputs(std::span<const int32_t> tokens,
+                           std::optional<std::span<const AcousticFrameInterval>> timestamps)
+    : tokens_{tokens}, timestamps_{timestamps} {}
 
 std::span<const int32_t> TokenOutputs::GetTokens() const {
-  return impl_->tokens;
+  return tokens_;
 }
 
-const std::span<const OgaTokenMetadataAcousticFrameInterval>* TokenOutputs::GetTimestamps() const {
-  if (!impl_->timestamps) return nullptr;
-  return &*impl_->timestamps;
-}
-
-void TokenOutputs::SetTimestamps(std::span<const OgaTokenMetadataAcousticFrameInterval> intervals) {
-  impl_->timestamps = intervals;
+const std::span<const AcousticFrameInterval>* TokenOutputs::GetTimestamps() const {
+  if (!timestamps_) return nullptr;
+  return &*timestamps_;
 }
 
 }  // namespace Generators

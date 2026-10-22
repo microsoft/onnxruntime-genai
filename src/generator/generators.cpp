@@ -977,14 +977,14 @@ void Generator::GenerateNextToken() {
 
 TokenOutputs Generator::GetTokenOutputs() const {
   if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
-    TokenOutputs outputs{transducer->GetStepTokens()};
+    const auto tokens = transducer->GetStepTokens();
     if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off) {
       const auto intervals = transducer->GetStepTokenIntervals();
-      if (intervals.size() != outputs.GetTokens().size())
+      if (intervals.size() != tokens.size())
         throw std::runtime_error("Generator timing count does not match emitted tokens");
-      outputs.SetTimestamps(intervals);
+      return TokenOutputs{tokens, intervals};
     }
-    return outputs;
+    return TokenOutputs{tokens};
   }
   return TokenOutputs{search_->GetNextTokens().CopyDeviceToCpu()};
 }
