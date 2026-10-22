@@ -363,16 +363,16 @@ python builder.py -m model_name -o path_to_output_folder -p precision -e executi
 
 #### Export Qwen3.5/Qwen3.6 VLM Components
 
-Set `qwen_vlm=true` to export a full Qwen3.5/Qwen3.6 VLM package from one builder invocation. The option exports the text decoder plus `embedding.onnx`, `vision.onnx`, and `processor_config.json`, and patches `genai_config.json` for multimodal loading. The default is `false`.
+Set `exclude_embeds=true` to export a full Qwen3.5/Qwen3.6 VLM package from one builder invocation. The Qwen model builder exports the text decoder plus `embedding.onnx`, `vision.onnx`, and `processor_config.json`, and generates a multimodal `genai_config.json`. With the default `exclude_embeds=false`, it exports a standalone text model.
 
-This option supports Hugging Face configs whose architecture is `Qwen3_5ForConditionalGeneration` or `Qwen3_5MoeForConditionalGeneration` and uses the selected execution provider for the decoder. It requires the decoder to consume `inputs_embeds`; the builder sets `exclude_embeds=true` automatically unless `exclude_embeds=false` is explicitly provided, which raises a `ValueError`.
+This applies to Hugging Face configs whose architecture is `Qwen3_5ForConditionalGeneration` or `Qwen3_5MoeForConditionalGeneration`. The same embedding and vision graph builders are used for every execution provider; only provider-specific runtime options differ. A Transformers release with the Qwen3.5 config classes is required.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m Qwen/Qwen3.5-0.8B -o qwen35_08b_qdq -p int4 -e NvTensorRtRtx -c hf_cache_qwen35 --extra_options qwen_vlm=true filename=text.onnx hf_token=false quant_mode=int4 int4_accuracy_level=4 int4_block_size=32 use_qdq=true
+python -m onnxruntime_genai.models.builder -m Qwen/Qwen3.5-0.8B -o qwen35_08b_qdq -p int4 -e NvTensorRtRtx -c hf_cache_qwen35 --extra_options exclude_embeds=true filename=text.onnx hf_token=false quant_mode=int4 int4_accuracy_level=4 int4_block_size=32 use_qdq=true
 
 # From source:
-python builder.py -m Qwen/Qwen3.5-0.8B -o qwen35_08b_qdq -p int4 -e NvTensorRtRtx -c hf_cache_qwen35 --extra_options qwen_vlm=true filename=text.onnx hf_token=false quant_mode=int4 int4_accuracy_level=4 int4_block_size=32 use_qdq=true
+python builder.py -m Qwen/Qwen3.5-0.8B -o qwen35_08b_cuda -p int4 -e cuda -c hf_cache_qwen35 --extra_options exclude_embeds=true filename=text.onnx use_qdq=true
 ```
 
 #### Exclude Embedding Layer

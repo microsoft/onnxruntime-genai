@@ -2288,7 +2288,7 @@ class Model:
 
         node_name = name.replace("constants", "constant_nodes")
         self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=tensor)
-        self.make_value(name, onnx_dtype, shape=[])
+        self.make_value(name, onnx_dtype, shape=tensor.shape)
 
     def make_gather(self, name, inputs, dtype, shape, axis):
         output = f"{name}/output_0"
