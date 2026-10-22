@@ -10,7 +10,6 @@
 #include <functional>
 #include <fstream>
 #include <mutex>
-#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -94,24 +93,33 @@ State::State(const GeneratorParams& params, const Model& model, DeviceInterface*
       p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
-  // Generate a random id for graph capture of the default (1-token) decode shape.
+  // Reserve the default (1-token) decode capture identity.
   if (params_->use_graph_capture) {
     GraphIdForLength(1, 0);
   }
 }
 
-const std::string& State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
-  const int graph_key = graph_capture_length * 2 + graph_capture_variant;
-  auto it = graph_ids_.find(graph_key);
-  if (it != graph_ids_.end()) {
-    return it->second.text;
+int State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
+  // Activation is additive: each successful SetActiveAdapter appends one name.
+  // Replaying an older adapter set would bypass the new inputs and kernel selection.
+  const auto known_ids = graph_ids_.size();
+  const int id = graph_ids_.Id({static_cast<size_t>(graph_capture_length), static_cast<size_t>(graph_capture_variant),
+                                adapter_names_.size()});
+  if (g_log.enabled && g_log.graph_capture) {
+    if (graph_ids_.size() != known_ids) {
+      Log("graph_capture") << "State graph id=" << id << " length=" << graph_capture_length
+                           << " variant=" << graph_capture_variant << " adapters=" << adapter_names_.size() << std::endl;
+    } else if (id < 0 && !graph_capture_fallback_logged_) {
+      Log("graph_capture") << "State graph capture fallback: "
+                           << (graph_ids_.size() >= GraphAnnotationIds::kMaxCapturedShapes
+                                   ? "capture budget exhausted"
+                                   : "annotation IDs exhausted")
+                           << "; running new keys without capture (" << graph_ids_.size() << "/"
+                           << GraphAnnotationIds::kMaxCapturedShapes << " keys assigned)" << std::endl;
+      graph_capture_fallback_logged_ = true;
+    }
   }
-  // Distinct random annotation id per captured length (ORT captures one graph per id).
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<> dis(1, INT_MAX);
-  const int id_value = dis(gen);
-  return graph_ids_.emplace(graph_key, GraphId{id_value, std::to_string(id_value)}).first->second.text;
+  return id;
 }
 
 void State::DumpInputs() {
@@ -143,7 +151,8 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
     if (graph_capture_this_run) {
-      run_options_->AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
+      run_options_->AddConfigEntry("gpu_graph_id",
+                                   std::to_string(GraphIdForLength(graph_capture_length, graph_capture_variant)).c_str());
     } else {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
@@ -278,13 +287,8 @@ State::~State() {
   // would call std::terminate.
 #if ORT_API_VERSION >= 27
   if (graph_capture_session_) {
-    // Speculative decoding (MTP) may capture more than one input length, each with its
-    // own annotation id, so release every id that was handed out.
-    for (const auto& length_and_id : graph_ids_) {
-      const int id_value = length_and_id.second.value;
-      if (id_value <= 0) {
-        continue;
-      }
+    // Include captures from earlier adapter sets, as well as all input lengths.
+    graph_ids_.ForEachAssignedId([&](int id_value) {
       try {
         graph_capture_session_->ReleaseCapturedGraph(id_value);
       } catch (...) {
@@ -294,7 +298,7 @@ State::~State() {
                          << ") failed: unknown exception" << std::endl;
         }
       }
-    }
+    });
   }
 #endif
 

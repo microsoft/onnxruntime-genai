@@ -1233,6 +1233,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const
 
 /**
  * \brief Sets the adapter with the given adapter name as active for the given OgaGenerator object.
+ * Activations are additive. With graph capture, each active adapter set uses its own capture identity.
+ * Activating an adapter does not recompute an existing KV cache; rewind to zero and append the prompt
+ * again if the adapter should also apply to the earlier tokens.
  * \param[in] generator The OgaGenerator object to set the active adapter.
  * \param[in] adapters The OgaAdapters object that manages the model adapters.
  * \param[in] adapter_name The name of the adapter to set as active.
