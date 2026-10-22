@@ -43,7 +43,12 @@ DeviceSpan<float> LFM2_State::Run(int total_length, DeviceSpan<int32_t>& next_to
 }
 
 void LFM2_State::RewindTo(size_t index) {
-  throw std::runtime_error("LFM2 does not support RewindTo. Conv state requires replaying all prior tokens.");
+  position_inputs_->RewindTo(index);
+  cache_->RewindTo(index);
+}
+
+bool LFM2_State::CanRewindTo(size_t index) const {
+  return position_inputs_->CanRewindTo(index) && cache_->CanRewindTo(index);
 }
 
 void LFM2_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {

@@ -67,8 +67,12 @@ void CombinedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_l
   is_first_update_ = false;
 }
 
+bool CombinedKeyValueCache::CanRewindTo(size_t index) const {
+  return static_cast<int64_t>(index) <= shape_[3];
+}
+
 void CombinedKeyValueCache::RewindTo(size_t index) {
-  if (shape_[3] <= static_cast<int>(index)) {
+  if (!CanRewindTo(index)) {
     throw std::runtime_error("Requested length of rewind is greater than the current length.");
   }
 

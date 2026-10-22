@@ -15,6 +15,7 @@ struct WindowedPositionInputs : PositionInputs {
   void RewindTo(size_t index) override {
     throw std::runtime_error("WindowedPositionInputs does not support RewindTo.");
   };
+  bool CanRewindTo(size_t index) const override { (void)index; return false; }
 
  private:
   State& state_;

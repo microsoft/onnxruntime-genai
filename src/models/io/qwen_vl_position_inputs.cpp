@@ -437,8 +437,11 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
 void Qwen2VLPositionInputs::RewindTo(size_t index) {
   // For Qwen2-VL, we need to handle rewinding for beam search
   // This is a simplified rewind, just updating the shape.
-  // A full rewind would require re-calculating rope_deltas if we rewound into the prompt.
-  // For now, we assume rewind only happens during generation.
+  if (index == 0) {
+    // Force fresh mRoPE recompute instead of stale rope_deltas_.
+    is_first_update_ = true;
+    rope_deltas_.clear();
+  }
   if (has_posid_input_) {
     position_ids_shape_[2] = static_cast<int64_t>(index);
   }

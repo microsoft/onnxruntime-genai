@@ -99,7 +99,7 @@ void ExpectLayerTypesValidationMessage(const std::string& message, size_t actual
 }
 
 // LFM2 variants that the exporter labels with their own model type still have to run through the
-// LFM2 runtime: the same conv state cache, and no rewind.
+// LFM2 runtime: the same conv state cache, rewindable only to zero.
 void ExpectLfm2Runtime(const std::string& model_type, const std::string& temp_suffix) {
   const auto src_dir = GetLfm2ModelPath();
   const auto model_dir = MakeTempDir(temp_suffix);
@@ -114,21 +114,32 @@ void ExpectLfm2Runtime(const std::string& model_type, const std::string& temp_su
   auto generator = OgaGenerator::Create(*model, *params);
 
   const std::vector<int32_t> input_ids{0, 0, 195, 731};
+  constexpr int kSteps = 2;
   generator->AppendTokens(input_ids.data(), input_ids.size());
-  generator->GenerateNextToken();
+  for (int i = 0; i < kSteps; ++i) generator->GenerateNextToken();
   const size_t sequence_length = generator->GetSequenceCount(0);
-  EXPECT_GT(sequence_length, input_ids.size());
+  ASSERT_GT(sequence_length, input_ids.size() + 1);
+  const std::vector<int32_t> expected(generator->GetSequenceData(0), generator->GetSequenceData(0) + sequence_length);
 
-  // Conv state cannot be rewound, exactly like the dense LFM2 models. The generator's up-front guard
-  // has to reject it; a throw from deeper in the state would come after the sequence was rewound.
+  // Conv state cannot be cropped. The generator's up-front guard has to reject a partial rewind;
+  // a throw from deeper in the state would come after the sequence was rewound.
   std::string message;
   try {
-    generator->RewindTo(0);
+    generator->RewindTo(input_ids.size() + 1);
   } catch (const std::runtime_error& e) {
     message = e.what();
   }
-  EXPECT_NE(message.find("RewindTo is currently not supported for " + model_type), std::string::npos) << message;
+  EXPECT_NE(message.find("RewindTo is only supported with new_length=0 for " + model_type), std::string::npos) << message;
   EXPECT_EQ(generator->GetSequenceCount(0), sequence_length);
+
+  // A full rewind resets the conv state and must replay the original generation exactly.
+  generator->RewindTo(0);
+  EXPECT_EQ(generator->GetSequenceCount(0), 0u);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  for (int i = 0; i < kSteps; ++i) generator->GenerateNextToken();
+  ASSERT_EQ(generator->GetSequenceCount(0), sequence_length);
+  const std::vector<int32_t> replayed(generator->GetSequenceData(0), generator->GetSequenceData(0) + sequence_length);
+  EXPECT_EQ(replayed, expected);
 }
 
 }  // namespace

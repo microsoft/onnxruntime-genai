@@ -32,6 +32,8 @@ struct KeyValueCache {
   virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) = 0;
 
   virtual void RewindTo(size_t index) = 0;
+  // Must be exact: Generator::RewindToLength mutates search and position state after this passes.
+  virtual bool CanRewindTo(size_t index) const = 0;
 
   // Note: PartialUpdate() is mainly for supporting DecoderOnlyPipelineState usage where we update
   // part of the KV cache after running part of the pipeline.
