@@ -25,6 +25,27 @@ OrtValue* FindExtraInput(const std::vector<ExtraInput>& extra_inputs, std::strin
   return nullptr;
 }
 
+void MergeAllImageFeatures(OrtValue& inputs_embeds,
+                           const OrtValue& image_features,
+                           std::span<const int64_t> image_token_rows) {
+  const auto info = image_features.GetTensorTypeAndShapeInfo();
+  const auto shape = info->GetShape();
+  if (shape.empty() || shape.back() <= 0) {
+    throw std::runtime_error("OpenVINO vision merger: image features must have a positive hidden dimension");
+  }
+  const size_t hidden_dim = static_cast<size_t>(shape.back());
+  const size_t element_count = info->GetElementCount();
+  if (element_count % hidden_dim != 0) {
+    throw std::runtime_error("OpenVINO vision merger: image feature element count is not divisible by hidden dimension");
+  }
+  const size_t feature_rows = element_count / hidden_dim;
+  if (image_token_rows.size() != feature_rows) {
+    throw std::runtime_error("OpenVINO vision merger: image token count " + std::to_string(image_token_rows.size()) +
+                             " does not match image feature row count " + std::to_string(feature_rows));
+  }
+  MergeImageFeaturesIntoEmbeddings(inputs_embeds, image_features, image_token_rows);
+}
+
 // Wraps a caller-owned buffer as a CPU tensor (a view; the buffer must outlive the tensor).
 template <typename T>
 std::unique_ptr<OrtValue> WrapCpuTensor(std::vector<T>& data, std::span<const int64_t> shape) {
@@ -51,7 +72,7 @@ void Gemma3OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra_
   image_features_.reset();
   token_type_ids_.clear();
 
-  OrtValue* pixel_values = FindExtraInput(extra_inputs, Config::Defaults::PixelValuesName);
+  OrtValue* pixel_values = FindExtraInput(extra_inputs, model_.config_->model.vision.inputs.pixel_values);
   if (!pixel_values || !model_.ov_vision_session_) return;  // text-only prompt
 
   // Ensure pixel_values are float32 for the vision graph.
@@ -69,7 +90,11 @@ void Gemma3OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra_
   const char* output_names[] = {image_features_name.c_str()};
 
   auto outputs = model_.ov_vision_session_->Run(nullptr, input_names, input_values, 1, output_names, 1);
-  image_features_ = std::move(outputs[0]);
+  if (outputs[0]->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    Cast(*outputs[0], image_features_, *model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  } else {
+    image_features_ = std::move(outputs[0]);
+  }
 
   // Cache token_type_ids (int32) so Merge can locate the image rows after the text embedding runs.
   if (OrtValue* token_type_ids = FindExtraInput(extra_inputs, Config::Defaults::TokenTypeIdsName)) {
@@ -79,8 +104,15 @@ void Gemma3OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra_
   }
 }
 
-void Gemma3OpenVINOVisionMerger::Merge(OrtValue& inputs_embeds, const OrtValue& /*input_ids*/) {
+void Gemma3OpenVINOVisionMerger::Merge(OrtValue& inputs_embeds, const OrtValue& input_ids) {
   if (!image_features_) return;  // text-only prompt
+
+  const size_t prompt_tokens = input_ids.GetTensorTypeAndShapeInfo()->GetElementCount();
+  if (token_type_ids_.size() != prompt_tokens) {
+    throw std::runtime_error("Gemma3 OpenVINO vision merger: token_type_ids has " +
+                             std::to_string(token_type_ids_.size()) + " values but the prompt has " +
+                             std::to_string(prompt_tokens) + " tokens");
+  }
 
   // Gemma marks image placeholder tokens with token_type_ids == 1.
   std::vector<int64_t> image_token_rows;
@@ -89,7 +121,7 @@ void Gemma3OpenVINOVisionMerger::Merge(OrtValue& inputs_embeds, const OrtValue& 
     if (token_type_ids_[i] == 1) image_token_rows.push_back(static_cast<int64_t>(i));
   }
 
-  MergeImageFeaturesIntoEmbeddings(inputs_embeds, *image_features_, image_token_rows);
+  MergeAllImageFeatures(inputs_embeds, *image_features_, image_token_rows);
 }
 
 // ----------------------------------------------------------------------------
@@ -258,7 +290,7 @@ struct Qwen3_5OpenVINOVisionMerger : OpenVINOVisionMerger {
   std::string merger_hidden_input_, merger_mask_input_, merger_rope_input_, merger_output_;
 
   int64_t spatial_merge_size_{2};
-  int64_t rotary_dim_{};        // read from the merger's rotary_pos_emb input width
+  int64_t rotary_dim_{};           // read from the merger's rotary_pos_emb input width
   int64_t num_grid_per_side_{48};  // sqrt(num_position_embeddings): 2304 -> 48 for qwen3_5
 
   std::unique_ptr<OrtValue> image_features_;  // produced for the current prompt (null when no image)
@@ -335,10 +367,14 @@ void Qwen3_5OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra
     if (count < 3) throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw has fewer than 3 values.");
     if (info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
       const int64_t* g = grid_thw->GetTensorData<int64_t>();
-      t = g[count - 3]; h = g[count - 2]; w = g[count - 1];
+      t = g[count - 3];
+      h = g[count - 2];
+      w = g[count - 1];
     } else {
       const int32_t* g = grid_thw->GetTensorData<int32_t>();
-      t = g[count - 3]; h = g[count - 2]; w = g[count - 1];
+      t = g[count - 3];
+      h = g[count - 2];
+      w = g[count - 1];
     }
   }
   const int64_t num_patches = t * h * w;
@@ -408,7 +444,7 @@ void Qwen3_5OpenVINOVisionMerger::Merge(OrtValue& inputs_embeds, const OrtValue&
     }
   }
 
-  MergeImageFeaturesIntoEmbeddings(inputs_embeds, *image_features_, image_token_rows);
+  MergeAllImageFeatures(inputs_embeds, *image_features_, image_token_rows);
 }
 
 }  // namespace
