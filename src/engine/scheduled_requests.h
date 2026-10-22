@@ -105,6 +105,7 @@ struct ScheduledRequests {
   std::vector<DeviceSpan<float>> ProcessLogits();
 
   void GenerateNextTokens(std::vector<RequestStepResult>& results);
+  void StageExecutorTokens(size_t row, std::span<const int32_t> tokens);
   void ScheduleGuidanceMasks() noexcept;
   void BeginTransaction();
   void GenerateNextTokensForTransaction(
@@ -136,6 +137,7 @@ struct ScheduledRequests {
       std::vector<int32_t>& greedy_tokens);
 
   std::vector<std::shared_ptr<Request>> requests_;
+  std::vector<std::vector<int32_t>> executor_tokens_;
   // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty
   // outside a dynamic step plan.
   std::vector<size_t> draft_token_counts_;

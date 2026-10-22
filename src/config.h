@@ -703,6 +703,8 @@ struct Config {
       int head_s1_graph_id{61};
       int head_s2_graph_id{63};
       bool warmup{true};
+      int prefill_chunk_tokens{2048};
+      int suffix_lookup{0};
       struct Mtp {
         bool enabled{true};
         bool prefill_head{true};
@@ -720,6 +722,7 @@ struct Config {
       } fold;
       struct Prefill {
         bool enabled{false};
+        bool unified{false};
         int chunk{8192};
         std::string weights_pool;
         std::string constants;

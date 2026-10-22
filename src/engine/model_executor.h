@@ -54,6 +54,11 @@ struct ModelExecutor {
 
   virtual bool SupportsDraftVerification() const { return false; }
 
+  virtual bool SelectsOwnTokens() const { return false; }
+  virtual void ValidateTurn(const EffectiveTurnPolicy&, const TurnOptions&) const {}
+  virtual void AddSpeculativeStats(SpeculativeStats&) const {}
+  virtual void OnStepCommitted(const ScheduledRequests&, std::span<const RequestStepResult>) {}
+
   virtual ~ModelExecutor() = default;
 };
 

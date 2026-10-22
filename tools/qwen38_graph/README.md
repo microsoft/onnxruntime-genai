@@ -4,6 +4,58 @@ The `qwen38_flash_graph` model type exposes fixed-shape CUDA graph execution
 through the normal Model, Tokenizer, and Generator interfaces. It supports
 greedy MTP(1), folded decode, dense chunked prefill, and shared device weights.
 
+## DFlash2 device pipeline
+
+This incremental integration also supports a three-token DFlash2 drafter with
+four-row folded verification, through both Generator and the native Engine.
+It requires the companion ORT feature branches and a compatible four-row target
+package; it is not independently usable with an upstream-main ORT build.
+
+The drafter and target share a CUDA stream. Persistent pinned staging and GPU
+lattice selection remove per-round allocations and host lattice readback.
+Unused MTP sessions are omitted for DFlash-only packages, prompt hidden storage
+is sized to the configured prefill chunk, and prompt argmax stays on device
+until full logits are requested. Generator preserves logits for each buffered
+emission before scheduling the next verifier pass.
+
+Export the drafter using a local checkpoint and a compatible target graph:
+
+```bash
+python export_dflash2.py --checkpoint /models/dflash2-checkpoint \
+  --target /models/target/target.onnx --output /models/drafter-fp8 \
+  --precision fp8 --drafts 3
+```
+
+The exporter uses BF16 activations, page size 128, and the target's exact
+embedding and FP8 head. `--precision bf16` disables body-weight FP8
+quantization; it does not replace the target head. The output directory must
+not already exist. This exports the drafter, not the target, auxiliary feature
+capture graphs, shared-weight pool, or complete runtime configuration.
+Supply a package configured with `model.dflash2` and four-row folded graphs.
+`model.qwen38_graph.prefill_chunk_tokens` defaults to 8192.
+`model.qwen38_graph.prefill.unified` is optional and requires prefill enabled.
+
+For the qualified H200 workload, set these before loading the model:
+
+```bash
+export ORT_DSA_INT8_GROUPED_MAX_ROWS=4
+export ORT_QMOE_INT2_DECODE_MAX_EXPANDED_ROWS=40
+export ORT_HC_DECODE_ROWS=1
+export ORT_INT2_S4_FUSED_FINALIZE=1
+```
+
+When using a custom ORT build from Python, set `ORT_LIB_PATH` to its shared
+library; explicit selection takes precedence over the installed Python ORT
+package. Invalid explicit paths fail rather than silently selecting another
+runtime. Rebuild the package's data-plane library with this runtime.
+
+The combined experimental stack reached 334-342 decode tokens/s on H200 at
+2K-32K contexts. These are combined-stack results, not individual-kernel
+ablations or measurements of this rebased branch. Paired HumanEval runs scored
+154/164 with exact DFlash/control output parity. A five-problem LiveCodeBench
+smoke scored 2/5 versus historical MTP 3/5, including a capacity-limited
+regression; this is an integration candidate, not an accuracy-qualified default.
+
 ## Build and dependencies
 
 Build GenAI with CUDA enabled on Linux and build the `qwen38_plane` target.
@@ -24,7 +76,7 @@ fixed-shape graphs; this runtime is not a standalone model exporter.
 ## API and limits
 
 Use the regular Generator lifecycle with greedy search. An accepted draft
-produces two tokens internally; the API returns one per call.
+produces up to four tokens internally; the API returns one per call.
 
 - Linux CUDA, batch size one, greedy decoding only.
 - One active generator per model.

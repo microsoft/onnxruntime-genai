@@ -92,6 +92,9 @@ struct CacheManager {
 
   virtual size_t MaxBatchSize() const { return 4; }
 
+  virtual size_t MaxStaticBatchSize() const { return 0; }
+  virtual size_t MaxStaticRequestLength() const { return 0; }
+
   virtual std::vector<std::shared_ptr<Request>> AllocatedRequests() const = 0;
 
   virtual bool IsResident(const std::shared_ptr<Request>& request) const = 0;

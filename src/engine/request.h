@@ -306,6 +306,7 @@ struct Request : std::enable_shared_from_this<Request>,
    * scheduled request's token selection before it synchronizes with the device once.
    */
   void GenerateNextTokens(DeviceSpan<float> logits, bool guidance_applied = false);
+  RequestStepResult CommitExternalTokens(std::span<const int32_t> tokens);
 
   /**
    * @brief Proposes speculative draft tokens for this request's next step.

@@ -724,9 +724,22 @@ Tensor& Dflash2Drafter::StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterfac
   Tensor& tensor = Dflash2StepTensor(slot, device, type, shape, &reallocated, &displaced);
   if (reallocated) {
     ReleaseCapturedGraphs();
+    if (displaced) {
+      model_->p_device_->Synchronize();
+      staging_.erase(displaced.get());
+    }
     ++buffer_generation_;
   }
   return tensor;
+}
+
+DeviceSpan<uint8_t> Dflash2Drafter::Staging(Tensor& tensor) {
+  auto [it, inserted] = staging_.try_emplace(&tensor);
+  if (inserted) {
+    it->second = tensor.p_device_->WrapMemory(
+        std::span<uint8_t>{static_cast<uint8_t*>(tensor.GetMutableRawData()), tensor.bytes_});
+  }
+  return it->second.subspan(0, tensor.GetElementCount() * Ort::SizeOf(tensor.type_));
 }
 
 void Dflash2Drafter::ReleaseCapturedGraphs() noexcept {
@@ -959,7 +972,12 @@ void Dflash2Drafter::ReleaseAll() {
 bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                              std::vector<std::vector<int32_t>>& drafts,
                              std::vector<std::vector<TargetTokenSelection>>* draft_distributions,
-                             std::vector<Dflash2Lattice>* lattices) {
+                             std::vector<Dflash2Lattice>* lattices,
+                             bool device_selection) {
+  if (device_selection && (feeds.size() != 1 || draft_distributions || lattices ||
+                           feeds[0].wants_independent_sampling)) {
+    throw std::runtime_error("DFlash device selection requires a single greedy feed");
+  }
   drafts.assign(feeds.size(), {});
   if (draft_distributions) {
     draft_distributions->assign(feeds.size(), {});
@@ -1137,9 +1155,9 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   const size_t block_table_columns =
       graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
                      : max_blocks;
-  auto fill_int32 = [](Tensor& tensor, const std::vector<int32_t>& values) {
-    auto span = tensor.GetDeviceSpan<int32_t>();
-    std::copy(values.begin(), values.end(), span.CpuSpan().begin());
+  auto fill_int32 = [this](Tensor& tensor, const std::vector<int32_t>& values) {
+    auto span = Staging(tensor);
+    std::memcpy(span.CpuSpan().data(), values.data(), values.size() * sizeof(int32_t));
     span.CopyCpuToDevice();
   };
 
@@ -1169,8 +1187,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                              {static_cast<int64_t>(num_block_rows), model_->cpu_embedding_->hidden_size_});
   }
   {
-    auto span = input_ids.GetDeviceSpan<int64_t>();
-    auto cpu = span.CpuSpan();
+    auto span = Staging(input_ids);
+    auto cpu = std::span<int64_t>{reinterpret_cast<int64_t*>(span.CpuSpan().data()), input_ids.GetElementCount()};
     for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
       const auto& feed = feeds[block_feed_indices[slot]];
       cpu[slot * block_size] = feed.wants_drafts ? feed.anchor_token : config_.mask_token_id;
@@ -1206,8 +1224,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       step_tensors_.block_table, device, int32_type,
       {static_cast<int64_t>(served.size()), static_cast<int64_t>(block_table_columns)});
   {
-    auto span = block_table.GetDeviceSpan<int32_t>();
-    auto cpu = span.CpuSpan();
+    auto span = Staging(block_table);
+    auto cpu = std::span<int32_t>{reinterpret_cast<int32_t*>(span.CpuSpan().data()), block_table.GetElementCount()};
     for (size_t row = 0; row < served.size(); ++row) {
       const auto& blocks = requests_[feeds[served[row]].request].blocks;
       auto columns = cpu.subspan(row * block_table_columns, block_table_columns);
@@ -1256,7 +1274,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     // A replayed step that proposes drafts reads its outputs back below with a synchronizing copy,
     // so the run itself need not wait for the device; the copy also drains the uploads from the
     // step tensors' host mirrors before the next step rewrites them.
-    const bool async_run = capture && drafts_wanted && device->GetType() == DeviceType::CUDA;
+    const bool async_run = device_selection ||
+                           (capture && drafts_wanted && device->GetType() == DeviceType::CUDA);
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", async_run ? "1" : "0");
   }
 
@@ -1309,6 +1328,9 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     outputs.push_back(caches_[i]->GetOrtTensor());
   }
 
+  if (device_selection) {
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
+  }
   model_->session_->Run(run_options_.get(), input_names.data(), inputs.data(), input_names.size(),
                         output_names.data(), outputs.data(), output_names.size());
 
@@ -1318,15 +1340,17 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
   }
 
-  if (!drafts_wanted) {
+  if (!drafts_wanted || device_selection) {
     return true;
   }
 
   // The spans own the host mirrors these point into, so they must outlive the reads below.
-  auto candidate_span = candidate_ids.GetDeviceSpan<int32_t>();
-  auto scores_span = scores.GetDeviceSpan<float>();
-  auto candidate_cpu = candidate_span.CopyDeviceToCpu();
-  auto scores_cpu = scores_span.CopyDeviceToCpu();
+  auto candidate_span = Staging(candidate_ids);
+  auto scores_span = Staging(scores);
+  auto candidate_cpu = std::span<const int32_t>{
+      reinterpret_cast<const int32_t*>(candidate_span.CopyDeviceToCpu().data()), candidate_ids.GetElementCount()};
+  auto scores_cpu = std::span<const float>{
+      reinterpret_cast<const float*>(scores_span.CopyDeviceToCpu().data()), scores.GetElementCount()};
   for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
     const size_t feed_index = block_feed_indices[slot];
     if (feeds[feed_index].wants_independent_sampling && draft_distributions) {

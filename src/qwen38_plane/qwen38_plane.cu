@@ -401,7 +401,23 @@ __global__ void k_transpose_f32(const float* src, float* dst, int n) {
   }
 }
 
+__global__ void k_embed_rows(const uint16_t* table, const i64* ids, uint16_t* output, int rows, int width, int vocab) {
+  const int row = blockIdx.x;
+  if (row >= rows) return;
+  const i64 id = ids[row];
+  for (int col = threadIdx.x; col < width; col += blockDim.x)
+    output[static_cast<size_t>(row) * width + col] =
+        id >= 0 && id < vocab ? table[static_cast<size_t>(id) * width + col] : 0;
+}
+
 extern "C" {
+
+void qg_embed_rows(cudaStream_t stream, const void* table, const void* ids, void* output,
+                   int rows, int width, int vocab) {
+  if (rows > 0 && width > 0 && vocab > 0)
+    k_embed_rows<<<rows, 256, 0, stream>>>(static_cast<const uint16_t*>(table), static_cast<const i64*>(ids),
+                                        static_cast<uint16_t*>(output), rows, width, vocab);
+}
 int mtp_sizeof_params() { return (int)sizeof(PleParams); }
 
 void mtp_prep(cudaStream_t s, const PleParams* P, const i64* tok_ptr, const i64* pos_ptr, int pos_add,
@@ -470,6 +486,9 @@ int qg_free(void* p) { return (int)cudaFree(p); }
 int qg_host_alloc(void** p, size_t bytes) { return (int)cudaHostAlloc(p, bytes, cudaHostAllocPortable); }
 int qg_host_free(void* p) { return (int)cudaFreeHost(p); }
 int qg_host_register(void* p, size_t bytes, unsigned flags) { return (int)cudaHostRegister(p, bytes, flags); }
+int qg_host_get_device_pointer(void** device, void* host, unsigned flags) {
+  return static_cast<int>(cudaHostGetDevicePointer(device, host, flags));
+}
 int qg_host_unregister(void* p) { return (int)cudaHostUnregister(p); }
 int qg_memset(void* p, int value, size_t bytes, cudaStream_t s) { return (int)cudaMemsetAsync(p, value, bytes, s); }
 int qg_memcpy_h2d(void* dst, const void* src, size_t bytes, cudaStream_t s) {
@@ -490,4 +509,51 @@ int qg_stream_destroy(void* s) { return (int)cudaStreamDestroy((cudaStream_t)s);
 int qg_stream_sync(cudaStream_t s) { return (int)cudaStreamSynchronize(s); }
 int qg_device_sync() { return (int)cudaDeviceSynchronize(); }
 int qg_mem_info(size_t* free_bytes, size_t* total_bytes) { return (int)cudaMemGetInfo(free_bytes, total_bytes); }
+}
+
+__global__ void DflashSelect(const int32_t* candidates, const float* scores, i64* control,
+                            int drafts, int top_k) {
+  const int slots[] = {2, 8, 9};
+  int previous = 0;
+  for (int step = 0; step < drafts; ++step) {
+    const float* row = scores + (step * top_k + previous) * top_k;
+    int best = 0;
+    for (int index = 1; index < top_k; ++index) {
+      if (row[best] < row[index]) best = index;
+    }
+    control[slots[step]] = candidates[step * top_k + best];
+    previous = best;
+  }
+}
+
+extern "C" int qg_dflash_select(void* stream, const void* candidates, const void* scores,
+                                void* control, int drafts, int top_k) {
+  if (!candidates || !scores || !control || drafts < 1 || drafts > 3 || top_k < 1)
+    return static_cast<int>(cudaErrorInvalidValue);
+  DflashSelect<<<1, 1, 0, static_cast<cudaStream_t>(stream)>>>(
+      static_cast<const int32_t*>(candidates), static_cast<const float*>(scores),
+      static_cast<i64*>(control), drafts, top_k);
+  return static_cast<int>(cudaGetLastError());
+}
+
+__global__ void FinishArgmax(const float* values, const int* indices, int blocks, int32_t* output) {
+  float best = values[0];
+  int index = indices[0];
+  for (int block = 1; block < blocks; ++block) {
+    if (values[block] > best || (values[block] == best && indices[block] < index)) {
+      best = values[block];
+      index = indices[block];
+    }
+  }
+  *output = index;
+}
+
+extern "C" int qg_argmax_finish(void* stream, const void* values, const void* indices,
+                                int blocks, void* output) {
+  if (!values || !indices || !output || blocks < 1)
+    return static_cast<int>(cudaErrorInvalidValue);
+  FinishArgmax<<<1, 1, 0, static_cast<cudaStream_t>(stream)>>>(
+      static_cast<const float*>(values), static_cast<const int*>(indices), blocks,
+      static_cast<int32_t*>(output));
+  return static_cast<int>(cudaGetLastError());
 }
