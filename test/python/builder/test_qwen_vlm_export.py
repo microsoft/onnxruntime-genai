@@ -78,6 +78,31 @@ def test_embedding_matches_placeholder_replacement(tmp_path, monkeypatch, ids):
     np.testing.assert_array_equal(actual, expected)
 
 
+@pytest.mark.parametrize("ep", ["cpu", "cuda", "trt-rtx"])
+@pytest.mark.parametrize("moe", [False, True])
+def test_vision_dimensions_are_set_before_attention_initialization(tmp_path, monkeypatch, ep, moe):
+    config = _config(moe=moe)
+    config.text_config.hidden_size = 24
+    config.text_config.num_attention_heads = 3
+    config.text_config.head_dim = 8
+    original_config = config.to_dict()
+    dimensions = []
+    initialize_attention = qwen_vlm.Model.make_attention_init
+
+    def record_attention_dimensions(self, config):
+        dimensions.append((self.num_attn_heads, self.head_size))
+        return initialize_attention(self, config)
+
+    monkeypatch.setattr(qwen_vlm.Model, "make_attention_init", record_attention_dimensions)
+    builder = Qwen35VisionModel(config, ir.DataType.FLOAT, ir.DataType.FLOAT, ep, str(tmp_path), {})
+
+    expected = (config.vision_config.num_heads, config.vision_config.hidden_size // config.vision_config.num_heads)
+    assert dimensions == [expected]
+    assert (builder.num_attn_heads, builder.head_size) == expected
+    assert builder.attention_attrs["scale"] == pytest.approx(expected[1] ** -0.5)
+    assert config.to_dict() == original_config
+
+
 @pytest.mark.parametrize("grid", [[[1, 4, 6]], [[1, 4, 4], [1, 2, 6]], [[2, 4, 4]]])
 def test_vision_matches_hugging_face_with_dynamic_grids(tmp_path, monkeypatch, grid):
     monkeypatch.setattr(torch.onnx, "export", lambda *args, **kwargs: pytest.fail("PyTorch ONNX export was called"))

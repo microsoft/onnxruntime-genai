@@ -97,11 +97,12 @@ class Qwen35VisionModel(Model):
     """Build the vision encoder with dynamic image grids and no control-flow operators."""
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        config = copy.deepcopy(config)
         self.vision_config = config.vision_config
+        config.num_attention_heads = self.vision_config.num_heads
+        config.head_dim = self.vision_config.hidden_size // config.num_attention_heads
         options = {"filename": "vision.onnx", "hf_token": extra_options.get("hf_token", True)}
-        super().__init__(copy.deepcopy(config), io_dtype, io_dtype, ep, cache_dir, options)
-        self.num_attn_heads = self.vision_config.num_heads
-        self.head_size = self.vision_config.hidden_size // self.num_attn_heads
+        super().__init__(config, io_dtype, io_dtype, ep, cache_dir, options)
         self.attention_attrs["scale"] = self.head_size ** (-0.5)
         self.attention_attrs["unidirectional"] = False
 
