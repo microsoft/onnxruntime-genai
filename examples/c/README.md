@@ -100,6 +100,29 @@ cd build
 ./model_mm -m {path to model folder} -e {execution provider}
 ```
 
+## Streaming ASR with speaker attribution
+
+Build with `-DMODEL_ASR=ON` and run:
+
+```bash
+./model_asr --model_path /path/to/nemotron --audio_file /path/to/audio.wav
+```
+
+Use matching GenAI headers and native binaries from the diarization implementation.
+Configure `diarization.filename` in the model configuration following the
+[streaming diarization guide](../../docs/nemotron_speech_timestamps.md#streaming-diarization).
+The example automatically prints speaker-turn segments when `timestamp_level` is
+`off`, labeled words for `word`, or timestamped speaker turns for `segment`.
+Without diarization, timestamp-only modes remain available and `off` uses plain
+incremental text. `all` is not supported.
+
+All remaining audio chunks are flushed before metadata finalization. Printed
+records include timestamps only when enabled and speaker labels only when
+diarization is enabled. The final summary remains the plain transcript.
+The example uses one generator and one `TokenPostProcessor`; `HasTimestamp()`
+and `GetSpeakerLabel()` read optional fields from opaque borrowed records before
+the next processing mutation.
+
 ## Tool Calling
 
 Please read through [our constrained decoding](https://github.com/microsoft/onnxruntime-genai/blob/main/docs/ConstrainedDecoding.md) options to learn more.

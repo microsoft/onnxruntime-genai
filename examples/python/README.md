@@ -50,6 +50,32 @@ python qwen-3.6-mtp.py -m {path to main model folder} -d {path to MTP head folde
 python d1-decisions.py -m {path to model folder} -r {path to request json}
 ```
 
+## Streaming ASR with speaker attribution
+
+Use a Python package and native binaries built from the corresponding diarization
+implementation branch:
+
+```bash
+python model-asr.py --model_path /path/to/nemotron --audio_file /path/to/audio.wav --execution_provider cpu
+```
+
+Configure `diarization.filename` and optional right-context in the model's
+`genai_config.json` following the
+[streaming diarization guide](../../docs/nemotron_speech_timestamps.md#streaming-diarization).
+No separate diarization CLI flag is needed. With diarization enabled,
+`timestamp_level: off` prints speaker-turn segments without times, `word` prints
+timestamped labeled words, and `segment` prints timestamped speaker turns.
+Without diarization, timestamp-only modes still work and `off` preserves ordinary
+incremental text. `all` is not supported.
+
+Metadata output consists of completed records rather than duplicate text fragments.
+`TokenPostProcessor` owns the tokenizer/stream internally. Its borrowed record
+accessors `has_timestamp()` and `get_speaker_label()` distinguish optional timing
+from attribution; `get_timestamps()` remains non-null for diarization-only output.
+The example drains all remaining audio through `processor.flush()` before one
+metadata finalization. VAD statistics distinguish skipped chunks from initial
+look-ahead buffering. The final summary remains the plain transcript.
+
 ## Execution Providers
 
 The ONNX Runtime GenAI Python package supports the following execution providers (EPs):
