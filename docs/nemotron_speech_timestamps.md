@@ -45,34 +45,27 @@ thresholds are rejected while loading the configuration.
 
 ## Decoding flows
 
-Both paths start with audio processed into features, followed by generated token IDs. Model
-configuration determines whether acoustic timing is produced. `TokenPostProcessor` owns
-decoding and timestamp processing; ordinary tokenizer stream decoding is unchanged.
-`timestamp_level` controls timestamp generation:
+Audio is processed into aligned central chunks and optional diarization right-context.
+One generator drives ASR and, only when configured, diarization inference.
+`TokenPostProcessor` derives from `PostProcessor` and forwards borrowed output views
+to its internal `TokenPostProcessorInternal`, which owns decoding and speech metadata.
+Ordinary tokenizer stream decoding is unchanged.
+
 ```mermaid
 flowchart TB
   audio[Audio chunks] --> processor[StreamingProcessor]
-  processor --> features[Mel features and optional chunk origin]
-  features --> generator[Generator / Nemotron]
-
-  subgraph plain[Without timestamps: timestamp_level = off]
-    ids[GetNextTokens: token IDs] --> decode[TokenizerStream.Decode: incremental text]
-    decode --> transcript[Plain-text transcript]
-  end
-
-  subgraph timed[With timestamps: word or segment]
-    setup[Processor copies model configuration] --> stream
-    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNextTokens]
-    stream --> ortx[Extensions: vocabulary facts + ordinary cached decode]
-    ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
-    align --> events[Per-call word / segment events with frame and second bounds]
-    events --> read[GetNextTokenResults: read only]
-    stream --> final[Finalize: flush trailing word / segment]
-    final --> trailing[Trailing word / segment events]
-  end
-
-  generator --> ids
-  generator --> timed_tokens
+  processor --> features[Shared VAD, aligned features, optional chunk origin]
+  features --> generator[One Generator: ASR and optional diarization]
+  generator --> outputs[Private GetTokenOutputs: IDs, optional frame intervals and speaker evidence]
+  outputs --> stream[TokenPostProcessor.ProcessNextTokens]
+  stream --> internal[TokenPostProcessorInternal.Process]
+  internal --> ortx[Extensions: lexical facts when needed and ordinary cached decode]
+  ortx --> align[GenAI MetadataCoreState: optional word grouping and alignment]
+  align --> speaker[Optional word speaker aggregation and speaker-turn segments]
+  speaker --> events[Canonical per-call text and optional metadata]
+  events --> read[GetNextTokenResults: read only]
+  stream --> final[Finalize: flush trailing word or turn]
+  final --> events
 ```
 
 When timestamps or diarization are enabled, the streaming processor includes a scalar int64
@@ -81,7 +74,7 @@ The origin counts samples in chunks dropped by VAD; `Flush()` pads the final chu
 for feature extraction but advances the origin by only the actual input samples.
 This is a processor-to-generator signal, not an ONNX model input. Pass the complete
 processor result to the generator: omitting or renaming `chunk_start_sample` is an
-error when timestamps are enabled.
+error when timestamps or diarization are enabled.
 For a locally installed Nemotron model outside the test fixtures, set
 `NEMOTRON_STREAMING_MODEL_PATH` when running
 `AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
@@ -92,13 +85,23 @@ the model. The generator supplies *when* each token occurred; Extensions supplie
 vocabulary-derived lexical facts and ordinary decoded text. GenAI groups the words.
 Each processor result also contains the ordinary incremental text fragment. Use it for live text, or collect
 completed word/segment events for stable timestamped output; do not append both to one transcript.
-The plain path needs no metadata state or finalization call.
+When both speech features are off, processor results contain only ordinary text,
+without grouping or metadata accumulation. Text-only applications may alternatively
+use `GetNextTokens()` and `TokenizerStream.Decode()` without a postprocessor.
 
 Internally, GenAI buffers the frame intervals in token order until its word grouper reports
 completed word spans and a pending-token watermark. It uses the first and last token
 intervals of each word, accumulates unfinished segments across calls, and owns the
 completed event text for the lifetime of the returned per-call result. The generator
 pairs tokens and intervals by emission position, not by token ID.
+
+The internal processor accepts ordered token, interval, and optional speaker-evidence
+spans, allowing batch and incremental processing with the same alignment/finalization
+rules. This does not add a public offline producer API. At setup, the generator-facing
+adapter derives `seconds_per_frame` and the rounded segment gap threshold once from
+the model configuration. The internal timestamp code receives those derived values,
+not another copy of sample rate, hop length, and subsampling factor. Native token
+input uses an optional `AcousticFrameInterval`; public results remain opaque handles.
 
 ## Decoding
 

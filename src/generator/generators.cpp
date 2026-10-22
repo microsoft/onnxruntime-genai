@@ -977,21 +977,21 @@ void Generator::GenerateNextToken() {
 
 TokenOutputs Generator::GetTokenOutputs() const {
   if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
-    TokenOutputs outputs{transducer->GetStepTokens()};
+    const auto tokens = transducer->GetStepTokens();
+    std::optional<std::span<const AcousticFrameInterval>> intervals;
+    std::optional<std::span<const TokenSpeakerEvidence>> evidence;
     if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off ||
         model_->config_->model.diarization.Enabled()) {
-      const auto intervals = transducer->GetStepTokenIntervals();
-      if (intervals.size() != outputs.GetTokens().size())
+      intervals = transducer->GetStepTokenIntervals();
+      if (intervals->size() != tokens.size())
         throw std::runtime_error("Generator timing count does not match emitted tokens");
-      outputs.SetTimestamps(intervals);
     }
     if (model_->config_->model.diarization.Enabled()) {
-      const auto evidence = transducer->GetStepSpeakerEvidence();
-      if (evidence.size() != outputs.GetTokens().size())
+      evidence = transducer->GetStepSpeakerEvidence();
+      if (evidence->size() != tokens.size())
         throw std::runtime_error("Generator speaker evidence count does not match emitted tokens");
-      outputs.SetSpeakerEvidence(evidence);
     }
-    return outputs;
+    return TokenOutputs{tokens, intervals, evidence};
   }
   return TokenOutputs{search_->GetNextTokens().CopyDeviceToCpu()};
 }

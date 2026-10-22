@@ -5,32 +5,59 @@
 
 namespace Generators {
 
-TokenPostProcessor::TokenPostProcessor(const Generator& generator)
-    : generator_{generator},
-      config_{{generator.model_->config_->model.timestamp_level, generator.model_->config_->model.segment_separators,
-               generator.model_->config_->model.segment_gap_threshold_seconds, generator.model_->config_->model.sample_rate,
-               generator.model_->config_->model.hop_length, generator.model_->config_->model.subsampling_factor},
-              generator.model_->config_->model.diarization.Enabled()} {
+namespace {
+MetadataCoreConfig GetPostProcessorConfig(const Generator& generator) {
   const auto& model = *generator.model_;
   const auto& search = generator.state_->params_->search;
   if (search.batch_size != 1 || search.num_beams != 1)
     throw std::runtime_error("TokenPostProcessor requires batch_size=1 and num_beams=1");
   ValidateTimestampConfiguration(model.config_->model);
-  tokenizer_ = model.CreateTokenizer();
+  const auto& source = model.config_->model;
+  MetadataCoreConfig config;
+  config.timestamps.level = source.timestamp_level;
+  config.timestamps.segment_separators = source.segment_separators;
+  config.diarization = source.diarization.Enabled();
+  if (source.timestamp_level != Config::TimestampLevel::Off) {
+    config.seconds_per_frame = static_cast<double>(source.hop_length) * source.subsampling_factor / source.sample_rate;
+    config.timestamps.segment_gap_threshold_frames = GetSegmentGapThresholdFrames(source);
+  }
+  return config;
+}
+}  // namespace
+
+TokenPostProcessor::TokenPostProcessor(const Generator& generator)
+    : PostProcessor{generator}, internal_{generator_.model_->CreateTokenizer(), GetPostProcessorConfig(generator_)} {}
+
+void TokenPostProcessor::ProcessNextTokens() {
+  internal_.Process(generator_.GetTokenOutputs());
+}
+
+void TokenPostProcessor::Finalize() {
+  internal_.Finalize();
+}
+
+void TokenPostProcessor::Reset() {
+  internal_.Reset();
+}
+
+TokenPostProcessorInternal::TokenPostProcessorInternal(std::shared_ptr<Tokenizer> tokenizer, MetadataCoreConfig config)
+    : tokenizer_{std::move(tokenizer)}, config_{std::move(config)} {
   stream_ = tokenizer_->CreateStream();
   metadata_state_ = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(config_));
 }
 
-void TokenPostProcessor::ProcessNextTokens() {
+void TokenPostProcessorInternal::Process(const TokenOutputs& outputs) {
   results_.clear();
-  const auto outputs = generator_.GetTokenOutputs();
   const auto tokens = outputs.GetTokens();
-  const auto* timestamps = outputs.GetTimestamps();
+  const auto* timestamps = outputs.GetAcousticFrameIntervals();
   const auto* speaker_evidence = outputs.GetSpeakerEvidence();
+  if (timestamps && timestamps->size() != tokens.size())
+    throw std::runtime_error("Token timing count does not match emitted tokens");
+  if (speaker_evidence && speaker_evidence->size() != tokens.size())
+    throw std::runtime_error("Token speaker evidence count does not match emitted tokens");
   for (size_t index = 0; index < tokens.size(); ++index) {
-    TokenMetadataInput token{tokens[index], 0, {}};
+    TokenMetadataInput token{tokens[index], std::nullopt};
     if (timestamps) {
-      token.has_token_acoustic_frame_interval = 1;
       token.token_acoustic_frame_interval = (*timestamps)[index];
     }
     if (speaker_evidence) token.speaker_evidence = (*speaker_evidence)[index];
@@ -44,12 +71,12 @@ void TokenPostProcessor::ProcessNextTokens() {
   }
 }
 
-void TokenPostProcessor::Finalize() {
+void TokenPostProcessorInternal::Finalize() {
   results_.clear();
   metadata_state_->ProcessFinalized(results_.emplace_back());
 }
 
-void TokenPostProcessor::Reset() {
+void TokenPostProcessorInternal::Reset() {
   results_.clear();
   stream_->Reset();
   metadata_state_ = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(config_));
