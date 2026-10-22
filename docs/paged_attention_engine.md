@@ -2104,7 +2104,9 @@ staged prefix adoption and leaves all service/fairness counters unchanged.
 
 `Request::PreemptionCount()` counts published suspensions. `RecomputedTokenCount()` counts only
 discarded KV tokens actually re-executed by committed replay steps; cached-prefix adoption does
-not count as recomputation. These internal observations do not change the public event ABI.
+not count as recomputation. Cancellation and another eviction during a partial rebuild preserve
+the outstanding discarded-KV boundary, so repeated committed replay work is counted on each pass.
+These internal observations do not change the public event ABI.
 
 The guarantee is identical logical context and preserved sampling state, **not bit-identical
 model output**. Replaying former one-token decodes as prefill changes query shape, disables decode

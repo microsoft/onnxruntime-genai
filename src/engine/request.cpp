@@ -969,7 +969,9 @@ bool Request::CanSuspendForRecompute() const {
 void Request::SuspendForRecompute() noexcept {
   assert(CanSuspendForRecompute());
   recompute_sequence_length_ = tokens_host_.size();
-  recompute_processed_length_ = static_cast<size_t>(processed_sequence_length_);
+  // A canceled partial replay may be evicted again before rebuilding its earlier discarded KV.
+  recompute_processed_length_ = std::max(
+      recompute_processed_length_, static_cast<size_t>(processed_sequence_length_));
   preemption_turn_id_ = current_turn_id_;
   processed_sequence_length_ = 0;
   scheduled_token_count_ = 0;

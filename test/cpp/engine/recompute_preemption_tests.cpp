@@ -506,6 +506,64 @@ TEST(RecomputePreemptionTest, CancelSuspendedTurnThenContinueFromItsRetainedToke
   CheckState(test, std::array{victim, beneficiary});
 }
 
+TEST(RecomputePreemptionTest, CancelPartialReplayThenEvictPreservesDiscardedKVBoundary) {
+  auto model = PreemptionModel(1, true, 4);
+  model->config_->engine.dynamic_batching->prefix_caching = false;
+  auto test = MakeCompositeDoublesEngine(model, 5);
+  auto victim = Queue(test.engine);
+  ModelSteps(test, 8);
+  ASSERT_EQ(victim->ProcessedSequenceLength(), 10);
+  ASSERT_EQ(victim->CurrentSequenceLength(), 11);
+  const auto generated = victim->TurnGeneratedTokens();
+  const auto turn = victim->CurrentTurnId();
+  auto first_beneficiary = Queue(test.engine, kPrompt, 1);
+  ModelSteps(test, 1);
+  ASSERT_EQ(victim->Status(), RequestStatus::Suspended);
+  ASSERT_EQ(victim->PreemptionCount(), 1u);
+  ASSERT_TRUE(first_beneficiary->IsTurnComplete());
+  first_beneficiary->Close();
+
+  ModelSteps(test, 1);
+  ASSERT_EQ(victim->ProcessedSequenceLength(), 4);
+  ASSERT_EQ(victim->RecomputedTokenCount(), 4u);
+  ASSERT_TRUE(victim->NeedsCacheReplay());
+  EXPECT_EQ(victim->TurnGeneratedTokens(), generated);
+  ASSERT_TRUE(victim->Cancel(turn));
+  const auto canceled = RunOne(*test.engine);
+  ASSERT_EQ(canceled.request, victim);
+  EXPECT_EQ(canceled.finish_reason, GenerationFinishReason::Canceled);
+  EXPECT_EQ(canceled.usage.generated_tokens, generated);
+  ASSERT_TRUE(victim->IsTurnComplete());
+  ASSERT_TRUE(test.cache->IsResident(victim));
+
+  auto second_beneficiary = Queue(test.engine, kPrompt, 1);
+  ModelSteps(test, 1);
+  ASSERT_EQ(victim->PreemptionCount(), 2u);
+  EXPECT_TRUE(victim->IsTurnComplete());
+  EXPECT_EQ(victim->FinishReason(), GenerationFinishReason::Canceled);
+  EXPECT_FALSE(test.cache->IsResident(victim));
+  EXPECT_EQ(victim->ProcessedSequenceLength(), 0);
+  EXPECT_EQ(victim->RecomputedTokenCount(), 4u);
+  EXPECT_TRUE(victim->NeedsCacheReplay());
+  ASSERT_TRUE(second_beneficiary->IsTurnComplete());
+  second_beneficiary->Close();
+
+  const std::array<int32_t, 2> continuation{8, 9};
+  EXPECT_EQ(victim->BeginTurn(continuation, 1), turn + 1);
+  Finish(*test.engine);
+
+  EXPECT_TRUE(victim->IsTurnComplete());
+  EXPECT_FALSE(victim->NeedsCacheReplay());
+  EXPECT_EQ(victim->PreemptionCount(), 2u);
+  EXPECT_EQ(victim->RecomputedTokenCount(), 14u);
+  EXPECT_EQ(victim->TurnPromptTokens(), continuation.size());
+  EXPECT_EQ(victim->TurnCachedPromptTokens(), 0u);
+  EXPECT_EQ(victim->TurnGeneratedTokens(), 1u);
+  EXPECT_EQ(victim->ProcessedSequenceLength(), 13);
+  EXPECT_EQ(victim->CurrentSequenceLength(), 14);
+  CheckState(test, std::array{victim});
+}
+
 TEST(RecomputePreemptionTest, CancelSuspendedTurnThenRewindAndRestart) {
   auto test = MakeCompositeDoublesEngine(PreemptionModel(), 5);
   auto victim = Queue(test.engine);
