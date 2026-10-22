@@ -116,12 +116,6 @@ OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame
 OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record);
 OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record);
 
-/** Half-open [start, stop) interval in absolute acoustic frames. */
-typedef struct OgaTokenMetadataAcousticFrameInterval {
-  int64_t start;
-  int64_t stop;
-} OgaTokenMetadataAcousticFrameInterval;
-
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
  */
@@ -1269,6 +1263,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const
 
 /**
  * \brief Sets the adapter with the given adapter name as active for the given OgaGenerator object.
+ * Activations are additive. With graph capture, each active adapter set uses its own capture identity.
+ * Activating an adapter does not recompute an existing KV cache; rewind to zero and append the prompt
+ * again if the adapter should also apply to the earlier tokens.
  * \param[in] generator The OgaGenerator object to set the active adapter.
  * \param[in] adapters The OgaAdapters object that manages the model adapters.
  * \param[in] adapter_name The name of the adapter to set as active.

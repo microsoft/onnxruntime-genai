@@ -1,7 +1,6 @@
 #pragma once
 
 #include "config.h"
-#include "ort_genai_c.h"
 #include "ortx_tokenizer.h"
 #include "token_word_grouping.h"
 #include "generator/token_outputs.h"
@@ -17,8 +16,7 @@ namespace Generators {
 
 struct TokenMetadataInput {
   int32_t token_id;
-  int32_t has_token_acoustic_frame_interval;
-  OgaTokenMetadataAcousticFrameInterval token_acoustic_frame_interval;
+  std::optional<AcousticFrameInterval> token_acoustic_frame_interval;
   std::optional<TokenSpeakerEvidence> speaker_evidence;
 };
 
@@ -41,24 +39,22 @@ struct PostProcessorResult {
   std::optional<TimestampResult> timestamps;
 };
 
-// Processor-specific grouping settings and model timing.
+// Processor-specific word and segment settings.
 struct TimestampPostProcessorConfig {
   Config::TimestampLevel level{Config::TimestampLevel::Off};
   std::vector<std::string> segment_separators;
-  std::optional<double> segment_gap_threshold_seconds;
-  int sample_rate{};
-  int hop_length{};
-  int subsampling_factor{};
+  std::optional<int> segment_gap_threshold_frames;
 };
 
 // Model-derived metadata options copied into each processor.
 struct MetadataCoreConfig {
   TimestampPostProcessorConfig timestamps;
+  std::optional<double> seconds_per_frame;
   bool diarization{};
 };
 
 class MetadataCoreState {
-  friend class TokenPostProcessor;
+  friend class TokenPostProcessorInternal;
 
  private:
   explicit MetadataCoreState(const MetadataCoreConfig& config);
@@ -70,10 +66,10 @@ class MetadataCoreState {
   void ProcessDecoded(const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, PostProcessorResult& result);
   void ProcessFinalized(PostProcessorResult& result);
   void ProcessCompletedWords(TimestampResult& result);
-  void PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval, int speaker, TimestampResult& result);
+  void PublishWord(std::string_view text, AcousticFrameInterval interval, int speaker, TimestampResult& result);
   void CompleteSegment(TimestampResult& result);
   void AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
-                 OgaTokenMetadataAcousticFrameInterval interval, int speaker);
+                 AcousticFrameInterval interval, int speaker);
 
   const MetadataCoreConfig& config_;
   TokenWordGroupingState word_grouping_;
@@ -84,7 +80,7 @@ class MetadataCoreState {
   std::optional<TokenSpeakerEvidence> last_speaker_evidence_;
   size_t first_pending_token_index_{};
   std::optional<std::string> pending_segment_text_;
-  OgaTokenMetadataAcousticFrameInterval pending_segment_interval_{};
+  AcousticFrameInterval pending_segment_interval_{};
   int pending_segment_speaker_{-1};
 };
 

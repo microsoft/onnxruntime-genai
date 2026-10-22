@@ -802,10 +802,10 @@ def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
         (
             "/model/layers.3/linear_attn/LinearAttentionGate",
             {
-                "a": "/a_proj/MatMul/output_0",
+                "a": "/a_proj/MatMul",
                 "dt_bias": "model.layers.3.linear_attn.dt_bias",
                 "decay_scale": "model.layers.3.linear_attn.neg_exp_A",
-                "b": "/b_proj/MatMul/output_0",
+                "b": "/b_proj/MatMul",
                 "shape": ["batch_size", "sequence_length", 4],
             },
         )
@@ -853,7 +853,7 @@ def test_qwen35_linear_attention_uses_gated_rms_norm(monkeypatch):
         "/model/layers.4/linear_attn/GatedRMSNorm",
         "linear_output",
         "model.layers.4.linear_attn.norm.weight",
-        "/z_proj/MatMul/output_0",
+        "/z_proj/MatMul",
         ["batch_size", "sequence_length", 2048],
         1e-6,
     )

@@ -42,10 +42,21 @@ or either inference cache. Recreate/reset recording inference state separately.
 If either model fails, generation fails rather than publishing incomplete combined
 outputs; do not blindly retry after one branch may have advanced state.
 
-`TokenPostProcessor(generator)` owns a tokenizer, an ordinary tokenizer
-stream, `MetadataCoreState`, word grouping, acoustic interval buffers, and the
-results completed by the latest processing call. Configuration comes from the
-model's `genai_config.json`. Callers do not create or pass token metadata records.
+`TokenPostProcessor(generator)` derives from `PostProcessor`, which holds the
+borrowed generator reference and the virtual `Finalize()` / `Reset()` interface.
+The token-specific wrapper calls `generator_.GetTokenOutputs()` and delegates to
+its private `TokenPostProcessorInternal`. That internal processor owns the tokenizer,
+ordinary tokenizer stream, immutable configuration, `MetadataCoreState`, and current
+results. It accepts borrowed token, acoustic interval, and speaker evidence spans,
+not a generator. Configuration comes from the model's `genai_config.json`.
+Callers do not create or pass token metadata records.
+
+`TokenOutputs` holds direct optional spans: when diarization is disabled,
+its speaker evidence is `std::nullopt`, `GetSpeakerEvidence()` returns null, and
+the generator does not request speaker evidence from the model state. No
+diarization session, feature extraction, aggregation, or speaker buffering runs.
+Acoustic intervals are still required with diarization on and timestamps off,
+but no public timing fields are populated in that configuration.
 
 ## Processing Loop
 
@@ -206,12 +217,15 @@ invalid intervals fail before decoding the affected token.
 
 `segment_separators` defaults to `.`, `?`, and `!`. The optional
 `segment_gap_threshold_seconds` is non-negative or `null`; it is rounded to the
-nearest acoustic frame. Zero and positive gaps below half a frame split each word
-into its own segment. When timestamps are off, ordinary text is still returned,
-without timestamp records, interval buffering, or word/segment accumulation.
+nearest acoustic frame before being copied into the processor configuration.
+The processor also receives a model-derived `seconds_per_frame` timebase for
+converting published timestamps, rather than interpreting audio preprocessing settings.
+Zero and positive gaps below half a frame split each word into its own segment
+in timestamp-only mode. When both timestamps and diarization are off, ordinary
+text is returned without metadata, interval buffering, or word/segment accumulation.
 
 See [Nemotron speech timestamps](nemotron_speech_timestamps.md) for acoustic
-origins and interval semantics. Diarization is not implemented by this processor.
+origins and interval semantics.
 
 ## Bindings and Lifetime
 
@@ -229,7 +243,7 @@ must be externally serialized. Independent processors have independent state.
 
 `MetadataCoreState` populates the processor's canonical results directly. There
 is no intermediate metadata output or conversion to a second result model. The
-processor owns one immutable configuration; metadata state reads that same object.
+internal processor owns one immutable configuration; metadata state reads that same object.
 
 Python uses `TokenPostProcessor(generator)`, `process_next_tokens()`,
 `get_next_token_results()`, `finalize()`, and `reset()`. Borrowed

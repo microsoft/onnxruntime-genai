@@ -70,10 +70,14 @@ namespace {
 struct DiarizationTestState : Generators::TransducerState {
   using TransducerState::TransducerState;
   std::vector<Generators::TokenSpeakerEvidence> evidence;
+  mutable size_t speaker_evidence_reads{};
   void StepToken() override {}
   Generators::DeviceSpan<float> Run(int, Generators::DeviceSpan<int32_t>&,
                                     Generators::DeviceSpan<int32_t>) override { return {}; }
-  std::span<const Generators::TokenSpeakerEvidence> GetStepSpeakerEvidence() const override { return evidence; }
+  std::span<const Generators::TokenSpeakerEvidence> GetStepSpeakerEvidence() const override {
+    ++speaker_evidence_reads;
+    return evidence;
+  }
   void SetStep(int32_t token, int64_t frame, std::optional<Generators::TokenSpeakerEvidence> speaker) {
     last_tokens_ = {token};
     last_token_intervals_ = {{frame, frame + 1}};
@@ -168,6 +172,7 @@ TEST(NemotronDiarization, MetadataConfigurationsAndTurnBoundaries) {
       EXPECT_EQ(transcript, "Hello world.");
       if (diarization || level != Generators::Config::TimestampLevel::Off) EXPECT_EQ(records, transcript);
       if (diarization && level != Generators::Config::TimestampLevel::Word) EXPECT_EQ(count, 1U);
+      EXPECT_EQ(pipeline.state->speaker_evidence_reads, diarization ? tokens.size() : 0U);
       pipeline.processor->Finalize();
       const auto& repeated = pipeline.processor->GetNextTokenResults()[0];
       if (repeated.timestamps) {
@@ -177,6 +182,82 @@ TEST(NemotronDiarization, MetadataConfigurationsAndTurnBoundaries) {
       pipeline.processor->Reset();
       pipeline.state->SetStep(tokens[0], 0, std::nullopt);
       if (diarization) EXPECT_THROW(pipeline.processor->ProcessNextTokens(), std::runtime_error);
+    }
+  }
+}
+
+TEST(NemotronDiarization, InternalProcessorAlignsBatchAndIncrementalSpeakerEvidence) {
+  using namespace Generators;
+  DiarizationTestPipeline pipeline{true, Config::TimestampLevel::Word};
+  auto tokenizer = pipeline.model->CreateTokenizer();
+  const auto tokens = tokenizer->Encode("Hello world.");
+  const auto first_word_tokens = tokenizer->Encode("Hello").size();
+  std::vector<AcousticFrameInterval> intervals;
+  std::vector<TokenSpeakerEvidence> evidence;
+  TokenSpeakerEvidence snapshot{};
+  for (size_t index = 0; index < tokens.size(); ++index) {
+    intervals.push_back({static_cast<int64_t>(index), static_cast<int64_t>(index + 1)});
+    std::copy(std::begin(snapshot.stop_probability_sums), std::end(snapshot.stop_probability_sums),
+              snapshot.start_probability_sums);
+    snapshot.start_frame_count = snapshot.stop_frame_count;
+    ++snapshot.stop_frame_count;
+    ++snapshot.stop_probability_sums[index < first_word_tokens ? 0 : 1];
+    evidence.push_back(snapshot);
+  }
+  for (const auto level : {Config::TimestampLevel::Off, Config::TimestampLevel::Word, Config::TimestampLevel::Segment}) {
+    MetadataCoreConfig config;
+    config.timestamps.level = level;
+    config.timestamps.segment_separators = {"."};
+    config.timestamps.segment_gap_threshold_frames = 0;
+    if (level != Config::TimestampLevel::Off) config.seconds_per_frame = 0.1;
+    config.diarization = true;
+    const auto process = [&](size_t batch_size) {
+      TokenPostProcessorInternal processor{tokenizer, config};
+      const auto token_span = std::span<const int32_t>{tokens};
+      const auto interval_span = std::span<const AcousticFrameInterval>{intervals};
+      const auto evidence_span = std::span<const TokenSpeakerEvidence>{evidence};
+      EXPECT_THROW(processor.Process(TokenOutputs{token_span, interval_span}), std::runtime_error);
+      EXPECT_THROW(processor.Process(TokenOutputs{token_span, interval_span, evidence_span.first(evidence.size() - 1)}),
+                   std::runtime_error);
+      std::string text;
+      std::vector<TimestampRecord> records;
+      const auto collect = [&] {
+        for (const auto& result : processor.GetNextTokenResults()) {
+          text += result.text;
+          EXPECT_TRUE(result.timestamps);
+          if (!result.timestamps) continue;
+          const auto& completed = level == Config::TimestampLevel::Word
+                                      ? result.timestamps->words
+                                      : result.timestamps->segments;
+          records.insert(records.end(), completed.begin(), completed.end());
+        }
+      };
+      for (size_t offset = 0; offset < tokens.size(); offset += batch_size) {
+        const auto count = std::min(batch_size, tokens.size() - offset);
+        processor.Process(TokenOutputs{token_span.subspan(offset, count), interval_span.subspan(offset, count),
+                                       evidence_span.subspan(offset, count)});
+        collect();
+      }
+      processor.Finalize();
+      collect();
+      EXPECT_EQ(text, "Hello world.");
+      EXPECT_EQ(records.size(), 2U);
+      processor.Reset();
+      EXPECT_TRUE(processor.GetNextTokenResults().empty());
+      return records;
+    };
+    const auto batch = process(tokens.size());
+    const auto incremental = process(1);
+    ASSERT_EQ(batch.size(), incremental.size());
+    for (size_t index = 0; index < batch.size(); ++index) {
+      EXPECT_EQ(batch[index].text, incremental[index].text);
+      EXPECT_EQ(batch[index].speaker_label, "speaker_" + std::to_string(index));
+      EXPECT_EQ(batch[index].speaker_label, incremental[index].speaker_label);
+      EXPECT_EQ(batch[index].start_frame, incremental[index].start_frame);
+      EXPECT_EQ(batch[index].stop_frame, incremental[index].stop_frame);
+      EXPECT_EQ(batch[index].start_time, incremental[index].start_time);
+      EXPECT_EQ(batch[index].stop_time, incremental[index].stop_time);
+      EXPECT_EQ(batch[index].start_time.has_value(), level != Config::TimestampLevel::Off);
     }
   }
 }

@@ -28,29 +28,23 @@ MetadataCoreState::MetadataCoreState(const MetadataCoreConfig& config) : config_
       break;
     case Config::TimestampLevel::Word:
     case Config::TimestampLevel::Segment:
-      segment_gap_threshold_frames_ = GetSegmentGapThresholdFrames(
-          config_.timestamps.segment_gap_threshold_seconds, config_.timestamps.sample_rate,
-          config_.timestamps.hop_length, config_.timestamps.subsampling_factor);
-      if (config_.timestamps.sample_rate <= 0 || config_.timestamps.hop_length <= 0 ||
-          config_.timestamps.subsampling_factor <= 0) {
-        throw std::runtime_error("Timestamp decoding requires positive sample_rate, hop_length, and subsampling_factor");
-      }
-      seconds_per_frame_ = static_cast<double>(config_.timestamps.hop_length) *
-                           config_.timestamps.subsampling_factor / config_.timestamps.sample_rate;
+      segment_gap_threshold_frames_ = config_.timestamps.segment_gap_threshold_frames;
+      if (segment_gap_threshold_frames_ && *segment_gap_threshold_frames_ < 0)
+        throw std::runtime_error("Timestamp segment gap must not be negative");
+      if (!config_.seconds_per_frame || !std::isfinite(*config_.seconds_per_frame) || *config_.seconds_per_frame <= 0)
+        throw std::runtime_error("Timestamp decoding requires a positive finite seconds_per_frame timebase");
+      seconds_per_frame_ = *config_.seconds_per_frame;
       break;
     default:
       throw std::runtime_error("Invalid timestamp level in metadata configuration");
   }
-  if (AlignmentEnabled() && (config_.timestamps.sample_rate <= 0 || config_.timestamps.hop_length <= 0 ||
-                             config_.timestamps.subsampling_factor <= 0))
-    throw std::runtime_error("Speech post-processing requires positive acoustic timing parameters");
 }
 
 void MetadataCoreState::ValidateInput(const TokenMetadataInput& token) const {
   if (AlignmentEnabled()) {
-    if (!token.has_token_acoustic_frame_interval)
-      throw std::runtime_error("Enabled timestamps require generation timing metadata");
-    const auto& token_acoustic_frame_interval = token.token_acoustic_frame_interval;
+    if (!token.token_acoustic_frame_interval)
+      throw std::runtime_error("Enabled timestamps or diarization require generation timing metadata");
+    const auto& token_acoustic_frame_interval = *token.token_acoustic_frame_interval;
     if (token_acoustic_frame_interval.start < 0 || token_acoustic_frame_interval.stop <= token_acoustic_frame_interval.start)
       throw std::runtime_error("Token timestamp interval must satisfy 0 <= start_frame < stop_frame");
   }
@@ -63,7 +57,7 @@ void MetadataCoreState::ValidateInput(const TokenMetadataInput& token) const {
 }
 
 void MetadataCoreState::AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
-                                  OgaTokenMetadataAcousticFrameInterval interval, int speaker) {
+                                  AcousticFrameInterval interval, int speaker) {
   auto& record = records.emplace_back();
   record.text = text;
   if (TimestampsEnabled()) {
@@ -81,7 +75,7 @@ void MetadataCoreState::CompleteSegment(TimestampResult& result) {
   pending_segment_text_.reset();
 }
 
-void MetadataCoreState::PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval, int speaker, TimestampResult& result) {
+void MetadataCoreState::PublishWord(std::string_view text, AcousticFrameInterval interval, int speaker, TimestampResult& result) {
   const auto level = config_.timestamps.level;
   if (level == Config::TimestampLevel::Word) {
     AddRecord(result.words, text, interval, speaker);
@@ -128,7 +122,7 @@ void MetadataCoreState::ProcessCompletedWords(TimestampResult& result) {
     const int speaker = config_.diarization
                             ? TokenDiarization::AggregateWordSpeaker(*first.speaker_evidence, *last.speaker_evidence)
                             : -1;
-    PublishWord(word.text, {first.token_acoustic_frame_interval.start, last.token_acoustic_frame_interval.stop}, speaker, result);
+    PublishWord(word.text, {first.token_acoustic_frame_interval->start, last.token_acoustic_frame_interval->stop}, speaker, result);
   }
 
   const auto first_pending = word_grouping_.FirstPendingTokenIndex();
