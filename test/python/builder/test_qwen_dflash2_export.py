@@ -12,14 +12,13 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
-from safetensors.torch import save_file
-
 from models.builders.base import Model
 from models.builders.block_drafter import BlockDrafterBuilder
 from models.builders.dflash2 import DFlash2Builder
 from models.builders.mtp import MTPModel
 from models.builders.qwen import Qwen35MoEModel
 from models.quantization.quant_config import QuantConfig
+from safetensors.torch import save_file
 
 TARGET_LAYER_IDS = [1, 11, 21]
 AUX_LAYERS = [layer_id + 1 for layer_id in TARGET_LAYER_IDS]
@@ -378,11 +377,13 @@ def test_target_mlp_gate_up_fusion_maps_matching_exclusions():
     }
     model.make_matmul = types.MethodType(
         lambda self, projection, basename, root_input: (
-            self.exclude_node_from_quantization(basename)
-            if getattr(projection, "exclude_from_quantization", False)
-            else None
-        )
-        or basename,
+            (
+                self.exclude_node_from_quantization(basename)
+                if getattr(projection, "exclude_from_quantization", False)
+                else None
+            )
+            or basename
+        ),
         model,
     )
     model.make_split = types.MethodType(lambda self, *args, **kwargs: None, model)
@@ -1923,6 +1924,42 @@ def test_fp8_lm_head_normalizes_supported_scale_layouts(tmp_path, scale_shape):
     assert tuple(scale.shape) == (builder.vocab_size, 1)
 
 
+def test_supplied_mask_embedding_is_restored_after_external_fp16_cast(tmp_path):
+    draft_dir = make_precision_checkpoint(tmp_path, 1)
+    mask = torch.full((32,), 1e-9, dtype=torch.bfloat16)
+    save_file({"mask_embedding": mask}, os.path.join(draft_dir, "mask_embedding.safetensors"))
+    builder = DFlash2Builder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
+
+    builder.make_model()
+
+    restored = builder.graph.initializers["dflash2.mask_embedding"]
+    assert restored.dtype == ir.DataType.BFLOAT16
+    torch.testing.assert_close(torch.from_numpy(restored.const_value.numpy().astype(np.float32)), mask.float())
+    where = next(node for node in builder.graph if node.name == "/dflash2/mask/Where")
+    cast = next(node for node in builder.graph if node.name == "/dflash2/embed_tokens/Cast")
+    assert where.inputs[2] is cast.outputs[0]
+    assert where.outputs[0].dtype == ir.DataType.BFLOAT16
+    assert any(use.node.name == "/dflash2/conv_mask/Shape" for use in where.outputs[0].uses())
+
+
+@pytest.mark.parametrize("invalid", ["shape", "nan", "integer", "underflow", "overflow"])
+def test_invalid_supplied_mask_embedding_is_rejected(tmp_path, invalid):
+    builder = DFlash2Builder(_draft_checkpoint(tmp_path), str(tmp_path), ir.DataType.FLOAT16, 256, 128)
+    mask = torch.ones(builder.hidden_size)
+    if invalid == "shape":
+        mask = mask[:-1]
+    elif invalid == "nan":
+        mask[0] = float("nan")
+    elif invalid == "integer":
+        mask = mask.long()
+    else:
+        builder.io_dtype = ir.DataType.FLOAT16
+        mask *= 1e-9 if invalid == "underflow" else 1e9
+    builder.weights = {"mask_embedding": mask}
+    with pytest.raises(ValueError, match="mask_embedding"):
+        builder.restore_mask_embedding("embedding", "num_block")
+
+
 @pytest.mark.parametrize("conv_kernel_size", [0, 1, 3, 4])
 def test_unsupported_conv_kernel_size_is_rejected(tmp_path, conv_kernel_size):
     draft_dir = _draft_checkpoint(tmp_path)
@@ -2008,8 +2045,9 @@ def test_drafter_resolves_target_repository_to_local_snapshot(tmp_path, monkeypa
     monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
     monkeypatch.setattr(
         "huggingface_hub.snapshot_download",
-        lambda repo_id, cache_dir, token: captured.update(repo_id=repo_id, cache_dir=cache_dir, token=token)
-        or str(snapshot_dir),
+        lambda repo_id, cache_dir, token: (
+            captured.update(repo_id=repo_id, cache_dir=cache_dir, token=token) or str(snapshot_dir)
+        ),
     )
     model = _composite()
     model.decoder.model_name_or_path = "Qwen/Qwen3.8-27B"

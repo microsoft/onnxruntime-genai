@@ -322,6 +322,12 @@ Only the body dtype is a component property; the boundary dtype is a consequence
 of the target's, and the drafter cannot choose it independently without breaking
 the sharing it depends on.
 
+If a DFlash2 checkpoint supplies `mask_embedding.safetensors`, the builder
+restores its `mask_embedding` vector after the target embedding's cast to the
+body dtype. This preserves tiny mask values that an FP16 target table may lose.
+Malformed/non-finite vectors and a body dtype that underflows nonzero mask
+values are rejected; other token embeddings are unchanged.
+
 So `drafter_options.quant_config.io_dtype` describes the body only. DSpark
 requires `bf16`, while DFlash2 defaults to `bf16` and allows explicit `fp16`.
 The generic config parser also accepts `fp32`, but provider support for the

@@ -331,6 +331,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         emb = self.unary(
             "Cast", "/dflash2/embed_tokens/Cast", emb_ext, self.io_dtype, [rows_q, self.hidden_size], to=self.io_dtype
         )
+        emb = self.restore_mask_embedding(emb, rows_q)
         if self.input_embedding_scale != 1.0:
             scale = self.const(np.full((1,), self.input_embedding_scale, np.float32), ir.DataType.FLOAT)
             scale_cast = self.unary(
@@ -794,6 +795,40 @@ class DFlash2Builder(BlockDrafterBuilder):
             self.graph.outputs.append(self.values[f"present.{i}.value"])
 
     # --------------------------------------------------------------- weights
+
+    def restore_mask_embedding(self, embedding, rows):
+        """Restore a supplied target mask row after the external embedding's precision cast."""
+        mask = self.weights.get("mask_embedding")
+        if mask is None:
+            return embedding
+        if tuple(mask.shape) != (self.hidden_size,) or not mask.is_floating_point() or not torch.isfinite(mask).all():
+            raise ValueError("mask_embedding must be a finite floating-point vector of hidden_size.")
+        converted = mask.to(
+            {
+                ir.DataType.FLOAT: torch.float32,
+                ir.DataType.FLOAT16: torch.float16,
+                ir.DataType.BFLOAT16: torch.bfloat16,
+            }[self.io_dtype]
+        )
+        if not torch.isfinite(converted).all():
+            raise ValueError("The DFlash 2 compute dtype overflows the supplied mask_embedding; use BF16 or FP32.")
+        if torch.any((mask != 0) & (converted == 0)):
+            raise ValueError("The DFlash 2 compute dtype underflows the supplied mask_embedding; use BF16 or FP32.")
+        name = "dflash2.mask_embedding"
+        self.make_initializer(mask, name, to=self.io_dtype)
+        condition = self.binary(
+            "Equal",
+            "/dflash2/mask/Equal",
+            "input_ids",
+            self.const(self.mask_token_id),
+            ir.DataType.BOOL,
+            [rows],
+        )
+        condition = self.reshape("/dflash2/mask/Reshape", condition, [-1, 1], ir.DataType.BOOL, [rows, 1])
+        output = self.out("/dflash2/mask/Where")
+        self.make_node("Where", [condition, name, embedding], [output], name="/dflash2/mask/Where")
+        self.make_value(output, self.io_dtype, [rows, self.hidden_size])
+        return output
 
     def load_weights(self):
         import safetensors.torch as safetensors_torch  # noqa: PLC0415
