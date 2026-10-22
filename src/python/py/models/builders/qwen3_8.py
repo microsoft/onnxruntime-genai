@@ -18,7 +18,7 @@ from .qwen3_8_text import Qwen4ExpTextModel
 from .qwen3_8_vision import Qwen4ExpVisionModel
 
 
-class Qwen38DenseEngram:
+class Qwen38Engram:
     """Non-paged Qwen3.8 Engram graph construction."""
 
     def make_ple(self, layer_id, ple, root_input):

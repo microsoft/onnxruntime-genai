@@ -21,9 +21,9 @@ class Qwen4ExpTextModel(Qwen38, Qwen35MoETextModel):
     def make_ple(self, layer_id, ple, root_input):
         if self.use_paged_attention:
             return super().make_ple(layer_id, ple, root_input)
-        from .qwen3_8 import Qwen38DenseEngram  # noqa: PLC0415
+        from .qwen3_8 import Qwen38Engram  # noqa: PLC0415
 
-        return Qwen38DenseEngram.make_ple(self, layer_id, ple, root_input)
+        return Qwen38Engram.make_ple(self, layer_id, ple, root_input)
 
     def resolve_model_loader(self):
         """Load Qwen4-Exp weights independently of the Qwen3.5 multimodal runtime alias."""

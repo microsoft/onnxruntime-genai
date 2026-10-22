@@ -4,12 +4,12 @@
 import pytest
 from models.builders.base import Model
 from models.builders.expansions.engine import Engine
-from models.builders.expansions.engram import Qwen38Engram
+from models.builders.expansions.engram import Qwen38Engram as PagedEngram
 from models.builders.expansions.mtp import Qwen35MTP, Qwen38MTP
 from models.builders.expansions.qwen3_5 import Qwen35, Qwen35MoE
 from models.builders.expansions.qwen3_8 import Qwen38, Qwen38Graph, Qwen38Vision
 from models.builders.qwen3_5 import Qwen35MoETextModel, Qwen35MTPModel, Qwen35TextModel
-from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel, Qwen38DenseEngram
+from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel, Qwen38Engram
 
 
 @pytest.mark.parametrize(
@@ -75,10 +75,10 @@ def test_qwen38_engram_dispatches_to_dense_builder_or_paged_expansion(monkeypatc
         calls.append(("paged", self, layer_id, weights, root_input))
         return "paged_output"
 
-    monkeypatch.setattr(Qwen38DenseEngram, "make_ple", dense)
-    monkeypatch.setattr(Qwen38Engram, "make_ple", packed)
+    monkeypatch.setattr(Qwen38Engram, "make_ple", dense)
+    monkeypatch.setattr(PagedEngram, "make_ple", packed)
     kind = "paged" if paged else "dense"
     assert model.make_ple(2, ple, "hidden_states") == f"{kind}_output"
     assert calls == [(kind, model, 2, ple, "hidden_states")]
-    assert Qwen38DenseEngram.__module__ == "models.builders.qwen3_8"
-    assert Qwen38Engram.__module__ == "models.builders.expansions.engram"
+    assert Qwen38Engram.__module__ == "models.builders.qwen3_8"
+    assert PagedEngram.__module__ == "models.builders.expansions.engram"
