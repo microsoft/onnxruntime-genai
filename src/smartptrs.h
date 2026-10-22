@@ -124,6 +124,8 @@ struct PositionInputs {
   virtual void Add() = 0;
   virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
   virtual void RewindTo(size_t index) = 0;
+  virtual OrtValue* GetRotaryPositionIds() { return nullptr; }
+  virtual void SetRotaryPositionIds(OrtValue* positions) { (void)positions; }
 };
 
 struct BatchedSamplerState {
@@ -197,6 +199,8 @@ struct StateSlotDesc {
 enum class StateUpdateReplayKind : uint32_t {
   CausalConv = 1,
   GatedDeltaNet = 2,
+  Snapshot = 3,
+  Indexer = 4,
 };
 
 struct StateUpdateReplayDesc {
@@ -216,6 +220,13 @@ struct StateUpdateReplayDesc {
   uint32_t kept_count;
   uint32_t element_size;
   StateUpdateReplayKind kind;
+  DeviceSpan<const uint8_t> source_aux_state;
+  DeviceSpan<uint8_t> destination_aux_state;
+  DeviceSpan<const uint8_t> source_lengths;
+  DeviceSpan<uint8_t> destination_lengths;
+  uint64_t state_capacity;
+  uint64_t aux_capacity;
+  uint32_t compress_ratio;
 };
 
 // Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
@@ -223,7 +234,7 @@ struct StateUpdateReplayDesc {
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 10;
+inline constexpr uint32_t kDeviceInterfaceVersion = 13;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

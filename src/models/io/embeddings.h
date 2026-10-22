@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <map>
+
 namespace Generators {
 
 struct Model;
@@ -47,7 +49,8 @@ struct Embeddings {
   const Mode mode_{};
   const std::string name_;
   // Tensor preserves the captured decode buffer across uncaptured prefills.
-  std::unique_ptr<Tensor> embeddings_;
+  std::shared_ptr<Tensor> embeddings_;
+  std::map<size_t, std::shared_ptr<Tensor>> captured_embeddings_;
   std::unique_ptr<OrtValue> chunk_view_;  // Non-owning view into embeddings_ used during prefill chunking
 
   // Output mode, cross-device pipelines only: buffer this session writes instead of the

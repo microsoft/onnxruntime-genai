@@ -101,7 +101,8 @@ State::State(const GeneratorParams& params, const Model& model, DeviceInterface*
 }
 
 const std::string& State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
-  const int graph_key = graph_capture_length * 2 + graph_capture_variant;
+  const uint64_t graph_key = (static_cast<uint64_t>(static_cast<uint32_t>(graph_capture_length)) << 32) |
+                             static_cast<uint32_t>(graph_capture_variant);
   auto it = graph_ids_.find(graph_key);
   if (it != graph_ids_.end()) {
     return it->second.text;
@@ -663,6 +664,10 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
 
   if (config_session_options.inter_op_num_threads.has_value()) {
     session_options.SetInterOpNumThreads(config_session_options.inter_op_num_threads.value());
+  }
+
+  if (config_session_options.use_deterministic_compute.has_value()) {
+    session_options.SetDeterministicCompute(config_session_options.use_deterministic_compute.value());
   }
 
   if (config_session_options.enable_cpu_mem_arena.has_value()) {

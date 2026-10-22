@@ -13,13 +13,20 @@ struct StateUpdateReplayDescGpu {
   const float* decay;
   const float* key;
   const float* delta;
+  const void* source_aux_state;
+  void* destination_aux_state;
+  const int32_t* source_lengths;
+  int32_t* destination_lengths;
   uint64_t channel_count;
   uint64_t state_width;
   uint64_t key_width;
   uint64_t key_head_count;
+  uint64_t state_capacity;
+  uint64_t aux_capacity;
   uint32_t capacity;
   uint32_t kept_count;
   uint32_t element_size;
+  uint32_t compress_ratio;
   uint32_t kind;
 };
 

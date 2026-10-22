@@ -14,6 +14,19 @@
 
 namespace Generators::test {
 
+TEST(ConfigTest, ParsesDeterministicCompute) {
+  Config config;
+  EXPECT_FALSE(config.model.decoder.session_options.use_deterministic_compute.has_value());
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":true}}}})");
+  EXPECT_EQ(config.model.decoder.session_options.use_deterministic_compute, true);
+  EXPECT_TRUE(config.model.decoder.session_options.config_entries.empty());
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":false}}}})");
+  EXPECT_EQ(config.model.decoder.session_options.use_deterministic_compute, false);
+  EXPECT_THROW(OverlayConfig(config,
+                             R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":"true"}}}})"),
+               std::exception);
+}
+
 TEST(ConfigTest, ParsesStaticBatching) {
   Config config;
 
@@ -30,6 +43,90 @@ TEST(ConfigTest, ParsesSelectedLogitsInput) {
   OverlayConfig(config, R"({"model":{"decoder":{"inputs":{"logits_indices":"selected_rows"}}}})");
 
   EXPECT_EQ(config.model.decoder.inputs.logits_indices, "selected_rows");
+}
+
+TEST(ConfigTest, ParsesRotaryHistoryAndIndexerCompressionMetadata) {
+  Config config;
+  OverlayConfig(config, R"({"model":{
+    "decoder":{"hidden_size":16,"indexer_compress_ratio":8,"ple_token_pad_id":7,
+               "inputs":{"rotary_position_ids":"main_rotary_history"}},
+    "mtp":{"filename":"mtp.onnx","num_hidden_layers":1,"num_key_value_heads":1,"head_size":16,
+           "inputs":{"rotary_position_ids":"head_rotary_history"}}
+  }})");
+  EXPECT_EQ(config.model.decoder.inputs.rotary_position_ids, "main_rotary_history");
+  EXPECT_EQ(config.model.decoder.indexer_compress_ratio, 8);
+  EXPECT_EQ(config.model.decoder.ple_token_pad_id, 7);
+  auto head = CreateMtpDecoderConfig(config);
+  EXPECT_EQ(head->model.decoder.inputs.rotary_position_ids, "head_rotary_history");
+  EXPECT_EQ(head->model.decoder.indexer_compress_ratio, 8);
+}
+
+TEST(ConfigTest, RejectsInvalidPlePadIdsAndCompressionRatios) {
+  for (const auto* value : {"1.5", "-1", "1e100"}) {
+    Config config;
+    const std::string overlay = std::string{R"({"model":{"decoder":{"ple_token_pad_id":)"} + value + "}}}";
+    EXPECT_THROW(OverlayConfig(config, overlay), std::exception);
+  }
+  for (const auto* value : {"0", "-1", "1.5", "1e100"}) {
+    Config config;
+    const std::string overlay = std::string{R"({"model":{"decoder":{"indexer_compress_ratio":)"} + value + "}}}";
+    EXPECT_THROW(OverlayConfig(config, overlay), std::exception);
+  }
+}
+
+TEST(ConfigTest, EngramRequiresExplicitPaddingAndRetainsItsOwnProviders) {
+  const auto root = fs::path{MODEL_PATH "engine/dummy-decoder"};
+  EXPECT_THROW((Config{root, R"({"model":{"engram":{"filename":"engram.onnx"}}})"}), std::runtime_error);
+  EXPECT_THROW((Config{root, R"({"model":{"decoder":{"inputs":{"past_ple_token_names":"past.%d.ple_tokens"}}}})"}),
+               std::runtime_error);
+  Config config{root, R"({"model":{
+    "decoder":{"ple_token_pad_id":7},
+    "engram":{"filename":"engram.onnx","session_options":{"provider_options":[{"cuda":{}}]}}
+  }})"};
+  ASSERT_TRUE(config.model.engram.session_options);
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"cuda"}));
+}
+
+TEST(ConfigTest, EngramProviderOverridesAreAppliedAndUnknownProvidersFailExplicitly) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{"session_options":{"provider_options":[{"cpu":{}}]}}}})");
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"CPU"}));
+  OverlayConfig(config, R"({"search":{"max_length":8}})");
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"CPU"}));
+  auto unknown = std::make_unique<Config>(
+      fs::path{MODEL_PATH "engine/dummy-decoder"}, R"({"model":{
+        "type":"qwen4_exp_text",
+        "decoder":{"ple_token_pad_id":7},
+        "engram":{"filename":"engram.onnx","session_options":{"provider_options":[{"nonexistent_provider":{}}]}}
+      }})");
+  try {
+    CreateModel(GetOrtEnv(), std::move(unknown));
+    FAIL() << "Unknown Engram provider must not silently fall back to CPU";
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string{error.what()}.find("nonexistent_provider"), std::string::npos) << error.what();
+  }
+}
+
+TEST(ConfigTest, ParsesEngramPleTokenNames) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{
+    "inputs":{"past_ple_token_names":"past.1.ple_tokens"},
+    "outputs":{"present_ple_token_names":"present.1.ple_tokens"}
+  }}})");
+
+  EXPECT_EQ(config.model.engram.inputs.past_tokens, "past.1.ple_tokens");
+  EXPECT_EQ(config.model.engram.outputs.present_tokens, "present.1.ple_tokens");
+}
+
+TEST(ConfigTest, ParsesLegacyEngramTokenNames) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{
+    "inputs":{"past_tokens":"legacy_past"},
+    "outputs":{"present_tokens":"legacy_present"}
+  }}})");
+
+  EXPECT_EQ(config.model.engram.inputs.past_tokens, "legacy_past");
+  EXPECT_EQ(config.model.engram.outputs.present_tokens, "legacy_present");
 }
 
 TEST(ConfigTest, RejectsNonPositiveStaticBatchSize) {

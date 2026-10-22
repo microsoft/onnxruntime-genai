@@ -62,8 +62,8 @@ def mtp_decoder_overlay(model_dir: Path):
     decoder["conv_cache_size"] = 0
     decoder["session_options"] = copy.deepcopy(mtp.get("session_options", {}))
     decoder["shared_initializers"] = copy.deepcopy(mtp.get("shared_initializers", []))
-    model_type = config["model"]["type"]
-    if model_type in {"qwen3_5", "qwen3_5_moe", "qwen4_exp"}:
+    model_type = config["model"].get("type", "decoder")
+    if model_type in ("qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp"):
         model_type += "_text"
     return {
         "model": {
