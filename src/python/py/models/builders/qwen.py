@@ -16,6 +16,7 @@ import torch
 
 from .base import Model
 from .mtp import MTPModel
+from .qwen_vlm import Qwen35EmbeddingModel, Qwen35VisionModel, make_qwen35_vlm_config, save_qwen35_processor
 
 
 class QwenModel(Model):
@@ -115,6 +116,14 @@ class VideoChatFlashQwenModel(QwenModel):
 
 
 class Qwen35TextModel(Model):
+    def make_quant_init(self, config):
+        super().make_quant_init(config)
+        if self.extra_options.get("exclude_embeds", False) and self.quant_attrs["use_qdq"]:
+            # Tied-embedding defaults also request Gather quantization, which ORT cannot emit as QDQ.
+            self.quant_attrs["op_types_to_quantize"] = tuple(
+                op for op in self.quant_attrs["op_types_to_quantize"] if op != "Gather"
+            )
+
     def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep, io_dtype):
         uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
         if uses_gated_delta_net and ep not in ("cuda", "webgpu"):
@@ -939,6 +948,12 @@ class Qwen35MoEModel(MTPModel):
         self.exclude_embeds = self.decoder.exclude_embeds
         self.model_type = self.decoder.model_type
 
+        self.embedding = None
+        self.vision = None
+        if self.exclude_embeds and getattr(config, "vision_config", None) is not None:
+            self.embedding = Qwen35EmbeddingModel(config, io_dtype, io_dtype, ep, cache_dir, extra_options)
+            self.vision = Qwen35VisionModel(config, io_dtype, io_dtype, ep, cache_dir, extra_options)
+
     def make_mtp_init(self, config, extra_options):
         decoder_options = super().make_mtp_init(config, extra_options)
         text_config = getattr(config, "text_config", config)
@@ -1020,6 +1035,9 @@ class Qwen35MoEModel(MTPModel):
 
     def make_model(self, input_path):
         self.decoder.make_model(input_path)
+        if self.vision is not None:
+            self.embedding.make_model(input_path)
+            self.vision.make_model(input_path)
         if self.mtp is not None:
             print("Building MTP (multi-token prediction) head -> mtp.onnx")
             self.mtp.make_model(input_path)
@@ -1028,6 +1046,9 @@ class Qwen35MoEModel(MTPModel):
 
     def save_model(self, output_dir):
         self.decoder.save_model(output_dir)
+        if self.vision is not None:
+            self.embedding.save_model(output_dir)
+            self.vision.save_model(output_dir)
         if self.mtp is not None:
             self.mtp.save_model(output_dir)
             self.mtp_attrs["shared_initializers"] = self.share_initializers(
@@ -1047,6 +1068,8 @@ class Qwen35MoEModel(MTPModel):
             self.add_dspark_to_genai_config(out_dir)
         if self.dflash2 is not None or self.dspark is not None:
             self.make_block_drafter_search_defaults(out_dir)
+        if self.vision is not None:
+            make_qwen35_vlm_config(out_dir, config, self.decoder.ep)
 
     def make_block_drafter_search_defaults(self, out_dir):
         """Ship greedy search defaults alongside a block drafter.
@@ -1107,6 +1130,8 @@ class Qwen35MoEModel(MTPModel):
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
+        if self.vision is not None:
+            save_qwen35_processor(out_dir, self.vision.vision_config, self.decoder.ep)
 
     def require_specforge_aux_taps(self, target_layer_ids, drafter_name):
         if not target_layer_ids:
