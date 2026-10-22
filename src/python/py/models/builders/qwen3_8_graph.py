@@ -6,7 +6,7 @@ import os
 import onnx_ir as ir
 
 from .base import Model
-from .expansions.graph import Qwen38Graph
+from .expansions.qwen3_8 import Qwen38Graph
 
 
 class Qwen4ExpGraphModel(Qwen38Graph, Model):
