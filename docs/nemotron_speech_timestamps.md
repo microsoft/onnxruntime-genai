@@ -166,6 +166,11 @@ the processor APIs, together with the corresponding ONNX Runtime Extensions lexi
 Existing packages such as GenAI `0.17.0` do not provide those APIs. Until a feature-containing release
 is published:
 
+The timestamp implementation is on `main` after
+[PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591).
+Diarization additionally requires [PR #2719](https://github.com/microsoft/onnxruntime-genai/pull/2719);
+use matching bindings and native binaries from that implementation checkout.
+
 - For Python, use the wheel built from the implementation branch. Call `process_next_tokens()`
   after generation and `finalize()` at the end, then read typed objects from
   `get_next_token_results()`: use nullable `result.get_timestamps()`, then

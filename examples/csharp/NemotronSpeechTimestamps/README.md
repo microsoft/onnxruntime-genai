@@ -14,6 +14,9 @@ This sample requires managed bindings and a native GenAI library containing the 
 including the corresponding ONNX Runtime Extensions lexical lookup API. The current `0.17.0` package
 references are aligned with the other C# examples but do not contain these APIs. Until a
 feature-containing package is published, use the local project reference and matching native build.
+The timestamp implementation is available on `main` after
+[PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591); optional diarization
+requires the corresponding [implementation branch](https://github.com/microsoft/onnxruntime-genai/pull/2719).
 
 From the repository root on Linux, point `LD_LIBRARY_PATH` at the directories containing the matching
 GenAI, ONNX Runtime, and execution-provider libraries, then run:
@@ -29,8 +32,9 @@ CUDA package references to a feature-containing release before using the package
 After each `GenerateNextToken()`, the sample calls `ProcessNextTokens()` and iterates
 `GetNextTokenResults()`. After checking `result.GetTimestamps()` for null,
 `GetSegments()` returns the completed records for the current call,
-not cumulative history. A step can emit zero or multiple tokens and complete zero or
-multiple segments, so every result and record is visited. Repeated getter calls do
+not cumulative history. Nemotron emits zero or one token per generation step;
+the processor accepts sequential batches and can complete zero or multiple segments,
+so every result and record is visited. Repeated getter calls do
 not change state. Enabled timestamps require valid model-provided acoustic timing.
 `FinalizeProcessing()` completes the trailing segment; read it through the same
 getter. Results and nested records borrow processor-owned data and expire on the

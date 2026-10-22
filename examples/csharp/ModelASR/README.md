@@ -27,7 +27,10 @@ dotnet build ModelASR -c Release
 
 The timestamp-capable example requires bindings and a native GenAI library containing the timestamp
 APIs; the current `0.17.0` package references do not contain them, even when running in plain-text mode.
-Until a feature-containing package is published, build from the repository root with:
+The timestamp implementation is available on `main` after
+[PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591); diarization also
+requires the implementation from [PR #2719](https://github.com/microsoft/onnxruntime-genai/pull/2719).
+Until a feature-containing package is published, build from the root of that checkout with:
 
 ```bash
 dotnet build examples/csharp/ModelASR -c Release -p:UseLocalGenAI=true
@@ -85,6 +88,8 @@ For Nemotron, configure `model.timestamp_level` in `genai_config.json` as `word`
 to print completed timestamp records instead of incremental token text. `TokenPostProcessor`
 owns decoding and grouping, consumes every sequential emission through `ProcessNextTokens()`,
 and exposes read-only per-call results through `GetNextTokenResults()`.
+The same processor handles diarization; applications do not run a separate speaker
+postprocessor or tokenizer metadata stream.
 Results expose `GetText()` and nullable `GetTimestamps()`; timestamps expose
 `GetWords()` and `GetSegments()`, with text and time accessors on each record.
 These objects borrow the processor's current output. The sample appends needed
