@@ -58,11 +58,19 @@ bool GenerationTelemetry::IsEnabled() const {
 
 bool GenerationTelemetry::BeginAppend() {
   append_tracking_ = false;
-  if (append_tracking_suppressed_) return false;
+  if (append_tracking_suppressed_) {
+    return false;
+  }
 
   CloseRequestBoundary();
   append_tracking_ = IsEnabled();
-  if (append_tracking_) append_start_time_ = std::chrono::steady_clock::now();
+  if (append_tracking_) {
+    append_start_time_ = std::chrono::steady_clock::now();
+    if (TelemetryInternal::ShouldBeginResourceSample(
+            prompt_tokens_, first_token_logged_, resource_samples_.IsStarted())) {
+      resource_samples_.Begin(CollectProcessResourceUsage());
+    }
+  }
   return append_tracking_;
 }
 
@@ -79,7 +87,9 @@ void GenerationTelemetry::CompleteAppend(size_t input_token_count, int num_beams
 void GenerationTelemetry::OnTokenGenerated(int64_t active_token_count) {
   const bool track_telemetry = IsEnabled();
   if (track_telemetry && !generation_abandoned_) {
-    if (active_token_count <= 0) return;
+    if (active_token_count <= 0) {
+      return;
+    }
 
     const auto now = std::chrono::steady_clock::now();
     if (prompt_tokens_ == 0 && generated_tokens_ == 0) start_time_ = now;
@@ -92,6 +102,13 @@ void GenerationTelemetry::OnTokenGenerated(int64_t active_token_count) {
   } else if (!track_telemetry && !generation_abandoned_) {
     generation_abandoned_ = true;
     Reset();
+  }
+}
+
+void GenerationTelemetry::OnGenerationCompleted() {
+  if (resource_samples_.IsStarted() && !resource_samples_.IsComplete() &&
+      generated_tokens_ > 0 && IsEnabled()) {
+    resource_samples_.Complete(CollectProcessResourceUsage());
   }
 }
 
@@ -142,6 +159,18 @@ void GenerationTelemetry::Finish() {
     info.time_to_first_token_ms = time_to_first_token_ms;
     info.total_time_ms = total_time_ms;
     info.tokens_per_second = tokens_per_second;
+    if (resource_samples_.IsComplete()) {
+      info.process_resident_memory_mb = resource_samples_.End().resident_memory_mb;
+      info.process_cpu_time_ms =
+          ProcessCpuTimeDelta(resource_samples_.Start().cpu_time_ms,
+                              resource_samples_.End().cpu_time_ms);
+      info.process_gpu_memory_mb = resource_samples_.End().gpu_memory_mb;
+      info.process_npu_memory_mb = resource_samples_.End().npu_memory_mb;
+      info.accelerator_memory_source =
+          resource_samples_.End().accelerator_memory_source;
+    } else {
+      info.resource_sample_scope = "completion_not_observed";
+    }
     GenAiTelemetry::Instance().LogGeneration(
         session_id_, generator_id_, prompt_tokens_, input_modality_, info,
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -167,6 +196,7 @@ void GenerationTelemetry::Reset() {
   system_clock_anchor_ = std::chrono::system_clock::now();
   input_modality_ = is_transducer_ ? "audio" : "text";
   append_tracking_ = false;
+  resource_samples_.Reset();
 }
 
 }  // namespace Generators

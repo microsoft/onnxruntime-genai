@@ -9,7 +9,8 @@
 //
 // Telemetry controls (in priority order):
 //   1. Compile-time:  ENABLE_TELEMETRY=OFF (telemetry SDK not linked; API calls are no-ops)
-//   2. Environment:   ORT_DISABLE_TELEMETRY=1 (irreversibly disables telemetry for this process)
+//   2. Environment:   ORT_DISABLE_TELEMETRY=1 or legacy ORT_TELEMETRY_DISABLED
+//                     (irreversibly disables telemetry for this process)
 //   3. Runtime API:   OgaSetTelemetryEnabled(false) (disables non-essential events dynamically)
 
 #pragma once
@@ -55,6 +56,12 @@ struct GenerateEndInfo {
   double time_to_first_token_ms{};
   double total_time_ms{};
   double tokens_per_second{};
+  int64_t process_resident_memory_mb{-1};
+  int64_t process_cpu_time_ms{-1};
+  int64_t process_gpu_memory_mb{-1};
+  int64_t process_npu_memory_mb{-1};
+  std::string_view accelerator_memory_source{"unavailable"};
+  std::string_view resource_sample_scope{"observed_generation_completion_query"};
 };
 
 class GenAiTelemetry {
@@ -80,6 +87,7 @@ class GenAiTelemetry {
   // ProcessInfo: Emitted once per process on first model load.
   // Device fingerprint + library version for MAD/DAD.
   void LogProcessInfo();
+  void LogHardwareInfo(uint32_t session_id);
 
   // ModelLoadStart/End: Paired events tracing model creation lifecycle.
   // Returns true only when the start event was accepted by the live logger.
@@ -157,6 +165,7 @@ class GenAiTelemetry {
   std::atomic<bool> network_context_suppressed_{false};
   std::atomic<bool> initialized_{false};
   std::atomic<bool> process_info_logged_{false};
+  std::atomic<bool> hardware_info_logged_{false};
 #if defined(__ANDROID__)
   std::atomic<bool> android_readiness_warning_logged_{false};
 #endif
