@@ -12,6 +12,8 @@ its `embedding_norm` there, and label the export `lfm2_vl` (a vision pipeline st
 from __future__ import annotations
 
 import importlib.util
+import json
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -82,6 +84,21 @@ def test_lfm2_vl_architecture_uses_lfm2_builder_and_labels_the_export(
 
     assert captured["args"][0] is config
     assert captured["model_type"] == expected_type
+
+
+def test_d1_config_with_auto_map_loads_without_remote_code(tmp_path):
+    # LiquidAI/d1-3B is a stock Lfm2VlForConditionalGeneration whose config.json also names its own
+    # AutoModel class (auto_map). The builder must load it without trust_remote_code and modeling_d1.py.
+    auto_map = {"AutoModel": "modeling_d1.D1Model"}
+    config = {"architectures": ["Lfm2VlForConditionalGeneration"], "auto_map": auto_map, "model_type": "lfm2_vl"}
+    (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    for name in ("tokenizer.json", "tokenizer_config.json"):
+        shutil.copy(Path(__file__).parents[2] / "models" / "lfm2-vl" / name, tmp_path / name)
+
+    hf_config = builder_module.get_hf_details("LiquidAI/d1-3B", str(tmp_path), str(tmp_path / "cache"), {})["hf_config"]
+
+    assert type(hf_config).__name__ == "Lfm2VlConfig"
+    assert hf_config.auto_map == auto_map
 
 
 @pytest.mark.parametrize("model_type", ["lfm2_vl", "lfm2_vl_text"])

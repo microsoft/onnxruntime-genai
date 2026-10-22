@@ -123,7 +123,7 @@ class GenAiTelemetry {
                        std::string_view context);
 
  private:
-  GenAiTelemetry() = default;
+  GenAiTelemetry();
   ~GenAiTelemetry();
   GenAiTelemetry(const GenAiTelemetry&) = delete;
   GenAiTelemetry& operator=(const GenAiTelemetry&) = delete;

@@ -9,6 +9,10 @@
 
 namespace Generators {
 
+void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float* destination,
+                             int64_t height, int64_t width, int64_t channels,
+                             int64_t patch_size, int64_t temporal_patch_size);
+
 struct QwenImageProcessor : Processor {
   QwenImageProcessor(Config& config, const SessionInfo& session_info);
 

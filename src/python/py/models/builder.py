@@ -14,14 +14,18 @@ import argparse
 import json
 import os
 import textwrap
+from pathlib import Path
 from typing import Any
 
 import onnx_ir as ir
 import torch
 from builder_config import (
     apply_runtime_config,
+    export_component_package,
     load_json_object,
     normalize_builder_config,
+    plan_component_package,
+    validate_component_backbone_destination,
     validate_model_dependent_config,
 )
 from builders import (
@@ -29,8 +33,8 @@ from builders import (
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
-    Gemma4MoEModel,
     Gemma4Model,
+    Gemma4MoEModel,
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
@@ -62,7 +66,13 @@ from builders import (
     VideoChatFlashQwenModel,
     WhisperModel,
 )
+from builders.non_generative import (
+    configure_model_specific_export,
+    prepare_model_specific_hf,
+    validate_model_specific_components,
+)
 from builders.qwen import Qwen35Model, Qwen35MoEModel
+from loaders.resolver import resolve_input
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
@@ -105,9 +115,17 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     """
     Get Hugging Face details based on the provided inputs
     """
+    # Resolve URI sources (e.g. oci://) to local paths, once
+    model_name, input_path = resolve_input(model_name), resolve_input(input_path)
+
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
+    if revision := extra_options.get("base_revision"):
+        extra_kwargs["revision"] = revision
     hf_name = input_path if os.path.isdir(input_path) else model_name
+    model_specific_hf = extra_options.get("_model_specific_hf", {})
+    if model_specific_hf:
+        hf_name = model_specific_hf["base_model"]
     hf_token = extra_options.get("hf_token", True)
     hf_remote = extra_options.get("hf_remote", False)
 
@@ -118,16 +136,24 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
         config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
         if config is None:
             raise
-    tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    tokenizer_name = model_specific_hf.get("tokenizer", hf_name)
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs
+    )
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
         from peft import PeftConfig
 
+        adapter_source = (
+            model_specific_hf.get("adapter")
+            or extra_options["adapter_path"]
+        )
+        adapter_kwargs = {} if os.path.isdir(adapter_source) else {"cache_dir": cache_dir}
         peft_config = PeftConfig.from_pretrained(
-            extra_options["adapter_path"],
+            adapter_source,
             token=hf_token,
             trust_remote_code=hf_remote,
-            **extra_kwargs,
+            **adapter_kwargs,
         )
         config.update(peft_config.__dict__)
 
@@ -136,6 +162,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
         "extra_kwargs": extra_kwargs,
         "hf_name": hf_name,
         "hf_config": config,
+        "input_path": input_path,
     }
     return hf_details
 
@@ -227,8 +254,6 @@ def check_extra_options(
             raise ValueError(message)
         if state_update_capacity and not extra_options.get("use_paged_attention", False):
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
-        if state_update_capacity and execution_provider == "webgpu":
-            raise ValueError("state_update_capacity > 0 is not supported on WebGPU: Engine compact state replay is not implemented.")
         extra_options["state_update_capacity"] = state_update_capacity
 
     if "max_draft_tokens" in extra_options:
@@ -492,6 +517,7 @@ def parse_extra_options(
     speculative_options=None,
     runtime_config=None,
     search=None,
+    component_options=None,
 ):
     """
     Parse CLI KEY=VALUE options and normalize the structured envelope.
@@ -520,8 +546,12 @@ def parse_extra_options(
         speculative_options=speculative_options,
         runtime_config=runtime_config,
         search=search,
+        component_options=component_options,
     )
     kv_pairs = effective_config.extra_options
+    if effective_config.component_options is not None and effective_config.component_options.model_source is not None:
+        base_source = input_path if os.path.isdir(input_path) else model_name
+        prepare_model_specific_hf(effective_config.component_options, kv_pairs, base_source)
     print(f"Extra options: {kv_pairs}")
     check_extra_options(
         model_name,
@@ -650,6 +680,7 @@ def create_model(
             "speculative_options",
             "runtime_config",
             "search",
+            "component_options",
         )
         if key in extra_options
     }
@@ -680,8 +711,15 @@ def create_model(
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
+    # Local path from `get_hf_details`, after any URI resolution
+    input_path = hf_details.pop("input_path", input_path)
     if effective_config is not None:
         validate_model_dependent_config(effective_config, config)
+        if (
+            effective_config.component_options is not None
+            and effective_config.component_options.model_source is not None
+        ):
+            configure_model_specific_export(effective_config.component_options, config, extra_options)
 
     # Set input/output precision of ONNX model
     quant_config = extra_options.get("_quant_config")
@@ -829,6 +867,21 @@ def create_model(
     # metadata is dropped when the builder does not honor it.
     warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
 
+    if effective_config is not None and effective_config.component_options is not None:
+        validate_component_backbone_destination(
+            effective_config.component_options,
+            output_dir,
+            require_exists=config_only,
+        )
+        if effective_config.component_options.model_source is not None:
+            validate_model_specific_components(
+                effective_config.component_options, Path(output_dir).resolve()
+            )
+        else:
+            plan_component_package(
+                effective_config.component_options, Path(output_dir).resolve()
+            )
+
     if not config_only:
         # Make ONNX model
         onnx_model.make_model(input_path)
@@ -838,6 +891,8 @@ def create_model(
 
     # Make GenAI config
     onnx_model.make_genai_config(config, extra_kwargs, output_dir)
+    if effective_config is not None and effective_config.component_options is not None:
+        export_component_package(effective_config.component_options, output_dir)
 
     # Composite exporters append MTP/block-drafter sections after the decoder.
     # Applying a profile earlier would reject valid component names or lose it
@@ -867,7 +922,7 @@ def get_args():
         "--model_name",
         required=False,
         default=None,
-        help="Model name in Hugging Face. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
+        help="Model name in Hugging Face, or an oci://<registry>/<repo>:<tag> reference. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
     )
 
     parser.add_argument(
@@ -879,6 +934,7 @@ def get_args():
             Input model source. Currently supported options are:
                 hf_path: Path to folder on disk containing the Hugging Face config, model, tokenizer, etc.
                 gguf_path: Path to float16/float32 GGUF file on disk containing the GGUF model
+                oci://<registry>/<repo>:<tag>: CNCF ModelPack artifact, pulled via an llmman daemon
             """),
     )
 
@@ -1005,9 +1061,12 @@ def get_args():
                     exclude_lm_head. A block drafter (dflash2_path/dspark_path) already supersedes the head
                     and does not need this option.
                 prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
-                    When enabled for standard models, inserts Gather+Unsqueeze so the MatMul input is [B,1,H] instead
-                    of [B,S,H]. For paged-attention models, gathers the final packed hidden state for each sequence so
-                    the MatMul input is [B,H] instead of [num_tokens,H].
+                    When enabled for standard models, takes each row's last real token (the last 1 in
+                    attention_mask), so padded batches work, and the MatMul input is [B,1,H] instead of [B,S,H].
+                    Pruned models exported by older builders take the last column instead, which is wrong for
+                    the shorter rows of a right-padded batch, so export them again if you run padded batches.
+                    For paged-attention models, gathers the final packed hidden state for each sequence so the
+                    MatMul input is [B,H] instead of [num_tokens,H].
                     Ignored when exclude_lm_head is true.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
@@ -1031,7 +1090,7 @@ def get_args():
                     default of 4 in effect.
                 dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
                     Accepts true or false (default). Requires dflash2_path. Combines gate/up
-                    weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
+                    weights into one MatMul or MatMulNBits followed by Split. Preserves EP-specific
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
                 dflash2_fuse_qkv = Experimental DFlash 2 attention Q/K/V projection fusion.
@@ -1053,15 +1112,19 @@ def get_args():
                     format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
                     projections the kernel supports (N % 64 for int4, N % 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
-                    Body activations and KV caches remain bf16; this option does not quantize the
-                    drafter's KV cache. When the target LM head uses a reproducible symmetric default
+                    CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
+                    with FP32 residual/skip normalization and convolution-finish accumulation for FP16
+                    models. Finish outputs stay FP32 until after normalization; normalized outputs
+                    return to FP16. This option does not quantize the drafter's KV cache.
+                    When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
                     and prepack mode when eligible so `share_initializers` can fold it onto the target's
                     copy. Dense or unsupported target LM-head layouts keep the drafter head dense.
                 dspark_path = Path to a DSpark draft checkpoint. Exports an auxiliary `dspark.onnx`
                     block drafter beside the target model and adds a `dspark` section to
                     genai_config.json. Mutually exclusive with dflash2_path. Requires
-                    use_paged_attention=true. SpecForge taps each target layer's output, so
+                    use_paged_attention=true. Unsupported on WebGPU because the drafter requires BF16.
+                    SpecForge taps each target layer's output, so
                     aux_hidden_state_layers must be the drafter's `target_layer_ids` each plus one.
                 dspark_num_draft_tokens = Override the number of draft tokens the DSpark block
                     drafter proposes per step. Must be at least 2 and no greater than the draft checkpoint's
@@ -1073,12 +1136,11 @@ def get_args():
                     structured QuantConfig schema independently from the main model.
                 linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
                     Qwen3.5/3.8 exports. Default is linear_attention. Paged exports always use GatedDeltaNet and
-                    ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and supports fp16
-                    or bf16 I/O.
+                    ignore this option. gated_delta_net requires CUDA or WebGPU and state_window=0. CUDA supports
+                    fp16 or bf16 I/O; non-paged WebGPU supports fp16 or fp32.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
-                    Must be an integer from 0 through 8 and requires use_paged_attention=true. Positive capacities
-                    are not supported on WebGPU because Engine compact state replay is not implemented. This experimental
-                    contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
+                    Must be an integer from 0 through 8 and requires use_paged_attention=true. Engine compact
+                    replay supports CPU, CUDA, and WebGPU; WebGPU stages partial-acceptance replay through CPU.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
                     Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require
@@ -1215,6 +1277,17 @@ def get_args():
         help="Target export options as an inline JSON object or JSON file path.",
     )
     parser.add_argument(
+        "--component_options",
+        default=None,
+        help=(
+            "Optional hidden-state backbone plus generic pre-built heads or one "
+            "pinned model_source, as inline JSON or a JSON file. Generic heads "
+            "require unique safe names/files and valid graph bindings; "
+            "model_source requires artifact_revision and base_revision. "
+            "Cannot be combined with drafter_options; omitted by default."
+        ),
+    )
+    parser.add_argument(
         "--drafter_options",
         default=None,
         help="Drafter export options as an inline JSON object or JSON file path.",
@@ -1254,6 +1327,7 @@ if __name__ == "__main__":
         args.extra_options,
         builder_config_version=args.builder_config_version,
         target_options=args.target_options,
+        component_options=args.component_options,
         drafter_options=args.drafter_options,
         speculative_options=args.speculative_options,
         runtime_config=args.runtime_config,

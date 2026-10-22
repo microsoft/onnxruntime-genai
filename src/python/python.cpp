@@ -318,6 +318,51 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
   return d;
 }
 
+template <typename Output>
+struct PyPostProcessorOutput {
+  const Output* output;
+  std::weak_ptr<bool> lifetime;
+
+  const Output& Get() const {
+    if (lifetime.expired()) throw std::runtime_error("The postprocessor result expired after a processor mutation or destruction.");
+    return *output;
+  }
+};
+
+using PyTokenPostProcessorResult = PyPostProcessorOutput<OgaTokenPostProcessorResult>;
+using PyTokenPostProcessorTimestamp = PyPostProcessorOutput<OgaTokenPostProcessorTimestamp>;
+using PyTokenPostProcessorTimestampRecord = PyPostProcessorOutput<OgaTokenPostProcessorTimestampRecord>;
+
+struct PyTokenPostProcessor {
+  explicit PyTokenPostProcessor(std::unique_ptr<OgaTokenPostProcessor> processor)
+      : processor_{std::move(processor)} {}
+
+  void ProcessNextTokens() {
+    result_lifetime_ = std::make_shared<bool>(true);
+    processor_->ProcessNextTokens();
+  }
+
+  void Finalize() {
+    result_lifetime_ = std::make_shared<bool>(true);
+    processor_->Finalize();
+  }
+
+  void Reset() {
+    result_lifetime_ = std::make_shared<bool>(true);
+    processor_->Reset();
+  }
+
+  std::vector<PyTokenPostProcessorResult> GetNextTokenResults() const {
+    std::vector<PyTokenPostProcessorResult> results;
+    for (const auto* result : processor_->GetNextTokenResults()) results.push_back({result, result_lifetime_});
+    return results;
+  }
+
+ private:
+  std::unique_ptr<OgaTokenPostProcessor> processor_;
+  std::shared_ptr<bool> result_lifetime_{std::make_shared<bool>(true)};
+};
+
 struct PyGenerator {
   PyGenerator(const OgaModel& model, PyGeneratorParams& params) {
     generator_ = OgaGenerator::Create(model, *params.params_);
@@ -325,6 +370,10 @@ struct PyGenerator {
 
   pybind11::array_t<int32_t> GetNextTokens() {
     return ToPython(generator_->GetNextTokens());
+  }
+
+  std::unique_ptr<OgaTokenPostProcessor> CreatePostProcessor() {
+    return OgaTokenPostProcessor::Create(*generator_);
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
@@ -495,8 +544,50 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            pybind11::arg("enable_ff_tokens") = false)
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
+  pybind11::class_<PyTokenPostProcessorTimestampRecord>(m, "TokenPostProcessorTimestampRecord")
+      .def("get_text", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
+      .def("get_start_frame", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStartFrame(); })
+      .def("get_stop_frame", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStopFrame(); })
+      .def("get_start_time", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStartTime(); })
+      .def("get_stop_time", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStopTime(); });
+
+  pybind11::class_<PyTokenPostProcessorTimestamp>(m, "TokenPostProcessorTimestamp")
+      .def("get_words", [](const PyTokenPostProcessorTimestamp& result) {
+        std::vector<PyTokenPostProcessorTimestampRecord> records;
+        const auto& timestamps = result.Get();
+        for (size_t index = 0; index < timestamps.GetWordCount(); ++index)
+          records.push_back({&timestamps.GetWord(index), result.lifetime});
+        return records;
+      })
+      .def("get_segments", [](const PyTokenPostProcessorTimestamp& result) {
+        std::vector<PyTokenPostProcessorTimestampRecord> records;
+        const auto& timestamps = result.Get();
+        for (size_t index = 0; index < timestamps.GetSegmentCount(); ++index)
+          records.push_back({&timestamps.GetSegment(index), result.lifetime});
+        return records;
+      });
+
+  pybind11::class_<PyTokenPostProcessorResult>(m, "TokenPostProcessorResult")
+      .def("get_text", [](const PyTokenPostProcessorResult& result) { return result.Get().GetText(); })
+      .def("get_timestamps", [](const PyTokenPostProcessorResult& result) -> std::optional<PyTokenPostProcessorTimestamp> {
+        const auto* timestamps = result.Get().GetTimestamps();
+        if (!timestamps) return std::nullopt;
+        return PyTokenPostProcessorTimestamp{timestamps, result.lifetime};
+      });
+
+  pybind11::class_<PyTokenPostProcessor>(m, "TokenPostProcessor")
+      .def(pybind11::init([](PyGenerator& generator) {
+             return std::make_unique<PyTokenPostProcessor>(generator.CreatePostProcessor());
+           }),
+           pybind11::keep_alive<1, 2>())
+      .def("process_next_tokens", &PyTokenPostProcessor::ProcessNextTokens)
+      .def("get_next_token_results", &PyTokenPostProcessor::GetNextTokenResults)
+      .def("finalize", &PyTokenPostProcessor::Finalize)
+      .def("reset", &PyTokenPostProcessor::Reset);
+
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
-      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
+      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); })
+      .def("reset", &OgaTokenizerStream::Reset);
 
   pybind11::class_<OgaNamedTensors>(m, "NamedTensors")
       .def(pybind11::init([]() { return OgaNamedTensors::Create(); }))

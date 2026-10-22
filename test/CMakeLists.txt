@@ -13,6 +13,7 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 )
 
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cpu_cast_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
@@ -20,10 +21,14 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -66,6 +71,20 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   target_link_libraries(unit_tests PRIVATE cublasLt cublas curand cufft cudart)
   set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
   add_dependencies(unit_tests onnxruntime-genai-cuda)
+
+  # Header-only helper regression tests: no GenAI/ORT dependency or production CUDA rebuild.
+  foreach(warp_sort_target IN ITEMS cuda_warp_sort_tests cuda_warp_sort_stable_tests)
+    add_executable(${warp_sort_target} "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cuda_kernel/warp_sort_tests.cu")
+    target_include_directories(${warp_sort_target} PRIVATE
+      "${CMAKE_SOURCE_DIR}/src"
+      "${CMAKE_SOURCE_DIR}/src/ep/cuda"
+    )
+    target_link_libraries(${warp_sort_target} PRIVATE GTest::gtest_main cudart)
+    set_target_properties(${warp_sort_target} PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON FOLDER "Tests")
+    target_compile_options(${warp_sort_target} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>")
+    add_test(NAME ${warp_sort_target} COMMAND ${warp_sort_target})
+  endforeach()
+  target_compile_definitions(cuda_warp_sort_stable_tests PRIVATE STABLE_TOPK)
 
   # These tests exercise the internal BatchedSampler interface, so keep them out of unit_tests,
   # which deliberately links only the public shared-library API.
@@ -185,6 +204,38 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+add_executable(parallel_preprocessing_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
+target_include_directories(parallel_preprocessing_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(parallel_preprocessing_tests PRIVATE
+  onnxruntime-genai-obj
+  GTest::gtest
+)
+add_dependencies(parallel_preprocessing_tests onnxruntime-genai)
+set_target_properties(parallel_preprocessing_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  FOLDER "Tests"
+)
+if(NOT MSVC)
+  target_compile_options(parallel_preprocessing_tests PRIVATE "-fvisibility=hidden")
+endif()
+add_test(NAME ParallelPreprocessingTests
+  COMMAND parallel_preprocessing_tests --gtest_filter=-ParallelPerformanceTests.*)
+option(ENABLE_PREPROCESSING_PERFORMANCE_TESTS
+  "Register preprocessing timing checks; requires an idle, known CPU setup" OFF)
+if(ENABLE_PREPROCESSING_PERFORMANCE_TESTS)
+  add_test(NAME ParallelPreprocessingPerformanceTests
+    COMMAND parallel_preprocessing_tests --gtest_filter=ParallelPerformanceTests.*)
+  set_tests_properties(ParallelPreprocessingPerformanceTests PROPERTIES LABELS "performance")
+endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/telemetry-shutdown-tests.cmake")
 
 add_executable(kv_cache_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 target_include_directories(kv_cache_unit_tests PRIVATE
@@ -273,6 +324,7 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.cpp"
 )
 list(APPEND engine_unit_test_srcs
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/model_package_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp"
@@ -280,6 +332,7 @@ list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})
 target_include_directories(engine_unit_tests PRIVATE
