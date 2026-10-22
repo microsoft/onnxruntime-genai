@@ -459,6 +459,34 @@ inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,
   Ort::ThrowOnError(Ort::api->CopyTensors(this, src_tensors.data(), dst_tensors.data(), stream, src_tensors.size()));
 }
 
+inline bool OrtEnv::TryZeroTensors(const std::vector<OrtValue*>& tensors, OrtSyncStream* stream) const {
+#if ORT_API_VERSION >= 28
+  // Declared here rather than taken from onnxruntime_experimental_c_api.h so this builds against ORT headers that
+  // predate the function. The signature must match ORT's OrtApi_ZeroTensors_SinceV32.
+  using ZeroTensorsFn = OrtStatusPtr(ORT_API_CALL*)(const OrtEnv* env, OrtValue* const* tensors,
+                                                    OrtSyncStream* stream, size_t num_tensors);
+  static const ZeroTensorsFn zero_tensors = []() -> ZeroTensorsFn {
+    if (Ort::api_version < 28)
+      return nullptr;
+    return reinterpret_cast<ZeroTensorsFn>(Ort::api->GetExperimentalFunction("OrtApi_ZeroTensors_SinceV32"));
+  }();
+  if (!zero_tensors)
+    return false;
+
+  OrtStatus* status = zero_tensors(this, tensors.data(), stream, tensors.size());
+  if (status && Ort::api->GetErrorCode(status) == ORT_NOT_IMPLEMENTED) {
+    Ort::api->ReleaseStatus(status);
+    return false;
+  }
+  Ort::ThrowOnError(status);
+  return true;
+#else
+  (void)tensors;
+  (void)stream;
+  return false;
+#endif
+}
+
 inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
   size_t num_devices = 0;
   const OrtEpDevice* const* device_ptrs = nullptr;
