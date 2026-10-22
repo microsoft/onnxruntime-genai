@@ -22,6 +22,12 @@ void Sequences::AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t b
 
 void Sequences::RewindTo(size_t index) {
   current_length_ = static_cast<int>(index);
+  if (encoder_prompt_length_ > current_length_)
+    encoder_prompt_length_ = current_length_;
+  if (encoder_prompt_length_ + decoder_prompt_length_ > current_length_)
+    decoder_prompt_length_ = current_length_ - encoder_prompt_length_;
+  if (current_length_ <= encoder_prompt_length_ + decoder_prompt_length_)
+    has_generated_tokens_ = false;
   assert(current_length_ >= 0);
 }
 

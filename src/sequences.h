@@ -23,6 +23,35 @@ struct Sequences {
   // Returns current sequence length.
   int GetSequenceLength() const { return current_length_; }
 
+  // Returns the encoder prompt tokens for a given beam index.
+  DeviceSpan<int32_t> GetEncoderPromptTokens(size_t batch_beam_index) {
+    return sequences_.subspan(batch_beam_index * max_length_, encoder_prompt_length_);
+  }
+  int GetEncoderPromptLength() const { return encoder_prompt_length_; }
+
+  // Returns the decoder prompt tokens for a given beam index.
+  DeviceSpan<int32_t> GetDecoderPromptTokens(size_t batch_beam_index) {
+    return sequences_.subspan(batch_beam_index * max_length_ + encoder_prompt_length_, decoder_prompt_length_);
+  }
+  int GetDecoderPromptLength() const { return decoder_prompt_length_; }
+
+  // Returns the decoder sequence (decoder prompt tokens + generated decoder tokens) for a given beam index.
+  DeviceSpan<int32_t> GetDecoderSequence(size_t batch_beam_index) {
+    return sequences_.subspan(batch_beam_index * max_length_ + encoder_prompt_length_, GetDecoderSequenceLength());
+  }
+  int GetDecoderSequenceLength() const { return current_length_ - encoder_prompt_length_; }
+
+  void RecordPromptLength(bool is_encoder_prompt) {
+    if (has_generated_tokens_)
+      return;
+    if (is_encoder_prompt && encoder_prompt_length_ == 0) {
+      encoder_prompt_length_ = current_length_;
+    } else {
+      decoder_prompt_length_ = current_length_ - encoder_prompt_length_;
+    }
+  }
+  void MarkGenerationStarted() { has_generated_tokens_ = true; }
+
   // After tokens are appended, this function must be called to update the state & log the tokens
   void AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t batch_beam_size);
 
@@ -39,6 +68,9 @@ struct Sequences {
   DeviceSpan<int32_t> sequences_next_;  // This only exists for beam search, to allow for the easy reordering of sequences
 
   int current_length_;
+  int encoder_prompt_length_{0};
+  int decoder_prompt_length_{0};
+  bool has_generated_tokens_{false};
 };
 
 }  // namespace Generators

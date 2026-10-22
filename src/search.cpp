@@ -187,6 +187,7 @@ void GreedySearch_Cpu::SelectTop() {
     SetNextToken(batch_id, token);
   }
 
+  sequences_.MarkGenerationStarted();
   if (!done_)
     AppendNextTokensToSequences();
 }
@@ -196,6 +197,7 @@ void GreedySearch_Cpu::CommitToken(int32_t token) {
   // (SetNextToken handles EOS/done accounting, AppendNextTokensToSequences appends + checks
   // max_length) but skip the argmax since the id is known. batch_size is always 1 here.
   SetNextToken(0, token);
+  sequences_.MarkGenerationStarted();
   if (!done_)
     AppendNextTokensToSequences();
 }
@@ -212,6 +214,7 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature, std::mt19937& rng) {
     ComputeSampledCategorical({scores.data(), scores.size()}, k, /*top_p=*/0.0f, temperature, dist);
     SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
+  sequences_.MarkGenerationStarted();
   if (!done_)
     AppendNextTokensToSequences();
 }
@@ -231,6 +234,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature, std::mt19937& rng)
     ComputeSampledCategorical({scores.data(), scores.size()}, /*top_k=*/0, p, temperature, dist);
     SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
+  sequences_.MarkGenerationStarted();
   if (!done_)
     AppendNextTokensToSequences();
 }
@@ -249,6 +253,7 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature, std::mt
     ComputeSampledCategorical({scores.data(), scores.size()}, k, p, temperature, dist);
     SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
+  sequences_.MarkGenerationStarted();
   if (!done_)
     AppendNextTokensToSequences();
 }
@@ -307,6 +312,7 @@ void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
     AppendNextTokensToSequences();
   }
 
+  sequences_.RecordPromptLength(params_->HasEncoderPromptTokens());
   ResetDone();
 }
 
@@ -340,6 +346,7 @@ void BeamSearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
     copy(source, target);
   }
   sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size);  // next_tokens is not expanded
+  sequences_.RecordPromptLength(params_->HasEncoderPromptTokens());
 }
 
 bool BeamSearch_Cpu::IsDone() const {
@@ -352,6 +359,7 @@ bool BeamSearch_Cpu::IsDone() const {
 }
 
 void BeamSearch_Cpu::AppendNextTokensToSequences() {
+  sequences_.MarkGenerationStarted();
   auto sequences_span = sequences_.GetSequences().CpuSpan();
   auto sequences_next_span = sequences_.GetNextSequences().CpuSpan();
   auto max_length = sequences_.max_length_;
@@ -433,38 +441,15 @@ void Search_Cpu::ApplyNoRepeatNgram(int ngram_size) {
   if (ngram_size <= 0)
     return;
 
-  const int sequence_length = sequences_.GetSequenceLength();
-  // Need at least one complete n-gram in history before anything can be banned.
-  if (sequence_length < ngram_size)
+  // Need at least one complete n-gram in decoder history before anything can be banned.
+  if (sequences_.GetDecoderSequenceLength() < ngram_size)
     return;
 
-  const int prefix_length = ngram_size - 1;
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    std::span<const int32_t> const sequence = sequences_.GetSequence(i).CpuSpan();
-
-    // The prefix we are about to extend: the trailing (ngram_size - 1) tokens.
-    std::span<const int32_t> const target_prefix = sequence.subspan(sequence_length - prefix_length, prefix_length);
-
-    // Scan every historical n-gram. Its first (ngram_size - 1) tokens form a prefix
-    // and its last token is what followed. If the prefix matches the trailing prefix,
-    // ban that following token so the same n-gram cannot repeat.
-    const int last_start = sequence_length - ngram_size;
-    for (int start = 0; start <= last_start; start++) {
-      bool matches = true;
-      for (int j = 0; j < prefix_length; j++) {
-        if (sequence[start + j] != target_prefix[j]) {
-          matches = false;
-          break;
-        }
-      }
-      if (matches) {
-        const int32_t banned_token = sequence[start + prefix_length];
-        if (banned_token >= 0 && banned_token < params_->config.model.vocab_size)
-          beam_token_scores[banned_token] = std::numeric_limits<float>::lowest();
-      }
-    }
+    std::span<const int32_t> const sequence = sequences_.GetDecoderSequence(i).CpuSpan();
+    ApplyNoRepeatNgramToLogits(beam_token_scores, sequence, ngram_size);
   }
 }
 
