@@ -3099,7 +3099,13 @@ struct RuntimeProfileEligibility_Element : JSON::Element {
       v_.minimum_free_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
     } else if (name == "maximum_free_device_memory_bytes") {
       v_.maximum_free_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
-    } else if (name == "is_integrated") {
+    } else if (name == "minimum_effective_host_memory_bytes") {
+      v_.minimum_effective_host_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "maximum_effective_host_memory_bytes") {
+      v_.maximum_effective_host_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "minimum_available_host_memory_bytes") {
+      v_.minimum_available_host_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "is_integrated" || name == "is_integrated_device") {
       v_.is_integrated = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
@@ -3133,8 +3139,20 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
   Config::RuntimeProfile::Overlay::DynamicBatching& v_;
 };
 
+struct RuntimeProfileSessionOptions_Element : JSON::Element {
+  explicit RuntimeProfileSessionOptions_Element(std::map<std::string, std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_[std::string{name}] = std::string{JSON::Get<std::string_view>(value)};
+  }
+
+ private:
+  std::map<std::string, std::string>& v_;
+};
+
 struct RuntimeProfileDecoder_Element : JSON::Element {
-  explicit RuntimeProfileDecoder_Element(Config::RuntimeProfile::Overlay::Model& v) : v_{v} {}
+  explicit RuntimeProfileDecoder_Element(Config::RuntimeProfile::Overlay::Model& v)
+      : v_{v}, session_options_{v.decoder_session_options} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
@@ -3144,8 +3162,16 @@ struct RuntimeProfileDecoder_Element : JSON::Element {
     }
   }
 
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      return session_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::RuntimeProfile::Overlay::Model& v_;
+  RuntimeProfileSessionOptions_Element session_options_;
 };
 
 struct RuntimeProfileModel_Element : JSON::Element {
@@ -3334,8 +3360,14 @@ bool EligibilitiesIntersect(const Config::RuntimeProfile::Eligibility& a,
                                          std::numeric_limits<uint64_t>::max()),
                                      b.maximum_free_device_memory_bytes.value_or(
                                          std::numeric_limits<uint64_t>::max()));
+  const auto minimum_host = std::max(a.minimum_effective_host_memory_bytes.value_or(0),
+                                     b.minimum_effective_host_memory_bytes.value_or(0));
+  const auto maximum_host = std::min(a.maximum_effective_host_memory_bytes.value_or(
+                                         std::numeric_limits<uint64_t>::max()),
+                                     b.maximum_effective_host_memory_bytes.value_or(
+                                         std::numeric_limits<uint64_t>::max()));
   return minimum_total <= maximum_total && minimum_free <= maximum_free &&
-         minimum_free <= maximum_total &&
+         minimum_free <= maximum_total && minimum_host <= maximum_host &&
          ExactConditionsIntersect(a.is_integrated, b.is_integrated);
 }
 
@@ -3350,6 +3382,15 @@ bool MatchesEligibility(const Config::RuntimeProfile::Eligibility& eligibility,
          (!eligibility.maximum_free_device_memory_bytes ||
           (device.free_device_memory_bytes &&
            *device.free_device_memory_bytes <= *eligibility.maximum_free_device_memory_bytes)) &&
+         (!eligibility.minimum_effective_host_memory_bytes ||
+          (device.effective_host_memory_bytes &&
+           *device.effective_host_memory_bytes >= *eligibility.minimum_effective_host_memory_bytes)) &&
+         (!eligibility.maximum_effective_host_memory_bytes ||
+          (device.effective_host_memory_bytes &&
+           *device.effective_host_memory_bytes <= *eligibility.maximum_effective_host_memory_bytes)) &&
+         (!eligibility.minimum_available_host_memory_bytes ||
+          (device.available_host_memory_bytes &&
+           *device.available_host_memory_bytes >= *eligibility.minimum_available_host_memory_bytes)) &&
          (!eligibility.is_integrated ||
           (device.is_integrated && *device.is_integrated == *eligibility.is_integrated));
 }
@@ -3396,7 +3437,9 @@ void ValidateRuntimeProfiles(const Config& config) {
       ValidateConfigPath(*profile.overlay.model.decoder_filename,
                          "runtime profile '" + profile.id + "' model.decoder.filename");
     }
-    if (!profile.overlay.model.decoder_filename && !batching.num_blocks && !batching.max_batch_size &&
+    if (!profile.overlay.model.decoder_filename &&
+        profile.overlay.model.decoder_session_options.empty() &&
+        !batching.num_blocks && !batching.max_batch_size &&
         !batching.max_scheduled_tokens && !search.chunk_size &&
         !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
@@ -3775,15 +3818,29 @@ void LogRuntimeProfileSelection(std::string_view profile_id, const RuntimeProfil
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   ValidateRuntimeProfiles(config);
   const Config::RuntimeProfile* selected = nullptr;
-  for (const auto& profile : config.runtime_profiles) {
-    if (!MatchesEligibility(profile.eligibility, device)) {
-      continue;
+  const char* forced_id = std::getenv("ORTGENAI_ENABLE_RUNTIME_PROFILE");
+  if (forced_id && *forced_id) {
+    for (const auto& profile : config.runtime_profiles) {
+      if (profile.id == forced_id) {
+        selected = &profile;
+        break;
+      }
     }
-    if (selected) {
-      throw std::runtime_error("multiple runtime profiles match device eligibility: '" +
-                               selected->id + "' and '" + profile.id + "'");
+    if (!selected) {
+      throw std::runtime_error(std::string("ORTGENAI_ENABLE_RUNTIME_PROFILE='") + forced_id +
+                               "' not found in runtime_profiles");
     }
-    selected = &profile;
+  } else {
+    for (const auto& profile : config.runtime_profiles) {
+      if (!MatchesEligibility(profile.eligibility, device)) {
+        continue;
+      }
+      if (selected) {
+        throw std::runtime_error("multiple runtime profiles match device eligibility: '" +
+                                 selected->id + "' and '" + profile.id + "'");
+      }
+      selected = &profile;
+    }
   }
   if (!selected) {
     if (!config.runtime_profiles.empty()) {
@@ -3801,6 +3858,16 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   Config candidate{config};
   if (selected->overlay.model.decoder_filename) {
     candidate.model.decoder.filename = *selected->overlay.model.decoder_filename;
+  }
+  for (const auto& [k, v] : selected->overlay.model.decoder_session_options) {
+    auto& entries = candidate.model.decoder.session_options.config_entries;
+    auto it = std::find_if(entries.begin(), entries.end(),
+                           [&](const auto& pair) { return pair.first == k; });
+    if (it != entries.end()) {
+      it->second = v;
+    } else {
+      entries.emplace_back(k, v);
+    }
   }
   if (has_batching_overlay) {
     auto& effective = *candidate.engine.dynamic_batching;

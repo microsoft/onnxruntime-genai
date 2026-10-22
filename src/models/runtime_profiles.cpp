@@ -6,9 +6,51 @@
 #include "smartptrs.h"
 
 #include <algorithm>
+#include <fstream>
 #include <iostream>
+#include <limits>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace Generators {
+
+namespace {
+
+void QueryHostMemoryFacts(std::optional<uint64_t>& effective_host_bytes,
+                          std::optional<uint64_t>& available_host_bytes) noexcept {
+#if defined(_WIN32)
+  MEMORYSTATUSEX stat{};
+  stat.dwLength = sizeof(stat);
+  if (GlobalMemoryStatusEx(&stat)) {
+    effective_host_bytes = static_cast<uint64_t>(stat.ullTotalPhys);
+    available_host_bytes = static_cast<uint64_t>(stat.ullAvailPhys);
+  }
+#else
+  const long page_sz = sysconf(_SC_PAGESIZE);
+  const long phys_pages = sysconf(_SC_PHYS_PAGES);
+  const long avphys_pages = sysconf(_SC_AVPHYS_PAGES);
+  if (page_sz > 0 && phys_pages > 0) {
+    uint64_t total_phys = static_cast<uint64_t>(page_sz) * static_cast<uint64_t>(phys_pages);
+    std::ifstream cgroup_max("/sys/fs/cgroup/memory.max");
+    uint64_t cg_limit = 0;
+    if (cgroup_max && (cgroup_max >> cg_limit) && cg_limit > 0 && cg_limit < total_phys) {
+      total_phys = cg_limit;
+    }
+    effective_host_bytes = total_phys;
+  }
+  if (page_sz > 0 && avphys_pages > 0) {
+    available_host_bytes = static_cast<uint64_t>(page_sz) * static_cast<uint64_t>(avphys_pages);
+  }
+#endif
+}
+
+}  // namespace
 
 void ApplyRuntimeProfileForSelectedDevice(Config& config, DeviceInterface& device) {
   if (config.runtime_profiles.empty()) return;
@@ -50,8 +92,15 @@ void ApplyRuntimeProfileForSelectedDevice(Config& config, DeviceInterface& devic
       return;
     }
   }
+  std::optional<uint64_t> effective_host_bytes;
+  std::optional<uint64_t> available_host_bytes;
+  QueryHostMemoryFacts(effective_host_bytes, available_host_bytes);
   ApplyRuntimeProfile(config, RuntimeProfileDeviceFacts{
-                                  total_device_memory_bytes, is_integrated, available_device_memory_bytes});
+                                  total_device_memory_bytes,
+                                  is_integrated,
+                                  available_device_memory_bytes,
+                                  effective_host_bytes,
+                                  available_host_bytes});
   config.runtime_profiles.clear();
 }
 

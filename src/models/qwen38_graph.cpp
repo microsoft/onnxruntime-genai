@@ -610,8 +610,9 @@ void Qwen38GraphEngine::PrepRow(int rows, int row, const void* tok, const void* 
               in.ple + 2 * static_cast<size_t>(ple_width_) * row, ctl_.data());
   if (in.inputs_embeds && plane_.embed_rows && model_.embed_mapping_) {
     const int embed_width = model_.config_->model.decoder.hidden_size;
+    const int encoded_width = model_.embed_is_int8_ ? -embed_width : embed_width;
     plane_.embed_rows(stream_, model_.embed_mapping_->device_data(), in.input_ids + 8 * row,
-                      in.inputs_embeds + 2 * static_cast<size_t>(embed_width) * row, 1, embed_width);
+                      in.inputs_embeds + 2 * static_cast<size_t>(embed_width) * row, 1, encoded_width);
   }
 }
 
@@ -1265,16 +1266,38 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     if (std::filesystem::exists(embed_data_path)) {
       embed_mapping_ = std::make_unique<Qwen38FileMapping>(*plane_, embed_data_path, true);
       const std::vector<int64_t> embed_shape{config_->model.vocab_size, config_->model.decoder.hidden_size};
-      const size_t expected_bytes =
+      const size_t expected_bf16_bytes =
           static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]) * sizeof(uint16_t);
-      if (embed_mapping_->size() >= expected_bytes) {
+      const size_t expected_int8_bytes =
+          static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]) +
+          static_cast<size_t>(embed_shape[0]) * sizeof(float);
+      if (embed_mapping_->size() >= expected_bf16_bytes) {
+        embed_is_int8_ = false;
         embed_values_.push_back(OrtValue::CreateTensor(
-            *p_device_->GetMemoryInfo(), embed_mapping_->device_data(), expected_bytes, embed_shape,
+            *p_device_->GetMemoryInfo(), embed_mapping_->device_data(), expected_bf16_bytes, embed_shape,
             ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
         for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
           session_options_->AddInitializer(name, *embed_values_.back());
         }
+      } else if (embed_mapping_->size() >= expected_int8_bytes) {
+        embed_is_int8_ = true;
+        const size_t table_i8_bytes = static_cast<size_t>(embed_shape[0]) * static_cast<size_t>(embed_shape[1]);
+        embed_values_.push_back(OrtValue::CreateTensor(
+            *p_device_->GetMemoryInfo(), embed_mapping_->device_data(), table_i8_bytes, embed_shape,
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8));
+        for (const char* name : {"model.embed_tokens.weight", "head.mtp.embed_tokens.weight"}) {
+          session_options_->AddInitializer(name, *embed_values_.back());
+        }
       }
+    }
+  }
+
+  bool moe_offload_constrained = false;
+  for (const auto& [k, v] : config_->model.decoder.session_options.config_entries) {
+    if (k == "session.moe.offload.mode" && v == "required") {
+      moe_offload_constrained = true;
+    } else if (k == "session.moe.offload.device_expert_bytes" && v != "auto" && v != "0") {
+      moe_offload_constrained = true;
     }
   }
 
@@ -1291,7 +1314,21 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
         target_filename = "target/" + alt_name;
       }
     }
+  } else if (moe_offload_constrained && target_filename == "model.onnx" &&
+             std::filesystem::exists(root / "model_s4.onnx")) {
+    target_filename = "model_s4.onnx";
   }
+
+  if (target_filename.find("64k") != std::string::npos) {
+    config_->model.qwen38_graph.kv_capacity = 65796;
+    config_->model.context_length = 65792;
+    config_->search.max_length = 65792;
+    if (config_->model.qwen38_graph.fold.head_r2.filename == "mtp.onnx" &&
+        std::filesystem::exists(root / "mtp_64k.onnx")) {
+      config_->model.qwen38_graph.fold.head_r2.filename = "mtp_64k.onnx";
+    }
+  }
+
   session_target_ = CreateSession(ort_env, target_filename, session_options_.get());
   session_info_.Add(*session_target_);
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
@@ -1302,6 +1339,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     auto result = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(options, *result, /*is_primary_session_options=*/false,
                                    /*disable_graph_capture=*/false, /*cloned_from_parent=*/false, /*append_providers=*/true);
+    result->AddConfigEntry("session.moe.offload.mode", "disabled");
     if (pool_) pool_->AddTo(*result, label);
     if (!embed_values_.empty() &&
         (std::string(label) == "mtp" || std::string(label) == "drafter" || std::string(label) == "head_r2" ||

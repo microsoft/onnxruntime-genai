@@ -150,6 +150,7 @@ def apply_kv_quant(
     head_r2_model,
     kv_quant: str,
     scale_file: Path,
+    mtp_kv_quant: str = "same",
 ) -> dict:
     import numpy as np  # noqa: PLC0415
     from onnx import TensorProto, helper  # noqa: PLC0415
@@ -161,18 +162,26 @@ def apply_kv_quant(
     head_k = [float(v) for v in data["scales"]["head_k_scales"][0]]
     head_v = [float(v) for v in data["scales"]["head_v_scales"][0]]
     kv_dtype = TensorProto.INT8 if kv_quant == "int8" else TensorProto.FLOAT8E4M3FN
+    quantize_head_kv = (mtp_kv_quant != "bf16")
 
     for model, is_head_only in ((target_model, False), (head_r2_model, True)):
+        if is_head_only and not quantize_head_kv:
+            continue
         for vi in list(model.graph.input) + list(model.graph.output):
-            if vi.name.endswith((".key", ".value")) and (
-                vi.name.startswith(("past_key_values.", "present.", "head.past_key_values.", "head.present."))
-            ):
+            if not vi.name.endswith((".key", ".value")):
+                continue
+            if vi.name.startswith(("head.past_key_values.", "head.present.")):
+                if quantize_head_kv:
+                    vi.type.tensor_type.elem_type = kv_dtype
+            elif vi.name.startswith(("past_key_values.", "present.")):
                 vi.type.tensor_type.elem_type = kv_dtype
         for node in model.graph.node:
             if node.op_type != "GuardedDSA":
                 continue
             pk_name = node.input[3]
             if is_head_only or pk_name.startswith("head."):
+                if not quantize_head_kv:
+                    continue
                 ks, vs = head_k, head_v
             else:
                 lid = int(pk_name.split(".")[1])
@@ -198,13 +207,15 @@ def apply_kv_quant(
     for lid in sorted(layer_ids):
         add_scale("target", f"kscale.{lid}", k_scales[lid])
         add_scale("target", f"vscale.{lid}", v_scales[lid])
-    add_scale("head", "kscale.0", head_k)
-    add_scale("head", "vscale.0", head_v)
+    if quantize_head_kv:
+        add_scale("head", "kscale.0", head_k)
+        add_scale("head", "vscale.0", head_v)
 
     (out / "qsa_consts.bin").write_bytes(bytes(blob))
     (out / "qsa_consts.txt").write_text("\n".join(lines) + "\n")
     return {
         "kv_quant": kv_quant,
+        "mtp_kv_quant": "bf16" if not quantize_head_kv else kv_quant,
         "kv_dtype": int(kv_dtype),
         "scale_file": str(scale_file),
         "target_layers": len(layer_ids),
@@ -373,6 +384,8 @@ def apply_weight_and_dense_transforms(
     hc_quant: str = "none",
     share_dense: bool = False,
     fuse_dense_ops: bool = False,
+    keep_bf16_router_shared: bool = False,
+    keep_bf16_shared_down: bool = False,
 ) -> dict:
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
@@ -560,6 +573,198 @@ def apply_weight_and_dense_transforms(
         del model.graph.node[:]
         model.graph.node.extend(rebuilt)
 
+        # Fuse final hyper_connection_mixer chains into HcPostBlock (in head.mtp / mtp) and HcBlock (in target model)
+        dummy_inject = next(
+            t.name for t in model.graph.initializer if list(t.dims) == [10240, 4] and t.data_type == TensorProto.BFLOAT16
+        )
+        nodes_list = list(model.graph.node)
+        replace_idx, remove_idx = {}, set()
+        for idx in range(len(nodes_list) - 5):
+            # Case A: 7-node chain [HyperConnectionPostMix -> BranchwiseRMSNorm -> SkinnyGemm -> ScaledSiLU -> SkinnyGemm -> Sigmoid -> HyperConnectionPreMix]
+            # (Used for head.mtp/hyper_connection_mixer in target and mtp/hyper_connection_mixer in head_r2)
+            if idx + 6 < len(nodes_list):
+                n_post, n_norm, n_down, n_silu, n_up, n_sig, n_pre = nodes_list[idx : idx + 7]
+                if (
+                    n_post.op_type == "HyperConnectionPostMix"
+                    and n_norm.op_type == "BranchwiseRMSNorm"
+                    and n_down.op_type == "SkinnyGemm"
+                    and n_silu.op_type == "ScaledSiLU"
+                    and n_up.op_type == "SkinnyGemm"
+                    and n_sig.op_type == "Sigmoid"
+                    and n_pre.op_type == "HyperConnectionPreMix"
+                    and n_norm.input[0] == n_post.output[0]
+                    and n_down.input[0] == n_norm.output[0]
+                    and n_silu.input[0] == n_down.output[0]
+                    and n_up.input[0] == n_silu.output[0]
+                    and n_sig.input[0] == n_up.output[0]
+                    and n_pre.input[0] == n_norm.output[0]
+                    and n_pre.input[1] == n_sig.output[0]
+                    and not n_norm.name.startswith("model/hyper_connection_mixer/")
+                ):
+                    norm_w = n_norm.input[1]
+                    wd_name, wu_name = n_down.input[1], n_up.input[1]
+                    wd_off, wd_len = append_hc_tiled_bf16(base_dir, inits[wd_name], 0)
+                    wu_off, wu_len = append_hc_tiled_bf16(base_dir, inits[wu_name], 1)
+                    wd_tiled_name = f"{wd_name}.hc_tiled_down"
+                    wu_tiled_name = f"{wu_name}.hc_tiled_up"
+                    set_external(inits[wd_name], "hc_tiled.data", wd_off, wd_len, TensorProto.BFLOAT16, [160, 20480])
+                    inits[wd_name].name = wd_tiled_name
+                    inits[wd_tiled_name] = inits.pop(wd_name)
+                    set_external(inits[wu_name], "hc_tiled.data", wu_off, wu_len, TensorProto.BFLOAT16, [160, 20480])
+                    inits[wu_name].name = wu_tiled_name
+                    inits[wu_tiled_name] = inits.pop(wu_name)
+                    prefix = n_norm.name.rsplit("/hc_norm", 1)[0]
+                    ins = list(n_post.input[:3]) + [norm_w, wd_tiled_name, dummy_inject, wu_tiled_name]
+                    outs = [n_post.output[0], n_pre.output[0], f"{prefix}.dummy_gate", f"{prefix}.hc_scratch"]
+                    replace_idx[idx] = helper.make_node(
+                        "HcPostBlock",
+                        ins,
+                        outs,
+                        name=f"{prefix}/HcPostBlock",
+                        domain="qwen.fused_hc",
+                        epsilon=9.999999974752427e-07,
+                        silu_alpha=0.25,
+                        reduction_scale=0.25,
+                        gate_div=4.0,
+                        gate_mul=2.0,
+                    )
+                    for k in range(idx, idx + 7):
+                        remove_idx.add(k)
+                    stats[f"{mlabel}_mixer_hc_merged"] += 1
+                    continue
+
+            # Case B: 6-node chain [BranchwiseRMSNorm -> SkinnyGemm -> ScaledSiLU -> SkinnyGemm -> Sigmoid -> HyperConnectionPreMix]
+            # (Used for model/hyper_connection_mixer in target so Slice_last2 can sit between HyperConnectionPostMix and HcBlock)
+            if idx not in remove_idx:
+                n_norm, n_down, n_silu, n_up, n_sig, n_pre = nodes_list[idx : idx + 6]
+                if (
+                    n_norm.op_type == "BranchwiseRMSNorm"
+                    and n_down.op_type == "SkinnyGemm"
+                    and n_silu.op_type == "ScaledSiLU"
+                    and n_up.op_type == "SkinnyGemm"
+                    and n_sig.op_type == "Sigmoid"
+                    and n_pre.op_type == "HyperConnectionPreMix"
+                    and n_down.input[0] == n_norm.output[0]
+                    and n_silu.input[0] == n_down.output[0]
+                    and n_up.input[0] == n_silu.output[0]
+                    and n_sig.input[0] == n_up.output[0]
+                    and n_pre.input[0] == n_norm.output[0]
+                    and n_pre.input[1] == n_sig.output[0]
+                    and n_norm.name.startswith("model/hyper_connection_mixer/")
+                ):
+                    norm_w = n_norm.input[1]
+                    wd_name, wu_name = n_down.input[1], n_up.input[1]
+                    wd_off, wd_len = append_hc_tiled_bf16(base_dir, inits[wd_name], 0)
+                    wu_off, wu_len = append_hc_tiled_bf16(base_dir, inits[wu_name], 1)
+                    wd_tiled_name = f"{wd_name}.hc_tiled_down"
+                    wu_tiled_name = f"{wu_name}.hc_tiled_up"
+                    set_external(inits[wd_name], "hc_tiled.data", wd_off, wd_len, TensorProto.BFLOAT16, [160, 20480])
+                    inits[wd_name].name = wd_tiled_name
+                    inits[wd_tiled_name] = inits.pop(wd_name)
+                    set_external(inits[wu_name], "hc_tiled.data", wu_off, wu_len, TensorProto.BFLOAT16, [160, 20480])
+                    inits[wu_name].name = wu_tiled_name
+                    inits[wu_tiled_name] = inits.pop(wu_name)
+                    prefix = n_norm.name.rsplit("/hc_norm", 1)[0]
+                    ins = [n_norm.input[0], norm_w, wd_tiled_name, dummy_inject, wu_tiled_name]
+                    outs = [n_pre.output[0], f"{prefix}.dummy_gate", f"{prefix}.hc_scratch"]
+                    replace_idx[idx] = helper.make_node(
+                        "HcBlock",
+                        ins,
+                        outs,
+                        name=f"{prefix}/HcBlock",
+                        domain="qwen.fused_hc",
+                        epsilon=9.999999974752427e-07,
+                        silu_alpha=0.25,
+                        reduction_scale=0.25,
+                        gate_div=4.0,
+                        gate_mul=2.0,
+                    )
+                    for k in range(idx, idx + 6):
+                        remove_idx.add(k)
+                    stats[f"{mlabel}_mixer_hc_merged"] += 1
+
+        if replace_idx:
+            rebuilt_mixer = []
+            for idx, n in enumerate(nodes_list):
+                if idx in replace_idx:
+                    rebuilt_mixer.append(replace_idx[idx])
+                elif idx not in remove_idx:
+                    rebuilt_mixer.append(n)
+            del model.graph.node[:]
+            model.graph.node.extend(rebuilt_mixer)
+            for a, b in zip(model.graph.node, model.graph.node[1:]):
+                if (
+                    a.domain == "qwen.fused_gemm"
+                    and a.op_type in ("SkinnyGemm", "SharedExpertDown")
+                    and b.domain == "qwen.fused_hc"
+                    and b.op_type in ("HcBlock", "HcPostBlock")
+                    and not any(attr.name == "trigger" for attr in a.attribute)
+                ):
+                    a.attribute.append(helper.make_attribute("trigger", 1))
+                    stats[f"{mlabel}_gemm_triggers_added"] += 1
+
+        if mlabel == "target":
+            # Simplify 23-node 3D M-RoPE (t=h=w=position_ids in 1D text prefill/decode) to 2 Gather(axis=0) nodes
+            rot_nodes = [n for n in model.graph.node if n.name.startswith("model/rotary_emb/")]
+            if (
+                len(rot_nodes) == 23
+                and any(n.output and n.output[0] == "v_model.rotary_emb.Where_30" for n in rot_nodes)
+                and any(n.output and n.output[0] == "v_model.rotary_emb.Where_32" for n in rot_nodes)
+            ):
+                rot_set = {id(n) for n in rot_nodes}
+                first_rot = rot_nodes[0]
+                g_cos = helper.make_node(
+                    "Gather",
+                    ["model.rotary_emb.cos_cache", "position_ids"],
+                    ["v_model.rotary_emb.Where_30"],
+                    name="model/rotary_emb/Gather_cos_1d",
+                    axis=0,
+                )
+                g_sin = helper.make_node(
+                    "Gather",
+                    ["model.rotary_emb.sin_cache", "position_ids"],
+                    ["v_model.rotary_emb.Where_32"],
+                    name="model/rotary_emb/Gather_sin_1d",
+                    axis=0,
+                )
+                rebuilt_rot = []
+                for n in model.graph.node:
+                    if n is first_rot:
+                        rebuilt_rot.extend([g_cos, g_sin])
+                    elif id(n) not in rot_set:
+                        rebuilt_rot.append(n)
+                del model.graph.node[:]
+                model.graph.node.extend(rebuilt_rot)
+                stats["target_simplify_1d_rope"] += 1
+
+            # Bypass 12-node attention_mask != 0 Where_node_85 chain (attention_mask is fixed all-ones)
+            mask_chain_names = {
+                "Constant_node_3",
+                "model/Shape_node_62",
+                "model/Shape_node_63",
+                "model/Sub_node_64",
+                "model/Constant_node_77",
+                "model/Slice_node_78",
+                "model/Constant_node_79",
+                "model/Equal_node_80",
+                "model/Not_node_81",
+                "model/Shape_node_83",
+                "model/Expand_node_84",
+                "model/Where_node_85",
+            }
+            if any(n.name == "model/Where_node_85" and list(n.output) == ["v_model.Where_85"] for n in model.graph.node):
+                rebuilt_mask = []
+                for n in model.graph.node:
+                    if n.name in mask_chain_names:
+                        continue
+                    for i_idx, inp in enumerate(n.input):
+                        if inp == "v_model.Where_85":
+                            n.input[i_idx] = "input_ids"
+                    rebuilt_mask.append(n)
+                del model.graph.node[:]
+                model.graph.node.extend(rebuilt_mask)
+                stats["target_bypass_mask_where"] += 1
+
     hc_scales_by_name: dict[str, list[float]] = {}
     if hc_quant == "fp8":
         hc_fp8_path = out / "target" / "hc_tiled_fp8.data"
@@ -641,7 +846,18 @@ def apply_weight_and_dense_transforms(
             return quant_cache[cache_key]
         k_dim, n_dim = int(w_bf16.shape[0]), int(w_bf16.shape[1])
         wf = w_bf16.float()
-        if qmode == "fp8":
+        if qmode == "bf16":
+            raw = w_bf16.contiguous().view(torch.uint16).cpu().numpy().tobytes()
+            off, length = write_quant_blob(raw)
+            info = {
+                "offset": off,
+                "length": length,
+                "dtype": TensorProto.BFLOAT16,
+                "dims": [k_dim, n_dim],
+                "n_cols": n_dim,
+                "w_scale": [],
+            }
+        elif qmode == "fp8":
             amax = wf.abs().amax(dim=0).clamp(min=1e-12)
             w_scale = (amax / 448.0).to(torch.float32)
             wq = (wf / w_scale[None, :]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).view(torch.uint8)
@@ -742,6 +958,10 @@ def apply_weight_and_dense_transforms(
     def mode_for_node(node) -> str | None:
         if node.op_type == "SkinnyGemm" and node.input[1] in ("lm_head.weight_t", "head.lm_head.weight_t"):
             return "fp8"
+        if node.op_type == "SharedExpertDown" and (keep_bf16_router_shared or keep_bf16_shared_down):
+            return "bf16"
+        if node.op_type == "SkinnyGemm" and len(node.output) == 3 and keep_bf16_router_shared:
+            return "bf16"
         if weight_quant == "none":
             return None
         if weight_quant == "fp8":
@@ -773,8 +993,9 @@ def apply_weight_and_dense_transforms(
                 keep_attrs = [a for a in node.attribute if a.name != "w_scale"]
                 del node.attribute[:]
                 node.attribute.extend(keep_attrs)
-                node.attribute.append(helper.make_attribute("w_scale", info["w_scale"]))
-                if mlabel == "target":
+                if info["w_scale"]:
+                    node.attribute.append(helper.make_attribute("w_scale", info["w_scale"]))
+                if mlabel == "target" and info["w_scale"]:
                     target_quant_by_name[w_name] = info
                 stats[f"{mlabel}_{node.op_type}_{qmode}"] += 1
             elif node.op_type == "MtpMoe" and mtp_moe_quant != "none":
@@ -1136,12 +1357,15 @@ def copy_file_slice(src_fd: int, src_off: int, dst_fd: int, dst_off: int, length
         rem -= copied
 
 
-def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
+def clean_and_pack_package(source: Path, out: Path, copy: bool = False, embed_quant: str = "int8") -> dict:
     """Clean up unreferenced safetensors/dense.data/merged.data/generated.data, compact expert scales,
-    split model.embed_tokens.weight into a standard CPU embedding.onnx + embedding.onnx.data model,
-    unify target and MTP graphs so the same ONNX graph serves both prefill and decode, and place all
-    ONNX models (model.onnx, mtp.onnx, embedding.onnx) in the root package directory."""
+    split model.embed_tokens.weight into a standard CPU embedding.onnx + embedding.onnx.data model
+    (INT8 per-row or BF16), unify target and MTP graphs so the same ONNX graph serves both prefill
+    and decode, and place all ONNX models (model.onnx, model_s2..s4.onnx, mtp.onnx, embedding.onnx)
+    in the root package directory."""
+    import numpy as np  # noqa: PLC0415
     import onnx  # noqa: PLC0415
+    import torch  # noqa: PLC0415
     from onnx import TensorProto, helper, numpy_helper  # noqa: PLC0415
 
     session_names = ("target", "head_r2")
@@ -1195,42 +1419,97 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
         raise RuntimeError("Failed to locate model.embed_tokens.weight in target/mtp model.onnx")
 
     dst_embed_data = out / "embedding.onnx.data"
-    if embed_src_path.resolve() != dst_embed_data.resolve():
-        with open(embed_src_path, "rb") as fin, open(dst_embed_data, "wb") as fout:
-            copy_file_slice(fin.fileno(), embed_src_off, fout.fileno(), 0, embed_len)
-
-    # Build standard embedding.onnx with Gather(model.embed_tokens.weight, input_ids) -> inputs_embeds
-    embed_init = TensorProto()
-    embed_init.name = "model.embed_tokens.weight"
-    embed_init.data_type = embed_dtype
-    embed_init.dims.extend(embed_dims)
-    set_ext(embed_init, "embedding.onnx.data", 0, embed_len)
-    gather_node = helper.make_node(
-        "Gather",
-        ["model.embed_tokens.weight", "input_ids"],
-        ["inputs_embeds"],
-        name="/model/embed_tokens/Gather",
-    )
     std_opset = next((o.version for o in models["target"].opset_import if o.domain in ("", "ai.onnx")), 21)
-    embedding_model = helper.make_model(
-        helper.make_graph(
-            [gather_node],
-            "cpu_embedding",
-            [helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"])],
-            [helper.make_tensor_value_info("inputs_embeds", embed_dtype, ["num_tokens", embed_dims[1]])],
-            [embed_init],
-        ),
-        opset_imports=[helper.make_opsetid("", std_opset)],
-        ir_version=models["target"].ir_version,
-    )
-    onnx.save_model(embedding_model, str(out / "embedding.onnx"), save_as_external_data=False)
 
-    # Point head.mtp.embed_tokens.weight / mtp.embed_tokens.weight to embedding.onnx.data;
-    # replace Gather(model.embed_tokens.weight, input_ids) in model.onnx with inputs_embeds.
-    for sname in ("target", "head_r2"):
-        for t in models[sname].graph.initializer:
-            if t.name in embed_names:
-                set_ext(t, "embedding.onnx.data", 0, embed_len)
+    if embed_quant == "int8":
+        with open(embed_src_path, "rb") as fin:
+            fin.seek(embed_src_off)
+            raw_bf16 = fin.read(embed_len)
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        w_bf16 = torch.frombuffer(bytearray(raw_bf16), dtype=torch.bfloat16).reshape(embed_dims).to(device)
+        wf = w_bf16.float()
+        amax = wf.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+        scales_f32 = (amax / 127.0).to(torch.float32)
+        q_i8 = torch.round(wf / scales_f32).clamp(-127.0, 127.0).to(torch.int8)
+        q_bytes = q_i8.cpu().numpy().tobytes()
+        s_bytes = scales_f32.cpu().numpy().tobytes()
+        with open(dst_embed_data, "wb") as fout:
+            fout.write(q_bytes)
+            fout.write(s_bytes)
+        embed_len = len(q_bytes) + len(s_bytes)
+
+        embed_init = TensorProto()
+        embed_init.name = "model.embed_tokens.weight"
+        embed_init.data_type = TensorProto.INT8
+        embed_init.dims.extend(embed_dims)
+        set_ext(embed_init, "embedding.onnx.data", 0, len(q_bytes))
+
+        scale_init = TensorProto()
+        scale_init.name = "model.embed_tokens.scales"
+        scale_init.data_type = TensorProto.FLOAT
+        scale_init.dims.extend([embed_dims[0], 1])
+        set_ext(scale_init, "embedding.onnx.data", len(q_bytes), len(s_bytes))
+
+        emb_nodes = [
+            helper.make_node("Gather", ["model.embed_tokens.weight", "input_ids"], ["embed_q_i8"], name="/model/embed_tokens/GatherWeight"),
+            helper.make_node("Gather", ["model.embed_tokens.scales", "input_ids"], ["embed_scale_f32"], name="/model/embed_tokens/GatherScale"),
+            helper.make_node("Cast", ["embed_q_i8"], ["embed_q_f32"], name="/model/embed_tokens/CastWeight", to=TensorProto.FLOAT),
+            helper.make_node("Mul", ["embed_q_f32", "embed_scale_f32"], ["embed_out_f32"], name="/model/embed_tokens/MulScale"),
+            helper.make_node("Cast", ["embed_out_f32"], ["inputs_embeds"], name="/model/embed_tokens/CastOut", to=TensorProto.BFLOAT16),
+        ]
+        embedding_model = helper.make_model(
+            helper.make_graph(
+                emb_nodes,
+                "cpu_embedding_int8",
+                [helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"])],
+                [helper.make_tensor_value_info("inputs_embeds", TensorProto.BFLOAT16, ["num_tokens", embed_dims[1]])],
+                [embed_init, scale_init],
+            ),
+            opset_imports=[helper.make_opsetid("", std_opset)],
+            ir_version=models["target"].ir_version,
+        )
+        onnx.save_model(embedding_model, str(out / "embedding.onnx"), save_as_external_data=False)
+
+        for sname in ("target", "head_r2"):
+            for t in models[sname].graph.initializer:
+                if t.name in embed_names:
+                    t.data_type = TensorProto.INT8
+                    set_ext(t, "embedding.onnx.data", 0, len(q_bytes))
+        embed_dtype_str = "INT8"
+    else:
+        if embed_src_path.resolve() != dst_embed_data.resolve():
+            with open(embed_src_path, "rb") as fin, open(dst_embed_data, "wb") as fout:
+                copy_file_slice(fin.fileno(), embed_src_off, fout.fileno(), 0, embed_len)
+
+        embed_init = TensorProto()
+        embed_init.name = "model.embed_tokens.weight"
+        embed_init.data_type = embed_dtype
+        embed_init.dims.extend(embed_dims)
+        set_ext(embed_init, "embedding.onnx.data", 0, embed_len)
+        gather_node = helper.make_node(
+            "Gather",
+            ["model.embed_tokens.weight", "input_ids"],
+            ["inputs_embeds"],
+            name="/model/embed_tokens/Gather",
+        )
+        embedding_model = helper.make_model(
+            helper.make_graph(
+                [gather_node],
+                "cpu_embedding",
+                [helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"])],
+                [helper.make_tensor_value_info("inputs_embeds", embed_dtype, ["num_tokens", embed_dims[1]])],
+                [embed_init],
+            ),
+            opset_imports=[helper.make_opsetid("", std_opset)],
+            ir_version=models["target"].ir_version,
+        )
+        onnx.save_model(embedding_model, str(out / "embedding.onnx"), save_as_external_data=False)
+
+        for sname in ("target", "head_r2"):
+            for t in models[sname].graph.initializer:
+                if t.name in embed_names:
+                    set_ext(t, "embedding.onnx.data", 0, embed_len)
+        embed_dtype_str = "BFLOAT16"
 
     t_graph = models["target"].graph
     gather_candidates = [
@@ -1260,7 +1539,10 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
     t_nodes = []
     has_slice_last2 = any(n.name == "model/hyper_connection_mixer/Slice_last2" for n in t_graph.node)
     for n in t_graph.node:
-        if n.name == "model/hyper_connection_mixer/hc_norm/BranchwiseRMSNorm_node_5816" and not has_slice_last2:
+        if n.name in (
+            "model/hyper_connection_mixer/hc_norm/BranchwiseRMSNorm_node_5816",
+            "model/hyper_connection_mixer/HcBlock",
+        ) and not has_slice_last2:
             t_nodes.append(
                 helper.make_node(
                     "Slice",
@@ -1367,6 +1649,9 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
     }
     for sname in session_names:
         g = models[sname].graph
+        kept_ins = [vi for vi in g.input if vi.name != "logits_indices"]
+        del g.input[:]
+        g.input.extend(kept_ins)
         for vi in list(g.input) + list(g.output):
             if vi.name in seq_io_names or vi.name.startswith("ple_embeddings."):
                 dims = vi.type.tensor_type.shape.dim
@@ -1477,8 +1762,12 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
                 set_ext(t, "norm_and_rope.data", norm_rope_map[dedup_key], s_len)
                 packed_tensors += 1
 
-    # 5. Save cleaned unified ONNX models in the root directory and remove legacy subdirectories
+    # 5. Save cleaned unified ONNX models in the root directory, generate S=2..4 multi-draft QMoE graphs, and remove legacy subdirectories
     onnx.save_model(models["target"], str(out / "model.onnx"), save_as_external_data=False)
+    link_file(out / "model.onnx", out / "model_s2.onnx", copy)
+    from build_package_offload_v3 import build_multidraft_target_onnx  # noqa: PLC0415
+    build_multidraft_target_onnx(out / "model_s2.onnx", out / "model_s3.onnx", verify_rows=3)
+    build_multidraft_target_onnx(out / "model_s2.onnx", out / "model_s4.onnx", verify_rows=4)
     onnx.save_model(models["head_r2"], str(out / "mtp.onnx"), save_as_external_data=False)
     for obsolete_dir in ("target", "head_r2", "dense", "head_kv"):
         if (out / obsolete_dir).exists():
@@ -1488,8 +1777,8 @@ def clean_and_pack_package(source: Path, out: Path, copy: bool = False) -> dict:
         "cpu_embedding": {
             "model_file": "embedding.onnx",
             "data_file": "embedding.onnx.data",
-            "operator": "Gather",
-            "dtype": "BFLOAT16",
+            "operator": "Gather+DequantInt8" if embed_quant == "int8" else "Gather",
+            "dtype": embed_dtype_str,
             "shape": embed_dims,
             "bytes": embed_len,
             "mib": embed_len / (1024**2),
@@ -1653,6 +1942,30 @@ def main() -> None:
         default=False,
         help="remove unneeded safetensors/dense.data/merged.data/generated.data, compact expert scales, and extract explicit cpu_embed_tokens.data",
     )
+    parser.add_argument(
+        "--embed-quant",
+        choices=("none", "int8"),
+        default="int8",
+        help="quantize CPU embedding.onnx.data to symmetric per-row INT8 (607.2 MiB vs 1212.5 MiB BF16)",
+    )
+    parser.add_argument(
+        "--mtp-kv-quant",
+        choices=("same", "bf16"),
+        default="bf16",
+        help="keep MTP head KV cache in BF16 for better performance and draft acceptance while target KV is INT8",
+    )
+    parser.add_argument(
+        "--keep-bf16-router-shared",
+        action="store_true",
+        default=False,
+        help="keep MoE router and shared expert projections (merged_proj.{mlp} and SharedExpertDown) in BF16",
+    )
+    parser.add_argument(
+        "--keep-bf16-shared-down",
+        action="store_true",
+        default=False,
+        help="keep SharedExpertDown projections in BF16",
+    )
     args = parser.parse_args()
 
     source, out = args.from_package.resolve(), args.out.resolve()
@@ -1759,7 +2072,15 @@ def main() -> None:
                 raise SystemExit("--kv-scale-file is required and must exist when --kv-quant != none")
             if args.dsa_lib is not None and not args.dsa_lib.exists():
                 raise SystemExit(f"missing GuardedDSA library: {args.dsa_lib}")
-            kv_info = apply_kv_quant(source, out, target_model, head_r2_model, args.kv_quant, scale_file.resolve())
+            kv_info = apply_kv_quant(
+                source,
+                out,
+                target_model,
+                head_r2_model,
+                args.kv_quant,
+                scale_file.resolve(),
+                mtp_kv_quant=args.mtp_kv_quant,
+            )
             if args.dsa_lib is not None:
                 link_file(args.dsa_lib.resolve(), out / "libs" / "libqwen_guarded_dsa_r2_v12.so", True)
 
@@ -1777,6 +2098,8 @@ def main() -> None:
                 hc_quant=args.hc_quant,
                 share_dense=share_dense,
                 fuse_dense_ops=args.fuse_dense_ops,
+                keep_bf16_router_shared=args.keep_bf16_router_shared,
+                keep_bf16_shared_down=args.keep_bf16_shared_down,
             )
             if args.gemm_lib is not None:
                 link_file(args.gemm_lib.resolve(), out / "libs" / "libqwen_fused_gemm_r5.so", True)
@@ -1804,13 +2127,29 @@ def main() -> None:
             hk_so["provider_options"] = [{"cuda": {"arena_extend_strategy": "kSameAsRequested"}}]
 
     if clean_pkg:
-        clean_info = clean_and_pack_package(source, out, copy=args.copy)
+        clean_info = clean_and_pack_package(source, out, copy=args.copy, embed_quant=args.embed_quant)
         config["model"]["decoder"]["filename"] = "model.onnx"
         old_fold_head = qwen["fold"].pop("head_r2", None) or qwen["fold"].get("mtp", {})
         graph_id = old_fold_head.get("graph_id", 81) if isinstance(old_fold_head, dict) else 81
         qwen["fold"]["mtp"] = {"filename": "mtp.onnx", "graph_id": graph_id}
         if isinstance(old_fold_head, dict) and "session_options" in old_fold_head:
             qwen["fold"]["mtp"]["session_options"] = old_fold_head["session_options"]
+        else:
+            qwen["fold"]["mtp"]["session_options"] = {
+                "log_id": "onnxruntime-genai",
+                "graph_optimization_level": "ORT_DISABLE_ALL",
+                "provider_options": [
+                    {
+                        "cuda": {
+                            "enable_cuda_graph": "1",
+                            "min_num_runs_before_cuda_graph_capture": "4",
+                            "arena_extend_strategy": "kSameAsRequested",
+                            "arena.extend_strategy": "1",
+                        }
+                    }
+                ],
+                "session.use_device_allocator_for_initializers": "1",
+            }
         config["model"]["embedding"] = {
             "filename": "embedding.onnx",
             "session_options": {"intra_op_num_threads": 1},
@@ -1820,6 +2159,107 @@ def main() -> None:
         qwen["prefill"].pop("dense", None)
         qwen["prefill"].pop("head_kv", None)
         qwen["prefill"].pop("constants", None)
+
+        # Copy STRP v1 expert popularity profile and configure Portable QMoE Offload v4 runtime_profiles
+        strata_prof = Path("/home/tianlei/git/Strata/data/expert-profile.bin")
+        if strata_prof.exists():
+            shutil.copy2(strata_prof, out / "expert-profile.bin")
+        config["runtime_profiles"] = [
+            {
+                "id": "consumer-gpu-24g",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 21474836480,
+                    "maximum_total_device_memory_bytes": 26843545600,
+                    "minimum_effective_host_memory_bytes": 68719476736,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model_s4.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "required",
+                                "session.moe.offload.placement": "adaptive",
+                                "session.moe.offload.cpu_execution": "auto",
+                                "session.moe.offload.device_expert_bytes": "10351538176",
+                                "session.moe.offload.popularity_file": "expert-profile.bin",
+                            },
+                        }
+                    }
+                },
+            },
+            {
+                "id": "consumer-gpu-24g-host-64g",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 21474836480,
+                    "maximum_total_device_memory_bytes": 26843545600,
+                    "maximum_effective_host_memory_bytes": 68719476735,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model_s4.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "required",
+                                "session.moe.offload.placement": "adaptive",
+                                "session.moe.offload.cpu_execution": "auto",
+                                "session.moe.offload.device_expert_bytes": "10351538176",
+                                "session.moe.offload.host_expert_bytes": "17179869184",
+                                "session.moe.offload.popularity_file": "expert-profile.bin",
+                            },
+                        }
+                    }
+                },
+            },
+            {
+                "id": "consumer-gpu-30g-ram-48g-32k",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 26843545601,
+                    "maximum_total_device_memory_bytes": 32212254720,
+                    "maximum_effective_host_memory_bytes": 68719476735,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model_s4.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "required",
+                                "session.moe.offload.placement": "adaptive",
+                                "session.moe.offload.cpu_execution": "auto",
+                                "session.moe.offload.device_expert_bytes": "18289511424",
+                                "session.moe.offload.host_expert_bytes": "41339060224",
+                                "session.moe.offload.popularity_file": "expert-profile.bin",
+                            },
+                        }
+                    }
+                },
+            },
+            {
+                "id": "consumer-gpu-32g",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 26843545601,
+                    "maximum_total_device_memory_bytes": 36507222016,
+                    "minimum_effective_host_memory_bytes": 68719476736,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model_s4.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "required",
+                                "session.moe.offload.placement": "adaptive",
+                                "session.moe.offload.cpu_execution": "auto",
+                                "session.moe.offload.device_expert_bytes": "19229035520",
+                                "session.moe.offload.popularity_file": "expert-profile.bin",
+                            },
+                        }
+                    }
+                },
+            },
+        ]
 
     if transform_models or clean_pkg:
         if clean_pkg:
