@@ -141,7 +141,7 @@ constexpr const char* kPluginEpName = "NvTensorRTRTXExecutionProvider";
 
 // CUDA ordinal of the EP device. For the plugin EP this is the device of the allocator
 // advertised by the selected OrtEpDevice (the same one AppendExecutionProviderV2 passes to the EP), which
-// is not necessarily 0.
+// is not necessarily 0. For the built-in EP it is the device_id provider option, which defaults to 0.
 std::optional<int> GetSelectedCudaDeviceId(const Config::ProviderOptions& provider_options) {
   const auto ep_devices = FindRegisteredEpDevices(kPluginEpName);
   if (!ep_devices.empty()) {
@@ -160,7 +160,9 @@ std::optional<int> GetSelectedCudaDeviceId(const Config::ProviderOptions& provid
       throw std::runtime_error("Invalid NvTensorRtRtx device_id provider option: " + value);
     return device_id;
   }
-  return std::nullopt;
+  // The built-in EP runs on device 0 when device_id is not set. Bind to it explicitly rather than to
+  // whichever device happened to be current when the device interface was created.
+  return 0;
 }
 
 }  // namespace
