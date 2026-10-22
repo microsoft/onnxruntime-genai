@@ -1081,6 +1081,23 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
   std::string GetExecutionProviderName() const override { return "NvTensorRtRtx"; }
   int GetDeviceId(const ProviderOptions*) override { return device_id_; }
 
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (!user_options) return;
+
+    // The trivial init session is used to create the device allocator, so it must run on the same
+    // device as the model session. For the plugin EP, the device is selected through device_filtering_options,
+    // which EnsureDeviceOrtInit already copies. The built-in EP is selected only by its device_id option, so
+    // forward that, otherwise the init session runs on device 0 and does not provide an allocator for the
+    // device this interface is bound to.
+    for (const auto& opt : user_options->options) {
+      if (opt.first == "device_id") {
+        init_options.options.emplace_back(opt);
+        return;
+      }
+    }
+  }
+
   // The interface, its stream and the global device allocator are shared by every model in the process,
   // so they can only be bound to one device. Recreate the stream on the selected device if it is not yet
   // bound, i.e. before it is first handed to an EP. Model inits may run concurrently, so binding is
