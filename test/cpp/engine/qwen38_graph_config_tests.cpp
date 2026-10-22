@@ -82,5 +82,17 @@ TEST(Qwen38GraphConfig, RejectsUnknownSettingsAndEscapingPaths) {
   }
 }
 
+TEST(Qwen38GraphConfig, FoldedConfigurationDoesNotRequireUnusedMtpHeadFilename) {
+  GraphConfigDirectory directory;
+  directory.Write(R"({
+    "plane_library":"libs/libdflash_plane_v2.so","ple_table":"ple_table.txt",
+    "fold":{"enabled":true},"prefill":{"enabled":true,"unified":true}
+  })");
+  Config config(directory.path.string(), {});
+  EXPECT_TRUE(config.model.qwen38_graph.IsConfigured());
+  EXPECT_TRUE(config.model.qwen38_graph.fold.head_r2.filename.empty());
+  EXPECT_TRUE(config.model.qwen38_graph.head.filename_s1.empty());
+}
+
 }  // namespace
 }  // namespace Generators::test

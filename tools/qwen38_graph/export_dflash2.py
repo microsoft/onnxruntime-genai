@@ -4,6 +4,7 @@
 """Export a BF16-activation DFlash2 drafter sharing the Qwen target embedding/head."""
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +18,8 @@ from onnxruntime_genai.models.builders.dflash2 import DFlash2Builder
 
 class QwenDFlash2Builder(DFlash2Builder):
     def __init__(self, checkpoint, target, precision, drafts):
-        super().__init__(str(checkpoint), "", ir.DataType.BFLOAT16, 128, 131072,
+        context = json.loads((checkpoint / "config.json").read_text())["max_position_embeddings"]
+        super().__init__(str(checkpoint), "", ir.DataType.BFLOAT16, 128, context + 4,
                          num_draft_tokens=drafts)
         self.checkpoint = checkpoint
         self.target_path = target

@@ -732,7 +732,7 @@ struct Config {
         } dense, head_kv;
         std::vector<int> warmup_lengths{8192, 2048, 512, 128, 37};
       } prefill;
-      bool IsConfigured() const noexcept { return !head.filename_s1.empty() || !fold.head_r2.filename.empty(); }
+      bool IsConfigured() const noexcept { return fold.enabled || !head.filename_s1.empty() || !fold.head_r2.filename.empty(); }
     } qwen38_graph;
 
     // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it

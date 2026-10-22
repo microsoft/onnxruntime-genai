@@ -6,6 +6,48 @@ greedy MTP(1), folded decode, dense chunked prefill, and shared device weights.
 
 ## DFlash2 device pipeline
 
+### Restoring the native context limit
+
+`extend_dflash_context.py --source PACKAGE --output NEW_PACKAGE` expands the
+qualified consolidated 128K Qwen/DFlash package to 262144 total prompt/output
+tokens, retaining 8192-token prefill chunks. It updates target KV dimensions,
+compressed-index capacity, fold capacity, search/context limits and both
+graphs' rotary caches, including the shared-weight pool's rotary bindings.
+Four internal speculative guard positions are separate from the public limit.
+Original rotary rows and learned weights are preserved. The fixed-capacity
+runtime still preallocates target KV/index storage; allocation is not prompt-sized.
+The 256K boundary is an execution check, not long-context accuracy qualification.
+
+### Consolidation workflow
+
+For a folded DFlash package using unified prefill without standalone head
+execution, run:
+
+```bash
+python tools/qwen38_graph/consolidate_dflash_package.py \
+  --source /path/to/package --output /path/to/new-package \
+  --report /path/to/consolidation-report.json
+```
+
+The output directory must not exist. The tool preserves target nodes and IO,
+renames the active target to `model.onnx`, and packs its external/inline raw
+weights, shared-pool ranges and PLE table shards into `model.onnx.data`.
+Small constants and integer shapes remain embedded for ORT shape inference.
+Identical duplicate initializer entries are removed; conflicting names fail.
+All copied ranges are SHA-256 verified by independently reading the completed
+file. Duplicate source ranges are shared; unused source-file regions are omitted.
+The small PLE/pool manifests are rewritten with new offsets. DFlash graph/data
+and the data-plane helper are hardlinked unchanged and must be treated as
+immutable. Tokenizer/configuration metadata is copied.
+
+The standalone dense/MTP/head graphs are not merged as additional execution
+branches: this DFlash runtime already skips them and uses the target for both
+prefill and verification. Their unused weights and numerical-original data are
+omitted. Configuration removes inactive session entries and requires a runtime
+that accepts folded DFlash configuration without an unused MTP-head filename.
+Ordinary MTP packages and split-prefill packages are rejected rather than
+silently dropping paths they need. Validate generation parity before deploying.
+
 ### Native speculative fold migration
 
 `convert_fold_to_contrib.py --input target.onnx --output target.contrib.onnx`
