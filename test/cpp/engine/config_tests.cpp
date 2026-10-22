@@ -751,6 +751,79 @@ TEST(ConfigTest, RejectsMtpScaleBindings) {
   }
 }
 
+TEST(ConfigTest, ParsesOpenVINOPartitionedVisionPipeline) {
+  Config config;
+  OverlayConfig(config, R"({
+    "model": {
+      "partitioning": "openvino",
+      "vision": {
+        "pipeline": [{
+          "patch_embed": {
+            "filename": "patch_embed.onnx",
+            "inputs": ["pixel_values"],
+            "outputs": ["hidden_states"],
+            "session_options": {"log_id": "patch_embed"}
+          },
+          "pos": {
+            "filename": "pos.onnx",
+            "inputs": ["input"],
+            "outputs": ["last_hidden_state"]
+          },
+          "merger": {
+            "filename": "merger.onnx",
+            "inputs": ["hidden_states", "attention_mask", "rotary_pos_emb"],
+            "outputs": ["last_hidden_state"]
+          }
+        }]
+      }
+    }
+  })");
+
+  EXPECT_EQ(config.model.partitioning, "openvino");
+  ASSERT_EQ(config.model.vision.pipeline.size(), 3u);
+  const auto& patch_embed = config.model.vision.pipeline[0];
+  EXPECT_EQ(patch_embed.model_id, "patch_embed");
+  EXPECT_EQ(patch_embed.filename, "patch_embed.onnx");
+  EXPECT_EQ(patch_embed.inputs, (std::vector<std::string>{"pixel_values"}));
+  EXPECT_EQ(patch_embed.outputs, (std::vector<std::string>{"hidden_states"}));
+  ASSERT_TRUE(patch_embed.session_options.has_value());
+  ASSERT_TRUE(patch_embed.session_options->log_id.has_value());
+  EXPECT_EQ(*patch_embed.session_options->log_id, "patch_embed");
+
+  const auto& pos = config.model.vision.pipeline[1];
+  EXPECT_EQ(pos.model_id, "pos");
+  EXPECT_EQ(pos.filename, "pos.onnx");
+  EXPECT_EQ(pos.inputs, (std::vector<std::string>{"input"}));
+  EXPECT_EQ(pos.outputs, (std::vector<std::string>{"last_hidden_state"}));
+
+  const auto& merger = config.model.vision.pipeline[2];
+  EXPECT_EQ(merger.model_id, "merger");
+  EXPECT_EQ(merger.filename, "merger.onnx");
+  EXPECT_EQ(merger.inputs,
+            (std::vector<std::string>{"hidden_states", "attention_mask", "rotary_pos_emb"}));
+  EXPECT_EQ(merger.outputs, (std::vector<std::string>{"last_hidden_state"}));
+}
+
+TEST(ConfigTest, PartitioningDefaultsToEmpty) {
+  Config config;
+  EXPECT_TRUE(config.model.partitioning.empty());
+}
+
+TEST(ConfigTest, ParsesDecoderTokenTypeIdsInput) {
+  Config config;
+  EXPECT_EQ(config.model.decoder.inputs.token_type_ids, "token_type_ids");
+
+  OverlayConfig(config, R"({"model":{"decoder":{"inputs":{"token_type_ids":"image_markers"}}}})");
+  EXPECT_EQ(config.model.decoder.inputs.token_type_ids, "image_markers");
+}
+
+TEST(ConfigTest, RejectsFlatVisionPipelineStage) {
+  Config config;
+  EXPECT_THROW(
+      OverlayConfig(config, R"({"model":{"vision":{"pipeline":[{"model_id":"patch_embed","filename":"a.onnx"}]}}})"),
+      std::runtime_error);
+}
+
 template <typename PipelineModels>
 void ExpectPipelineOverlayMerged(const PipelineModels& pipeline) {
   ASSERT_EQ(pipeline.size(), 3u);
