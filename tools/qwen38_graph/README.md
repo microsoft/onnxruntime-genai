@@ -6,6 +6,22 @@ greedy MTP(1), folded decode, dense chunked prefill, and shared device weights.
 
 ## DFlash2 device pipeline
 
+### Native speculative fold migration
+
+`convert_fold_to_contrib.py --input target.onnx --output target.contrib.onnx`
+converts the legacy multi-row `FoldMid2`/`FoldTail` graph to the native
+`com.microsoft` version-2 contract. The output must be beside the input to
+preserve relative external-weight paths and must not already exist. The
+converter adds explicit aliased state outputs and a mid-to-tail control
+dependency; it does not rewrite or copy model weights.
+
+Use a source-built ORT core and CUDA provider containing both v2 operators.
+After validating the converted graph, update the target filename (or atomically
+replace the original), remove the decoder session's `custom_ops_libraries`
+entry, and stop distributing `libqwen_fold.so`. Other custom-op dependencies
+must be audited separately before removing their registrations. The DFlash
+data-plane helper is not an ONNX custom-op library and is still required.
+
 This incremental integration also supports a three-token DFlash2 drafter with
 four-row folded verification, through both Generator and the native Engine.
 It requires the companion ORT feature branches and a compatible four-row target
