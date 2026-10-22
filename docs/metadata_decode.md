@@ -1,11 +1,16 @@
 # Token Post-Processing
 
-`TokenPostProcessor(generator)` is a generator-facing adapter around an internal
-`TokenPostProcessorInternal`. That internal processor owns a tokenizer, an ordinary tokenizer
-stream, `MetadataCoreState`, grouping/timing state, and the current results.
-Configuration comes from the
-generator's model and its `genai_config.json`. Callers do not pass a model or
-create token metadata records.
+`PostProcessor` is the native base class for generator-facing postprocessors. It
+holds the borrowed generator reference shared by output-specific wrappers and has
+no token-specific processing interface.
+
+`TokenPostProcessor(generator)` derives from that base. It retrieves token and
+optional timing views from the generator and delegates to its private
+`TokenPostProcessorInternal` member. The internal processor accepts token/timing
+values rather than a generator and owns a tokenizer, an ordinary tokenizer stream,
+`MetadataCoreState`, grouping/timing state, and the current results. Configuration
+comes from the generator's model and its `genai_config.json`. Callers do not pass a
+model or create token metadata records. The public token-processing API is unchanged.
 
 ## Processing Loop
 

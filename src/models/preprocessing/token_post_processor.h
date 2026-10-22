@@ -2,6 +2,7 @@
 
 #include "genai_tokenizer.h"
 #include "metadata_core_state.h"
+#include "post_processor.h"
 
 namespace Generators {
 
@@ -21,17 +22,16 @@ class TokenPostProcessorInternal {
   std::vector<PostProcessorResult> results_;
 };
 
-class TokenPostProcessor : public LeakChecked<TokenPostProcessor> {
+class TokenPostProcessor : public PostProcessor, public LeakChecked<TokenPostProcessor> {
  public:
   explicit TokenPostProcessor(const Generator& generator);
   void ProcessNextTokens();
-  const std::vector<PostProcessorResult>& GetNextTokenResults() const { return stream_.GetNextTokenResults(); }
+  const std::vector<PostProcessorResult>& GetNextTokenResults() const { return internal_.GetNextTokenResults(); }
   void Finalize();
   void Reset();
 
  private:
-  const Generator& generator_;
-  TokenPostProcessorInternal stream_;
+  TokenPostProcessorInternal internal_;
 };
 
 }  // namespace Generators

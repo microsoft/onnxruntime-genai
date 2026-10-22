@@ -25,18 +25,18 @@ MetadataCoreConfig GetPostProcessorConfig(const Generator& generator) {
 }  // namespace
 
 TokenPostProcessor::TokenPostProcessor(const Generator& generator)
-    : generator_{generator}, stream_{generator.model_->CreateTokenizer(), GetPostProcessorConfig(generator)} {}
+    : PostProcessor{generator}, internal_{generator_.model_->CreateTokenizer(), GetPostProcessorConfig(generator_)} {}
 
 void TokenPostProcessor::ProcessNextTokens() {
-  stream_.Process(generator_.GetTokenOutputs());
+  internal_.Process(generator_.GetTokenOutputs());
 }
 
 void TokenPostProcessor::Finalize() {
-  stream_.Finalize();
+  internal_.Finalize();
 }
 
 void TokenPostProcessor::Reset() {
-  stream_.Reset();
+  internal_.Reset();
 }
 
 TokenPostProcessorInternal::TokenPostProcessorInternal(std::shared_ptr<Tokenizer> tokenizer, MetadataCoreConfig config)

@@ -429,6 +429,19 @@ class MetadataCoreStateTests : public testing::Test {
   const Generators::AcousticFrameInterval interval{4, 5};
 };
 
+TEST_F(MetadataCoreStateTests, PostProcessorBaseOwnsTokenProcessor) {
+  const int initial_count = Generators::TokenPostProcessor::Count();
+  {
+    auto processor = std::make_unique<Generators::TokenPostProcessor>(*generator);
+    processor->ProcessNextTokens();
+    ASSERT_EQ(processor->GetNextTokenResults().size(), tokens.size());
+    std::unique_ptr<Generators::PostProcessor> base = std::move(processor);
+    EXPECT_NE(base, nullptr);
+    EXPECT_EQ(Generators::TokenPostProcessor::Count(), initial_count + 1);
+  }
+  EXPECT_EQ(Generators::TokenPostProcessor::Count(), initial_count);
+}
+
 TEST_F(MetadataCoreStateTests, ChunkStartSampleSurvivesGeneratorInputHandoff) {
   auto features = std::make_shared<Generators::Tensor>(
       OrtValue::CreateTensor<float>(model->allocator_cpu_, std::array<int64_t, 1>{1}));
