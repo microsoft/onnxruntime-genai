@@ -280,9 +280,9 @@ struct Qwen3_5OpenVINOVisionMerger : OpenVINOVisionMerger {
  private:
   const OpenVINOMultiModalModel& model_;
 
-  std::unique_ptr<OrtSession> patch_embed_session_;
-  std::unique_ptr<OrtSession> pos_session_;
-  std::unique_ptr<OrtSession> merger_session_;
+  OrtSession* patch_embed_session_{};
+  OrtSession* pos_session_{};
+  OrtSession* merger_session_{};
 
   // Stage I/O names, resolved from the config pipeline stage inputs/outputs arrays.
   std::string patch_embed_input_, patch_embed_output_;
@@ -325,10 +325,9 @@ Qwen3_5OpenVINOVisionMerger::Qwen3_5OpenVINOVisionMerger(const OpenVINOMultiModa
   merger_rope_input_ = merger->inputs.at(2);
   merger_output_ = merger->outputs.at(0);
 
-  OrtSessionOptions* session_options = model_.vision_session_options_ov_.get();
-  patch_embed_session_ = OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(patch_embed->filename)).c_str(), session_options);
-  pos_session_ = OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(pos->filename)).c_str(), session_options);
-  merger_session_ = OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(merger->filename)).c_str(), session_options);
+  patch_embed_session_ = &model_.GetVisionPipelineSession("patch_embed");
+  pos_session_ = &model_.GetVisionPipelineSession("pos");
+  merger_session_ = &model_.GetVisionPipelineSession("merger");
 
   // Rotary width comes from the merger's rotary_pos_emb input (e.g. 32).
   for (size_t i = 0; i < merger_session_->GetInputCount(); ++i) {
