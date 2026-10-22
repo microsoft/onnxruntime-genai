@@ -113,12 +113,6 @@ OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame
 OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record);
 OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record);
 
-/** Half-open [start, stop) interval in absolute acoustic frames. */
-typedef struct OgaTokenMetadataAcousticFrameInterval {
-  int64_t start;
-  int64_t stop;
-} OgaTokenMetadataAcousticFrameInterval;
-
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
  */
