@@ -49,6 +49,7 @@ configuration determines whether acoustic timing is produced. `TokenPostProcesso
 forwards borrowed token and optional timing views to its internal `TokenPostProcessorInternal`, which
 owns decoding and timestamp processing. Ordinary tokenizer decoding is unchanged.
 `timestamp_level` controls timestamp generation:
+
 ```mermaid
 flowchart TB
   audio[Audio chunks] --> processor[StreamingProcessor]
@@ -173,10 +174,11 @@ transcript followed by the per-word timestamp transcript.
 
 These examples require headers, language bindings, and a native GenAI library from a build containing
 the processor APIs, together with the corresponding ONNX Runtime Extensions lexical lookup API.
+The implementation is available on `main` after [PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591).
 Existing packages such as GenAI `0.17.0` do not provide those APIs. Until a feature-containing release
 is published:
 
-- For Python, use the wheel built from the implementation branch. Call `process_next_tokens()`
+- For Python, use a wheel built from the same `main` checkout as the native library. Call `process_next_tokens()`
   after generation and `finalize()` at the end, then read typed objects from
   `get_next_token_results()`: use nullable `result.get_timestamps()`, then
   `get_words()` or `get_segments()`, and each record's `get_text()`,

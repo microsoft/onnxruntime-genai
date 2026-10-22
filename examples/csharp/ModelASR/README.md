@@ -27,7 +27,8 @@ dotnet build ModelASR -c Release
 
 The timestamp-capable example requires bindings and a native GenAI library containing the timestamp
 APIs; the current `0.17.0` package references do not contain them, even when running in plain-text mode.
-Until a feature-containing package is published, build from the repository root with:
+The implementation is available on `main` after [PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591).
+Until a feature-containing package is published, build from the root of that checkout with:
 
 ```bash
 dotnet build examples/csharp/ModelASR -c Release -p:UseLocalGenAI=true
@@ -48,7 +49,7 @@ cd ./ModelASR/bin/Release/net8.0/
 ### Arguments
 
 | Argument | Description |
-|---|---|
+| --- | --- |
 | `model_path` | Path to the streaming ASR ONNX model directory |
 | `audio_file.wav` | Path to a WAV audio file (any sample rate — resampled automatically) |
 | `execution_provider` | *(Optional)* Execution provider: `cpu`, `cuda`, `dml`, or `follow_config` (default: `follow_config`) |
@@ -83,7 +84,7 @@ without timestamps; Moonshine supports only this plain-text path. See
 [Nemotron streaming timestamps](../../../docs/nemotron_speech_timestamps.md) for configuration and
 output formats.
 
-```
+```text
 ------------------------------------------------------------
  This is an example of streaming speech recognition...
 ============================================================
