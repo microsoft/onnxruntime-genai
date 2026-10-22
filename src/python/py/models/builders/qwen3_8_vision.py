@@ -3,7 +3,7 @@
 
 import onnx_ir as ir
 
-from .expansions.vision import Qwen38Vision
+from .expansions.qwen3_8 import Qwen38Vision
 from .qwen3_8_graph import Qwen4ExpGraphModel
 
 
