@@ -39,13 +39,7 @@ Excluding the time it may take to download the original model, the model builder
 
 Model architectures are defined in classes. By defining model architectures in this way, future models can leverage class inheritance to greatly reduce the amount of time and effort needed to onboard new model architectures. Optimizations and quantizations are also inherited from the base classes so there is no additional work needed to add those opportunities per model.
 
-Qwen3.8 text, vision, embedding, Engram, and MTP builders live in separate
-`builders/qwen3_8_*.py` modules; `builders/qwen3_8.py` coordinates the package.
-Vision, Engram, and MTP loading and expansion code likewise have their own
-`loaders/` and `builders/expansions/` modules. Reusable standard-ONNX-only
-expansions live in `builders/expansions/standard.py`; provider adapters select
-only the methods they need, so importing a portable expansion does not override
-unrelated CUDA or WebGPU contrib-op paths.
+Qwen3.8 text, vision, embedding, Engram, and MTP builders live in separate `builders/qwen3_8_*.py` modules; `builders/qwen3_8.py` coordinates the package. Vision, Engram, and MTP loading and expansion code likewise have their own `loaders/` and `builders/expansions/` modules. Reusable standard-ONNX-only expansions live in `builders/expansions/standard.py`; provider adapters select only the methods they need, so importing a portable expansion does not override unrelated CUDA or WebGPU contrib-op paths.
 
 ### Compatibility
 
@@ -61,8 +55,7 @@ After the final ONNX model is created, additional files are saved in the output 
 
 ### Configuration Boundary
 
-The experimental version-2 path adds grouped configuration entry points in
-`builder.py` and a normalization layer in `builder_config.py`. The current flow is:
+The experimental version-2 path adds grouped configuration entry points in `builder.py` and a normalization layer in `builder_config.py`. The current flow is:
 
 1. `parse_extra_options` collects legacy CLI strings and resolves structured policy.
 2. `check_extra_options` converts legacy values and loads Hugging Face metadata.
@@ -70,13 +63,9 @@ The experimental version-2 path adds grouped configuration entry points in
 4. The composite exporter writes the decoder and auxiliary runtime sections.
 5. The runtime fragment is merged into the completed `genai_config.json`.
 
-Legacy syntax is normalized before structured leaves are overlaid. A resolved
-`QuantConfig` is still export intent rather than a final graph manifest, so the
-builder separately validates emitted node names, tensor adoption, exporter
-capabilities, and runtime requirements.
+Legacy syntax is normalized before structured leaves are overlaid. A resolved `QuantConfig` is still export intent rather than a final graph manifest, so the builder separately validates emitted node names, tensor adoption, exporter capabilities, and runtime requirements.
 
-Do not move checkpoint unpacking into this layer or change the C++ runtime
-schema to accommodate builder inputs.
+Do not move checkpoint unpacking into this layer or change the C++ runtime schema to accommodate builder inputs.
 
 ### Architecture Classes
 
@@ -86,16 +75,7 @@ Classes are the main abstraction within the model builder. Information that is s
 
 When adding support for a new model architecture, it is preferred to make changes in the `Model` class when possible. This allows the functions in `Model` to become more generic to multiple model architectures. An example of this is the changes made to support the `GemmaModel` class. If the changes are large or the model architecture is different than the currently supported options, it is easier to override or create new `Make` functions in the new model architecture's class. Examples of this include the changes made to support the `MistralModel` and `PhiModel` classes.
 
-Graph expansions live in `builders/expansions/`. `paged_attention.py` supplies the
-shared paged-attention graph emitters, cache layouts, input/output setup, and
-runtime configuration hooks inherited by `Model`. The core builder dispatches to
-these hooks while retaining the non-paged paths. Model-specific graph expansions
-belong in the corresponding architecture module, such as `qwen3_5.py` or
-`qwen3_8.py`, rather than in `base.py` or the architecture's configuration and
-export orchestration code. Architecture classes inherit the expansion mixins
-before their model base classes so overrides and `super()` retain the intended
-dispatch order. Auxiliary vision and MTP graph helpers use separate mixins in
-the same architecture expansion module.
+Graph expansions live in `builders/expansions/`. `paged_attention.py` supplies the shared paged-attention graph emitters, cache layouts, input/output setup, and runtime configuration hooks inherited by `Model`. The core builder dispatches to these hooks while retaining the non-paged paths. Model-specific graph expansions belong in the corresponding architecture module, such as `qwen3_5.py` or `qwen3_8.py`, rather than in `base.py` or the architecture's configuration and export orchestration code. Architecture classes inherit the expansion mixins before their model base classes so overrides and `super()` retain the intended dispatch order. Auxiliary vision and MTP graph helpers use separate mixins in the same architecture expansion module.
 
 ### `Attrs` Dictionaries
 
