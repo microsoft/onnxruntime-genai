@@ -132,3 +132,9 @@ Unit tests and Python static/lint checks do not qualify complete generated
 packages, native runtime compatibility, model accuracy, or GPU performance.
 No benchmark/profiling/evaluation drivers, weights, or task metadata are
 included.
+
+## Shared-expert and normalization/rotary fusions
+
+`fuse_shared_expert_projection` rewrites private BF16 SiLU/up, FP8 down-projection, projected sigmoid gate and routed-residual chains. `fuse_rms_norm_rotary` combines eligible ONNX-arithmetic BranchwiseRMSNorm, flattening Reshape and non-interleaved RotaryEmbedding chains. Both require matching companion ORT kernels; they do not convert weights. Shared values, incompatible controls/shapes and unsupported arithmetic are rejected. Shape-only norm consumers are rebuilt without a GPU copy, optional widened outputs are preserved, and replacements are atomic and hard-link safe.
+
+The combined H200 INT2 S2 package matched exact baseline output tokens in focused four-context validation. Shared-expert fusion removes 48 launches/cycle; normalization/rotary removes another 48 (1042 -> 994 -> 946). These combined-runtime measurements do not qualify an independent PR branch or full model accuracy. Companion ORT PRs #33469, #33470 and #33473 must be integrated before using these rewrites. Full accuracy qualification remains deferred.

@@ -1517,7 +1517,7 @@ def infer_value_types(model):
                     raise ValueError(f"FoldMid2 rotary outputs require BF16: {name}")
                 types[name] = TensorProto.BFLOAT16
         if node.domain == "com.microsoft" and node.op_type == "SigmoidGateMul":
-            for name in (*node.input, *node.output):
+            for name in (*node.input[:3], *node.input[4:], *node.output):
                 if not name:
                     continue
                 if types.get(name, TensorProto.BFLOAT16) not in (0, TensorProto.BFLOAT16):
@@ -1532,6 +1532,8 @@ def infer_value_types(model):
             "BranchwiseRMSNorm",
             "SigmoidGateMul",
             "CausalConvWithState",
+            "RotaryEmbedding",
+            "RMSNormRotary",
         },
     }
     for node in model.graph.node:
@@ -1546,7 +1548,7 @@ def infer_value_types(model):
         if node.op_type in preserving.get(node.domain, set()) and types.get(node.input[0]):
             for output in node.output:
                 types[output] = types[node.input[0]]
-        if node.domain == "com.microsoft" and node.op_type == "BranchwiseRMSNorm" and len(node.output) > 1:
+        if node.domain == "com.microsoft" and node.op_type in {"BranchwiseRMSNorm", "RMSNormRotary"} and len(node.output) > 1:
             types[node.output[1]] = TensorProto.FLOAT
     return types
 
@@ -1762,6 +1764,265 @@ def fuse_shared_expert_residual(path):
         model.graph.ClearField("node")
         model.graph.node.extend(nodes)
         temporary = path.with_suffix(".optimized.onnx")
+        onnx.save(model, temporary)
+        os.replace(temporary, path)
+    return len(replacements)
+
+
+def fuse_shared_expert_projection(path):
+    """Fuse private BF16 SiLU/down/projected-gate/residual chains into the FP8 operator."""
+    model = onnx.load(path, load_external_data=False)
+    types = infer_value_types(model)
+    tensors = {t.name: t for t in model.graph.initializer}
+    producers = {out: node for node in model.graph.node for out in node.output}
+    consumers = defaultdict(list)
+    for node in model.graph.node:
+        for name in node.input:
+            consumers[name].append(node)
+    protected = externally_observed_values(model.graph)
+    replacements, removed = {}, set()
+
+    def attrs(node):
+        return {a.name: helper.get_attribute_value(a) for a in node.attribute}
+
+    def is_op(node, kind):
+        return node is not None and node.domain == "com.microsoft" and node.op_type == kind
+
+    for post in model.graph.node:
+        if (not is_op(post, "SigmoidGateMul") or len(post.input) != 5 or len(post.output) != 1 or
+                attrs(post) != {"broadcast_gate": 1, "sigmoid_in_fp32": 0}):
+            continue
+        down = producers.get(post.input[0])
+        if (not is_op(down, "MatMulBlockQuantizedFp8Weight") or len(down.input) > 6 or
+                len(down.input) < 3 or len(down.output) != 1 or
+                set(attrs(down)) - {"block_size"} or any(down.input[3:5])):
+            continue
+        silu = producers.get(down.input[0])
+        if (not is_op(silu, "SigmoidGateMul") or len(silu.input) != 4 or silu.input[2] or
+                len(silu.output) != 1 or attrs(silu) != {"silu_gate": 1, "sigmoid_in_fp32": 0} or
+                post.input[3] != silu.input[3] or
+                (down.input[5] if len(down.input) > 5 else "") != post.input[3]):
+            continue
+        routed = producers.get(post.input[2])
+        if not is_op(routed, "QMoE") or routed.input[0] != post.input[1]:
+            continue
+        weight, scale, gate_weight = (tensors.get(name) for name in
+                                      (down.input[1], down.input[2], post.input[4]))
+        if (weight is None or weight.data_type != TensorProto.FLOAT8E4M3FN or len(weight.dims) != 2 or
+                any(width <= 0 for width in weight.dims) or attrs(down).get("block_size", 128) <= 0 or
+                scale is None or scale.data_type != TensorProto.FLOAT or
+                gate_weight is None or gate_weight.data_type != TensorProto.BFLOAT16 or
+                list(gate_weight.dims) != [weight.dims[0], 1] or
+                any(types.get(name) != TensorProto.BFLOAT16 for name in
+                    (silu.input[0], silu.input[1], post.input[1], post.input[2]))):
+            continue
+        source = producers.get(silu.input[0])
+        if (source is None or source is not producers.get(silu.input[1]) or
+                not is_op(source, "MatMulBlockQuantizedFp8Weight") or source.input[0] != post.input[1]):
+            continue
+        source_weight = tensors.get(source.input[1])
+        if (source_weight is None or len(source_weight.dims) != 2 or
+                source_weight.dims[1] != weight.dims[0]):
+            continue
+        widths = attrs(source).get("split_sizes")
+        if (not widths or len(widths) != len(source.output) or
+                any(widths[list(source.output).index(name)] != weight.dims[1] for name in silu.input[:2])):
+            continue
+        if any(n.output[0] in protected or len(consumers[n.output[0]]) != 1 or id(n) in removed
+               for n in (silu, down)):
+            continue
+        inputs = list(down.input) + [""] * (9 - len(down.input))
+        inputs[0] = silu.input[0]
+        inputs.extend([silu.input[1], post.input[1], post.input[4], post.input[2]])
+        replacements[id(post)] = helper.make_node(
+            "MatMulBlockQuantizedFp8Weight", inputs, list(post.output), domain="com.microsoft",
+            name=post.name + "_SharedExpert", shared_expert=1, **attrs(down))
+        removed.update(id(n) for n in (silu, down, post))
+    if replacements:
+        nodes = [replacements.get(id(node), node) for node in model.graph.node
+                 if id(node) not in removed or id(node) in replacements]
+        live = {name for node in nodes for name in (*node.input, *node.output)} | protected
+        values = [value for value in model.graph.value_info if value.name in live]
+        del model.graph.node[:]
+        model.graph.node.extend(nodes)
+        del model.graph.value_info[:]
+        model.graph.value_info.extend(values)
+        temporary = path.with_suffix(".shared_expert.onnx")
+        onnx.save(model, temporary)
+        os.replace(temporary, path)
+    return len(replacements)
+
+
+def fuse_rms_norm_rotary(path):
+    """Combine ONNX-arithmetic BF16 normalization and non-interleaved rotary embedding."""
+    model = onnx.load(path, load_external_data=False)
+    producers = {name: node for node in model.graph.node for name in node.output}
+    tensors = {tensor.name: tensor for tensor in model.graph.initializer}
+    constants = {name: numpy_helper.to_array(tensor) for name, tensor in tensors.items()
+                 if tensor.data_location != TensorProto.EXTERNAL}
+    consumers = defaultdict(list)
+    for node in model.graph.node:
+        for name in node.input:
+            consumers[name].append(node)
+    protected = externally_observed_values(model.graph)
+    types = infer_value_types(model)
+    removed, replacements, shape_replacements, extra_tensors = set(), {}, {}, []
+    if next((op.version for op in model.opset_import if op.domain == ""), 0) < 15:
+        return 0
+    used = set(producers) | set(tensors) | {value.name for value in model.graph.input}
+
+    def unique(base):
+        name, index = base, 0
+        while name in used:
+            index += 1
+            name = f"{base}_{index}"
+        used.add(name)
+        return name
+
+    def attrs(node):
+        return {a.name: helper.get_attribute_value(a) for a in node.attribute}
+
+    def upstream(name, visited, shape_nodes, norm):
+        if not name or name in visited:
+            return
+        visited.add(name)
+        node = producers.get(name)
+        if node is not None:
+            if id(node) in shape_nodes:
+                upstream(norm.input[0], visited, shape_nodes, norm)
+                return
+            for value in node.input:
+                upstream(value, visited, shape_nodes, norm)
+
+    def captured_inputs(graph):
+        local = {value.name for value in graph.input} | {tensor.name for tensor in graph.initializer}
+        local.update(name for node in graph.node for name in node.output)
+        reads = {name for node in graph.node for name in node.input} | {value.name for value in graph.output}
+        for node in graph.node:
+            reads.update(implicit_inputs(node))
+        return reads - local
+
+    def implicit_inputs(node):
+        names = set()
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                names.update(captured_inputs(attribute.g))
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for graph in attribute.graphs:
+                    names.update(captured_inputs(graph))
+        return names
+
+    for rotary in model.graph.node:
+        if rotary.domain != "com.microsoft" or rotary.op_type != "RotaryEmbedding":
+            continue
+        ra = attrs(rotary)
+        if (len(rotary.input) not in (4, 5) or len(rotary.output) != 1 or
+                set(ra) - {"interleaved", "num_heads", "rotary_embedding_dim", "use_fp32_arithmetic"} or
+                ra.get("interleaved", 0) != 0 or ra.get("use_fp32_arithmetic", 0) not in (0, 1)):
+            continue
+        reshape = producers.get(rotary.input[0])
+        if reshape is None or reshape.domain or reshape.op_type != "Reshape" or len(reshape.input) != 2:
+            continue
+        if attrs(reshape).get("allowzero", 0) != 0:
+            continue
+        norm = producers.get(reshape.input[0])
+        if (norm is None or norm.domain != "com.microsoft" or norm.op_type != "BranchwiseRMSNorm" or
+                len(norm.input) not in (2, 3) or len(norm.output) not in (1, 2)):
+            continue
+        na = attrs(norm)
+        if (na.get("use_onnx_arithmetic", 0) != 1 or na.get("num_branches", 0) != 0 or
+                set(na) - {"epsilon", "use_onnx_arithmetic", "num_branches", "input_start", "input_width"} or
+                types.get(norm.input[0]) != TensorProto.BFLOAT16):
+            continue
+        mode = norm.input[2] if len(norm.input) > 2 else ""
+        if mode != (rotary.input[4] if len(rotary.input) > 4 else ""):
+            continue
+        gamma = tensors.get(norm.input[1])
+        source = producers.get(norm.input[0])
+        if (gamma is None or gamma.data_type != TensorProto.FLOAT or len(gamma.dims) != 1 or
+                source is None or source.domain or source.op_type != "Reshape" or len(source.input) != 2):
+            continue
+        if attrs(source).get("allowzero", 0) != 0:
+            continue
+        source_shape = constants.get(source.input[1])
+        flat_shape = constants.get(reshape.input[1])
+        width = int(gamma.dims[0])
+        if (source_shape is None or source_shape.shape != (4,) or list(source_shape[:2]) != [0, 0] or
+                source_shape[2] <= 0 or source_shape[3] <= 0 or width <= 0 or
+                na.get("input_width", int(source_shape[3])) != width or
+                na.get("input_start", 0) < 0 or na.get("input_start", 0) + width > source_shape[3] or
+                ra.get("num_heads") != int(source_shape[2]) or
+                flat_shape is None or not any(np.array_equal(flat_shape, shape) for shape in
+                    ([0, 0, int(source_shape[2]) * width], [1, -1, int(source_shape[2]) * width])) or
+                ra.get("rotary_embedding_dim", 0) <= 0 or ra["rotary_embedding_dim"] > width or
+                ra["rotary_embedding_dim"] % 2):
+            continue
+        if any(types.get(name) != TensorProto.BFLOAT16 for name in rotary.input[2:4]):
+            continue
+        if any(n.output[0] in protected or len(consumers[n.output[0]]) != 1 or id(n) in removed
+               for n in (norm, reshape)):
+            continue
+        ancestors = set()
+        shape_nodes = {id(node) for name in norm.output[1:] for node in consumers[name]
+                       if node.domain == "" and node.op_type == "Shape" and not node.attribute}
+        for name in rotary.input[1:]:
+            upstream(name, ancestors, shape_nodes, norm)
+        if ancestors.intersection(norm.output):
+            continue
+        outputs = [rotary.output[0]]
+        if len(norm.output) > 1 and (norm.output[1] in protected or any(
+                id(node) not in shape_nodes for node in consumers[norm.output[1]])):
+            outputs.append(norm.output[1])
+        for name in norm.output[1:]:
+            for node in consumers[name]:
+                if id(node) not in shape_nodes:
+                    continue
+                prefix = unique(node.output[0] + "_RMSShape")
+                width_name = unique(prefix + "_width")
+                extra_tensors.append(numpy_helper.from_array(np.array([width], np.int64), width_name))
+                shape_replacements[id(node)] = [
+                    helper.make_node("Shape", [norm.input[0]], [prefix], start=0, end=3),
+                    helper.make_node("Concat", [prefix, width_name], list(node.output), axis=0),
+                ]
+        replacements[id(rotary)] = helper.make_node(
+            "RMSNormRotary", [norm.input[0], norm.input[1], *rotary.input[1:4], mode], outputs,
+            name=rotary.name + "_FusedRMSNorm", domain="com.microsoft",
+            epsilon=na.get("epsilon", 1e-5), input_start=na.get("input_start", 0),
+            input_width=width, rotary_embedding_dim=ra["rotary_embedding_dim"],
+            flatten_batch=int(flat_shape[0] == 1),
+            use_fp32_arithmetic=ra.get("use_fp32_arithmetic", 0))
+        removed.update(id(node) for node in (norm, reshape, rotary))
+    if replacements:
+        pending = []
+        for node in model.graph.node:
+            if id(node) in shape_replacements:
+                pending.extend(shape_replacements[id(node)])
+            elif id(node) in replacements:
+                pending.append(replacements[id(node)])
+            elif id(node) not in removed:
+                pending.append(node)
+        known = {value.name for value in model.graph.input} | set(tensors) | {""}
+        known.update(tensor.name for tensor in extra_tensors)
+        nodes = []
+        while pending:
+            rest = []
+            for node in pending:
+                if all(name in known for name in (*node.input, *implicit_inputs(node))):
+                    nodes.append(node)
+                    known.update(node.output)
+                else:
+                    rest.append(node)
+            if len(rest) == len(pending):
+                raise ValueError("RMSNormRotary rewrite would introduce a cycle or undefined input")
+            pending = rest
+        live = {name for node in nodes for name in (*node.input, *node.output)} | protected
+        values = [value for value in model.graph.value_info if value.name in live]
+        del model.graph.node[:]
+        model.graph.node.extend(nodes)
+        del model.graph.value_info[:]
+        model.graph.value_info.extend(values)
+        model.graph.initializer.extend(extra_tensors)
+        temporary = path.with_suffix(".norm_rotary.onnx")
         onnx.save(model, temporary)
         os.replace(temporary, path)
     return len(replacements)
@@ -2521,6 +2782,7 @@ def main():
         results[relative]["fused_causal_conv_state_updates"] = fuse_causal_conv_state_updates(destination / relative)
         results[relative]["fused_attention_rotary"] = fuse_attention_rotary(destination / relative)
         results[relative]["fused_shared_expert_residual"] = fuse_shared_expert_residual(destination / relative)
+        results[relative]["fused_shared_expert_projection"] = fuse_shared_expert_projection(destination / relative)
         results[relative]["fused_silu_gate"] = fuse_silu_gate(destination / relative)
         results[relative]["fused_fp8_projection_split"] = fuse_fp8_projection_split(destination / relative)
         results[relative]["fused_fp8_projection_slices"] = fuse_fp8_projection_slices(destination / relative)
@@ -2539,6 +2801,7 @@ def main():
         result["shared_rotary_cache_shapes"] = share_rotary_cache_expands(destination / relative)
         result["deduplicated_standard_expressions"] = deduplicate_standard_expressions(destination / relative)
         result["fused_rotary_casts"] = fuse_rotary_casts(destination / relative)
+        result["fused_rms_norm_rotary"] = fuse_rms_norm_rotary(destination / relative)
     pool = refresh_weight_pool(source, destination, transformed_provenance)
     write_performance_metadata(destination, source, results, pool, provider, runtime, genai_library)
     print(json.dumps(results, indent=2))

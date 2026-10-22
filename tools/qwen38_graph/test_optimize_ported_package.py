@@ -30,6 +30,8 @@ from optimize_ported_package import (
     fuse_rms_output_casts,
     fuse_rotary_casts,
     fuse_shared_expert_residual,
+    fuse_shared_expert_projection,
+    fuse_rms_norm_rotary,
     fuse_silu_gate,
     fuse_standard_rms_norm,
     infer_value_types,
@@ -87,6 +89,189 @@ def capture_value(model, value, dtype=TensorProto.FLOAT):
 
 
 class OptimizePortedPackageTest(unittest.TestCase):
+    def test_rms_norm_rotary_guards_shapes_side_output_and_hardlink(self):
+        def model(mutation=None, flatten=False):
+            tensors = [
+                numpy_helper.from_array(np.array([0, 0, 2, 512], np.int64), "heads_shape"),
+                numpy_helper.from_array(np.array([1, -1, 512] if flatten else [0, 0, 512], np.int64), "flat_shape"),
+                numpy_helper.from_array(np.ones(256, np.float32), "scale"),
+            ]
+            nodes = [
+                helper.make_node("Reshape", ["x", "heads_shape"], ["heads"]),
+                helper.make_node("BranchwiseRMSNorm", ["heads", "scale", "mode"], ["normalized", "wide"],
+                                 domain="com.microsoft", use_onnx_arithmetic=1, input_width=256),
+                helper.make_node("Shape", ["wide"], ["wide_shape"]),
+                helper.make_node("Reshape", ["normalized", "flat_shape"], ["flat"]),
+                helper.make_node("RotaryEmbedding", ["flat", "positions", "cos", "sin", "mode"], ["y"],
+                                 domain="com.microsoft", num_heads=2, interleaved=0,
+                                 rotary_embedding_dim=64, use_fp32_arithmetic=1),
+            ]
+            outputs = [helper.make_tensor_value_info("y", TensorProto.BFLOAT16, [1, 2, 512]),
+                       helper.make_tensor_value_info("wide", TensorProto.FLOAT, [1, 2, 2, 256]),
+                       helper.make_tensor_value_info("wide_shape", TensorProto.INT64, [4])]
+            if mutation == "shared":
+                nodes.append(helper.make_node("Identity", ["normalized"], ["observed"]))
+                outputs.append(helper.make_tensor_value_info("observed", TensorProto.BFLOAT16, [1, 2, 2, 256]))
+            if mutation == "output":
+                outputs.append(helper.make_tensor_value_info("flat", TensorProto.BFLOAT16, [1, 2, 512]))
+            if mutation == "interleaved":
+                next(a for a in nodes[-1].attribute if a.name == "interleaved").i = 1
+            if mutation == "arithmetic":
+                next(a for a in nodes[1].attribute if a.name == "use_onnx_arithmetic").i = 0
+            if mutation == "mode":
+                nodes[-1].input[-1] = ""
+            if mutation == "shape":
+                tensors[1].CopyFrom(numpy_helper.from_array(np.array([0, 0, 1024], np.int64), "flat_shape"))
+            if mutation == "allowzero":
+                nodes[0].attribute.append(helper.make_attribute("allowzero", 1))
+            if mutation == "dependent_cache":
+                tensors.append(numpy_helper.from_array(np.array([-1, 32], np.int64), "cache_shape"))
+                nodes[4].input[2] = "dependent_cos"
+                nodes[4:4] = [
+                    helper.make_node("Cast", ["wide"], ["dependent_bf16"], to=TensorProto.BFLOAT16),
+                    helper.make_node("Reshape", ["dependent_bf16", "cache_shape"], ["dependent_cos"]),
+                ]
+            if mutation == "shape_cache":
+                for name, values in (("axes", [0, 1]), ("cache_width", [32]), ("cache_shape", [-1, 32])):
+                    tensors.append(numpy_helper.from_array(np.array(values, np.int64), name))
+                nodes[4].input[2] = "selected_cos"
+                nodes[4:4] = [
+                    helper.make_node("Gather", ["wide_shape", "axes"], ["tokens"], axis=0),
+                    helper.make_node("Concat", ["tokens", "cache_width"], ["cache_expand"], axis=0),
+                    helper.make_node("Expand", ["cos", "cache_expand"], ["expanded_cos"]),
+                    helper.make_node("Reshape", ["expanded_cos", "cache_shape"], ["selected_cos"]),
+                ]
+            if mutation == "capture":
+                body = helper.make_graph([helper.make_node("Identity", ["normalized"], ["inside"])], "body", [],
+                                         [helper.make_tensor_value_info("inside", TensorProto.BFLOAT16, [1, 2, 2, 256])])
+                tensors.append(numpy_helper.from_array(np.array(True), "condition"))
+                nodes.append(helper.make_node("If", ["condition"], ["branch"], then_branch=body, else_branch=body))
+                outputs.append(helper.make_tensor_value_info("branch", TensorProto.BFLOAT16, [1, 2, 2, 256]))
+            if mutation == "capture_wide":
+                body = helper.make_graph([helper.make_node("Identity", ["wide"], ["inside"])], "body", [],
+                                         [helper.make_tensor_value_info("inside", TensorProto.FLOAT, [1, 2, 2, 256])])
+                tensors.append(numpy_helper.from_array(np.array(True), "condition"))
+                nodes.insert(3, helper.make_node("If", ["condition"], ["branch"], then_branch=body, else_branch=body))
+                outputs.append(helper.make_tensor_value_info("branch", TensorProto.FLOAT, [1, 2, 2, 256]))
+            return helper.make_model(helper.make_graph(nodes, "norm_rope", [
+                helper.make_tensor_value_info("x", TensorProto.BFLOAT16, [1, 2, 1024]),
+                helper.make_tensor_value_info("mode", TensorProto.INT32, [1]),
+                helper.make_tensor_value_info("positions", TensorProto.INT64, [1]),
+                helper.make_tensor_value_info("cos", TensorProto.BFLOAT16, [1 if mutation == "shape_cache" else 8, 32]),
+                helper.make_tensor_value_info("sin", TensorProto.BFLOAT16, [8, 32]),
+            ], outputs, tensors), opset_imports=[helper.make_opsetid("", 18), helper.make_opsetid("com.microsoft", 2)])
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "target.onnx"
+            original = Path(directory) / "original.onnx"
+            onnx.save(model(), path)
+            os.link(path, original)
+            before = original.read_bytes()
+            self.assertEqual(fuse_rms_norm_rotary(path), 1)
+            self.assertEqual(original.read_bytes(), before)
+            fused = onnx.load(path)
+            self.assertEqual([node.op_type for node in fused.graph.node], ["Reshape", "Shape", "Concat", "RMSNormRotary"])
+            self.assertEqual(list(fused.graph.node[-1].output), ["y", "wide"])
+            self.assertEqual(list(fused.graph.node[-1].input), ["heads", "scale", "positions", "cos", "sin", "mode"])
+            self.assertEqual(fuse_rms_norm_rotary(path), 0)
+            for mutation in ("shared", "output", "interleaved", "arithmetic", "mode", "shape",
+                             "capture", "allowzero", "dependent_cache"):
+                with self.subTest(mutation=mutation):
+                    onnx.save(model(mutation), path)
+                    before = path.read_bytes()
+                    self.assertEqual(fuse_rms_norm_rotary(path), 0)
+                    self.assertEqual(path.read_bytes(), before)
+            onnx.save(model(flatten=True), path)
+            self.assertEqual(fuse_rms_norm_rotary(path), 1)
+            node = next(n for n in onnx.load(path).graph.node if n.op_type == "RMSNormRotary")
+            self.assertEqual(next(a.i for a in node.attribute if a.name == "flatten_batch"), 1)
+            for mutation in ("shape_cache", "capture_wide"):
+                with self.subTest(mutation=mutation):
+                    onnx.save(model(mutation), path)
+                    self.assertEqual(fuse_rms_norm_rotary(path), 1)
+                    fused = onnx.load(path)
+                    order = {node.op_type: i for i, node in enumerate(fused.graph.node)}
+                    if mutation == "capture_wide":
+                        self.assertLess(order["RMSNormRotary"], order["If"])
+                    else:
+                        self.assertLess(order["Concat"], order["Expand"])
+                        self.assertLess(order["Expand"], order["RMSNormRotary"])
+                    self.assertEqual(fuse_rms_norm_rotary(path), 0)
+
+    def test_shared_expert_projection_guards_and_atomic_replacement(self):
+        def model(mutation=None):
+            nodes = [
+                helper.make_node("MatMulBlockQuantizedFp8Weight", ["x", "up_weight", "up_scale"],
+                                 ["up", "gate"], domain="com.microsoft", split_sizes=[4, 4], block_size=8),
+                helper.make_node("SigmoidGateMul", ["up", "gate", "", "mode"], ["activated"],
+                                 domain="com.microsoft", silu_gate=1, sigmoid_in_fp32=0),
+                helper.make_node("MatMulBlockQuantizedFp8Weight", ["activated", "weight", "scale", "", "", "mode"],
+                                 ["down"], domain="com.microsoft", block_size=4),
+                helper.make_node("QMoE", ["x"], ["routed"], domain="com.microsoft"),
+                helper.make_node("SigmoidGateMul", ["down", "x", "routed", "mode", "gate_weight"], ["y"],
+                                 domain="com.microsoft", broadcast_gate=1, sigmoid_in_fp32=0),
+            ]
+            constants = [
+                helper.make_tensor("up_weight", TensorProto.FLOAT8E4M3FN, [8, 8], bytes(64), raw=True),
+                helper.make_tensor("weight", TensorProto.FLOAT8E4M3FN, [8, 4], bytes(32), raw=True),
+                numpy_helper.from_array(np.ones((8, 1), np.float32), "scale"),
+                numpy_helper.from_array(np.ones((8, 1), np.float32), "up_scale"),
+                helper.make_tensor("gate_weight", TensorProto.BFLOAT16, [8, 1], bytes(16), raw=True),
+            ]
+            outputs = [helper.make_tensor_value_info("y", TensorProto.BFLOAT16, [2, 8])]
+            if mutation == "shared":
+                nodes.append(helper.make_node("Identity", ["activated"], ["observed"]))
+                outputs.append(helper.make_tensor_value_info("observed", TensorProto.BFLOAT16, [2, 4]))
+            if mutation == "output":
+                outputs.append(helper.make_tensor_value_info("down", TensorProto.BFLOAT16, [2, 8]))
+            if mutation == "control":
+                nodes[1].input[3] = ""
+            if mutation == "bias":
+                nodes[2].input[4] = "gate_weight"
+            if mutation == "split":
+                nodes[0].attribute[1].ints[:] = [3, 5]
+            if mutation == "sigmoid":
+                nodes[-1].attribute[1].i = 1
+            if mutation == "prefill_weight":
+                nodes[2].input.extend(["gate_weight"])
+            if mutation == "mtp":
+                nodes[3].op_type = "PackedMtpMoe"
+            if mutation == "source_width":
+                constants[0].dims[1] = 7
+            if mutation == "captured":
+                body = helper.make_graph([helper.make_node("Identity", ["down"], ["captured"])], "body", [],
+                                         [helper.make_tensor_value_info("captured", TensorProto.BFLOAT16, [2, 8])])
+                nodes.append(helper.make_node("If", ["condition"], ["branch"], then_branch=body, else_branch=body))
+                constants.append(numpy_helper.from_array(np.array(True), "condition"))
+                outputs.append(helper.make_tensor_value_info("branch", TensorProto.BFLOAT16, [2, 8]))
+            return helper.make_model(helper.make_graph(nodes, "shared", [
+                helper.make_tensor_value_info("x", TensorProto.BFLOAT16, [2, 8]),
+                helper.make_tensor_value_info("mode", TensorProto.INT32, [1])], outputs, constants),
+                opset_imports=[helper.make_opsetid("", 18), helper.make_opsetid("com.microsoft", 1)])
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "target.onnx"
+            original = Path(directory) / "original.onnx"
+            onnx.save(model(), path)
+            os.link(path, original)
+            before = original.read_bytes()
+            self.assertEqual(fuse_shared_expert_projection(path), 1)
+            self.assertEqual(original.read_bytes(), before)
+            fused = onnx.load(path)
+            self.assertEqual(len(fused.graph.node), 3)
+            node = fused.graph.node[-1]
+            self.assertEqual(node.input[0], "up")
+            self.assertEqual(list(node.input[9:]), ["gate", "x", "gate_weight", "routed"])
+            self.assertEqual(list(node.output), ["y"])
+            self.assertEqual(fuse_shared_expert_projection(path), 0)
+            for mutation in ("shared", "output", "control", "bias", "split", "sigmoid",
+                             "prefill_weight", "captured", "mtp", "source_width"):
+                with self.subTest(mutation=mutation):
+                    onnx.save(model(mutation), path)
+                    before = path.read_bytes()
+                    self.assertEqual(fuse_shared_expert_projection(path), 0)
+                    self.assertEqual(path.read_bytes(), before)
+
     def test_conv_state_update_fusion_numerics_and_guards(self):
         class CausalConvWithState(OpRun):
             op_domain = "com.microsoft"
