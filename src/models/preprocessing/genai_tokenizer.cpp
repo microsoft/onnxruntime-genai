@@ -53,6 +53,14 @@ const std::string& TokenizerStream::Decode(int32_t token) {
   return chunk_;
 }
 
+TokenizerStream::~TokenizerStream() = default;
+
+void TokenizerStream::Reset() {
+  OrtxDispose(&cache_.p_);
+  CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
+  chunk_.clear();
+}
+
 Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_token_id},
                                              eos_token_id_{config.model.eos_token_id},
                                              pad_token_id_{config.model.pad_token_id},
@@ -98,6 +106,12 @@ int32_t Tokenizer::GetEorTokenId() const {
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
   return std::make_unique<TokenizerStream>(*this);
+}
+
+OrtxWordPieceInfo Tokenizer::GetWordPieceInfo(int32_t vocab_id) const {
+  OrtxWordPieceInfo piece{};
+  CheckResult(OrtxGetTokenWordPieceInfo(tokenizer_, vocab_id, &piece));
+  return piece;
 }
 
 void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {

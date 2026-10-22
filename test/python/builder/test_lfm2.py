@@ -24,6 +24,9 @@ onnx = pytest.importorskip("onnx")
 # Extractor runs a part of a graph.
 onnx_utils = pytest.importorskip("onnx.utils")
 ort = pytest.importorskip("onnxruntime")
+if not hasattr(ort, "InferenceSession"):
+    # _builder_test_utils puts an empty onnxruntime module in place when the package is missing.
+    pytest.skip("onnxruntime is not installed", allow_module_level=True)
 
 lfm2_module = load_builder_module("lfm2")
 ir = lfm2_module.ir
@@ -304,6 +307,8 @@ def test_lfm2_conv_state_of_each_row(tmp_path):
     ir.save(model.model, tmp_path / "model.onnx")
     (shape_node,) = [node for node in model.model.graph if node.name == "/model/last_real_token/seq_len/Shape"]
     hidden_states = shape_node.inputs[0].name
+    # S comes from layer 0's [B, S, H] input. A Shape of the [B, C, S] conv input stops WebGPU graph capture.
+    assert hidden_states == "/model/layers.0/operator_layernorm/output_0"
     conv_input = "/model/layers.0/conv/Mul_1/output_0"
     subgraph = onnx_utils.Extractor(onnx.load(tmp_path / "model.onnx")).extract_model(
         ["attention_mask", hidden_states, conv_input, "past.0.conv"], ["present.0.conv"]

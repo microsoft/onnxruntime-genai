@@ -87,6 +87,37 @@ typedef struct OgaRequestOptions OgaRequestOptions;
 typedef struct OgaTurnOptions OgaTurnOptions;
 typedef struct OgaTurnUsage OgaTurnUsage;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
+typedef struct OgaTokenPostProcessor OgaTokenPostProcessor;
+typedef struct OgaTokenPostProcessorResult OgaTokenPostProcessorResult;
+typedef struct OgaTokenPostProcessorTimestamp OgaTokenPostProcessorTimestamp;
+typedef struct OgaTokenPostProcessorTimestampRecord OgaTokenPostProcessorTimestampRecord;
+
+/** Configuration and tokenizer come from the generator's model.
+ * The generator must outlive the processor. Results are borrowed until its next mutation. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenPostProcessor(const OgaGenerator* generator, OgaTokenPostProcessor** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTokenPostProcessor(OgaTokenPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorProcessNextTokens(OgaTokenPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorFinalize(OgaTokenPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorReset(OgaTokenPostProcessor* processor);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorGetResultCount(const OgaTokenPostProcessor* processor);
+OGA_EXPORT const OgaTokenPostProcessorResult* OGA_API_CALL OgaTokenPostProcessorGetResult(const OgaTokenPostProcessor* processor, size_t index);
+OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorResultGetText(const OgaTokenPostProcessorResult* result);
+OGA_EXPORT const OgaTokenPostProcessorTimestamp* OGA_API_CALL OgaTokenPostProcessorResultGetTimestamps(const OgaTokenPostProcessorResult* result);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampGetWordCount(const OgaTokenPostProcessorTimestamp* timestamps);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampGetSegmentCount(const OgaTokenPostProcessorTimestamp* timestamps);
+OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampGetWord(const OgaTokenPostProcessorTimestamp* timestamps, size_t index);
+OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampGetSegment(const OgaTokenPostProcessorTimestamp* timestamps, size_t index);
+OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetText(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record);
+OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record);
+
+/** Half-open [start, stop) interval in absolute acoustic frames. */
+typedef struct OgaTokenMetadataAcousticFrameInterval {
+  int64_t start;
+  int64_t stop;
+} OgaTokenMetadataAcousticFrameInterval;
 
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
@@ -1084,6 +1115,8 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream*);
+
 /** Create an OgaTensor from an optional user owned buffer. If a user owned buffer is supplied, the OgaTensor does
  * not own the memory (as it has no way to free it) so the 'data' parameter must be valid for the lifetime of the OgaTensor.
  *  If the 'data' parameter is nullptr, the OgaTensor will allocate its own memory.
@@ -1233,6 +1266,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const
 
 /**
  * \brief Sets the adapter with the given adapter name as active for the given OgaGenerator object.
+ * Activations are additive. With graph capture, each active adapter set uses its own capture identity.
+ * Activating an adapter does not recompute an existing KV cache; rewind to zero and append the prompt
+ * again if the adapter should also apply to the earlier tokens.
  * \param[in] generator The OgaGenerator object to set the active adapter.
  * \param[in] adapters The OgaAdapters object that manages the model adapters.
  * \param[in] adapter_name The name of the adapter to set as active.
