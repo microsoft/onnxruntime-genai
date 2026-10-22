@@ -19,6 +19,7 @@ from optimize_ported_package import (
     deduplicate_standard_expressions,
     fuse_attention_rotary,
     fuse_causal_conv_projection,
+    fuse_causal_conv_state_updates,
     fuse_fp8_projection_slices,
     fuse_fp8_projection_split,
     fuse_gdn_gate_casts,
@@ -86,6 +87,146 @@ def capture_value(model, value, dtype=TensorProto.FLOAT):
 
 
 class OptimizePortedPackageTest(unittest.TestCase):
+    def test_conv_state_update_fusion_numerics_and_guards(self):
+        class CausalConvWithState(OpRun):
+            op_domain = "com.microsoft"
+
+            def _run(
+                self,
+                x,
+                weight,
+                bias,
+                past,
+                dilation=1,
+                state_channels_last=-1,
+                input_channels=0,
+                state_length=0,
+                activation="none",
+                **kwargs,
+            ):
+                state = past.transpose(0, 2, 1) if state_channels_last == 0 else past
+                sequence = np.concatenate([state, x], axis=1)
+                history = state.shape[1]
+                result = np.zeros_like(x)
+                for t in range(x.shape[1]):
+                    for k in range(weight.shape[2]):
+                        result[:, t] += sequence[:, t + k * dilation] * weight[:, 0, k]
+                if bias is not None:
+                    result += bias
+                if activation == "silu":
+                    result = result / (1 + np.exp(-result))
+                present = sequence[:, -history:]
+                first = sequence[:, 1 : history + 1]
+                if state_channels_last == 0:
+                    return result, present.transpose(0, 2, 1), first.transpose(0, 2, 1)
+                return result, present
+
+        def graph(length=2, extra=None, mutation=None, captured=False):
+            constants = [numpy_helper.from_array(np.linspace(-0.3, 0.4, 12).astype(np.float32).reshape(4, 1, 3), "w")]
+            nodes = [
+                helper.make_node("Transpose", ["past"], ["past_cl"], perm=[0, 2, 1]),
+                helper.make_node(
+                    "CausalConvWithState",
+                    ["x", "w", "", "past_cl"],
+                    ["y", "carry"],
+                    domain="com.microsoft",
+                    channels_last=1,
+                    dilation=2,
+                    activation="silu",
+                    name="conv",
+                ),
+            ]
+
+            def add_slice(source, output, start, end, axis, step=1):
+                names = [output + suffix for suffix in ("_start", "_end", "_axis", "_step")]
+                constants.extend(
+                    numpy_helper.from_array(np.array([v], np.int64), name)
+                    for name, v in zip(names, (start, end, axis, step), strict=True)
+                )
+                nodes.append(helper.make_node("Slice", [source, *names], [output]))
+
+            add_slice("past", "tail", 1, 2**31 - 1, 2)
+            add_slice("x", "first", 0, 1, 1)
+            nodes.extend(
+                [
+                    helper.make_node("Transpose", ["first"], ["first_cf"], perm=[0, 2, 1]),
+                    helper.make_node("Concat", ["tail", "first_cf"], ["mid"], axis=2),
+                    helper.make_node("Transpose", ["carry"], ["present"], perm=[0, 2, 1]),
+                ]
+            )
+            if mutation == "dilation":
+                nodes[1].attribute.extend([helper.make_attribute("state_window", 1)])
+            if mutation == "tail":
+                constants[1].CopyFrom(numpy_helper.from_array(np.array([2], np.int64), "tail_start"))
+            if mutation == "layout":
+                nodes[0].attribute[0].ints[:] = [0, 1, 2]
+            outputs = [
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, length, 4]),
+                helper.make_tensor_value_info("present", TensorProto.FLOAT, [2, 4, 4]),
+                helper.make_tensor_value_info("mid", TensorProto.FLOAT, [2, 4, 4]),
+            ]
+            if extra:
+                nodes.append(helper.make_node("Identity", [extra], ["observed"]))
+                outputs.append(helper.make_tensor_value_info("observed", TensorProto.FLOAT, None))
+            if captured:
+                body = helper.make_graph(
+                    [helper.make_node("Identity", ["tail"], ["captured"])],
+                    "body",
+                    [],
+                    [helper.make_tensor_value_info("captured", TensorProto.FLOAT, [2, 4, 3])],
+                )
+                nodes.append(helper.make_node("If", ["condition"], ["branch"], then_branch=body, else_branch=body))
+                constants.append(numpy_helper.from_array(np.array(True), "condition"))
+                outputs.append(helper.make_tensor_value_info("branch", TensorProto.FLOAT, [2, 4, 3]))
+            input_shape = (
+                None if mutation == "unknown_rank" else ([2, length, 2, 2] if mutation == "rank4" else [2, length, 4])
+            )
+            return helper.make_model(
+                helper.make_graph(
+                    nodes,
+                    "state",
+                    [
+                        helper.make_tensor_value_info("x", TensorProto.FLOAT, input_shape),
+                        helper.make_tensor_value_info("past", TensorProto.FLOAT, [2, 4, 4]),
+                    ],
+                    outputs,
+                    constants,
+                ),
+                opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("com.microsoft", 1)],
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source, path = Path(temporary) / "source.onnx", Path(temporary) / "model.onnx"
+            for length in (1, 2, 7):
+                model = graph(length)
+                feed = {
+                    "x": np.linspace(-1, 1, 2 * length * 4).astype(np.float32).reshape(2, length, 4),
+                    "past": np.linspace(-0.7, 0.8, 32).astype(np.float32).reshape(2, 4, 4),
+                }
+                expected = ReferenceEvaluator(model, new_ops=[CausalConvWithState]).run(None, feed)
+                onnx.save(model, source)
+                if path.exists():
+                    path.unlink()
+                os.link(source, path)
+                before = source.read_bytes()
+                self.assertEqual(fuse_causal_conv_state_updates(path), 1)
+                self.assertEqual(source.read_bytes(), before)
+                fused = onnx.load(path)
+                self.assertEqual(len(fused.graph.node), 1)
+                self.assertEqual(list(fused.graph.node[0].output), ["y", "present", "mid"])
+                actual = ReferenceEvaluator(fused, new_ops=[CausalConvWithState]).run(None, feed)
+                for a, b in zip(actual, expected, strict=True):
+                    np.testing.assert_array_equal(a, b)
+                self.assertEqual(fuse_causal_conv_state_updates(path), 0)
+            for extra in ("past_cl", "carry", "tail", "first", "first_cf"):
+                onnx.save(graph(extra=extra), path)
+                self.assertEqual(fuse_causal_conv_state_updates(path), 0)
+            for mutation in ("dilation", "tail", "layout", "unknown_rank", "rank4"):
+                onnx.save(graph(mutation=mutation), path)
+                self.assertEqual(fuse_causal_conv_state_updates(path), 0)
+            onnx.save(graph(captured=True), path)
+            self.assertEqual(fuse_causal_conv_state_updates(path), 0)
+
     def fp8_model(self, scale_dtype=np.float32, output="output", missing_shape=False):
         return helper.make_model(
             helper.make_graph(

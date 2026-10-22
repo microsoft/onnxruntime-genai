@@ -2019,6 +2019,146 @@ def fuse_attention_rotary(path):
     return fused_count
 
 
+def fuse_causal_conv_state_updates(path):
+    """Absorb channels-first carry layouts and first-token snapshots into CUDA convolution."""
+    model = onnx.load(path, load_external_data=False)
+    producers = {name: node for node in model.graph.node for name in node.output}
+    consumers = defaultdict(list)
+    for node in model.graph.node:
+        for name in node.input:
+            consumers[name].append(node)
+    constants = {t.name: numpy_helper.to_array(t) for t in model.graph.initializer if not t.external_data}
+    tensors = {t.name: t for t in model.graph.initializer}
+    shapes = {v.name: v.type.tensor_type.shape for v in list(model.graph.input) + list(model.graph.value_info)}
+    protected = externally_observed_values(model.graph)
+    replacements, removed = {}, set()
+
+    def attr(node, name, default=None):
+        return next((helper.get_attribute_value(a) for a in node.attribute if a.name == name), default)
+
+    def standard(node, kind):
+        return node is not None and node.domain in ("", "ai.onnx") and node.op_type == kind
+
+    def rank(name, visiting=None):
+        visiting = set() if visiting is None else visiting
+        if name in visiting:
+            return None
+        visiting.add(name)
+        if name in shapes:
+            return len(shapes[name].dim) or None
+        node = producers.get(name)
+        if node is None or not node.input:
+            return None
+        preserves_rank = (
+            (
+                node.domain == "com.microsoft"
+                and node.op_type in {"BranchwiseRMSNorm", "DotProductGate", "MatMulBlockQuantizedFp8Weight"}
+            )
+            or standard(node, "Identity")
+            or standard(node, "Cast")
+        )
+        return rank(node.input[0], visiting) if preserves_rank else None
+
+    def sole_user(name, kind):
+        users = consumers[name]
+        return users[0] if len(users) == 1 and standard(users[0], kind) else None
+
+    def slice_spec(node):
+        if not standard(node, "Slice") or len(node.input) not in (4, 5):
+            return None
+        arrays = [constants.get(name) for name in node.input[1:]]
+        if any(a is None or a.shape != (1,) or a.dtype not in (np.int32, np.int64) for a in arrays):
+            return None
+        values = [int(a.item()) for a in arrays]
+        return tuple(values) if len(values) == 4 else (*values, 1)
+
+    for conv in model.graph.node:
+        if (
+            conv.domain != "com.microsoft"
+            or conv.op_type != "CausalConvWithState"
+            or len(conv.input) != 4
+            or len(conv.output) != 2
+            or attr(conv, "channels_last", 0) != 1
+            or attr(conv, "ndim", 1) != 1
+            or any(
+                attr(conv, name, default) != default
+                for name, default in (
+                    ("state_window", 0),
+                    ("input_channels", 0),
+                    ("input_channel_offset", 0),
+                    ("state_length", 0),
+                    ("state_channels_last", -1),
+                )
+            )
+            or rank(conv.input[0]) != 3
+        ):
+            continue
+        state_in = producers.get(conv.input[3])
+        state_out = sole_user(conv.output[1], "Transpose")
+        if any(not standard(node, "Transpose") or attr(node, "perm") != [0, 2, 1] for node in (state_in, state_out)):
+            continue
+        past = state_in.input[0]
+        shape = shapes.get(past)
+        weight = tensors.get(conv.input[1])
+        dilation = attr(conv, "dilation", 1)
+        if (
+            shape is None
+            or len(shape.dim) != 3
+            or not all(shape.dim[i].HasField("dim_value") for i in (1, 2))
+            or weight is None
+            or len(weight.dims) != 3
+            or weight.dims[1] != 1
+            or dilation <= 0
+        ):
+            continue
+        channels, history = (shape.dim[i].dim_value for i in (1, 2))
+        if channels <= 0 or history <= 0 or weight.dims[0] != channels or (weight.dims[2] - 1) * dilation != history:
+            continue
+        tails = [n for n in consumers[past] if slice_spec(n) == (1, 2**31 - 1, 2, 1)]
+        firsts = [n for n in consumers[conv.input[0]] if slice_spec(n) == (0, 1, 1, 1)]
+        if len(tails) != 1 or len(firsts) != 1:
+            continue
+        tail, first = tails[0], firsts[0]
+        first_transpose = sole_user(first.output[0], "Transpose")
+        if first_transpose is None or attr(first_transpose, "perm") != [0, 2, 1]:
+            continue
+        mid = sole_user(first_transpose.output[0], "Concat")
+        if mid is None or attr(mid, "axis") != 2 or list(mid.input) != [tail.output[0], first_transpose.output[0]]:
+            continue
+        chain = [conv, state_in, state_out, tail, first, first_transpose, mid]
+        ids = {id(node) for node in chain}
+        retained = {conv.output[0], state_out.output[0], mid.output[0]}
+        if ids & removed or any(
+            name not in retained and (name in protected or any(id(user) not in ids for user in consumers[name]))
+            for node in chain
+            for name in node.output
+        ):
+            continue
+        attributes = {a.name: helper.get_attribute_value(a) for a in conv.attribute}
+        attributes.update(input_channels=channels, state_length=history, state_channels_last=0)
+        replacements[id(conv)] = helper.make_node(
+            "CausalConvWithState",
+            [conv.input[0], conv.input[1], conv.input[2], past],
+            [conv.output[0], state_out.output[0], mid.output[0]],
+            domain="com.microsoft",
+            name=conv.name + "_FusedStateUpdates",
+            **attributes,
+        )
+        removed.update(ids)
+    if replacements:
+        nodes = [replacements.get(id(n), n) for n in model.graph.node if id(n) not in removed or id(n) in replacements]
+        live = {name for node in nodes for name in (*node.input, *node.output)} | protected
+        values = [v for v in model.graph.value_info if v.name in live]
+        del model.graph.node[:]
+        model.graph.node.extend(nodes)
+        del model.graph.value_info[:]
+        model.graph.value_info.extend(values)
+        temporary = path.with_suffix(".conv_state_updates.onnx")
+        onnx.save(model, temporary)
+        os.replace(temporary, path)
+    return len(replacements)
+
+
 def fuse_causal_conv_projection(path):
     """Fold channel selection, layout changes and full/first carry updates into CUDA convolution."""
     model = onnx.load(path, load_external_data=False)
@@ -2236,6 +2376,11 @@ def write_performance_metadata(destination, source, results, pool, provider, run
             "MatMulBlockQuantizedFp8Weight split_sizes supplies complete convolution/attention Slice "
             "partitions directly; indexed convolution or packed gating is rebased to its partition."
         )
+    if any(result.get("fused_causal_conv_state_updates", 0) for result in results.values()):
+        rewrites["CausalConvStateUpdates"] = (
+            "CausalConvWithState writes channels-first final and first-token carry directly, "
+            "replacing private state transposes and first-token Slice/Concat chains."
+        )
     if any(result.get("fused_gdn_gate_casts", 0) for result in results.values()):
         rewrites["GdnGateCasts"] = (
             "GatedDeltaNet directly loads FP16/BF16 decay and beta, losslessly widening to FP32 "
@@ -2373,6 +2518,7 @@ def main():
         results[relative]["fused_hyper_connections"] = fuse_hyper_connections(destination / relative)
         results[relative]["fused_hyper_connection_postmix"] = fuse_hyper_connection_postmix(destination / relative)
         results[relative]["fused_causal_conv_projection"] = fuse_causal_conv_projection(destination / relative)
+        results[relative]["fused_causal_conv_state_updates"] = fuse_causal_conv_state_updates(destination / relative)
         results[relative]["fused_attention_rotary"] = fuse_attention_rotary(destination / relative)
         results[relative]["fused_shared_expert_residual"] = fuse_shared_expert_residual(destination / relative)
         results[relative]["fused_silu_gate"] = fuse_silu_gate(destination / relative)

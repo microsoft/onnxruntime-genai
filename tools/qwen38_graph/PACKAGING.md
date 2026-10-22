@@ -55,6 +55,23 @@ Generated graph schemas must match the companion ORT operators:
 normalization/rotary, GDN/convolution, quantized MoE/FP8, hyper-connections,
 packed sparse-attention/indexer, and speculative fold/state operations.
 
+## Native convolution state-update fusion
+
+After projection fusion, the optimizer can absorb private carry-layout
+transposes and the first-token `Slice`/`Concat` snapshot chain into the existing
+`CausalConvWithState` final/first-state outputs. It proves rank-three
+channels-last input, weight/history/dilation compatibility, default extension
+attributes, and exact slice semantics. Shared or externally captured
+intermediates are not removed, and graph replacement is atomic.
+
+On the experimental INT2 two-token verification package this removes six
+graph nodes. Paired Nsight captures measured four fewer actual GPU kernels
+per verification cycle (1046 to 1042), across 266 cycles per capture.
+Twenty-four measured requests at 2K/8K/16K matched all 512 output token IDs
+against the unfused baseline, with no generation failures. Timing varied
+between processes; this does not establish a repeatable multi-percent gain.
+Weights are unchanged, and full model accuracy qualification remains deferred.
+
 ## Experimental native decode preset
 
 Recent native CUDA experiments are carried by the companion ORT PRs:
