@@ -25,6 +25,8 @@ namespace Generators {
 
 struct OpenVINOVisionMerger;
 
+void UpdatePendingTokenTypeIds(OrtValue& token_type_ids, std::vector<int32_t>& pending_token_type_ids);
+
 struct MultiModalLanguageModel : Model {
   MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
   MultiModalLanguageModel(const MultiModalLanguageModel&) = delete;
@@ -176,6 +178,7 @@ struct DecoderState : State {
   // prompt (it is a lookup/projection), while the decoder prefill is split into several runs so the
   // peak attention workspace scales with the chunk size instead of the full prompt length.
   bool SupportsPrefillChunking(bool has_multimodal_content) const;
+  bool HasTokenTypeIds() const { return token_type_ids_ != nullptr; }
   void PrepareEmbeddingsForPrefill(size_t new_length);
   DeviceSpan<float> RunPrefillWithChunking(int current_length, DeviceSpan<int32_t>& next_tokens,
                                            DeviceSpan<int32_t> next_indices, size_t chunk_size);
@@ -189,7 +192,7 @@ struct DecoderState : State {
   // 0 for text and 1 for image placeholder tokens; MultiModalPipelineState supplies the prompt markers.
   void AddTokenTypeIds();
   void UpdateTokenTypeIds(size_t new_length);
-  void SetPromptTokenTypeIds(std::span<const int32_t> token_type_ids);
+  void SetPendingTokenTypeIds(std::span<const int32_t> token_type_ids);
 
   const MultiModalLanguageModel& model_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
@@ -198,7 +201,7 @@ struct DecoderState : State {
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
   std::unique_ptr<OrtValue> token_type_ids_;            // Optional model input (OpenVINO-partitioned Gemma3)
   size_t token_type_ids_index_{~0U};                    // Slot in state_.inputs_ for token_type_ids
-  std::vector<int32_t> prompt_token_type_ids_;          // Cached prompt markers, applied on the prompt step
+  std::vector<int32_t> pending_token_type_ids_;         // Consumed by the next decoder update
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
   std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
