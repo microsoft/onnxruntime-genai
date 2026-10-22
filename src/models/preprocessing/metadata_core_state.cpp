@@ -28,12 +28,15 @@ MetadataCoreState::MetadataCoreState(const MetadataCoreConfig& config) : config_
     case Config::TimestampLevel::Word:
     case Config::TimestampLevel::Segment:
     case Config::TimestampLevel::All:
-      segment_gap_threshold_frames_ = config_.timestamps.segment_gap_threshold_frames;
-      if (segment_gap_threshold_frames_ && *segment_gap_threshold_frames_ < 0)
-        throw std::runtime_error("Timestamp segment gap must not be negative");
-      if (!config_.seconds_per_frame || !std::isfinite(*config_.seconds_per_frame) || *config_.seconds_per_frame <= 0)
-        throw std::runtime_error("Timestamp decoding requires a positive finite seconds_per_frame timebase");
-      seconds_per_frame_ = *config_.seconds_per_frame;
+      segment_gap_threshold_frames_ = GetSegmentGapThresholdFrames(
+          config_.timestamps.segment_gap_threshold_seconds, config_.timestamps.sample_rate,
+          config_.timestamps.hop_length, config_.timestamps.subsampling_factor);
+      if (config_.timestamps.sample_rate <= 0 || config_.timestamps.hop_length <= 0 ||
+          config_.timestamps.subsampling_factor <= 0) {
+        throw std::runtime_error("Timestamp decoding requires positive sample_rate, hop_length, and subsampling_factor");
+      }
+      seconds_per_frame_ = static_cast<double>(config_.timestamps.hop_length) *
+                           config_.timestamps.subsampling_factor / config_.timestamps.sample_rate;
       break;
     default:
       throw std::runtime_error("Invalid timestamp level in metadata configuration");
@@ -42,16 +45,16 @@ MetadataCoreState::MetadataCoreState(const MetadataCoreConfig& config) : config_
 
 void MetadataCoreState::ValidateInput(const TokenMetadataInput& token) const {
   if (TimestampsEnabled()) {
-    if (!token.token_acoustic_frame_interval)
+    if (!token.has_token_acoustic_frame_interval)
       throw std::runtime_error("Enabled timestamps require generation timing metadata");
-    const auto& token_acoustic_frame_interval = *token.token_acoustic_frame_interval;
+    const auto& token_acoustic_frame_interval = token.token_acoustic_frame_interval;
     if (token_acoustic_frame_interval.start < 0 || token_acoustic_frame_interval.stop <= token_acoustic_frame_interval.start)
       throw std::runtime_error("Token timestamp interval must satisfy 0 <= start_frame < stop_frame");
   }
 }
 
 void MetadataCoreState::AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
-                                  AcousticFrameInterval interval) {
+                                  OgaTokenMetadataAcousticFrameInterval interval) {
   records.push_back({std::string(text), interval.start, interval.stop,
                      RoundTimestamp(interval.start * seconds_per_frame_),
                      RoundTimestamp(interval.stop * seconds_per_frame_)});
@@ -63,7 +66,7 @@ void MetadataCoreState::CompleteSegment(TimestampResult& result) {
   pending_segment_text_.reset();
 }
 
-void MetadataCoreState::PublishWord(std::string_view text, AcousticFrameInterval interval, TimestampResult& result) {
+void MetadataCoreState::PublishWord(std::string_view text, OgaTokenMetadataAcousticFrameInterval interval, TimestampResult& result) {
   const auto level = config_.timestamps.level;
   if (level == Config::TimestampLevel::Word || level == Config::TimestampLevel::All) {
     AddRecord(result.words, text, interval);
@@ -121,7 +124,7 @@ void MetadataCoreState::ProcessDecoded(
     const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, PostProcessorResult& result) {
   if (TimestampsEnabled()) {
     auto& timestamps = result.timestamps.emplace();
-    pending_token_intervals_.push_back(*token.token_acoustic_frame_interval);
+    pending_token_intervals_.push_back(token.token_acoustic_frame_interval);
     word_grouping_.Process(piece, result.text);
     ProcessCompletedWords(timestamps);
   }

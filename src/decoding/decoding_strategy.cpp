@@ -15,17 +15,6 @@
 
 namespace Generators {
 
-void DecodingStrategy::Step(Generator& generator) {
-  generator.BeginStepOutput();
-  try {
-    StepImpl(generator);
-    generator.EndStepOutput();
-  } catch (...) {
-    generator.ClearStepOutput();
-    throw;
-  }
-}
-
 // Default: no stats. Speculative strategies override.
 SpeculativeStats DecodingStrategy::GetStats() const {
   return SpeculativeStats{};

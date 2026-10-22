@@ -877,7 +877,6 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
       std::span<int32_t> forced_tokens_span{ff_tokens};
       auto forced_tokens = AllocateInputIdsOnDevice(forced_tokens_span);
       search_->AppendTokens(forced_tokens);
-      RecordStepTokens(ff_tokens);
 
       std::span<int32_t> new_next_token_span{ff_tokens};
       auto new_next_token = AllocateInputIdsOnDevice(new_next_token_span);
@@ -977,36 +976,17 @@ void Generator::GenerateNextToken() {
 }
 
 TokenOutputs Generator::GetTokenOutputs() const {
-  if (has_step_timestamps_) return TokenOutputs{step_tokens_, step_timestamps_};
-  return TokenOutputs{step_tokens_};
-}
-
-void Generator::BeginStepOutput() {
-  ClearStepOutput();
-  collecting_step_output_ = true;
-}
-
-void Generator::EndStepOutput() {
-  collecting_step_output_ = false;
-}
-
-void Generator::ClearStepOutput() {
-  collecting_step_output_ = false;
-  has_step_timestamps_ = false;
-  step_tokens_.clear();
-  step_timestamps_.clear();
-}
-
-void Generator::RecordStepTokens(std::span<const int32_t> tokens) {
-  if (!collecting_step_output_) return;
-  step_tokens_.insert(step_tokens_.end(), tokens.begin(), tokens.end());
-}
-
-void Generator::SetStepTimestamps(std::span<const AcousticFrameInterval> intervals) {
-  if (intervals.size() != step_tokens_.size())
-    throw std::runtime_error("Generator timing count does not match emitted tokens");
-  step_timestamps_.assign(intervals.begin(), intervals.end());
-  has_step_timestamps_ = true;
+  if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
+    TokenOutputs outputs{transducer->GetStepTokens()};
+    if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off) {
+      const auto intervals = transducer->GetStepTokenIntervals();
+      if (intervals.size() != outputs.GetTokens().size())
+        throw std::runtime_error("Generator timing count does not match emitted tokens");
+      outputs.SetTimestamps(intervals);
+    }
+    return outputs;
+  }
+  return TokenOutputs{search_->GetNextTokens().CopyDeviceToCpu()};
 }
 
 SpeculativeStats Generator::GetSpeculativeStats() const {

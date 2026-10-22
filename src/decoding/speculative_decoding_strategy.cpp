@@ -139,7 +139,7 @@ void SpeculativeDecodingStrategy::CommitGuidanceProposalToken(
 
 // Each call emits exactly one token. The first call of a round runs the whole round (RunRound)
 // and buffers its tokens; every call then hands out one buffered token (DrainOne).
-void SpeculativeDecodingStrategy::StepImpl(Generator& g) {
+void SpeculativeDecodingStrategy::Step(Generator& g) {
   if (g.phi3_rope_threshold_ != 0 &&
       g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {
     auto current_seq = cpu_span<int32_t>(g.GetSequence(0).CopyDeviceToCpu());
@@ -1268,9 +1268,7 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
 bool SpeculativeDecodingStrategy::EmitToken(Generator& g, int32_t tok) {
   const int length_before = g.search_->GetSequenceLength();
   g.search_->CommitToken(tok);
-  const bool emitted = g.search_->GetSequenceLength() == length_before + 1;
-  if (emitted) g.RecordStepTokens(std::span<const int32_t>{&tok, 1});
-  return emitted;
+  return g.search_->GetSequenceLength() == length_before + 1;
 }
 
 SpeculativeStats SpeculativeDecodingStrategy::GetStats() const {

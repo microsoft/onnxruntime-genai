@@ -348,7 +348,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // Sampling settings are read directly from the canonical config (search params) and the
   // Generator's sampling method inside Propose/RunRound.
 
-  void StepImpl(Generator& g) final;
+  void Step(Generator& g) final;
   SpeculativeStats GetStats() const final;
   void Reset() final;
   void PrepareForAppend(Generator& g) final;

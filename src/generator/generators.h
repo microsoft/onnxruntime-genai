@@ -28,7 +28,6 @@
 #include <vector>
 
 #include "leakcheck.h"
-#include "generator/token_outputs.h"
 #include "make_string.h"
 #include "models/onnxruntime_api.h"
 #include "smartptrs.h"
@@ -182,15 +181,6 @@ struct Generator : LeakChecked<Generator> {
  private:
   friend class TokenPostProcessor;
   TokenOutputs GetTokenOutputs() const;
-  void BeginStepOutput();
-  void EndStepOutput();
-  void ClearStepOutput();
-  void RecordStepTokens(std::span<const int32_t> tokens);
-  void SetStepTimestamps(std::span<const AcousticFrameInterval> intervals);
-  std::vector<int32_t> step_tokens_;
-  std::vector<AcousticFrameInterval> step_timestamps_;
-  bool collecting_step_output_{};
-  bool has_step_timestamps_{};
 #if defined(_MSC_VER)
   [[msvc::no_unique_address]]
 #else
@@ -216,7 +206,6 @@ struct Generator : LeakChecked<Generator> {
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
 
   std::unique_ptr<DecodingStrategy> strategy_;
-  friend struct DecodingStrategy;
   friend struct StandardDecodingStrategy;
   friend struct TransducerDecodingStrategy;
   friend struct SpeculativeDecodingStrategy;

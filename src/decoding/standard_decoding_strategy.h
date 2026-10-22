@@ -15,7 +15,7 @@ void RunStandardDecodingStep(Generator& g);
 // The classic single-token GenerateNextToken body (greedy / top-k / top-p).
 // Commits exactly one token per Step.
 struct StandardDecodingStrategy final : DecodingStrategy {
-  void StepImpl(Generator& g) override;
+  void Step(Generator& g) override;
 };
 
 }  // namespace Generators
