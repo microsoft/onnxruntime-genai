@@ -28,4 +28,8 @@ struct OpenVINOMultiModalModel : MultiModalLanguageModel {
   std::unique_ptr<OrtSession> ov_vision_session_;
 };
 
+inline const OpenVINOMultiModalModel* AsOpenVINOMultiModalModel(const Model& model) {
+  return dynamic_cast<const OpenVINOMultiModalModel*>(&model);
+}
+
 }  // namespace Generators
