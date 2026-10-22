@@ -45,22 +45,23 @@ void RunStandardDecodingStep(Generator& g) {
   switch (g.sampling_method_) {
     case Generator::SamplingMethod::kGreedy:
       g.search_->SelectTop();
-      return;
+      break;
     case Generator::SamplingMethod::kTopKTopP:
       g.search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature, g.rng_);
-      return;
+      break;
     case Generator::SamplingMethod::kTopK:
       g.search_->SampleTopK(search.top_k, search.temperature, g.rng_);
-      return;
+      break;
     case Generator::SamplingMethod::kTopP:
       g.search_->SampleTopP(search.top_p, search.temperature, g.rng_);
-      return;
+      break;
     default:
       throw std::runtime_error("Unknown sampling method");
   }
+  g.RecordStepTokens(g.search_->GetNextTokens().CopyDeviceToCpu());
 }
 
-void StandardDecodingStrategy::Step(Generator& g) {
+void StandardDecodingStrategy::StepImpl(Generator& g) {
   // Phi3 models switch rope factors at a threshold token; recompute position
   // IDs and KV cache by rewinding and re-appending the sequence.
   if (g.phi3_rope_threshold_ != 0 && g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {

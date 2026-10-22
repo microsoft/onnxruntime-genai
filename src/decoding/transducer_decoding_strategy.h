@@ -12,7 +12,7 @@ struct TransducerState;
 // Drives RNNT / TDT models that bypass the search / logits pipeline entirely.
 struct TransducerDecodingStrategy final : DecodingStrategy {
   explicit TransducerDecodingStrategy(Generator& g);
-  void Step(Generator& g) override;
+  void StepImpl(Generator& g) override;
 
  private:
   TransducerState& transducer_state_;

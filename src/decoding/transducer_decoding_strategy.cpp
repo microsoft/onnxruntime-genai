@@ -19,10 +19,13 @@ static TransducerState& RequireTransducerState(Generator& g) {
 TransducerDecodingStrategy::TransducerDecodingStrategy(Generator& g)
     : transducer_state_{RequireTransducerState(g)} {}
 
-void TransducerDecodingStrategy::Step(Generator& g) {
+void TransducerDecodingStrategy::StepImpl(Generator& g) {
   g.state_->SetExtraInputs(g.extra_inputs_);
   g.extra_inputs_.clear();
   transducer_state_.StepToken();
+  g.RecordStepTokens(transducer_state_.GetStepTokens());
+  if (g.model_->config_->model.timestamp_level != Config::TimestampLevel::Off)
+    g.SetStepTimestamps(transducer_state_.GetStepTokenIntervals());
 }
 
 }  // namespace Generators

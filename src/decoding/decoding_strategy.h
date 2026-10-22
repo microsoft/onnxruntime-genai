@@ -15,10 +15,9 @@ struct DeviceSpan;
 struct DecodingStrategy {
   virtual ~DecodingStrategy() = default;
 
-  // Drives one user-visible "generate next token" step, committing exactly one
-  // token to the search sequence per call. Speculative variants compute several
-  // tokens per round internally but emit them one-per-call.
-  virtual void Step(Generator& generator) = 0;
+  // Records all actual emissions from one user-visible generation call, including guidance fast-forward tokens.
+  void Step(Generator& generator);
+  virtual void StepImpl(Generator& generator) = 0;
 
   // Default: no stats. Speculative strategies override.
   virtual SpeculativeStats GetStats() const;

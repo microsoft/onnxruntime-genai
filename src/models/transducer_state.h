@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "model.h"
-#include "ort_genai_c.h"
+#include "generator/token_outputs.h"
 #include "span.h"
 
 namespace Generators {
@@ -31,7 +31,7 @@ struct TransducerState : State {
 
   bool IsChunkDone() const { return chunk_done_; }
   std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
-  std::span<const OgaTokenMetadataAcousticFrameInterval> GetStepTokenIntervals() const { return last_token_intervals_; }
+  std::span<const AcousticFrameInterval> GetStepTokenIntervals() const { return last_token_intervals_; }
   bool TimestampsEnabled() const { return timestamps_enabled_; }
   std::span<const int32_t> GetAllTokens() const { return all_tokens_; }
   size_t TokenCount() const { return all_tokens_.size(); }
@@ -43,7 +43,7 @@ struct TransducerState : State {
   std::vector<int32_t> last_tokens_;
   // Allocated and populated only when timestamp output is enabled.
   bool timestamps_enabled_{false};
-  std::vector<OgaTokenMetadataAcousticFrameInterval> last_token_intervals_;
+  std::vector<AcousticFrameInterval> last_token_intervals_;
   // Set to true when the current chunk has been fully consumed.
   bool chunk_done_{false};
 };

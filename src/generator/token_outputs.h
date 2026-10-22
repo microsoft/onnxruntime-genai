@@ -1,27 +1,27 @@
 #pragma once
 
-#include "ort_genai_c.h"
 #include "span.h"
 
-#include <memory>
+#include <cstdint>
+#include <optional>
 
 namespace Generators {
 
-struct Generator;
-class TokenOutputs {
-  friend struct Generator;
+struct AcousticFrameInterval {
+  int64_t start;
+  int64_t stop;
+};
 
+class TokenOutputs {
  public:
-  ~TokenOutputs();
-  TokenOutputs(TokenOutputs&&) noexcept;
+  explicit TokenOutputs(std::span<const int32_t> tokens,
+                        std::optional<std::span<const AcousticFrameInterval>> timestamps = std::nullopt);
   std::span<const int32_t> GetTokens() const;
-  const std::span<const OgaTokenMetadataAcousticFrameInterval>* GetTimestamps() const;
+  const std::span<const AcousticFrameInterval>* GetTimestamps() const;
 
  private:
-  explicit TokenOutputs(std::span<const int32_t> tokens);
-  void SetTimestamps(std::span<const OgaTokenMetadataAcousticFrameInterval> intervals);
-  struct Impl;
-  std::unique_ptr<Impl> impl_;
+  std::span<const int32_t> tokens_;
+  std::optional<std::span<const AcousticFrameInterval>> timestamps_;
 };
 
 }  // namespace Generators
