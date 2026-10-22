@@ -172,13 +172,13 @@ transcript followed by the per-word timestamp transcript.
 
 ### Building the examples
 
-These examples require headers, language bindings, and a native GenAI library from a build containing
-the processor APIs, together with the corresponding ONNX Runtime Extensions lexical lookup API.
-The implementation is available on `main` after [PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591).
-Existing packages such as GenAI `0.17.0` do not provide those APIs. Until a feature-containing release
-is published:
+These examples require officially released GenAI headers, language bindings, and native libraries
+containing the processor APIs. The initial implementation landed in
+[PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591), but the examples remain pending
+the planned postprocessor refactor and a new GenAI package release. Existing packages such as
+GenAI `0.17.0` do not provide the required APIs. Once a containing release is available:
 
-- For Python, use a wheel built from the same `main` checkout as the native library. Call `process_next_tokens()`
+- For Python, install the official wheel containing the processor APIs. Call `process_next_tokens()`
   after generation and `finalize()` at the end, then read typed objects from
   `get_next_token_results()`: use nullable `result.get_timestamps()`, then
   `get_words()` or `get_segments()`, and each record's `get_text()`,
@@ -186,11 +186,10 @@ is published:
   application-owned transcript storage before the next processing call; the
   returned objects are borrowed, not independent snapshots.
 - For C++, build the `model_asr` target with `MODEL_ASR=ON` and set `OGA_INCLUDE_DIR` and `OGA_LIB_DIR`
-  to the matching headers and native library.
-- For C#, pass `-p:UseLocalGenAI=true` to build against the local managed project. Run with matching
-  native libraries on the platform library search path; the project reference alone does not supply
-  the Linux native GenAI library. See the [ASR sample](../examples/csharp/ModelASR/README.md), including
-  its segment-timestamp configuration instructions.
+  to the headers and native library from the corresponding official release archive.
+- For C#, update both the CPU and CUDA NuGet references to the containing release and use the normal
+  package-based build. See the [ASR sample](../examples/csharp/ModelASR/README.md), including its
+  segment-timestamp configuration instructions.
 
 The C# package references remain at the common `0.17.0` baseline and must be updated to a release
 containing these APIs before using package-based builds. Selecting `timestamp_level: "off"` does not

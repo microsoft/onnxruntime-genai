@@ -25,19 +25,11 @@ cd examples/csharp/
 dotnet build ModelASR -c Release
 ```
 
-The timestamp-capable example requires bindings and a native GenAI library containing the timestamp
-APIs; the current `0.17.0` package references do not contain them, even when running in plain-text mode.
-The implementation is available on `main` after [PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591).
-Until a feature-containing package is published, build from the root of that checkout with:
-
-```bash
-dotnet build examples/csharp/ModelASR -c Release -p:UseLocalGenAI=true
-```
-
-Use the matching native GenAI, ONNX Runtime, and execution-provider libraries at runtime. Make their
-directories available on `LD_LIBRARY_PATH` on Linux or `PATH` on Windows. The native build also needs
-the corresponding ONNX Runtime Extensions lexical lookup API. Update both the CPU and CUDA package
-references to a feature-containing release before using the package-based build.
+This example uses officially released GenAI packages only. The current `0.17.0` package references
+do not contain the required `TokenPostProcessor` APIs, even for plain-text mode. Completing this
+example is pending the planned postprocessor refactor and a new GenAI package release. Both the CPU
+and CUDA package references must be updated to that release before the example can build and run.
+No local project reference or local-build switch is provided.
 
 ## Run
 
