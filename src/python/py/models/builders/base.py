@@ -2571,6 +2571,7 @@ class Model:
             state_window=self.context_length_attrs["state_window"],
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
+        self.make_value(kwargs["present_conv_state"], self.io_dtype, shape=self.output_shapes["present.conv"])
 
     def make_causal_conv_state_at_last_real_token(self, name, **kwargs):
         """Write each row's conv state from the K-1 columns that end at its last real token.
@@ -2585,6 +2586,10 @@ class Model:
         The Generator API pads only on the right and only in the first prefill, which this covers. The
         Engine's static batching pads every step with a mask of ones, so its shorter rows still get pad
         columns, as before. The index nodes are named by (C, K-1), so all layers of the same size share them.
+
+        S is read from root_input, the layer's [B, S, H] input, and not from the [B, C, S] conv input. With
+        WebGPU, ORT's transpose optimizer moves the Transpose before the conv past the Mul, so a Shape of the
+        conv input becomes Shape + Gather. That adds copy nodes, and the graph capture session is not created.
         """
         #   n (make_last_real_token_position)
         #         |
