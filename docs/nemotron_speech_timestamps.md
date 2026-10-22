@@ -158,12 +158,12 @@ The Nemotron examples demonstrate the complete flow:
 
 - `examples/c/src/model_asr.cpp`
 - `examples/csharp/ModelASR/Program.cs`
-- `examples/csharp/NemotronSpeechTimestamps/Program.cs`
 - `examples/python/model-asr.py`
 
-The timestamp-focused C# sample enables segment mode and builds output only from completed segment
-events. It prints each segment as `[StartTime - StopTime] SegmentText`; it does not concatenate token
-fragments.
+For segment-only output in the C# ModelASR sample, configure `model.timestamp_level` as `segment`.
+The sample builds output only from completed segment events, including the trailing segment emitted
+by finalization. It prints each segment as `[StartTime - StopTime] SegmentText`; it does not
+concatenate token fragments.
 
 The general Nemotron examples render word mode as `[StartTime - StopTime]WordText` followed by one
 space, with no space after the interval. Segment mode renders
@@ -189,8 +189,8 @@ is published:
   to the matching headers and native library.
 - For C#, pass `-p:UseLocalGenAI=true` to build against the local managed project. Run with matching
   native libraries on the platform library search path; the project reference alone does not supply
-  the Linux native GenAI library. See the [general ASR sample](../examples/csharp/ModelASR/README.md)
-  and [segment timestamp sample](../examples/csharp/NemotronSpeechTimestamps/README.md).
+  the Linux native GenAI library. See the [ASR sample](../examples/csharp/ModelASR/README.md), including
+  its segment-timestamp configuration instructions.
 
 The C# package references remain at the common `0.17.0` baseline and must be updated to a release
 containing these APIs before using package-based builds. Selecting `timestamp_level: "off"` does not

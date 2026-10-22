@@ -84,6 +84,23 @@ without timestamps; Moonshine supports only this plain-text path. See
 [Nemotron streaming timestamps](../../../docs/nemotron_speech_timestamps.md) for configuration and
 output formats.
 
+### Segment timestamps
+
+Set the existing `model.timestamp_level` field to `segment` in the model's
+`genai_config.json` before loading the model, then use the same ModelASR executable:
+
+```bash
+./ModelASR /path/to/nemotron-model /path/to/audio.wav cuda
+```
+
+The sample builds the timestamped transcript from completed segments, formatted as
+`[StartTime - StopTime] SegmentText`, rather than concatenating token fragments.
+It flushes remaining audio and calls `FinalizeProcessing()` to complete the trailing
+segment. Timestamp state is initialized by `TokenPostProcessor(generator)`; no
+explicit metadata-state initialization is needed. The generator must outlive the
+processor, and the sample copies each formatted record into its own transcript
+before the next processing or finalization call.
+
 ```text
 ------------------------------------------------------------
  This is an example of streaming speech recognition...
