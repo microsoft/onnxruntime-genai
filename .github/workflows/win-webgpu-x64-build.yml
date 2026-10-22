@@ -24,6 +24,10 @@ env:
   # Use an API-32 SDK for both the native build and runtime tests.
   # PagedAttention requires the extended schema with attention_metadata at input 16.
   # This core/plugin pair includes the GatedDeltaNetStateReplay schema and WebGPU kernel.
+  # ConvStateReplay needs both packages rebuilt after microsoft/onnxruntime#33493
+  # (merged 2026-10-21). These are still the newest published packages in ORT-Nightly;
+  # advance both pins when that pair is published. Required replay tests fail, not skip,
+  # until the core schema and WebGPU kernel are available.
   ORT_TEST_VERSION: '1.32.0-dev-20261018-0507-c1ea5bf'
 
 jobs:
@@ -148,7 +152,7 @@ jobs:
 
       - name: Run required WebGPU Engine tests
         run: |
-          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep --gtest_filter="DeviceSpanTest.*:GraphBuilderTest.*:BackingOwners/WebGpuStateReplayTest.*:WebGpuFixedStatePoolTest.*:FixedStatePoolTest.DeferredReplayFailurePoisonsPool:VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder" --gtest_output="xml:webgpu-engine-tests.xml"
+          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep --gtest_filter="DeviceSpanTest.*:GraphBuilderTest.*:BackingOwners/WebGpuStateReplayTest.*:WebGpuFixedStatePoolTest.*:FixedStatePoolTest.*:VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder" --gtest_output="xml:webgpu-engine-tests.xml"
           if ($LASTEXITCODE -ne 0) { throw "WebGPU Engine tests failed: $LASTEXITCODE" }
           [xml]$results = Get-Content webgpu-engine-tests.xml
           $required = @(
@@ -156,17 +160,23 @@ jobs:
             "GraphBuilderTest.DefaultOnnxDomainStillExecutesCast",
             "WebGpuFixedStatePoolTest.CompactPartialAcceptanceReplaysConvAndGdn",
             "WebGpuFixedStatePoolTest.AdversarialReplayPreservesRequestState",
-            "WebGpuFixedStatePoolTest.PartialRequestsShareBackingTransfers",
-            "WebGpuFixedStatePoolTest.ConvolutionSharedMirrorsObserveEarlierDescriptorWrites",
+            "WebGpuFixedStatePoolTest.PartialRequestsReplayOnGpuWithoutCpuStaging",
+            "WebGpuFixedStatePoolTest.ConvolutionDescriptorsObserveEarlierGpuWrites",
             "WebGpuFixedStatePoolTest.DeferredGpuRunFailurePoisonsPoolBeforeNextReader",
+            "WebGpuFixedStatePoolTest.DeferredConvolutionGpuFailurePoisonsPoolBeforeNextReader",
+            "WebGpuFixedStatePoolTest.RetainedAnchorRepeatedPrefixesAndPreparedDiscard",
             "FixedStatePoolTest.DeferredReplayFailurePoisonsPool",
             "VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder",
             "BackingOwners/WebGpuStateReplayTest.ReplaysEveryPrefixOnGpuWithoutCpuStaging/0",
             "BackingOwners/WebGpuStateReplayTest.ReplaysEveryPrefixOnGpuWithoutCpuStaging/1",
             "BackingOwners/WebGpuStateReplayTest.RejectsInvalidViewsAndPropagatesOrtFailures/0",
             "BackingOwners/WebGpuStateReplayTest.RejectsInvalidViewsAndPropagatesOrtFailures/1",
-            "BackingOwners/WebGpuStateReplayTest.ConvolutionStillStagesThroughCpu/0",
-            "BackingOwners/WebGpuStateReplayTest.ConvolutionStillStagesThroughCpu/1",
+            "BackingOwners/WebGpuStateReplayTest.ConvolutionReplaysOnGpuWithoutCpuStaging/0",
+            "BackingOwners/WebGpuStateReplayTest.ConvolutionReplaysOnGpuWithoutCpuStaging/1",
+            "BackingOwners/WebGpuStateReplayTest.ConvolutionEveryPrefixAndExactPayloads/0",
+            "BackingOwners/WebGpuStateReplayTest.ConvolutionEveryPrefixAndExactPayloads/1",
+            "BackingOwners/WebGpuStateReplayTest.ConvolutionFailureStopsSequenceWithoutCpuRetry/0",
+            "BackingOwners/WebGpuStateReplayTest.ConvolutionFailureStopsSequenceWithoutCpuRetry/1",
             "BackingOwners/WebGpuStateReplayTest.SeparateCapsuleBackingsFallBackBeforeGpuReplay/0",
             "BackingOwners/WebGpuStateReplayTest.SeparateCapsuleBackingsFallBackBeforeGpuReplay/1",
             "BackingOwners/WebGpuStateReplayTest.MixedDescriptorsPreserveDependentExecutionOrder/0",
