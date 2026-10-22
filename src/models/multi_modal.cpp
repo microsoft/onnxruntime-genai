@@ -339,8 +339,10 @@ EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const Gener
   if (!model_.config_->model.embedding.outputs.per_layer_inputs.empty()) {
     auto shape = model_.session_info_.GetOutputShape(model_.config_->model.embedding.outputs.per_layer_inputs);
     int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
+    int64_t per_layer_count = shape.size() >= 4 ? shape[shape.size() - 2] : 0;
     per_layer_inputs_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Output,
-                                                     model_.config_->model.embedding.outputs.per_layer_inputs, per_layer_dim);
+                                                     model_.config_->model.embedding.outputs.per_layer_inputs,
+                                                     per_layer_dim, per_layer_count);
     per_layer_inputs_->Add();
   }
 }
@@ -403,8 +405,10 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
   if (!model_.config_->model.decoder.inputs.per_layer_inputs.empty()) {
     auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.per_layer_inputs);
     int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
+    int64_t per_layer_count = shape.size() >= 4 ? shape[shape.size() - 2] : 0;
     per_layer_inputs_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Input,
-                                                     model_.config_->model.decoder.inputs.per_layer_inputs, per_layer_dim);
+                                                     model_.config_->model.decoder.inputs.per_layer_inputs,
+                                                     per_layer_dim, per_layer_count);
     per_layer_inputs_->Add();
   }
 

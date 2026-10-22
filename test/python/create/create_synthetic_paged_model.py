@@ -36,7 +36,12 @@ def _const(name, array):
     return tensor
 
 
-def _decoder_graph(logits_per_token=False, scale_caches=False, selected_logits=False):
+def _decoder_graph(
+    logits_per_token=False,
+    scale_caches=False,
+    selected_logits=False,
+    num_blocks=NUM_BLOCKS,
+):
     i64 = lambda v: np.asarray(v, dtype=np.int64)  # noqa: E731
     initializers = [
         _const("c0", i64(0)),
@@ -48,7 +53,7 @@ def _decoder_graph(logits_per_token=False, scale_caches=False, selected_logits=F
         _const("start1", i64([1])),
         _const("end_all", i64([np.iinfo(np.int64).max])),
         _const("flat", i64([-1])),
-        _const("cache_shape", i64([NUM_BLOCKS, BLOCK_SIZE, 1, 1])),
+        _const("cache_shape", i64([num_blocks, BLOCK_SIZE, 1, 1])),
         _const("vocab_range", np.arange(VOCAB_SIZE, dtype=np.int64).reshape(1, VOCAB_SIZE)),
     ]
 
@@ -139,7 +144,7 @@ def _decoder_graph(logits_per_token=False, scale_caches=False, selected_logits=F
         node("Cast", ["is_next_per_request"], ["logits"], to=TensorProto.FLOAT16)
         logits_shape = ["batch_size", VOCAB_SIZE]
 
-    cache_shape = [NUM_BLOCKS, BLOCK_SIZE, 1, 1]
+    cache_shape = [num_blocks, BLOCK_SIZE, 1, 1]
     inputs = [
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"]),
         helper.make_tensor_value_info("cumulative_sequence_lengths", TensorProto.INT32, ["batch_plus_1"]),
@@ -174,16 +179,22 @@ def _decoder_graph(logits_per_token=False, scale_caches=False, selected_logits=F
             for side in ("key", "value"):
                 input_name = f"past_key_values.{layer}.{side}_scale"
                 output_name = f"present.{layer}.{side}_scale"
-                shape = [NUM_BLOCKS, BLOCK_SIZE, 1]
+                shape = [num_blocks, BLOCK_SIZE, 1]
                 inputs.append(helper.make_tensor_value_info(input_name, TensorProto.FLOAT16, shape))
                 outputs.append(helper.make_tensor_value_info(output_name, TensorProto.FLOAT16, shape))
                 node("Identity", [input_name], [output_name])
     return helper.make_graph(nodes, "synthetic_paged_decoder", inputs, outputs, initializer=initializers)
 
 
-def create_decoder(output_dir, logits_per_token=False, scale_caches=False, selected_logits=False):
+def create_decoder(
+    output_dir,
+    logits_per_token=False,
+    scale_caches=False,
+    selected_logits=False,
+    num_blocks=NUM_BLOCKS,
+):
     model = helper.make_model(
-        _decoder_graph(logits_per_token, scale_caches, selected_logits),
+        _decoder_graph(logits_per_token, scale_caches, selected_logits, num_blocks),
         opset_imports=[helper.make_operatorsetid("", 17)],
         ir_version=9,
         producer_name="onnxruntime-genai",
@@ -194,7 +205,13 @@ def create_decoder(output_dir, logits_per_token=False, scale_caches=False, selec
     onnx.save_model(model, path)
 
 
-def create_config(output_dir, scale_caches=False, selected_logits=False):
+def create_config(
+    output_dir,
+    scale_caches=False,
+    selected_logits=False,
+    num_blocks=NUM_BLOCKS,
+    max_batch_size=MAX_BATCH_SIZE,
+):
     config = {
         "model": {
             "type": "decoder",
@@ -241,8 +258,8 @@ def create_config(output_dir, scale_caches=False, selected_logits=False):
         "engine": {
             "dynamic_batching": {
                 "block_size": BLOCK_SIZE,
-                "num_blocks": NUM_BLOCKS,
-                "max_batch_size": MAX_BATCH_SIZE,
+                "num_blocks": num_blocks,
+                "max_batch_size": max_batch_size,
             },
         },
     }

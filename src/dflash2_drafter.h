@@ -258,6 +258,7 @@ struct Dflash2Drafter {
     std::unique_ptr<Tensor> q_row_map;
     std::unique_ptr<Tensor> qkv_row_map;
     std::unique_ptr<Tensor> block_row_index;
+    std::unique_ptr<Tensor> anchor_row_index;
     std::unique_ptr<Tensor> cumulative_sequence_lengths;
     std::unique_ptr<Tensor> past_sequence_lengths;
     std::unique_ptr<Tensor> block_table;

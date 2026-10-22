@@ -782,6 +782,24 @@ size_t PrefixCache::ReclaimableBlocks() const {
   return reclaimable_entries_.size() - MarkLeasedReclaimableBlocks();
 }
 
+std::vector<size_t> PrefixCache::ReclaimableBlockIds(
+    std::span<const std::shared_ptr<Block>> blocks) const {
+  const size_t protected_blocks = MarkLeasedReclaimableBlocks();
+  std::vector<size_t> reclaimable;
+  reclaimable.reserve(blocks.size());
+  for (const auto& block : blocks) {
+    if (!block || block->Id() >= entries_by_block_id_.size()) {
+      continue;
+    }
+    const auto* entry = entries_by_block_id_[block->Id()];
+    if (entry && entry->block == block && entry->reclaimable &&
+        (protected_blocks == 0 || !leased_ancestry_[block->Id()])) {
+      reclaimable.push_back(block->Id());
+    }
+  }
+  return reclaimable;
+}
+
 void PrefixCache::Reorder(Entry& entry, const std::shared_ptr<const BlockIdentity>& parent) {
   // Every entry sits immediately before the entry it chains from, so the head of a chain is always
   // the most recently used of its run and eviction takes the tail first.

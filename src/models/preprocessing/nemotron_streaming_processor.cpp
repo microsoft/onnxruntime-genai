@@ -39,7 +39,7 @@ void PopulateMelTensor(OrtValue& output, std::span<const float> cache,
                        int num_frames, int num_mels) {
   if (num_frames < 0 || num_mels <= 0 ||
       cache.size() % static_cast<size_t>(num_mels) != 0 ||
-      mel.size() != static_cast<size_t>(num_frames * num_mels) ||
+      mel.size() != static_cast<size_t>(num_frames) * static_cast<size_t>(num_mels) ||
       output.GetTensorTypeAndShapeInfo()->GetElementCount() != cache.size() + mel.size())
     throw std::runtime_error("PopulateMelTensor: incompatible buffer dimensions");
 
@@ -49,11 +49,11 @@ void PopulateMelTensor(OrtValue& output, std::span<const float> cache,
     const int cache_frames = static_cast<int>(cache.size()) / num_mels;
     const int first_run = cache_frames - cache_pos;
     std::memcpy(output_data,
-                cache.data() + cache_pos * num_mels,
-                static_cast<size_t>(first_run * num_mels) * sizeof(float));
-    std::memcpy(output_data + first_run * num_mels,
+                cache.data() + static_cast<size_t>(cache_pos) * static_cast<size_t>(num_mels),
+                static_cast<size_t>(first_run) * static_cast<size_t>(num_mels) * sizeof(float));
+    std::memcpy(output_data + static_cast<size_t>(first_run) * static_cast<size_t>(num_mels),
                 cache.data(),
-                static_cast<size_t>((cache_frames - first_run) * num_mels) * sizeof(float));
+                static_cast<size_t>(cache_frames - first_run) * static_cast<size_t>(num_mels) * sizeof(float));
 
     auto* chunk_output = output_data + cache.size();
     for (int frame = 0; frame < num_frames; ++frame) {
@@ -194,7 +194,8 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
   }
   auto signal_shape = std::array<int64_t, 3>{1, total_mel_frames, num_mels};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, signal_type);
-  PopulateMelTensor(*processed_signal, mel_pre_encode_cache_, cache_pos_,
+  PopulateMelTensor(*processed_signal,
+                    mel_pre_encode_cache_, cache_pos_,
                     mel_data, num_frames, num_mels);
 
   UpdateMelCache(mel_pre_encode_cache_, cache_pos_, mel_data, num_frames, num_mels);

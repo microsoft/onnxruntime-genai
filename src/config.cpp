@@ -1202,6 +1202,8 @@ struct Dflash2Inputs_Element : JSON::Element {
       v_.qkv_row_map = JSON::Get<std::string_view>(value);
     } else if (name == "block_row_index") {
       v_.block_row_index = JSON::Get<std::string_view>(value);
+    } else if (name == "anchor_row_index") {
+      v_.anchor_row_index = JSON::Get<std::string_view>(value);
     } else if (name == "past_key_scale_names") {
       v_.past_key_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_scale_names") {
