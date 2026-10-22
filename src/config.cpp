@@ -2223,17 +2223,28 @@ struct Embedding_Element : JSON::Element {
 struct Diarization_Element : JSON::Element {
   explicit Diarization_Element(Config::Model::Diarization& v) : v_{v} {}
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "filename") v_.filename = JSON::Get<std::string_view>(value);
-    else if (name == "right_context") v_.right_context = SafeDoubleToInt(JSON::Get<double>(value), name);
-    else if (name == "sample_rate") v_.sample_rate = SafeDoubleToInt(JSON::Get<double>(value), name);
-    else if (name == "num_mels") v_.num_mels = SafeDoubleToInt(JSON::Get<double>(value), name);
-    else if (name == "fft_size") v_.fft_size = SafeDoubleToInt(JSON::Get<double>(value), name);
-    else if (name == "win_length") v_.win_length = SafeDoubleToInt(JSON::Get<double>(value), name);
-    else if (name == "hop_length") v_.hop_length = SafeDoubleToInt(JSON::Get<double>(value), name);
-    else if (name == "subsampling_factor") v_.subsampling_factor = SafeDoubleToInt(JSON::Get<double>(value), name);
-    else if (name == "preemph") v_.preemph = static_cast<float>(JSON::Get<double>(value));
-    else if (name == "log_eps") v_.log_eps = static_cast<float>(JSON::Get<double>(value));
-    else throw JSON::unknown_value_error{};
+    if (name == "filename")
+      v_.filename = JSON::Get<std::string_view>(value);
+    else if (name == "right_context")
+      v_.right_context = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "sample_rate")
+      v_.sample_rate = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "num_mels")
+      v_.num_mels = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "fft_size")
+      v_.fft_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "win_length")
+      v_.win_length = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "hop_length")
+      v_.hop_length = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "subsampling_factor")
+      v_.subsampling_factor = SafeDoubleToInt(JSON::Get<double>(value), name);
+    else if (name == "preemph")
+      v_.preemph = static_cast<float>(JSON::Get<double>(value));
+    else if (name == "log_eps")
+      v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    else
+      throw JSON::unknown_value_error{};
   }
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
@@ -2248,6 +2259,7 @@ struct Diarization_Element : JSON::Element {
     }
     throw JSON::unknown_value_error{};
   }
+
  private:
   Config::Model::Diarization& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
@@ -2505,7 +2517,7 @@ void ValidateTimestampConfiguration(const Config::Model& model) {
       throw std::runtime_error("diarization.right_context must be non-negative encoder frames");
 
     const int64_t window_frames = model.chunk_samples / diar.hop_length +
-                                 static_cast<int64_t>(diar.right_context) * diar.subsampling_factor;
+                                  static_cast<int64_t>(diar.right_context) * diar.subsampling_factor;
     if (window_frames > std::numeric_limits<int>::max() / diar.num_mels)
       throw std::runtime_error("Diarization feature window exceeds supported tensor dimensions");
   }

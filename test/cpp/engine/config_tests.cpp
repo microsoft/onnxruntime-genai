@@ -60,7 +60,8 @@ TEST(ConfigTest, ParsesDiarizationGeometry) {
   EXPECT_FLOAT_EQ(diar.log_eps, 1e-7f);
   EXPECT_EQ(diar.SamplesPerEncoderFrame(), 160);
   EXPECT_DOUBLE_EQ(diar.right_context * diar.SamplesPerEncoderFrame() /
-                       static_cast<double>(diar.sample_rate), 0.1);
+                       static_cast<double>(diar.sample_rate),
+                   0.1);
 }
 
 TEST(ConfigTest, RejectsInvalidTimestampConfiguration) {
