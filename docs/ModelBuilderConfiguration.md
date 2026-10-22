@@ -328,6 +328,13 @@ body dtype. This preserves tiny mask values that an FP16 target table may lose.
 Malformed/non-finite vectors and a body dtype that underflows nonzero mask
 values are rejected; other token embeddings are unchanged.
 
+The Python `DFlash2Builder` also exposes the opt-in diagnostic
+`conv_fp32_accumulation=True`: dynamic-convolution coefficient construction
+and accumulation then use FP32 and cast only the final output to the requested
+dtype, matching the compiled reference's rounding in isolated tests. The
+default decomposition is unchanged. This is not a structured-recipe option
+and does not by itself establish higher acceptance or throughput.
+
 So `drafter_options.quant_config.io_dtype` describes the body only. DSpark
 requires `bf16`, while DFlash2 defaults to `bf16` and allows explicit `fp16`.
 The generic config parser also accepts `fp32`, but provider support for the

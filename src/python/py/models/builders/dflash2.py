@@ -64,6 +64,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         ep="cuda",
         compute_dtype=None,
         fuse_qkv=False,
+        conv_fp32_accumulation=False,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
@@ -86,6 +87,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.include_attention_metadata = include_attention_metadata
         self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
         self.attn_attrs = {"fuse_qkv": fuse_qkv}
+        self.conv_fp32_accumulation = conv_fp32_accumulation
         # An unconsumed graph input is copied to the CPU by ORT, which breaks CUDA graph capture.
         self.uses_q_row_map = not fuse_qkv
 
@@ -217,27 +219,43 @@ class DFlash2Builder(BlockDrafterBuilder):
         Coefficient construction and shifts stay at the normal activation dtype.
         """
         dtype = self.io_dtype if dtype is None else dtype
+        output_dtype = dtype
+        if self.conv_fp32_accumulation:
+            dtype = ir.DataType.FLOAT
         if dtype != self.io_dtype:
             shift_mask = self.unary("Cast", f"{prefix}/mask/Cast", shift_mask, dtype, ["num_block", 1], to=dtype)
         terms = []
         for tap in range(self.taps):
             base_name = f"{prefix}.base_kernel.{tap}"
             self.make_initializer(
-                base_kernel[tap].reshape(1, self.num_groups, self.group_size), base_name, to=self.io_dtype
+                base_kernel[tap].reshape(1, self.num_groups, self.group_size),
+                base_name,
+                to=ir.DataType.FLOAT if self.conv_fp32_accumulation else self.io_dtype,
             )
+            delta = deltas[tap]
+            coefficient_dtype = ir.DataType.FLOAT if self.conv_fp32_accumulation else self.io_dtype
+            if coefficient_dtype != self.io_dtype:
+                delta = self.unary(
+                    "Cast",
+                    f"{prefix}/delta{tap}/Cast",
+                    delta,
+                    coefficient_dtype,
+                    [rows, self.num_groups, 1],
+                    to=coefficient_dtype,
+                )
             coef3 = self.binary(
                 "Add",
                 f"{prefix}/coef{tap}/Add",
                 base_name,
-                deltas[tap],
-                self.io_dtype,
+                delta,
+                coefficient_dtype,
                 ["num_block", self.num_groups, self.group_size],
             )
             coef = self.reshape(
                 f"{prefix}/coef{tap}/Reshape",
                 coef3,
                 [-1, self.hidden_size],
-                self.io_dtype,
+                coefficient_dtype,
                 ["num_block", self.hidden_size],
             )
             if tap == 0:
@@ -272,7 +290,10 @@ class DFlash2Builder(BlockDrafterBuilder):
                 shifted = self.unary(
                     "Cast", f"{prefix}/term{tap}/input/Cast", shifted, dtype, [rows, self.hidden_size], to=dtype
                 )
-                coef = self.unary("Cast", f"{prefix}/coef{tap}/Cast", coef, dtype, [rows, self.hidden_size], to=dtype)
+                if coefficient_dtype != dtype:
+                    coef = self.unary(
+                        "Cast", f"{prefix}/coef{tap}/Cast", coef, dtype, [rows, self.hidden_size], to=dtype
+                    )
             term = self.binary("Mul", f"{prefix}/term{tap}/Mul", shifted, coef, dtype, ["num_block", self.hidden_size])
             if tap > 0:
                 term = self.binary(
@@ -282,6 +303,15 @@ class DFlash2Builder(BlockDrafterBuilder):
         out = terms[0]
         for i, term in enumerate(terms[1:], start=1):
             out = self.binary("Add", f"{prefix}/sum{i}/Add", out, term, dtype, ["num_block", self.hidden_size])
+        if dtype != output_dtype:
+            out = self.unary(
+                "Cast",
+                f"{prefix}/output/Cast",
+                out,
+                output_dtype,
+                [rows, self.hidden_size],
+                to=output_dtype,
+            )
         return out
 
     # ------------------------------------------------------------------ graph

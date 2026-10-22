@@ -904,6 +904,47 @@ def test_non_fp8_lm_head_preserves_target_layout_and_dtype(tmp_path):
     assert builder.values[output].dtype == ir.DataType.FLOAT16
 
 
+def test_fp32_dynamic_convolution_rounds_only_the_final_output(tmp_path):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        256,
+        128,
+        ep="webgpu",
+        conv_fp32_accumulation=True,
+    )
+    rows = 10
+    for name, shape in (("x", [rows, 8]), ("d0", [rows, 2, 1]), ("d1", [rows, 2, 1])):
+        builder.graph.inputs.append(builder.make_value(name, ir.DataType.FLOAT16, shape))
+    generator = np.random.default_rng(19)
+    base = torch.tensor(generator.normal(size=(2, 2, 4)), dtype=torch.float16)
+    mask = builder._block_shift_mask("x")
+    output = builder._grouped_conv("/conv", "x", ["d0", "d1"], base, mask, rows)
+    builder.graph.outputs.append(builder.values[output])
+    session = ort.InferenceSession(
+        ir.serde.serialize_model(builder.model).SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    inputs = {
+        "x": generator.normal(size=(rows, 8)).astype(np.float16),
+        "d0": generator.normal(size=(rows, 2, 1)).astype(np.float16),
+        "d1": generator.normal(size=(rows, 2, 1)).astype(np.float16),
+    }
+    x = inputs["x"].astype(np.float32).reshape(rows, 2, 4)
+    coefficients = base.float().numpy()[None] + np.stack(
+        (inputs["d0"].astype(np.float32), inputs["d1"].astype(np.float32)), axis=1
+    )
+    shifted = np.concatenate((np.zeros_like(x[:1]), x[:-1]))
+    shift_mask = (np.arange(rows) % builder.block_size != 0).astype(np.float32)[:, None, None]
+    expected = coefficients[:, 0] * x + coefficients[:, 1] * shifted * shift_mask
+    actual = session.run(None, inputs)[0]
+    np.testing.assert_array_equal(actual, expected.reshape(rows, 8).astype(np.float16))
+    assert builder.values[output].dtype == ir.DataType.FLOAT16
+    for node in builder.graph:
+        if node.op_type in ("Add", "Mul") and node.name.startswith("/conv/"):
+            assert node.outputs[0].dtype == ir.DataType.FLOAT
+
+
 def _quant_composite(
     weight_name="lm_head.MatMul.weight_Q4",
     scales_name="lm_head.MatMul.weight_scales",
