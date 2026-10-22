@@ -50,9 +50,9 @@ struct MultiModalFeatures {
 //
 // inputs_embeds:      mutable float embeddings tensor, shape [batch, seq, hidden] or [seq, hidden].
 // image_features:     float image features tensor, shape [num_image_tokens, hidden].
-// target_token_rows:  flat row indices (into the seq dimension) to overwrite, in order.
+// target_token_rows:  flat indices into batch*seq to overwrite, in order; each written row must be in range.
 //
-// Returns the number of image feature rows consumed. Throws if the hidden dimensions mismatch.
+// Returns the number of image feature rows consumed. Validates all written rows before copying.
 size_t MergeImageFeaturesIntoEmbeddings(OrtValue& inputs_embeds,
                                         const OrtValue& image_features,
                                         std::span<const int64_t> target_token_rows);
