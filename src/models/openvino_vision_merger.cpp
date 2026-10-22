@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -12,8 +13,86 @@
 #include "io/multi_modal_features.h"
 #include "openvino_multi_modal.h"
 #include "openvino_vision_merger.h"
+#include "openvino_vision_merger_utils.h"
+#include "qwen_vl_state.h"
 
 namespace Generators {
+
+std::vector<QwenImageSlice> PlanQwenImageSlices(std::span<const int64_t> grid_values,
+                                                int64_t total_patches,
+                                                int64_t merge_size) {
+  if (grid_values.empty() || grid_values.size() % 3 != 0) {
+    throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw must contain one or more triplets");
+  }
+  if (total_patches < 0 || merge_size <= 0 ||
+      merge_size > std::numeric_limits<int64_t>::max() / merge_size) {
+    throw std::runtime_error("Qwen3.5 OpenVINO vision: invalid patch count or spatial_merge_size");
+  }
+
+  auto checked_multiply = [](int64_t lhs, int64_t rhs, const char* dimension) {
+    if (lhs <= 0 || rhs <= 0 || lhs > std::numeric_limits<int64_t>::max() / rhs) {
+      throw std::runtime_error(std::string("Qwen3.5 OpenVINO vision: grid dimension overflow for ") + dimension);
+    }
+    return lhs * rhs;
+  };
+
+  const size_t num_images = grid_values.size() / 3;
+  std::vector<std::array<int64_t, 3>> grids;
+  grids.reserve(num_images);
+  int64_t total_grid_tokens = 0;
+  int64_t total_hw = 0;
+  int64_t max_grid_tokens = 0;
+  bool all_temporal_dims_one = true;
+
+  for (size_t i = 0; i < num_images; ++i) {
+    const int64_t temporal = grid_values[i * 3];
+    const int64_t height = grid_values[i * 3 + 1];
+    const int64_t width = grid_values[i * 3 + 2];
+    if (temporal <= 0 || height <= 0 || width <= 0) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: grid dimensions must be positive");
+    }
+    if (height % merge_size != 0 || width % merge_size != 0) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: image height and width must be divisible by spatial_merge_size");
+    }
+
+    const int64_t hw = checked_multiply(height, width, "height*width");
+    const int64_t grid_tokens = checked_multiply(temporal, hw, "temporal*height*width");
+    if (grid_tokens > std::numeric_limits<int64_t>::max() - total_grid_tokens ||
+        hw > std::numeric_limits<int64_t>::max() - total_hw) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: aggregate grid size overflow");
+    }
+    total_grid_tokens += grid_tokens;
+    total_hw += hw;
+    max_grid_tokens = std::max(max_grid_tokens, grid_tokens);
+    all_temporal_dims_one = all_temporal_dims_one && temporal == 1;
+    grids.push_back({temporal, height, width});
+  }
+
+  const auto layout = ResolveQwenPatchLayout(total_patches, total_grid_tokens, total_hw, max_grid_tokens,
+                                             static_cast<int64_t>(num_images), all_temporal_dims_one);
+  if (layout.temporal_multiplier > 0) {
+    throw std::runtime_error("Qwen3.5 OpenVINO vision does not support temporal-multiplier pixel_values layouts");
+  }
+
+  std::vector<QwenImageSlice> slices;
+  slices.reserve(num_images);
+  int64_t packed_offset = 0;
+  for (size_t i = 0; i < num_images; ++i) {
+    const auto [temporal, height, width] = grids[i];
+    const int64_t num_patches = checked_multiply(temporal, checked_multiply(height, width, "height*width"),
+                                                 "temporal*height*width");
+    const int64_t patch_offset = layout.ImagePatchOffset(static_cast<int64_t>(i), packed_offset);
+    if (patch_offset < 0 || patch_offset > total_patches || num_patches > total_patches - patch_offset) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: image patch slice exceeds pixel_values");
+    }
+    if (num_patches > std::numeric_limits<int64_t>::max() / num_patches) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: image attention mask size overflow");
+    }
+    slices.push_back({patch_offset, num_patches, temporal, height, width});
+    packed_offset += num_patches;
+  }
+  return slices;
+}
 
 namespace {
 
@@ -348,75 +427,187 @@ void Qwen3_5OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra
   OrtValue* pixel_values = FindExtraInput(extra_inputs, model_.config_->model.vision.inputs.pixel_values);
   if (!pixel_values) return;  // text-only prompt
 
+  auto pixel_info = pixel_values->GetTensorTypeAndShapeInfo();
+  const auto pixel_shape = pixel_info->GetShape();
+  if (pixel_shape.empty() || pixel_shape.back() <= 0) {
+    throw std::runtime_error("Qwen3.5 OpenVINO vision: pixel_values must have a positive patch dimension");
+  }
+  const int64_t patch_dim = pixel_shape.back();
+  const size_t pixel_element_count = pixel_info->GetElementCount();
+  if (pixel_element_count % static_cast<size_t>(patch_dim) != 0 ||
+      pixel_element_count / static_cast<size_t>(patch_dim) >
+          static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+    throw std::runtime_error("Qwen3.5 OpenVINO vision: invalid pixel_values patch count");
+  }
+  const int64_t total_patches = static_cast<int64_t>(pixel_element_count / static_cast<size_t>(patch_dim));
+
+  OrtValue* grid_thw = FindExtraInput(extra_inputs, model_.config_->model.vision.inputs.image_grid_thw);
+  if (!grid_thw) throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw input missing.");
+  const auto grid_info = grid_thw->GetTensorTypeAndShapeInfo();
+  const size_t grid_count = grid_info->GetElementCount();
+  if (grid_count == 0 || grid_count % 3 != 0) {
+    throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw must contain one or more triplets");
+  }
+  std::vector<int64_t> grid_values(grid_count);
+  if (grid_info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+    const int64_t* values = grid_thw->GetTensorData<int64_t>();
+    std::copy_n(values, grid_count, grid_values.begin());
+  } else if (grid_info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+    const int32_t* values = grid_thw->GetTensorData<int32_t>();
+    std::transform(values, values + grid_count, grid_values.begin(), [](int32_t value) { return value; });
+  } else {
+    throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw must contain int32 or int64 values");
+  }
+  const auto slices = PlanQwenImageSlices(grid_values, total_patches, spatial_merge_size_);
+
   // Ensure pixel_values are float32 for the vision graph.
   std::unique_ptr<OrtValue> pixel_values_fp32;
-  const OrtValue* pixel_input = pixel_values;
+  OrtValue* pixel_input = pixel_values;
   if (pixel_values->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     Cast(*pixel_values, pixel_values_fp32, *model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     pixel_input = pixel_values_fp32.get();
   }
 
-  // Grid [t, h, w] from image_grid_thw (int64 or int32; last 3 values).
-  OrtValue* grid_thw = FindExtraInput(extra_inputs, model_.config_->model.vision.inputs.image_grid_thw);
-  if (!grid_thw) throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw input missing.");
-  int64_t t = 0, h = 0, w = 0;
-  {
-    auto info = grid_thw->GetTensorTypeAndShapeInfo();
-    const size_t count = info->GetElementCount();
-    if (count < 3) throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw has fewer than 3 values.");
-    if (info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-      const int64_t* g = grid_thw->GetTensorData<int64_t>();
-      t = g[count - 3];
-      h = g[count - 2];
-      w = g[count - 1];
-    } else {
-      const int32_t* g = grid_thw->GetTensorData<int32_t>();
-      t = g[count - 3];
-      h = g[count - 2];
-      w = g[count - 1];
+  auto& allocator = model_.allocator_cpu_;
+  const auto pixel_data = pixel_input->GetTensorMutableData<float>();
+  auto cpu_memory = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  std::vector<std::unique_ptr<OrtValue>> image_features;
+  image_features.reserve(slices.size());
+  int64_t merged_hidden_dim = 0;
+  int64_t total_feature_rows = 0;
+
+  for (const auto& slice : slices) {
+    const size_t patch_offset = static_cast<size_t>(slice.patch_offset);
+    const size_t num_patches = static_cast<size_t>(slice.num_patches);
+    if (patch_offset > std::numeric_limits<size_t>::max() / static_cast<size_t>(patch_dim) ||
+        num_patches > std::numeric_limits<size_t>::max() / static_cast<size_t>(patch_dim)) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: pixel_values slice size overflow");
     }
+    const size_t patch_element_offset = patch_offset * static_cast<size_t>(patch_dim);
+    const size_t patch_element_count = num_patches * static_cast<size_t>(patch_dim);
+    if (patch_element_count > std::numeric_limits<size_t>::max() / sizeof(float)) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: pixel_values slice byte size overflow");
+    }
+    const std::array<int64_t, 2> image_pixel_shape{slice.num_patches, patch_dim};
+    auto image_pixel_values = OrtValue::CreateTensor(
+        *cpu_memory, pixel_data + patch_element_offset, patch_element_count * sizeof(float), image_pixel_shape,
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+
+    const char* pe_in[] = {patch_embed_input_.c_str()};
+    const OrtValue* pe_vals[] = {image_pixel_values.get()};
+    const char* pe_out[] = {patch_embed_output_.c_str()};
+    auto hidden_states = std::move(patch_embed_session_->Run(nullptr, pe_in, pe_vals, 1, pe_out, 1)[0]);
+    std::unique_ptr<OrtValue> hidden_states_fp32;
+    if (hidden_states->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      Cast(*hidden_states, hidden_states_fp32, *model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      hidden_states = std::move(hidden_states_fp32);
+    }
+    const auto hidden_info = hidden_states->GetTensorTypeAndShapeInfo();
+    const auto hidden_shape = hidden_info->GetShape();
+    if (hidden_shape.empty() || hidden_shape.back() <= 0) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: patch_embed output has no hidden dimension");
+    }
+    const int64_t embed_dim = hidden_shape.back();
+    const size_t hidden_element_count = hidden_info->GetElementCount();
+    if (hidden_element_count % static_cast<size_t>(embed_dim) != 0 ||
+        hidden_element_count / static_cast<size_t>(embed_dim) != num_patches) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: patch_embed returned " +
+                               std::to_string(hidden_element_count / static_cast<size_t>(embed_dim)) +
+                               " rows for an image with " + std::to_string(slice.num_patches) + " patches");
+    }
+    float* hidden = hidden_states->GetTensorMutableData<float>();
+
+    std::vector<int64_t> indices;
+    std::vector<float> weights;
+    GetPositionInterpolationIndicesAndWeights(slice.temporal, slice.height, slice.width, num_grid_per_side_,
+                                              indices, weights);
+    const std::array<int64_t, 2> indices_shape{4, slice.num_patches};
+    auto indices_tensor = WrapCpuTensor(indices, indices_shape);
+    const char* pos_in[] = {pos_input_.c_str()};
+    const OrtValue* pos_vals[] = {indices_tensor.get()};
+    const char* pos_out[] = {pos_output_.c_str()};
+    auto pos_embeds = std::move(pos_session_->Run(nullptr, pos_in, pos_vals, 1, pos_out, 1)[0]);
+    const auto pos_info = pos_embeds->GetTensorTypeAndShapeInfo();
+    if (pos_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: pos output must contain float elements");
+    }
+    if (static_cast<size_t>(slice.num_patches) > std::numeric_limits<size_t>::max() / 4 ||
+        static_cast<size_t>(embed_dim) >
+            std::numeric_limits<size_t>::max() / (4 * static_cast<size_t>(slice.num_patches))) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: expected pos output size overflow");
+    }
+    const size_t expected_pos_elements = 4 * static_cast<size_t>(slice.num_patches) * static_cast<size_t>(embed_dim);
+    if (pos_info->GetElementCount() != expected_pos_elements) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: pos output has " +
+                               std::to_string(pos_info->GetElementCount()) + " elements; expected " +
+                               std::to_string(expected_pos_elements));
+    }
+    auto weighted_sum = WeightedSumOverCorners(pos_embeds->GetTensorData<float>(), weights,
+                                               slice.num_patches, embed_dim);
+    PermuteWithSpatialMergeAndAdd(weighted_sum, hidden, slice.temporal, slice.height, slice.width,
+                                  spatial_merge_size_, embed_dim);
+
+    auto rope = BuildRotaryPosEmb(slice.temporal, slice.height, slice.width, spatial_merge_size_, rotary_dim_);
+    auto mask = BuildAttentionMask(slice.temporal, slice.height, slice.width);
+    const std::array<int64_t, 2> rope_shape{slice.num_patches, rotary_dim_};
+    const std::array<int64_t, 3> mask_shape{1, slice.num_patches, slice.num_patches};
+    auto rope_tensor = WrapCpuTensor(rope, rope_shape);
+    auto mask_tensor = WrapCpuTensor(mask, mask_shape);
+
+    const char* merger_in[] = {merger_hidden_input_.c_str(), merger_mask_input_.c_str(), merger_rope_input_.c_str()};
+    const OrtValue* merger_vals[] = {hidden_states.get(), mask_tensor.get(), rope_tensor.get()};
+    const char* merger_out[] = {merger_output_.c_str()};
+    auto features = std::move(merger_session_->Run(nullptr, merger_in, merger_vals, 3, merger_out, 1)[0]);
+    if (features->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      std::unique_ptr<OrtValue> features_fp32;
+      Cast(*features, features_fp32, *model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      features = std::move(features_fp32);
+    }
+    const auto features_info = features->GetTensorTypeAndShapeInfo();
+    const auto features_shape = features_info->GetShape();
+    if (features_shape.empty() || features_shape.back() <= 0) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: merger output has no hidden dimension");
+    }
+    const int64_t feature_hidden_dim = features_shape.back();
+    const size_t feature_element_count = features_info->GetElementCount();
+    if (feature_element_count % static_cast<size_t>(feature_hidden_dim) != 0) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: merger output element count is not divisible by hidden dimension");
+    }
+    const size_t feature_rows = feature_element_count / static_cast<size_t>(feature_hidden_dim);
+    const int64_t expected_feature_rows =
+        slice.num_patches / (spatial_merge_size_ * spatial_merge_size_);
+    if (feature_rows != static_cast<size_t>(expected_feature_rows)) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: merger returned " + std::to_string(feature_rows) +
+                               " rows; expected " + std::to_string(expected_feature_rows));
+    }
+    if (merged_hidden_dim != 0 && merged_hidden_dim != feature_hidden_dim) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: merger hidden dimension differs between images");
+    }
+    merged_hidden_dim = feature_hidden_dim;
+    if (expected_feature_rows > std::numeric_limits<int64_t>::max() - total_feature_rows) {
+      throw std::runtime_error("Qwen3.5 OpenVINO vision: total image feature row count overflow");
+    }
+    total_feature_rows += expected_feature_rows;
+    image_features.push_back(std::move(features));
   }
-  const int64_t num_patches = t * h * w;
 
-  // Stage 1: patch_embed(pixel_values) -> hidden_states [N, D].
-  const char* pe_in[] = {patch_embed_input_.c_str()};
-  const OrtValue* pe_vals[] = {pixel_input};
-  const char* pe_out[] = {patch_embed_output_.c_str()};
-  auto hidden_states = std::move(patch_embed_session_->Run(nullptr, pe_in, pe_vals, 1, pe_out, 1)[0]);
-  const int64_t embed_dim = hidden_states->GetTensorTypeAndShapeInfo()->GetShape().back();
-  float* hidden = hidden_states->GetTensorMutableData<float>();
-
-  // Stage 2: interpolated position embeddings, added onto hidden_states in spatial-merge order.
-  std::vector<int64_t> indices;
-  std::vector<float> weights;
-  GetPositionInterpolationIndicesAndWeights(t, h, w, num_grid_per_side_, indices, weights);
-  const int64_t indices_shape[] = {4, num_patches};
-  auto indices_tensor = WrapCpuTensor(indices, indices_shape);
-  const char* pos_in[] = {pos_input_.c_str()};
-  const OrtValue* pos_vals[] = {indices_tensor.get()};
-  const char* pos_out[] = {pos_output_.c_str()};
-  auto pos_embeds = std::move(pos_session_->Run(nullptr, pos_in, pos_vals, 1, pos_out, 1)[0]);
-  auto weighted_sum = WeightedSumOverCorners(pos_embeds->GetTensorData<float>(), weights, num_patches, embed_dim);
-  PermuteWithSpatialMergeAndAdd(weighted_sum, hidden, t, h, w, spatial_merge_size_, embed_dim);
-
-  // Stage 3: rotary embeddings + block-diagonal attention mask -> merger -> image features.
-  auto rope = BuildRotaryPosEmb(t, h, w, spatial_merge_size_, rotary_dim_);
-  auto mask = BuildAttentionMask(t, h, w);
-  const int64_t rope_shape[] = {num_patches, rotary_dim_};
-  const int64_t mask_shape[] = {1, num_patches, num_patches};
-  auto rope_tensor = WrapCpuTensor(rope, rope_shape);
-  auto mask_tensor = WrapCpuTensor(mask, mask_shape);
-
-  const char* merger_in[] = {merger_hidden_input_.c_str(), merger_mask_input_.c_str(), merger_rope_input_.c_str()};
-  const OrtValue* merger_vals[] = {hidden_states.get(), mask_tensor.get(), rope_tensor.get()};
-  const char* merger_out[] = {merger_output_.c_str()};
-  auto features = std::move(merger_session_->Run(nullptr, merger_in, merger_vals, 3, merger_out, 1)[0]);
-
-  // The host merge is float-only; cast the merger output if the EP emitted a reduced-precision type.
-  if (features->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    Cast(*features, image_features_, *model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-  } else {
-    image_features_ = std::move(features);
+  if (merged_hidden_dim <= 0 || total_feature_rows <= 0 ||
+      static_cast<uint64_t>(total_feature_rows) >
+          std::numeric_limits<size_t>::max() / static_cast<size_t>(merged_hidden_dim) ||
+      static_cast<uint64_t>(total_feature_rows) * static_cast<size_t>(merged_hidden_dim) >
+          std::numeric_limits<size_t>::max() / sizeof(float)) {
+    throw std::runtime_error("Qwen3.5 OpenVINO vision: invalid concatenated feature shape");
+  }
+  const std::array<int64_t, 2> concatenated_shape{total_feature_rows, merged_hidden_dim};
+  image_features_ = OrtValue::CreateTensor<float>(allocator, concatenated_shape);
+  float* concatenated_data = image_features_->GetTensorMutableData<float>();
+  size_t row_offset = 0;
+  for (const auto& features : image_features) {
+    const auto features_info = features->GetTensorTypeAndShapeInfo();
+    const size_t rows = features_info->GetElementCount() / static_cast<size_t>(merged_hidden_dim);
+    std::memcpy(concatenated_data + row_offset * static_cast<size_t>(merged_hidden_dim),
+                features->GetTensorData<float>(), rows * static_cast<size_t>(merged_hidden_dim) * sizeof(float));
+    row_offset += rows;
   }
 }
 
