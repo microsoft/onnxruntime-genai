@@ -46,7 +46,7 @@ thresholds are rejected while loading the configuration.
 
 Both paths start with audio processed into features, followed by generated token IDs. Model
 configuration determines whether acoustic timing is produced. `TokenPostProcessor`
-forwards borrowed token and optional timing views to its internal `TokenPostProcessingStream`, which
+forwards borrowed token and optional timing views to its internal `TokenPostProcessorInternal`, which
 owns decoding and timestamp processing. Ordinary tokenizer decoding is unchanged.
 `timestamp_level` controls timestamp generation:
 ```mermaid
@@ -63,7 +63,7 @@ flowchart TB
   subgraph timed[With timestamps: word, segment, or all]
     setup[Processor copies model configuration] --> stream
     timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNextTokens]
-    stream --> internal[Internal TokenPostProcessingStream.Process]
+    stream --> internal[Internal TokenPostProcessorInternal.Process]
     internal --> ortx[Extensions: vocabulary facts + ordinary cached decode]
     ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
     align --> events[Per-call word / segment events with frame and second bounds]

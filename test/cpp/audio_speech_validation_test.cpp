@@ -279,7 +279,7 @@ TEST(AudioSpeechValidationTests, ZeroAndSubFrameGapsSplitEachWord) {
   }
 }
 
-TEST(TokenPostProcessingStreamTests, OfflineBatchMatchesIncrementalProcessing) {
+TEST(TokenPostProcessorInternalTests, OfflineBatchMatchesIncrementalProcessing) {
   Generators::Config model_config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
   auto tokenizer = std::make_shared<Generators::Tokenizer>(model_config);
   const std::string text = "Hello world. Next.";
@@ -294,7 +294,7 @@ TEST(TokenPostProcessingStreamTests, OfflineBatchMatchesIncrementalProcessing) {
   config.timestamps.segment_separators = {"."};
   config.seconds_per_frame = 0.1;
   const auto process = [&](size_t batch_size) {
-    Generators::TokenPostProcessingStream stream{tokenizer, config};
+    Generators::TokenPostProcessorInternal stream{tokenizer, config};
     Generators::PostProcessorResult transcript;
     transcript.timestamps.emplace();
     const auto collect = [&] {
@@ -339,7 +339,7 @@ TEST(TokenPostProcessingStreamTests, OfflineBatchMatchesIncrementalProcessing) {
   expect_records(batch.timestamps->segments, incremental.timestamps->segments);
 }
 
-TEST(TokenPostProcessingStreamTests, OptionalTimingAndCountValidation) {
+TEST(TokenPostProcessorInternalTests, OptionalTimingAndCountValidation) {
   Generators::Config model_config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
   auto tokenizer = std::make_shared<Generators::Tokenizer>(model_config);
   const std::string text = "Hello world.";
@@ -347,8 +347,8 @@ TEST(TokenPostProcessingStreamTests, OptionalTimingAndCountValidation) {
   ASSERT_GT(tokens.size(), 1U);
 
   Generators::TokenOutputs untimed{tokens};
-  EXPECT_EQ(untimed.GetTimestamps(), nullptr);
-  Generators::TokenPostProcessingStream plain{tokenizer, {}};
+  EXPECT_EQ(untimed.GetAcousticFrameIntervals(), nullptr);
+  Generators::TokenPostProcessorInternal plain{tokenizer, {}};
   plain.Process(untimed);
   std::string decoded;
   for (const auto& result : plain.GetNextTokenResults()) {
@@ -360,7 +360,7 @@ TEST(TokenPostProcessingStreamTests, OptionalTimingAndCountValidation) {
   Generators::MetadataCoreConfig config;
   config.timestamps.level = Generators::Config::TimestampLevel::Word;
   config.seconds_per_frame = 0.1;
-  Generators::TokenPostProcessingStream timed{tokenizer, config};
+  Generators::TokenPostProcessorInternal timed{tokenizer, config};
   const std::vector<Generators::AcousticFrameInterval> incomplete(tokens.size() - 1, {4, 5});
   EXPECT_THROW(timed.Process(Generators::TokenOutputs{tokens, std::span<const Generators::AcousticFrameInterval>{incomplete}}), std::runtime_error);
   EXPECT_THROW(timed.Process(untimed), std::runtime_error);

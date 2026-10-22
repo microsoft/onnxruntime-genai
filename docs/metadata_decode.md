@@ -1,7 +1,7 @@
 # Token Post-Processing
 
 `TokenPostProcessor(generator)` is a generator-facing adapter around an internal
-`TokenPostProcessingStream`. That stream owns a tokenizer, an ordinary tokenizer
+`TokenPostProcessorInternal`. That internal processor owns a tokenizer, an ordinary tokenizer
 stream, `MetadataCoreState`, grouping/timing state, and the current results.
 Configuration comes from the
 generator's model and its `genai_config.json`. Callers do not pass a model or
@@ -70,9 +70,9 @@ TokenPostProcessor.ProcessNextTokens()
       -> transducer: GetStepTokens() and optional GetStepTokenIntervals()
           -> validate token/interval counts
       -> search: GetNextTokens().CopyDeviceToCpu()
-  -> TokenPostProcessingStream.Process(outputs)
+  -> TokenPostProcessorInternal.Process(outputs)
       -> clear previous processing results
-      -> TokenOutputs.GetTokens() / GetTimestamps()
+      -> TokenOutputs.GetTokens() / GetAcousticFrameIntervals()
       -> validate token/interval counts
       -> for each emission, in order:
           -> MetadataCoreState.ValidateInput(token)
@@ -85,7 +85,7 @@ TokenPostProcessor.ProcessNextTokens()
   -> return to application
 
 TokenPostProcessor.GetNextTokenResults()
-  -> TokenPostProcessingStream.GetNextTokenResults(): read only
+  -> TokenPostProcessorInternal.GetNextTokenResults(): read only
   -> GetText() / nullable GetTimestamps()
 ```
 
@@ -98,7 +98,7 @@ unchanged.
 
 The private getter returns an internal `TokenOutputs` with inline private spans,
 not a heap-allocated PImpl. Token IDs and optional timing are separate collections;
-`GetTimestamps()` returns null when timing is absent. The spans borrow their
+`GetAcousticFrameIntervals()` returns null when timing is absent. The spans borrow their
 producer's storage and must remain valid for `Process()`. Native timing uses
 `AcousticFrameInterval` and `std::optional`, not the public C interval layout or an
 integer presence flag. Public C declarations and result handles are unchanged.
@@ -154,7 +154,7 @@ flowchart TD
   pending --> separator["EndsWithSeparator() for configured suffixes"]
   separator -->|Suffix completes segment| finish["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
   completed --> release["After all completed words:<br/>TokenWordGroupingState::FirstPendingTokenIndex()<br/>Release intervals before that watermark"]
-  release --> returned["Return to TokenPostProcessingStream with result populated"]
+  release --> returned["Return to TokenPostProcessorInternal with result populated"]
 ```
 
 The grouper buffers incomplete words, whitespace, and UTF-8 output. It may
@@ -168,7 +168,7 @@ After the last generation step, flush pending work without decoding a token:
 
 ```mermaid
 flowchart TD
-  finalize["TokenPostProcessor::Finalize()"] --> stream["TokenPostProcessingStream::Finalize()<br/>Clear previous results; create final result"]
+  finalize["TokenPostProcessor::Finalize()"] --> stream["TokenPostProcessorInternal::Finalize()<br/>Clear previous results; create final result"]
   stream --> state["MetadataCoreState::ProcessFinalized()"]
   state --> enabled["TimestampsEnabled()"]
   enabled --> group["TokenWordGroupingState::Finalize()<br/>Append() pending delimiter; CompleteWord()"]

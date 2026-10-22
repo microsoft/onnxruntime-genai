@@ -10,7 +10,7 @@ std::span<const int32_t> TokenOutputs::GetTokens() const {
   return tokens_;
 }
 
-const std::span<const AcousticFrameInterval>* TokenOutputs::GetTimestamps() const {
+const std::span<const AcousticFrameInterval>* TokenOutputs::GetAcousticFrameIntervals() const {
   if (!timestamps_) return nullptr;
   return &*timestamps_;
 }

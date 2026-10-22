@@ -51,7 +51,7 @@ struct MetadataCoreConfig {
 };
 
 class MetadataCoreState {
-  friend class TokenPostProcessingStream;
+  friend class TokenPostProcessorInternal;
 
  private:
   explicit MetadataCoreState(const MetadataCoreConfig& config);

@@ -5,9 +5,9 @@
 
 namespace Generators {
 
-class TokenPostProcessingStream {
+class TokenPostProcessorInternal {
  public:
-  TokenPostProcessingStream(std::shared_ptr<Tokenizer> tokenizer, MetadataCoreConfig config);
+  TokenPostProcessorInternal(std::shared_ptr<Tokenizer> tokenizer, MetadataCoreConfig config);
   void Process(const TokenOutputs& outputs);
   const std::vector<PostProcessorResult>& GetNextTokenResults() const { return results_; }
   void Finalize();
@@ -31,7 +31,7 @@ class TokenPostProcessor : public LeakChecked<TokenPostProcessor> {
 
  private:
   const Generator& generator_;
-  TokenPostProcessingStream stream_;
+  TokenPostProcessorInternal stream_;
 };
 
 }  // namespace Generators

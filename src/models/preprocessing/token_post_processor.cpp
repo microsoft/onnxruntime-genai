@@ -39,16 +39,16 @@ void TokenPostProcessor::Reset() {
   stream_.Reset();
 }
 
-TokenPostProcessingStream::TokenPostProcessingStream(std::shared_ptr<Tokenizer> tokenizer, MetadataCoreConfig config)
+TokenPostProcessorInternal::TokenPostProcessorInternal(std::shared_ptr<Tokenizer> tokenizer, MetadataCoreConfig config)
     : tokenizer_{std::move(tokenizer)}, config_{std::move(config)} {
   stream_ = tokenizer_->CreateStream();
   metadata_state_ = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(config_));
 }
 
-void TokenPostProcessingStream::Process(const TokenOutputs& outputs) {
+void TokenPostProcessorInternal::Process(const TokenOutputs& outputs) {
   results_.clear();
   const auto tokens = outputs.GetTokens();
-  const auto* timestamps = outputs.GetTimestamps();
+  const auto* timestamps = outputs.GetAcousticFrameIntervals();
   if (timestamps && timestamps->size() != tokens.size())
     throw std::runtime_error("Token timing count does not match emitted tokens");
   for (size_t index = 0; index < tokens.size(); ++index) {
@@ -66,12 +66,12 @@ void TokenPostProcessingStream::Process(const TokenOutputs& outputs) {
   }
 }
 
-void TokenPostProcessingStream::Finalize() {
+void TokenPostProcessorInternal::Finalize() {
   results_.clear();
   metadata_state_->ProcessFinalized(results_.emplace_back());
 }
 
-void TokenPostProcessingStream::Reset() {
+void TokenPostProcessorInternal::Reset() {
   results_.clear();
   stream_->Reset();
   metadata_state_ = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(config_));
