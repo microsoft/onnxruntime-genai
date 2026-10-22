@@ -380,7 +380,7 @@ class DFlash2Builder(BlockDrafterBuilder):
 
         final, _ = self.skip_rms_norm("/dflash2/norm", residual, hidden, w["norm.weight"], rows_q, want_sum=False)
 
-        self._make_candidates_and_selector(final, w)
+        self.make_candidates_and_selector(final, w)
         self.graph.sort()
         return self.model
 
@@ -589,7 +589,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             rows_q,
         )
 
-    def _make_candidates_and_selector(self, final, w):
+    def make_candidates_and_selector(self, final, w):
         n_spec, top_k, rank = self.num_draft_tokens, self.selector_top_k, self.selector_rank
 
         # Only the mask rows predict; the anchor at offset 0 is the bonus token.
