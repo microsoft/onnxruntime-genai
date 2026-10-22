@@ -33,7 +33,8 @@ from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, 
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 
-from .expansions.paged_attention import PagedAttention
+from .expansions.engine import Engine
+
 
 def load_text_backbone_adapter(
     base_container, source, cache_dir=None, token=None
@@ -81,7 +82,7 @@ def load_text_backbone_adapter(
     return base_container
 
 
-class Model(PagedAttention):
+class Model(Engine):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.extra_options = extra_options
         self.hf_load_config = (

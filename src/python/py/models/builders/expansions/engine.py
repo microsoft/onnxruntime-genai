@@ -6,8 +6,8 @@
 import onnx_ir as ir
 
 
-class PagedAttention:
-    """Paged-attention graph, cache-layout, and runtime configuration expansions."""
+class Engine:
+    """Engine graph, cache-layout, and runtime configuration expansions."""
 
     def make_paged_mrope_inputs(self, name, root_input, position_ids, dtype, num_heads):
         input_unsqueeze_name = f"{name}/input/Unsqueeze"

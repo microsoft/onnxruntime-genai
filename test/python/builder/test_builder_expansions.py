@@ -3,8 +3,8 @@
 
 import pytest
 from models.builders.base import Model
+from models.builders.expansions.engine import Engine
 from models.builders.expansions.mtp import Qwen35MTP, Qwen38MTP
-from models.builders.expansions.paged_attention import PagedAttention
 from models.builders.expansions.qwen3_5 import Qwen35, Qwen35MoE
 from models.builders.expansions.qwen3_8 import Qwen38, Qwen38Graph, Qwen38Vision
 from models.builders.qwen3_5 import Qwen35MoETextModel, Qwen35MTPModel, Qwen35TextModel
@@ -14,15 +14,15 @@ from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwe
 @pytest.mark.parametrize(
     ("model_class", "expansion_class", "method"),
     [
-        (Model, PagedAttention, "make_paged_attention"),
-        (Model, PagedAttention, "make_paged_inputs_init"),
-        (Model, PagedAttention, "make_paged_outputs_init"),
-        (Model, PagedAttention, "make_paged_engine_config"),
-        (Model, PagedAttention, "make_paged_mrope_inputs"),
-        (Model, PagedAttention, "make_selected_hidden_rows"),
-        (Model, PagedAttention, "make_paged_rotary_multi_cache_subgraph"),
-        (Model, PagedAttention, "make_varlen_causal_conv_with_state"),
-        (Model, PagedAttention, "make_varlen_gated_delta_net"),
+        (Model, Engine, "make_paged_attention"),
+        (Model, Engine, "make_paged_inputs_init"),
+        (Model, Engine, "make_paged_outputs_init"),
+        (Model, Engine, "make_paged_engine_config"),
+        (Model, Engine, "make_paged_mrope_inputs"),
+        (Model, Engine, "make_selected_hidden_rows"),
+        (Model, Engine, "make_paged_rotary_multi_cache_subgraph"),
+        (Model, Engine, "make_varlen_causal_conv_with_state"),
+        (Model, Engine, "make_varlen_gated_delta_net"),
         (Qwen35TextModel, Qwen35, "make_attention_input_proj"),
         (Qwen35TextModel, Qwen35, "make_qwen_gated_delta_net"),
         (Qwen35TextModel, Qwen35, "make_linear_attention_output_proj"),
