@@ -576,6 +576,11 @@ struct OrtEnv {
                    const std::vector<OrtValue*>& dst_tensors,
                    OrtSyncStream* stream = nullptr) const;
 
+  /// \brief Zero tensors on their device, without a host staging buffer. Wraps the experimental
+  /// OrtApi_ZeroTensors function (ORT 1.32+, implemented by the EP's data transfer).
+  /// \return false when ORT or the EP can't zero these tensors; the caller must zero them another way.
+  bool TryZeroTensors(const std::vector<OrtValue*>& tensors, OrtSyncStream* stream = nullptr) const;
+
   std::vector<const OrtEpDevice*> GetEpDevices();
 
   static void operator delete(void* p) { Ort::api->ReleaseEnv(reinterpret_cast<OrtEnv*>(p)); }

@@ -123,15 +123,17 @@ struct GpuMemory final : DeviceBuffer {
     if (!ort_allocator_)
       throw std::runtime_error("AMDGPU allocator not initialized");
 
-    // TODO: device-side zero to avoid the host staging buffer. Off the decode hot path for now.
-    std::vector<uint8_t> zero_buffer(size_in_bytes_, 0);
-
     int64_t shape_val = static_cast<int64_t>(size_in_bytes_);
     std::span<const int64_t> shape{&shape_val, 1};
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+    if (GetOrtEnv().TryZeroTensors({dst_tensor.get()}))
+      return;
+
+    // ORT or the EP predates device-side zeroing, so upload zeros from the host.
+    std::vector<uint8_t> zero_buffer(size_in_bytes_, 0);
     auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
     auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, zero_buffer.data(), size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-
-    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
     const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
     const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
