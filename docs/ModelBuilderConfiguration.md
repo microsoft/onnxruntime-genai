@@ -16,7 +16,7 @@ Tensor sharing follows the adoption approach in
 gate/up fusion follows
 [PR #2585](https://github.com/microsoft/onnxruntime-genai/pull/2585).
 The examples describe the proposed API; they are not runnable with the current
-builder unchanged. The explicit sharing policies and grouped optimization keys
+builder unchanged. The explicit sharing policies and grouped configuration keys
 below are new schema proposals, not existing flags introduced by those PRs.
 
 ## 1. Goals
@@ -46,8 +46,8 @@ same structure.
 | Field | Owner and purpose |
 | --- | --- |
 | `builder_config_version` | Structured builder schema version, proposed as `2`. Not written to the generated runtime config. |
-| `target_options` | Target text-decoder export policy: `quant_config`, `attention`, and `optimizations`. |
-| `drafter_options` | Drafter selection, source, quantization, attention, `optimizations`, `shared_weights`, and type-specific export settings. |
+| `target_options` | Target text-decoder export policy: `quant_config` and `attention`. |
+| `drafter_options` | Drafter selection, source, quantization, attention, `shared_weights`, and type-specific export settings. |
 | `speculative_options` | Graph requirements connecting the target and drafter. |
 | `runtime_config` | Inline runtime JSON fragment or a path/resource referencing one. |
 | `component_options` | Optional generic hidden-state backbone and named pre-built head graphs. |
@@ -76,7 +76,7 @@ compatibility defaults are provider-dependent today:
 | `moe.block_size` | `128` on TRT-RTX, else `32` |
 | `moe.type` | `int2`/`mxfp4`/`nvfp4` accepted only on CUDA |
 | `moe.fc1_type`, `moe.fc2_type` | Projection overrides require integer QMoE on CUDA; INT2 and mixed widths require block size 64 or 128 that divides both hidden and intermediate sizes |
-| `format.matmulnbits_weights_prepacked` | Prepacked layouts are CUDA-only, including block-drafter body weights |
+| Explicit weight packing | `moe.weights_prepacked` and `format.matmulnbits_weights_prepacked` select independent target layouts without querying the export host GPU. NVFP4 K-packed storage is opt-in. |
 | `format.use_qdq` | Required `true` for TRT-RTX integer dense weights |
 
 So the resolver signature is (envelope, execution provider), and rule 1 in
@@ -103,18 +103,22 @@ full quantization configuration from PR #2588:
 | `checkpoint_policy` | Reserved for loaders that implement both paths. Target options currently reject it; MTP supports `preserve` and `requantize`. |
 | `weights` | `type`, `block_size`, `symmetric`, `method`, `accuracy_level`, `op_types`, and ordered `overrides`. |
 | `moe` | Expert quantization type, optional `fc1_type`/`fc2_type` projection overrides, block size, and packing. |
-| `format` | `use_qdq` and `matmulnbits_weights_prepacked`. |
+| `format` | `use_qdq` and explicit `matmulnbits_weights_prepacked` target layout. |
 
-`format` is the proposed replacement name for `quant_config.runtime`: QDQ and
-weight packing change the exported graph or its initializers. They are not
-runtime-profile overrides. Keep `quant_config.runtime` as a compatibility alias;
+`format` is the proposed replacement name for `quant_config.runtime`: QDQ changes
+the exported graph and is not a runtime-profile override. Weight packing is
+explicitly configurable per operator. Keep `quant_config.runtime` as a compatibility alias;
 conflicting values supplied through both names are errors.
 
-Structured `weights.accuracy_level` must be a JSON integer from `0` to `4`,
-`moe.weights_prepacked` must be `-1`, `0`, or `1`, and
-`format.matmulnbits_weights_prepacked` must be `0`, `1`, or `2`. Booleans,
-floating-point values, and numeric strings are rejected for these fields;
-legacy adapters retain their string conversion. `weights.op_types` must be a
+Structured `weights.accuracy_level` must be a JSON integer from `0` to `4`.
+Booleans, floating-point values, and numeric strings are rejected for this field;
+legacy adapters retain their string conversion. `moe.weights_prepacked`
+accepts `-1` (default), `0`, or `1`; `format.matmulnbits_weights_prepacked`
+accepts `0` (default), `1` (SM80 layout), or `2` (exact SM90 layout).
+These target choices do not inspect the export host GPU. NVFP4 uses legacy raw
+storage by default and requires explicit mode `1` for its newer K-packed layout.
+Ineligible projections stay raw, including SM90 MatMulNBits with block size `32`.
+`weights.op_types` must be a
 non-empty JSON array containing only `"MatMul"` and/or `"Gather"`, not a single
 string.
 
@@ -180,16 +184,12 @@ runtime behavior even though they are not graph-construction options.
 
 ### Projection Fusion
 
-Expose `optimizations.fuse_mlp_gate_up` independently under `target_options` and
-`drafter_options`. The default is `false` for each; enabling target fusion does
-not enable drafter fusion or apply it to future vision components.
-
-For the target this maps to `fuse_mlp_gate_up` from PR #2585. It combines eligible
-MLP gate/up projections before weight quantization, producing a single projection
-(`MatMulNBits` for the INT4 example) followed by `Split`. For DFlash2 the same
-structured key maps to its existing `dflash2_fuse_gate_up` option. This supersedes
-the earlier draft's DFlash2-only `dflash2.fuse_gate_up` placement; reserve
-type-specific groups for settings that have no shared model-level meaning.
+Target MLP gate/up fusion is configurable through
+`target_options.optimizations.fuse_mlp_gate_up` (default `false`), corresponding
+to `fuse_mlp_gate_up`. DFlash2 fusion is independently configurable through
+`drafter_options.optimizations.fuse_mlp_gate_up` (default `false`), corresponding to
+`dflash2_fuse_gate_up`. When enabled, fusion produces a single projection
+(`MatMulNBits` for INT4) followed by `Split`. This does not apply fusion to vision components.
 
 Fusion requires a supported exporter and compatible projection shapes, biases,
 and quantization policy. Current target fusion requires unpacked floating-point
@@ -197,8 +197,7 @@ gate/up weights and does not support adapted projections. Reject unsupported
 requests, including any per-projection exclusion or precision rule that cannot
 be preserved. Resolve exact-name overrides against the final emitted graph;
 do not silently drop old gate/up names after fusion or change one projection's
-policy to match the other. An unsupported DSpark/MTP fusion request must fail,
-not be accepted just because the schema has the field.
+policy to match the other.
 
 `target_options.optimizations.fuse_qkv` controls target Q/K/V projection fusion
 and defaults to `true`. It maps to the `fuse_qkv` exporter option. The legacy
@@ -225,7 +224,7 @@ must retain its own supported session settings rather than inherit target flags.
 only one drafter can be selected. `none` explicitly disables automatic MTP export;
 an omitted `drafter_options` retains current automatic discovery for compatibility.
 
-Common model fields are `quant_config`, `attention`, and `optimizations`.
+Common model fields are `quant_config` and `attention`.
 Additional drafter fields are:
 
 | Field | Applicability |
@@ -618,9 +617,10 @@ and do not share the builder's quantization, cache, or attention policy.
 This is the proposed migration of the user-supplied Qwen3.8-27B DFlash2 Olive
 recipe, reproduced below without requiring a separate recipe checkout.
 It retains the target source, CUDA system, output/cache locations, and requested
-target INT4 plus INT8 embedding policy. It additionally opts into target gate/up
-fusion and makes embedding/head sharing policy explicit. Fusion is an intentional
-graph change, so this extended example is not a claim of byte-identical migration.
+target INT4 plus INT8 embedding policy and makes embedding/head sharing policy explicit.
+Target and DFlash2 gate/up fusion both default to `false` and can be enabled explicitly.
+Enabling fusion is an intentional graph change, so this extended example is not a
+claim of byte-identical migration when fusion is selected.
 
 **Prerequisite:** INT8 embedding export must be implemented and validated before
 this recipe can be migrated. PR #2588 rejects a Gather type override, and the
@@ -678,8 +678,7 @@ there, or be supplied as resolved Olive resources.
             ]
           },
           "format": {
-            "use_qdq": false,
-            "matmulnbits_weights_prepacked": 1
+            "use_qdq": false
           }
         },
         "attention": {
@@ -703,9 +702,6 @@ there, or be supplied as resolved Olive resources.
           "embedding": "auto",
           "lm_head": "auto"
         },
-        "optimizations": {
-          "fuse_mlp_gate_up": false
-        },
         "quant_config": {
           "io_dtype": "bf16",
           "weights": {
@@ -716,8 +712,7 @@ there, or be supplied as resolved Olive resources.
             "op_types": ["MatMul"]
           },
           "format": {
-            "use_qdq": false,
-            "matmulnbits_weights_prepacked": 0
+            "use_qdq": false
           }
         }
       },
@@ -756,9 +751,8 @@ The two `auto` sharing settings request adoption when compatible, not guaranteed
 sharing. In particular, the INT8 embedding adoption path is an additional
 capability gate; this example must not be advertised as a one-copy package merely
 because it exports successfully. Use `required` below to enforce a memory budget.
-Target fusion is enabled; DFlash2 fusion is explicitly disabled independently.
-Set the drafter's `optimizations.fuse_mlp_gate_up` to `true` to opt into its own
-supported gate/up fusion as well, with separate numerical validation.
+Target and DFlash2 gate/up fusion are configurable, default off, and require numerical
+validation for their respective quantization policies.
 
 ### Runtime Profile
 
@@ -806,21 +800,14 @@ The profile does not duplicate them. For an inline profile, replace the recipe's
 For a package that must store one target/drafter copy of each tensor, change both
 policies to `required`. The fragment below is a variant of the pass above, shown
 without repeating it. Compose it using the section 6 convention: objects merge
-recursively, scalars replace, arrays replace whole. So its
-`target_options.quant_config.format` changes only
-`matmulnbits_weights_prepacked`, and the base pass's `use_qdq: false` survives;
-its `runtime_config` object first replaces the recipe's profile filename with
+recursively, scalars replace, arrays replace whole. Its `runtime_config` object
+first replaces the recipe's profile filename with
 that file's loaded contents, then merges the session entries shown here on top,
 leaving the base profile's `provider_options` array and `engine`, `search`, and
 `speculative` sections intact. The result is one complete pass.
 
 ```json
 {
-  "target_options": {
-    "quant_config": {
-      "format": {"matmulnbits_weights_prepacked": 0}
-    }
-  },
   "drafter_options": {
     "shared_weights": {
       "embedding": "required",
@@ -840,12 +827,10 @@ leaving the base profile's `provider_options` array and `engine`, `search`, and
 }
 ```
 
-Raw target layout plus target-only fpA/intB session selection follows PR #2585
-and avoids one offline-prepacked-layout obstacle to sharing. It does not by
-itself guarantee adoption: the actual head format, boundary dtype, target tying,
-and INT8 embedding adoption must still pass validation. Keep the target's INT8
-embedding requirement; fail rather than downgrade it to satisfy sharing. Some
-compatible prepacked exports can share already and need not switch to raw layout.
+Offline packing follows the explicit per-op target settings; runtime flags do not force
+raw initializer storage. Sharing is checked against the actual saved head layout,
+boundary dtype, target tying, and INT8 embedding adoption. Keep the target's INT8
+embedding requirement; fail rather than downgrade it to satisfy sharing.
 The runtime flags above select kernels independently of the still-enabled target
 fusion; DFlash2's session does not inherit the target's fpA/intB setting.
 
@@ -969,9 +954,10 @@ target/drafter/runtime envelope.
 | `block_size`, `op_types_to_quantize` | Target `quant_config.weights` fields |
 | `is_symmetric`, `accuracy_level` | Target `quant_config.weights.symmetric` and `weights.accuracy_level` |
 | `algo_config`, `nodes_to_exclude` | Target `quant_config.weights.method` plus generated `weights.overrides` entries; exclusions precede generated preset rules so they stay unconditional |
-| `matmulnbits_weights_prepacked`, `use_qdq` | Target `quant_config.format` fields |
+| `use_qdq` | Target `quant_config.format.use_qdq` |
+| `matmulnbits_weights_prepacked`, `qmoe_weights_prepacked` | Preserved; map to `format.matmulnbits_weights_prepacked` and `moe.weights_prepacked` |
 | `enable_cuda_fpa_intb_gemm` | `runtime_config.model.decoder.session_options["ep.cuda.fpa_intb_gemm"]` |
-| `moe_quant_type`, `qmoe_block_size`, `qmoe_weights_prepacked` | Target `quant_config.moe` fields |
+| `moe_quant_type`, `qmoe_block_size` | Target `quant_config.moe` fields |
 | `use_8bits_moe` | Deprecated `moe_quant_type` alias; unchanged |
 | `use_paged_attention`, `paged_block_size` | Target `attention.implementation` and `attention.paged.block_size` |
 | `kv_cache_quant_scheme`, `kv_cache_scale_file` | Target `attention.kv_cache` fields |
@@ -992,9 +978,15 @@ target/drafter/runtime envelope.
 | `max_draft_tokens` | Runtime `speculative.max_draft_tokens` |
 | `max_batch_size`, `max_scheduled_tokens`, `num_blocks`, `gpu_utilization_factor` | Runtime `engine.dynamic_batching` fields |
 | `paged_chunk_size` | Runtime `search.chunk_size` |
-| `enable_cuda_graph`, `use_device_allocator_for_initializers` | Runtime decoder session/provider settings |
+| `enable_cuda_graph` | Runtime decoder session/provider settings |
+| `use_device_allocator_for_initializers` | Preserved, default `false`; paged Qwen3.8 sessions enable it automatically |
 | Olive `search` | Runtime `search` |
 | Any other `extra_options` key | No canonical destination yet; see rule 8 |
+
+Target and DFlash2 gate/up fusion both default to `false` and support explicit fusion
+controls. The `use_device_allocator_for_initializers` extra option remains supported
+and opt-in (default `false`), except that paged Qwen3.8 sessions enable it automatically.
+Explicit per-op packing fields select the target layout independently.
 
 Normalization rules:
 
@@ -1064,7 +1056,7 @@ and any later vision artifacts when packaging the result.
 2. Adapt MTP/DFlash2/DSpark to isolated policies and resolve cross-model graph
    requirements before export. Reject capabilities not implemented by each adapter.
   Reuse PR #2579's tensor-adoption mechanism with per-tensor sharing policies,
-  and PR #2585's target fusion path with independent per-model optimization flags.
+  and PR #2585's target fusion path with opt-in target and DFlash2 fusion.
 3. Add runtime fragment loading, validation, and finalization after composite
    model configuration is complete. Keep the existing runtime hierarchy.
 4. Integrate Olive fields, resources, cache identity, and typed forwarding.
@@ -1105,7 +1097,7 @@ feature, not merely a rename of configuration keys.
   private storage. Cover INT8 embeddings, target tying, QDQ, native FP8 heads,
   prepacked incompatibility, and distinct learned MTP heads without assuming
   every combination supports adoption.
-- Fusion tests for independent target/drafter flags, legacy mappings, one fused
+- Fusion tests for default-off target/drafter behavior, explicit opt-in, one fused
   projection plus split, invalid shapes/adapters, and exclusion/override conflicts.
   Fusion can change quantization or kernel accumulation; compare numerical outputs
   and validate quality/acceptance rather than assuming bit-identical generation.

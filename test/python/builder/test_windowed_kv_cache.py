@@ -36,6 +36,8 @@ sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
+    if f"models.builders.{module_name}" in sys.modules:
+        return sys.modules[f"models.builders.{module_name}"]
     spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"models.builders.{module_name}"] = module
@@ -200,7 +202,9 @@ def _make_shape_model(ep, local_layers=()):
     model.context_length_attrs["window_kv_cache"] = True
     model.use_paged_attention = False
     model.window_size = 128
-    model.layer_types = ["sliding_attention" if local_layers and layer_id in local_layers else "full_attention" for layer_id in range(2)]
+    model.layer_types = [
+        "sliding_attention" if local_layers and layer_id in local_layers else "full_attention" for layer_id in range(2)
+    ]
     return model
 
 

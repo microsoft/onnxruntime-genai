@@ -11,6 +11,7 @@ import os
 
 import onnx_ir as ir
 import torch
+from builder_config import serialize_genai_config
 
 class WhisperEncoder(Model):
     # Each Whisper encoder layer is typically defined as:
@@ -990,4 +991,4 @@ class WhisperModel(Model):
         }
 
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
-            json.dump(genai_config, f, indent=4)
+            f.write(serialize_genai_config(genai_config))

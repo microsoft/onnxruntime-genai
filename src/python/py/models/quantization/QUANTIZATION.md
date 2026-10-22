@@ -18,14 +18,17 @@ all *round-to-nearest* (RTN) — none of them use calibration data or error feed
 
 The experimental builder envelope uses `target_options.quant_config` and
 `drafter_options.quant_config`. Numeric policy remains in `weights` and `moe`;
-QDQ and packing belong to `format` because they change the exported graph or
-stored bytes. `runtime` remains the compatibility key emitted by
-`QuantConfig.to_dict()`; the builder envelope translates it to canonical
-`format` without changing the public serializer.
+QDQ is configured through `format` because it changes the exported graph.
+Packing is selected explicitly for the deployment target, without inspecting the
+export host GPU. `runtime` remains the compatibility
+key emitted by `QuantConfig.to_dict()`; the builder envelope translates it to
+canonical `format` without changing the public serializer. Internal packing
+fields can be supplied as `moe.weights_prepacked` and
+`format.matmulnbits_weights_prepacked`.
 
 Target options reject an explicit checkpoint policy because target loaders do
 not implement both paths. Qwen MTP supports `preserve` and `requantize` when
-loading its tensors.
+loading its tensors; Qwen3.8 MTP currently rejects `requantize` explicitly.
 
 Typed overrides support preset or exact-name selection, and exclusions require
 exact names. Typed and exclusion rules share ordered first-match resolution;
@@ -140,7 +143,8 @@ orthogonal post-pass over the quantized `MatMulNBits` nodes (see
 `[N, K / block_size, block_size * bits / 8]` and setting the node attribute
 `weight_prepacked = 1` (SM80/Ampere) or `2` (SM90/Hopper).
 
-Enable it with `--extra_options matmulnbits_weights_prepacked=1` (SM80) or `=2` (SM90).
+Packing is controlled by `matmulnbits_weights_prepacked`: `0` (default) retains
+raw weights, `1` targets SM80, and `2` targets exact SM90 (not Blackwell). Other EPs retain raw weights.
 A node is prepacked only when the fpA_intB kernel supports it: symmetric weights, bits
 in {4, 8}, `block_size` supported by the target layout (SM80 → {32, 64, 128}, SM90 →
 {64, 128}), `K % block_size == 0`, and `N` aligned to the kernel tile (`N % 32` for
@@ -148,7 +152,14 @@ int8, `N % 64` for int4). Ineligible nodes (e.g. an `N = 32` MoE router) keep th
 blockwise layout. Eligible prepacked nodes select the fpA-intB path automatically.
 `ORT_FPA_INTB_GEMM=1` or the equivalent `ep.cuda.fpa_intb_gemm=1` session option is
 only needed to select that kernel family for nodes left in raw layout; the builder
-emits the session option automatically for prepacked exports.
+emits the session option automatically when an offline packing mode is selected.
+An export with no eligible nodes succeeds without changing its raw weights.
+
+Integer CUDA QMoE uses `qmoe_weights_prepacked=-1` (default) or `1` for its
+CUTLASS layout, and `0` for raw storage. Other providers retain their encodings.
+NVFP4 uses `-1`/`0` for legacy N-packed storage and requires explicit `1` for
+new K-packed storage; it never opts into that contract from host GPU detection.
+FP8 block weights remain in their native checkpoint layout.
 
 ## QMoE expert-weight quantization
 
