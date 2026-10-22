@@ -7,6 +7,8 @@
 #include "request_index.h"
 #include "sequence_positions.h"
 
+#include <numeric>
+
 namespace Generators {
 
 Scheduler::Scheduler(std::shared_ptr<Model> model)
@@ -137,12 +139,23 @@ bool StaticBatchScheduler::HasPendingRequests() const {
 }
 
 DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
+    : Scheduler{model}, model_{model}, cache_manager_{cache_manager}, preemption_enabled_{model->config_->engine.dynamic_batching->enable_recompute_preemption} {
+  if (preemption_enabled_ && !cache_manager_->SupportsRecomputePreemption()) {
+    throw std::runtime_error(
+        "Recompute preemption requires full-attention paged KV without fixed or auxiliary state.");
+  }
+  const auto& config = *model_->config_->engine.dynamic_batching;
+  if (preemption_enabled_ &&
+      (config.max_preemptions_per_step == 0 || config.min_decode_steps_before_preemption == 0)) {
+    throw std::invalid_argument("Recompute preemption limits must be positive.");
+  }
+}
 
 void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
   requests_pool_.reserve(requests_pool_.size() + 1);
   auto sampling_state = CreateSamplingState(*request);
   request->CommitSamplingState(std::move(sampling_state));
+  request->last_serviced_step_ = committed_step_index_;
   requests_pool_.push_back(std::move(request));
 }
 
@@ -164,6 +177,146 @@ void DynamicBatchScheduler::DetachRequestForTeardown(
 ScheduledRequests DynamicBatchScheduler::Schedule() {
   throw std::logic_error(
       "Dynamic batching requires transactional step planning.");
+}
+
+void DynamicBatchScheduler::OnStepCommitted(const StepPlan& plan) noexcept {
+  if (!preemption_enabled_) {
+    return;
+  }
+  ++committed_step_index_;
+  for (const auto& entry : plan.requests) {
+    entry.request->last_serviced_step_ = committed_step_index_;
+    if (entry.request == preemption_beneficiary_.lock()) {
+      preemption_beneficiary_.reset();
+    }
+  }
+}
+
+PreemptionProbeBuilder::PreemptionProbeBuilder(
+    std::span<const RequestStepPlan> candidates, size_t resident_capacity) {
+  resident_candidates_.reserve(
+      std::min(candidates.size(), resident_capacity));
+  for (const auto& entry : candidates) {
+    if (!entry.newly_admitted) {
+      if (resident_candidates_.size() >= resident_capacity) {
+        throw StepPlanningConsistencyError{
+            "Preemption candidates exceed committed cache residency."};
+      }
+      resident_candidates_.push_back(entry);
+    }
+  }
+}
+
+StepPlan PreemptionProbeBuilder::Build(
+    const StepPlan& source, const RequestStepPlan& beneficiary) const {
+  StepPlan probe;
+  probe.transaction_id = source.transaction_id;
+  probe.scheduled_request_limit = source.scheduled_request_limit;
+  probe.requests.reserve(1 + resident_candidates_.size());
+  probe.requests.push_back(beneficiary);
+  for (const auto& entry : resident_candidates_) {
+    if (entry.request_id != beneficiary.request_id) {
+      probe.requests.push_back(entry);
+    }
+  }
+  return probe;
+}
+
+std::vector<std::shared_ptr<Request>> DynamicBatchScheduler::PlanPreemption(
+    StepPlan& plan, std::span<const RequestStepPlan> candidates, StepPlanningResult& result) {
+  if (!result.capacity_deferred || result.unserviceable_request_id) {
+    return {};
+  }
+  const auto contains = [](const StepPlan& value, const void* request_id) {
+    return std::any_of(value.requests.begin(), value.requests.end(),
+                       [request_id](const RequestStepPlan& entry) {
+                         return entry.request_id == request_id;
+                       });
+  };
+  if (const auto pending = preemption_beneficiary_.lock();
+      pending && contains(plan, pending.get())) {
+    return {};
+  }
+  const auto residents = cache_manager_->AllocatedRequests();
+  std::vector<size_t> victim_order(residents.size());
+  std::iota(victim_order.begin(), victim_order.end(), 0);
+  std::stable_sort(victim_order.begin(), victim_order.end(), [&](size_t left, size_t right) {
+    const bool left_idle = IsTurnComplete(residents[left]->status_);
+    const bool right_idle = IsTurnComplete(residents[right]->status_);
+    if (left_idle != right_idle) {
+      return left_idle;
+    }
+    if (residents[left]->last_serviced_step_ != residents[right]->last_serviced_step_) {
+      return residents[left]->last_serviced_step_ > residents[right]->last_serviced_step_;
+    }
+    return left > right;
+  });
+  const auto& config = *model_->config_->engine.dynamic_batching;
+  const PreemptionProbeBuilder probe_builder{candidates, residents.size()};
+
+  for (const auto& beneficiary : candidates) {
+    if (contains(plan, beneficiary.request_id)) {
+      continue;
+    }
+    auto probe = probe_builder.Build(plan, beneficiary);
+    auto probe_result = cache_manager_->PlanStepResources(probe);
+    if (contains(probe, beneficiary.request_id) && !probe_result.unserviceable_request_id) {
+      // The existing committed-epoch ordering handles token-row pressure. If prioritizing this
+      // row alone suffices, evicting anyone would be unnecessary.
+      continue;
+    }
+
+    std::vector<std::shared_ptr<Request>> eligible_victims;
+    eligible_victims.reserve(residents.size());
+    for (size_t index : victim_order) {
+      const auto& victim = residents[index];
+      if (victim.get() == beneficiary.request_id || !victim->CanSuspendForRecompute()) {
+        continue;
+      }
+      if (!IsTurnComplete(victim->status_)) {
+        if (victim->last_serviced_step_ < beneficiary.request->last_serviced_step_) {
+          continue;
+        }
+        const bool earned_quantum =
+            victim->decode_steps_since_admission_ >= config.min_decode_steps_before_preemption;
+        // A globally stalled batch may have exhausted blocks before paying the full quantum.
+        // Require at least one committed output since admission even in that liveness escape.
+        if (!earned_quantum && (result.executable || !victim->generated_since_admission_)) {
+          continue;
+        }
+      }
+      eligible_victims.push_back(victim);
+    }
+    const size_t victim_limit =
+        std::min(config.max_preemptions_per_step, eligible_victims.size());
+    std::vector<std::shared_ptr<Request>> victims;
+    victims.reserve(victim_limit);
+    // A useless early owner must not hide a useful later victim. Rotate the policy order rather
+    // than enumerate subsets: at most eligible_victims.size() * victim_limit release probes.
+    // Keep cumulative sets because shared owners may reclaim capacity only when released jointly.
+    for (size_t first = 0; first < eligible_victims.size(); ++first) {
+      victims.clear();
+      for (size_t offset = 0; offset < victim_limit; ++offset) {
+        victims.push_back(eligible_victims[(first + offset) % eligible_victims.size()]);
+        probe = probe_builder.Build(plan, beneficiary);
+        probe.requests.erase(
+            std::remove_if(probe.requests.begin(), probe.requests.end(), [&](const RequestStepPlan& entry) {
+              return std::any_of(victims.begin(), victims.end(), [&](const auto& request) {
+                return request.get() == entry.request_id;
+              });
+            }),
+            probe.requests.end());
+        probe_result = cache_manager_->PlanStepAfterReleasing(probe, victims);
+        if (contains(probe, beneficiary.request_id) && !probe_result.unserviceable_request_id) {
+          plan = std::move(probe);
+          result = probe_result;
+          result.capacity_deferred = true;
+          return victims;
+        }
+      }
+    }
+  }
+  return {};
 }
 
 StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
@@ -263,7 +416,26 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   budget_candidates.reserve(candidates.size());
   for (const auto& candidate : candidates)
     budget_candidates.push_back(candidate.budget);
-  const auto order = DecodeFirstCandidateOrder(budget_candidates);
+  auto order = DecodeFirstCandidateOrder(budget_candidates);
+  if (preemption_enabled_) {
+    auto pending = preemption_beneficiary_.lock();
+    if (pending &&
+        (!IsExecutable(pending->status_) ||
+         pending->CurrentTurnId() != preemption_beneficiary_turn_id_)) {
+      preemption_beneficiary_.reset();
+      pending.reset();
+    }
+    // Ties keep the existing decode-first order. New arrivals start at the current committed epoch,
+    // so they cannot continually jump ahead of a suspended or otherwise waiting Request.
+    std::stable_sort(order.begin(), order.end(), [&](size_t left, size_t right) {
+      if (pending && candidates[left].entry.request != candidates[right].entry.request) {
+        if (candidates[left].entry.request == pending) return true;
+        if (candidates[right].entry.request == pending) return false;
+      }
+      return candidates[left].entry.request->last_serviced_step_ <
+             candidates[right].entry.request->last_serviced_step_;
+    });
+  }
   plan.requests.reserve(candidates.size());
   for (size_t candidate_index : order) {
     auto entry = candidates[candidate_index].entry;
@@ -279,7 +451,14 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       dynamic_batching.max_scheduled_tokens,
       dynamic_batching.max_batch_size);
 
+  const auto provisional_requests =
+      preemption_enabled_ ? plan.requests : std::vector<RequestStepPlan>{};
   auto result = cache_manager_->PlanStepResources(plan);
+  auto preempted_requests =
+      preemption_enabled_ ? PlanPreemption(plan, provisional_requests, result)
+                          : std::vector<std::shared_ptr<Request>>{};
+  const auto intended_beneficiary =
+      preempted_requests.empty() ? nullptr : plan.requests.front().request;
   const auto record_deferred_prefix_matches = [&] {
     if (!result.capacity_deferred) {
       return;
@@ -434,10 +613,20 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         entry.unprocessed_token_count != 0;
   }
   try {
+    for (const auto& request : preempted_requests) {
+      cache_manager_->ValidateRewind(request);
+    }
     for (const auto& entry : plan.requests) {
       if (entry.prefix_match) {
         entry.request->StagePrefixAdoption(entry.prefix_match->token_count);
       }
+    }
+    for (const auto& request : preempted_requests) {
+      cache_manager_->CommitPreemption(request);
+    }
+    if (!preempted_requests.empty()) {
+      preemption_beneficiary_ = intended_beneficiary;
+      preemption_beneficiary_turn_id_ = intended_beneficiary->CurrentTurnId();
     }
   } catch (...) {
     for (const auto& entry : plan.requests) {

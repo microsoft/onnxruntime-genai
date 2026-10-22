@@ -1749,6 +1749,74 @@ def test_dflash2_snapshot_limits_in_runtime_config_and_profiles(in_profile, valu
 
 
 @pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_recompute_preemption_policy_round_trip(in_profile, enabled):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"num_blocks": 32}}}
+    baseline = copy.deepcopy(generated)
+    policy = {
+        "enable_recompute_preemption": enabled,
+        "max_preemptions_per_step": 2,
+        "min_decode_steps_before_preemption": 8,
+    }
+    runtime = {"engine": {"dynamic_batching": policy}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "preemption", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    effective = normalize_builder_config("fp16", "cuda", runtime_config=json.loads(json.dumps(runtime)))
+    assert effective.version == 2
+    assert effective.runtime_config == runtime
+    result = apply_runtime_config(generated, effective.runtime_config)
+    assert json.loads(json.dumps(result)) == result
+    if in_profile:
+        assert result["runtime_profiles"] == runtime["runtime_profiles"]
+        assert result["engine"] == generated["engine"]
+    else:
+        assert result["engine"]["dynamic_batching"] == {"num_blocks": 32, **policy}
+    assert generated == baseline
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize("value", [0, 1, 1.0, "true", "false", None, [], {}])
+def test_recompute_preemption_requires_strict_boolean(in_profile, value):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {}}}
+    runtime = {"engine": {"dynamic_batching": {"enable_recompute_preemption": value}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "preemption", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    with pytest.raises(ValueError, match="enable_recompute_preemption must be a boolean"):
+        apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize("field", ["max_preemptions_per_step", "min_decode_steps_before_preemption"])
+@pytest.mark.parametrize("value", [1, 8, 2_147_483_647, 0, -1, 1.5, 2**31, True, False, "8", None])
+def test_recompute_preemption_limits_match_runtime_int32_bounds(in_profile, field, value):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {}}}
+    runtime = {"engine": {"dynamic_batching": {field: value}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "preemption", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 2_147_483_647:
+        result = apply_runtime_config(generated, runtime)
+        if in_profile:
+            assert result["runtime_profiles"] == runtime["runtime_profiles"]
+        else:
+            assert result["engine"]["dynamic_batching"][field] == value
+    else:
+        with pytest.raises(ValueError, match=field):
+            apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
 @pytest.mark.parametrize(
     "model,max_draft_tokens,error",
     [

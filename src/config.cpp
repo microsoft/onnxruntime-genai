@@ -2651,6 +2651,17 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value < 0)
         throw std::out_of_range("dflash2_max_snapshots must be >= 0");
       v_->dflash2_max_snapshots = static_cast<size_t>(parsed_value);
+    } else if (name == "enable_recompute_preemption") {
+      v_->enable_recompute_preemption = JSON::Get<bool>(value);
+    } else if (name == "max_preemptions_per_step" ||
+               name == "min_decode_steps_before_preemption") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range(std::string{name} + " must be > 0");
+      if (name == "max_preemptions_per_step")
+        v_->max_preemptions_per_step = static_cast<size_t>(parsed_value);
+      else
+        v_->min_decode_steps_before_preemption = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2740,6 +2751,10 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
   explicit RuntimeProfileDynamicBatching_Element(Config::RuntimeProfile::Overlay::DynamicBatching& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "enable_recompute_preemption") {
+      v_.enable_recompute_preemption = JSON::Get<bool>(value);
+      return;
+    }
     const auto parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
     if (parsed < 0 || (parsed == 0 && name != "dflash2_max_snapshots")) {
       throw std::out_of_range(std::string{name} +
@@ -2753,6 +2768,10 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
       v_.max_scheduled_tokens = static_cast<size_t>(parsed);
     } else if (name == "dflash2_max_snapshots") {
       v_.dflash2_max_snapshots = static_cast<size_t>(parsed);
+    } else if (name == "max_preemptions_per_step") {
+      v_.max_preemptions_per_step = static_cast<size_t>(parsed);
+    } else if (name == "min_decode_steps_before_preemption") {
+      v_.min_decode_steps_before_preemption = static_cast<size_t>(parsed);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -3027,6 +3046,8 @@ void ValidateRuntimeProfiles(const Config& config) {
     }
     if (!profile.overlay.model.decoder_filename && !batching.num_blocks && !batching.max_batch_size &&
         !batching.max_scheduled_tokens && !batching.dflash2_max_snapshots && !search.chunk_size &&
+        !batching.enable_recompute_preemption && !batching.max_preemptions_per_step &&
+        !batching.min_decode_steps_before_preemption &&
         !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
@@ -3433,7 +3454,9 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   }
   const auto& batching = selected->overlay.dynamic_batching;
   const bool has_batching_overlay = batching.num_blocks || batching.max_batch_size ||
-                                    batching.max_scheduled_tokens || batching.dflash2_max_snapshots;
+                                    batching.max_scheduled_tokens || batching.dflash2_max_snapshots ||
+                                    batching.enable_recompute_preemption || batching.max_preemptions_per_step ||
+                                    batching.min_decode_steps_before_preemption;
   if (has_batching_overlay && !config.engine.dynamic_batching) {
     throw std::runtime_error("runtime profile '" + selected->id +
                              "' requires engine.dynamic_batching in the base config");
@@ -3448,6 +3471,13 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     if (batching.max_batch_size) effective.max_batch_size = *batching.max_batch_size;
     if (batching.max_scheduled_tokens) effective.max_scheduled_tokens = *batching.max_scheduled_tokens;
     if (batching.dflash2_max_snapshots) effective.dflash2_max_snapshots = *batching.dflash2_max_snapshots;
+    if (batching.enable_recompute_preemption) {
+      effective.enable_recompute_preemption = *batching.enable_recompute_preemption;
+    }
+    if (batching.max_preemptions_per_step) effective.max_preemptions_per_step = *batching.max_preemptions_per_step;
+    if (batching.min_decode_steps_before_preemption) {
+      effective.min_decode_steps_before_preemption = *batching.min_decode_steps_before_preemption;
+    }
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;

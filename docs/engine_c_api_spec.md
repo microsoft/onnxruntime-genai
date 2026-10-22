@@ -645,11 +645,17 @@ not processed any model tokens may be restarted while nonresident; otherwise the
 and device-specific continuous-decoding rules apply. Static batching supports continuous decoding
 only when its resident batch contains one Request.
 
+An explicitly enabled recompute-preemption Engine can also mark a formerly resident Request for
+cache replay. Cancellation preserves this marker: after its terminal event is drained, the next
+Turn can re-admit and rebuild the full retained context even though earlier Turns processed model
+tokens. Automatic eviction of an idle Turn-complete Request has the same replay behavior.
+
 `CancelTurn` behavior:
 
 | Request/Turn state | Result |
 | --- | --- |
 | ID matches queued or active Turn | Cancel synchronously and set `out_cancelled = true` |
+| ID matches a suspended Turn | Cancel with the same logical-token and usage preservation |
 | ID identifies the completed Turn | Success with `false` |
 | ID is stale, unknown, or newer than the current Turn | Success with `false`; never cancel another Turn |
 | Request has never started or is closed | Error |
@@ -680,13 +686,16 @@ still returns its stored fatal error.
 RequestCreated/Unassigned
    | BeginTurn -> turn_id
    v
-Assigned/Active -- Token event -------------------------------+
-   |                                                          |
-   +-- Token | TurnFinished(reason) --> TurnComplete           |
-   |                                      |                   |
-   +-- CancelTurn(same turn_id) -----------+                   |
-                                          | BeginTurn          |
-                                          +-------------------+
+Assigned -- admission --> Active -- Token event --> Active
+
+Active -- internal preemption --> Suspended
+Active <-- automatic re-admission/replay (same turn_id) -- Suspended
+
+Assigned/Active/Suspended -- CancelTurn(same turn_id) --> TurnComplete
+Active -- Token | TurnFinished(reason) --> TurnComplete
+
+TurnComplete -- internal idle eviction --> TurnComplete/CacheReplay
+TurnComplete[/CacheReplay] -- BeginTurn -> next turn_id --> Assigned
 
 TurnComplete -- RewindToStartOfTurn(turn_id) --> TurnComplete/Replaying
                                                        |
@@ -696,6 +705,13 @@ TurnComplete -- RewindToStartOfTurn(turn_id) --> TurnComplete/Replaying
 
 Any state -- Close --> Closed
 ```
+
+`Suspended` is an internal state of an unfinished Turn. Automatic re-admission and cache replay
+resume that same Turn without `BeginTurn`; `BeginTurn` remains invalid until the Turn completes
+or is canceled and its terminal event is drained. Cancellation completes the same suspended Turn
+and preserves its cache-replay marker. Idle eviction never reopens a completed Turn: the Request
+remains `TurnComplete` with a cache-replay marker, and a later `BeginTurn` starts a new Turn.
+`CacheReplay` in the diagram denotes that marker, not a separate Request status.
 
 There is no Request `Continue` operation. Initial input, tool results, and later user input all use
 `BeginTurn`.
@@ -707,7 +723,8 @@ There is no Request `Continue` operation. Initial input, tool results, and later
 - every event for that Request has been delivered by `OgaEngineRun`;
 - `turn_id` identifies a previously begun Turn that remains in the Request's active branch; and
 - the Request remains resident, is a canceled never-admitted Request with scheduler ownership,
-  or was already rewound and has not begun another Turn.
+  was already rewound and has not begun another Turn, or has an explicit recompute-preemption
+  replay marker after completing/canceling its Turn.
 
 Queued and active Turns are rejected; rewind never implicitly cancels a Turn. A closed Request,
 failed Request, unknown Turn ID, other nonresident Request, and a Request with an undelivered
@@ -746,6 +763,10 @@ rewinding.
 Classic `Generator::RewindToLength` remains a separate Generator API. Dynamic Engine transaction
 rollback also remains separate: rollback restores an in-flight step, whereas Request rewind acts
 only after a Turn and deliberately evicts committed model state for replay.
+
+Recompute preemption is separate from completed-Turn rewind. It never truncates token history,
+changes Turn identity, or resets Search/RNG state. Its supported layouts and default-off
+configuration are described in [Paged Attention Engine](paged_attention_engine.md#recompute-preemption).
 
 ## Event production and delivery
 

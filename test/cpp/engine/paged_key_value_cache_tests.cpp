@@ -366,6 +366,70 @@ TEST_F(PagedKeyValueCacheTest, SharedReclaimablePrefixIsChargedOnceAcrossAdmissi
   EXPECT_TRUE(ValidateCacheInvariants(cache_->Snapshot()).empty());
 }
 
+TEST_F(PagedKeyValueCacheTest, PlannedReleaseChargesSharedPrefixOnceAcrossAdmissions) {
+  model_->config_->engine.dynamic_batching->max_batch_size = 3;
+  model_->config_->engine.dynamic_batching->prefix_caching = true;
+  cache_ = MakePagedCache(model_);
+
+  const std::array<int32_t, 4> prefix{2, 3, 4, 5};
+  auto source = AddCommittedRequest(prefix);
+  cache_->SealCommittedBlocks(source.get(), prefix);
+  const auto before = cache_->Snapshot();
+  ASSERT_EQ(before.free_blocks, 2u);
+  ASSERT_EQ(before.blocks.size(), 1u);
+  ASSERT_EQ(before.blocks.front().ref_count, 2u);
+
+  const std::array<int32_t, 5> prompt{2, 3, 4, 5, 6};
+  StepPlan plan;
+  std::array<std::shared_ptr<Request>, 3> pending;
+  for (size_t index = 0; index < pending.size(); ++index) {
+    pending[index] = CreateRequestWithPrompt(assign_target_, prompt);
+    auto entry = PlanEntry(pending[index], /*target_cache_slots=*/5,
+                           /*newly_admitted=*/true,
+                           /*whole_sequence_cache_slots=*/5);
+    auto match = cache_->MatchPrefix(prompt, prompt.size() - 1);
+    ASSERT_EQ(match.token_count, prefix.size());
+    entry.prefix_match =
+        std::make_shared<const PrefixCacheMatch>(std::move(match));
+    plan.requests.push_back(std::move(entry));
+  }
+  auto after_release_plan = plan;
+  const std::array<const void*, 1> released_requests{source.get()};
+
+  const auto result = cache_->PlanStepResources(plan, released_requests);
+
+  ASSERT_TRUE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  ASSERT_EQ(plan.requests.size(), 2u);
+  EXPECT_EQ(plan.requests[0].request, pending[0]);
+  EXPECT_EQ(plan.requests[1].request, pending[1]);
+  EXPECT_TRUE(cache_->OwnsRequest(source.get()));
+  EXPECT_EQ(cache_->Snapshot().free_blocks, before.free_blocks);
+  EXPECT_EQ(cache_->Snapshot().blocks.front().ref_count, 2u);
+
+  cache_->Remove(source);
+  const auto after_release_result = cache_->PlanStepResources(after_release_plan);
+  EXPECT_EQ(after_release_result.executable, result.executable);
+  EXPECT_EQ(after_release_result.capacity_deferred, result.capacity_deferred);
+  ASSERT_EQ(after_release_plan.requests.size(), plan.requests.size());
+  for (size_t index = 0; index < plan.requests.size(); ++index) {
+    EXPECT_EQ(after_release_plan.requests[index].request, plan.requests[index].request);
+  }
+
+  const std::array reservation_requests{
+      PagedCacheReservationRequest{pending[0].get(), 5, true, 5,
+                                   plan.requests[0].prefix_match.get()},
+      PagedCacheReservationRequest{pending[1].get(), 5, true, 5,
+                                   plan.requests[1].prefix_match.get()},
+  };
+  auto reservation = cache_->Reserve(reservation_requests);
+  reservation.Commit();
+  const auto after = cache_->Snapshot();
+  EXPECT_EQ(after.free_blocks, 0u);
+  EXPECT_EQ(after.requests.size(), 2u);
+  EXPECT_TRUE(ValidateCacheInvariants(after).empty());
+}
+
 TEST(PagedKeyValueCacheManifestTest, AllocatesOnlySparseLogicalLayersUsingDecoderBindings) {
   auto model = LoadSyntheticPagedModel();
   ASSERT_TRUE(model->config_->model.decoder.state_groups.has_value());

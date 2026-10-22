@@ -295,6 +295,14 @@ std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnap
     }
   }
 
+  if (request.status == RequestStatus::Suspended) {
+    if (!request.needs_cache_replay || !request.is_prefill ||
+        request.preemption_count == 0 ||
+        (request.processed_sequence_length != 0 && !request.prefix_adoption_staged)) {
+      add("Suspended Request " + id + " does not have a valid cache replay boundary.");
+    }
+  }
+
   if (IsTurnComplete(request.status)) {
     if (!request.has_current_turn) {
       add("Turn-complete Request " + id + " has no assigned turn id.");
@@ -305,6 +313,7 @@ std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnap
     // Cancellation is observed between Engine::Run calls and deliberately retains accepted input.
     // Fatal failure can likewise stop before all accepted input is processed.
     if (request.is_prefill &&
+        !request.needs_cache_replay &&
         request.finish_reason != GenerationFinishReason::Canceled &&
         request.finish_reason != GenerationFinishReason::Failed) {
       add("Turn-complete Request " + id +
@@ -391,13 +400,21 @@ std::vector<InvariantViolation> ValidateInvariants(const PagedCacheSnapshot& cac
   // Block tables exist only for known Requests: every block-owning id must be a Request we were
   // handed. (The reverse does not hold: an Assigned-but-unallocated Request owns no blocks yet.)
   std::set<const void*> known_requests;
+  std::set<const void*> suspended_requests;
   for (const auto& request : requests) {
     known_requests.insert(request.request_id);
+    if (request.status == RequestStatus::Suspended) {
+      suspended_requests.insert(request.request_id);
+    }
   }
   for (const auto& owner : cache.requests) {
     if (known_requests.find(owner.request_id) == known_requests.end()) {
       violations.push_back(InvariantViolation{
           "Cache holds a block table for unknown Request " + PtrId(owner.request_id) + "."});
+    }
+    if (suspended_requests.count(owner.request_id) != 0) {
+      violations.push_back(InvariantViolation{
+          "Cache holds a block table for suspended Request " + PtrId(owner.request_id) + "."});
     }
   }
 
