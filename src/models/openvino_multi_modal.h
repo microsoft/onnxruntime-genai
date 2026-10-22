@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <memory>
+#include <string>
+#include <unordered_map>
+
 #include "multi_modal.h"
 
 namespace Generators {
@@ -16,16 +20,16 @@ struct OpenVINOMultiModalModel : MultiModalLanguageModel {
   OpenVINOMultiModalModel(const OpenVINOMultiModalModel&) = delete;
   OpenVINOMultiModalModel& operator=(const OpenVINOMultiModalModel&) = delete;
 
-  OrtEnv& ort_env_;
+  OrtSession& GetVisionPipelineSession(const std::string& model_id) const;
 
-  // Session options for the host-side OpenVINO vision sub-model(s), built from the config's vision
-  // session options. Owned here so the vision merger can create its sessions.
+  // Session options for the host-side OpenVINO vision sub-model(s).
   std::unique_ptr<OrtSessionOptions> vision_session_options_ov_;
 
-  // Single-session vision model. Null for families that use a multi-stage vision pipeline
-  // (config.model.vision.pipeline), which the merger builds instead. Registered in session_info_ so the
-  // image processor can resolve the pixel_values input type.
+  // Single-session vision model. Registered so the image processor can resolve pixel_values type.
   std::unique_ptr<OrtSession> ov_vision_session_;
+
+  // Shared across generators and created through Model::CreateSession to support in-memory model data.
+  std::unordered_map<std::string, std::unique_ptr<OrtSession>> ov_vision_pipeline_sessions_;
 };
 
 inline const OpenVINOMultiModalModel* AsOpenVINOMultiModalModel(const Model& model) {
