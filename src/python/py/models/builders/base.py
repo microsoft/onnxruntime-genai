@@ -1241,6 +1241,7 @@ class Model:
         else:
             self.tied_quantized_embeddings = False
             self.tied_unquantized_embeddings = False
+        # make_embedding_lookup clears both flags if the loaded LM head cannot back the lookup.
 
     def is_lm_head_quantized(self):
         return (
@@ -1249,16 +1250,17 @@ class Model:
             and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
         )
 
-    def make_tied_quantized_embedding_input_names(self):
+    def make_tied_quantized_embedding_input_names(self, lm_head):
         # Quantized tied embeddings in make_embedding() consume lm_head weights using
-        # algorithm-specific naming.
+        # algorithm-specific naming. Returns (bits, block_size, weight, scales, zero points),
+        # all taken from `lm_head` so they cannot disagree.
         #
         # Reference for quantized input names that will be produced:
         # +------------+-------------+--------------------------------------+--------------------------+-------------------------------+
         # | Symmetry   | Algorithm   | Weight Input Name Format             | Scales Input Name Format | Zero-Points Input Name Format |
         # +------------+-------------+--------------------------------------+--------------------------+-------------------------------+
-        # | asymmetric | default     | *.MatMul.weight                      | N/A                      | N/A                           |
-        # | symmetric  | default     | *.MatMul.weight_Q4                   | *.MatMul.weight_scales   | N/A                           |
+        # | asymmetric | default     | *.MatMul.weight_Q4 or _Q8            | *.MatMul.weight_scales   | *.MatMul.weight_zero_points   |
+        # | symmetric  | default     | *.MatMul.weight_Q4 or _Q8            | *.MatMul.weight_scales   | N/A                           |
         # | asymmetric | rtn*        | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | *.MatMul.weight_zp            |
         # | symmetric  | rtn*        | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | N/A                           |
         # | asymmetric | k_quant*    | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | *.MatMul.weight_zp            |
@@ -1268,20 +1270,19 @@ class Model:
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
         # Pre-quantized lm_head (e.g. quant_auto): make_matmul_nbits registers weight under
-        # the MatMulNBits naming scheme rather than the to_nbits naming scheme. Return those
-        # names directly so make_embedding's GatherBlockQuantized references the right initializers.
-        # self.weights is the loaded model object (set in make_model before make_embedding runs).
-        wlm = getattr(getattr(self, "weights", None), "lm_head", None)
-        if wlm is not None and getattr(wlm, "qweight", None) is not None:
-            bits = wlm.bits
-            has_zeros = getattr(wlm, "qzeros", None) is not None
+        # the MatMulNBits naming scheme rather than the to_nbits naming scheme, and keeps the
+        # group size of its checkpoint.
+        if getattr(lm_head, "qweight", None) is not None:
+            has_zeros = getattr(lm_head, "qzeros", None) is not None
             return (
-                bits,
+                lm_head.bits,
+                int(lm_head.group_size),
                 "lm_head.MatMulNBits.qweight",
                 "lm_head.MatMulNBits.scales",
                 "lm_head.MatMulNBits.qzeros" if has_zeros else "",
             )
 
+        block_size = int(self.quant_attrs["matmul_block_size"])
         base_method = self.quantization_algo
         placement = self.matmul_mixed_precision
 
@@ -1295,10 +1296,11 @@ class Model:
         bits = resolve_dtype(last_matmul_type).bits if last_matmul_type else default_bits
         is_symmetric = self.quant_attrs["is_symmetric"]
 
-        if base_method == "rtn" or (base_method == "default" and bits != 4):
+        if base_method == "rtn":
             return (
                 bits,
-                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs['matmul_block_size']}",
+                block_size,
+                f"lm_head.MatMul.weight_Q{bits}G{block_size}",
                 "lm_head.MatMul.weight_scale",
                 "lm_head.MatMul.weight_zp" if not is_symmetric else "",
             )
@@ -1306,7 +1308,8 @@ class Model:
         if base_method == "k_quant":
             return (
                 bits,
-                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs['matmul_block_size']}",
+                block_size,
+                f"lm_head.MatMul.weight_Q{bits}G{block_size}",
                 "lm_head.MatMul.weight_scale",
                 "lm_head.MatMul.weight_zp",
             )
@@ -1315,9 +1318,10 @@ class Model:
         assert base_method == "default", "Unknown quantization algo config name detected"
         return (
             bits,
-            f"lm_head.MatMul.weight_Q{bits}" if is_symmetric else "lm_head.MatMul.weight",
-            "lm_head.MatMul.weight_scales" if is_symmetric else "",
-            "",
+            block_size,
+            f"lm_head.MatMul.weight_Q{bits}",
+            "lm_head.MatMul.weight_scales",
+            "" if is_symmetric else "lm_head.MatMul.weight_zero_points",
         )
 
     def make_genai_config(self, config, extra_kwargs, out_dir):
@@ -1974,6 +1978,10 @@ class Model:
         force_arch = 90 if prepack_mode == 2 else 80
         allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
         initializers = {init.name: init for init in model_proto.graph.initializer}
+        consumer_counts = {}
+        for node in model_proto.graph.node:
+            for name in node.input:
+                consumer_counts[name] = consumer_counts.get(name, 0) + 1
 
         candidates = 0
         prepacked = 0
@@ -1990,6 +1998,11 @@ class Model:
             if len(node.input) > 3 and node.input[3]:
                 continue
             if not all(key in attrs for key in ("bits", "block_size", "K", "N")):
+                continue
+            # Another reader of the weight (e.g. the tied embedding's GatherBlockQuantized)
+            # needs the raw blockwise layout, so the weight must stay unpacked.
+            if consumer_counts.get(node.input[1], 0) > 1:
+                print(f"Keeping '{node.input[1]}' in the raw layout because another node also reads it.")
                 continue
 
             candidates += 1
@@ -3139,15 +3152,17 @@ class Model:
         # Tied quantized: lm_head weight -> Reshape -> GatherBlockQuantized [-> Slice]
         # Tied float:     lm_head weight -> Transpose -> Gather
         # Separate:       embedding weight -------------> Gather
-        can_reuse_lm_head = getattr(lm_head, "can_reuse_as_embedding", True)
+        if not getattr(lm_head, "can_reuse_as_embedding", True):
+            # The loader's LM head cannot back a lookup, so the graph is untied after all.
+            self.tied_quantized_embeddings = False
+            self.tied_unquantized_embeddings = False
 
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and the export model
         # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
-        if self.tied_quantized_embeddings and can_reuse_lm_head:
-            bits, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = self.make_tied_quantized_embedding_input_names()
-            # A pre-quantized LM head keeps the group size of its checkpoint.
-            is_prequantized = getattr(lm_head, "qweight", None) is not None
-            block_size = int(lm_head.group_size if is_prequantized else self.quant_attrs["matmul_block_size"])
+        if self.tied_quantized_embeddings:
+            bits, block_size, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = (
+                self.make_tied_quantized_embedding_input_names(lm_head)
+            )
 
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
@@ -3197,7 +3212,7 @@ class Model:
                 gather_output = f"{slice_name}/output_0"
 
         # Use Transpose + Gather for tied embeddings for float embedding layers
-        elif self.tied_unquantized_embeddings and can_reuse_lm_head:
+        elif self.tied_unquantized_embeddings:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(
