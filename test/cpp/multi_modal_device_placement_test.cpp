@@ -46,6 +46,14 @@ TEST(MultiModalDevicePlacementTests, SessionCanAccessOnlyHostOrItsOwnMemory) {
   EXPECT_FALSE(Generators::SessionCanAccess(cpu, gpu));
 }
 
+TEST(MultiModalDevicePlacementTests, SessionCanAccessHostAccessibleDeviceMemory) {
+  auto& cpu = *Generators::GetDeviceInterface(Generators::DeviceType::CPU);
+  // OpenVINO allocates from the CPU interface and QNN from shared memory: host memory that a CPU
+  // session writes in place, so binding it needs no staging copy.
+  EXPECT_TRUE(Generators::SessionCanAccess(cpu, *Generators::GetDeviceInterface(Generators::DeviceType::OpenVINO)));
+  EXPECT_TRUE(Generators::SessionCanAccess(cpu, *Generators::GetDeviceInterface(Generators::DeviceType::QnnHtp)));
+}
+
 TEST(MultiModalDevicePlacementTests, StateDefaultsToTheModelDevices) {
   auto model = std::make_shared<PlacementTestModel>();
   auto params = std::make_shared<Generators::GeneratorParams>(*model);

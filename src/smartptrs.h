@@ -223,7 +223,7 @@ struct StateUpdateReplayDesc {
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 10;
+inline constexpr uint32_t kDeviceInterfaceVersion = 11;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -381,6 +381,11 @@ struct DeviceInterface {
   // True when ReplayStateUpdates can reconstruct a partially accepted fixed-state transition.
   // Keep last for vtable ABI stability.
   virtual bool SupportsCompactStateReplay() const { return false; }
+  // True when a CPU session may be handed this interface's tensors directly (see SessionCanAccess):
+  // the CPU reads and writes them through their own pointer, and their OrtMemoryInfo names a CPU
+  // device. AMDGPU's pinned inputs fail the second test, since ORT tags them with the GPU.
+  // Keep last for vtable ABI stability.
+  virtual bool IsHostAccessible() const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
