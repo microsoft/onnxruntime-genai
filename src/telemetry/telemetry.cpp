@@ -3,6 +3,7 @@
 
 #include "telemetry.h"
 #include "device_info.h"
+#include "hardware_info.h"
 #include "telemetry_context.h"
 #include "telemetry_environment.h"
 #include "telemetry_redaction.h"
@@ -95,6 +96,7 @@ MAT::EventProperties MakeEvent(std::string event_name, EventPriority priority) {
   event.SetLatency(static_cast<MAT::EventLatency>(priority));
   event.SetPopsample(100.0);
   event.SetLevel(DIAG_LEVEL_REQUIRED);
+  event.SetProperty("TelemetryLayer", "onnxruntime_genai");
   return event;
 }
 
@@ -430,9 +432,12 @@ bool GenAiTelemetry::IsEnabled() const {
 }
 
 void GenAiTelemetry::SetEnabled(bool enabled) {
-  if (!telemetry_disabled_.load()) {
-    enabled_.store(enabled);
-  }
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  TelemetryInternal::ApplyTelemetryEnabledControl(
+      enabled, telemetry_disabled_, enabled_);
+#else
+  (void)enabled;
+#endif
 }
 
 uint32_t GenAiTelemetry::AllocateSessionId() {
@@ -518,6 +523,73 @@ void GenAiTelemetry::LogProcessInfo() {
   }
   // Allow a retry if telemetry was not live (or threw before emitting).
   if (!emitted) process_info_logged_.store(false);
+#endif
+}
+
+void GenAiTelemetry::LogHardwareInfo(uint32_t session_id) {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  bool claimed = false;
+  bool emitted = false;
+  RunLocked([&] {
+    if (hardware_info_logged_.load()) {
+      return;
+    }
+
+    auto summary = MakeEvent("HardwareInfo", EventPriority::Normal);
+    if (!PrepareSampledEvent(summary, app_session_guid_, session_id)) {
+      return;
+    }
+    const auto info = CollectHardwareInfo();
+    if (info.devices.empty()) {
+      return;
+    }
+
+    bool expected = false;
+    if (!hardware_info_logged_.compare_exchange_strong(expected, true)) {
+      return;
+    }
+    claimed = true;
+
+    summary.SetProperty("sessionId", static_cast<int64_t>(session_id));
+    summary.SetProperty("availableSystemMemoryMB", info.available_system_memory_mb);
+    summary.SetProperty("deviceCount", static_cast<int64_t>(info.devices.size()));
+    summary.SetProperty("inventoryTruncated", info.inventory_truncated);
+    impl_->logger->LogEvent(summary);
+
+    for (size_t index = 0; index < info.devices.size(); ++index) {
+      const auto& device = info.devices[index];
+      auto event = MakeEvent("HardwareDevice", EventPriority::Normal);
+      event.SetPopsample(TelemetryInternal::kModelSessionSampleRatePercent);
+      event.SetProperty("sessionId", static_cast<int64_t>(session_id));
+      event.SetProperty("deviceIndex", static_cast<int64_t>(index));
+      SetTelemetryStringProperty(event, "type", device.type);
+      SetTelemetryStringProperty(event, "name", device.name);
+      SetTelemetryStringProperty(event, "vendor", device.vendor);
+      SetTelemetryStringProperty(event, "driverVersion", device.driver_version);
+      SetTelemetryStringProperty(event, "source", device.source);
+      event.SetProperty("vendorId", device.vendor_id);
+      event.SetProperty("deviceId", device.device_id);
+      event.SetProperty("dedicatedMemoryMB", device.dedicated_memory_mb);
+      event.SetProperty("sharedMemoryMB", device.shared_memory_mb);
+      event.SetProperty("freeMemoryMB", device.free_memory_mb);
+      event.SetProperty("memoryBudgetMB", device.memory_budget_mb);
+      event.SetProperty("memoryBudgetAvailableMB",
+                        device.memory_budget_available_mb);
+      event.SetProperty("physicalCoreCount", device.physical_core_count);
+      event.SetProperty("logicalCoreCount", device.logical_core_count);
+      event.SetProperty("nominalClockMHz", device.nominal_clock_mhz);
+      event.SetProperty("maxClockMHz", device.max_clock_mhz);
+      event.SetProperty("memoryClockMHz", device.memory_clock_mhz);
+      event.SetProperty("memoryBusWidthBits", device.memory_bus_width_bits);
+      impl_->logger->LogEvent(event);
+    }
+    emitted = true;
+  });
+  if (claimed && !emitted) {
+    hardware_info_logged_.store(false);
+  }
+#else
+  (void)session_id;
 #endif
 }
 
@@ -634,6 +706,15 @@ void GenAiTelemetry::LogGeneration(uint32_t session_id, uint32_t generator_id,
     end_event.SetProperty("timeToFirstTokenMs", info.time_to_first_token_ms);
     end_event.SetProperty("totalTimeMs", info.total_time_ms);
     end_event.SetProperty("tokensPerSecond", info.tokens_per_second);
+    end_event.SetProperty("processResidentMemoryMB",
+                          info.process_resident_memory_mb);
+    end_event.SetProperty("processCpuTimeMs", info.process_cpu_time_ms);
+    end_event.SetProperty("processGpuMemoryMB", info.process_gpu_memory_mb);
+    end_event.SetProperty("processNpuMemoryMB", info.process_npu_memory_mb);
+    SetTelemetryStringProperty(end_event, "acceleratorMemorySource",
+                               info.accelerator_memory_source);
+    SetTelemetryStringProperty(end_event, "resourceSampleScope",
+                               info.resource_sample_scope);
     impl_->logger->LogEvent(end_event);
   });
 #endif

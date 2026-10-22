@@ -285,7 +285,8 @@ if (ENABLE_TELEMETRY AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(telemetry_device_info_test_source "device_info_tests.cpp")
   endif()
   add_executable(telemetry_device_info_tests
-    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/${telemetry_device_info_test_source}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/${telemetry_device_info_test_source}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/hardware_info_tests.cpp")
   target_include_directories(telemetry_device_info_tests PRIVATE
     ${ORT_HEADER_DIR}
     ${onnxruntime_extensions_SOURCE_DIR}/shared/api

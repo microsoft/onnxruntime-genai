@@ -925,7 +925,11 @@ bool Generator::IsDone() {
   if (transducer_state_) {
     // Pending mel input means we haven't started processing this chunk yet
     if (!extra_inputs_.empty()) return false;
-    return transducer_state_->IsChunkDone();
+    const bool is_done = transducer_state_->IsChunkDone();
+    if (is_done) {
+      generation_telemetry_.OnGenerationCompleted();
+    }
+    return is_done;
   }
 
   if (computed_logits_) {
@@ -939,6 +943,7 @@ bool Generator::IsDone() {
       guidance_logits_processor_->Reset();
       last_action_ = Action::standard;
     }
+    generation_telemetry_.OnGenerationCompleted();
   }
 
   return is_done;

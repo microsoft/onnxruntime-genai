@@ -124,6 +124,7 @@ std::shared_ptr<Model> CreateModelWithTelemetry(
                 .count();
         telemetry.LogModelLoadEnd(session_id, true, elapsed_ms);
       }
+      telemetry.LogHardwareInfo(session_id);
       model->telemetry_session_id_ = session_id;
       return model;
     } catch (const std::exception& error) {
