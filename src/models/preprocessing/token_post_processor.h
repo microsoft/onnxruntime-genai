@@ -27,8 +27,8 @@ class TokenPostProcessor : public PostProcessor, public LeakChecked<TokenPostPro
   explicit TokenPostProcessor(const Generator& generator);
   void ProcessNextTokens();
   const std::vector<PostProcessorResult>& GetNextTokenResults() const { return internal_.GetNextTokenResults(); }
-  void Finalize();
-  void Reset();
+  void Finalize() override;
+  void Reset() override;
 
  private:
   TokenPostProcessorInternal internal_;

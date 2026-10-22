@@ -435,9 +435,16 @@ TEST_F(MetadataCoreStateTests, PostProcessorBaseOwnsTokenProcessor) {
     auto processor = std::make_unique<Generators::TokenPostProcessor>(*generator);
     processor->ProcessNextTokens();
     ASSERT_EQ(processor->GetNextTokenResults().size(), tokens.size());
+    auto& token_processor = *processor;
     std::unique_ptr<Generators::PostProcessor> base = std::move(processor);
     EXPECT_NE(base, nullptr);
     EXPECT_EQ(Generators::TokenPostProcessor::Count(), initial_count + 1);
+    base->Finalize();
+    ASSERT_EQ(token_processor.GetNextTokenResults().size(), 1U);
+    base->Reset();
+    EXPECT_TRUE(token_processor.GetNextTokenResults().empty());
+    token_processor.ProcessNextTokens();
+    EXPECT_EQ(token_processor.GetNextTokenResults().size(), tokens.size());
   }
   EXPECT_EQ(Generators::TokenPostProcessor::Count(), initial_count);
 }

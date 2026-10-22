@@ -7,6 +7,8 @@ namespace Generators {
 class PostProcessor {
  public:
   virtual ~PostProcessor() = default;
+  virtual void Finalize() = 0;
+  virtual void Reset() = 0;
 
  protected:
   explicit PostProcessor(const Generator& generator) : generator_{generator} {}
