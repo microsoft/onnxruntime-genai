@@ -1552,6 +1552,22 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         raise ValueError("runtime_config.engine.dynamic_batching.max_batch_size must be at most 256")
     if "prefix_caching" in dynamic_batching and not isinstance(dynamic_batching["prefix_caching"], bool):
         raise ValueError("runtime_config.engine.dynamic_batching.prefix_caching must be a boolean")
+    if dynamic_batching.get("prefix_caching") is True:
+        exported_model = generated_config.get("model", {})
+        decoder = exported_model.get("decoder", {})
+        mtp = exported_model.get("mtp", {})
+        dflash2 = exported_model.get("dflash2", {})
+        dspark = exported_model.get("dspark", {})
+        windowed_layers = decoder.get("sliding_window", {}).get("layers", [])
+        if (
+            dspark.get("filename")
+            or (mtp.get("filename") and mtp.get("enabled", True))
+            or (dflash2.get("filename") and dflash2.get("sliding_window", 0) <= 0)
+            or (windowed_layers and decoder.get("inputs", {}).get("block_table_windowed"))
+        ):
+            raise ValueError(
+                "runtime_config.engine.dynamic_batching.prefix_caching is unsupported by the exported layout"
+            )
     if "max_snapshots" in dynamic_batching:
         value = dynamic_batching["max_snapshots"]
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2_147_483_647:
@@ -1853,4 +1869,6 @@ def apply_runtime_config(generated_config: dict[str, Any], runtime_config: dict[
         generated_dynamic_batching.pop("gpu_utilization_factor", None)
     elif "gpu_utilization_factor" in dynamic_batching:
         generated_dynamic_batching.pop("num_blocks", None)
+    if "snapshot_cache" in dynamic_batching:
+        generated_dynamic_batching.pop("snapshot_cache", None)
     return merge_objects(baseline, overlay)

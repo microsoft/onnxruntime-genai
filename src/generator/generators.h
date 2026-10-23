@@ -123,6 +123,9 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   bool IsPastPresentShareBufferEnabled(const std::string& model_type) const;
 };
 
+class TokenOutputs;
+class TokenPostProcessor;
+
 struct Generator : LeakChecked<Generator> {
   enum class Action {
     standard,   // Default, set in any other case
@@ -176,6 +179,8 @@ struct Generator : LeakChecked<Generator> {
   bool IsGreedySampling() const;
 
  private:
+  friend class TokenPostProcessor;
+  TokenOutputs GetTokenOutputs() const;
 #if defined(_MSC_VER)
   [[msvc::no_unique_address]]
 #else

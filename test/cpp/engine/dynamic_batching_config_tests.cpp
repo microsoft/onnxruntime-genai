@@ -140,6 +140,27 @@ TEST(DynamicBatchingConfigTest, RuntimeProfileReplacesSnapshotPolicyAndCanDisabl
   EXPECT_EQ(batching.snapshot_cache.disk_bytes, 4096u);
 }
 
+TEST(DynamicBatchingConfigTest, OverlayReplacesSnapshotPolicyIncludingExplicitEmptyOptOut) {
+  auto config = LoadDynamicConfig(R"({
+    "snapshot_cache":{"vram_bytes":1024,"ram_bytes":2048,"directory":"spill"}
+  })");
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{
+    "snapshot_cache":{"disk_bytes":4096}
+  }}})");
+  const auto& policy = config.engine.dynamic_batching->snapshot_cache;
+  EXPECT_TRUE(policy.explicitly_set);
+  EXPECT_EQ(policy.vram_bytes, 0u);
+  EXPECT_EQ(policy.ram_bytes, 0u);
+  EXPECT_EQ(policy.disk_bytes, 4096u);
+  EXPECT_TRUE(policy.directory.empty());
+
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"snapshot_cache":{}}}})");
+  const auto& disabled = config.engine.dynamic_batching->snapshot_cache;
+  EXPECT_TRUE(disabled.Configured());
+  EXPECT_FALSE(disabled.Enabled());
+  EXPECT_TRUE(disabled.directory.empty());
+}
+
 TEST(CpuEmbeddingConfigTest, PrefaultDefaultsOnAndCanBeDisabled) {
   const fs::path model_path{std::string{MODEL_PATH "engine/dummy-decoder"}};
   const Config default_config{model_path, "{}"};

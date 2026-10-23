@@ -1396,7 +1396,7 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
   }
 }
 
-TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
+TEST_P(Dflash2StorageRestoreTest, ExecutesWindowedRestoreAcrossRingWrap) {
   auto config = MakeDflash2Config();
   if (GetParam()) {
     config.engine.dynamic_batching->snapshot_cache.ram_bytes = 0;

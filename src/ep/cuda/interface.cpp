@@ -733,11 +733,17 @@ struct CudaInterfaceImplBase : DeviceInterface {
       throw std::bad_alloc{};
     }
     CUDA_CHECK(status);
-    return std::shared_ptr<void>(memory, [](void* pointer) {
+    return std::shared_ptr<void>(memory, [](void* pointer) noexcept {
       const auto release_status = ::cudaFreeHost(pointer);
       if (release_status != cudaSuccess) {
-        Log("cuda", "Failed to release pinned host storage: ") << ::cudaGetErrorString(release_status) << '\n';
-        std::terminate();
+        try {
+          const auto& log = GetLogItems();
+          if (log.enabled && log.warning) {
+            Log("warning", "Failed to release pinned host storage: %s", ::cudaGetErrorString(release_status));
+          }
+        } catch (...) {
+          // Cleanup diagnostics must not throw from the deleter.
+        }
       }
     });
   }

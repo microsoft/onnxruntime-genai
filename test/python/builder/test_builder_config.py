@@ -71,12 +71,8 @@ def _write_external_component_model(
             entry = tensor.external_data.add()
             entry.key = key
             entry.value = str(value)
-    hidden = onnx.helper.make_tensor_value_info(
-        input_name, onnx.TensorProto.FLOAT, [None, 4]
-    )
-    scores = onnx.helper.make_tensor_value_info(
-        output_name, onnx.TensorProto.FLOAT, [None, 4]
-    )
+    hidden = onnx.helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, [None, 4])
+    scores = onnx.helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, [None, 4])
     graph = onnx.helper.make_graph(
         [onnx.helper.make_node("Identity", [input_name], [output_name])],
         "component",
@@ -87,16 +83,10 @@ def _write_external_component_model(
     path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
 
 
-def _write_backbone(
-    output_dir, filename="model.onnx", output_name="hidden_states"
-):
+def _write_backbone(output_dir, filename="model.onnx", output_name="hidden_states"):
     output_dir.mkdir(exist_ok=True)
-    input_value = onnx.helper.make_tensor_value_info(
-        "input_ids", onnx.TensorProto.INT64, [None, None]
-    )
-    output_value = onnx.helper.make_tensor_value_info(
-        output_name, onnx.TensorProto.FLOAT, [None, None, 4]
-    )
+    input_value = onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT64, [None, None])
+    output_value = onnx.helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, [None, None, 4])
     model = onnx.helper.make_model(
         onnx.helper.make_graph(
             [
@@ -377,15 +367,11 @@ def test_component_package_protects_backbone_declared_external_data(tmp_path):
         (0, 4, 16, "range is too small"),
     ],
 )
-def test_component_package_rejects_invalid_external_data_ranges(
-    tmp_path, offset, length, file_size, match
-):
+def test_component_package_rejects_invalid_external_data_ranges(tmp_path, offset, length, file_size, match):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     graph = source_dir / "head.onnx"
-    _write_external_component_model(
-        graph, "weights.bin", offset=offset, length=length
-    )
+    _write_external_component_model(graph, "weights.bin", offset=offset, length=length)
     (source_dir / "weights.bin").write_bytes(b"\0" * file_size)
     output_dir = tmp_path / "package"
     _write_backbone(output_dir)
@@ -404,9 +390,7 @@ def test_component_package_rejects_invalid_external_data_ranges(
     "reserved_name",
     ["genai_config.json", "tokenizer.json", "model.onnx.data"],
 )
-def test_component_package_rejects_exporter_owned_external_data(
-    tmp_path, reserved_name
-):
+def test_component_package_rejects_exporter_owned_external_data(tmp_path, reserved_name):
     output_dir = tmp_path / "package"
     _write_backbone(output_dir)
     graph = output_dir / "head.onnx"
@@ -657,9 +641,7 @@ def test_component_backbone_rejects_external_data_directory(tmp_path):
     ).component_options
 
     with pytest.raises(ValueError, match="existing directory"):
-        validate_component_backbone_destination(
-            options, output_dir, require_exists=False
-        )
+        validate_component_backbone_destination(options, output_dir, require_exists=False)
 
 
 def test_config_only_backbone_requires_hidden_states_output(tmp_path):
@@ -671,15 +653,11 @@ def test_config_only_backbone_requires_hidden_states_output(tmp_path):
     ).component_options
 
     _write_backbone(output_dir)
-    validate_component_backbone_destination(
-        options, output_dir, require_exists=True
-    )
+    validate_component_backbone_destination(options, output_dir, require_exists=True)
 
     _write_backbone(output_dir, output_name="logits")
     with pytest.raises(ValueError, match="hidden_states output"):
-        validate_component_backbone_destination(
-            options, output_dir, require_exists=True
-        )
+        validate_component_backbone_destination(options, output_dir, require_exists=True)
 
 
 def test_generic_component_options_reject_revision_fields():
@@ -1752,6 +1730,59 @@ def test_snapshot_limits_in_runtime_config_and_profiles(in_profile, field, error
     else:
         with pytest.raises(ValueError, match=error):
             apply_runtime_config(generated, runtime)
+    assert generated == baseline
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "model,supported",
+    [
+        ({"decoder": {}}, True),
+        ({"decoder": {}, "dspark": {"filename": "dspark.onnx"}}, False),
+        ({"decoder": {}, "mtp": {"filename": "mtp.onnx"}}, False),
+        ({"decoder": {}, "mtp": {"filename": "mtp.onnx", "enabled": False}}, True),
+        ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx"}}, False),
+        ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx", "sliding_window": 8}}, True),
+        (
+            {"decoder": {"sliding_window": {"layers": [0]}, "inputs": {"block_table_windowed": "windowed"}}},
+            False,
+        ),
+        ({"decoder": {"sliding_window": {"layers": []}, "inputs": {"block_table_windowed": "windowed"}}}, True),
+        ({"decoder": {"sliding_window": {"layers": [0]}}}, True),
+    ],
+)
+def test_runtime_prefix_caching_respects_exported_layout(in_profile, model, supported):
+    generated = {"model": model, "engine": {"dynamic_batching": {"prefix_caching": False}}}
+    runtime = {"engine": {"dynamic_batching": {"prefix_caching": True}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "prefix-cache", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    baseline = copy.deepcopy(generated)
+    if supported:
+        updated = apply_runtime_config(generated, runtime)
+        if in_profile:
+            assert updated["runtime_profiles"] == runtime["runtime_profiles"]
+        else:
+            assert updated["engine"]["dynamic_batching"]["prefix_caching"] is True
+    else:
+        with pytest.raises(ValueError, match="prefix_caching is unsupported by the exported layout"):
+            apply_runtime_config(generated, runtime)
+    assert generated == baseline
+
+
+@pytest.mark.parametrize("policy", [{}, {"disk_bytes": 4096}])
+def test_runtime_snapshot_policy_replaces_existing_budgets(policy):
+    generated = {
+        "engine": {
+            "dynamic_batching": {"snapshot_cache": {"vram_bytes": 1024, "ram_bytes": 2048, "directory": "spill"}}
+        }
+    }
+    baseline = copy.deepcopy(generated)
+    updated = apply_runtime_config(generated, {"engine": {"dynamic_batching": {"snapshot_cache": policy}}})
+    assert updated["engine"]["dynamic_batching"]["snapshot_cache"] == policy
     assert generated == baseline
 
 
