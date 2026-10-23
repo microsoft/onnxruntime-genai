@@ -23,6 +23,51 @@ namespace {
 
 using StateGroupKind = Config::Model::Decoder::StateGroupKind;
 
+class FixedStateCopyBatch {
+ public:
+  explicit FixedStateCopyBatch(DeviceInterface& device) : device_{device} {}
+
+  void Copy(DeviceSpan<uint8_t> destination, DeviceSpan<const uint8_t> source) {
+    // WebGPU handles cannot encode offsets. Drain before the CPU read/modify/write fallback.
+    if (device_.GetType() != DeviceType::WEBGPU ||
+        source.ByteOffset() != 0 || destination.ByteOffset() != 0) {
+      Flush();
+      destination.CopyFrom(source);
+      return;
+    }
+    const auto& info = device_.GetAllocator().GetInfo();
+    const std::array<int64_t, 1> shape{static_cast<int64_t>(source.size())};
+    auto src = OrtValue::CreateTensor(info, source.BackingBuffer()->p_device_, source.size(),
+                                      shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto dst = OrtValue::CreateTensor(info, destination.BackingBuffer()->p_device_, destination.size(),
+                                      shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    sources_.push_back(src.get());
+    destinations_.push_back(dst.get());
+    tensors_.push_back(std::move(src));
+    tensors_.push_back(std::move(dst));
+    owners_.push_back(source.BackingBuffer());
+    owners_.push_back(destination.BackingBuffer());
+  }
+
+  // Explicit phase boundary: never submit from a destructor, including during failure unwinding.
+  void Flush() {
+    if (!sources_.empty()) {
+      GetOrtEnv().CopyTensors(sources_, destinations_, nullptr);
+      sources_.clear();
+      destinations_.clear();
+      tensors_.clear();
+      owners_.clear();
+    }
+  }
+
+ private:
+  DeviceInterface& device_;
+  std::vector<const OrtValue*> sources_;
+  std::vector<OrtValue*> destinations_;
+  std::vector<std::unique_ptr<OrtValue>> tensors_;
+  std::vector<std::shared_ptr<DeviceBuffer>> owners_;
+};
+
 class FixedStateCheckpointCaptureError final
     : public std::exception,
       public std::nested_exception {
@@ -336,40 +381,40 @@ struct FixedStatePool::Impl {
   // Copies a resident slot's visible (active-bank) state into contiguous batch row `batch_row` of
   // the gathered input. Enqueues a device copy only.
   void GatherResidentRow(const TensorSpec& spec, size_t slot_index, uint8_t active_bank,
-                         size_t batch_row, OrtValue& gathered) {
+                         size_t batch_row, OrtValue& gathered, FixedStateCopyBatch& copies) {
     auto destination = ByteWrapTensor(*device, gathered)
                            .subspan(batch_row * spec.row_bytes, spec.row_bytes);
     const auto source = ByteWrapTensor(*device, *spec.banks[active_bank])
                             .subspan(slot_index * spec.row_bytes, spec.row_bytes);
-    destination.CopyFrom(source);
+    copies.Copy(destination, source);
   }
 
-  void GatherZeroRow(const TensorSpec& spec, size_t batch_row, OrtValue& gathered) {
+  void GatherZeroRow(const TensorSpec& spec, size_t batch_row, OrtValue& gathered, FixedStateCopyBatch& copies) {
     auto destination = ByteWrapTensor(*device, gathered)
                            .subspan(batch_row * spec.row_bytes, spec.row_bytes);
     const auto source = ByteWrapTensor(*device, *spec.zero_row);
-    destination.CopyFrom(source);
+    copies.Copy(destination, source);
   }
 
   void GatherCheckpointRow(const TensorSpec& spec, size_t checkpoint_slot,
-                           size_t batch_row, OrtValue& gathered) {
+                           size_t batch_row, OrtValue& gathered, FixedStateCopyBatch& copies) {
     auto destination = ByteWrapTensor(*device, gathered)
                            .subspan(batch_row * spec.row_bytes, spec.row_bytes);
     const auto source = ByteWrapTensor(*device, *spec.checkpoint_bank)
                             .subspan(checkpoint_slot * spec.row_bytes, spec.row_bytes);
-    destination.CopyFrom(source);
+    copies.Copy(destination, source);
   }
 
   // Stages a committed batch row into the slot's inactive persistent bank. The active bank (the
   // visible state) is untouched, so this device copy is fully reversible until PublishCommit flips
   // the slot to `inactive_bank`.
   void StageRowIntoInactiveBank(const TensorSpec& spec, size_t slot_index, uint8_t inactive_bank,
-                                size_t batch_row, OrtValue& staged) {
+                                size_t batch_row, OrtValue& staged, FixedStateCopyBatch& copies) {
     auto destination = ByteWrapTensor(*device, *spec.banks[inactive_bank])
                            .subspan(slot_index * spec.row_bytes, spec.row_bytes);
     const auto source = ByteWrapTensor(*device, staged)
                             .subspan(batch_row * spec.row_bytes, spec.row_bytes);
-    destination.CopyFrom(source);
+    copies.Copy(destination, source);
   }
 
   // Launches the compact-update replay the last PrepareCommit deferred. Replay only rewrites the
@@ -1168,9 +1213,11 @@ FixedStatePool::CapturePrefixCheckpoint(
     }
   }
   try {
+    FixedStateCopyBatch batch{*impl_->device};
     for (auto& [destination, source] : copies) {
-      destination.CopyFrom(source);
+      batch.Copy(destination, source);
     }
+    batch.Flush();
     impl_->device->Synchronize();
   } catch (...) {
     impl_->healthy = false;
@@ -1510,6 +1557,7 @@ FixedStateReservation FixedStatePool::Reserve(
       capture_count_span.CopyCpuToDevice();
     }
     if (!storage->uses_direct_bindings) {
+      FixedStateCopyBatch copies{*impl_->device};
       for (size_t tensor_index = 0; tensor_index < impl_->tensors.size();
            ++tensor_index) {
         const auto& spec = impl_->tensors[tensor_index];
@@ -1518,17 +1566,18 @@ FixedStateReservation FixedStatePool::Reserve(
           if (plan[row].provisional) {
             if (plan[row].prefix_checkpoint) {
               impl_->GatherCheckpointRow(
-                  spec, plan[row].prefix_checkpoint->slot_, row, gathered);
+                  spec, plan[row].prefix_checkpoint->slot_, row, gathered, copies);
             } else {
-              impl_->GatherZeroRow(spec, row, gathered);
+              impl_->GatherZeroRow(spec, row, gathered, copies);
             }
           } else {
             impl_->GatherResidentRow(spec, plan[row].slot_index,
                                      impl_->slots[plan[row].slot_index].active_bank,
-                                     row, gathered);
+                                     row, gathered, copies);
           }
         }
       }
+      copies.Flush();
       impl_->device->Synchronize();
     } else if (impl_->device->GetType() != DeviceType::CUDA) {
       impl_->device->Synchronize();
@@ -1712,6 +1761,7 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
   // inactive banks may be left partially written.
   try {
     impl_->FlushDeferredReplay();
+    FixedStateCopyBatch copies{*impl_->device};
     auto& views = *storage.views;
     std::vector<StateUpdateReplayDesc> replay_descriptors;
     if (storage.captures_state_updates) {
@@ -1741,7 +1791,7 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         if (kept_tokens == 0 || kept_tokens == storage.commit_step_tokens[row]) {
           if (!storage.uses_direct_bindings) {
             impl_->StageRowIntoInactiveBank(
-                spec, storage.handles[row].slot, inactive_bank, row, staged);
+                spec, storage.handles[row].slot, inactive_bank, row, staged, copies);
           }
           continue;
         }
@@ -1789,6 +1839,7 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         });
       }
     }
+    copies.Flush();
     impl_->device->Synchronize();
     // The replay reads only this step's inputs and captured updates, which stay untouched until the
     // next reservation, and writes only inactive banks. It is launched by the next pool operation

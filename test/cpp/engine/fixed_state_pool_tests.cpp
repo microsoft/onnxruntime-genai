@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -200,6 +201,54 @@ class ScopedKeyValueCacheDevice {
  private:
   Model& model_;
   DeviceInterface* original_;
+};
+
+class FixedStateCopyCountingDevice final : public OffsetTensorViewsUnsupportedDevice {
+ public:
+  explicit FixedStateCopyCountingDevice(DeviceInterface& inner)
+      : OffsetTensorViewsUnsupportedDevice{inner, inner.GetType()}, inner_{inner} {}
+
+  Ort::Allocator& GetAllocator() override {
+    if (++tensor_views == fail_tensor_view) {
+      throw std::runtime_error("Injected fixed state batch view failure");
+    }
+    return inner_.GetAllocator();
+  }
+
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    struct Buffer final : DeviceBuffer {
+      Buffer(std::shared_ptr<DeviceBuffer> value, size_t& copies)
+          : inner{std::move(value)}, copies{copies} {
+        p_device_ = inner->p_device_;
+        size_in_bytes_ = inner->size_in_bytes_;
+      }
+      const char* GetType() const override { return inner->GetType(); }
+      void AllocateCpu() override {
+        inner->AllocateCpu();
+        p_cpu_ = inner->p_cpu_;
+      }
+      void CopyDeviceToCpu() override {
+        inner->CopyDeviceToCpu();
+        p_cpu_ = inner->p_cpu_;
+      }
+      void CopyCpuToDevice() override { inner->CopyCpuToDevice(); }
+      void CopyFrom(size_t destination, DeviceBuffer& source, size_t offset, size_t bytes) override {
+        ++copies;
+        inner->CopyFrom(destination, source, offset, bytes);
+      }
+      void Zero() override { inner->Zero(); }
+      std::shared_ptr<DeviceBuffer> inner;
+      size_t& copies;
+    };
+    return std::make_shared<Buffer>(inner_.WrapMemoryBase(memory, size), individual_copies);
+  }
+
+  size_t tensor_views{};
+  size_t individual_copies{};
+  size_t fail_tensor_view{std::numeric_limits<size_t>::max()};
+
+ private:
+  DeviceInterface& inner_;
 };
 
 // Builds a one-request reservation input in scheduled row order.
@@ -2710,6 +2759,131 @@ TEST(WebGpuFixedStatePoolTest, AdversarialReplayPreservesRequestState) {
   ClearProviders(*config);
   SetProviderOption(*config, "webgpu", {}, {});
   RunDeviceAdversarialReplay(CreateModel(GetOrtEnv(), std::move(config)));
+}
+
+TEST(WebGpuFixedStatePoolTest, PhaseCopiesPreservePreparedDiscardAndPublication) {
+  if (!HasWebGpuProvider()) {
+    GTEST_SKIP() << "No native or registered WebGPU EP is available.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "webgpu", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  FixedStateCopyCountingDevice device{*model->p_device_kvcache_};
+  ScopedKeyValueCacheDevice guard{*model, device};
+  FixedStatePool pool{model, 1, 1};
+  device.tensor_views = 0;
+  for (size_t step = 1; step <= 3; ++step) {
+    auto reservation = pool.Reserve(One(kRequestA, step));
+    const size_t tensors = reservation.Bindings().size();
+    ASSERT_GT(tensors, 1u);
+    EXPECT_EQ(device.tensor_views, (step * 2 - 1) * tensors);
+    EXPECT_EQ(device.individual_copies, 0u);
+    for (const auto& binding : reservation.Bindings()) {
+      auto input = WrapTensor<float>(device, *binding.input);
+      for (float value : input.CopyDeviceToCpu()) {
+        EXPECT_FLOAT_EQ(value, step == 1 ? 0.0f : 4.0f);
+      }
+      auto output = WrapTensor<float>(device, *binding.output);
+      const std::vector<float> values(output.size(), step == 3 ? 99.0f : 4.0f);
+      output.CopyFromCpu(values);
+    }
+    reservation.PrepareCommit();
+    EXPECT_EQ(device.tensor_views, step * 2 * tensors);
+    EXPECT_EQ(reservation.State(), FixedStateReservationState::Prepared);
+    if (step == 1) {
+      EXPECT_FALSE(pool.OwnsCommittedSlot(kRequestA));
+    } else {
+      EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestA)), step - 1);
+      EXPECT_EQ(pool.StateGeneration(pool.HandleFor(kRequestA)), step - 1);
+    }
+    if (step == 3) {
+      reservation.Discard();
+    } else {
+      reservation.PublishCommit();
+    }
+    EXPECT_EQ(device.tensor_views, step * 2 * tensors);
+  }
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(checkpoint, nullptr);
+  EXPECT_EQ(checkpoint->TokenCount(), 2u);
+  EXPECT_EQ(device.individual_copies, 0u);
+  pool.Release(pool.HandleFor(kRequestA));
+  const std::array<Request, 1> restored{Request{kRequestB, 3, 0, checkpoint}};
+  auto reservation = pool.Reserve(restored);
+  for (const auto& binding : reservation.Bindings()) {
+    auto input = WrapTensor<float>(device, *binding.input);
+    for (float value : input.CopyDeviceToCpu()) EXPECT_FLOAT_EQ(value, 4.0f);
+  }
+  EXPECT_EQ(device.individual_copies, 0u);
+}
+
+TEST(WebGpuFixedStatePoolTest, PhaseCopiesFlushBeforeOffsetFallback) {
+  if (!HasWebGpuProvider()) {
+    GTEST_SKIP() << "No native or registered WebGPU EP is available.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "webgpu", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  FixedStateCopyCountingDevice device{*model->p_device_kvcache_};
+  ScopedKeyValueCacheDevice guard{*model, device};
+  FixedStatePool pool{model, 2};
+  const std::array<Request, 2> requests{Request{kRequestA, 1}, Request{kRequestB, 1}};
+  {
+    auto reservation = pool.Reserve(requests);
+    ASSERT_GT(device.individual_copies, 0u);
+    ASSERT_GT(device.tensor_views, 0u);
+    for (const auto& binding : reservation.Bindings()) {
+      auto output = WrapTensor<float>(device, *binding.output);
+      std::vector<float> values(output.size(), 7.0f);
+      std::fill_n(values.begin(), RowElements(*binding.output), 3.0f);
+      output.CopyFromCpu(values);
+    }
+    reservation.Commit();
+  }
+  for (size_t pass = 0; pass < 2; ++pass) {
+    const std::array<Request, 2> next{
+        Request{pass == 0 ? kRequestA : kRequestB, 2},
+        Request{pass == 0 ? kRequestB : kRequestA, 2}};
+    auto reservation = pool.Reserve(next);
+    for (const auto& binding : reservation.Bindings()) {
+      auto input = WrapTensor<float>(device, *binding.input);
+      const auto actual = input.CopyDeviceToCpu();
+      const size_t row_elements = RowElements(*binding.input);
+      for (size_t i = 0; i < actual.size(); ++i) {
+        const bool request_a = (i < row_elements) == (pass == 0);
+        EXPECT_FLOAT_EQ(actual[i], request_a ? 3.0f : 7.0f);
+      }
+    }
+    reservation.Discard();
+  }
+  EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestA)), 1u);
+  EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestB)), 1u);
+}
+
+TEST(WebGpuFixedStatePoolTest, BatchViewFailurePoisonsPoolWithoutPublishing) {
+  if (!HasWebGpuProvider()) {
+    GTEST_SKIP() << "No native or registered WebGPU EP is available.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "webgpu", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  FixedStateCopyCountingDevice device{*model->p_device_kvcache_};
+  ScopedKeyValueCacheDevice guard{*model, device};
+  FixedStatePool pool{model, 1};
+  auto reservation = pool.Reserve(One(kRequestA));
+  ASSERT_GT(reservation.Bindings().size(), 1u);
+  device.fail_tensor_view = device.tensor_views + 2;
+  EXPECT_THROW(reservation.PrepareCommit(), std::runtime_error);
+  EXPECT_EQ(reservation.State(), FixedStateReservationState::Failed);
+  EXPECT_FALSE(pool.OwnsCommittedSlot(kRequestA));
+  EXPECT_EQ(pool.Snapshot().reserved_slots, 0u);
+  EXPECT_EQ(pool.Snapshot().committed_slots, 0u);
+  EXPECT_FALSE(pool.Snapshot().healthy);
+  EXPECT_THROW(pool.Reserve(One(kRequestB)), std::logic_error);
+  EXPECT_THROW(pool.CapturePrefixCheckpoint(kRequestA), std::logic_error);
 }
 
 TEST(WebGpuFixedStatePoolTest, PartialRequestsShareBackingTransfers) {
