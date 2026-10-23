@@ -383,8 +383,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         while not gen.is_done() and gen.token_count() < prompt_length:
             gen.generate_next_token()
         generated_text = tokenizer.decode(gen.get_sequence(0))
-        if not args.reuse_generator:
-            del gen
+        del gen
         text = [generated_text] * batch_size
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
@@ -418,8 +417,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             gen.generate_next_token()
         if args.print_model_output:
             print(tokenizer.decode(gen.get_sequence(0)))
-        if not args.reuse_generator:
-            del gen
+        del gen
 
     tokenize_times = []
     prompt_times = []
@@ -473,12 +471,10 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output:
             print(tokenizer.decode(gen.get_sequence(0)))
-        if not args.reuse_generator:
-            del gen
+        del gen
 
-    # Release both aliases before the adapter container leaves scope.
-    gen = None
-    generator = None
+    # Release the retained generator before the adapter container leaves scope.
+    del generator
 
     aggregation_label = "Average" if args.aggregation == "mean" else "Median"
 
