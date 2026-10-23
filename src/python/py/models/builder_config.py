@@ -24,6 +24,22 @@ from typing import Any
 import onnx
 from quantization import QuantConfig
 
+
+def serialize_genai_config(config: dict[str, Any]) -> str:
+    """Indent config objects while keeping every array on one line."""
+    def format_value(value, level):
+        if not isinstance(value, dict) or not value:
+            return json.dumps(value)
+        indentation = " " * (4 * (level + 1))
+        entries = [
+            f"{indentation}{json.dumps(key)}: {format_value(child, level + 1)}"
+            for key, child in value.items()
+        ]
+        return "{\n" + ",\n".join(entries) + "\n" + " " * (4 * level) + "}"
+
+    return format_value(config, 0) + "\n"
+
+
 STRUCTURED_FIELDS = (
     "target_options",
     "drafter_options",
@@ -887,8 +903,6 @@ def normalize_target_quant_config(
         raise ValueError("target weight overrides are not supported when weights.type=none")
     if merged["moe"]["type"] in ("mxfp4", "nvfp4") and execution_provider != "cuda":
         raise ValueError(f"moe.type={merged['moe']['type']} is supported only on CUDA")
-    if merged["format"]["matmulnbits_weights_prepacked"] and execution_provider != "cuda":
-        raise ValueError("format.matmulnbits_weights_prepacked is supported only on CUDA")
     if execution_provider == "trt-rtx" and weights_type in ("int4", "uint4", "int8", "uint8"):
         if "format" in canonical and canonical["format"].get("use_qdq") is False:
             raise ValueError("TRT-RTX integer dense weights require quant_config.format.use_qdq=true")
@@ -902,9 +916,7 @@ def normalize_target_quant_config(
         "algo_config": "weights.method",
         "moe_quant_type": "moe.type",
         "qmoe_block_size": "moe.block_size",
-        "qmoe_weights_prepacked": "moe.weights_prepacked",
         "use_qdq": "format.use_qdq",
-        "matmulnbits_weights_prepacked": "format.matmulnbits_weights_prepacked",
     }
     for legacy_key, path in aliases.items():
         section, leaf = path.split(".")
@@ -936,7 +948,6 @@ def flatten_target_options(
     flattened["is_symmetric"] = quant_config.weights.symmetric
     flattened["op_types_to_quantize"] = quant_config.weights.op_types
     flattened["use_qdq"] = quant_config.format.use_qdq
-    flattened["matmulnbits_weights_prepacked"] = quant_config.format.matmulnbits_weights_prepacked
     if "type" in options.get("quant_config", {}).get("moe", {}):
         if quant_config.moe.type == "none":
             flattened.pop("moe_quant_type", None)
@@ -1067,8 +1078,6 @@ def normalize_drafter_quant_config(
             raise ValueError(f"DFlash2 INT4/INT8 offline prepacking requires weights.block_size in {supported_blocks}")
     if quant_config.moe.type != "none":
         raise ValueError(f"{drafter_type} does not support MoE expert quantization")
-    if execution_provider != "cuda" and quant_config.format.matmulnbits_weights_prepacked:
-        raise ValueError("prepacked MatMulNBits weights are supported only on CUDA")
     return quant_config
 
 
@@ -1096,6 +1105,10 @@ def flatten_drafter_options(
     drafter_type = options.get("drafter_type")
     if drafter_type not in ("none", "mtp", "dflash2", "dspark"):
         raise ValueError("drafter_options.drafter_type must be mtp, dflash2, dspark, or none")
+    optimizations = options.get("optimizations", {})
+    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "drafter_options.optimizations")
+    if "fuse_mlp_gate_up" in optimizations and drafter_type != "dflash2":
+        raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
     if drafter_type == "mtp" and flattened.get("exclude_mtp", False):
         raise ValueError("drafter_options.drafter_type=mtp conflicts with legacy extra_options.exclude_mtp")
 

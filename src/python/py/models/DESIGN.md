@@ -39,6 +39,8 @@ Excluding the time it may take to download the original model, the model builder
 
 Model architectures are defined in classes. By defining model architectures in this way, future models can leverage class inheritance to greatly reduce the amount of time and effort needed to onboard new model architectures. Optimizations and quantizations are also inherited from the base classes so there is no additional work needed to add those opportunities per model.
 
+Qwen3.8 text, vision, embedding, Engram, and MTP builders live in separate `builders/qwen3_8_*.py` modules; `builders/qwen3_8.py` coordinates the package. Component loaders live in `loaders/`, while graph-construction helpers belong to their corresponding builder classes. Only overrides of existing builder methods live in `builders/expansions/`. Reusable standard-ONNX-only overrides live in `builders/expansions/standard.py`; provider adapters select only the methods they need, so importing a portable expansion does not override unrelated CUDA or WebGPU contrib-op paths.
+
 ### Compatibility
 
 The models produced by the model builder should directly work in ONNX Runtime GenAI and other solutions that use ONNX Runtime such as Hugging Face's Optimum. There should be no additional model modifications needed.
@@ -53,8 +55,7 @@ After the final ONNX model is created, additional files are saved in the output 
 
 ### Configuration Boundary
 
-The experimental version-2 path adds grouped configuration entry points in
-`builder.py` and a normalization layer in `builder_config.py`. The current flow is:
+The experimental version-2 path adds grouped configuration entry points in `builder.py` and a normalization layer in `builder_config.py`. The current flow is:
 
 1. `parse_extra_options` collects legacy CLI strings and resolves structured policy.
 2. `check_extra_options` converts legacy values and loads Hugging Face metadata.
@@ -62,13 +63,9 @@ The experimental version-2 path adds grouped configuration entry points in
 4. The composite exporter writes the decoder and auxiliary runtime sections.
 5. The runtime fragment is merged into the completed `genai_config.json`.
 
-Legacy syntax is normalized before structured leaves are overlaid. A resolved
-`QuantConfig` is still export intent rather than a final graph manifest, so the
-builder separately validates emitted node names, tensor adoption, exporter
-capabilities, and runtime requirements.
+Legacy syntax is normalized before structured leaves are overlaid. A resolved `QuantConfig` is still export intent rather than a final graph manifest, so the builder separately validates emitted node names, tensor adoption, exporter capabilities, and runtime requirements.
 
-Do not move checkpoint unpacking into this layer or change the C++ runtime
-schema to accommodate builder inputs.
+Do not move checkpoint unpacking into this layer or change the C++ runtime schema to accommodate builder inputs.
 
 ### Architecture Classes
 
@@ -77,6 +74,8 @@ ORT GenAI builder classes and the Transformers package are imported at module sc
 Classes are the main abstraction within the model builder. Information that is specific to a particular model architecture is stored within the model architecture's class. Class inheritance is used to re-use existing code and reduce the time it takes to support a new model architecture. It also allows for any functions in the `Model` class to be overwritten as needed. Any changes in the `Model` class that add or modify support for optimization or quantization will benefit all models without any additional effort to support per model.
 
 When adding support for a new model architecture, it is preferred to make changes in the `Model` class when possible. This allows the functions in `Model` to become more generic to multiple model architectures. An example of this is the changes made to support the `GemmaModel` class. If the changes are large or the model architecture is different than the currently supported options, it is easier to override or create new `Make` functions in the new model architecture's class. Examples of this include the changes made to support the `MistralModel` and `PhiModel` classes.
+
+Graph expansions live in `builders/expansions/` and must override existing builder methods; non-overriding helpers belong in the corresponding `builders/` class. `Model` directly owns shared paged-attention graph emitters, cache layouts, input/output setup, runtime configuration hooks, and portable graph primitives. Architecture-specific helpers belong to their text, graph, vision, or MTP builder classes. Architecture classes inherit expansion mixins before their model base classes so overrides and `super()` retain the intended dispatch order. Provider adapters bind only genuine overrides, and their helper calls resolve through the builder. Engram's non-paged graph is implemented by `Qwen38Engram` in `builders/qwen3_8.py`; the decoder dispatches paged execution to the overriding `Qwen38Engram.make_ple` in `builders/expansions/engram.py`. Both paths reuse embedding, projection, gate, and convolution-input helpers defined by the text builder without duplicating those subgraphs.
 
 ### `Attrs` Dictionaries
 

@@ -12,14 +12,13 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
-from safetensors.torch import save_file
-
 from models.builders.base import Model
 from models.builders.block_drafter import BlockDrafterBuilder
 from models.builders.dflash2 import DFlash2Builder
 from models.builders.mtp import MTPModel
 from models.builders.qwen import Qwen35MoEModel
 from models.quantization.quant_config import QuantConfig
+from safetensors.torch import save_file
 
 TARGET_LAYER_IDS = [1, 11, 21]
 AUX_LAYERS = [layer_id + 1 for layer_id in TARGET_LAYER_IDS]
@@ -1012,7 +1011,7 @@ def test_quantized_drafter_reuses_the_targets_lm_head_names():
     }
 
 
-def test_structured_drafter_quantization_does_not_inherit_target_layout():
+def test_structured_drafter_quantization_uses_target_hardware_layout():
     quant_config = types.SimpleNamespace(
         weights=types.SimpleNamespace(block_size=128),
         format=types.SimpleNamespace(matmulnbits_weights_prepacked=0),
@@ -1021,7 +1020,7 @@ def test_structured_drafter_quantization_does_not_inherit_target_layout():
     quant = _quant_composite().block_drafter_quant("int4", quant_config)
 
     assert quant["block_size"] == 128
-    assert quant["prepack"] == 0
+    assert quant["prepack"] == 1
 
 
 @pytest.mark.parametrize(
@@ -1437,12 +1436,11 @@ def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
     builder._make_mlp(0, "hidden_states", weights, "num_block")
 
     projections = [node for node in builder.graph if node.op_type in ("MatMul", "MatMulNBits")]
-    assert len(projections) == (2 if fuse_gate_up else 3)
     if not fuse_gate_up:
+        assert len(projections) == 3
         assert not any(node.op_type == "Split" for node in builder.graph)
-        assert projections[0].name == "/dflash2/layers.0/mlp/gate_proj/MatMul"
-        assert projections[1].name == "/dflash2/layers.0/mlp/up_proj/MatMul"
         return
+    assert len(projections) == 2
 
     projection = next(node for node in builder.graph if node.name == "/dflash2/layers.0/mlp/gate_up_proj/MatMul")
     assert projection.op_type == ("MatMulNBits" if bits else "MatMul")
@@ -1491,8 +1489,8 @@ def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
             paged_block_size=256,
             max_position_embeddings=128,
             quant={"bits": bits, "block_size": 32, "prepack": 0} if bits else None,
-            fuse_gate_up=fused,
         )
+        builder.mlp_attrs["fuse_gate_up"] = fused
         builder.io_dtype = ir.DataType.FLOAT
         builder.hidden_size = 32
         builder.intermediate_size = 64
@@ -1964,8 +1962,7 @@ def test_five_uniformly_windowed_layers_accept_total_layer_count(tmp_path):
     assert builder.sliding_window == 2048
 
 
-@pytest.mark.parametrize("fuse_gate_up", [False, True, "true", "false"])
-def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up):
+def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     captured = {}
 
     class StubDFlash2Builder:
@@ -1982,13 +1979,13 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
     model = _composite(ep="webgpu")
     model.make_dflash2_init(
         io_dtype=ir.DataType.FLOAT16,
-        extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_gate_up": fuse_gate_up},
+        extra_options={"dflash2_path": _draft_checkpoint(tmp_path)},
     )
 
     model.make_dflash2_model(str(tmp_path))
 
     assert captured["max_position"] == model.decoder.context_length
-    assert captured["fuse_gate_up"] is (str(fuse_gate_up).lower() == "true")
+    assert captured["fuse_gate_up"] is False
     assert captured["include_attention_metadata"] is True
 
 

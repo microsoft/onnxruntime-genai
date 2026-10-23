@@ -1,0 +1,138 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+import ast
+from pathlib import Path
+
+import pytest
+from models.builders.base import Model
+from models.builders.expansions.engram import Qwen38Engram as PagedEngram
+from models.builders.expansions.qwen3_5 import Qwen35, Qwen35MoE
+from models.builders.expansions.qwen3_8 import Qwen38, Qwen38Graph, Qwen38Vision
+from models.builders.qwen3_5 import Qwen35MoETextModel, Qwen35MTPModel, Qwen35TextModel
+from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel, Qwen38Engram
+from models.builders.qwen3_8_graph import Qwen4ExpGraphModel
+
+
+@pytest.mark.parametrize(
+    ("model_class", "expansion_class", "method"),
+    [
+        (Qwen35TextModel, Qwen35, "make_attention_input_proj"),
+        (Qwen35MoETextModel, Qwen35MoE, "make_moe_router"),
+        (Qwen35MoETextModel, Qwen35MoE, "make_shared_expert"),
+        (Qwen4ExpTextModel, Qwen38, "make_attention_input_proj"),
+        (Qwen4ExpGraphModel, Qwen38Graph, "make_cast"),
+        (Qwen4ExpVisionModel, Qwen38Vision, "make_attention"),
+    ],
+)
+def test_model_uses_architecture_expansion(model_class, expansion_class, method):
+    assert method not in model_class.__dict__
+    assert getattr(model_class, method) is getattr(expansion_class, method)
+
+
+@pytest.mark.parametrize(
+    ("model_class", "methods"),
+    [
+        (
+            Model,
+            [
+                "make_paged_attention",
+                "make_paged_inputs_init",
+                "make_paged_outputs_init",
+                "make_paged_engine_config",
+                "make_varlen_gated_delta_net",
+                "make_selected_counts",
+                "make_mrope_positions",
+                "make_simplified_layer_norm",
+                "make_offset_rmsnorm",
+                "make_l2_normalize_expansion",
+            ],
+        ),
+        (
+            Qwen35TextModel,
+            ["make_qwen_gated_delta_net", "make_linear_attention_output_proj", "make_linear_attention_qkv_z_proj"],
+        ),
+        (Qwen35MTPModel, ["make_mtp_input_projection", "make_mtp_embedding"]),
+        (
+            Qwen4ExpTextModel,
+            [
+                "make_linear_attention_qkv_z_proj",
+                "make_qwen_sparse_attention",
+                "make_hyper_connection_mix",
+                "make_ple_embedding",
+                "make_ple_gate",
+            ],
+        ),
+        (Qwen4ExpGraphModel, ["make_linear", "make_layer_norm", "make_binary"]),
+        (Qwen4ExpVisionModel, ["make_position_embeddings", "make_rotary_embeddings", "make_frame_attention_mask"]),
+        (Qwen4ExpMTPTextModel, ["make_mtp_input_projection"]),
+    ],
+)
+def test_non_overriding_helpers_are_defined_in_builders(model_class, methods):
+    for method in methods:
+        assert method in model_class.__dict__
+        assert getattr(model_class, method).__module__.startswith("models.builders.")
+        assert ".expansions." not in getattr(model_class, method).__module__
+
+
+def test_expansion_methods_have_existing_builder_counterparts():
+    builders = Path(__file__).parents[3] / "src/python/py/models/builders"
+    names = {
+        method.name
+        for path in builders.glob("*.py")
+        for cls in ast.parse(path.read_text(encoding="utf-8")).body
+        if isinstance(cls, ast.ClassDef)
+        for method in cls.body
+        if isinstance(method, ast.FunctionDef)
+    }
+    for path in (builders / "expansions").glob("*.py"):
+        for cls in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(cls, ast.ClassDef):
+                for method in cls.body:
+                    if isinstance(method, ast.FunctionDef):
+                        assert method.name in names, f"{path.name}:{cls.name}.{method.name}"
+                    elif isinstance(method, ast.Assign) and isinstance(method.value, ast.Attribute):
+                        for target in method.targets:
+                            assert isinstance(target, ast.Name)
+                            assert target.id in names, f"{path.name}:{cls.name}.{target.id}"
+
+
+def test_qwen38_super_dispatch_preserves_qwen35_projection_fallback():
+    model = object.__new__(Qwen4ExpTextModel)
+
+    assert super(Qwen38, model).make_attention_input_proj.__func__ is Qwen35.make_attention_input_proj
+    assert super(Qwen38, model).make_moe_preprocessing.__func__ is Qwen35MoE.make_moe_preprocessing
+    assert super(Qwen35, model).make_attention_input_proj.__func__ is Model.make_attention_input_proj
+    assert (
+        super(Qwen4ExpTextModel, model).make_linear_attention_qkv_z_proj.__func__
+        is Qwen35TextModel.make_linear_attention_qkv_z_proj
+    )
+
+
+@pytest.mark.parametrize("expansion_class", [Qwen38Graph, Qwen38Vision])
+def test_qwen38_auxiliary_expansions_live_in_architecture_module(expansion_class):
+    assert expansion_class.__module__ == "models.builders.expansions.qwen3_8"
+
+
+@pytest.mark.parametrize("paged", [False, True])
+def test_qwen38_engram_dispatches_to_dense_builder_or_paged_expansion(monkeypatch, paged):
+    model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = paged
+    ple = object()
+    calls = []
+
+    def dense(self, layer_id, weights, root_input):
+        calls.append(("dense", self, layer_id, weights, root_input))
+        return "dense_output"
+
+    def packed(self, layer_id, weights, root_input):
+        calls.append(("paged", self, layer_id, weights, root_input))
+        return "paged_output"
+
+    monkeypatch.setattr(Qwen38Engram, "make_ple", dense)
+    monkeypatch.setattr(PagedEngram, "make_ple", packed)
+    kind = "paged" if paged else "dense"
+    assert model.make_ple(2, ple, "hidden_states") == f"{kind}_output"
+    assert calls == [(kind, model, 2, ple, "hidden_states")]
+    assert Qwen38Engram.__module__ == "models.builders.qwen3_8"
+    assert PagedEngram.__module__ == "models.builders.expansions.engram"
