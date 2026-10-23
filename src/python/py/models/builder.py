@@ -171,10 +171,11 @@ def validate_paged_cache_config(dynamic_batching, execution_provider):
     # An explicit capacity and a utilization factor select incompatible cache-sizing policies.
     if "num_blocks" in dynamic_batching and "gpu_utilization_factor" in dynamic_batching:
         raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
-    if execution_provider == "webgpu":
+    if execution_provider in {"webgpu", "mlx"}:
         num_blocks = dynamic_batching.get("num_blocks")
         if isinstance(num_blocks, bool) or not isinstance(num_blocks, int) or num_blocks <= 0:
-            raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
+            provider_name = "WebGPU" if execution_provider == "webgpu" else "MLX"
+            raise ValueError(f"{provider_name} paged attention requires num_blocks to be a positive integer.")
 
 
 def check_extra_options(
@@ -254,6 +255,8 @@ def check_extra_options(
             raise ValueError(message)
         if state_update_capacity and not extra_options.get("use_paged_attention", False):
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
+        if state_update_capacity and execution_provider == "mlx":
+            raise ValueError("MLX does not support compact state updates; set state_update_capacity=0.")
         extra_options["state_update_capacity"] = state_update_capacity
 
     if "max_draft_tokens" in extra_options:
@@ -958,8 +961,8 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml", "webgpu", "NvTensorRtRtx"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU, INT8 WebGPU)",
+        choices=["cpu", "cuda", "dml", "webgpu", "mlx", "NvTensorRtRtx"],
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU, INT4 MLX)",
     )
 
     parser.add_argument(

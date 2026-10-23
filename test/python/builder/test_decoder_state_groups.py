@@ -10,6 +10,7 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import onnx
 import pytest
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
@@ -611,10 +612,12 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 @pytest.mark.parametrize(
     ("use_paged_attention", "linear_attn_op", "state_window", "ep", "message"),
     [
-        (True, "linear_attention", 0, "cpu", "CUDA or WebGPU execution provider"),
-        (False, "gated_delta_net", 0, "cpu", "CUDA or WebGPU execution provider"),
+        (True, "linear_attention", 0, "cpu", "CUDA, WebGPU, or MLX execution provider"),
+        (False, "gated_delta_net", 0, "cpu", "CUDA, WebGPU, or MLX execution provider"),
         (True, "linear_attention", 1, "cuda", "require state_window=0"),
         (False, "gated_delta_net", 1, "cuda", "require state_window=0"),
+        (True, "gated_delta_net", 1, "mlx", "require state_window=0"),
+        (False, "gated_delta_net", 1, "mlx", "require state_window=0"),
     ],
 )
 def test_qwen35_gated_delta_net_option_validation(
@@ -635,7 +638,7 @@ def test_qwen35_gated_delta_net_option_validation(
         )
 
 
-@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+@pytest.mark.parametrize("ep", ["cuda", "webgpu", "mlx"])
 def test_qwen35_gated_delta_net_supported_providers(ep):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.validate_gated_delta_net_options(True, "linear_attention", 0, ep, base_module.ir.DataType.FLOAT16)
@@ -657,6 +660,16 @@ def test_qwen35_gated_delta_net_accepts_webgpu(use_paged_attention):
 def test_qwen35_non_paged_gated_delta_net_accepts_webgpu_fp32():
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.validate_gated_delta_net_options(False, "gated_delta_net", 0, "webgpu", base_module.ir.DataType.FLOAT)
+
+
+@pytest.mark.parametrize(
+    "io_dtype",
+    [base_module.ir.DataType.FLOAT, base_module.ir.DataType.FLOAT16, base_module.ir.DataType.BFLOAT16],
+)
+def test_qwen35_non_paged_gated_delta_net_accepts_mlx(io_dtype):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+
+    model.validate_gated_delta_net_options(False, "gated_delta_net", 0, "mlx", io_dtype)
 
 
 @pytest.mark.parametrize(
@@ -733,6 +746,116 @@ def test_qwen38_capacity_is_cleared_without_linear_attention_layers():
 
     assert model.context_length_attrs["state_update_capacity"] == 0
     assert "state_update.capture_count" not in model.input_names
+
+
+@pytest.mark.parametrize("io_dtype", [base_module.ir.DataType.FLOAT16, base_module.ir.DataType.BFLOAT16])
+def test_mlx_paged_qwen35_exports_fp32_recurrent_state_without_capture(monkeypatch, tmp_path, io_dtype):
+    model = _packed_gated_delta_net_model(capacity=0, io_dtype=io_dtype)
+    model.ep = "mlx"
+
+    model.configure_gated_delta_net_io()
+
+    assert model.input_types["past.conv"] == io_dtype
+    assert model.output_types["present.conv"] == io_dtype
+    assert model.input_shapes["past.conv"] == ["batch_size", 48, 3]
+    assert model.input_types["past.recurrent"] == base_module.ir.DataType.FLOAT
+    assert model.output_types["present.recurrent"] == base_module.ir.DataType.FLOAT
+    assert model.input_shapes["past.recurrent"] == ["batch_size", 3, 8, 4]
+    assert model.output_shapes["present.recurrent"] == ["batch_size", 3, 8, 4]
+    assert "state_update.capture_count" not in model.input_names
+    assert "state_update.recurrent_capsule" not in model.output_names
+
+    config_model = _make_config_model(Qwen35TextModel, layer_types=model.layer_types)
+    config_model.ep = "mlx"
+    config_model.ep_attrs = {"mlx": {}}
+    config_model.extra_options = {"num_blocks": 8, "max_batch_size": 1}
+    config = _write_config(monkeypatch, tmp_path, config_model)
+
+    decoder = config["model"]["decoder"]
+    assert decoder["session_options"]["provider_options"] == [{"MLXExecutionProvider": {}}]
+    assert decoder["state_groups"] == [
+        {"kind": "paged_kv", "layer_ids": [1]},
+        {"kind": "fixed_conv", "layer_ids": [0]},
+        {"kind": "fixed_recurrent", "layer_ids": [0]},
+    ]
+    assert config["engine"]["dynamic_batching"] == {
+        "block_size": 256,
+        "max_batch_size": 1,
+        "num_blocks": 8,
+    }
+
+
+def test_mlx_qwen35_rejects_compact_state_capture():
+    model = _packed_gated_delta_net_model()
+    model.ep = "mlx"
+
+    with pytest.raises(ValueError, match="MLX does not support compact state updates"):
+        model.configure_gated_delta_net_io()
+
+
+def test_mlx_qwen35_exports_quantized_paged_graph(monkeypatch, tmp_path):
+    transformers_qwen = pytest.importorskip("transformers.models.qwen3_5")
+    config = transformers_qwen.Qwen3_5TextConfig(
+        architectures=["Qwen3_5ForConditionalGeneration"],
+        vocab_size=160,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        max_position_embeddings=256,
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        linear_key_head_dim=8,
+        linear_value_head_dim=16,
+        layer_types=["linear_attention", "full_attention"],
+        rope_parameters={
+            "rope_type": "default",
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.25,
+            "mrope_section": [1, 1, 2],
+        },
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    config._name_or_path = str(tmp_path)
+    weights = transformers_qwen.Qwen3_5ForCausalLM(config)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    model = Qwen35TextModel(
+        config,
+        base_module.ir.DataType.FLOAT16,
+        base_module.ir.DataType.INT4,
+        "mlx",
+        str(cache_dir),
+        {"use_paged_attention": True, "num_blocks": 8, "max_batch_size": 1, "hf_token": False},
+    )
+    model.model_type = "qwen3_5_text"
+    monkeypatch.setattr(model, "load_weights", lambda _path: weights)
+    monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
+
+    model.make_model("")
+    model.save_model(str(tmp_path))
+    model.make_genai_config(config, {}, str(tmp_path))
+
+    exported = onnx.load(tmp_path / "model.onnx")
+    op_types = {node.op_type for node in exported.graph.node}
+    assert {"MatMulNBits", "PagedAttention", "VarlenCausalConvWithState", "GatedDeltaNet"} <= op_types
+    assert "LinearAttention" not in op_types
+    inputs = {value.name: value.type.tensor_type for value in exported.graph.input}
+    outputs = {value.name: value.type.tensor_type for value in exported.graph.output}
+    assert len(inputs["input_ids"].shape.dim) == 1
+    assert len(inputs["position_ids"].shape.dim) == 2
+    assert inputs["past.0.recurrent"].elem_type == onnx.TensorProto.FLOAT
+    assert outputs["present.0.recurrent"].elem_type == onnx.TensorProto.FLOAT
+    assert [dim.dim_value for dim in inputs["past.0.recurrent"].shape.dim][1:] == [4, 16, 8]
+    assert not any(name.startswith("state_update") for name in inputs.keys() | outputs.keys())
+    manifest = json.loads((tmp_path / "genai_config.json").read_text())
+    assert manifest["model"]["type"] == "qwen3_5_text"
+    assert manifest["model"]["decoder"]["session_options"]["provider_options"] == [{"MLXExecutionProvider": {}}]
+    assert manifest["engine"]["dynamic_batching"]["num_blocks"] == 8
 
 
 def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
