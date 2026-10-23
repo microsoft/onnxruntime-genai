@@ -2,8 +2,9 @@
 # Licensed under the MIT License.
 
 import unittest
-from onnx import TensorProto, helper
+
 from convert_fold_to_contrib import convert
+from onnx import TensorProto, helper
 
 
 def legacy_model():
@@ -11,12 +12,17 @@ def legacy_model():
         "FoldMid2",
         ["tokens", "ids", "status", "ctl", "ctx", "prefixes", "prefix2", "ptrs", "cos", "sin", "hidden"],
         ["head_ids", "head_c", "slots", "lengths", "cos_out", "sin_out", "sel", "head_hidden"],
-        domain="com.microsoft", head_rows=4, head_capacity=131076)
+        domain="com.microsoft",
+        head_rows=4,
+        head_capacity=131076,
+    )
     tail = helper.make_node("FoldTail", ["sel", "status", "ctl", "ptrs"], ["done"], domain="com.microsoft")
     graph = helper.make_graph(
-        [mid, tail], "legacy",
+        [mid, tail],
+        "legacy",
         [helper.make_tensor_value_info("ctl", TensorProto.INT64, [16])],
-        [helper.make_tensor_value_info("done", TensorProto.INT32, [1])])
+        [helper.make_tensor_value_info("done", TensorProto.INT32, [1])],
+    )
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("com.microsoft", 2)])
 
 
@@ -30,9 +36,14 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(len(mid.output), 10)
         self.assertEqual(tail.input[2], mid.output[8])
         self.assertEqual(len(tail.output), 2)
-        self.assertEqual(result.opset_import[0].version, 2)
+        self.assertEqual(result.opset_import[0].version, 1)
         info = {value.name: value for value in result.graph.value_info}
         self.assertEqual(info[mid.output[8]].type.tensor_type.shape.dim[0].dim_value, 16)
+
+    def test_version_one_import_is_preserved(self):
+        model = legacy_model()
+        model.opset_import[0].version = 1
+        self.assertEqual(convert(model).opset_import[0].version, 1)
 
     def test_repeat_conversion_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "legacy multi-row"):

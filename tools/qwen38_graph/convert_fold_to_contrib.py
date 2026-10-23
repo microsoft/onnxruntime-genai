@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Convert the legacy in-place folded graph to contrib FoldMid2/FoldTail v2."""
+"""Convert the legacy in-place folded graph to the replacement FoldMid2/FoldTail schema."""
 
 import argparse
 from pathlib import Path
@@ -11,10 +11,8 @@ from onnx import TensorProto, helper
 
 
 def convert(model):
-    mid_nodes = [node for node in model.graph.node
-                 if node.domain == "com.microsoft" and node.op_type == "FoldMid2"]
-    tail_nodes = [node for node in model.graph.node
-                  if node.domain == "com.microsoft" and node.op_type == "FoldTail"]
+    mid_nodes = [node for node in model.graph.node if node.domain == "com.microsoft" and node.op_type == "FoldMid2"]
+    tail_nodes = [node for node in model.graph.node if node.domain == "com.microsoft" and node.op_type == "FoldTail"]
     if len(mid_nodes) != 1 or len(tail_nodes) != 1:
         raise ValueError("Expected exactly one FoldMid2 and one FoldTail")
     mid, tail = mid_nodes[0], tail_nodes[0]
@@ -38,7 +36,7 @@ def convert(model):
     imports = [opset for opset in model.opset_import if opset.domain == "com.microsoft"]
     if len(imports) != 1 or imports[0].version not in (1, 2):
         raise ValueError("Expected a single com.microsoft opset-1 or opset-2 import")
-    imports[0].version = 2
+    imports[0].version = 1
     return model
 
 
