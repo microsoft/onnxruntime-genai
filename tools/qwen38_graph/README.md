@@ -4,6 +4,10 @@ The `qwen38_flash_graph` model type exposes fixed-shape CUDA graph execution
 through the normal Model, Tokenizer, and Generator interfaces. It supports
 greedy MTP(1), folded decode, dense chunked prefill, and shared device weights.
 
+For the complete published integration branches, exact runtime revisions,
+conversion prerequisites, ORT/GenAI builds and run commands, see
+[Build and run the combined integration](./BUILD_AND_RUN.md).
+
 ## DFlash2 device pipeline
 
 ### Restoring the native context limit
