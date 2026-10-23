@@ -12,6 +12,40 @@ Prerequisites:
 Example call to benchmarking script
 python benchmark_e2e.py -i {model folder} -b 1 -l 128 -g 256 -r 100 -w 10 -k 5 -o {output csv file name}
 
+LoRA adapters
+
+Pass --adapter_path with a model exported to accept that adapter's inputs. The
+optional --adapter_name defaults to benchmark, matching the C++ benchmark. The
+adapter is loaded once per model/configuration and activated on every generator,
+including generated prompts, warmup, and measured iterations. --reuse_generator
+retains the active adapter across rewind_to(0) calls.
+
+Run from benchmark/python so the supplied prompts.json is available. For built-in
+WebGPU, use a built-in WebGPU runtime and a model configured for WebGPU:
+
+python benchmark_e2e.py -i {lora model folder} -e follow_config --adapter_path {adapter.onnx_adapter} --adapter_name rewrite --use_prompt_set --chat_template "{input}" -l 128 -g 64 -m 4096 -w 2 -r 5 -k 1 --reuse_generator -o lora_on.csv
+
+For plugin WebGPU, install compatible onnxruntime-genai, onnxruntime, and
+onnxruntime-ep-webgpu packages, then replace -e follow_config with -e webgpu. The
+Python benchmark registers the installed WebGPU plugin automatically. Replace
+the example chat template with the format expected by the model/adapter.
+
+For adapter-off, omit --adapter_path and --adapter_name, keeping the same model,
+prompt set, and other settings, and use a different output filename. Omit
+--reuse_generator to measure fresh generators. Use --use_prompt_set for matched
+inputs; generated prompts can change with the adapter, and random inputs differ
+between processes. --print_model_output prints warmup and measured responses.
+
+Adapter Load Latency is reported separately and saved in the JSON result, along
+with the adapter path/name. Loading and activation are outside prompt/decode
+timers and the generator creation latency. The existing Python wall-clock metric
+includes per-request setup, including activation when a fresh generator is used.
+
+Adapter-off does not guarantee branch skipping for a model with optional zero
+adapter inputs. This measures activation overhead on the same graph. An INT8
+adapter also requires a graph exported for its quantized types/layout; it cannot
+be substituted directly into an FP16 LoRA graph.
+
 Engine guidance benchmark
 
 Build with guidance and run paired guided and unguided requests to compare setup latency, time to first token, inter-token latency, decode throughput, and schema compliance:

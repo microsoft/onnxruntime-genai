@@ -28,4 +28,34 @@ With `--ep_library_path`, custom provider names are accepted; use the provider n
 configuration (for example, `webgpu`, `cuda`, or a custom EP's advertised name).
 The program prints the registered library path and provider selection before benchmarking.
 
+## LoRA adapters
+
+Use `--adapter_path` with a model exported to accept the adapter's inputs. The optional
+`--adapter_name` defaults to `benchmark`. The adapter is loaded once and activated on every
+new generator, including prompt generation, warmup, and measured iterations. With
+`--reuse_generator`, the same active adapter is retained across `RewindTo(0)` calls.
+
+For built-in WebGPU:
+
+```powershell
+.\model_benchmark.exe -i C:\models\lora-model -e webgpu `
+  --adapter_path C:\models\lora-model\rewrite.onnx_adapter --adapter_name rewrite `
+  --prompt_file C:\prompts\benchmark.txt -g 64 -ml 4096 -w 2 -r 5 --reuse_generator
+```
+
+For plugin WebGPU, use a compatible plugin-enabled ORT build and add
+`--ep_library_path C:\ort\onnxruntime_providers_webgpu.dll`. To measure adapter-off,
+omit `--adapter_path` and `--adapter_name` while using the same model and prompt file.
+Omit `--reuse_generator` to measure fresh generators.
+
+Adapter loading is reported separately as `Adapter Load Latency`. Loading and activation
+are outside the inference timers and the reported generator creation latency. For on/off
+comparisons, use a fixed `--prompt` or `--prompt_file` containing the model's expected prompt
+format. The default generated prompt can change when the adapter changes.
+
+An absent adapter does not guarantee that its graph branches are skipped: a model with
+optional zero adapter inputs can still execute those nodes. This measures activation
+overhead on that graph. For an INT8 adapter, use a graph exported for its quantized tensor
+types/layout; changing the adapter file alone does not quantize an FP16 LoRA graph.
+
 Note: On some platforms, such as Android, you may need to set the environment variable `LD_LIBRARY_PATH` to the directory containing the onnxruntime shared library for `model_benchmark` to be able to run.
