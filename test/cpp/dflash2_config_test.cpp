@@ -13,6 +13,10 @@
 #include <unordered_map>
 #include <vector>
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+
 #include <gtest/gtest.h>
 
 #include "dflash2_drafter.h"
@@ -2702,6 +2706,12 @@ TEST(PrefixSnapshotCacheTest, CountEvictionPrefersRecencyOverCompatibleStorage) 
 }
 
 TEST(PrefixSnapshotCacheTest, DiskOnlyStorageOutlivesManagerAndCleansUpAfterLastLease) {
+#ifndef _WIN32
+  struct ScopedUmask {
+    mode_t previous{::umask(0)};
+    ~ScopedUmask() { ::umask(previous); }
+  } scoped_umask;
+#endif
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
   const auto parent = fs_std::temp_directory_path() /
                       ("oga-snapshot-test-" + std::to_string(reinterpret_cast<uintptr_t>(cpu)));
@@ -2712,6 +2722,12 @@ TEST(PrefixSnapshotCacheTest, DiskOnlyStorageOutlivesManagerAndCleansUpAfterLast
     entry = MakeStorageEntry(cache, cpu);
     ASSERT_NE(entry, nullptr);
     EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 16}));
+#ifndef _WIN32
+    const auto directory = fs_std::directory_iterator(parent)->path();
+    EXPECT_EQ(fs_std::status(directory).permissions() & fs_std::perms::mask, fs_std::perms::owner_all);
+    EXPECT_EQ(fs_std::status(directory / "payload").permissions() & fs_std::perms::mask,
+              fs_std::perms::owner_read | fs_std::perms::owner_write);
+#endif
   }
   CheckStorageEntry(*entry);
   EXPECT_FALSE(fs_std::is_empty(parent));

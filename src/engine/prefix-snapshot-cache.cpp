@@ -9,6 +9,13 @@
 #include <limits>
 #include <random>
 
+#ifndef _WIN32
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include "../logging.h"
 
 namespace Generators {
@@ -372,7 +379,16 @@ void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterfa
     std::random_device random;
     for (size_t attempt = 0; attempt < 32; ++attempt) {
       const auto candidate = parent / ("oga-prefix-" + std::to_string(random()) + "-" + std::to_string(random()));
+#ifdef _WIN32
       if (!std::filesystem::create_directory(candidate)) continue;
+#else
+      if (::mkdir(candidate.c_str(), S_IRWXU) != 0) {
+        if (errno == EEXIST) continue;
+        throw std::filesystem::filesystem_error(
+            "Unable to create private prefix snapshot spill storage.", candidate,
+            std::error_code{errno, std::generic_category()});
+      }
+#endif
       disk->directory = candidate;
       break;
     }
@@ -382,8 +398,26 @@ void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterfa
     }
     std::filesystem::permissions(disk->directory, std::filesystem::perms::owner_all,
                                  std::filesystem::perm_options::replace);
+    const auto payload = disk->directory / "payload";
+    auto mode = std::ios::in | std::ios::out | std::ios::binary;
+#ifdef _WIN32
+    mode |= std::ios::trunc;
+#else
+    const int descriptor = ::open(payload.c_str(), O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_RDWR,
+                                  S_IRUSR | S_IWUSR);
+    if (descriptor == -1) {
+      throw std::filesystem::filesystem_error(
+          "Unable to create private prefix snapshot payload.", payload,
+          std::error_code{errno, std::generic_category()});
+    }
+    if (::close(descriptor) != 0) {
+      throw std::filesystem::filesystem_error(
+          "Unable to close prefix snapshot payload.", payload,
+          std::error_code{errno, std::generic_category()});
+    }
+#endif
     disk->file.exceptions(std::ios::failbit | std::ios::badbit);
-    disk->file.open(disk->directory / "payload", std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
+    disk->file.open(payload, mode);
     disk->file.seekp(static_cast<std::streamoff>(entry.bytes - 1));
     disk->file.put('\0');
     disk->file.flush();
