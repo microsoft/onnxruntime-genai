@@ -127,34 +127,6 @@ std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> 
   return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
 }
 
-std::vector<int32_t> ReadTokenTypeIds(const OrtValue& token_type_ids) {
-  const auto info = token_type_ids.GetTensorTypeAndShapeInfo();
-  const size_t count = info->GetElementCount();
-  if (count == 0) return {};
-
-  switch (info->GetElementType()) {
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
-      const int32_t* values = token_type_ids.GetTensorData<int32_t>();
-      return std::vector<int32_t>(values, values + count);
-    }
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
-      const int64_t* values = token_type_ids.GetTensorData<int64_t>();
-      std::vector<int32_t> converted;
-      converted.reserve(count);
-      for (size_t i = 0; i < count; ++i) {
-        if (values[i] < std::numeric_limits<int32_t>::min() ||
-            values[i] > std::numeric_limits<int32_t>::max()) {
-          throw std::runtime_error("token_type_ids values must fit in int32");
-        }
-        converted.push_back(static_cast<int32_t>(values[i]));
-      }
-      return converted;
-    }
-    default:
-      throw std::runtime_error("token_type_ids must have int32 or int64 elements");
-  }
-}
-
 VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params)
     : State{params, model, model.vision_device_},
       model_{model} {}
@@ -460,7 +432,8 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
     // image-token attention. It is absent from native decoders, so bind it only when present.
     if (AsOpenVINOMultiModalModel(model_) &&
         decoder_only_info.HasInput(model_.config_->model.decoder.inputs.token_type_ids)) {
-      AddTokenTypeIds();
+      token_type_ids_ = std::make_unique<TokenTypeIds>(*this);
+      token_type_ids_->Add();
     }
   }
 
@@ -470,72 +443,6 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
     kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
-}
-
-namespace {
-// Zeroes a token_type_ids tensor (i32 or i64), i.e. marks every position as text.
-void ZeroTokenTypeIds(OrtValue& tensor) {
-  auto info = tensor.GetTensorTypeAndShapeInfo();
-  const size_t count = info->GetElementCount();
-  if (info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
-    std::fill_n(tensor.GetTensorMutableData<int64_t>(), count, int64_t{0});
-  else
-    std::fill_n(tensor.GetTensorMutableData<int32_t>(), count, int32_t{0});
-}
-}  // namespace
-
-void UpdatePendingTokenTypeIds(OrtValue& token_type_ids, std::vector<int32_t>& pending_token_type_ids) {
-  std::vector<int32_t> markers = std::move(pending_token_type_ids);
-  pending_token_type_ids.clear();
-
-  auto info = token_type_ids.GetTensorTypeAndShapeInfo();
-  const size_t count = info->GetElementCount();
-  const auto type = info->GetElementType();
-  if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 && type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-    throw std::runtime_error("token_type_ids input must be int32 or int64");
-  }
-  ZeroTokenTypeIds(token_type_ids);
-  if (markers.empty()) return;
-  if (markers.size() != count) {
-    throw std::runtime_error("pending token_type_ids has " + std::to_string(markers.size()) +
-                             " values but the decoder input has " + std::to_string(count) + " tokens");
-  }
-
-  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-    auto* dst = token_type_ids.GetTensorMutableData<int64_t>();
-    std::copy(markers.begin(), markers.end(), dst);
-  } else {
-    auto* dst = token_type_ids.GetTensorMutableData<int32_t>();
-    std::copy(markers.begin(), markers.end(), dst);
-  }
-}
-
-void DecoderState::AddTokenTypeIds() {
-  const int64_t batch_size = inputs_embeds_.GetShape()[0];
-  const int64_t seq_len = inputs_embeds_.GetShape()[1];
-  auto type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.token_type_ids);
-  std::array<int64_t, 2> shape{batch_size, seq_len};
-  token_type_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type);
-  ZeroTokenTypeIds(*token_type_ids_);
-  token_type_ids_index_ = inputs_.size();
-  inputs_.push_back(token_type_ids_.get());
-  input_names_.push_back(model_.config_->model.decoder.inputs.token_type_ids.c_str());
-}
-
-void DecoderState::SetPendingTokenTypeIds(std::span<const int32_t> token_type_ids) {
-  pending_token_type_ids_.assign(token_type_ids.begin(), token_type_ids.end());
-}
-
-void DecoderState::UpdateTokenTypeIds(size_t new_length) {
-  if (!token_type_ids_) return;
-  // Reallocate to the current sequence length. Generated tokens are always text (token_type_id 0); the
-  // prompt step reinstates the cached image-placeholder markers when their length matches.
-  const int64_t batch_size = inputs_embeds_.GetShape()[0];
-  auto type = token_type_ids_->GetTensorTypeAndShapeInfo()->GetElementType();
-  std::array<int64_t, 2> shape{batch_size, static_cast<int64_t>(new_length)};
-  token_type_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type);
-  UpdatePendingTokenTypeIds(*token_type_ids_, pending_token_type_ids_);
-  inputs_[token_type_ids_index_] = token_type_ids_.get();
 }
 
 DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -640,7 +547,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
-  UpdateTokenTypeIds(new_length);
+  if (token_type_ids_) token_type_ids_->Update(new_length);
 }
 
 // Overload for pipeline to call
@@ -653,7 +560,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
-  UpdateTokenTypeIds(new_length);
+  if (token_type_ids_) token_type_ids_->Update(new_length);
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
@@ -705,12 +612,12 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
   }
   // Forward the prompt's token_type_ids (image placeholder markers) to the decoder when its graph
   // consumes them (OpenVINO-partitioned Gemma3). Text-only prompts have none, so the decoder keeps zeros.
-  if (decoder_state_->HasTokenTypeIds()) {
+  if (decoder_state_->token_type_ids_) {
     for (const auto& input : extra_inputs) {
       if (input.name == Config::Defaults::TokenTypeIdsName) {
         OrtValue* ttids = input.tensor->GetOrtTensor();
         auto markers = ReadTokenTypeIds(*ttids);
-        decoder_state_->SetPendingTokenTypeIds(markers);
+        decoder_state_->token_type_ids_->SetPending(markers);
         break;
       }
     }
