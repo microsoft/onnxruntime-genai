@@ -2488,6 +2488,16 @@ class Model:
         self.make_node("Div", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
+    def make_mod(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Mod", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_abs(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Abs", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
     def make_tanh(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Tanh", inputs=[root_input], outputs=[output], name=name)

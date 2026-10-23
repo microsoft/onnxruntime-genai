@@ -76,7 +76,7 @@ The tool currently supports the following model architectures.
 - Granite MoE Hybrid
 - HunYuan Dense V1
 - InternLM2
-- LFM2 (text and the decoders of LFM2-VL / LFM2.5-VL / d1-3B and LFM2-Audio / LFM2.5-Audio)
+- LFM2 (text, LFM2-VL / LFM2.5-VL / d1-3B with their vision models, and the decoders of LFM2-Audio / LFM2.5-Audio)
 - LFM2 MoE
 - Llama
 - Mistral
@@ -363,6 +363,8 @@ python builder.py -m model_name -o path_to_output_folder -p precision -e executi
 #### Exclude Embedding Layer
 
 This scenario is for when you want to exclude the embedding layer from your ONNX model.
+
+For LFM2-VL models (`Lfm2VlForConditionalGeneration`, such as LFM2-VL, LFM2.5-VL and d1-3B), this option builds the whole image pipeline: next to the decoder, the builder writes the embedding model (`embeddings.onnx`), the vision model (`vision.onnx`) and `processor_config.json`, and adds their sections to `genai_config.json`. The vision and embedding models are never quantized. The vision model uses the decoder's input/output precision, except that it uses FP16 when the decoder uses BF16.
 
 ```bash
 # From wheel:
