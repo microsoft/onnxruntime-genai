@@ -224,7 +224,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},  // Default to float, will be determined at runtime if vision session exists
       spatial_merge_size_{config.model.vision.spatial_merge_size},
-      patch_size_{config.model.vision.patch_size} {
+      patch_size_{config.model.vision.patch_size},
+      requires_patch_image_{IsOpenVINOPartitioned(config)} {
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
@@ -281,6 +282,12 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
 
   // Check if pixel_values needs patching (shape should be [1, height, width, channels] in HWC format)
   if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
+    // This patcher's row order and per-patch layout differ from PatchImage's, which OpenVINO vision expects.
+    if (requires_patch_image_) {
+      throw std::runtime_error(
+          "OpenVINO-partitioned Qwen models require the PatchImage transform in the vision processor config "
+          "(model.vision.config_filename); the built-in patcher uses a different patch layout");
+    }
     const int64_t kPatchSize = patch_size_;  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
     constexpr int64_t kTemporalPatchSize = 2;
 
