@@ -14,6 +14,18 @@
 
 namespace Generators {
 
+std::vector<int64_t> GetQwenPatchedPixelValuesShape(int64_t total_patches, int64_t patch_dim,
+                                                    std::optional<size_t> input_rank) {
+  if (!input_rank || *input_rank == 2) {
+    return {total_patches, patch_dim};
+  }
+  if (*input_rank == 3) {
+    return {1, total_patches, patch_dim};
+  }
+  throw std::runtime_error("Qwen pixel_values input must have rank 2 or 3, got " +
+                           std::to_string(*input_rank));
+}
+
 void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float* destination,
                              int64_t height, int64_t width, int64_t channels,
                              int64_t patch_size, int64_t temporal_patch_size) {
@@ -216,12 +228,11 @@ QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& sessio
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
-  // Try to get pixel values type from session info if vision session exists (for MultiModalLanguageModel)
-  // For pipeline models like Qwen2_5_VL_PipelineModel, vision session won't be in session_info
-  try {
-    pixel_values_type_ = session_info.GetInputDataType(config.model.vision.inputs.pixel_values);
-  } catch (...) {
-    // Vision session not in session_info (e.g., for pipeline models), keep default float type
+  // Pipeline models have no vision session in SessionInfo and use the rank-2 default.
+  const auto& pixel_values_name = config.model.vision.inputs.pixel_values;
+  if (session_info.HasInput(pixel_values_name)) {
+    pixel_values_type_ = session_info.GetInputDataType(pixel_values_name);
+    pixel_values_input_rank_ = session_info.GetInputShape(pixel_values_name).size();
   }
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);
@@ -324,9 +335,9 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
                                  std::to_string(patch_dim));
       }
 
-      // Create patched pixel_values: [total_patches, patch_dim]
-      patched_pixel_values = OrtValue::CreateTensor<float>(
-          allocator, std::vector<int64_t>{total_patches, patch_dim});
+      const auto patched_shape =
+          GetQwenPatchedPixelValuesShape(total_patches, patch_dim, pixel_values_input_rank_);
+      patched_pixel_values = OrtValue::CreateTensor<float>(allocator, patched_shape);
       auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
 
       ExtractQwenImagePatches(thread_pool_, pixel_values_data, patched_data, height, width,
