@@ -8,6 +8,7 @@
 #include "models/io/qwen_vl_position_inputs.h"
 #include "pixtral_vision_state.h"
 #include "qwen_vl_state.h"
+#include "ep/openvino/interface.h"
 #include "openvino_multi_modal.h"
 #include "openvino_vision_merger.h"
 #include <cstring>
@@ -124,6 +125,9 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
 }
 
 std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
+  const bool is_openvino_vlm = AsOpenVINOMultiModalModel(*this) != nullptr;
+  const bool is_stateful = is_openvino_vlm && IsOpenVINOStatefulModel(*this);
+  ValidateOpenVINOStatefulVlmBeamSearch(is_openvino_vlm, is_stateful, params.search.num_beams);
   return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
 }
 
@@ -152,6 +156,13 @@ std::vector<int32_t> ReadTokenTypeIds(const OrtValue& token_type_ids) {
     }
     default:
       throw std::runtime_error("token_type_ids must have int32 or int64 elements");
+  }
+}
+
+void ValidateOpenVINOStatefulVlmBeamSearch(bool is_openvino_vlm, bool is_stateful, int num_beams) {
+  if (is_openvino_vlm && is_stateful && num_beams > 1) {
+    throw std::runtime_error(
+        "Beam search is not supported for stateful OpenVINO-partitioned VLMs; set num_beams to 1");
   }
 }
 
