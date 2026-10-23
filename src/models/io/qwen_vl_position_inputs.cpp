@@ -43,17 +43,6 @@ struct UpdatePositionIdsFunctor {
   }
 };
 
-struct FillMaskFunctor {
-  OrtValue* attention_mask;
-  int64_t total_size;
-
-  template <typename T>
-  void operator()() {
-    auto* mask_data = attention_mask->GetTensorMutableData<T>();
-    std::fill_n(mask_data, total_size, static_cast<T>(1));
-  }
-};
-
 struct InitPositionIdsFunctor {
   Qwen2VLPositionInputs* self;
   DeviceSpan<int32_t> next_tokens;
@@ -109,6 +98,8 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
     attention_mask_shape_[1] = 0;  // Will be set during first update
     attention_mask_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
   }
+  position_buffer_ = CreatePositionIdsBuffer(*state_.params_);
+  mask_buffer_ = CreateAttentionMaskBuffer(model_, *state_.params_, DynamicMaskUpdate::FillOnes);
 }
 
 void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
@@ -347,9 +338,8 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
     rope_deltas_.push_back(max_pos_for_batch + 1 - seq_len);
   }
 
-  // Move tensor to GPU and expand by num_beams
-  position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
   position_ids_shape_[1] *= state_.params_->search.num_beams;
+  position_buffer_->Assign(*position_ids_, model_, position_ids, state_.params_->search.num_beams);
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 
   // Expand rope_deltas_
@@ -364,24 +354,22 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
 
 template <typename T>
 void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
+  const int64_t seq_len = shape[1];
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* mask_data = attention_mask->GetTensorMutableData<T>();
   auto input_ids_span = next_tokens.CpuSpan();
   int64_t batch_size = shape[0];
-  int64_t seq_len = shape[1];
+  std::fill_n(mask_data, batch_size * shape[1], static_cast<T>(0));
 
   for (int64_t b = 0; b < batch_size; ++b) {
     for (int64_t s = 0; s < seq_len; ++s) {
-      int64_t current_token_idx = b * seq_len + s;
-      mask_data[current_token_idx] = (input_ids_span[current_token_idx] == model_.config_->model.pad_token_id)
-                                         ? static_cast<T>(0)
-                                         : static_cast<T>(1);
+      mask_data[b * shape[1] + s] = (input_ids_span[b * seq_len + s] == model_.config_->model.pad_token_id)
+                                        ? static_cast<T>(0)
+                                        : static_cast<T>(1);
     }
   }
 
-  // Move tensor to GPU and expand by num_beams
-  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
-  attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  mask_buffer_->Initialize(*attention_mask_, attention_mask, state_.params_->search.num_beams, attention_mask_shape_);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
@@ -398,16 +386,12 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
 
   DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_});
 
-  position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);  // No beam expansion needed, already expanded
+  position_buffer_->Assign(*position_ids_, model_, position_ids, 1);
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
-void Qwen2VLPositionInputs::UpdateAttentionMask() {
-  auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
-
-  DispatchOnType(type_, FillMaskFunctor{attention_mask.get(), attention_mask_shape_[0] * attention_mask_shape_[1]});
-
-  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, 1);
+void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_length) {
+  mask_buffer_->Update(*attention_mask_, attention_mask_shape_, total_length, new_length);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
@@ -426,8 +410,7 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       attention_mask_shape_[1] = new_length;
       DispatchOnType(type_, InitAttentionMaskFunctor{this, next_tokens, attention_mask_shape_});
     } else {
-      attention_mask_shape_[1] = total_length;
-      UpdateAttentionMask();
+      UpdateAttentionMask(total_length, new_length);
     }
   }
 
@@ -435,6 +418,14 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
 }
 
 void Qwen2VLPositionInputs::RewindTo(size_t index) {
+  if (index == 0) {
+    is_first_update_ = true;
+    position_ids_shape_[2] = 0;
+    position_ids_shape_[1] = state_.params_->search.batch_size;
+    attention_mask_shape_[0] = state_.params_->search.batch_size;
+    attention_mask_shape_[1] = 0;
+    return;
+  }
   // For Qwen2-VL, we need to handle rewinding for beam search
   // This is a simplified rewind, just updating the shape.
   // A full rewind would require re-calculating rope_deltas if we rewound into the prompt.
@@ -443,7 +434,7 @@ void Qwen2VLPositionInputs::RewindTo(size_t index) {
     position_ids_shape_[2] = static_cast<int64_t>(index);
   }
   if (has_mask_input_) {
-    attention_mask_shape_[1] = static_cast<int64_t>(index);
+    mask_buffer_->Rewind(*attention_mask_, attention_mask_shape_, index);
   }
 }
 
