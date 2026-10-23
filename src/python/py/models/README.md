@@ -699,7 +699,7 @@ python builder.py -m model_name -o path_to_output_folder -p bf16 -e cuda -c cach
 
 #### Qwen3.5/3.8 Recurrent Operator
 
-Qwen3.5/3.8 hybrid layers emit `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. GatedDeltaNet export supports CUDA and WebGPU, with `state_window=0` or at least `2`; paged exports use CUDA with `fp16`/`bf16` or WebGPU with `fp16` model I/O. The equivalent `LinearAttention` + `LinearAttentionGate` decomposition is retained internally with the Qwen3.8 builder expansions rather than exposed as a model export option.
+Qwen3.5/3.8 hybrid layers emit `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. GatedDeltaNet export supports CUDA and WebGPU, with `state_window=0` or at least `2`; paged exports use CUDA with `fp16`/`bf16` or WebGPU with `fp16` model I/O. The equivalent `LinearAttention` + `LinearAttentionGate` decomposition is retained internally in the Qwen builders rather than exposed as a model export option.
 
 ```bash
 # From wheel:

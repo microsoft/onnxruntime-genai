@@ -5,6 +5,4 @@ from .standard import Standard
 
 
 class WebGPU:
-    make_attention_mask_graph_capture_reformatting_for_gqa = (
-        Standard.make_attention_mask_graph_capture_reformatting_for_gqa
-    )
+    make_attention_mask_reformatting_for_gqa = Standard.make_attention_mask_reformatting_for_gqa
