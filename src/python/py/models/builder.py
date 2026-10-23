@@ -63,6 +63,7 @@ from builders import (
     Qwen4ExpModel,
     Qwen4ExpTextModel,
     Qwen25VLTextModel,
+    Qwen38FlashBuilder,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
@@ -720,6 +721,31 @@ def create_model(
     config = hf_details.pop("hf_config")
     # Local path from `get_hf_details`, after any URI resolution
     input_path = hf_details.pop("input_path", input_path)
+    qwen38_flash_build = extra_options.pop("_qwen38_flash_build", None)
+    if qwen38_flash_build is not None:
+        if effective_config is not None:
+            raise ValueError("The procedural Qwen 3.8 Flash build does not accept structured builder options.")
+        if execution_provider != "cuda":
+            raise ValueError("The procedural Qwen 3.8 Flash build requires --execution_provider cuda.")
+        if not input_path or not os.path.isdir(input_path):
+            raise ValueError("The procedural Qwen 3.8 Flash build requires a local raw target checkpoint directory.")
+        if config.architectures[0] != "Qwen4ExpForConditionalGeneration":
+            raise ValueError(
+                "The procedural Qwen 3.8 Flash build requires a Qwen4ExpForConditionalGeneration checkpoint."
+            )
+        Qwen38FlashBuilder.build(
+            input_path,
+            qwen38_flash_build["draft_checkpoint"],
+            output_dir,
+            qwen38_flash_build["calibration_prompts"],
+            qwen38_flash_build["provider"],
+            qwen38_flash_build["ort_home"],
+            workers=qwen38_flash_build["workers"],
+            threads=qwen38_flash_build["threads"],
+            calibration_capacity=qwen38_flash_build["calibration_capacity"],
+            resume=qwen38_flash_build["resume"],
+        )
+        return
     if effective_config is not None:
         validate_model_dependent_config(effective_config, config)
         if (
@@ -981,6 +1007,20 @@ def get_args():
     )
 
     parser.add_argument(
+        "--qwen38_flash_graph",
+        action="store_true",
+        help="Build the specialized procedural Qwen 3.8 Flash target + DFlash2 package from raw checkpoints.",
+    )
+    parser.add_argument("--qwen38_draft_checkpoint", type=Path)
+    parser.add_argument("--qwen38_calibration_prompts", type=Path)
+    parser.add_argument("--qwen38_ort_home", type=Path)
+    parser.add_argument("--qwen38_cuda_provider", type=Path)
+    parser.add_argument("--qwen38_workers", type=int, default=8)
+    parser.add_argument("--qwen38_threads", type=int, default=1)
+    parser.add_argument("--qwen38_calibration_capacity", type=int, default=4096)
+    parser.add_argument("--qwen38_resume", action="store_true")
+
+    parser.add_argument(
         "--extra_options",
         required=False,
         metavar="KEY=VALUE",
@@ -1122,7 +1162,7 @@ def get_args():
                     small dynamic-convolution and candidate-selector projections dense. The body
                     uses the target's automatic hardware-specific packing policy. CUDA emits
                     the corresponding fpA-intB layout for
-                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
+                    projections the kernel supports (N %% 64 for int4, N %% 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
                     CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
                     with FP32 residual/skip normalization and convolution-finish accumulation for FP16
@@ -1317,6 +1357,15 @@ def get_args():
     )
 
     args = parser.parse_args()
+    qwen38_options = (
+        args.qwen38_draft_checkpoint,
+        args.qwen38_calibration_prompts,
+        args.qwen38_ort_home,
+        args.qwen38_cuda_provider,
+        args.qwen38_resume,
+    )
+    if not args.qwen38_flash_graph and any(value is not None and value is not False for value in qwen38_options):
+        raise ValueError("Qwen 3.8 Flash procedural options require --qwen38_flash_graph.")
     print(
         "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, FP16 TRT-RTX, BF16 CUDA, BF16 TRT-RTX, INT8 CPU, INT8 CUDA, INT8 WebGPU, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
     )
@@ -1341,6 +1390,26 @@ if __name__ == "__main__":
         runtime_config=args.runtime_config,
         search=args.search,
     )
+    if args.qwen38_flash_graph:
+        required = {
+            "--qwen38_draft_checkpoint": args.qwen38_draft_checkpoint,
+            "--qwen38_calibration_prompts": args.qwen38_calibration_prompts,
+            "--qwen38_ort_home": args.qwen38_ort_home,
+            "--qwen38_cuda_provider": args.qwen38_cuda_provider,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(f"--qwen38_flash_graph requires {', '.join(missing)}.")
+        extra_options["_qwen38_flash_build"] = {
+            "draft_checkpoint": args.qwen38_draft_checkpoint,
+            "calibration_prompts": args.qwen38_calibration_prompts,
+            "ort_home": args.qwen38_ort_home,
+            "provider": args.qwen38_cuda_provider,
+            "workers": args.qwen38_workers,
+            "threads": args.qwen38_threads,
+            "calibration_capacity": args.qwen38_calibration_capacity,
+            "resume": args.qwen38_resume,
+        }
     create_model(
         args.model_name,
         args.input,
