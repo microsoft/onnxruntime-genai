@@ -20,9 +20,21 @@ void ValidateOpenVINOVlmBeamSearch(int num_beams) {
   }
 }
 
+// The vision mergers write image features on the host, so GenAI inputs must be CPU memory.
+void ValidateOpenVINOVlmInputsDevice(DeviceType inputs_device, DeviceType model_device) {
+  if (inputs_device != DeviceType::CPU) {
+    throw std::runtime_error(
+        "OpenVINO-partitioned VLMs merge image features on the host, which needs inputs in CPU "
+        "memory; " +
+        to_string(model_device) + " keeps them in device memory");
+  }
+}
+
 OpenVINOMultiModalModel::OpenVINOMultiModalModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     // vision=false: the merger owns host-side vision, and this makes the embedding text-only.
     : MultiModalLanguageModel(std::move(config), ort_env, /*vision=*/false, /*speech=*/false) {
+  ValidateOpenVINOVlmInputsDevice(p_device_inputs_->GetType(), p_device_->GetType());
+
   // Build session options for the host-side vision sub-model(s). Fall back to the decoder session
   // options when the config does not specify vision-specific ones, matching MultiModalLanguageModel.
   vision_session_options_ov_ = OrtSessionOptions::Create();

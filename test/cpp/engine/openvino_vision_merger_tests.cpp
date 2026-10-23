@@ -91,5 +91,23 @@ TEST(OpenVINOVisionStageSessionOptionsTest, PrefersStageThenVisionThenDecoderOpt
   EXPECT_EQ(GetOpenVINOVisionStageSessionOptions(config, config.model.vision.pipeline[1]).log_id, "vision");
 }
 
+TEST(OpenVINOVlmInputsDeviceTest, RequiresCpuMemoryInputs) {
+  // OpenVINO (any device_type) and the CPU EP both keep GenAI inputs in CPU memory.
+  EXPECT_NO_THROW(ValidateOpenVINOVlmInputsDevice(DeviceType::CPU, DeviceType::OpenVINO));
+  EXPECT_NO_THROW(ValidateOpenVINOVlmInputsDevice(DeviceType::CPU, DeviceType::CPU));
+
+  for (auto device : {DeviceType::CUDA, DeviceType::DML, DeviceType::NvTensorRtRtx, DeviceType::RyzenAI,
+                      DeviceType::WEBGPU, DeviceType::AMDGPU}) {
+    EXPECT_THROW(ValidateOpenVINOVlmInputsDevice(device, device), std::runtime_error);
+  }
+
+  try {
+    ValidateOpenVINOVlmInputsDevice(DeviceType::DML, DeviceType::DML);
+    FAIL() << "expected a device-memory error";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("DirectML keeps them in device memory"), std::string::npos);
+  }
+}
+
 }  // namespace
 }  // namespace Generators::test

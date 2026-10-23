@@ -16,6 +16,7 @@ const Config::SessionOptions& GetOpenVINOVisionStageSessionOptions(const Config&
                                                                    const Config::Model::Vision::PipelineModel& stage);
 
 void ValidateOpenVINOVlmBeamSearch(int num_beams);
+void ValidateOpenVINOVlmInputsDevice(DeviceType inputs_device, DeviceType model_device);
 
 // Model for OpenVINO-partitioned VLMs. These models use a text-only embedding graph and
 // merge image features on the host, so they delegate all vision work to a per-family
