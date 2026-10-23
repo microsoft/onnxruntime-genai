@@ -619,7 +619,7 @@ class TargetGraph:
             helper.make_graph(self.nodes, "QwenFlashProceduralTarget", self.inputs, self.outputs, self.constants),
             opset_imports=[
                 helper.make_opsetid("", 21),
-                helper.make_opsetid("com.microsoft", 1 if self.calibration else 2),
+                helper.make_opsetid("com.microsoft", 1),
             ],
             producer_name="onnxruntime-genai.qwen38_graph",
         )

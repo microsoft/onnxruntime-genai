@@ -95,7 +95,7 @@ class TargetGraphTests(unittest.TestCase):
         self.assertIn("aux_hidden_states", outputs)
         self.assertIn("fold.tail_done", outputs)
         self.assertEqual({node.domain for node in model.graph.node}, {"", "com.microsoft"})
-        self.assertEqual({p.domain: p.version for p in model.opset_import}, {"": 21, "com.microsoft": 2})
+        self.assertEqual({p.domain: p.version for p in model.opset_import}, {"": 21, "com.microsoft": 1})
         self.assertEqual(len({w.name for w in weights}), len(weights))
         self.assertEqual(sum(w.transform.startswith("cache_scale:") for w in weights), 24)
         self.assertEqual(sum(w.transform.startswith("experts:") for w in weights), 192)
