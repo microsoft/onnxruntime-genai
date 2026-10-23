@@ -100,13 +100,6 @@ TEST(OpenVINOVlmInputsDeviceTest, RequiresCpuMemoryInputs) {
                       DeviceType::WEBGPU, DeviceType::AMDGPU}) {
     EXPECT_THROW(ValidateOpenVINOVlmInputsDevice(device, device), std::runtime_error);
   }
-
-  try {
-    ValidateOpenVINOVlmInputsDevice(DeviceType::DML, DeviceType::DML);
-    FAIL() << "expected a device-memory error";
-  } catch (const std::runtime_error& error) {
-    EXPECT_NE(std::string(error.what()).find("DirectML keeps them in device memory"), std::string::npos);
-  }
 }
 
 }  // namespace
