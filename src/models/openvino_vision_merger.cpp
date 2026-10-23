@@ -11,6 +11,7 @@
 #include "generator/generators.h"
 #include "model.h"
 #include "multi_modal.h"
+#include "io/token_type_ids.h"
 #include "openvino_multi_modal.h"
 #include "openvino_vision_merger.h"
 #include "openvino_vision_merger_utils.h"

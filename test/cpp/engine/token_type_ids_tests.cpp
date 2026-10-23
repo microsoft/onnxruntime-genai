@@ -1,15 +1,16 @@
-// Copyright (c) Microsoft Corporation. All rights reserved.
+// Copyright (c) Intel® Corporation. All rights reserved.
 // Licensed under the MIT License.
 
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include <gtest/gtest.h>
 
-#include "models/multi_modal.h"
-#include "models/openvino_multi_modal.h"
+#include "generator/generators.h"
+#include "models/io/token_type_ids.h"
 
 namespace Generators::test {
 namespace {
@@ -94,13 +95,6 @@ TEST(TokenTypeIdsReadTest, RejectsInt64ValuesOutsideInt32Range) {
       static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
 
   EXPECT_THROW(ReadTokenTypeIds(*token_type_ids), std::runtime_error);
-}
-
-TEST(OpenVINOVlmBeamSearchTest, RejectsMultipleBeams) {
-  EXPECT_THROW(ValidateOpenVINOVlmBeamSearch(2), std::runtime_error);
-  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(1));
-  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(0));
-  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(-1));
 }
 
 }  // namespace

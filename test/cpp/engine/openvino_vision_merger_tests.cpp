@@ -124,6 +124,13 @@ TEST(OpenVINOVlmInputsDeviceTest, RequiresCpuMemoryInputs) {
   }
 }
 
+TEST(OpenVINOVlmBeamSearchTest, RejectsMultipleBeams) {
+  EXPECT_THROW(ValidateOpenVINOVlmBeamSearch(2), std::runtime_error);
+  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(1));
+  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(0));
+  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(-1));
+}
+
 TEST(MergeImageFeaturesIntoEmbeddingsTest, CopiesRowsInOrderForTwoAndThreeDimensionalEmbeddings) {
   auto embeddings_2d = FloatTensor(std::array<int64_t, 2>{3, 2}, std::array<float, 6>{0, 1, 2, 3, 4, 5});
   auto embeddings_3d = FloatTensor(std::array<int64_t, 3>{1, 3, 2}, std::array<float, 6>{0, 1, 2, 3, 4, 5});
