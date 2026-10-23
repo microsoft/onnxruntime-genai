@@ -7,11 +7,15 @@
 #include "models/preprocessing/processor.h"
 #include "ortx_processor.h"
 
+#include <optional>
+
 namespace Generators {
 
 void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float* destination,
                              int64_t height, int64_t width, int64_t channels,
                              int64_t patch_size, int64_t temporal_patch_size);
+std::vector<int64_t> GetQwenPatchedPixelValuesShape(int64_t total_patches, int64_t patch_dim,
+                                                    std::optional<size_t> input_rank);
 
 struct QwenImageProcessor : Processor {
   QwenImageProcessor(Config& config, const SessionInfo& session_info);
@@ -22,6 +26,7 @@ struct QwenImageProcessor : Processor {
   ort_extensions::OrtxObjectPtr<OrtxProcessor> processor_;
 
   ONNXTensorElementDataType pixel_values_type_;
+  std::optional<size_t> pixel_values_input_rank_;
   int64_t spatial_merge_size_;
   int64_t patch_size_{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
 };
