@@ -10,9 +10,9 @@
 #include "qwen_vl_state.h"
 #include "openvino_multi_modal.h"
 #include "openvino_vision_merger.h"
-#include <cstring>
+
 #include <algorithm>
-#include <limits>
+#include <cstring>
 #include <numeric>
 #include <utility>
 

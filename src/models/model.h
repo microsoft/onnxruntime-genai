@@ -25,6 +25,10 @@ void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& d
 void CheckResult(extError_t error);
 void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config);
 
+// Returns true when the model was exported with an OpenVINO graph partitioning (text-only embedding
+// graph + host-side image feature merge).
+bool IsOpenVINOPartitioned(const Config& config);
+
 // True when a session running on `session_device` may be handed a tensor whose memory lives on
 // `buffer_device`. ORT moves tensor data between host memory and the devices the session has an EP
 // for; for memory on any other device it neither copies nor rejects the binding but treats the
@@ -119,10 +123,6 @@ struct State {
   std::shared_ptr<Adapters> adapters_;
   ExtraOutputs extra_outputs_;
 };
-
-// Returns true when the model was exported with an OpenVINO graph partitioning (text-only embedding
-// graph + host-side image feature merge).
-bool IsOpenVINOPartitioned(const Config& config);
 
 struct SessionInfo : ModelStateMetadata {
   SessionInfo() = default;
