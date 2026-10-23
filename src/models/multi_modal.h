@@ -5,7 +5,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -15,6 +14,7 @@
 #include "models/io/embeddings.h"
 #include "models/io/extra_inputs.h"
 #include "models/io/logits.h"
+#include "models/io/token_type_ids.h"
 #include "io/kv_cache.h"
 #include "models/io/position_inputs.h"
 #include "model_type.h"
@@ -24,9 +24,6 @@
 namespace Generators {
 
 struct OpenVINOVisionMerger;
-
-std::vector<int32_t> ReadTokenTypeIds(const OrtValue& token_type_ids);
-void UpdatePendingTokenTypeIds(OrtValue& token_type_ids, std::vector<int32_t>& pending_token_type_ids);
 
 struct MultiModalLanguageModel : Model {
   MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
@@ -179,7 +176,6 @@ struct DecoderState : State {
   // prompt (it is a lookup/projection), while the decoder prefill is split into several runs so the
   // peak attention workspace scales with the chunk size instead of the full prompt length.
   bool SupportsPrefillChunking(bool has_multimodal_content) const;
-  bool HasTokenTypeIds() const { return token_type_ids_ != nullptr; }
   void PrepareEmbeddingsForPrefill(size_t new_length);
   DeviceSpan<float> RunPrefillWithChunking(int current_length, DeviceSpan<int32_t>& next_tokens,
                                            DeviceSpan<int32_t> next_indices, size_t chunk_size);
@@ -189,20 +185,12 @@ struct DecoderState : State {
 
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices, size_t new_length);
 
-  // Binds/updates the decoder's optional token_type_ids input (OpenVINO-partitioned Gemma3). Values are
-  // 0 for text and 1 for image placeholder tokens; MultiModalPipelineState supplies the prompt markers.
-  void AddTokenTypeIds();
-  void UpdateTokenTypeIds(size_t new_length);
-  void SetPendingTokenTypeIds(std::span<const int32_t> token_type_ids);
-
   const MultiModalLanguageModel& model_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
   std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
-  std::unique_ptr<OrtValue> token_type_ids_;            // Optional model input (OpenVINO-partitioned Gemma3)
-  size_t token_type_ids_index_{~0U};                    // Slot in state_.inputs_ for token_type_ids
-  std::vector<int32_t> pending_token_type_ids_;         // Consumed by the next decoder update
+  std::unique_ptr<TokenTypeIds> token_type_ids_;        // Optional model input (OpenVINO-partitioned Gemma3)
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
   std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
