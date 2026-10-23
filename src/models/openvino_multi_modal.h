@@ -15,6 +15,8 @@ namespace Generators {
 const Config::SessionOptions& GetOpenVINOVisionStageSessionOptions(const Config& config,
                                                                    const Config::Model::Vision::PipelineModel& stage);
 
+void ValidateOpenVINOVlmBeamSearch(int num_beams);
+
 // Model for OpenVINO-partitioned VLMs. These models use a text-only embedding graph and
 // merge image features on the host, so they delegate all vision work to a per-family
 // OpenVINOVisionMerger (see openvino_vision_merger.h).
@@ -23,6 +25,8 @@ struct OpenVINOMultiModalModel : MultiModalLanguageModel {
 
   OpenVINOMultiModalModel(const OpenVINOMultiModalModel&) = delete;
   OpenVINOMultiModalModel& operator=(const OpenVINOMultiModalModel&) = delete;
+
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
   OrtSession& GetVisionPipelineSession(const std::string& model_id) const;
 

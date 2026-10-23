@@ -13,6 +13,13 @@ const Config::SessionOptions& GetOpenVINOVisionStageSessionOptions(const Config&
   return config.model.decoder.session_options;
 }
 
+// The host-side mergers produce one feature set per prompt, and stateful OVEP can't follow beam reordering.
+void ValidateOpenVINOVlmBeamSearch(int num_beams) {
+  if (num_beams > 1) {
+    throw std::runtime_error("Beam search is not supported for OpenVINO-partitioned VLMs; set num_beams to 1");
+  }
+}
+
 OpenVINOMultiModalModel::OpenVINOMultiModalModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     // vision=false: the merger owns host-side vision, and this makes the embedding text-only.
     : MultiModalLanguageModel(std::move(config), ort_env, /*vision=*/false, /*speech=*/false) {
@@ -46,6 +53,12 @@ OpenVINOMultiModalModel::OpenVINOMultiModalModel(std::unique_ptr<Config> config,
       ov_vision_pipeline_sessions_.emplace(stage.model_id, CreateSession(ort_env, stage.filename, stage_options));
     }
   }
+}
+
+std::unique_ptr<State> OpenVINOMultiModalModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
+                                                            const GeneratorParams& params) const {
+  ValidateOpenVINOVlmBeamSearch(params.search.num_beams);
+  return MultiModalLanguageModel::CreateState(sequence_lengths, params);
 }
 
 OrtSession& OpenVINOMultiModalModel::GetVisionPipelineSession(const std::string& model_id) const {

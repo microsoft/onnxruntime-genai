@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "models/multi_modal.h"
+#include "models/openvino_multi_modal.h"
 
 namespace Generators::test {
 namespace {
@@ -95,13 +96,11 @@ TEST(TokenTypeIdsReadTest, RejectsInt64ValuesOutsideInt32Range) {
   EXPECT_THROW(ReadTokenTypeIds(*token_type_ids), std::runtime_error);
 }
 
-TEST(OpenVINOVlmBeamSearchTest, RejectsMultipleBeamsForStatefulVlmsAndGemma3) {
-  EXPECT_THROW(ValidateOpenVINOVlmBeamSearch(true, true, false, 2), std::runtime_error);
-  EXPECT_THROW(ValidateOpenVINOVlmBeamSearch(true, false, true, 2), std::runtime_error);
-  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(true, true, false, 1));
-  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(true, false, true, 1));
-  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(true, false, false, 2));
-  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(false, false, true, 2));
+TEST(OpenVINOVlmBeamSearchTest, RejectsMultipleBeams) {
+  EXPECT_THROW(ValidateOpenVINOVlmBeamSearch(2), std::runtime_error);
+  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(1));
+  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(0));
+  EXPECT_NO_THROW(ValidateOpenVINOVlmBeamSearch(-1));
 }
 
 }  // namespace
