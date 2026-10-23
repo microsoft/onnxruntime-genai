@@ -150,6 +150,7 @@ Qwen38Plane::Qwen38Plane(const std::filesystem::path& path) {
     embed_rows = reinterpret_cast<decltype(embed_rows)>(dlsym(handle_, "qwen38_plane_embed_rows"));
     host_get_device_pointer =
         reinterpret_cast<decltype(host_get_device_pointer)>(dlsym(handle_, "qwen38_plane_host_get_device_pointer"));
+    dflash_select = reinterpret_cast<decltype(dflash_select)>(dlsym(handle_, "qwen38_plane_dflash_select"));
     if (abi_version() != QWEN38_PLANE_ABI_VERSION) {
       throw std::runtime_error("qwen38_graph: the plane library has ABI version " + std::to_string(abi_version()) +
                                ", expected " + std::to_string(QWEN38_PLANE_ABI_VERSION));

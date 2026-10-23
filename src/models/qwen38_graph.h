@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "model.h"
+#include "../dflash2_drafter.h"
 #include "qwen38_decode_device.h"
 #include "qwen38_graph_plane.h"
 
@@ -220,6 +221,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     uint8_t* tokens{};
     uint8_t* hidden{};
     size_t status_count{};
+    uint8_t* auxiliary{};
   };
   struct RowInputs {  // fixed-address per-row-count inputs of the target
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
@@ -265,6 +267,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   DevTensor* NewDeviceTensor(std::map<std::string, std::unique_ptr<DevTensor>>& owner, const std::string& name,
                              std::vector<int64_t> shape, ONNXTensorElementDataType type);
   void Warmup();
+  void Draft(const uint8_t* features, size_t rows, size_t position, int32_t anchor, bool propose);
 
   void PrepRow(int rows, int row, const void* tok, const void* pos, int add, const void* ctx_in, void* ctx_out);
   void RunTarget(int rows, int phase);
@@ -375,6 +378,12 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     std::unique_ptr<OrtRunOptions> run_options;
   };
   std::unique_ptr<FastPrefillState> fast_;
+  std::shared_ptr<Dflash2Model> dflash_model_;
+  std::unique_ptr<Dflash2Drafter> dflash_;
+  PlaneBuffer d_dflash_prompt_;
+  size_t dflash_prompt_rows_{};
+  size_t dflash_prompt_position_{};
+  static constexpr size_t kDflashWidth = 12800;
 
   // host state
   Qwen38DecodeLedger ledger_;

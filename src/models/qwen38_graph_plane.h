@@ -37,6 +37,7 @@ struct Qwen38Plane {
                       int dst_pitch_elems, int mode){};
   void (*embed_rows)(void* stream, const void* table, const void* ids, void* out, int rows, int width){};
   int (*host_get_device_pointer)(void** dev_ptr, void* host_ptr, unsigned flags){};
+  int (*dflash_select)(void* stream, const void* candidates, const void* scores, void* control, int drafts, int top_k){};
 
  private:
   void* handle_{};
