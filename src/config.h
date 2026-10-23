@@ -695,7 +695,6 @@ struct Config {
         std::string filename_s2;
         std::optional<SessionOptions> session_options;
       } head;
-      std::string plane_library;
       std::string ple_table;
       int kv_capacity{33028};
       int target_s1_graph_id{41};

@@ -2386,7 +2386,8 @@ struct Qwen38Graph_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "plane_library") {
-      v_.plane_library = JSON::Get<std::string_view>(value);
+      if (!JSON::Get<std::string_view>(value).empty())
+        throw std::runtime_error("model.qwen38_graph.plane_library is no longer supported; remove it and use the matching GenAI CUDA add-on");
     } else if (name == "ple_table") {
       v_.ple_table = JSON::Get<std::string_view>(value);
     } else if (name == "kv_capacity") {
@@ -3646,7 +3647,6 @@ void ValidateModelPaths(const Config& config) {
   ValidateConfigPath(qwen.head.filename_s1, "model.qwen38_graph.head.filename_s1");
   ValidateConfigPath(qwen.head.filename_s2, "model.qwen38_graph.head.filename_s2");
   ValidateConfigPath(qwen.fold.head_r2.filename, "model.qwen38_graph.fold.head_r2.filename");
-  ValidateConfigPath(qwen.plane_library, "model.qwen38_graph.plane_library");
   ValidateConfigPath(qwen.ple_table, "model.qwen38_graph.ple_table");
   ValidateConfigPath(qwen.prefill.dense.filename, "model.qwen38_graph.prefill.dense.filename");
   ValidateConfigPath(qwen.prefill.head_kv.filename, "model.qwen38_graph.prefill.head_kv.filename");

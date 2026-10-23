@@ -21,6 +21,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <stdint.h>
+#include "interface.h"
 
 typedef long long i64;
 
@@ -556,4 +557,94 @@ extern "C" int qg_argmax_finish(void* stream, const void* values, const void* in
       static_cast<const float*>(values), static_cast<const int*>(indices), blocks,
       static_cast<int32_t*>(output));
   return static_cast<int>(cudaGetLastError());
+}
+
+extern "C" __attribute__((visibility("default")))
+const Generators::Qwen38PlaneFunctions* GetQwen38PlaneFunctions(uint32_t version, size_t size) {
+  using Generators::Qwen38PlaneFunctions;
+  if (version != Generators::kQwen38PlaneVersion || size != sizeof(Qwen38PlaneFunctions)) return nullptr;
+  static const Qwen38PlaneFunctions functions = [] {
+    Qwen38PlaneFunctions f{};
+    f.sizeof_params = mtp_sizeof_params;
+    f.set_device = qg_set_device;
+    f.error_string = qg_error_string;
+    f.malloc_ = qg_malloc;
+    f.free_ = qg_free;
+    f.host_alloc = qg_host_alloc;
+    f.host_free = qg_host_free;
+    f.host_register = qg_host_register;
+    f.host_unregister = qg_host_unregister;
+    f.host_get_device_pointer = qg_host_get_device_pointer;
+    f.stream_create = qg_stream_create;
+    f.stream_destroy = qg_stream_destroy;
+    f.dflash_select = qg_dflash_select;
+    f.argmax_finish = qg_argmax_finish;
+    f.memset_ = [](void* p, int value, size_t bytes, void* stream) {
+      return qg_memset(p, value, bytes, static_cast<cudaStream_t>(stream));
+    };
+    f.memcpy_h2d = [](void* dst, const void* src, size_t bytes, void* stream) {
+      return qg_memcpy_h2d(dst, src, bytes, static_cast<cudaStream_t>(stream));
+    };
+    f.memcpy_d2h = [](void* dst, const void* src, size_t bytes, void* stream) {
+      return qg_memcpy_d2h(dst, src, bytes, static_cast<cudaStream_t>(stream));
+    };
+    f.memcpy_d2d = [](void* dst, const void* src, size_t bytes, void* stream) {
+      return qg_memcpy_d2d(dst, src, bytes, static_cast<cudaStream_t>(stream));
+    };
+    f.memcpy2d_d2d = [](void* dst, size_t dp, const void* src, size_t sp, size_t width, size_t height, void* stream) {
+      return qg_memcpy2d_d2d(dst, dp, src, sp, width, height, static_cast<cudaStream_t>(stream));
+    };
+    f.stream_sync = [](void* stream) { return qg_stream_sync(static_cast<cudaStream_t>(stream)); };
+    f.prep = [](void* stream, const void* p, const void* tokens, const void* positions, int add, const void* ctx,
+                void* next_ctx, void* ids, void* pos_ids, void* committed, void* past, void* ple, void* state) {
+      mtp_prep(static_cast<cudaStream_t>(stream), static_cast<const PleParams*>(p), static_cast<const i64*>(tokens),
+               static_cast<const i64*>(positions), add, static_cast<const i64*>(ctx), static_cast<i64*>(next_ctx),
+               static_cast<i64*>(ids), static_cast<i64*>(pos_ids), static_cast<int*>(committed),
+               static_cast<i64*>(past), static_cast<__nv_bfloat16*>(ple), static_cast<i64*>(state));
+    };
+    f.argmax_part = [](void* stream, const void* logits, int count, void* values, void* indices, int blocks) {
+      mtp_argmax_part(static_cast<cudaStream_t>(stream), static_cast<const __nv_bfloat16*>(logits), count,
+                      static_cast<float*>(values), static_cast<int*>(indices), blocks);
+    };
+    f.post_tok = [](void* stream, const void* tokens, void* state, void* ctx, const void* a, const void* b,
+                    const void* status, int count, void* result, int ring) {
+      mtp_post_tok(static_cast<cudaStream_t>(stream), static_cast<const i64*>(tokens), static_cast<i64*>(state),
+                   static_cast<i64*>(ctx), static_cast<const i64*>(a), static_cast<const i64*>(b),
+                   static_cast<const int*>(status), count, static_cast<i64*>(result), ring);
+    };
+    f.post1 = [](void* stream, const void* values, const void* indices, int blocks, void* state, void* ctx,
+                 const void* a, const void* status, int count, void* result, int ring) {
+      mtp_post1(static_cast<cudaStream_t>(stream), static_cast<const float*>(values), static_cast<const int*>(indices),
+                blocks, static_cast<i64*>(state), static_cast<i64*>(ctx), static_cast<const i64*>(a),
+                static_cast<const int*>(status), count, static_cast<i64*>(result), ring);
+    };
+    f.head_prep = [](void* stream, const void* ctl, int rows, int length, const void* src, void* dst,
+                     void* tokens, void* positions, void* committed) {
+      mtp_head_prep(static_cast<cudaStream_t>(stream), static_cast<const i64*>(ctl), rows, length, src, dst,
+                    static_cast<i64*>(tokens), static_cast<i64*>(positions), static_cast<int*>(committed));
+    };
+    f.head_post = [](void* stream, const void* token, void* ctl) {
+      mtp_head_post(static_cast<cudaStream_t>(stream), static_cast<const i64*>(token), static_cast<i64*>(ctl));
+    };
+    f.or_status = [](void* stream, const void* status, int count, void* ctl) {
+      mtp_or_status(static_cast<cudaStream_t>(stream), static_cast<const int*>(status), count, static_cast<i64*>(ctl));
+    };
+    f.ple_rows = [](void* stream, const void* p, const void* tokens, int rows, const void* ctx, void* next, void* ple) {
+      mtp_ple_rows(static_cast<cudaStream_t>(stream), static_cast<const PleParams*>(p), static_cast<const i64*>(tokens),
+                   rows, static_cast<const i64*>(ctx), static_cast<i64*>(next), static_cast<__nv_bfloat16*>(ple));
+    };
+    f.pool_keys = [](void* stream, const void* raw, int blocks, const void* norm, const void* cos, const void* sin,
+                     int width, float epsilon, int first, void* output) {
+      mtp_pool_keys(static_cast<cudaStream_t>(stream), raw, blocks, norm, cos, sin, width, epsilon, first,
+                    static_cast<float*>(output));
+    };
+    f.transpose_f32 = [](void* stream, const void* src, void* dst, int n, int batch) {
+      mtp_transpose_f32(static_cast<cudaStream_t>(stream), static_cast<const float*>(src), static_cast<float*>(dst), n, batch);
+    };
+    f.embed_rows = [](void* stream, const void* table, const void* ids, void* output, int rows, int width, int vocab) {
+      qg_embed_rows(static_cast<cudaStream_t>(stream), table, ids, output, rows, width, vocab);
+    };
+    return f;
+  }();
+  return &functions;
 }

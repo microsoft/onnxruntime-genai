@@ -7,7 +7,6 @@
 #include "qwen38_graph.h"
 #include <limits>
 
-#include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -77,55 +76,15 @@ constexpr int kStatusRingSpinCheck = 1 << 16;
 // ------------------------------------------------------------------------------------------------
 // Plane library
 // ------------------------------------------------------------------------------------------------
-Qwen38Plane::Qwen38Plane(const std::string& path) {
-  handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-  if (!handle)
-    throw std::runtime_error(std::string("qwen38_graph: failed to load plane library ") + path + ": " + dlerror());
-  auto load = [&](auto& fn, const char* name) {
-    void* symbol = dlsym(handle, name);
-    if (!symbol) throw std::runtime_error(std::string("qwen38_graph: plane library lacks symbol ") + name);
-    fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(symbol);
-  };
-  load(sizeof_params, "mtp_sizeof_params");
-  load(set_device, "qg_set_device");
-  load(error_string, "qg_error_string");
-  load(malloc_, "qg_malloc");
-  load(free_, "qg_free");
-  load(host_alloc, "qg_host_alloc");
-  load(host_free, "qg_host_free");
-  load(host_register, "qg_host_register");
-  load(host_unregister, "qg_host_unregister");
-  load(memset_, "qg_memset");
-  load(memcpy_h2d, "qg_memcpy_h2d");
-  load(memcpy_d2h, "qg_memcpy_d2h");
-  load(memcpy_d2d, "qg_memcpy_d2d");
-  load(stream_sync, "qg_stream_sync");
-  load(prep, "mtp_prep");
-  load(argmax_part, "mtp_argmax_part");
-  load(post_tok, "mtp_post_tok");
-  load(post1, "mtp_post1");
-  load(head_prep, "mtp_head_prep");
-  load(head_post, "mtp_head_post");
-  load(or_status, "mtp_or_status");
-  auto load_optional = [&](auto& fn, const char* name) {
-    fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(dlsym(handle, name));
-  };
-  load_optional(memcpy2d_d2d, "qg_memcpy2d_d2d");
-  load_optional(host_get_device_pointer, "qg_host_get_device_pointer");
-  load_optional(embed_rows, "qg_embed_rows");
-  load_optional(dflash_select, "qg_dflash_select");
-  load_optional(argmax_finish, "qg_argmax_finish");
-  load_optional(stream_create, "qg_stream_create");
-  load_optional(stream_destroy, "qg_stream_destroy");
-  load_optional(ple_rows, "mtp_ple_rows");
-  load_optional(pool_keys, "mtp_pool_keys");
-  load_optional(transpose_f32, "mtp_transpose_f32");
+Qwen38Plane::Qwen38Plane(const Qwen38PlaneFunctions& functions) : Qwen38PlaneFunctions{functions} {
+  if (!sizeof_params || !set_device || !error_string || !malloc_ || !free_ || !host_alloc || !host_free ||
+      !host_register || !host_unregister || !memset_ || !memcpy_h2d || !memcpy_d2h || !memcpy_d2d ||
+      !stream_sync || !prep || !argmax_part || !post_tok || !post1 || !head_prep || !head_post || !or_status ||
+      !memcpy2d_d2d || !host_get_device_pointer || !embed_rows || !dflash_select || !argmax_finish ||
+      !stream_create || !stream_destroy || !ple_rows || !pool_keys || !transpose_f32)
+    throw std::runtime_error("qwen38_graph: CUDA add-on returned an incomplete data-plane interface");
   if (sizeof_params() != static_cast<int>(sizeof(Qwen38PleParams)))
-    throw std::runtime_error("qwen38_graph: plane library PleParams layout differs from the host definition");
-}
-
-Qwen38Plane::~Qwen38Plane() {
-  if (handle) dlclose(handle);
+    throw std::runtime_error("qwen38_graph: CUDA add-on PleParams layout differs from the host definition");
 }
 
 void Qwen38Plane::Check(int error, const char* what) const {
@@ -1548,9 +1507,9 @@ void Qwen38GraphEngine::Warmup() {
 // ------------------------------------------------------------------------------------------------
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env) : Model{std::move(config)} {
   const auto& q = config_->model.qwen38_graph;
-  if (!q.IsConfigured() || q.plane_library.empty() || q.ple_table.empty())
+  if (!q.IsConfigured() || q.ple_table.empty())
     throw std::runtime_error(
-        "qwen38_flash_graph requires model.qwen38_graph.{head.filename_s1|fold.head_r2.filename,plane_library,ple_table}");
+        "qwen38_flash_graph requires a folded/head configuration and model.qwen38_graph.ple_table");
   if (!p_device_ || p_device_->GetType() != DeviceType::CUDA)
     throw std::runtime_error("qwen38_flash_graph requires the CUDA execution provider");
   if (q.fold.enabled) {
@@ -1574,11 +1533,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
 
   const auto start = Clock::now();
   const std::filesystem::path root = std::filesystem::weakly_canonical(std::filesystem::path(config_->config_path.string()));
-  const std::string root_string = root.string() + "/";
-  const std::filesystem::path plane_path = std::filesystem::weakly_canonical(root / q.plane_library);
-  if (plane_path.string().compare(0, root_string.size(), root_string) != 0)
-    throw std::runtime_error("model.qwen38_graph.plane_library must resolve inside the model folder: " + plane_path.string());
-  plane_ = std::make_unique<Qwen38Plane>(plane_path.string());
+  plane_ = std::make_unique<Qwen38Plane>(GetOrtGlobals()->LoadQwen38PlaneFunctions());
   plane_->Check(plane_->set_device(0), "cudaSetDevice");
 
   // Device copy of the initializers several sessions have in common (optional)

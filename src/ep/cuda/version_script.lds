@@ -3,6 +3,7 @@ VERS_1.0 {
   global:
     GetInterface;
     GetInterfaceVersion;
+    GetQwen38PlaneFunctions;
 
   # Hide everything else.
   local:

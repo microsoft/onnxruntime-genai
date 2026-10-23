@@ -71,7 +71,21 @@ class ConsolidationTests(unittest.TestCase):
             self.assertEqual(config["decoder"]["filename"], "model.onnx")
             self.assertNotIn("head_r2", config["qwen38_graph"]["fold"])
             self.assertNotIn("constants", config["qwen38_graph"]["prefill"])
+            self.assertNotIn("plane_library", config["qwen38_graph"])
+            self.assertFalse((output / "plane.so").exists())
             self.assertEqual((source / "genai_config.json").read_bytes(), original)
+
+    def test_integrated_package_does_not_require_a_helper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, output = root / "source", root / "output"
+            package(source)
+            config = json.loads((source / "genai_config.json").read_text())
+            del config["model"]["qwen38_graph"]["plane_library"]
+            (source / "genai_config.json").write_text(json.dumps(config))
+            (source / "plane.so").unlink()
+            consolidate(source, output)
+            self.assertFalse(list(output.rglob("*.so")))
 
     def test_existing_destination_and_unsupported_execution_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

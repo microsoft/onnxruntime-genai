@@ -37,8 +37,9 @@ Identical duplicate initializer entries are removed; conflicting names fail.
 All copied ranges are SHA-256 verified by independently reading the completed
 file. Duplicate source ranges are shared; unused source-file regions are omitted.
 The small PLE/pool manifests are rewritten with new offsets. DFlash graph/data
-and the data-plane helper are hardlinked unchanged and must be treated as
-immutable. Tokenizer/configuration metadata is copied.
+are hardlinked unchanged and must be treated as immutable.
+Tokenizer/configuration metadata is copied. The obsolete `plane_library` entry
+is removed and no data-plane helper library is copied.
 
 The standalone dense/MTP/head graphs are not merged as additional execution
 branches: this DFlash runtime already skips them and uses the target for both
@@ -62,7 +63,8 @@ After validating the converted graph, update the target filename (or atomically
 replace the original), remove the decoder session's `custom_ops_libraries`
 entry, and stop distributing `libqwen_fold.so`. Other custom-op dependencies
 must be audited separately before removing their registrations. The DFlash
-data-plane helper is not an ONNX custom-op library and is still required.
+data-plane kernels are integrated into the standard GenAI CUDA add-on; no
+separate model-local helper is required.
 
 This incremental integration also supports a three-token DFlash2 drafter with
 four-row folded verification, through both Generator and the native Engine.
@@ -105,7 +107,7 @@ export ORT_INT2_S4_FUSED_FINALIZE=1
 When using a custom ORT build from Python, set `ORT_LIB_PATH` to its shared
 library; explicit selection takes precedence over the installed Python ORT
 package. Invalid explicit paths fail rather than silently selecting another
-runtime. Rebuild the package's data-plane library with this runtime.
+runtime. Rebuild the GenAI core and its integrated CUDA add-on together.
 
 The combined experimental stack reached 334-342 decode tokens/s on H200 at
 2K-32K contexts. These are combined-stack results, not individual-kernel
@@ -116,8 +118,11 @@ regression; this is an integration candidate, not an accuracy-qualified default.
 
 ## Build and dependencies
 
-Build GenAI with CUDA enabled on Linux and build the `qwen38_plane` target.
-The model loads this data-plane library from its package. A compatible ORT
+Build GenAI with CUDA enabled on Linux. The data-plane kernels are compiled into
+the existing `onnxruntime-genai-cuda` target and accessed through a version/size-checked
+function table from the already-owned CUDA add-on. No separate helper library is
+built or loaded from the model package, and the core library does not link cudart.
+A compatible ORT
 CUDA plugin and the companion generic contrib operator stack are required:
 packed sparse-attention/indexer caches, speculative fold/state operations,
 normalization/rotary, GDN/convolution, hyper-connections, and quantized MoE/FP8.
@@ -126,10 +131,14 @@ allocator, model-package, decoder-state, and builder APIs are preserved.
 
 Use `model.type = "qwen38_flash_graph"` and the `model.qwen38_graph` settings
 in `src/config.h`. Configure target/head graph paths, optional folded and
-dense-prefill sessions, the data-plane library, and PLE table relative to the
+dense-prefill sessions and PLE table relative to the
 model package. Provider registration and session-option inheritance use the
 existing GenAI conventions. Model packages must already contain compatible
 fixed-shape graphs; this runtime is not a standalone model exporter.
+Remove the legacy `model.qwen38_graph.plane_library` setting when migrating a
+package; a nonempty value is rejected with an explicit migration diagnostic.
+The package consolidator also removes this setting and does not copy helper
+libraries. The normal ORT, GenAI, CUDA and contrib-operator dependencies remain.
 
 ## API and limits
 
@@ -157,7 +166,16 @@ sequence and statistics. Each step also requires
 `tokens_queued == tokens_emitted + tokens_buffered + tokens_discarded`.
 These model-dependent regressions remain pending native/GPU qualification;
 CPU/mock checks validate test logic only, not device execution or row selection.
-`test_plane_kernels.py` checks a supplied CUDA data-plane library.
+`test_plane_kernels.py` checks the integrated data plane in the installed GenAI
+CUDA add-on (or an explicit `--lib libonnxruntime-genai-cuda.so`).
+`test_integrated_plane.py` checks interface negotiation, complete function tables,
+lattice selection, BF16 argmax/ties, invalid inputs, and transpose on a GPU:
+
+```bash
+python -m unittest discover -s tools/qwen38_graph -p test_integrated_plane.py -v
+```
+
+Set `QWEN_GENAI_CUDA_LIBRARY` to test a specific built add-on.
 `test_prompts.py` checks supplied prompt/reference cases.
 `smoke.py` and `smoke_cpp.cpp` provide integration examples.
 These tests require compatible model artifacts and native libraries; they

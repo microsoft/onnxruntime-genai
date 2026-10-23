@@ -227,7 +227,7 @@ def consolidate(source, destination):
         draft = onnx.load(writer.source_path(draft_name), load_external_data=False)
         locations = {dict((item.key, item.value) for item in tensor.external_data)["location"]
                      for tensor in tensors(draft.graph) if tensor.data_location == TensorProto.EXTERNAL}
-        for name in (draft_name, *sorted(locations), graph_config["plane_library"]):
+        for name in (draft_name, *sorted(locations)):
             path = writer.source_path(name)
             output = destination / path.relative_to(source)
             if output.exists():
@@ -245,6 +245,7 @@ def consolidate(source, destination):
         prefill.pop("head_kv", None)
         prefill.pop("constants", None)
         graph_config.pop("head", None)
+        graph_config.pop("plane_library", None)
         (destination / "genai_config.json").write_text(json.dumps(config, indent=2) + "\n")
         writer.verify()
         return {"source": str(source), "destination": str(destination), "duplicate_initializers_removed": duplicates,
