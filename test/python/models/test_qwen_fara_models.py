@@ -685,6 +685,39 @@ def test_qwen3_5_hybrid_vision_preprocessing(test_data_path, relative_image_path
     assert "pixel_values" in inputs
 
 
+@pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
+def test_qwen3_5_openvino_partitioned_requires_patch_image(test_data_path, relative_image_path, tmp_path):
+    """OpenVINO-partitioned Qwen models reject the built-in fallback patcher, whose patch
+    layout differs from the PatchImage layout their host-side vision merger expects."""
+    source_path = Path(test_data_path) / "qwen3-5"
+    if not source_path.exists():
+        pytest.skip("qwen3-5 test model not found")
+    image_path = os.fspath(Path(test_data_path).parent / relative_image_path)
+    if not os.path.exists(image_path):
+        pytest.skip(f"Test image not found: {image_path}")
+
+    model_path = tmp_path / "qwen3-5"
+    shutil.copytree(source_path, model_path)
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>Describe"
+
+    def process():
+        config = og.Config(os.fspath(model_path))
+        config.overlay(json.dumps({"model": {"partitioning": "openvino"}}))
+        model = og.Model(config)
+        return model.create_multimodal_processor()(prompt, images=og.Images.open(image_path))
+
+    assert "pixel_values" in process()
+
+    processor_config_path = model_path / "processor_config.json"
+    processor_config = json.loads(processor_config_path.read_text())
+    transforms = processor_config["processor"]["transforms"]
+    processor_config["processor"]["transforms"] = [t for t in transforms if t["operation"]["type"] != "PatchImage"]
+    processor_config_path.write_text(json.dumps(processor_config))
+
+    with pytest.raises(Exception, match="PatchImage"):
+        process()
+
+
 # ---------------------------------------------------------------------------
 # Qwen3.5 hybrid model tests — CUDA EP (RecurrentState with shared buffers)
 # ---------------------------------------------------------------------------
