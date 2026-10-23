@@ -35,7 +35,7 @@ struct GraphConfigDirectory {
 TEST(Qwen38GraphConfig, ParsesGraphSessionsAndProviderOptions) {
   GraphConfigDirectory directory;
   directory.Write(R"({
-    "plane_library":"libs/libqwen38_plane.so","ple_table":"ple_table.txt","kv_capacity":128,
+    "ple_table":"ple_table.txt","kv_capacity":128,
     "target_s1_graph_id":11,"target_s2_graph_id":21,"head_s1_graph_id":31,"head_s2_graph_id":41,
     "warmup":false,
     "head":{"filename_s1":"head1.onnx","filename_s2":"head2.onnx",
@@ -80,6 +80,31 @@ TEST(Qwen38GraphConfig, RejectsUnknownSettingsAndEscapingPaths) {
     directory.Write(graph);
     EXPECT_THROW((Config{directory.path.string(), {}}), std::runtime_error);
   }
+}
+
+TEST(Qwen38GraphConfig, FoldedConfigurationDoesNotRequireUnusedMtpHeadFilename) {
+  GraphConfigDirectory directory;
+  directory.Write(R"({
+    "ple_table":"ple_table.txt",
+    "fold":{"enabled":true},"prefill":{"enabled":true,"unified":true}
+  })");
+  Config config(directory.path.string(), {});
+  EXPECT_TRUE(config.model.qwen38_graph.IsConfigured());
+  EXPECT_TRUE(config.model.qwen38_graph.fold.head_r2.filename.empty());
+  EXPECT_TRUE(config.model.qwen38_graph.head.filename_s1.empty());
+}
+
+TEST(Qwen38GraphConfig, RejectsLegacyLibraryWithMigrationDiagnostic) {
+  GraphConfigDirectory directory;
+  directory.Write(R"({"plane_library":"libs/libdflash_plane_v2.so"})");
+  try {
+    Config config(directory.path.string(), {});
+    FAIL() << "Legacy library must not be loaded or silently ignored";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("remove it and use the matching GenAI CUDA add-on"), std::string::npos);
+  }
+  directory.Write(R"({"plane_library":"","fold":{"enabled":true}})");
+  EXPECT_NO_THROW((Config{directory.path.string(), {}}));
 }
 
 }  // namespace

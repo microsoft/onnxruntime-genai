@@ -16,53 +16,24 @@
 #include <vector>
 
 #include "model.h"
+#include "qwen38_decode_device.h"
+#include "qwen38_suffix_drafter.h"
+#include "../dflash2_drafter.h"
+#include "../qwen38_plane/interface.h"
 
 namespace Generators {
 
 struct Qwen38GraphModel;
 
-// C ABI of libqwen38_plane.so (CUDA data plane + CUDA runtime helpers), loaded with dlopen so that the core library does
-// not link cudart.
-struct Qwen38Plane {
-  // CPU resource-lifetime tests inject callbacks instead of loading CUDA.
-  Qwen38Plane() = default;
-  explicit Qwen38Plane(const std::string& path);
-  ~Qwen38Plane();
+// Functions are owned by the standard CUDA add-on, keeping cudart out of the core library.
+struct Qwen38Plane : Qwen38PlaneFunctions {
+  Qwen38Plane() = default;  // Allows an explicitly supplied plane (including native test doubles).
+  explicit Qwen38Plane(const Qwen38PlaneFunctions& functions);
   Qwen38Plane(const Qwen38Plane&) = delete;
   Qwen38Plane& operator=(const Qwen38Plane&) = delete;
 
   void Check(int error, const char* what) const;
 
-  void* handle{};
-  int (*sizeof_params)();
-  int (*set_device)(int);
-  const char* (*error_string)(int);
-  int (*malloc_)(void**, size_t);
-  int (*free_)(void*);
-  int (*host_alloc)(void**, size_t);
-  int (*host_free)(void*);
-  int (*host_register)(void*, size_t, unsigned);
-  int (*host_unregister)(void*);
-  int (*memset_)(void*, int, size_t, void*);
-  int (*memcpy_h2d)(void*, const void*, size_t, void*);
-  int (*memcpy_d2h)(void*, const void*, size_t, void*);
-  int (*memcpy_d2d)(void*, const void*, size_t, void*);
-  int (*stream_sync)(void*);
-  void (*prep)(void*, const void*, const void*, const void*, int, const void*, void*, void*, void*, void*, void*, void*,
-               void*);
-  void (*argmax_part)(void*, const void*, int, void*, void*, int);
-  void (*post_tok)(void*, const void*, void*, void*, const void*, const void*, const void*, int, void*, int);
-  void (*post1)(void*, const void*, const void*, int, void*, void*, const void*, const void*, int, void*, int);
-  void (*head_prep)(void*, const void*, int, int, const void*, void*, void*, void*, void*);
-  void (*head_post)(void*, const void*, void*);
-  void (*or_status)(void*, const void*, int, void*);
-  // fast prefill (optional: nullptr in planes built before v12)
-  int (*memcpy2d_d2d)(void*, size_t, const void*, size_t, size_t, size_t, void*){};
-  int (*stream_create)(void**){};
-  int (*stream_destroy)(void*){};
-  void (*ple_rows)(void*, const void*, const void*, int, const void*, void*, void*){};
-  void (*pool_keys)(void*, const void*, int, const void*, const void*, const void*, int, float, int, void*){};
-  void (*transpose_f32)(void*, const void*, void*, int, int){};
 };
 
 // Device allocation owned by RAII.
@@ -130,7 +101,7 @@ struct Qwen38PleTable {
   std::vector<std::unique_ptr<Mapping>> mappings_;
 };
 
-// Device copy of every initializer that several sessions of the stack have in common (decode/fold, head, dense prefill,
+// Shared storage for every initializer that several sessions have in common (device, CPU, or pinned host-mapped;
 // head KV prefill): loaded once from the files of a text manifest (tools/qwen38_graph/build_package_v12.py), handed to each
 // session through AddInitializer (ORT uses a user supplied initializer in place when it is on the session's device).
 struct Qwen38WeightPool {
@@ -177,23 +148,18 @@ struct Qwen38QsaConstants {
   PlaneBuffer buffer_;
 };
 
-struct Qwen38CycleResult {
-  int64_t pred0{};
-  int64_t pred1{};
-  bool accepted{};
-  int64_t status{};
-  int64_t new_pending{};
-  int64_t new_length{};
-};
+using Qwen38CycleResult = Qwen38CycleRecord;
 
 struct Qwen38GraphStats {
   size_t cycles{};
   size_t accepted{};
   size_t tokens{};
+  size_t suffix_lookup_hits{};
+  size_t suffix_lookup_misses{};
 };
 
 // Owns every device-side object of one model: target + head bindings, state banks, KV store, control block, PLE table.
-// One generator at a time may lease it; graphs stay captured across generators.
+// One Engine or Generator at a time may lease it; captured graphs survive lease changes.
 struct Qwen38GraphEngine {
   explicit Qwen38GraphEngine(Qwen38GraphModel& model);
   ~Qwen38GraphEngine();
@@ -210,8 +176,8 @@ struct Qwen38GraphEngine {
   // d_last_hidden_, its argmax in PendingToken() and its logits row reachable through LastLogits().
   void PrefillChunk(std::span<const int32_t> tokens);
   void LastLogits(std::span<float> out) const;  // fp32 copy of the logits row of the last prompt token
-  void SaveBufferedLogits();
-  void DecodeLogits(bool buffered, std::span<float> out) const;
+  void SaveBufferedLogits(size_t buffered_tokens = 1);
+  void DecodeLogits(size_t buffered_tokens, std::span<float> out) const;
   size_t Length() const { return length_; }
   int32_t PendingToken() const { return pending_; }
   bool DecodeStarted() const { return decode_started_; }
@@ -247,6 +213,7 @@ struct Qwen38GraphEngine {
     uint8_t* tokens{};
     uint8_t* hidden{};
     size_t status_count{};
+    uint8_t* auxiliary{};
   };
   struct RowInputs {  // fixed-address per-row-count inputs of the target
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
@@ -283,6 +250,8 @@ struct Qwen38GraphEngine {
   void BuildFastPrefill();
   void StepPrefill(std::span<const int32_t> tokens);
   void FastAppend(std::span<const int32_t> tokens);
+  void FastUnifiedAppend(std::span<const int32_t> tokens);
+  void FastUnifiedHeadPrefill();
   void FastHandoff();
   void FastHeadKvPrefill();
   void FastReset();
@@ -292,6 +261,7 @@ struct Qwen38GraphEngine {
   DevTensor* NewDeviceTensor(std::map<std::string, std::unique_ptr<DevTensor>>& owner, const std::string& name,
                              std::vector<int64_t> shape, ONNXTensorElementDataType type);
   void Warmup();
+  void Draft(const uint8_t* features, size_t rows, size_t position, int32_t anchor, bool propose);
 
   void PrepRow(int rows, int row, const void* tok, const void* pos, int add, const void* ctx_in, void* ctx_out);
   void RunTarget(int rows, int phase);
@@ -310,6 +280,11 @@ struct Qwen38GraphEngine {
   Qwen38Plane& plane_;
   void* stream_{};
   std::unique_ptr<OrtMemoryInfo> memory_info_;
+  std::array<int32_t, 2> prefill_numerics_constants_{0, 1};
+  std::array<std::unique_ptr<OrtValue>, 2> prefill_numerics_values_;
+  const OrtValue& PrefillNumerics(bool prefill);
+  const OrtValue& NumericalCache(const std::string& name, const SessionInfo& info, bool prefill, bool head = false);
+  std::map<std::string, std::unique_ptr<DevTensor>> numerical_decode_cache_;
   const int capacity_;
   const int vocab_;
   int hidden_width_{};
@@ -320,16 +295,25 @@ struct Qwen38GraphEngine {
   bool mtp_enabled_{};
   bool prefill_head_{};
   bool skip_refeed_{};
+  int suffix_lookup_mode_{};
+  Qwen38SuffixDrafter suffix_drafter_;
+  bool suffix_lookup_attempted_{};
+  bool suffix_lookup_hit_{};
+  size_t suffix_lookup_tokens_proposed_{};
   static constexpr int kBanks = 3;
+  static constexpr int kMaxVerifyRows = 4;
+  static constexpr int kMaxBanks = kMaxVerifyRows + 1;
+  int verify_rows_{2};
+  int num_banks_{kBanks};
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
   // target state
   std::map<std::string, std::unique_ptr<DevTensor>> store_;   // in-place KV / positions
   std::map<std::string, std::unique_ptr<DevTensor>> shared_;  // index_key buffers
-  Bank banks_[kBanks + 1];                                    // last = scratch sink for S=1 present_mid
-  RowInputs inputs_[2];
-  Direction dirs_[2][kBanks];  // [rows-1][phase]
+  Bank banks_[kMaxBanks + 1];                                 // last live bank = S=1 scratch sink
+  RowInputs inputs_[kMaxVerifyRows];
+  Direction dirs_[kMaxVerifyRows][kMaxBanks];  // [rows-1][phase]
   std::vector<std::unique_ptr<DevTensor>> output_tensors_;
   std::vector<std::unique_ptr<DevTensor>> head_views_;
   std::deque<PlaneBuffer> owned_;  // individually allocated tensors
@@ -339,6 +323,7 @@ struct Qwen38GraphEngine {
   PlaneBuffer ctl_, ctx_commit_, ctx_a_, ctx_b_, scratch_i32_, part_v_, part_i_, params_dev_;
   PlaneBuffer d_tokens_, d_arange64_, d_arange32_, d_prompt_hidden_, d_last_hidden_;
   PlaneBuffer buffered_logits_;
+  size_t buffered_logits_count_{};
   int64_t* result_host_{};
   int64_t* stage_host_{};
   std::unique_ptr<Qwen38PleTable> ple_;
@@ -350,7 +335,7 @@ struct Qwen38GraphEngine {
   struct HeadBank {
     PlaneBuffer arena;
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
-  } head_banks_[3];  // two ping-pong banks (S=1/S=2 head sessions) or the three ring phases (fold)
+  } head_banks_[kMaxBanks];
   int head_length_{};
   int head_turn_{};
   int head_cur_{};  // fold: head ring phase
@@ -370,13 +355,14 @@ struct Qwen38GraphEngine {
     uint8_t* next_token{};
     uint8_t* status{};
     size_t status_count{};
-    Direction dirs[3];
+    Direction dirs[kMaxBanks];
   } head_r2_;
   std::map<std::string, std::unique_ptr<DevTensor>> fold_tensors_;  // fold.* inputs (device control block)
   PlaneBuffer fold_ptrs_;
 
   // fast prefill (dense session + hand-off); null when not configured
   struct FastPrefillState {
+    bool unified{};
     OrtSession* dense{};
     SessionInfo dense_info;
     std::vector<std::string> dense_inputs, dense_outputs;
@@ -386,6 +372,8 @@ struct Qwen38GraphEngine {
     Qwen38QsaConstants* consts{};
 
     PlaneBuffer ones, idx, ples, raw_keys, scratch;  // ones: attention mask; idx: logits_indices; ples: PLE rows of a chunk
+    std::deque<PlaneBuffer> numerical_buffers;
+    std::map<std::string, std::unique_ptr<DevTensor>> numerical_cache;
     std::deque<PlaneBuffer> zero_buffers;
     std::map<std::string, std::unique_ptr<OrtValue>> initial;  // zero-length / zero initial states of the dense model
     std::map<std::string, std::unique_ptr<OrtValue>> states;   // dense `past` inputs (outputs of the previous chunk)
@@ -398,6 +386,12 @@ struct Qwen38GraphEngine {
     } timings;
   };
   std::unique_ptr<FastPrefillState> fast_;
+  std::shared_ptr<Dflash2Model> dflash_model_;
+  std::unique_ptr<Dflash2Drafter> dflash_;
+  PlaneBuffer d_dflash_prompt_;
+  size_t dflash_prompt_rows_{};
+  size_t dflash_prompt_position_{};
+  static constexpr size_t kDflashWidth = 12800;
   std::vector<float> last_logits_host_;
 
   // host state

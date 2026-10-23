@@ -96,7 +96,9 @@ ScheduledRequests StaticBatchScheduler::Schedule() {
     }
   }
 
-  constexpr size_t static_batch_size = 4;
+  const size_t static_batch_size = cache_manager_->MaxStaticBatchSize() != 0
+                                       ? cache_manager_->MaxStaticBatchSize()
+                                       : 4;
   for (size_t batch_size = std::min(static_batch_size, requests_to_schedule.size());
        batch_size != 0; batch_size /= 2) {
     std::vector<std::shared_ptr<Request>> batch_requests(requests_to_schedule.begin(),

@@ -4,10 +4,129 @@ The `qwen38_flash_graph` model type exposes fixed-shape CUDA graph execution
 through the normal Model, Tokenizer, and Generator interfaces. It supports
 greedy MTP(1), folded decode, dense chunked prefill, and shared device weights.
 
+For the complete published integration branches, exact runtime revisions,
+conversion prerequisites, ORT/GenAI builds and run commands, see
+[Build and run the combined integration](./BUILD_AND_RUN.md).
+
+## DFlash2 device pipeline
+
+### Restoring the native context limit
+
+`extend_dflash_context.py --source PACKAGE --output NEW_PACKAGE` expands the
+qualified consolidated 128K Qwen/DFlash package to 262144 total prompt/output
+tokens, retaining 8192-token prefill chunks. It updates target KV dimensions,
+compressed-index capacity, fold capacity, search/context limits and both
+graphs' rotary caches, including the shared-weight pool's rotary bindings.
+Four internal speculative guard positions are separate from the public limit.
+Original rotary rows and learned weights are preserved. The fixed-capacity
+runtime still preallocates target KV/index storage; allocation is not prompt-sized.
+The 256K boundary is an execution check, not long-context accuracy qualification.
+
+### Consolidation workflow
+
+For a folded DFlash package using unified prefill without standalone head
+execution, run:
+
+```bash
+python tools/qwen38_graph/consolidate_dflash_package.py \
+  --source /path/to/package --output /path/to/new-package \
+  --report /path/to/consolidation-report.json
+```
+
+The output directory must not exist. The tool preserves target nodes and IO,
+renames the active target to `model.onnx`, and packs its external/inline raw
+weights, shared-pool ranges and PLE table shards into `model.onnx.data`.
+Small constants and integer shapes remain embedded for ORT shape inference.
+Identical duplicate initializer entries are removed; conflicting names fail.
+All copied ranges are SHA-256 verified by independently reading the completed
+file. Duplicate source ranges are shared; unused source-file regions are omitted.
+The small PLE/pool manifests are rewritten with new offsets. DFlash graph/data
+are hardlinked unchanged and must be treated as immutable.
+Tokenizer/configuration metadata is copied. The obsolete `plane_library` entry
+is removed and no data-plane helper library is copied.
+
+The standalone dense/MTP/head graphs are not merged as additional execution
+branches: this DFlash runtime already skips them and uses the target for both
+prefill and verification. Their unused weights and numerical-original data are
+omitted. Configuration removes inactive session entries and requires a runtime
+that accepts folded DFlash configuration without an unused MTP-head filename.
+Ordinary MTP packages and split-prefill packages are rejected rather than
+silently dropping paths they need. Validate generation parity before deploying.
+
+### Native speculative fold migration
+
+`convert_fold_to_contrib.py --input target.onnx --output target.contrib.onnx`
+converts the legacy multi-row `FoldMid2`/`FoldTail` graph to the native
+`com.microsoft` version-1 replacement schema. The output must be beside the input to
+preserve relative external-weight paths and must not already exist. The
+converter adds explicit aliased state outputs and a mid-to-tail control
+dependency; it does not rewrite or copy model weights.
+
+Use a source-built ORT core and CUDA provider containing the replacement version-1 Fold operators.
+After validating the converted graph, update the target filename (or atomically
+replace the original), remove the decoder session's `custom_ops_libraries`
+entry, and stop distributing `libqwen_fold.so`. Other custom-op dependencies
+must be audited separately before removing their registrations. The DFlash
+data-plane kernels are integrated into the standard GenAI CUDA add-on; no
+separate model-local helper is required.
+
+This incremental integration also supports a three-token DFlash2 drafter with
+four-row folded verification, through both Generator and the native Engine.
+It requires the companion ORT feature branches and a compatible four-row target
+package; it is not independently usable with an upstream-main ORT build.
+
+The drafter and target share a CUDA stream. Persistent pinned staging and GPU
+lattice selection remove per-round allocations and host lattice readback.
+Unused MTP sessions are omitted for DFlash-only packages, prompt hidden storage
+is sized to the configured prefill chunk, and prompt argmax stays on device
+until full logits are requested. Generator preserves logits for each buffered
+emission before scheduling the next verifier pass.
+
+Export the drafter using a local checkpoint and a compatible target graph:
+
+```bash
+python export_dflash2.py --checkpoint /models/dflash2-checkpoint \
+  --target /models/target/target.onnx --output /models/drafter-fp8 \
+  --precision fp8 --drafts 3
+```
+
+The exporter uses BF16 activations, page size 128, and the target's exact
+embedding and FP8 head. `--precision bf16` disables body-weight FP8
+quantization; it does not replace the target head. The output directory must
+not already exist. This exports the drafter, not the target, auxiliary feature
+capture graphs, shared-weight pool, or complete runtime configuration.
+Supply a package configured with `model.dflash2` and four-row folded graphs.
+`model.qwen38_graph.prefill_chunk_tokens` defaults to 8192.
+`model.qwen38_graph.prefill.unified` is optional and requires prefill enabled.
+
+For the qualified H200 workload, set these before loading the model:
+
+```bash
+export ORT_DSA_INT8_GROUPED_MAX_ROWS=4
+export ORT_QMOE_INT2_DECODE_MAX_EXPANDED_ROWS=40
+export ORT_HC_DECODE_ROWS=1
+export ORT_INT2_S4_FUSED_FINALIZE=1
+```
+
+When using a custom ORT build from Python, set `ORT_LIB_PATH` to its shared
+library; explicit selection takes precedence over the installed Python ORT
+package. Invalid explicit paths fail rather than silently selecting another
+runtime. Rebuild the GenAI core and its integrated CUDA add-on together.
+
+The combined experimental stack reached 334-342 decode tokens/s on H200 at
+2K-32K contexts. These are combined-stack results, not individual-kernel
+ablations or measurements of this rebased branch. Paired HumanEval runs scored
+154/164 with exact DFlash/control output parity. A five-problem LiveCodeBench
+smoke scored 2/5 versus historical MTP 3/5, including a capacity-limited
+regression; this is an integration candidate, not an accuracy-qualified default.
+
 ## Build and dependencies
 
-Build GenAI with CUDA enabled on Linux and build the `qwen38_plane` target.
-The model loads this data-plane library from its package. A compatible ORT
+Build GenAI with CUDA enabled on Linux. The data-plane kernels are compiled into
+the existing `onnxruntime-genai-cuda` target and accessed through a version/size-checked
+function table from the already-owned CUDA add-on. No separate helper library is
+built or loaded from the model package, and the core library does not link cudart.
+A compatible ORT
 CUDA plugin and the companion generic contrib operator stack are required:
 packed sparse-attention/indexer caches, speculative fold/state operations,
 normalization/rotary, GDN/convolution, hyper-connections, and quantized MoE/FP8.
@@ -16,15 +135,19 @@ allocator, model-package, decoder-state, and builder APIs are preserved.
 
 Use `model.type = "qwen38_flash_graph"` and the `model.qwen38_graph` settings
 in `src/config.h`. Configure target/head graph paths, optional folded and
-dense-prefill sessions, the data-plane library, and PLE table relative to the
+dense-prefill sessions and PLE table relative to the
 model package. Provider registration and session-option inheritance use the
 existing GenAI conventions. Model packages must already contain compatible
 fixed-shape graphs; this runtime is not a standalone model exporter.
+Remove the legacy `model.qwen38_graph.plane_library` setting when migrating a
+package; a nonempty value is rejected with an explicit migration diagnostic.
+The package consolidator also removes this setting and does not copy helper
+libraries. The normal ORT, GenAI, CUDA and contrib-operator dependencies remain.
 
 ## API and limits
 
 Use the regular Generator lifecycle with greedy search. An accepted draft
-produces two tokens internally; the API returns one per call.
+produces up to four tokens internally; the API returns one per call.
 
 - Linux CUDA, batch size one, greedy decoding only.
 - One active generator per model.
@@ -47,7 +170,16 @@ sequence and statistics. Each step also requires
 `tokens_queued == tokens_emitted + tokens_buffered + tokens_discarded`.
 These model-dependent regressions remain pending native/GPU qualification;
 CPU/mock checks validate test logic only, not device execution or row selection.
-`test_plane_kernels.py` checks a supplied CUDA data-plane library.
+`test_plane_kernels.py` checks the integrated data plane in the installed GenAI
+CUDA add-on (or an explicit `--lib libonnxruntime-genai-cuda.so`).
+`test_integrated_plane.py` checks interface negotiation, complete function tables,
+lattice selection, BF16 argmax/ties, invalid inputs, and transpose on a GPU:
+
+```bash
+python -m unittest discover -s tools/qwen38_graph -p test_integrated_plane.py -v
+```
+
+Set `QWEN_GENAI_CUDA_LIBRARY` to test a specific built add-on.
 `test_prompts.py` checks supplied prompt/reference cases.
 `smoke.py` and `smoke_cpp.cpp` provide integration examples.
 These tests require compatible model artifacts and native libraries; they

@@ -2347,6 +2347,8 @@ struct Qwen38GraphPrefill_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "enabled") {
       v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "unified") {
+      v_.unified = JSON::Get<bool>(value);
     } else if (name == "chunk") {
       v_.chunk = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "weights_pool") {
@@ -2384,7 +2386,8 @@ struct Qwen38Graph_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "plane_library") {
-      v_.plane_library = JSON::Get<std::string_view>(value);
+      if (!JSON::Get<std::string_view>(value).empty())
+        throw std::runtime_error("model.qwen38_graph.plane_library is no longer supported; remove it and use the matching GenAI CUDA add-on");
     } else if (name == "ple_table") {
       v_.ple_table = JSON::Get<std::string_view>(value);
     } else if (name == "kv_capacity") {
@@ -2399,6 +2402,14 @@ struct Qwen38Graph_Element : JSON::Element {
       v_.head_s2_graph_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "warmup") {
       v_.warmup = JSON::Get<bool>(value);
+    } else if (name == "prefill_chunk_tokens") {
+      v_.prefill_chunk_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.prefill_chunk_tokens <= 0)
+        throw std::runtime_error("model.qwen38_graph.prefill_chunk_tokens must be positive");
+    } else if (name == "suffix_lookup") {
+      v_.suffix_lookup = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.suffix_lookup < 0 || v_.suffix_lookup > 2)
+        throw std::runtime_error("model.qwen38_graph.suffix_lookup must be 0, 1, or 2");
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -3636,7 +3647,6 @@ void ValidateModelPaths(const Config& config) {
   ValidateConfigPath(qwen.head.filename_s1, "model.qwen38_graph.head.filename_s1");
   ValidateConfigPath(qwen.head.filename_s2, "model.qwen38_graph.head.filename_s2");
   ValidateConfigPath(qwen.fold.head_r2.filename, "model.qwen38_graph.fold.head_r2.filename");
-  ValidateConfigPath(qwen.plane_library, "model.qwen38_graph.plane_library");
   ValidateConfigPath(qwen.ple_table, "model.qwen38_graph.ple_table");
   ValidateConfigPath(qwen.prefill.dense.filename, "model.qwen38_graph.prefill.dense.filename");
   ValidateConfigPath(qwen.prefill.head_kv.filename, "model.qwen38_graph.prefill.head_kv.filename");

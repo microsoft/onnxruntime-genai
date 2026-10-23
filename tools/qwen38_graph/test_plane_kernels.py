@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
-"""Kernel-level tests of the fast prefill additions of libqwen38_plane.so against the research (python/torch) implementations:
+"""Kernel-level tests of the integrated CUDA data plane against the research (python/torch) implementations:
 
   mtp_ple_rows      batched PLE rows == Qwen4ExpCPUPLELookup (bitwise), incl. EOS masking and a carried-in context
   mtp_pool_keys     pooled / RMS-normalised / half-RoPE compressed index keys vs handoff_lib.pooled_block_keys (fp32)
@@ -9,7 +9,7 @@
 
 usage (mobius, torch; any GPU, < 2 GB): test_plane_kernels.py <package dir>
   --plane-module <plane.py> --handoff-module <handoff_lib.py> --checkpoint <directory>
-  [--lib libqwen38_plane.so] [--out json]
+  [--lib libonnxruntime-genai-cuda.so] [--out json]
 """
 
 import argparse
@@ -18,11 +18,57 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
-import torch
 
 c_vp = ctypes.c_void_p
+
+
+class PlaneFunctions(ctypes.Structure):
+    _fields_ = [(name, c_vp) for name in (
+        "sizeof_params", "set_device", "error_string", "malloc_", "free_", "host_alloc", "host_free",
+        "host_register", "host_unregister", "host_get_device_pointer", "memset_", "memcpy_h2d", "memcpy_d2h",
+        "memcpy_d2d", "stream_sync", "prep", "argmax_part", "post_tok", "post1", "head_prep", "head_post",
+        "or_status", "memcpy2d_d2d", "stream_create", "stream_destroy", "ple_rows", "pool_keys", "transpose_f32",
+        "embed_rows", "dflash_select", "argmax_finish",
+    )]
+
+
+def load_plane_api(path=None):
+    if path is None:
+        import onnxruntime_genai as og
+        path = Path(og.__file__).with_name("libonnxruntime-genai-cuda.so")
+    library = ctypes.CDLL(str(path))
+    getter = library.GetQwen38PlaneFunctions
+    getter.argtypes = [ctypes.c_uint32, ctypes.c_size_t]
+    getter.restype = ctypes.POINTER(PlaneFunctions)
+    pointer = getter(1, ctypes.sizeof(PlaneFunctions))
+    if not pointer:
+        raise RuntimeError("GenAI CUDA data-plane version/size mismatch")
+    table = pointer.contents
+    if any(not getattr(table, name) for name, _ in table._fields_):
+        raise RuntimeError("GenAI CUDA data-plane interface is incomplete")
+    ci = ctypes.c_int
+    signatures = {
+        "sizeof_params": (ci, []),
+        "ple_rows": (None, [c_vp, c_vp, c_vp, ci, c_vp, c_vp, c_vp]),
+        "pool_keys": (None, [c_vp, c_vp, ci, c_vp, c_vp, c_vp, ci, ctypes.c_float, ci, c_vp]),
+        "transpose_f32": (None, [c_vp, c_vp, c_vp, ci, ci]),
+        "argmax_part": (None, [c_vp, c_vp, ci, c_vp, c_vp, ci]),
+        "dflash_select": (ci, [c_vp, c_vp, c_vp, c_vp, ci, ci]),
+        "argmax_finish": (ci, [c_vp, c_vp, c_vp, ci, c_vp]),
+        "malloc_": (ci, [ctypes.POINTER(c_vp), ctypes.c_size_t]),
+        "free_": (ci, [c_vp]),
+        "memcpy_h2d": (ci, [c_vp, c_vp, ctypes.c_size_t, c_vp]),
+        "memcpy_d2h": (ci, [c_vp, c_vp, ctypes.c_size_t, c_vp]),
+        "stream_sync": (ci, [c_vp]),
+    }
+    api = SimpleNamespace(_library=library, _getter=getter)
+    for name, (result, args) in signatures.items():
+        prefix = "mtp_" if name in ("sizeof_params", "ple_rows", "pool_keys", "transpose_f32", "argmax_part") else "qg_"
+        setattr(api, prefix + name, ctypes.CFUNCTYPE(result, *args)(getattr(table, name)))
+    return api
 
 
 def reference_file(value):
@@ -52,6 +98,8 @@ def load_reference(name, path, required):
 
 
 def main():
+    import torch
+
     ap = argparse.ArgumentParser()
     ap.add_argument("package", type=Path)
     ap.add_argument("--lib", type=Path)
@@ -64,11 +112,7 @@ def main():
     args = ap.parse_args()
     plane = load_reference("plane", args.plane_module, ("PleDevice", "PleParams"))
     handoff_lib = load_reference("handoff_lib", args.handoff_module, ("pooled_block_keys",))
-    lib = ctypes.CDLL(str(args.lib or args.package / "libs/libqwen38_plane.so"))
-    ci = ctypes.c_int
-    lib.mtp_ple_rows.argtypes = [c_vp, c_vp, c_vp, ci, c_vp, c_vp, c_vp]
-    lib.mtp_pool_keys.argtypes = [c_vp, c_vp, ci, c_vp, c_vp, c_vp, ci, ctypes.c_float, ci, c_vp]
-    lib.mtp_transpose_f32.argtypes = [c_vp, c_vp, c_vp, ci, ci]
+    lib = load_plane_api(args.lib)
     torch.cuda.init()
     stream = torch.cuda.current_stream().cuda_stream
     result = {}

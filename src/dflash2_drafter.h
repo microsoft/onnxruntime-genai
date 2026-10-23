@@ -198,7 +198,10 @@ struct Dflash2Drafter {
   bool Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                std::vector<std::vector<int32_t>>& drafts,
                std::vector<std::vector<TargetTokenSelection>>* draft_distributions = nullptr,
-               std::vector<Dflash2Lattice>* lattices = nullptr);
+               std::vector<Dflash2Lattice>* lattices = nullptr,
+               bool device_selection = false);
+  const Tensor& CandidateIds() const { return *step_tensors_.candidate_ids; }
+  const Tensor& Scores() const { return *step_tensors_.scores; }
 
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
   void Release(const Request* request);
@@ -228,6 +231,8 @@ struct Dflash2Drafter {
   Tensor& StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
                      ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
   void ReleaseCapturedGraphs() noexcept;
+  DeviceSpan<uint8_t> Staging(Tensor& tensor);
+  std::unordered_map<Tensor*, DeviceSpan<uint8_t>> staging_;
 
   std::shared_ptr<Dflash2Model> model_;
   const Config::Model::Dflash2& config_;

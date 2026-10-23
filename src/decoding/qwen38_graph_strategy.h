@@ -32,9 +32,7 @@ struct Qwen38GraphStrategy : DecodingStrategy {
 
   Qwen38GraphState& state_;
   std::deque<int32_t> queue_;
-  size_t emitted_{};
-  size_t queued_{};
-  size_t discarded_{};
+  SpeculativeStats stats_;
   DeviceSpan<float> external_logits_;
   bool started_{};
 };

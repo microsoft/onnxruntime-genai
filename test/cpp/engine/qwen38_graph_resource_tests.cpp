@@ -136,6 +136,13 @@ TEST_F(Qwen38GraphResources, RejectsHeadCountsBeforeArrayAccess) {
   EXPECT_TRUE(mappings.empty());
 }
 
+TEST(Qwen38GraphPlaneInterface, RejectsIncompleteFunctionTable) {
+  EXPECT_THROW((Qwen38Plane{Qwen38PlaneFunctions{}}), std::runtime_error);
+  Qwen38Plane test_double;
+  EXPECT_EQ(test_double.malloc_, nullptr);
+  EXPECT_EQ(test_double.prep, nullptr);
+}
+
 TEST_F(Qwen38GraphResources, UnmapsCurrentAndEarlierShardsOnRegistrationFailure) {
   Write("shard.bin", "abcd");
   Write("ple.txt",

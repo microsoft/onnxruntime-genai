@@ -43,6 +43,7 @@
 void ThrowErrorIfSessionTerminated(bool is_session_terminated);
 
 namespace Generators {
+struct Qwen38PlaneFunctions;
 struct Model;
 struct State;
 struct TransducerState;
@@ -228,6 +229,7 @@ struct OrtGlobals {
   // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every
   // interface is rebuilt on re-initialization after a shutdown. Thread-safe.
   DeviceInterface* GetDeviceInterface(DeviceType type);
+  const Qwen38PlaneFunctions& LoadQwen38PlaneFunctions();
 
   struct Allocator {
     // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via

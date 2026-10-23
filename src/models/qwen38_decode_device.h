@@ -1,0 +1,151 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+//
+// Device-side contract of the Qwen3.8-Flash CUDA-graph decode loop, independent of CUDA, ORT and the Engine. The real
+// implementation is Qwen38GraphEngine (qwen38_graph.h); the Engine-hosted executor (src/engine/qwen38_graph_executor.h)
+// and its tests only see this interface.
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <stdexcept>
+#include <string>
+
+namespace Generators {
+
+// One verification cycle. The target commits one token plus the matching prefix of up to three drafts.
+struct Qwen38CycleRecord {
+  int64_t pred0{};
+  int64_t pred1{};
+  bool accepted{};
+  int64_t status{};
+  int64_t new_pending{};  // device view after the commit (checked against the host ledger)
+  int64_t new_length{};
+  int64_t pred2{};
+  int64_t pred3{};
+  int accepted_count{};
+  int proposed_count{1};
+  bool suffix_lookup_attempted{};
+  bool suffix_lookup_hit{};
+  size_t suffix_lookup_tokens_proposed{};
+
+  size_t AcceptedCount() const {
+    if (proposed_count < 1 || proposed_count > 3 || accepted_count < 0 || accepted_count > proposed_count)
+      throw std::logic_error("qwen38_graph: invalid draft acceptance counts");
+    return accepted_count > 0 ? static_cast<size_t>(accepted_count) : (accepted ? 1 : 0);
+  }
+
+  size_t TokenCount() const {
+    return 1 + AcceptedCount();
+  }
+};
+
+struct Qwen38DecodeStats {
+  size_t cycles{};
+  size_t accepted{};
+  size_t tokens{};
+};
+
+// The loop the Engine executor drives. Single-threaded: every method runs on the Engine owner thread.
+class Qwen38DecodeDevice {
+ public:
+  virtual ~Qwen38DecodeDevice() = default;
+
+  // Largest sequence (prompt + generated) the fixed KV store holds is Capacity() - kReservedTail.
+  virtual int Capacity() const = 0;
+  virtual bool MtpEnabled() const = 0;
+
+  // Waits for every enqueued cycle, then clears all state: the device is empty (length 0) afterwards.
+  virtual void Reset() = 0;
+  // Waits for every enqueued cycle without clearing anything.
+  virtual void Drain() = 0;
+
+  // Ingests prompt tokens and leaves PendingToken() = the greedy token after the last ingested one. Consecutive calls
+  // continue the same prompt; every chunk but the last has an even size unless PrefillChunkTokens() says otherwise. Only
+  // valid before BeginDecode. Synchronous.
+  virtual void PrefillChunk(std::span<const int32_t> tokens) = 0;
+  virtual int32_t PendingToken() const = 0;
+  // Size of the prompt chunks the device ingests most efficiently (the fast prefill keeps one dense chunk resident); 0 when
+  // it has no preference. The executor then delivers prompts in chunks of this size, any chunk size being valid.
+  virtual size_t PrefillChunkTokens() const { return 0; }
+
+  // Starts decoding after the prompt: hands the prompt state over to the decode state (fast prefill), prepares the head and,
+  // when `run_cycle`, enqueues the first cycle (so that it is running before the first token is returned to the caller).
+  virtual void BeginDecode(bool run_cycle) = 0;
+  // Spins on the pinned record of the cycle in flight. Throws when the device reports a validation failure.
+  virtual Qwen38CycleRecord WaitCycle() = 0;
+  // Commits `record` on the host and, when `want_more`, enqueues the next cycle (look-ahead).
+  virtual void Advance(const Qwen38CycleRecord& record, bool want_more) = 0;
+  // Throws when the device accumulated an error over the cycles of the decode. Only called while no cycle is in flight.
+  virtual void CheckDecodeStatus() {}
+
+  // Positions at the end of the KV store that are never filled: a verify step writes two rows past the committed length.
+  static constexpr int kReservedTail = 4;
+};
+
+// Host mirror of the device loop's committed state: how many tokens are committed and which recurrent bank of the ring the
+// next target step reads. A target step reading bank k writes its committed state into bank (k + step) % kBanks (step = rows
+// committed: 1 or 2), which is why three banks suffice: the bank being read, the mid-state (S=2) and the result.
+class Qwen38DecodeLedger {
+ public:
+  static constexpr int kBanks = 3;
+
+  explicit Qwen38DecodeLedger(int capacity, int num_banks = kBanks)
+      : capacity_{capacity} {
+    SetNumBanks(num_banks);
+  }
+
+  void SetNumBanks(int num_banks) {
+    if (num_banks < 2 || num_banks > 5)
+      throw std::invalid_argument("qwen38_graph: recurrent bank count must be in [2, 5]");
+    if (length_ != 0)
+      throw std::logic_error("qwen38_graph: cannot change recurrent bank count after prefill");
+    num_banks_ = num_banks;
+  }
+  int NumBanks() const { return num_banks_; }
+
+  void Reset() {
+    bank_ = 0;
+    length_ = 0;
+  }
+
+  int Bank() const { return bank_; }
+  size_t Length() const { return length_; }
+
+  // Commits `step` rows (1 .. num_banks_ - 1).
+  void Advance(size_t step) {
+    const size_t max_step = static_cast<size_t>(num_banks_ - 1);
+    if (step < 1 || step > max_step)
+      throw std::logic_error("qwen38_graph: invalid committed row count " + std::to_string(step));
+    bank_ = static_cast<int>((static_cast<size_t>(bank_) + step) % static_cast<size_t>(num_banks_));
+    length_ += step;
+  }
+
+  // Commits `rows` prompt rows at once (the dense prefill: no bank rotation, the hand-off writes bank 0).
+  void AdvancePrompt(size_t rows) {
+    if (bank_ != 0) throw std::logic_error("qwen38_graph: a dense prompt chunk needs the committed bank 0");
+    length_ += rows;
+  }
+
+  // Throws unless `rows` more positions fit. `tail` extra positions must stay free (see kReservedTail).
+  void RequireRoom(size_t rows, const char* what, size_t tail = 0) const {
+    if (length_ + rows + tail > static_cast<size_t>(capacity_))
+      throw std::runtime_error(std::string("qwen38_graph: ") + what + " exceeds the KV capacity of " + std::to_string(capacity_));
+  }
+
+  // The device published its own committed length; it must equal the host's.
+  void CheckDeviceLength(int64_t device_length) const {
+    if (static_cast<int64_t>(length_) != device_length)
+      throw std::runtime_error("qwen38_graph: device length " + std::to_string(device_length) + " differs from host length " +
+                               std::to_string(length_));
+  }
+
+ private:
+  int capacity_;
+  int num_banks_{kBanks};
+  int bank_{};
+  size_t length_{};
+};
+
+}  // namespace Generators

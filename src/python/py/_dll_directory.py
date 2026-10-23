@@ -55,6 +55,13 @@ def add_onnxruntime_dependency(package_id: str):
                 _ = ctypes.CDLL(ort_path)
 
     elif _is_linux() or _is_macos():
+        target_lib_path = os.environ.get("ORT_LIB_PATH")
+        if target_lib_path is not None:
+            if not target_lib_path:
+                raise ImportError("ORT_LIB_PATH must not be empty.")
+            _ = ctypes.CDLL(target_lib_path)
+            return
+
         ort_package = importlib.util.find_spec("onnxruntime")
         if not ort_package:
             raise ImportError("Could not find the onnxruntime package.")

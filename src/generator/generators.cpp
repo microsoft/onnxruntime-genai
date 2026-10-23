@@ -4,6 +4,7 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include "qwen38_plane/interface.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -382,6 +383,19 @@ DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
   } catch (const std::exception& e) {
     throw std::runtime_error("Cuda interface not available: " + std::string(e.what()));
   }
+}
+
+const Qwen38PlaneFunctions& OrtGlobals::LoadQwen38PlaneFunctions() {
+  GetDeviceInterface(DeviceType::CUDA);
+  std::scoped_lock lock{device_interfaces_mutex_};
+  const auto get_functions = reinterpret_cast<GetQwen38PlaneFunctionsFn>(
+      cuda_library_->GetSymbol("GetQwen38PlaneFunctions"));
+  if (!get_functions)
+    throw std::runtime_error("CUDA add-on does not export GetQwen38PlaneFunctions; install a matching GenAI CUDA add-on");
+  const auto* functions = get_functions(kQwen38PlaneVersion, sizeof(Qwen38PlaneFunctions));
+  if (!functions)
+    throw std::runtime_error("CUDA add-on data-plane interface version/size mismatch; install a matching GenAI CUDA add-on");
+  return *functions;
 }
 
 DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
