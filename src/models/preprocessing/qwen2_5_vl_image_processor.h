@@ -28,7 +28,8 @@ struct QwenImageProcessor : Processor {
   ONNXTensorElementDataType pixel_values_type_;
   std::optional<size_t> pixel_values_input_rank_;
   int64_t spatial_merge_size_;
-  int64_t patch_size_{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+  int64_t patch_size_{14};            // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+  bool requires_patch_image_{false};  // OpenVINO host vision expects PatchImage's patch layout
 };
 
 }  // namespace Generators
