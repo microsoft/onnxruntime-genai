@@ -10,6 +10,7 @@
 
 #include "generator/generators.h"
 #include "model.h"
+#include "multi_modal.h"
 #include "io/multi_modal_features.h"
 #include "openvino_multi_modal.h"
 #include "openvino_vision_merger.h"
@@ -177,9 +178,7 @@ void Gemma3OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra_
 
   // Cache token_type_ids (int32) so Merge can locate the image rows after the text embedding runs.
   if (OrtValue* token_type_ids = FindExtraInput(extra_inputs, Config::Defaults::TokenTypeIdsName)) {
-    const size_t count = token_type_ids->GetTensorTypeAndShapeInfo()->GetElementCount();
-    const int32_t* data = token_type_ids->GetTensorData<int32_t>();
-    token_type_ids_.assign(data, data + count);
+    token_type_ids_ = ReadTokenTypeIds(*token_type_ids);
   }
 }
 

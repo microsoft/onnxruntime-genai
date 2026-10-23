@@ -12,6 +12,7 @@
 #include "openvino_vision_merger.h"
 #include <cstring>
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <utility>
 
@@ -124,6 +125,34 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
 
 std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
   return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
+}
+
+std::vector<int32_t> ReadTokenTypeIds(const OrtValue& token_type_ids) {
+  const auto info = token_type_ids.GetTensorTypeAndShapeInfo();
+  const size_t count = info->GetElementCount();
+  if (count == 0) return {};
+
+  switch (info->GetElementType()) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
+      const int32_t* values = token_type_ids.GetTensorData<int32_t>();
+      return std::vector<int32_t>(values, values + count);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
+      const int64_t* values = token_type_ids.GetTensorData<int64_t>();
+      std::vector<int32_t> converted;
+      converted.reserve(count);
+      for (size_t i = 0; i < count; ++i) {
+        if (values[i] < std::numeric_limits<int32_t>::min() ||
+            values[i] > std::numeric_limits<int32_t>::max()) {
+          throw std::runtime_error("token_type_ids values must fit in int32");
+        }
+        converted.push_back(static_cast<int32_t>(values[i]));
+      }
+      return converted;
+    }
+    default:
+      throw std::runtime_error("token_type_ids must have int32 or int64 elements");
+  }
 }
 
 VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params)
@@ -680,8 +709,8 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
     for (const auto& input : extra_inputs) {
       if (input.name == Config::Defaults::TokenTypeIdsName) {
         OrtValue* ttids = input.tensor->GetOrtTensor();
-        const size_t count = ttids->GetTensorTypeAndShapeInfo()->GetElementCount();
-        decoder_state_->SetPendingTokenTypeIds(std::span<const int32_t>(ttids->GetTensorData<int32_t>(), count));
+        auto markers = ReadTokenTypeIds(*ttids);
+        decoder_state_->SetPendingTokenTypeIds(markers);
         break;
       }
     }
