@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -16,6 +17,19 @@ using Microsoft.ML.OnnxRuntime;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
+    public sealed class OnnxRuntimeGenAIFixture : IDisposable
+    {
+        private readonly OgaHandle ogaHandle = new OgaHandle();
+
+        public void Dispose() => ogaHandle.Dispose();
+    }
+
+    [CollectionDefinition(nameof(OnnxRuntimeGenAICollection))]
+    public sealed class OnnxRuntimeGenAICollection : ICollectionFixture<OnnxRuntimeGenAIFixture>
+    {
+    }
+
+    [Collection(nameof(OnnxRuntimeGenAICollection))]
     public class OnnxRuntimeGenAITests
     {
         private readonly ITestOutputHelper output;
@@ -87,8 +101,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         });
 
         private static string _adaptersPath => _lazyAdaptersPath.Value;
-        private static OgaHandle ogaHandle;
-
         private static int _epLibrariesRegistered = 0;
 
         [Fact(DisplayName = "TestTelemetryControl")]
@@ -161,12 +173,30 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
             Console.WriteLine("**** Running OnnxRuntimeGenAITests constructor");
-            // Initialize GenAI and register a handler to dispose it on process exit
-            ogaHandle = new OgaHandle();
-            AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
             RegisterEpLibrariesFromDirectory();
             this.output = o;
             Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void CreateCollectibleTestInstances()
+        {
+            _ = new OnnxRuntimeGenAITests(output);
+            _ = new OnnxRuntimeGenAITests(output);
+        }
+
+        [Fact]
+        public void TestRuntimeSurvivesTestInstanceCollection()
+        {
+            CreateCollectibleTestInstances();
+            using var model = new Model(_tinyRandomGpt2ModelPath);
+            using var tokenizer = new Tokenizer(model);
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            using var tokens = tokenizer.Encode("test");
+            Assert.NotEmpty(tokens[0].ToArray());
         }
 
         private class IgnoreOnModelAbsenceFact : FactAttribute

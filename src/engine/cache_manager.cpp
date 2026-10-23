@@ -399,6 +399,16 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   if (optional_draft_checkpoint_bytes != 0 && hybrid_prefix_caching &&
       auxiliary_bytes_per_block == 0) {
     const auto& batching = *model_->config_->engine.dynamic_batching;
+    const auto& limits = batching.snapshot_cache;
+    const bool device_resident = model_->p_device_kvcache_->GetType() == DeviceType::WEBGPU ||
+                                 !limits.Configured();
+    size_t count = std::min(batching.dflash2_max_snapshots, prefix_checkpoint_capacity);
+    if (batching.max_snapshots) {
+      count = std::min(count, *batching.max_snapshots);
+    }
+    if (!device_resident && limits.vram_bytes != 0 && model_->p_device_kvcache_->GetType() != DeviceType::CUDA) {
+      throw std::runtime_error("A VRAM prefix snapshot budget requires a CUDA device.");
+    }
     const size_t target_block_bytes = PagedKeyValueCacheBytesPerBlock(model_);
     size_t budget = 0;
     if (batching.num_blocks) {
@@ -410,11 +420,26 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
       model_->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
       budget = PagedCacheMemoryBudget(free_bytes, *batching.gpu_utilization_factor);
     }
-    draft_checkpoint_capacity_ = Dflash2PrefixCheckpointCapacity(
-        budget, auxiliary_reserved_memory_bytes, optional_draft_checkpoint_bytes,
-        target_block_bytes,
-        std::min(batching.dflash2_max_snapshots, prefix_checkpoint_capacity));
-    auxiliary_reserved_memory_bytes += draft_checkpoint_capacity_ * optional_draft_checkpoint_bytes;
+    const size_t available = budget > auxiliary_reserved_memory_bytes &&
+                                     budget - auxiliary_reserved_memory_bytes >= target_block_bytes
+                                 ? budget - auxiliary_reserved_memory_bytes - target_block_bytes
+                                 : 0;
+    const size_t device_count = std::min(count, available / optional_draft_checkpoint_bytes);
+    const size_t vram_count = device_resident ? device_count
+                                              : std::min(device_count, limits.vram_bytes / optional_draft_checkpoint_bytes);
+    draft_checkpoint_vram_bytes_ = vram_count * optional_draft_checkpoint_bytes;
+    auxiliary_reserved_memory_bytes += draft_checkpoint_vram_bytes_;
+    const size_t ram_count = limits.ram_bytes / optional_draft_checkpoint_bytes;
+    const size_t disk_count = limits.disk_bytes / optional_draft_checkpoint_bytes;
+    const size_t host_count =
+        ram_count > std::numeric_limits<size_t>::max() - disk_count
+            ? std::numeric_limits<size_t>::max()
+            : ram_count + disk_count;
+    const size_t tier_count =
+        vram_count > std::numeric_limits<size_t>::max() - host_count
+            ? std::numeric_limits<size_t>::max()
+            : vram_count + host_count;
+    draft_checkpoint_capacity_ = device_resident ? vram_count : std::min(count, tier_count);
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.
@@ -431,7 +456,7 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
         draft_checkpoint_capacity_, target_blocks,
         static_cast<size_t>(batching.block_size),
         target_blocks * PagedKeyValueCacheBytesPerBlock(model_),
-        draft_checkpoint_capacity_ * optional_draft_checkpoint_bytes);
+        draft_checkpoint_vram_bytes_);
   }
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
 }

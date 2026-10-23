@@ -9,15 +9,23 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 #include <gtest/gtest.h>
 
 #include "dflash2_drafter.h"
+#include "engine/cache_manager.h"
+#include "engine/engine.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
 #include "ep/webgpu/session_options.h"
+#include "models/decoder_only.h"
 #include "models/io/kv_cache.h"
 #include "models/session_options.h"
 #include "ort_genai.h"
@@ -30,6 +38,9 @@ namespace fs_std = std::filesystem;
 
 Config MakeDflash2Config() {
   Config config;
+  config.engine.dynamic_batching.emplace();
+  config.engine.dynamic_batching->prefix_caching = true;
+  config.engine.dynamic_batching->snapshot_cache.ram_bytes = 1024 * 1024;
   config.model.vocab_size = 128;
   auto& decoder = config.model.decoder;
   decoder.filename = "target.onnx";
@@ -49,6 +60,15 @@ Config MakeDflash2Config() {
   dflash2.mask_token_id = 31;
   dflash2.sliding_window = 17;
   return config;
+}
+
+std::shared_ptr<PrefixSnapshotCache> MakeSnapshotCache(const Config& config) {
+  const auto& batching = *config.engine.dynamic_batching;
+  const auto& limits = batching.snapshot_cache;
+  return std::make_shared<PrefixSnapshotCache>(
+      std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
+      batching.max_snapshots.value_or(std::numeric_limits<size_t>::max()),
+      fs_std::path{fs::path{limits.directory}.c_str()});
 }
 
 TEST(ConfigTests, FullProviderNameUpdatesCanonicalOptions) {
@@ -77,16 +97,52 @@ struct TensorMetadata {
   std::vector<int64_t> shape;
 };
 
+class SnapshotCountingBuffer final : public DeviceBuffer {
+ public:
+  SnapshotCountingBuffer(std::shared_ptr<DeviceBuffer> inner, size_t& downloads, size_t& uploads)
+      : inner_{std::move(inner)}, downloads_{downloads}, uploads_{uploads} {
+    p_device_ = inner_->p_device_;
+    size_in_bytes_ = inner_->size_in_bytes_;
+  }
+  const char* GetType() const override { return inner_->GetType(); }
+  void AllocateCpu() override {
+    inner_->AllocateCpu();
+    p_cpu_ = inner_->p_cpu_;
+  }
+  void CopyDeviceToCpu() override {
+    ++downloads_;
+    inner_->CopyDeviceToCpu();
+    p_cpu_ = inner_->p_cpu_;
+  }
+  void CopyCpuToDevice() override {
+    ++uploads_;
+    inner_->CopyCpuToDevice();
+  }
+  void CopyFrom(size_t destination, DeviceBuffer& source, size_t offset, size_t bytes) override {
+    inner_->CopyFrom(destination, source, offset, bytes);
+  }
+  void Zero() override { inner_->Zero(); }
+
+ private:
+  std::shared_ptr<DeviceBuffer> inner_;
+  size_t& downloads_;
+  size_t& uploads_;
+};
+
 class CheckpointAllocationDevice final : public DeviceInterface {
  public:
-  CheckpointAllocationDevice(DeviceInterface& inner, Ort::Allocator& allocator)
-      : inner_{inner}, allocator_{allocator} {}
+  CheckpointAllocationDevice(DeviceInterface& inner, bool host_snapshots,
+                             Ort::Allocator* allocator = nullptr)
+      : inner_{inner}, type_{host_snapshots ? DeviceType::CUDA : inner.GetType()}, allocator_{allocator} {}
 
-  DeviceType GetType() const override { return inner_.GetType(); }
+  CheckpointAllocationDevice(DeviceInterface& inner, DeviceType type)
+      : inner_{inner}, type_{type}, allocator_{nullptr} {}
+
+  DeviceType GetType() const override { return type_; }
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     inner_.InitOrt(api, allocator);
   }
-  Ort::Allocator& GetAllocator() override { return allocator_; }
+  Ort::Allocator& GetAllocator() override { return allocator_ ? *allocator_ : inner_.GetAllocator(); }
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     return inner_.GetMemoryInfo();
   }
@@ -97,6 +153,11 @@ class CheckpointAllocationDevice final : public DeviceInterface {
     return inner_.AllocateBase(size);
   }
   std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    if (type_ == DeviceType::WEBGPU) {
+      wrapped_memory.push_back(memory);
+      return std::make_shared<SnapshotCountingBuffer>(
+          inner_.WrapMemoryBase(memory, size), buffer_downloads, buffer_uploads);
+    }
     return inner_.WrapMemoryBase(memory, size);
   }
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
@@ -108,11 +169,50 @@ class CheckpointAllocationDevice final : public DeviceInterface {
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
     return inner_.CreateKeyValueCache(state);
   }
-  void Synchronize() override { inner_.Synchronize(); }
+  void Synchronize() override {
+    ++synchronizations;
+    inner_.Synchronize();
+  }
+  bool SupportsTransactionalFixedState() const override {
+    return inner_.SupportsTransactionalFixedState();
+  }
+  bool SupportsCompactStateReplay() const override {
+    return inner_.SupportsCompactStateReplay();
+  }
+  void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
+    inner_.ReplayStateUpdates(descriptors, count);
+  }
+  std::shared_ptr<void> AllocatePinnedHost(size_t bytes) override {
+    ++host_allocations;
+    if (fail_host_allocation) {
+      throw std::bad_alloc{};
+    }
+    void* memory = inner_.GetAllocator().Alloc(bytes);
+    return std::shared_ptr<void>(memory, [this](void* pointer) {
+      inner_.GetAllocator().Free(pointer);
+    });
+  }
+  void CopyDeviceToHost(void* host, const void* device, size_t bytes) override {
+    downloaded_bytes += bytes;
+    std::memcpy(host, device, bytes);
+  }
+  void CopyHostToDevice(void* device, const void* host, size_t bytes) override {
+    uploaded_bytes += bytes;
+    std::memcpy(device, host, bytes);
+  }
+  size_t downloaded_bytes{};
+  size_t uploaded_bytes{};
+  size_t host_allocations{};
+  bool fail_host_allocation{};
+  size_t buffer_downloads{};
+  size_t buffer_uploads{};
+  size_t synchronizations{};
+  std::vector<void*> wrapped_memory;
 
  private:
   DeviceInterface& inner_;
-  Ort::Allocator& allocator_;
+  DeviceType type_;
+  Ort::Allocator* allocator_;
 };
 
 class FakeModelStateMetadata final : public ModelStateMetadata {
@@ -988,18 +1088,19 @@ TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
             7680u);
 }
 
-TEST(Dflash2ConfigTest, OptionalPrefixCheckpointNeverConsumesTheLastTargetBlock) {
-  EXPECT_TRUE(CanReserveDflash2PrefixCheckpoint(
-      /*target_budget_bytes=*/100, /*reserved_bytes=*/40,
-      /*snapshot_bytes=*/20, /*target_block_bytes=*/40));
-  EXPECT_FALSE(CanReserveDflash2PrefixCheckpoint(99, 40, 20, 40));
-  EXPECT_FALSE(CanReserveDflash2PrefixCheckpoint(100, 100, 20, 40));
-  EXPECT_FALSE(CanReserveDflash2PrefixCheckpoint(100, 40, 60, 1));
-  EXPECT_FALSE(CanReserveDflash2PrefixCheckpoint(100, 40, 20, 41));
-  const size_t effective_budget = PagedCacheMemoryBudget(1000, 1.0f);
-  EXPECT_TRUE(CanReserveDflash2PrefixCheckpoint(1000, 860, 40, 40));
-  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(1000, 1.0f, 860, 40), 1u);
-  EXPECT_FALSE(CanReserveDflash2PrefixCheckpoint(effective_budget, 860, 40, 40));
+TEST(Dflash2ConfigTest, HostCheckpointDoesNotConsumeDeviceBudget) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.num_blocks = 1;
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  batching.snapshot_cache.ram_bytes = 2 * block_bytes;
+  auto manager = CacheManager::Create(model, 0, 0, 2 * block_bytes);
+  EXPECT_EQ(manager->DraftCheckpointCapacity(), 1u);
+  EXPECT_EQ(manager->DraftCheckpointVramBytes(), 0u);
+  EXPECT_EQ(manager->Snapshot().total_blocks, 1u);
+  EXPECT_THROW(CacheManager::Create(model, 0, block_bytes, 2 * block_bytes),
+               std::runtime_error);
 }
 
 TEST(Dflash2ConfigTest, RejectsWindowedPoolByteOverflow) {
@@ -1009,22 +1110,6 @@ TEST(Dflash2ConfigTest, RejectsWindowedPoolByteOverflow) {
           config, 8, std::numeric_limits<size_t>::max(),
           ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
       std::runtime_error);
-}
-
-TEST(Dflash2ConfigTest, SnapshotCapacityHonorsConfiguredLimitAndMemoryBudget) {
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 0), 0u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 1), 1u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 4), 4u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(200, 40, 20, 20, 32), 7u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(199, 40, 20, 20, 32), 6u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(79, 40, 20, 20, 32), 0u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 100, 20, 20, 32), 0u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 101, 20, 20, 32), 0u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 0, 20, 32), 0u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(100, 40, 20, 0, 32), 0u);
-  const size_t maximum = std::numeric_limits<size_t>::max();
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, 0, maximum / 2, 1, maximum), 2u);
-  EXPECT_EQ(Dflash2PrefixCheckpointCapacity(maximum, maximum - 1, maximum, 1, maximum), 0u);
 }
 
 TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
@@ -1184,6 +1269,8 @@ TEST(Dflash2ConfigTest, RunsPackedQkvDrafterWithoutQueryRowMap) {
   EXPECT_EQ(drafts[1], (std::vector<int32_t>{22, 0, 13, 325}));
 }
 
+class Dflash2StorageRestoreTest : public ::testing::TestWithParam<bool> {};
+
 TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
   const auto root = WriteAnchorRowIndexDrafterModel();
   auto config = MakeDflash2Config();
@@ -1313,8 +1400,12 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
   }
 }
 
-TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
+TEST_P(Dflash2StorageRestoreTest, ExecutesWindowedRestoreAcrossRingWrap) {
   auto config = MakeDflash2Config();
+  if (GetParam()) {
+    config.engine.dynamic_batching->snapshot_cache.ram_bytes = 0;
+    config.engine.dynamic_batching->snapshot_cache.disk_bytes = 1024 * 1024;
+  }
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
   auto& draft = config.model.dflash2;
   draft.filename = "dflash2.onnx";
@@ -1330,6 +1421,7 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   const size_t ring_blocks = Dflash2Drafter::PoolBlocks(config, 4, 1);
   Dflash2Drafter drafter{model, /*paged_block_size=*/4, ring_blocks * 2,
                          /*max_requests=*/2};
+  drafter.InitializeSnapshotCache(MakeSnapshotCache(config));
   int source_id = 0, restored_id = 0, peer_id = 0, extra_id = 0, remap_id = 0;
   auto* source = reinterpret_cast<Request*>(&source_id);
   auto* restored = reinterpret_cast<Request*>(&restored_id);
@@ -1345,20 +1437,6 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
         .request = source, .aux_row_count = 8, .first_position = position, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
     ASSERT_TRUE(drafter.Propose(aux, feeds, proposals));
   }
-  auto* device = model->p_device_kvcache_;
-  auto failing_allocator = Ort::Allocator::Create(
-      *model->session_, device->GetAllocator().GetInfo());
-  static_cast<OrtAllocator&>(*failing_allocator).Alloc =
-      [](OrtAllocator*, size_t) -> void* { throw std::bad_alloc{}; };
-  EXPECT_THROW(
-      OrtValue::CreateTensor(
-          *failing_allocator, std::array<int64_t, 1>{1}, Ort::TypeToTensorType<float>),
-      Ort::Exception);
-  CheckpointAllocationDevice failing_device{*device, *failing_allocator};
-  model->p_device_kvcache_ = &failing_device;
-  EXPECT_THROW(drafter.CapturePrefix(source, 24), std::bad_alloc);
-  model->p_device_kvcache_ = device;
-
   auto checkpoint = drafter.CapturePrefix(source, 24);
   ASSERT_NE(checkpoint, nullptr);
   EXPECT_EQ(checkpoint->ring_blocks, ring_blocks);
@@ -1461,31 +1539,40 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   auto missing_state = std::make_shared<Dflash2PrefixCheckpoint>();
   missing_state->token_count = checkpoint->token_count;
   missing_state->ring_blocks = checkpoint->ring_blocks;
-  for (const auto& cache : checkpoint->caches) {
-    auto copy = std::make_unique<Tensor>(GetDeviceInterface(DeviceType::CPU), cache->GetType());
-    copy->CreateTensor(cache->GetShape());
-    copy->GetByteSpan().CopyFrom(cache->GetByteSpan());
-    missing_state->caches.push_back(std::move(copy));
+  missing_state->shapes = checkpoint->shapes;
+  missing_state->type = checkpoint->type;
+  auto damaged_cache = MakeSnapshotCache(config);
+  ASSERT_TRUE(damaged_cache->Allocate(missing_state, model->p_device_kvcache_));
+  for (size_t layer = 0; layer < checkpoint->shapes.size(); ++layer) {
+    Tensor copy{GetDeviceInterface(DeviceType::CPU), checkpoint->type};
+    copy.CreateTensor(checkpoint->shapes[layer]);
+    checkpoint->Read(layer, 0, copy, 0, copy.GetByteSpan().size());
+    if (layer == 0) copy.GetByteSpan().Zero();
+    missing_state->Write(layer, 0, copy, 0, copy.GetByteSpan().size());
   }
-  missing_state->caches.front()->GetByteSpan().Zero();
   drafter.ReleaseAll();
   auto damaged = resumed;
-  damaged.front().prefix_checkpoint = std::move(missing_state);
+  damaged.front().prefix_checkpoint = missing_state;
   ASSERT_TRUE(drafter.Propose(next_aux, damaged, proposals));
   ASSERT_EQ(proposals.size(), 1u);
   ASSERT_FALSE(proposals.front().empty());
   EXPECT_NE(proposals.front().front(), expected.front());
 
   drafter.ReleaseAll();
+  ++missing_state->shapes.front().back();
+  EXPECT_THROW(drafter.Propose(next_aux, damaged, proposals), std::logic_error);
+
   auto invalid = std::make_shared<Dflash2PrefixCheckpoint>();
   invalid->token_count = checkpoint->token_count;
   invalid->ring_blocks = checkpoint->ring_blocks;
-  invalid->caches.resize(checkpoint->caches.size());
   damaged.front().prefix_checkpoint = std::move(invalid);
-  EXPECT_THROW(drafter.Propose(next_aux, damaged, proposals), std::logic_error);
+  EXPECT_FALSE(drafter.Propose(next_aux, damaged, proposals));
+  EXPECT_TRUE(proposals.front().empty());
 }
 
-TEST(Dflash2ConfigTest, SnapshotPoolRetainsAndRestoresMoreThanTwoBoundaries) {
+INSTANTIATE_TEST_SUITE_P(RamAndDisk, Dflash2StorageRestoreTest, ::testing::Bool());
+
+TEST(Dflash2ConfigTest, SnapshotIoFailuresPreserveHealthyDraftContextAndAllowRetry) {
   auto config = MakeDflash2Config();
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
   auto& draft = config.model.dflash2;
@@ -1497,68 +1584,56 @@ TEST(Dflash2ConfigTest, SnapshotPoolRetainsAndRestoresMoreThanTwoBoundaries) {
   draft.num_draft_tokens = 3;
   draft.selector_top_k = 2;
   draft.sliding_window = 8;
+  const auto parent = fs_std::temp_directory_path() /
+                      ("oga-dflash-io-" + std::to_string(std::random_device{}()));
+  ASSERT_FALSE(fs_std::exists(parent));
+  auto& limits = config.engine.dynamic_batching->snapshot_cache;
+  limits.ram_bytes = 0;
+  limits.disk_bytes = 1024 * 1024;
+  limits.directory = parent.string();
   auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
-  Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
-  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 1u);
-  drafter.SetPrefixCheckpointCapacity(0);
-  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
-  int request_id = 0;
-  auto* request = reinterpret_cast<Request*>(&request_id);
+  const size_t ring = Dflash2Drafter::PoolBlocks(config, 4, 1);
+  auto storage = MakeSnapshotCache(config);
+  Dflash2Drafter drafter{model, 4, ring * 2, 2};
+  drafter.InitializeSnapshotCache(storage);
+  int source_id = 0, restored_id = 0;
+  auto* source = reinterpret_cast<Request*>(&source_id);
+  auto* restored = reinterpret_cast<Request*>(&restored_id);
   Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
   aux.CreateTensor(std::array<int64_t, 2>{8, 1});
   aux.GetByteSpan().Zero();
   std::vector<std::vector<int32_t>> proposals;
   const std::array initial{Dflash2Drafter::Feed{
-      .request = request, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+      .request = source, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
   ASSERT_TRUE(drafter.Propose(aux, initial, proposals));
-  EXPECT_EQ(drafter.CapturePrefix(request, 8), nullptr);
-  drafter.SetPrefixCheckpointCapacity(3);
+  EXPECT_EQ(drafter.CapturePrefix(source, 8), nullptr);
+  EXPECT_TRUE(drafter.CanCapturePrefix(source, 8));
+  ASSERT_TRUE(fs_std::create_directory(parent));
+  auto checkpoint = drafter.CapturePrefix(source, 8);
+  ASSERT_NE(checkpoint, nullptr);
+  const auto directory = fs_std::directory_iterator(parent)->path();
+  fs_std::resize_file(directory / "payload", 0);
 
-  std::vector<std::shared_ptr<const Dflash2PrefixCheckpoint>> checkpoints;
-  std::vector<std::vector<int32_t>> expected;
-  for (size_t position = 8; position <= 24; position += 8) {
-    auto checkpoint = drafter.CapturePrefix(request, position);
-    ASSERT_NE(checkpoint, nullptr);
-    checkpoints.push_back(std::move(checkpoint));
-    Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
-    next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
-    next_aux.GetByteSpan().Zero();
-    const std::array next{Dflash2Drafter::Feed{
-        .request = request, .aux_row_count = 1, .first_position = position, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
-    ASSERT_TRUE(drafter.Propose(next_aux, next, proposals));
-    ASSERT_FALSE(proposals.front().empty());
-    expected.push_back(proposals.front());
-    if (position < 24) {
-      Tensor remaining{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
-      remaining.CreateTensor(std::array<int64_t, 2>{7, 1});
-      remaining.GetByteSpan().Zero();
-      const std::array advance{Dflash2Drafter::Feed{
-          .request = request, .aux_row_count = 7, .first_position = position + 1, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
-      ASSERT_TRUE(drafter.Propose(remaining, advance, proposals));
-    }
-  }
-  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
-  EXPECT_EQ(drafter.CapturePrefix(request, 25), nullptr);
-  EXPECT_THROW(drafter.SetPrefixCheckpointCapacity(0), std::logic_error);
-  for (size_t index = 0; index < checkpoints.size(); ++index) {
-    drafter.ReleaseAll();
-    Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
-    next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
-    next_aux.GetByteSpan().Zero();
-    const std::array restored{Dflash2Drafter::Feed{
-        .request = request, .prefix_checkpoint = checkpoints[index], .aux_row_count = 1, .first_position = checkpoints[index]->token_count, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
-    ASSERT_TRUE(drafter.Propose(next_aux, restored, proposals));
-    EXPECT_EQ(proposals.front(), expected[index]);
-  }
-  checkpoints[1].reset();
-  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 1u);
-  auto reused = drafter.CapturePrefix(request, 25);
-  ASSERT_NE(reused, nullptr);
-  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
-  checkpoints.clear();
-  reused.reset();
-  drafter.SetPrefixCheckpointCapacity(0);
-  EXPECT_EQ(drafter.AvailablePrefixCheckpoints(), 0u);
+  Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+  next_aux.GetByteSpan().Zero();
+  const std::array failed_restore{Dflash2Drafter::Feed{
+      .request = restored, .prefix_checkpoint = checkpoint, .aux_row_count = 1, .first_position = 8, .anchor_token = 13, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_TRUE(drafter.Propose(next_aux, failed_restore, proposals));
+  ASSERT_EQ(proposals.size(), 1u);
+  EXPECT_TRUE(proposals.front().empty());
+  EXPECT_TRUE(drafter.CanCapturePrefix(source, 8));
+  EXPECT_EQ(checkpoint->state, PrefixSnapshotCache::State::Evicted);
+  const std::array healthy{Dflash2Drafter::Feed{
+      .request = source, .aux_row_count = 1, .first_position = 8, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_TRUE(drafter.Propose(next_aux, healthy, proposals));
+  ASSERT_EQ(proposals.size(), 1u);
+  EXPECT_FALSE(proposals.front().empty());
+  EXPECT_TRUE(drafter.CanCapturePrefix(source, 9));
+  auto retried = drafter.CapturePrefix(source, 9);
+  ASSERT_NE(retried, nullptr);
+  retried.reset();
+  EXPECT_TRUE(fs_std::remove(parent));
 }
 
 TEST(Dflash2ConfigTest, MissingWindowedPrefixRebuildsBeforeDraftingOrCheckpointing) {
@@ -1575,6 +1650,7 @@ TEST(Dflash2ConfigTest, MissingWindowedPrefixRebuildsBeforeDraftingOrCheckpointi
   draft.sliding_window = 8;
   auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
   Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
+  drafter.InitializeSnapshotCache(MakeSnapshotCache(config));
   int request_id = 0;
   auto* request = reinterpret_cast<Request*>(&request_id);
   Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
@@ -1620,6 +1696,7 @@ TEST(Dflash2ConfigTest, CapturesAndRestoresExtendedWindowedPrefix) {
   auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
   const size_t ring_blocks = Dflash2Drafter::PoolBlocks(config, 4, 1);
   Dflash2Drafter drafter{model, /*paged_block_size=*/4, ring_blocks * 2, /*max_requests=*/2};
+  drafter.InitializeSnapshotCache(MakeSnapshotCache(config));
   int source_id = 0, replay_id = 0;
   auto* source = reinterpret_cast<Request*>(&source_id);
   auto* replay = reinterpret_cast<Request*>(&replay_id);
@@ -1962,41 +2039,778 @@ TEST(Dflash2ConfigTest, JoinsEligibleTurnsAtZeroOrWithWindowedContext) {
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/1, /*context_window=*/12));
 }
 
-TEST(Dflash2ConfigTest, RingCheckpointPreservesLogicalSlotsAcrossPhysicalRemapping) {
-  auto* device = GetDeviceInterface(DeviceType::CPU);
+class PrefixSnapshotTransferTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(PrefixSnapshotTransferTest, RemapsSelectedBlocksAndPreservesUntouchedBytes) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, GetParam()};
+  PrefixSnapshotCache storage{{0, 12, 0}, 1};
   constexpr auto type = Ort::TypeToTensorType<uint8_t>;
-  Tensor source{device, type}, checkpoint{device, type}, restored{device, type};
-  source.CreateTensor(std::array<int64_t, 4>{6, 4, 1, 1});
-  checkpoint.CreateTensor(std::array<int64_t, 4>{3, 4, 1, 1});
-  restored.CreateTensor(std::array<int64_t, 4>{5, 4, 1, 1});
+  auto checkpoint = std::make_shared<PrefixSnapshotCache::Entry>();
+  checkpoint->shapes = {{3, 4}};
+  checkpoint->type = type;
+  ASSERT_TRUE(storage.Allocate(checkpoint, &device));
+  Tensor source{&device, type}, restored{&device, type};
+  source.CreateTensor(std::array<int64_t, 2>{6, 4});
+  restored.CreateTensor(std::array<int64_t, 2>{5, 4});
   std::array<uint8_t, 24> values{};
-  for (size_t i = 0; i < values.size(); ++i) {
-    values[i] = static_cast<uint8_t>(i + 1);
-  }
+  std::iota(values.begin(), values.end(), uint8_t{1});
   source.GetByteSpan().CopyFromCpu(values);
-  restored.GetByteSpan().Zero();
-
-  const std::array<int32_t, 3> original{4, 1, 3};
-  const std::array<int32_t, 3> compact{0, 1, 2};
-  const std::array<int32_t, 3> relocated{2, 0, 4};
-  CopyDflash2RingBlocks(checkpoint, compact, source, original);
-  CopyDflash2RingBlocks(restored, relocated, checkpoint, compact);
-
-  auto restored_span = restored.GetByteSpan();
-  const auto copied = restored_span.CopyDeviceToCpu();
-  for (size_t logical_slot = 0; logical_slot < original.size(); ++logical_slot) {
+  std::memset(restored.GetMutableRawData(), 99, 20);
+  const std::array<int32_t, 3> original{4, 1, 3}, relocated{2, 0, 4};
+  for (size_t block = 0; block < original.size(); ++block) {
+    checkpoint->Write(0, block * 4, source, original[block] * 4, 4);
+    checkpoint->Read(0, block * 4, restored, relocated[block] * 4, 4);
+  }
+  EXPECT_EQ(device.downloaded_bytes, GetParam() ? 12u : 0u);
+  EXPECT_EQ(device.uploaded_bytes, GetParam() ? 12u : 0u);
+  const auto* copied = restored.GetData<uint8_t>();
+  for (size_t block = 0; block < original.size(); ++block) {
     for (size_t byte = 0; byte < 4; ++byte) {
-      EXPECT_EQ(copied[relocated[logical_slot] * 4 + byte],
-                values[original[logical_slot] * 4 + byte]);
+      EXPECT_EQ(copied[relocated[block] * 4 + byte], values[original[block] * 4 + byte]);
     }
   }
-  // A later absolute block wraps back to logical slot zero, not physical block zero.
-  EXPECT_EQ(copied[relocated[12 % original.size()] * 4], values[original[0] * 4]);
-  const std::array<int32_t, 3> invalid{6, 1, 3};
-  EXPECT_THROW(CopyDflash2RingBlocks(checkpoint, compact, source, invalid), std::logic_error);
-  Tensor scalar{device, type};
-  scalar.CreateTensor(std::array<int64_t, 0>{});
-  EXPECT_THROW(CopyDflash2RingBlocks(checkpoint, compact, scalar, original), std::logic_error);
+  for (size_t offset : {4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u}) {
+    EXPECT_EQ(copied[offset], 99);
+  }
+  EXPECT_THROW(checkpoint->Write(0, 0, source, 24, 4), std::out_of_range);
+  EXPECT_EQ(device.downloaded_bytes, GetParam() ? 12u : 0u);
+}
+
+INSTANTIATE_TEST_SUITE_P(CpuAndHostTransfers, PrefixSnapshotTransferTest, ::testing::Bool());
+
+TEST(Dflash2ConfigTest, HostSnapshotProtectsLeasesAndOutlivesDrafter) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.sliding_window = 8;
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  auto* cpu = model->p_device_kvcache_;
+  CheckpointAllocationDevice device{*cpu, true};
+  std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint;
+  std::weak_ptr<void> memory;
+  {
+    Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1};
+    drafter.InitializeSnapshotCache(MakeSnapshotCache(config));
+    int request_id{};
+    auto* request = reinterpret_cast<Request*>(&request_id);
+    Tensor aux{cpu, Ort::TypeToTensorType<float>};
+    aux.CreateTensor(std::array<int64_t, 2>{8, 1});
+    aux.GetByteSpan().Zero();
+    const std::array feeds{Dflash2Drafter::Feed{
+        .request = request, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+    std::vector<std::vector<int32_t>> drafts;
+    ASSERT_TRUE(drafter.Propose(aux, feeds, drafts));
+    model->p_device_kvcache_ = &device;
+    device.fail_host_allocation = true;
+    EXPECT_THROW(drafter.CapturePrefix(request, 8), std::bad_alloc);
+    device.fail_host_allocation = false;
+    checkpoint = drafter.CapturePrefix(request, 8);
+    ASSERT_NE(checkpoint, nullptr);
+    ASSERT_EQ(checkpoint->host_buffers.size(), 2u);
+    EXPECT_EQ(checkpoint->caches.front()->p_device_->GetType(), DeviceType::CPU);
+    memory = checkpoint->host_buffers.front();
+    const auto* address = checkpoint->host_buffers.front().get();
+    const auto allocations = device.host_allocations;
+    auto lease = checkpoint;
+    EXPECT_EQ(drafter.CapturePrefix(request, 8), nullptr);
+    lease.reset();
+    checkpoint = drafter.CapturePrefix(request, 8);
+    ASSERT_NE(checkpoint, nullptr);
+    EXPECT_EQ(checkpoint->host_buffers.front().get(), address);
+    EXPECT_EQ(device.host_allocations, allocations);
+    memory = checkpoint->host_buffers.front();
+    model->p_device_kvcache_ = cpu;
+  }
+  EXPECT_FALSE(memory.expired());
+  EXPECT_NE(checkpoint->caches.front()->GetRawData(), nullptr);
+  checkpoint.reset();
+  EXPECT_TRUE(memory.expired());
+}
+
+TEST(Dflash2ConfigTest, SnapshotProducersShareCountBudgetAndLeaseProtection) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  config.engine.dynamic_batching->max_snapshots = 1;
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.sliding_window = 8;
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  const size_t pool_blocks = Dflash2Drafter::PoolBlocks(config, 4, 1);
+  Dflash2Drafter first{model, 4, pool_blocks, 1};
+  Dflash2Drafter second{model, 4, pool_blocks, 1};
+  auto cache = MakeSnapshotCache(config);
+  EXPECT_THROW(first.InitializeSnapshotCache(nullptr), std::invalid_argument);
+  first.InitializeSnapshotCache(cache);
+  second.InitializeSnapshotCache(cache);
+  EXPECT_THROW(first.InitializeSnapshotCache(cache), std::logic_error);
+  int first_id{}, second_id{};
+  auto* first_request = reinterpret_cast<Request*>(&first_id);
+  auto* second_request = reinterpret_cast<Request*>(&second_id);
+  Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  aux.CreateTensor(std::array<int64_t, 2>{8, 1});
+  aux.GetByteSpan().Zero();
+  const std::array first_feeds{Dflash2Drafter::Feed{
+      .request = first_request, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+  const std::array second_feeds{Dflash2Drafter::Feed{
+      .request = second_request, .aux_row_count = 8, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+  std::vector<std::vector<int32_t>> proposals;
+  ASSERT_TRUE(first.Propose(aux, first_feeds, proposals));
+  ASSERT_TRUE(second.Propose(aux, second_feeds, proposals));
+  auto checkpoint = first.CapturePrefix(first_request, 8);
+  ASSERT_NE(checkpoint, nullptr);
+  ASSERT_EQ(checkpoint->caches.size(), 2u);
+  auto lease = checkpoint;
+  EXPECT_EQ(second.CapturePrefix(second_request, 8), nullptr);
+  EXPECT_EQ(cache->Used(), (std::array<size_t, 3>{0, checkpoint->bytes, 0}));
+  const auto* address = checkpoint->caches.front()->GetRawData();
+  lease.reset();
+  auto replacement = second.CapturePrefix(second_request, 8);
+  ASSERT_NE(replacement, nullptr);
+  ASSERT_EQ(replacement->caches.size(), 2u);
+  EXPECT_EQ(checkpoint->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(replacement->caches.front()->GetRawData(), address);
+  EXPECT_EQ(cache->Used(), (std::array<size_t, 3>{0, replacement->bytes, 0}));
+}
+
+namespace {
+
+std::shared_ptr<PrefixSnapshotCache::Entry> MakeStorageEntry(PrefixSnapshotCache& cache,
+                                                             DeviceInterface* device,
+                                                             std::string_view component = {},
+                                                             size_t component_limit =
+                                                                 std::numeric_limits<size_t>::max()) {
+  auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
+  entry->shapes = {{16}};
+  entry->type = Ort::TypeToTensorType<uint8_t>;
+  if (!cache.Allocate(entry, device, component, component_limit)) return nullptr;
+  Tensor source{GetDeviceInterface(DeviceType::CPU), entry->type};
+  source.CreateTensor(std::array<int64_t, 1>{32});
+  std::array<uint8_t, 32> values{};
+  std::iota(values.begin(), values.end(), uint8_t{1});
+  source.GetByteSpan().CopyFromCpu(values);
+  entry->Write(0, 0, source, 7, 16);
+  device->Synchronize();
+  return entry;
+}
+
+void CheckStorageEntry(const PrefixSnapshotCache::Entry& entry) {
+  Tensor restored{GetDeviceInterface(DeviceType::CPU), entry.type};
+  restored.CreateTensor(std::array<int64_t, 1>{32});
+  std::memset(restored.GetMutableRawData(), 99, 32);
+  entry.Read(0, 0, restored, 5, 16);
+  const auto* bytes = restored.GetData<uint8_t>();
+  for (size_t index = 0; index < 32; ++index) {
+    EXPECT_EQ(bytes[index], index >= 5 && index < 21 ? index + 3 : 99);
+  }
+}
+
+}  // namespace
+
+TEST(PrefixSnapshotCacheTest, ZeroAndUndersizedBudgetsRefuseStorage) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache disabled{{0, 0, 0}, 8};
+  EXPECT_EQ(MakeStorageEntry(disabled, cpu), nullptr);
+  PrefixSnapshotCache undersized{{0, 15, 15}, 8};
+  EXPECT_EQ(MakeStorageEntry(undersized, cpu), nullptr);
+  PrefixSnapshotCache no_entries{{0, 1024, 1024}, 0};
+  EXPECT_EQ(MakeStorageEntry(no_entries, cpu), nullptr);
+  PrefixSnapshotCache invalid_vram{{16, 0, 0}, 1};
+  EXPECT_THROW(MakeStorageEntry(invalid_vram, cpu), std::runtime_error);
+}
+
+TEST(PrefixSnapshotCacheTest, DiagnosticsReportTierMovesAndLeasedCapacityOnlyWhenEnabled) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, true};
+  for (bool enabled : {false, true}) {
+    const auto previous_logging = g_log;
+    SetLogBool("enabled", enabled);
+    testing::internal::CaptureStderr();
+    PrefixSnapshotCache cache{{16, 16, 16}, 8};
+    auto first = MakeStorageEntry(cache, &device);
+    auto second = MakeStorageEntry(cache, &device);
+    auto third = MakeStorageEntry(cache, &device);
+    auto fourth = MakeStorageEntry(cache, &device);
+    auto second_lease = second;
+    auto third_lease = third;
+    auto fourth_lease = fourth;
+    auto refused = MakeStorageEntry(cache, &device);
+    const auto log = testing::internal::GetCapturedStderr();
+    g_log = previous_logging;
+    EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+    EXPECT_EQ(refused, nullptr);
+    CheckStorageEntry(*second_lease);
+    CheckStorageEntry(*third_lease);
+    CheckStorageEntry(*fourth_lease);
+    if (!enabled) {
+      EXPECT_EQ(log.find("engine_snapshot_cache"), std::string::npos);
+      continue;
+    }
+    EXPECT_NE(log.find("action=configured"), std::string::npos);
+    EXPECT_NE(log.find("action=demoted reason=tier_capacity tier=1 bytes=16"), std::string::npos);
+    EXPECT_NE(log.find("action=demoted reason=tier_capacity tier=2 bytes=16"), std::string::npos);
+    EXPECT_NE(log.find("action=move_staged"), std::string::npos);
+    EXPECT_NE(log.find("used_vram_bytes=16 used_ram_bytes=16 used_disk_bytes=16"), std::string::npos);
+    EXPECT_NE(log.find("limit_vram_bytes=16 limit_ram_bytes=16 limit_disk_bytes=16"), std::string::npos);
+    EXPECT_NE(log.find("action=evicted reason=tier_capacity"), std::string::npos);
+    EXPECT_NE(log.find("action=refused reason=tier_capacity_leased"), std::string::npos);
+    EXPECT_NE(log.find("elapsed_us="), std::string::npos);
+  }
+}
+
+TEST(PrefixSnapshotCacheTest, DiagnosticsDistinguishBudgetAndCountRefusals) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  const auto previous_logging = g_log;
+  SetLogBool("enabled", true);
+  testing::internal::CaptureStderr();
+  PrefixSnapshotCache undersized{{0, 15, 0}, 8};
+  auto too_large = MakeStorageEntry(undersized, cpu);
+  PrefixSnapshotCache count_limited{{0, 64, 0}, 1};
+  auto first = MakeStorageEntry(count_limited, cpu, "dflash2", 1);
+  auto lease = first;
+  auto component_refused = MakeStorageEntry(count_limited, cpu, "dflash2", 1);
+  auto shared_refused = MakeStorageEntry(count_limited, cpu, "other");
+  lease.reset();
+  auto replacement = MakeStorageEntry(count_limited, cpu, "other");
+  const auto log = testing::internal::GetCapturedStderr();
+  g_log = previous_logging;
+  EXPECT_EQ(too_large, nullptr);
+  EXPECT_EQ(component_refused, nullptr);
+  EXPECT_EQ(shared_refused, nullptr);
+  ASSERT_NE(replacement, nullptr);
+  CheckStorageEntry(*replacement);
+  EXPECT_NE(log.find("action=refused reason=payload_exceeds_tiers"), std::string::npos);
+  EXPECT_NE(log.find("action=refused reason=component_count_leased"), std::string::npos);
+  EXPECT_NE(log.find("action=refused reason=shared_count_leased"), std::string::npos);
+  EXPECT_NE(log.find("action=reused reason=count"), std::string::npos);
+}
+
+TEST(PrefixSnapshotCacheTest, WebGpuIgnoresByteBudgetsButProtectsLeasesAndCountLimits) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, DeviceType::WEBGPU};
+  for (const auto limits : {std::array<size_t, 3>{0, 0, 0}, std::array<size_t, 3>{1, 1, 1}}) {
+    PrefixSnapshotCache cache{limits, 2};
+    auto first = MakeStorageEntry(cache, &device, "dflash2", 1);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Vram);
+    EXPECT_EQ(first->caches.front()->p_device_, &device);
+    CheckStorageEntry(*first);
+    auto lease = first;
+    EXPECT_EQ(MakeStorageEntry(cache, &device, "dflash2", 1), nullptr);
+    lease.reset();
+    auto replacement = MakeStorageEntry(cache, &device, "dflash2", 1);
+    ASSERT_NE(replacement, nullptr);
+    EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+    CheckStorageEntry(*replacement);
+
+    auto other = MakeStorageEntry(cache, &device, "other");
+    ASSERT_NE(other, nullptr);
+    auto third = MakeStorageEntry(cache, &device, "third");
+    ASSERT_NE(third, nullptr);
+    EXPECT_EQ(replacement->state, PrefixSnapshotCache::State::Evicted);
+    EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{32, 0, 0}));
+  }
+  PrefixSnapshotCache no_entries{{1, 1, 1}, 0};
+  EXPECT_EQ(MakeStorageEntry(no_entries, &device), nullptr);
+  PrefixSnapshotCache cache{{0, 0, 0}, 1};
+  EXPECT_EQ(MakeStorageEntry(cache, &device, "dflash2", 0), nullptr);
+}
+
+TEST(PrefixSnapshotCacheTest, WebGpuRangedCopiesPreserveBufferHandles) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, DeviceType::WEBGPU};
+  PrefixSnapshotCache cache{{0, 0, 0}, 1};
+  auto entry = MakeStorageEntry(cache, &device);
+  ASSERT_NE(entry, nullptr);
+  Tensor source{&device, Ort::TypeToTensorType<uint8_t>};
+  Tensor destination{&device, Ort::TypeToTensorType<uint8_t>};
+  source.CreateTensor(std::array<int64_t, 1>{32});
+  destination.CreateTensor(std::array<int64_t, 1>{32});
+  std::iota(source.GetMutableData<uint8_t>(), source.GetMutableData<uint8_t>() + 32, uint8_t{1});
+  std::memset(destination.GetMutableRawData(), 99, 32);
+  device.wrapped_memory.clear();
+  entry->Write(0, 3, source, 7, 8);
+  entry->Read(0, 3, destination, 5, 8);
+  for (void* memory : device.wrapped_memory) {
+    EXPECT_TRUE(memory == source.GetMutableRawData() ||
+                memory == destination.GetMutableRawData() ||
+                memory == entry->caches.front()->GetMutableRawData());
+  }
+  const auto* bytes = destination.GetData<uint8_t>();
+  for (size_t index = 0; index < 32; ++index) {
+    EXPECT_EQ(bytes[index], index >= 5 && index < 13 ? index + 3 : 99);
+  }
+}
+
+TEST(PrefixSnapshotCacheTest, WebGpuBatchesBlockCopiesOncePerBackingBuffer) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, DeviceType::WEBGPU};
+  PrefixSnapshotCache cache{{0, 0, 0}, 1};
+  auto entry = MakeStorageEntry(cache, &device);
+  ASSERT_NE(entry, nullptr);
+  Tensor source{&device, Ort::TypeToTensorType<uint8_t>};
+  Tensor destination{&device, Ort::TypeToTensorType<uint8_t>};
+  source.CreateTensor(std::array<int64_t, 1>{32});
+  destination.CreateTensor(std::array<int64_t, 1>{32});
+  std::iota(source.GetMutableData<uint8_t>(), source.GetMutableData<uint8_t>() + 32, uint8_t{1});
+  std::memset(destination.GetMutableRawData(), 99, 32);
+  const std::array ranges{PrefixSnapshotCache::Entry::Range{0, 16, 8},
+                          PrefixSnapshotCache::Entry::Range{8, 0, 8}};
+  device.buffer_downloads = device.buffer_uploads = 0;
+  entry->Write(0, source, ranges);
+  EXPECT_EQ(device.buffer_downloads, 1u);
+  EXPECT_EQ(device.buffer_uploads, 1u);
+  device.buffer_downloads = device.buffer_uploads = 0;
+  entry->Read(0, destination, ranges);
+  EXPECT_EQ(device.buffer_downloads, 2u);
+  EXPECT_EQ(device.buffer_uploads, 1u);
+  const auto* values = destination.GetData<uint8_t>();
+  for (size_t index = 0; index < 32; ++index) {
+    EXPECT_EQ(values[index], index < 8 || (index >= 16 && index < 24) ? index + 1 : 99);
+  }
+}
+
+TEST(PrefixSnapshotCacheTest, DiskBatchesRemappedBlocksAcrossTransferBufferBoundaries) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, true};
+  constexpr size_t block_bytes = 4096, blocks = 513, bytes = block_bytes * blocks;
+  PrefixSnapshotCache cache{{0, 0, bytes}, 1};
+  auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
+  entry->shapes = {{static_cast<int64_t>(bytes)}};
+  entry->type = Ort::TypeToTensorType<uint8_t>;
+  ASSERT_TRUE(cache.Allocate(entry, &device));
+  Tensor source{&device, entry->type};
+  Tensor destination{&device, entry->type};
+  source.CreateTensor(std::array<int64_t, 1>{static_cast<int64_t>(bytes + 32)});
+  destination.CreateTensor(source.GetShape());
+  std::iota(source.GetMutableData<uint8_t>(), source.GetMutableData<uint8_t>() + bytes + 32, uint8_t{1});
+  std::memset(destination.GetMutableRawData(), 99, bytes + 32);
+  std::vector<PrefixSnapshotCache::Entry::Range> ranges;
+  for (size_t block = 0; block < blocks; ++block) {
+    ranges.push_back({block * block_bytes, (blocks - block - 1) * block_bytes + 16, block_bytes});
+  }
+  entry->Write(0, source, ranges);
+  entry->Flush();
+  EXPECT_EQ(device.downloaded_bytes, bytes);
+  EXPECT_EQ(device.synchronizations, 3u);
+  device.synchronizations = 0;
+  entry->Read(0, destination, ranges);
+  EXPECT_EQ(device.uploaded_bytes, bytes);
+  EXPECT_EQ(device.synchronizations, 3u);
+  EXPECT_TRUE(std::equal(source.GetData<uint8_t>() + 16, source.GetData<uint8_t>() + bytes + 16,
+                         destination.GetData<uint8_t>() + 16));
+  for (size_t index = 0; index < 16; ++index) {
+    EXPECT_EQ(destination.GetData<uint8_t>()[index], 99);
+    EXPECT_EQ(destination.GetData<uint8_t>()[bytes + 16 + index], 99);
+  }
+}
+
+TEST(PrefixSnapshotCacheTest, LegacyDeviceStorageReusesSnapshotsWithoutTierBudgets) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  for (const bool cuda : {false, true}) {
+    CheckpointAllocationDevice device{*cpu, cuda};
+    PrefixSnapshotCache cache{{0, 0, 0}, 1, {}, true};
+    auto first = MakeStorageEntry(cache, &device);
+    ASSERT_NE(first, nullptr);
+    CheckStorageEntry(*first);
+    auto replacement = MakeStorageEntry(cache, &device);
+    ASSERT_NE(replacement, nullptr);
+    EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+    CheckStorageEntry(*replacement);
+    EXPECT_EQ(device.host_allocations, 0u);
+  }
+}
+
+TEST(PrefixSnapshotCacheTest, WebGpuReservationHonorsCountsAndPreservesTargetCapacity) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  auto* cpu = model->p_device_kvcache_;
+  CheckpointAllocationDevice device{*cpu, DeviceType::WEBGPU};
+  model->p_device_kvcache_ = &device;
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 8;
+  batching.dflash2_max_snapshots = 4;
+  batching.num_blocks = 7;
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  for (const size_t budget : {0u, 1u}) {
+    batching.snapshot_cache.vram_bytes = budget;
+    batching.snapshot_cache.ram_bytes = budget;
+    batching.snapshot_cache.disk_bytes = budget;
+    for (const size_t count : {0u, 1u, 4u}) {
+      batching.max_snapshots = count;
+      auto manager = CacheManager::Create(model, 0, 0, 2 * block_bytes);
+      const size_t expected_count = std::min(count, size_t{3});
+      EXPECT_EQ(manager->DraftCheckpointCapacity(), expected_count);
+      EXPECT_EQ(manager->DraftCheckpointVramBytes(), expected_count * 2 * block_bytes);
+      EXPECT_EQ(manager->Snapshot().total_blocks, 7 - expected_count * 2);
+    }
+    batching.prefix_caching = false;
+    auto disabled = CacheManager::Create(model, 0, 0, 2 * block_bytes);
+    EXPECT_EQ(disabled->DraftCheckpointCapacity(), 0u);
+    EXPECT_EQ(disabled->Snapshot().total_blocks, 7u);
+    batching.prefix_caching = true;
+  }
+  model->p_device_kvcache_ = cpu;
+}
+
+TEST(PrefixSnapshotCacheTest, WebGpuIgnoredBudgetsWarnOncePerEngineWhenEnabled) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  auto* cpu = model->p_device_kvcache_;
+  CheckpointAllocationDevice device{*cpu, DeviceType::WEBGPU};
+  model->p_device_kvcache_ = &device;
+  auto& batching = *model->config_->engine.dynamic_batching;
+  for (const auto [enabled, warning, budget] :
+       {std::tuple{false, true, 1u}, std::tuple{true, false, 1u},
+        std::tuple{true, true, 0u}, std::tuple{true, true, 1u}}) {
+    batching.snapshot_cache.vram_bytes = budget;
+    batching.snapshot_cache.ram_bytes = budget;
+    batching.snapshot_cache.disk_bytes = budget;
+    const auto previous_logging = g_log;
+    SetLogBool("enabled", enabled);
+    SetLogBool("warning", warning);
+    testing::internal::CaptureStderr();
+    {
+      Engine engine{model};
+    }
+    const auto log = testing::internal::GetCapturedStderr();
+    g_log = previous_logging;
+    const auto message = log.find("WebGPU does not support tiered prefix snapshot byte budgets");
+    if (enabled && warning && budget != 0) {
+      EXPECT_NE(message, std::string::npos);
+      EXPECT_EQ(log.find("WebGPU does not support tiered prefix snapshot byte budgets", message + 1),
+                std::string::npos);
+    } else {
+      EXPECT_EQ(message, std::string::npos);
+    }
+  }
+  model->p_device_kvcache_ = cpu;
+}
+
+TEST(PrefixSnapshotCacheTest, OrtAllocationFailurePreservesAccountingAndAllowsRetry) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(
+      CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite"));
+  ASSERT_NE(model, nullptr);
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  auto allocator = Ort::Allocator::Create(*model->session_decoder_, cpu->GetAllocator().GetInfo());
+  static_cast<OrtAllocator&>(*allocator).Alloc =
+      [](OrtAllocator*, size_t) -> void* { throw std::bad_alloc{}; };
+  CheckpointAllocationDevice failing_device{*cpu, true, allocator.get()};
+  PrefixSnapshotCache cache{{16, 0, 0}, 1};
+  auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
+  entry->shapes = {{16}};
+  entry->type = Ort::TypeToTensorType<uint8_t>;
+  EXPECT_THROW(cache.Allocate(entry, &failing_device), std::bad_alloc);
+  EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Empty);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 0}));
+
+  CheckpointAllocationDevice device{*cpu, true};
+  ASSERT_TRUE(cache.Allocate(entry, &device));
+  EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{16, 0, 0}));
+}
+
+TEST(PrefixSnapshotCacheTest, VramReservationPreservesTargetBlockAndConfiguredLimit) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 8;
+  batching.max_snapshots = 8;
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  const size_t snapshot_bytes = 2 * block_bytes;
+  batching.snapshot_cache.vram_bytes = 16 * block_bytes;
+  auto* cpu = model->p_device_kvcache_;
+  CheckpointAllocationDevice device{*cpu, true};
+  model->p_device_kvcache_ = &device;
+  bool enabled = false;
+  for (const size_t blocks : {4u, 3u, 2u}) {
+    batching.num_blocks = blocks;
+    auto manager = CacheManager::Create(model, 0, 0, snapshot_bytes, &enabled);
+    EXPECT_EQ(enabled, blocks >= 3);
+    EXPECT_EQ(manager->DraftCheckpointVramBytes(), blocks >= 3 ? snapshot_bytes : 0u);
+    EXPECT_EQ(manager->Snapshot().total_blocks, blocks >= 3 ? blocks - 2 : blocks);
+    EXPECT_EQ(batching.snapshot_cache.vram_bytes, 16 * block_bytes);
+  }
+  model->p_device_kvcache_ = cpu;
+}
+
+TEST(PagedKeyValueCacheManifestTest, SnapshotSizingReportsOneBlockMinimumAndBudgetReduction) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, true};
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  model->p_device_kvcache_ = &device;
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 4;
+  batching.num_blocks = 9;
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  batching.snapshot_cache.vram_bytes = 8 * block_bytes;
+  const auto previous_logging = g_log.enabled;
+  SetLogBool("enabled", true);
+  testing::internal::CaptureStderr();
+  batching.dflash2_max_snapshots = 1;
+  auto smaller = CacheManager::Create(model, 0, 0, 2 * block_bytes);
+  batching.dflash2_max_snapshots = 4;
+  auto larger = CacheManager::Create(model, 0, 0, 2 * block_bytes);
+  auto reduced = CacheManager::Create(model, 0, 0, 3 * block_bytes);
+  const auto log = testing::internal::GetCapturedStderr();
+  SetLogBool("enabled", previous_logging);
+
+  EXPECT_EQ(smaller->DraftCheckpointCapacity(), 1u);
+  EXPECT_EQ(smaller->Snapshot().total_blocks, 7u);
+  EXPECT_EQ(larger->DraftCheckpointCapacity(), 4u);
+  EXPECT_EQ(larger->Snapshot().total_blocks, 1u);
+  EXPECT_EQ(reduced->DraftCheckpointCapacity(), 2u);
+  EXPECT_EQ(reduced->Snapshot().total_blocks, 3u);
+  EXPECT_NE(log.find("requested=1, effective=1; target cache: blocks=7, block_size=4, bytes=" +
+                     std::to_string(7 * block_bytes)),
+            std::string::npos);
+  EXPECT_NE(log.find("requested=4, effective=4; target cache: blocks=1, block_size=4, bytes=" +
+                     std::to_string(block_bytes)),
+            std::string::npos);
+  EXPECT_NE(log.find("requested=4, effective=2; target cache: blocks=3, block_size=4, bytes=" +
+                     std::to_string(3 * block_bytes)),
+            std::string::npos);
+  EXPECT_NE(log.find("draft snapshot reservation: bytes=" + std::to_string(8 * block_bytes)),
+            std::string::npos);
+}
+
+TEST(PrefixSnapshotCacheTest, DemotesVramToRamToDiskAndEvictsLeastRecentlyUsed) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, true};
+  PrefixSnapshotCache cache{{16, 16, 16}, 8};
+  auto first = MakeStorageEntry(cache, &device);
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Vram);
+  auto second = MakeStorageEntry(cache, &device);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Ram);
+  EXPECT_EQ(second->tier, PrefixSnapshotCache::Tier::Vram);
+  auto third = MakeStorageEntry(cache, &device);
+  ASSERT_NE(third, nullptr);
+  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Disk);
+  EXPECT_EQ(second->tier, PrefixSnapshotCache::Tier::Ram);
+  EXPECT_EQ(third->tier, PrefixSnapshotCache::Tier::Vram);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{16, 16, 16}));
+  CheckStorageEntry(*first);
+  CheckStorageEntry(*second);
+  CheckStorageEntry(*third);
+  auto fourth = MakeStorageEntry(cache, &device);
+  ASSERT_NE(fourth, nullptr);
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(second->tier, PrefixSnapshotCache::Tier::Disk);
+  EXPECT_EQ(third->tier, PrefixSnapshotCache::Tier::Ram);
+  EXPECT_EQ(fourth->tier, PrefixSnapshotCache::Tier::Vram);
+  CheckStorageEntry(*second);
+  CheckStorageEntry(*third);
+  CheckStorageEntry(*fourth);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{16, 16, 16}));
+  second.reset();
+  third.reset();
+  fourth.reset();
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 0}));
+}
+
+TEST(PrefixSnapshotCacheTest, LeasesProtectTierAndCountCapacity) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache cache{{0, 16, 16}, 2};
+  auto first = MakeStorageEntry(cache, cpu);
+  auto lease = first;
+  auto second = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Ram);
+  EXPECT_EQ(second->tier, PrefixSnapshotCache::Tier::Disk);
+  auto second_lease = second;
+  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 16, 16}));
+  CheckStorageEntry(*lease);
+  lease.reset();
+  auto third = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(third, nullptr);
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(second->state, PrefixSnapshotCache::State::Resident);
+  CheckStorageEntry(*second_lease);
+}
+
+TEST(PrefixSnapshotCacheTest, ComponentCountsAreIndependentWithinSharedBudgetsAndGlobalCount) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache cache{{0, 64, 0}, 3};
+  auto dflash = MakeStorageEntry(cache, cpu, "dflash2", 1);
+  auto other_first = MakeStorageEntry(cache, cpu, "other", 2);
+  ASSERT_NE(dflash, nullptr);
+  ASSERT_NE(other_first, nullptr);
+  auto dflash_lease = dflash;
+  EXPECT_EQ(MakeStorageEntry(cache, cpu, "dflash2", 1), nullptr);
+  auto other_second = MakeStorageEntry(cache, cpu, "other", 2);
+  ASSERT_NE(other_second, nullptr);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 48, 0}));
+
+  auto other_lease = other_first;
+  auto global_replacement = MakeStorageEntry(cache, cpu, "third", 2);
+  ASSERT_NE(global_replacement, nullptr);
+  EXPECT_EQ(other_second->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(dflash->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(other_first->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 48, 0}));
+}
+
+TEST(PrefixSnapshotCacheTest, CommittedUseRefreshesCountEvictionRecency) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache cache{{0, 64, 0}, 2};
+  auto first = MakeStorageEntry(cache, cpu);
+  auto second = MakeStorageEntry(cache, cpu);
+  cache.Touch(*first);
+  auto third = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(third, nullptr);
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(second->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 32, 0}));
+  EXPECT_THROW(cache.Allocate(second, cpu), std::logic_error);
+}
+
+TEST(PrefixSnapshotCacheTest, CountEvictionPrefersRecencyOverCompatibleStorage) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache cache{{0, 64, 0}, 2};
+  auto oldest = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(oldest, nullptr);
+  auto recent = std::make_shared<PrefixSnapshotCache::Entry>();
+  recent->shapes = {{8, 2}};
+  recent->type = oldest->type;
+  ASSERT_TRUE(cache.Allocate(recent, cpu));
+  Tensor source{cpu, recent->type};
+  source.CreateTensor(std::array<int64_t, 1>{16});
+  oldest->Read(0, 0, source, 0, 16);
+  recent->Write(0, 0, source, 0, 16);
+  cache.Touch(*recent);
+
+  auto replacement = std::make_shared<PrefixSnapshotCache::Entry>();
+  replacement->shapes = recent->shapes;
+  replacement->type = recent->type;
+  ASSERT_TRUE(cache.Allocate(replacement, cpu));
+  EXPECT_EQ(oldest->state, PrefixSnapshotCache::State::Evicted);
+  ASSERT_EQ(recent->state, PrefixSnapshotCache::State::Resident);
+  CheckStorageEntry(*recent);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 32, 0}));
+}
+
+TEST(PrefixSnapshotCacheTest, DiskOnlyStorageOutlivesManagerAndCleansUpAfterLastLease) {
+#ifndef _WIN32
+  struct ScopedUmask {
+    mode_t previous{::umask(0)};
+    ~ScopedUmask() { ::umask(previous); }
+  } scoped_umask;
+#endif
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  const auto parent = fs_std::temp_directory_path() /
+                      ("oga-snapshot-test-" + std::to_string(reinterpret_cast<uintptr_t>(cpu)));
+  ASSERT_TRUE(fs_std::create_directory(parent));
+  std::shared_ptr<PrefixSnapshotCache::Entry> entry;
+  {
+    PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
+    entry = MakeStorageEntry(cache, cpu);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 16}));
+#ifndef _WIN32
+    const auto directory = fs_std::directory_iterator(parent)->path();
+    EXPECT_EQ(fs_std::status(directory).permissions() & fs_std::perms::mask, fs_std::perms::owner_all);
+    EXPECT_EQ(fs_std::status(directory / "payload").permissions() & fs_std::perms::mask,
+              fs_std::perms::owner_read | fs_std::perms::owner_write);
+#endif
+  }
+  CheckStorageEntry(*entry);
+  EXPECT_FALSE(fs_std::is_empty(parent));
+  entry.reset();
+  EXPECT_TRUE(fs_std::is_empty(parent));
+  EXPECT_TRUE(fs_std::remove(parent));
+}
+
+TEST(PrefixSnapshotCacheTest, CleanupFailureRespectsLoggingAndWarningSettings) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  const auto parent = fs_std::temp_directory_path() /
+                      ("oga-snapshot-cleanup-" + std::to_string(reinterpret_cast<uintptr_t>(cpu)));
+  ASSERT_TRUE(fs_std::create_directory(parent));
+  for (const auto [enabled, warning] :
+       {std::pair{false, true}, std::pair{true, false}, std::pair{true, true}}) {
+    SCOPED_TRACE(testing::Message() << "enabled=" << enabled << ", warning=" << warning);
+    PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
+    auto entry = MakeStorageEntry(cache, cpu);
+    ASSERT_NE(entry, nullptr);
+    const auto directory = fs_std::directory_iterator(parent)->path();
+    ASSERT_TRUE(fs_std::create_directory(directory / "blocker"));
+
+    const auto previous_logging = g_log;
+    SetLogBool("enabled", enabled);
+    SetLogBool("warning", warning);
+    testing::internal::CaptureStderr();
+    entry.reset();
+    const auto log = testing::internal::GetCapturedStderr();
+    g_log = previous_logging;
+
+    if (enabled && warning) {
+      EXPECT_NE(log.find("Unable to remove prefix snapshot spill storage"), std::string::npos);
+    } else {
+      EXPECT_TRUE(log.empty());
+    }
+    EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 0}));
+    EXPECT_FALSE(fs_std::exists(directory / "payload"));
+    EXPECT_TRUE(fs_std::remove(directory / "blocker"));
+    EXPECT_TRUE(fs_std::remove(directory));
+  }
+  EXPECT_TRUE(fs_std::remove(parent));
+}
+
+TEST(PrefixSnapshotCacheTest, FailedSpillPreservesSourceAndBudgetThenRetries) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  const auto parent = fs_std::temp_directory_path() /
+                      ("oga-snapshot-retry-" + std::to_string(reinterpret_cast<uintptr_t>(cpu)));
+  ASSERT_FALSE(fs_std::exists(parent));
+  PrefixSnapshotCache cache{{0, 16, 16}, 2, parent};
+  auto first = MakeStorageEntry(cache, cpu);
+  EXPECT_THROW(MakeStorageEntry(cache, cpu), fs_std::filesystem_error);
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Ram);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 16, 0}));
+  CheckStorageEntry(*first);
+  ASSERT_TRUE(fs_std::create_directory(parent));
+  auto second = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Disk);
+  CheckStorageEntry(*first);
+  first.reset();
+  second.reset();
+  EXPECT_TRUE(fs_std::remove(parent));
+}
+
+TEST(PrefixSnapshotCacheTest, RejectsInvalidRangesAndReportsTruncatedDiskPayload) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  const auto parent = fs_std::temp_directory_path() /
+                      ("oga-snapshot-truncate-" + std::to_string(reinterpret_cast<uintptr_t>(cpu)));
+  ASSERT_TRUE(fs_std::create_directory(parent));
+  PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
+  auto entry = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(entry, nullptr);
+  Tensor restored{cpu, entry->type};
+  restored.CreateTensor(std::array<int64_t, 1>{16});
+  EXPECT_THROW(entry->Read(1, 0, restored, 0, 1), std::out_of_range);
+  EXPECT_THROW(entry->Read(0, 15, restored, 0, 2), std::out_of_range);
+  EXPECT_THROW(entry->Read(0, 0, restored, 16, 1), std::out_of_range);
+  const auto directory = fs_std::directory_iterator(parent)->path();
+  fs_std::resize_file(directory / "payload", 0);
+  EXPECT_THROW(entry->Read(0, 0, restored, 0, 16), std::ios_base::failure);
+  entry.reset();
+  EXPECT_TRUE(fs_std::remove(parent));
 }
 
 namespace {

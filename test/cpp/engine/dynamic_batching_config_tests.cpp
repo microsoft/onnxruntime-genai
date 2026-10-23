@@ -77,6 +77,90 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
       config.engine.dynamic_batching->prefix_caching_explicitly_set);
 }
 
+TEST(DynamicBatchingConfigTest, SnapshotTiersDefaultOffAndAcceptIndependentBudgets) {
+  const auto defaults = LoadDynamicConfig(R"({"max_batch_size":4})");
+  EXPECT_TRUE(defaults.engine.dynamic_batching->prefix_caching);
+  EXPECT_FALSE(defaults.engine.dynamic_batching->snapshot_cache.Enabled());
+  EXPECT_FALSE(defaults.engine.dynamic_batching->max_snapshots);
+  EXPECT_EQ(defaults.engine.dynamic_batching->dflash2_max_snapshots, 1u);
+  const auto config = LoadDynamicConfig(R"({
+    "prefix_caching": true,
+    "max_snapshots": 8,
+    "snapshot_cache": {
+      "vram_bytes": 4294967296, "ram_bytes": 8589934592, "disk_bytes": 17179869184,
+      "directory": "spill"
+    }
+  })");
+  const auto& batching = *config.engine.dynamic_batching;
+  EXPECT_TRUE(batching.prefix_caching);
+  ASSERT_EQ(batching.max_snapshots, 8u);
+  EXPECT_EQ(batching.snapshot_cache.vram_bytes, 4294967296ull);
+  EXPECT_EQ(batching.snapshot_cache.ram_bytes, 8589934592ull);
+  EXPECT_EQ(batching.snapshot_cache.disk_bytes, 17179869184ull);
+  EXPECT_EQ(batching.snapshot_cache.directory, "spill");
+}
+
+TEST(DynamicBatchingConfigTest, RejectsInvalidSnapshotBudgetsAndCount) {
+  for (const auto* value : {"-1", "1.5", "true", "\"16\"", "9007199254740992"}) {
+    for (const auto* tier : {"vram_bytes", "ram_bytes", "disk_bytes"}) {
+      const auto config = std::string{"{\"snapshot_cache\":{\""} +
+                          tier + "\":" + value + "}}";
+      EXPECT_THROW(LoadDynamicConfig(config), std::runtime_error);
+    }
+  }
+  for (const auto* value : {"-1", "1.5", "true", "2147483648"}) {
+    EXPECT_THROW(LoadDynamicConfig(std::string{R"({"max_snapshots":)"} +
+                                   value + "}"),
+                 std::runtime_error);
+  }
+  EXPECT_NO_THROW(LoadDynamicConfig(R"({"max_snapshots":0})"));
+}
+
+TEST(DynamicBatchingConfigTest, RuntimeProfileReplacesSnapshotPolicyAndCanDisableCount) {
+  auto config = LoadDynamicConfig(R"({
+    "prefix_caching":true,
+    "max_snapshots":8,
+    "snapshot_cache":{"vram_bytes":1024,"ram_bytes":2048}
+  })");
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"disk-only",
+    "eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{
+      "prefix_caching":false,"max_snapshots":0,
+      "snapshot_cache":{"disk_bytes":4096}
+    }}}
+  }]})");
+  ApplyRuntimeProfile(config, uint64_t{0});
+  const auto& batching = *config.engine.dynamic_batching;
+  EXPECT_FALSE(batching.prefix_caching);
+  EXPECT_TRUE(batching.prefix_caching_explicitly_set);
+  ASSERT_EQ(batching.max_snapshots, 0u);
+  EXPECT_EQ(batching.snapshot_cache.vram_bytes, 0u);
+  EXPECT_EQ(batching.snapshot_cache.ram_bytes, 0u);
+  EXPECT_EQ(batching.snapshot_cache.disk_bytes, 4096u);
+}
+
+TEST(DynamicBatchingConfigTest, OverlayReplacesSnapshotPolicyIncludingExplicitEmptyOptOut) {
+  auto config = LoadDynamicConfig(R"({
+    "snapshot_cache":{"vram_bytes":1024,"ram_bytes":2048,"directory":"spill"}
+  })");
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{
+    "snapshot_cache":{"disk_bytes":4096}
+  }}})");
+  const auto& policy = config.engine.dynamic_batching->snapshot_cache;
+  EXPECT_TRUE(policy.explicitly_set);
+  EXPECT_EQ(policy.vram_bytes, 0u);
+  EXPECT_EQ(policy.ram_bytes, 0u);
+  EXPECT_EQ(policy.disk_bytes, 4096u);
+  EXPECT_TRUE(policy.directory.empty());
+
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"snapshot_cache":{}}}})");
+  const auto& disabled = config.engine.dynamic_batching->snapshot_cache;
+  EXPECT_TRUE(disabled.Configured());
+  EXPECT_FALSE(disabled.Enabled());
+  EXPECT_TRUE(disabled.directory.empty());
+}
+
 TEST(CpuEmbeddingConfigTest, PrefaultDefaultsOnAndCanBeDisabled) {
   const fs::path model_path{std::string{MODEL_PATH "engine/dummy-decoder"}};
   const Config default_config{model_path, "{}"};

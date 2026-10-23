@@ -13,25 +13,16 @@
 #include "models/cpu_embedding.h"
 #include "engine/graph_annotation_ids.h"
 #include "decoding/speculative_sampling.h"
+#include "engine/prefix-snapshot-cache.h"
 
 namespace Generators {
 
 struct Request;
 
-struct Dflash2PrefixCheckpoint {
+struct Dflash2PrefixCheckpoint : PrefixSnapshotCache::Entry {
   size_t token_count{};
   size_t ring_blocks{};
-  std::vector<std::unique_ptr<Tensor>> caches;
 };
-
-void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destination_blocks,
-                           Tensor& source, std::span<const int32_t> source_blocks);
-
-bool CanReserveDflash2PrefixCheckpoint(size_t target_budget_bytes, size_t reserved_bytes,
-                                       size_t snapshot_bytes, size_t target_block_bytes);
-size_t Dflash2PrefixCheckpointCapacity(size_t target_budget_bytes, size_t reserved_bytes,
-                                       size_t snapshot_bytes, size_t target_block_bytes,
-                                       size_t max_checkpoints);
 
 size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
@@ -146,6 +137,9 @@ struct Dflash2Drafter {
                  size_t max_requests);
   ~Dflash2Drafter();
 
+  // Binds the shared Engine policy once, before tracking requests.
+  void InitializeSnapshotCache(std::shared_ptr<PrefixSnapshotCache> snapshot_cache);
+
   // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
   static size_t BytesPerBlock(const Config& config, size_t paged_block_size,
                               ONNXTensorElementDataType cache_type);
@@ -175,8 +169,6 @@ struct Dflash2Drafter {
   // A windowed drafter retains only a bounded ring, independently of the target context length.
   static size_t PrefixCheckpointBytes(const Config& config, size_t paged_block_size,
                                       ONNXTensorElementDataType cache_type);
-  void SetPrefixCheckpointCapacity(size_t capacity);
-  size_t AvailablePrefixCheckpoints() const noexcept;
   bool CanCapturePrefix(const Request* request, size_t token_count) const;
   std::shared_ptr<const Dflash2PrefixCheckpoint> CapturePrefix(const Request* request,
                                                                size_t token_count);
@@ -220,7 +212,7 @@ struct Dflash2Drafter {
   // Whether the drafter can carry this feed's request, admitting it to the pool when it can.
   bool Admit(const Feed& feed);
   bool RestorePrefix(const Feed& feed);
-  std::vector<std::weak_ptr<const Dflash2PrefixCheckpoint>> prefix_checkpoints_{1};
+  std::shared_ptr<PrefixSnapshotCache> prefix_snapshot_cache_;
   // Grows a request's block list so positions [0, positions) are addressable. A windowed drafter
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);
