@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include "config.h"
+#include "models/openvino_multi_modal.h"
 #include "models/openvino_vision_merger_utils.h"
 
 namespace Generators::test {
@@ -68,6 +70,25 @@ TEST(PlanQwenImageSlicesTest, RejectsInvalidGridDimensionsAndTripletCount) {
   EXPECT_THROW(PlanQwenImageSlices(zero_grid, 0, 2), std::runtime_error);
   EXPECT_THROW(PlanQwenImageSlices(negative_grid, 0, 2), std::runtime_error);
   EXPECT_THROW(PlanQwenImageSlices(incomplete_grid, 2, 2), std::runtime_error);
+}
+
+TEST(OpenVINOVisionStageSessionOptionsTest, PrefersStageThenVisionThenDecoderOptions) {
+  Config config;
+  OverlayConfig(config, R"({"model":{
+    "decoder":{"session_options":{"log_id":"decoder"}},
+    "vision":{"pipeline":[{
+      "patch_embed":{"filename":"patch_embed.onnx","session_options":{"log_id":"stage"}},
+      "merger":{"filename":"merger.onnx"}
+    }]}
+  }})");
+  ASSERT_EQ(config.model.vision.pipeline.size(), 2u);
+  EXPECT_EQ(GetOpenVINOVisionStageSessionOptions(config, config.model.vision.pipeline[0]).log_id, "stage");
+  EXPECT_EQ(GetOpenVINOVisionStageSessionOptions(config, config.model.vision.pipeline[1]).log_id, "decoder");
+
+  // OverlayConfig swaps in a parsed copy, so index the pipeline again afterwards.
+  OverlayConfig(config, R"({"model":{"vision":{"session_options":{"log_id":"vision"}}}})");
+  EXPECT_EQ(GetOpenVINOVisionStageSessionOptions(config, config.model.vision.pipeline[0]).log_id, "stage");
+  EXPECT_EQ(GetOpenVINOVisionStageSessionOptions(config, config.model.vision.pipeline[1]).log_id, "vision");
 }
 
 }  // namespace

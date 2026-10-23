@@ -11,6 +11,10 @@
 
 namespace Generators {
 
+// Stage options win, then vision options, then decoder options (matching MultiModalLanguageModel).
+const Config::SessionOptions& GetOpenVINOVisionStageSessionOptions(const Config& config,
+                                                                   const Config::Model::Vision::PipelineModel& stage);
+
 // Model for OpenVINO-partitioned VLMs. These models use a text-only embedding graph and
 // merge image features on the host, so they delegate all vision work to a per-family
 // OpenVINOVisionMerger (see openvino_vision_merger.h).
@@ -24,6 +28,9 @@ struct OpenVINOMultiModalModel : MultiModalLanguageModel {
 
   // Session options for the host-side OpenVINO vision sub-model(s).
   std::unique_ptr<OrtSessionOptions> vision_session_options_ov_;
+
+  // Per-stage options, only for stages that set session_options or run_on_cpu.
+  std::unordered_map<std::string, std::unique_ptr<OrtSessionOptions>> ov_vision_stage_session_options_;
 
   // Single-session vision model. Registered so the image processor can resolve pixel_values type.
   std::unique_ptr<OrtSession> ov_vision_session_;

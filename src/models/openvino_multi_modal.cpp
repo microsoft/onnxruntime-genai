@@ -6,6 +6,13 @@
 
 namespace Generators {
 
+const Config::SessionOptions& GetOpenVINOVisionStageSessionOptions(const Config& config,
+                                                                   const Config::Model::Vision::PipelineModel& stage) {
+  if (stage.session_options.has_value()) return *stage.session_options;
+  if (config.model.vision.session_options.has_value()) return *config.model.vision.session_options;
+  return config.model.decoder.session_options;
+}
+
 OpenVINOMultiModalModel::OpenVINOMultiModalModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     // vision=false: the merger owns host-side vision, and this makes the embedding text-only.
     : MultiModalLanguageModel(std::move(config), ort_env, /*vision=*/false, /*speech=*/false) {
@@ -25,8 +32,18 @@ OpenVINOMultiModalModel::OpenVINOMultiModalModel(std::unique_ptr<Config> config,
       if (ov_vision_pipeline_sessions_.find(stage.model_id) != ov_vision_pipeline_sessions_.end()) {
         throw std::runtime_error("Duplicate OpenVINO vision pipeline stage: " + stage.model_id);
       }
-      ov_vision_pipeline_sessions_.emplace(
-          stage.model_id, CreateSession(ort_env, stage.filename, vision_session_options_ov_.get()));
+      OrtSessionOptions* stage_options = vision_session_options_ov_.get();
+      if (stage.session_options.has_value() || stage.run_on_cpu) {
+        auto& options = ov_vision_stage_session_options_[stage.model_id];
+        options = OrtSessionOptions::Create();
+        // Non-primary, like decoder pipeline stages: Config fills `providers` only for component options, and
+        // non-primary options take them from provider_options. run_on_cpu appends no provider (CPU EP).
+        CreateSessionOptionsFromConfig(GetOpenVINOVisionStageSessionOptions(*config_, stage), *options,
+                                       /*is_primary_session_options=*/false, /*disable_graph_capture=*/true,
+                                       /*cloned_from_parent=*/false, /*append_providers=*/!stage.run_on_cpu);
+        stage_options = options.get();
+      }
+      ov_vision_pipeline_sessions_.emplace(stage.model_id, CreateSession(ort_env, stage.filename, stage_options));
     }
   }
 }
