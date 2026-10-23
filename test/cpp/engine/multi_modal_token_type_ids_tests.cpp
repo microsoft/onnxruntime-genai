@@ -95,5 +95,12 @@ TEST(TokenTypeIdsReadTest, RejectsInt64ValuesOutsideInt32Range) {
   EXPECT_THROW(ReadTokenTypeIds(*token_type_ids), std::runtime_error);
 }
 
+TEST(OpenVINOStatefulVlmBeamSearchTest, RejectsMultipleBeamsOnlyForStatefulOpenVinoVlms) {
+  EXPECT_THROW(ValidateOpenVINOStatefulVlmBeamSearch(true, true, 2), std::runtime_error);
+  EXPECT_NO_THROW(ValidateOpenVINOStatefulVlmBeamSearch(true, true, 1));
+  EXPECT_NO_THROW(ValidateOpenVINOStatefulVlmBeamSearch(true, false, 2));
+  EXPECT_NO_THROW(ValidateOpenVINOStatefulVlmBeamSearch(false, true, 2));
+}
+
 }  // namespace
 }  // namespace Generators::test
