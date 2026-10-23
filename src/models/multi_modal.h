@@ -26,7 +26,7 @@ namespace Generators {
 struct OpenVINOVisionMerger;
 
 std::vector<int32_t> ReadTokenTypeIds(const OrtValue& token_type_ids);
-void ValidateOpenVINOStatefulVlmBeamSearch(bool is_openvino_vlm, bool is_stateful, int num_beams);
+void ValidateOpenVINOVlmBeamSearch(bool is_openvino_vlm, bool is_stateful, bool is_gemma3, int num_beams);
 void UpdatePendingTokenTypeIds(OrtValue& token_type_ids, std::vector<int32_t>& pending_token_type_ids);
 
 struct MultiModalLanguageModel : Model {
