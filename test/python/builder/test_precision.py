@@ -189,6 +189,44 @@ def test_webgpu_paged_attention_rejects_unsupported_io_dtype(io_dtype):
         model.make_attention_init(types.SimpleNamespace())
 
 
+@pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_mlx_paged_attention_keeps_packed_metadata(io_dtype):
+    model = _make_paged_attention_init_model("mlx", io_dtype)
+
+    model.make_attention_init(types.SimpleNamespace())
+
+    assert model.attention_attrs["op_type"] == "PagedAttention"
+    assert model.past_present_share_buffer is True
+    assert model.input_names["attention_metadata"] == "attention_metadata"
+
+
+def test_mlx_paged_attention_rejects_fp32():
+    model = _make_paged_attention_init_model("mlx", ir.DataType.FLOAT)
+
+    with pytest.raises(NotImplementedError, match="MLX with FP16/BF16"):
+        model.make_attention_init(types.SimpleNamespace())
+
+
+@pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_mlx_nonpaged_attention_selects_gqa(io_dtype):
+    model = _make_paged_attention_init_model("mlx", io_dtype)
+    model.use_paged_attention = False
+
+    model.make_attention_init(types.SimpleNamespace())
+
+    assert model.attention_attrs["op_type"] == "GroupQueryAttention"
+
+
+def test_cli_accepts_mlx_execution_provider(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["builder.py", "-m", "Qwen/Qwen3.5-0.8B", "-o", "output", "-p", "int4", "-e", "mlx"],
+    )
+
+    assert builder_module.get_args().execution_provider == "mlx"
+
+
 def _load_builder_entrypoint_module():
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
@@ -266,6 +304,7 @@ def test_int4_onnx_dtype_is_still_int4(is_symmetric, expected):
         ("cpu", ir.DataType.FLOAT),
         ("cuda", ir.DataType.FLOAT16),
         ("webgpu", ir.DataType.FLOAT16),
+        ("mlx", ir.DataType.FLOAT16),
     ],
 )
 def test_int8_io_dtype_is_not_forced_to_fp32(execution_provider, expected):
@@ -661,6 +700,18 @@ def test_state_update_capacity_is_normalized(monkeypatch):
     _run_check_extra_options(monkeypatch, options)
 
     assert options["state_update_capacity"] == 3
+
+
+@pytest.mark.parametrize("capacity", ["0", "3"])
+def test_mlx_compact_state_capture_is_rejected_unless_disabled(monkeypatch, capacity):
+    options = {"use_paged_attention": "true", "num_blocks": "8", "state_update_capacity": capacity}
+
+    if capacity == "0":
+        _run_check_extra_options(monkeypatch, options, execution_provider="mlx")
+        assert options["state_update_capacity"] == 0
+    else:
+        with pytest.raises(ValueError, match="MLX does not support compact state updates"):
+            _run_check_extra_options(monkeypatch, options, execution_provider="mlx")
 
 
 @pytest.mark.parametrize("capacity", ["1", "8", 3])
@@ -1144,39 +1195,42 @@ def test_paged_attention_rejects_invalid_engine_options(monkeypatch, extra_optio
         _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
 
 
-def test_webgpu_paged_attention_requires_num_blocks(monkeypatch):
+@pytest.mark.parametrize("execution_provider", ["webgpu", "mlx"])
+def test_plugin_paged_attention_requires_num_blocks(monkeypatch, execution_provider):
     with pytest.raises(ValueError, match="num_blocks"):
         _run_check_extra_options(
             monkeypatch,
             {"use_paged_attention": "true"},
             precision="fp16",
-            execution_provider="webgpu",
+            execution_provider=execution_provider,
         )
 
 
 @pytest.mark.parametrize("legacy_num_blocks", [None, "4"])
-def test_webgpu_paged_attention_accepts_runtime_num_blocks(monkeypatch, legacy_num_blocks):
+@pytest.mark.parametrize("execution_provider", ["webgpu", "mlx"])
+def test_plugin_paged_attention_accepts_runtime_num_blocks(monkeypatch, legacy_num_blocks, execution_provider):
     options = {
         "use_paged_attention": "true",
         "_runtime_config": {"engine": {"dynamic_batching": {"num_blocks": 8}}},
     }
     if legacy_num_blocks is not None:
         options["num_blocks"] = legacy_num_blocks
-    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider=execution_provider)
 
 
 @pytest.mark.parametrize("num_blocks", [0, -1, False, 1.5, "8"])
-def test_webgpu_paged_attention_rejects_invalid_runtime_num_blocks(monkeypatch, num_blocks):
+@pytest.mark.parametrize("execution_provider", ["webgpu", "mlx"])
+def test_plugin_paged_attention_rejects_invalid_runtime_num_blocks(monkeypatch, num_blocks, execution_provider):
     options = {
         "use_paged_attention": "true",
         "num_blocks": "8",
         "_runtime_config": {"engine": {"dynamic_batching": {"num_blocks": num_blocks}}},
     }
     with pytest.raises(ValueError, match="num_blocks"):
-        _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+        _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider=execution_provider)
 
 
-@pytest.mark.parametrize("execution_provider", ["webgpu", "cuda"])
+@pytest.mark.parametrize("execution_provider", ["webgpu", "cuda", "mlx"])
 @pytest.mark.parametrize(
     ("legacy_options", "runtime_batching"),
     [
@@ -1206,17 +1260,18 @@ def test_paged_attention_rejects_merged_cache_sizing_conflicts(
         ({"num_blocks": "16"}, {"num_blocks": 8}, 8),
     ],
 )
-def test_webgpu_paged_attention_effective_block_budget(
-    monkeypatch, legacy_allocation, runtime_allocation, expected_blocks
+@pytest.mark.parametrize("execution_provider", ["webgpu", "mlx"])
+def test_plugin_paged_attention_effective_block_budget(
+    monkeypatch, legacy_allocation, runtime_allocation, expected_blocks, execution_provider
 ):
     effective = builder_module.normalize_builder_config(
         "fp16",
-        "webgpu",
+        execution_provider,
         {"use_paged_attention": "true", **legacy_allocation},
         runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
     )
     options = effective.extra_options
-    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider=execution_provider)
 
     generated = {
         "engine": {
@@ -1239,18 +1294,19 @@ def test_webgpu_paged_attention_effective_block_budget(
         ({"num_blocks": None}, "num_blocks.*must not contain null"),
     ],
 )
-def test_webgpu_paged_attention_rejects_runtime_removal_of_block_budget(
-    monkeypatch, runtime_allocation, error
+@pytest.mark.parametrize("execution_provider", ["webgpu", "mlx"])
+def test_plugin_paged_attention_rejects_runtime_removal_of_block_budget(
+    monkeypatch, runtime_allocation, error, execution_provider
 ):
     with pytest.raises(ValueError, match=error):
         effective = builder_module.normalize_builder_config(
             "fp16",
-            "webgpu",
+            execution_provider,
             {"use_paged_attention": "true", "num_blocks": "16"},
             runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
         )
         _run_check_extra_options(
-            monkeypatch, effective.extra_options, precision="fp16", execution_provider="webgpu"
+            monkeypatch, effective.extra_options, precision="fp16", execution_provider=execution_provider
         )
 
 

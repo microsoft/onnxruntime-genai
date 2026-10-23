@@ -97,6 +97,19 @@ def test_dense_config_only_composite_does_not_require_decoder_token_ids(monkeypa
     assert model.decoder.extra_options["config_only"] is True
 
 
+def test_mlx_paged_export_can_exclude_declared_mtp_head(monkeypatch):
+    monkeypatch.setitem(Qwen35Model.__init__.__globals__, "Qwen35TextModel", FakeComponent)
+    config = SimpleNamespace(mtp_num_hidden_layers=1)
+    options = {"use_paged_attention": True, "num_blocks": 8, "exclude_mtp": True}
+
+    model = Qwen35Model(config, ir.DataType.FLOAT16, ir.DataType.INT4, "mlx", None, options)
+
+    assert model.mtp is None
+    assert model.mtp_attrs["build"] is False
+    assert "include_hidden_states" not in model.decoder.extra_options
+    assert options == {"use_paged_attention": True, "num_blocks": 8, "exclude_mtp": True}
+
+
 def test_declared_mtp_layers_include_hidden_states():
     original = {}
     model = object.__new__(Qwen35MoEModel)

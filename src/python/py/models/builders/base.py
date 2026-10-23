@@ -178,6 +178,7 @@ class Model:
         self.ep = ep
         self.ep_attrs = {
             "cpu": {},
+            "mlx": {},
             "cuda": {
                 "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",
             },
@@ -744,6 +745,9 @@ class Model:
             ("dml", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT),
+            ("mlx", ir.DataType.FLOAT),
+            ("mlx", ir.DataType.FLOAT16),
+            ("mlx", ir.DataType.BFLOAT16),
             ("trt-rtx", ir.DataType.FLOAT16),
             ("trt-rtx", ir.DataType.BFLOAT16),
         }
@@ -798,11 +802,13 @@ class Model:
                 ("cuda", ir.DataType.FLOAT16),
                 ("cuda", ir.DataType.BFLOAT16),
                 ("webgpu", ir.DataType.FLOAT16),
+                ("mlx", ir.DataType.FLOAT16),
+                ("mlx", ir.DataType.BFLOAT16),
             }
             if (self.ep, self.io_dtype) not in valid_paged_configurations:
                 raise NotImplementedError(
                     "PagedAttention (use_paged_attention=true) requires CUDA with FP16/BF16 or WebGPU "
-                    f"with FP16, not ({self.ep}, {self.io_dtype})."
+                    f"with FP16 or MLX with FP16/BF16, not ({self.ep}, {self.io_dtype})."
                 )
             block_size = int(self.extra_options.get("paged_block_size", 256))
             self.attention_attrs["paged_block_size"] = block_size
@@ -1488,7 +1494,7 @@ class Model:
             genai_config["search"]["chunk_size"] = int(self.extra_options["paged_chunk_size"])
 
         if self.ep != "cpu":
-            ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
+            ep_name = {"trt-rtx": "NvTensorRtRtx", "mlx": "MLXExecutionProvider"}.get(self.ep, self.ep)
             ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
