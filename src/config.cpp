@@ -556,6 +556,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.per_layer_inputs = JSON::Get<std::string_view>(value);
     } else if (name == "targets_length") {
       v_.targets_length = JSON::Get<std::string_view>(value);
+    } else if (name == "token_type_ids") {
+      v_.token_type_ids = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2229,6 +2231,8 @@ struct Model_Element : JSON::Element {
       v_.type = JSON::Get<std::string_view>(value);
     } else if (name == "tokenizer_dir") {
       v_.tokenizer_dir = JSON::Get<std::string_view>(value);
+    } else if (name == "partitioning") {
+      v_.partitioning = JSON::Get<std::string_view>(value);
     } else if (name == "vocab_size") {
       v_.vocab_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "context_length") {
