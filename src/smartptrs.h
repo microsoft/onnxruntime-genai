@@ -40,6 +40,7 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual void AllocateCpu() = 0;      // Allocates p_cpu_ if necessary (using appropriate memory type for interop)
   virtual void CopyDeviceToCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
   virtual void CopyCpuToDevice() = 0;
+  virtual void CopyCpuToDevice(size_t /*begin_bytes*/, size_t /*size_in_bytes*/) { CopyCpuToDevice(); }
   virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
   virtual void Zero() = 0;  // Zero out the device memory
   virtual void CopyFromCpu(const void* source, size_t size_in_bytes) {
@@ -88,7 +89,7 @@ struct DeviceSpan {
   }
 
   // Copy CPU memory to device memory, typically used after calling CpuSpan or CopyDeviceToCpu to update the device memory with the modifications made
-  void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
+  void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(begin_ * sizeof(T), length_ * sizeof(T)); }
 
   void CopyFromCpu(std::span<const T> source) {
     assert(source.size() == size());

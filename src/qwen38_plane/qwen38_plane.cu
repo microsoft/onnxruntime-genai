@@ -299,6 +299,90 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
   }
 }
 
+__global__ void k_prep_fold(const PleParams* P, const i64* ctx_in, i64* ctx_a, i64* input_ids, i64* position_ids,
+                            int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
+  __shared__ i64 s_row[32];
+  __shared__ const unsigned char* s_src[32];
+  __shared__ i64 s_tok, s_pos, s_c0, s_c1;
+  const int row = blockIdx.x;
+  const int tid = threadIdx.x;
+  if (tid == 0) {
+    constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
+    s_tok = state[kSlots[row]];
+    s_pos = state[1] + row;
+    s_c1 = (row == 0) ? ctx_in[1] : state[kSlots[row - 1]];
+    s_c0 = (row == 0) ? ctx_in[0] : ((row == 1) ? ctx_in[1] : state[kSlots[row - 2]]);
+  }
+  __syncthreads();
+  const i64 tok = s_tok, pos = s_pos, c1 = s_c1;
+  const i64 c0 = (c1 == P->eos) ? P->eos : s_c0;
+  if (tid < P->n_heads) {
+    const int h = tid;
+    unsigned long long mixed = (unsigned long long)tok * (unsigned long long)P->mult[0];
+    mixed ^= (unsigned long long)c1 * (unsigned long long)P->mult[1];
+    if (h >= P->heads_per_ngram) mixed ^= (unsigned long long)c0 * (unsigned long long)P->mult[2];
+    const i64 v = P->vocab[h];
+    i64 r = (i64)mixed % v;
+    if (r < 0) r += v;
+    const i64 id = r + P->offset[h];
+    int lo = 0, hi = P->n_shards - 1;
+    while (lo < hi) {
+      const int mid = (lo + hi) >> 1;
+      if (P->shard_end[mid] > id)
+        hi = mid;
+      else
+        lo = mid + 1;
+    }
+    const i64 first = lo == 0 ? 0 : P->shard_end[lo - 1];
+    s_row[h] = id - first;
+    s_src[h] = P->shard_ptr[lo];
+  }
+  if (tid == 0) {
+    input_ids[row] = tok;
+    position_ids[row] = pos;
+    if (row == 0) committed[0] = (int)pos;
+    if (pos >= 0 && pos < P->capacity)
+      past_pos[pos] = pos;
+    else
+      atomicOr((unsigned long long*)&state[5], 1ULL);
+  }
+  __syncthreads();
+  const int hd = P->head_dim;
+  const int total = P->n_heads * hd;
+  unsigned char b[3];
+#pragma unroll
+  for (int u = 0; u < 3; ++u) {
+    const int j = tid + u * blockDim.x;
+    b[u] = 0;
+    if (j < total) {
+      const int h = j / hd, c = j - h * hd;
+      b[u] = s_src[h][s_row[h] * hd + c];
+    }
+  }
+  const float scale = P->scale;
+  const bool is_int8 = (scale < 0.0f);
+  const float abs_scale = is_int8 ? -scale : scale;
+  __nv_bfloat16* row_ple = ple_out + (size_t)row * total;
+#pragma unroll
+  for (int u = 0; u < 3; ++u) {
+    const int j = tid + u * blockDim.x;
+    if (j < total) {
+      float f;
+      if (is_int8) {
+        f = static_cast<float>(static_cast<signed char>(b[u]));
+      } else {
+        const __half_raw hr = __nv_cvt_fp8_to_halfraw(b[u], __NV_E4M3);
+        f = __half2float(*reinterpret_cast<const __half*>(&hr));
+      }
+      row_ple[j] = __float2bfloat16_rn(f * abs_scale);
+    }
+  }
+  if (tid == 0) {
+    ctx_a[2 * row + 0] = c1;
+    ctx_a[2 * row + 1] = tok;
+  }
+}
+
 __global__ void k_argmax_part(const __nv_bfloat16* logits, int n, float* outv, int* outi) {
   __shared__ float sv[256];
   __shared__ int si[256];
@@ -644,6 +728,26 @@ QWEN38_PLANE_EXPORT int qwen38_plane_sizeof_ple_params(void) { return (int)sizeo
 QWEN38_PLANE_EXPORT void qwen38_plane_prep(void* s, const void* P, const void* tok_ptr, const void* pos_ptr, int pos_add, const void* ctx_in,
                        void* ctx_out, void* input_ids, void* position_ids, void* committed, void* past_pos,
                        void* ple_out, void* state) {
+  if (pos_add <= -2 && pos_add >= -8) {
+    const int rows = -pos_add;
+    if (g_has_host_ple_params && g_host_ple_params.pad_ == 1) {
+      constexpr int kSlots[8] = {0, 2, 8, 9, 10, 11, 12, 13};
+      const int ple_total = g_host_ple_params.n_heads * g_host_ple_params.head_dim;
+      int dummy_committed = 0;
+      for (int r = 0; r < rows; ++r) {
+        const void* r_ctx_in = (r == 0) ? ctx_in : ((const i64*)ctx_out + 2 * (r - 1));
+        void* r_ctx_out = (i64*)ctx_out + 2 * r;
+        qwen38_plane_prep(s, P, (const i64*)state + kSlots[r], (const i64*)state + 1, r, r_ctx_in, r_ctx_out,
+                          (i64*)input_ids + r, (i64*)position_ids + r, r == 0 ? committed : &dummy_committed,
+                          past_pos, (__nv_bfloat16*)ple_out + (size_t)r * ple_total, state);
+      }
+      return;
+    }
+    k_prep_fold<<<rows, 1024, 0, (cudaStream_t)s>>>((const PleParams*)P, (const i64*)ctx_in, (i64*)ctx_out,
+                                                    (i64*)input_ids, (i64*)position_ids, (int*)committed,
+                                                    (i64*)past_pos, (__nv_bfloat16*)ple_out, (i64*)state);
+    return;
+  }
   if (g_has_host_ple_params && g_host_ple_params.pad_ == 1) {
     ensure_prep_workspace();
     cudaStream_t stream = (cudaStream_t)s;
