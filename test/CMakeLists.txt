@@ -111,6 +111,29 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
     target_compile_options(cuda_batched_sampler_tests PRIVATE "-fvisibility=hidden")
   endif()
   add_test(NAME CudaBatchedSamplerTests COMMAND cuda_batched_sampler_tests)
+
+  # Runs the Engine's DFlash 2 / LiLiCorr drafter against a real exported drafter (skipped without LILICORR_TEST_DIR).
+  add_executable(lilicorr_drafter_tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lilicorr_drafter_tests/lilicorr_drafter_tests.cpp")
+  target_include_directories(lilicorr_drafter_tests PRIVATE
+    ${ORT_HEADER_DIR}
+    ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp
+  )
+  target_link_libraries(lilicorr_drafter_tests PRIVATE
+    onnxruntime-genai-obj
+    GTest::gtest
+  )
+  add_dependencies(lilicorr_drafter_tests onnxruntime-genai)
+  set_target_properties(lilicorr_drafter_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    FOLDER "Tests"
+  )
+  if(NOT MSVC)
+    target_compile_options(lilicorr_drafter_tests PRIVATE "-fvisibility=hidden")
+  endif()
+  add_test(NAME LiLiCorrDrafterTests COMMAND lilicorr_drafter_tests)
 endif()
 
 set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models/")

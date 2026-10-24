@@ -304,6 +304,8 @@ class DFlash2Builder(BlockDrafterBuilder):
         )
         ctx = self.matmul("/dflash2/fc/MatMul", aux, w["fc.weight"], self.aux_hidden_size, self.hidden_size, "num_ctx")
         ctx_n = self.rms_norm("/dflash2/hidden_norm", ctx, w["hidden_norm.weight"], "num_ctx")
+        # Kept for drafters (LiLiCorr) whose candidate scorer reads the fc output of the anchor row.
+        self.ctx_pre_norm = ctx
         ctx_kv = []
         for i in range(0 if self.attn_attrs["fuse_qkv"] else self.num_layers):
             k = self.matmul(
@@ -418,9 +420,13 @@ class DFlash2Builder(BlockDrafterBuilder):
             dtype=self.layernorm_attrs["residual_dtype"],
         )
 
-        self._make_candidates_and_selector(final, w)
+        self.make_candidates_and_selector(final, w)
         self.graph.sort()
         return self.model
+
+    def head_sink_input(self, layer_id):
+        """Name of the per-head attention-sink initializer of a layer, or "" when the drafter has none."""
+        return ""
 
     def _make_attention(self, i, x, context, rows_q):
         """``context`` is the normalized context hidden state when Q/K/V are fused, else its ``(k, v)``."""
@@ -454,7 +460,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 "dflash2.cos_cache",
                 "dflash2.sin_cache",
                 "",  # slot_mapping: derived from block_table + past_sequence_lengths
-                "",  # head_sink
+                self.head_sink_input(i),
                 q_norm,
                 k_norm,
                 "",
@@ -623,7 +629,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             rows_q,
         )
 
-    def _make_candidates_and_selector(self, final, w):
+    def make_candidates_and_selector(self, final, w):
         n_spec, top_k, rank = self.num_draft_tokens, self.selector_top_k, self.selector_rank
 
         # Only the mask rows predict; the anchor at offset 0 is the bonus token.
