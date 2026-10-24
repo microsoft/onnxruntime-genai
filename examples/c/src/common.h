@@ -235,7 +235,7 @@ struct GuidanceArgs {
  * @param rewind Rewind to the system prompt after each generation
  * @param image_paths File paths to images
  * @param audio_paths File paths to audios
- * @param use_model_prompt_default Use the package prompt default when --user_prompt is omitted
+ * @param use_model_prompt_default Use the example's model-specific default when --user_prompt is omitted
  *
  * @return true if command-line arguments can be parsed, else false
  */
@@ -308,12 +308,12 @@ std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& token
 std::string GetUserPrompt(const std::string& prompt, bool interactive);
 
 /**
- * @brief Get the default user prompt from the model package
+ * @brief Get the example's default user prompt for the model type
  *
  * @param model_path Path to folder containing model
- * @param fallback Prompt to use when model.default_user_prompt is absent
+ * @param fallback Prompt to use for model types without an example-specific default
  *
- * @return Package default or fallback, preserving an explicitly empty value
+ * @return Model-specific example default or fallback
  */
 std::string GetDefaultUserPrompt(const std::string& model_path, const std::string& fallback);
 

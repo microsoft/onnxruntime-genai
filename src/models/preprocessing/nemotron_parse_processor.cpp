@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
-#include "json.h"
+#include "config.h"
 #include "models/model.h"
 #include "models/nemotron_parse.h"
 #include "models/preprocessing/genai_tokenizer.h"
@@ -11,9 +11,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <fstream>
-#include <limits>
-#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -23,90 +20,6 @@ namespace {
 // Request bounding boxes, element classes, and Markdown in the parsed output.
 constexpr std::string_view kDefaultTaskPrompt =
     "</s><s><predict_bbox><predict_classes><output_markdown>";
-
-// ORT Extensions validates the processor pipeline; read the native settings here.
-struct IgnoreProcessorElement : JSON::Element {
-  void OnValue(std::string_view, JSON::Value) override {}
-  Element& OnArray(std::string_view) override { return *this; }
-  Element& OnObject(std::string_view) override { return *this; }
-};
-
-struct ChannelValuesElement : JSON::Element {
-  explicit ChannelValuesElement(std::array<float, 3>& values) : values_{values} {}
-
-  void OnValue(std::string_view, JSON::Value value) override {
-    if (count_ == values_.size())
-      throw std::runtime_error("must contain exactly three channel values");
-    const double number = JSON::Get<double>(value);
-    if (!std::isfinite(number) || std::abs(number) > std::numeric_limits<float>::max())
-      throw std::runtime_error("channel values must be finite float32 numbers");
-    values_[count_++] = static_cast<float>(number);
-  }
-
-  void OnComplete(bool) override {
-    if (count_ != values_.size())
-      throw std::runtime_error("must contain exactly three channel values");
-  }
-
-  std::array<float, 3>& values_;
-  size_t count_{};
-};
-
-struct VisionProcessingElement : JSON::Element {
-  VisionProcessingElement(std::array<float, 3>& mean, std::array<float, 3>& stddev,
-                          int64_t height, int64_t width)
-      : mean_{mean}, std_{stddev}, height_{height}, width_{width} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name != "image_height" && name != "image_width")
-      throw JSON::unknown_value_error{};
-    const auto expected = name == "image_height" ? height_ : width_;
-    if (JSON::Get<double>(value) != expected)
-      throw std::runtime_error(std::string{name} + " must match the encoder pixel_values shape; re-export the model");
-  }
-
-  Element& OnObject(std::string_view name) override {
-    if (name.empty()) return *this;
-    if (name == "processor") return processor_;
-    throw JSON::unknown_value_error{};
-  }
-
-  Element& OnArray(std::string_view name) override {
-    if (name == "image_mean") return mean_;
-    if (name == "image_std") return std_;
-    throw JSON::unknown_value_error{};
-  }
-
-  void OnComplete(bool) override {
-    if (mean_.count_ != 3 || std_.count_ != 3)
-      throw std::runtime_error("image_mean and image_std are required; re-export the model's vision processing config");
-    if (std::any_of(std_.values_.begin(), std_.values_.end(), [](float value) { return value <= 0; }))
-      throw std::runtime_error("image_std values must be positive");
-  }
-
-  ChannelValuesElement mean_;
-  ChannelValuesElement std_;
-  IgnoreProcessorElement processor_;
-  int64_t height_;
-  int64_t width_;
-};
-
-void LoadVisionConfig(const fs::path& path, std::array<float, 3>& mean, std::array<float, 3>& stddev,
-                      int64_t height, int64_t width) {
-  auto file = path.open(std::ios::binary);
-  if (!file.is_open())
-    throw std::runtime_error("Cannot open Nemotron Parse vision processing config: " + path.string());
-  std::ostringstream document;
-  document << file.rdbuf();
-  if (file.bad())
-    throw std::runtime_error("Cannot read Nemotron Parse vision processing config: " + path.string());
-  VisionProcessingElement root{mean, stddev, height, width};
-  try {
-    JSON::Parse(root, document.str());
-  } catch (const std::exception& error) {
-    throw std::runtime_error("Invalid Nemotron Parse vision processing config '" + path.string() + "': " + error.what());
-  }
-}
 
 std::unique_ptr<OrtValue> BuildInputIds(const Tokenizer& tokenizer,
                                         std::string_view prompt,
@@ -255,8 +168,7 @@ NemotronParseProcessor::NemotronParseProcessor(
     : pixel_values_type_{session_info.GetInputDataType(
           config.model.vision.inputs.pixel_values)},
       decoder_start_token_id_{config.model.bos_token_id},
-      context_length_{config.model.context_length},
-      default_user_prompt_{config.model.default_user_prompt.value_or(std::string{kDefaultTaskPrompt})} {
+      context_length_{config.model.context_length} {
   const auto input_ids_shape =
       session_info.GetInputShape(config.model.decoder.inputs.input_ids);
   if (input_ids_shape.size() != 2) {
@@ -275,7 +187,16 @@ NemotronParseProcessor::NemotronParseProcessor(
   target_width_ = shape[3];
 
   const auto processor_path = config.config_path / fs::path(config.model.vision.config_filename);
-  LoadVisionConfig(processor_path, image_mean_, image_std_, target_height_, target_width_);
+  const auto vision_config = LoadVisionProcessingConfig(processor_path);
+  const auto check_dimension = [&](std::optional<int64_t> dimension, int64_t expected, const char* name) {
+    if (dimension && *dimension != expected)
+      throw std::runtime_error("Invalid Nemotron Parse vision processing config '" + processor_path.string() +
+                               "': " + name + " must match the encoder pixel_values shape; re-export the model");
+  };
+  check_dimension(vision_config.image_height, target_height_, "image_height");
+  check_dimension(vision_config.image_width, target_width_, "image_width");
+  image_mean_ = vision_config.image_mean;
+  image_std_ = vision_config.image_std;
   const auto processor_config = processor_path.string();
   CheckResult(
       OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
@@ -313,7 +234,7 @@ std::unique_ptr<NamedTensors> NemotronParseProcessor::Process(
   named_tensors->emplace(
       std::string(Config::Defaults::InputIdsName),
       std::make_shared<Tensor>(BuildInputIds(
-          tokenizer, prompt.empty() ? std::string_view{default_user_prompt_} : prompt, decoder_start_token_id_,
+          tokenizer, prompt.empty() ? kDefaultTaskPrompt : prompt, decoder_start_token_id_,
           required_prompt_length_, context_length_, allocator)));
 
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;

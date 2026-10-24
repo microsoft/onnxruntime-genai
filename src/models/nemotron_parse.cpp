@@ -131,7 +131,7 @@ class EncoderState : public State {
     throw std::runtime_error("Nemotron Parse requires a pixel_values input");
   }
 
-  void RunEncoder() {
+  DeviceSpan<float> Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t>) override {
     if (!pixel_values_) {
       throw std::runtime_error("Nemotron Parse pixel_values were not set");
     }
@@ -139,10 +139,7 @@ class EncoderState : public State {
       State::SetRunOptions(*model_.config_->model.vision.run_options);
     }
     State::Run(*model_.encoder_session_);
-  }
-
-  DeviceSpan<float> Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t>) override {
-    throw std::runtime_error("Use EncoderState::RunEncoder for Nemotron Parse");
+    return {};
   }
 
  private:
@@ -259,7 +256,7 @@ class NemotronParseState : public State {
     ThrowIfFailed();
     try {
       if (!encoder_has_run_) {
-        encoder_state_->RunEncoder();
+        encoder_state_->Run(total_length, next_tokens, next_indices);
         encoder_has_run_ = true;
       }
       return decoder_state_.Run(total_length, next_tokens, next_indices);

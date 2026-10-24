@@ -260,26 +260,6 @@ if(ENABLE_PREPROCESSING_PERFORMANCE_TESTS)
   set_tests_properties(ParallelPreprocessingPerformanceTests PROPERTIES LABELS "performance")
 endif()
 
-add_executable(position_inputs_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/position_inputs_tests.cpp")
-target_include_directories(position_inputs_unit_tests PRIVATE
-  ${ORT_HEADER_DIR}
-  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
-  ${CMAKE_SOURCE_DIR}/src
-)
-target_link_libraries(position_inputs_unit_tests PRIVATE
-  onnxruntime-genai-obj
-  GTest::gtest
-)
-add_dependencies(position_inputs_unit_tests onnxruntime-genai)
-set_target_properties(position_inputs_unit_tests PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
-  FOLDER "Tests"
-)
-if (NOT MSVC)
-  target_compile_options(position_inputs_unit_tests PRIVATE "-fvisibility=hidden")
-endif()
-add_test(NAME PositionInputsUnitTests COMMAND position_inputs_unit_tests)
-
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/telemetry-shutdown-tests.cmake")
 
 add_executable(kv_cache_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
@@ -368,6 +348,7 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.cpp"
 )
 list(APPEND engine_unit_test_srcs
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/position_inputs_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/audio_speech_validation_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp"

@@ -27,7 +27,6 @@ struct NemotronParseProcessor : Processor {
   int32_t decoder_start_token_id_;
   int64_t required_prompt_length_;
   int context_length_;
-  std::string default_user_prompt_;
 };
 
 }  // namespace Generators

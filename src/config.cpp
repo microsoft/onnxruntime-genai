@@ -2436,8 +2436,6 @@ struct Model_Element : JSON::Element {
       v_.type = JSON::Get<std::string_view>(value);
     } else if (name == "tokenizer_dir") {
       v_.tokenizer_dir = JSON::Get<std::string_view>(value);
-    } else if (name == "default_user_prompt") {
-      v_.default_user_prompt = std::string{JSON::Get<std::string_view>(value)};
     } else if (name == "vocab_size") {
       v_.vocab_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "context_length") {
@@ -3681,6 +3679,94 @@ void RefreshEngramProviders(Config& config) {
     for (const auto& provider : options.provider_options)
       options.providers.push_back(provider.name);
   }
+}
+
+namespace {
+
+// ORT Extensions validates the processor pipeline; only parse native settings here.
+struct IgnoreProcessorElement : JSON::Element {
+  void OnValue(std::string_view, JSON::Value) override {}
+  Element& OnArray(std::string_view) override { return *this; }
+  Element& OnObject(std::string_view) override { return *this; }
+};
+
+struct ChannelValuesElement : JSON::Element {
+  explicit ChannelValuesElement(std::array<float, 3>& values) : values_{values} {}
+
+  void OnValue(std::string_view, JSON::Value value) override {
+    if (count_ == values_.size())
+      throw std::runtime_error("must contain exactly three channel values");
+    const double number = JSON::Get<double>(value);
+    if (!std::isfinite(number) || std::abs(number) > std::numeric_limits<float>::max())
+      throw std::runtime_error("channel values must be finite float32 numbers");
+    values_[count_++] = static_cast<float>(number);
+  }
+
+  void OnComplete(bool) override {
+    if (count_ != values_.size())
+      throw std::runtime_error("must contain exactly three channel values");
+  }
+
+  std::array<float, 3>& values_;
+  size_t count_{};
+};
+
+struct VisionProcessingElement : JSON::Element {
+  explicit VisionProcessingElement(VisionProcessingConfig& config)
+      : config_{config}, mean_{config.image_mean}, std_{config.image_std} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name != "image_height" && name != "image_width")
+      throw JSON::unknown_value_error{};
+    const auto dimension = SafeDoubleToInt64(JSON::Get<double>(value), name);
+    if (dimension <= 0)
+      throw std::runtime_error(std::string{name} + " must be positive");
+    (name == "image_height" ? config_.image_height : config_.image_width) = dimension;
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name.empty()) return *this;
+    if (name == "processor") return processor_;
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "image_mean") return mean_;
+    if (name == "image_std") return std_;
+    throw JSON::unknown_value_error{};
+  }
+
+  void OnComplete(bool) override {
+    if (mean_.count_ != 3 || std_.count_ != 3)
+      throw std::runtime_error("image_mean and image_std are required; re-export the model's vision processing config");
+    if (std::any_of(config_.image_std.begin(), config_.image_std.end(), [](float value) { return value <= 0; }))
+      throw std::runtime_error("image_std values must be positive");
+  }
+
+  VisionProcessingConfig& config_;
+  ChannelValuesElement mean_;
+  ChannelValuesElement std_;
+  IgnoreProcessorElement processor_;
+};
+
+}  // namespace
+
+VisionProcessingConfig LoadVisionProcessingConfig(const fs::path& path) {
+  auto file = path.open(std::ios::binary);
+  if (!file.is_open())
+    throw std::runtime_error("Cannot open vision processing config: " + path.string());
+  std::ostringstream document;
+  document << file.rdbuf();
+  if (file.bad())
+    throw std::runtime_error("Cannot read vision processing config: " + path.string());
+  VisionProcessingConfig config;
+  VisionProcessingElement root{config};
+  try {
+    JSON::Parse(root, document.str());
+  } catch (const std::exception& error) {
+    throw std::runtime_error("Invalid vision processing config '" + path.string() + "': " + error.what());
+  }
+  return config;
 }
 
 void OverlayConfig(Config& config, std::string_view json) {
