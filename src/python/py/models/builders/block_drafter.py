@@ -417,14 +417,15 @@ class BlockDrafterBuilder:
                 raise ValueError(
                     f"LM head qweight has shape {tuple(qweight.shape)}, expected {expected_qweight_shape}."
                 )
-            if self.io_dtype != self.external_dtype:
-                root = self.unary(
-                    "Cast", "/lm_head/Cast", root, self.external_dtype, [rows, self.hidden_size], to=self.external_dtype
-                )
+            # Q8_0 block scales are FP16. BF16 cannot represent them exactly, so a BF16 graph runs this head in FP16
+            # with explicit boundary casts instead of rounding the scales.
+            head_dtype = ir.DataType.FLOAT16 if self.external_dtype == ir.DataType.BFLOAT16 else self.external_dtype
+            if self.io_dtype != head_dtype:
+                root = self.unary("Cast", "/lm_head/Cast", root, head_dtype, [rows, self.hidden_size], to=head_dtype)
             name = "/lm_head/MatMul"
             output = self.out(name)
             self.make_initializer(qweight, "lm_head.MatMul.weight_Q8")
-            self.make_initializer(scales, "lm_head.MatMul.weight_scales", to=self.external_dtype)
+            self.make_initializer(scales, "lm_head.MatMul.weight_scales", to=head_dtype)
             self.make_node(
                 "MatMulNBits",
                 [root, "lm_head.MatMul.weight_Q8", "lm_head.MatMul.weight_scales"],
@@ -436,7 +437,16 @@ class BlockDrafterBuilder:
                 K=self.hidden_size,
                 N=self.vocab_size,
             )
-            self.make_value(output, self.external_dtype, [rows, self.vocab_size])
+            self.make_value(output, head_dtype, [rows, self.vocab_size])
+            if head_dtype != self.external_dtype:
+                output = self.unary(
+                    "Cast",
+                    "/lm_head/logits/Cast",
+                    output,
+                    self.external_dtype,
+                    [rows, self.vocab_size],
+                    to=self.external_dtype,
+                )
             return output
 
         weight = self.weights["lm_head.weight"]

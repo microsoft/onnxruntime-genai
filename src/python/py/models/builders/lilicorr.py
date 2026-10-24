@@ -53,6 +53,9 @@ class LiLiCorrBuilder(DFlash2Builder):
         precision="bf16",
         lm_head_precision="int8",
     ):
+        # DFlash2Builder.__init__ is intentionally not called: it parses a DFlash 2 config (rope_parameters,
+        # selector_rank, ...) that a LiLiCorr checkpoint does not have. Every attribute the inherited graph-building
+        # methods read is set below.
         self.draft_dir = draft_dir
         self.target_dir = target_dir
         self.io_dtype = ir.DataType.BFLOAT16

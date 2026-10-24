@@ -5,6 +5,8 @@
 # --------------------------------------------------------------------------
 
 import json
+import sys
+from pathlib import Path
 
 import numpy as np
 import onnx
@@ -14,8 +16,12 @@ import pytest
 import safetensors.torch as safetensors_torch
 import torch
 
-from models.builders.lilicorr import LiLiCorrBuilder
-from models.loaders.modelopt import ModeloptModel
+MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
+sys.path.insert(0, str(MODELS_DIR))
+
+from loaders.modelopt import ModeloptModel  # noqa: E402
+
+from models.builders.lilicorr import LiLiCorrBuilder  # noqa: E402
 
 
 def pack_nvfp4(values, scale_f32=1.0, global_scale=1.0, uint8_scale=False):
@@ -175,7 +181,8 @@ def write_lilicorr_checkpoints(tmp_path, uint8_scale=False, q8_lm_head=True):
     embed_weight = torch.arange(vocab_size * hidden_size, dtype=torch.float32).reshape(vocab_size, hidden_size) * 0.01
     embed_weight = embed_weight.to(torch.bfloat16)
     int8_vals = ((torch.arange(vocab_size * hidden_size) % 15) - 7).to(torch.int8).reshape(vocab_size, hidden_size // 32, 32)
-    scales_fp16 = torch.full((vocab_size, hidden_size // 32), 0.5, dtype=torch.float16)
+    # 0.5 * (1 + 2**-8) is exact in FP16 but not in BF16.
+    scales_fp16 = torch.full((vocab_size, hidden_size // 32), 0.501953125, dtype=torch.float16)
     if q8_lm_head:
         lm_head_tensor = pack_q8_0(int8_vals, scales_fp16)
     else:
@@ -291,6 +298,21 @@ def test_lilicorr_builder_emits_valid_graph(tmp_path, lm_head_precision):
     section = builder.genai_config_section()
     assert section["inputs"]["anchor_row_index"] == "anchor_row_index"
     assert section["aux_hidden_state_layers"] == [1, 3]
+
+
+def test_q8_lm_head_keeps_fp16_scales_in_bf16_graph(tmp_path):
+    draft_dir, target_dir = write_lilicorr_checkpoints(tmp_path, uint8_scale=True, q8_lm_head=True)
+    builder = LiLiCorrBuilder(draft_dir, target_dir, paged_block_size=256, lm_head_precision="int8")
+    builder.make_model()
+
+    nodes = {node.name: node for node in builder.graph}
+    scales = builder.graph.initializers["lm_head.MatMul.weight_scales"].const_value
+    assert scales.dtype == ir.DataType.FLOAT16
+    assert scales.numpy().flat[0] == np.float16(0.501953125)
+
+    assert nodes["/lm_head/Cast"].attributes["to"].value == ir.DataType.FLOAT16
+    assert nodes["/lm_head/MatMul"].outputs[0].dtype == ir.DataType.FLOAT16
+    assert nodes["/lm_head/logits/Cast"].attributes["to"].value == ir.DataType.BFLOAT16
 
 
 def test_lilicorr_stages_run_on_cpu(tmp_path):
