@@ -4,6 +4,7 @@
 #include "generator/generators.h"
 #include "gemma4_vision_state.h"
 #include "multi_modal.h"
+#include "nemotron_parse.h"
 #include "models/io/default_position_inputs.h"
 #include "models/io/qwen_vl_position_inputs.h"
 #include "pixtral_vision_state.h"
@@ -64,6 +65,12 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 }
 
 }  // namespace
+
+std::shared_ptr<Model> MultiModalLanguageModel::Create(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech) {
+  if (config->model.type == "nemotron_parse")
+    return std::make_shared<NemotronParseModel>(std::move(config), ort_env);
+  return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, vision, speech);
+}
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
