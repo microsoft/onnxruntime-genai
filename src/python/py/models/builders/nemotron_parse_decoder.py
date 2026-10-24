@@ -62,6 +62,8 @@ class NemotronParseDecoderComponent(Model):
         )
 
         self.graph.name = "nemotron_parse_decoder"
+        self.input_names["input_ids"] = "decoder_input_ids"
+        self.input_names["attention_mask"] = "decoder_attention_mask"
 
         self.output_shapes["logits"] = [
             1,
@@ -128,14 +130,14 @@ class NemotronParseDecoderComponent(Model):
 
         self.graph.inputs.append(
             self.make_value(
-                "decoder_input_ids",
+                self.input_names["input_ids"],
                 ir.DataType.INT64,
                 [batch, self.sequence_length],
             )
         )
         self.graph.inputs.append(
             self.make_value(
-                "decoder_attention_mask",
+                self.input_names["attention_mask"],
                 ir.DataType.INT64,
                 [batch, self.cache_sequence_length],
             )
@@ -213,7 +215,7 @@ class NemotronParseDecoderComponent(Model):
         equal = f"{base}/padding/Equal"
         self.make_equal(
             equal,
-            ["decoder_attention_mask", self.constant_names["mask_zero"]],
+            [self.input_names["attention_mask"], self.constant_names["mask_zero"]],
             ["batch_size", key_length],
         )
         unsqueeze = f"{base}/Unsqueeze"
@@ -225,7 +227,7 @@ class NemotronParseDecoderComponent(Model):
         )
 
         input_shape = f"{base}/input/Shape"
-        self.make_shape(input_shape, "decoder_input_ids", [2])
+        self.make_shape(input_shape, self.input_names["input_ids"], [2])
         sequence_length = f"{base}/sequence_length/Gather"
         self.make_gather(
             sequence_length,
@@ -313,7 +315,7 @@ class NemotronParseDecoderComponent(Model):
         gather = f"{base}/Gather"
         self.make_gather(
             gather,
-            [weight, "decoder_input_ids"],
+            [weight, self.input_names["input_ids"]],
             self.io_dtype,
             ["batch_size", self.sequence_length, self.hidden_size],
             axis=0,

@@ -737,14 +737,23 @@ class NemotronParseBuilderTests(TestCase):
 
     @skipIf(ort is None, "onnxruntime is required for numerical graph validation")
     def test_unified_decoder_matches_reference_for_prefill_and_decode(self):
+        self.check_unified_decoder_matches_reference(padded=False)
+
+    @skipIf(ort is None, "onnxruntime is required for numerical graph validation")
+    def test_unified_decoder_matches_reference_with_padded_prefill(self):
+        self.check_unified_decoder_matches_reference(padded=True)
+
+    def check_unified_decoder_matches_reference(self, padded):
         torch.manual_seed(0)
         builder = _make_builder(
             io_dtype=nemotron_parse.ir.DataType.FLOAT,
             config=_make_builder_config(max_sequence_length=8),
         )
         model = _TinyModel(builder.config).eval()
-        input_ids = torch.tensor([[2, 3, 4, 5]], dtype=torch.int64)
+        input_ids = torch.tensor([[2, 3, 4, 1 if padded else 5]], dtype=torch.int64)
         attention_mask = torch.ones_like(input_ids)
+        if padded:
+            attention_mask[0, -1] = 0
         encoder_states = torch.randn(
             1,
             builder.encoder_sequence_length,
@@ -769,9 +778,7 @@ class NemotronParseBuilderTests(TestCase):
         )
         feeds = {
             "decoder_input_ids": input_ids.numpy(),
-            "decoder_attention_mask": np.array(
-                [[1] * input_ids.shape[1] + [0] * 4], dtype=np.int64
-            ),
+            "decoder_attention_mask": np.pad(attention_mask.numpy(), ((0, 0), (0, 4))),
             "cache_write_indices": np.array([0], dtype=np.int64),
         }
         for layer_id, (_, _, cross_key, cross_value) in enumerate(
@@ -795,7 +802,8 @@ class NemotronParseBuilderTests(TestCase):
         )
         np.testing.assert_allclose(
             prefill_outputs["logits"],
-            reference_prefill_logits[:, -1:, :].detach().numpy(),
+            reference_prefill_logits[:, -2:-1, :].detach().numpy()
+            if padded else reference_prefill_logits[:, -1:, :].detach().numpy(),
             rtol=1e-5,
             atol=1e-6,
         )
@@ -814,7 +822,7 @@ class NemotronParseBuilderTests(TestCase):
 
         next_token = torch.tensor([[6]], dtype=torch.int64)
         full_input_ids = torch.cat((input_ids, next_token), dim=1)
-        full_attention_mask = torch.ones_like(full_input_ids)
+        full_attention_mask = torch.cat((attention_mask, torch.ones_like(next_token)), dim=1)
         with torch.no_grad():
             reference_decode_logits, reference_decode_caches = (
                 _reference_decoder(
@@ -826,10 +834,7 @@ class NemotronParseBuilderTests(TestCase):
             )
 
         feeds["decoder_input_ids"] = next_token.numpy()
-        feeds["decoder_attention_mask"] = np.array(
-            [[1] * full_input_ids.shape[1] + [0] * 3],
-            dtype=np.int64,
-        )
+        feeds["decoder_attention_mask"] = np.pad(full_attention_mask.numpy(), ((0, 0), (0, 3)))
         feeds["cache_write_indices"] = np.array(
             [input_ids.shape[1]], dtype=np.int64
         )
@@ -945,6 +950,26 @@ class NemotronParseBuilderTests(TestCase):
             self.assertEqual(matmul.op_type, "MatMul")
             self.assertEqual(matmul.input[1], dequantize.output[0])
         onnx.checker.check_model(model)
+
+    def test_decoder_input_names_match_graph_and_shared_lm_head(self):
+        for dtype in (
+            nemotron_parse.ir.DataType.FLOAT,
+            nemotron_parse.ir.DataType.FLOAT16,
+            nemotron_parse.ir.DataType.BFLOAT16,
+        ):
+            with self.subTest(dtype=dtype):
+                builder = _make_builder(io_dtype=dtype)
+                component = builder.make_decoder_component()
+                component.build(_TinyModel(builder.config))
+                model = nemotron_parse.ir.to_proto(component.model)
+                inputs = {value.name for value in model.graph.input}
+                for name in ("input_ids", "attention_mask"):
+                    self.assertEqual(component.input_names[name], f"decoder_{name}")
+                    self.assertIn(component.input_names[name], inputs)
+                    self.assertNotIn(name, inputs)
+                last_token_mask = next(node for node in model.graph.node if node.name == "/model/last_real_token/Cast")
+                self.assertEqual(list(last_token_mask.input), [component.input_names["attention_mask"]])
+                onnx.checker.check_model(model)
 
     def test_decoder_constants_use_shared_namespace_and_precision(self):
         for dtype, torch_dtype in (
