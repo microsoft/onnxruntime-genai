@@ -11,7 +11,6 @@
 #include "models/io/default_position_inputs.h"
 #include "models/io/dynamic_attention_mask.h"
 #include "models/io/static_attention_mask.h"
-#include "telemetry_test_environment.h"
 
 namespace Generators {
 namespace {
@@ -244,11 +243,3 @@ TEST(PositionInputsCapacityTest, UsesExplicitCapacityAndRejectsOverflow) {
 
 }  // namespace
 }  // namespace Generators
-
-int main(int argc, char** argv) {
-  Generators::test::SuppressTelemetryForTests();
-  ::testing::InitGoogleTest(&argc, argv);
-  const int result = RUN_ALL_TESTS();
-  Generators::Shutdown();
-  return result;
-}

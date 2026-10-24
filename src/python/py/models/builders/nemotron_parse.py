@@ -55,6 +55,8 @@ class NemotronParseModel(Model):
                 "from the default task prompt, and loading dtype from export precision; both graphs are always exported."
             )
         self.extra_options.setdefault("block_size", 32)
+        self.decoder_filename = "decoder.onnx"
+        self.extra_options["filename"] = self.decoder_filename
         self.generation_config = None
         self.processor = None
 
@@ -82,9 +84,7 @@ class NemotronParseModel(Model):
             make_decoder_config(config, self.cache_sequence_length),
             io_dtype, onnx_dtype, ep, cache_dir, self.extra_options,
         )
-        self.model_type = "nemotron_parse"
         self.encoder_filename = "encoder.onnx"
-        self.filename = self.decoder_filename = "decoder.onnx"
         self.input_names["input_ids"] = "decoder_input_ids"
         self.input_names["attention_mask"] = "decoder_attention_mask"
         self.input_names.pop("position_ids", None)
@@ -217,7 +217,7 @@ class NemotronParseModel(Model):
 
     def update_genai_config(self, genai_config):
         model = genai_config["model"]
-        model["default_user_prompt"] = self.default_user_prompt
+        model["type"] = "nemotron_parse"
         model["encoder"] = {
             "outputs": {
                 "cross_present_key_names": "cross_present.%d.key",

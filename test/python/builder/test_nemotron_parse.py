@@ -468,15 +468,20 @@ class NemotronParseBuilderTests(TestCase):
         self.assertEqual(builder.cache_sequence_length, builder.config.max_sequence_length)
         self.assertEqual([builder.image_height, builder.image_width], builder.config.image_size)
         self.assertEqual(builder.extra_options["block_size"], 32)
+        self.assertEqual(builder.filename, "decoder.onnx")
         self.assertIs(builder.hf_remote, False)
 
     def test_inherits_model_without_mutating_checkpoint_or_options(self):
         config = _make_builder_config(max_sequence_length=32)
         original = copy.deepcopy(config)
-        options = {"hf_token": "test-token"}
+        options = {"hf_token": "test-token", "filename": "custom.onnx"}
         builder = NemotronParseModel(config, None, None, "cpu", None, options)
 
         self.assertIsInstance(builder, nemotron_parse.Model)
+        self.assertEqual(builder.model_type, config.architectures[0])
+        self.assertEqual(builder.filename, "decoder.onnx")
+        self.assertEqual(builder.make_decoder_component().filename, builder.filename)
+        self.assertEqual(options["filename"], "custom.onnx")
         self.assertEqual(config, original)
         self.assertNotIn("block_size", options)
         self.assertEqual(builder.context_length, 32)
@@ -1339,7 +1344,7 @@ class NemotronParseBuilderTests(TestCase):
             config["search"]["past_present_share_buffer"], True
         )
         self.assertEqual(config["search"]["repetition_penalty"], 1.1)
-        self.assertEqual(config["model"]["default_user_prompt"], NemotronParseModel.default_user_prompt)
+        self.assertNotIn("default_user_prompt", config["model"])
 
     def test_config_uses_loaded_generation_defaults(self):
         builder = _make_builder()

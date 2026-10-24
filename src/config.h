@@ -6,6 +6,7 @@
 #include "filesystem.h"
 #include "provider_options.h"
 
+#include <array>
 #include <functional>
 #include <memory>
 
@@ -73,6 +74,7 @@ struct Config {
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
     static constexpr std::string_view CacheIndirectionName = "cache_indirection";
+    static constexpr std::string_view CacheWriteIndicesName = "cache_write_indices";
     static constexpr std::string_view AlignmentHeadsName = "alignment_heads";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
 
@@ -167,7 +169,6 @@ struct Config {
     std::string type;
 
     std::string tokenizer_dir;  // Directory containing tokenizer files. Empty means alongside genai_config.json. Resolved via Config::ResolvePath.
-    std::optional<std::string> default_user_prompt;  // Package default when the caller omits a prompt; empty is a valid value.
 
     int pad_token_id{};             // The id of the padding token.
     std::vector<int> eos_token_id;  // The end-of-stream tokens (when set as a single value it is converted to a vector with one value).
@@ -577,7 +578,7 @@ struct Config {
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
         std::string cache_indirection{Defaults::CacheIndirectionName};
-        std::string cache_write_indices;
+        std::string cache_write_indices{Defaults::CacheWriteIndicesName};
         std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
         std::string rnn_prev_states{Defaults::RnnStatesPrevName};
         std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
@@ -883,6 +884,16 @@ struct Config {
   std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;     // Mapping of nominal input/output names to graph input/output names
   std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
 };
+
+// Native RGB preprocessing settings; ORT Extensions interprets the processor pipeline.
+struct VisionProcessingConfig {
+  std::array<float, 3> image_mean{};
+  std::array<float, 3> image_std{};
+  std::optional<int64_t> image_height;
+  std::optional<int64_t> image_width;
+};
+
+VisionProcessingConfig LoadVisionProcessingConfig(const fs::path& path);
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);

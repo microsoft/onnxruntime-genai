@@ -87,6 +87,16 @@ TEST(ConfigTest, ParsesSelectedLogitsInput) {
   EXPECT_EQ(config.model.decoder.inputs.logits_indices, "selected_rows");
 }
 
+TEST(ConfigTest, CacheWriteIndicesDefaultAndOverride) {
+  Config config;
+  EXPECT_EQ(Config::Defaults::CacheWriteIndicesName, "cache_write_indices");
+  EXPECT_EQ(config.model.decoder.inputs.cache_write_indices, Config::Defaults::CacheWriteIndicesName);
+
+  OverlayConfig(config, R"({"model":{"decoder":{"inputs":{"cache_write_indices":"write_positions"}}}})");
+
+  EXPECT_EQ(config.model.decoder.inputs.cache_write_indices, "write_positions");
+}
+
 TEST(ConfigTest, RejectsNonPositiveStaticBatchSize) {
   Config config;
 

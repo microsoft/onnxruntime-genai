@@ -218,19 +218,19 @@ namespace CommonUtils
         }
 
         /// <summary>
-        /// Get the default user prompt from the model package
+        /// Get the example's default user prompt for the model type
         /// </summary>
         /// <param name="modelPath">Path to folder containing model</param>
-        /// <param name="fallback">Prompt to use when model.default_user_prompt is absent</param>
+        /// <param name="fallback">Prompt for model types without an example-specific default</param>
         /// <returns>
-        /// Package default or fallback, preserving an explicitly empty value
+        /// Model-specific example default or fallback
         /// </returns>
         public static string GetDefaultUserPrompt(string modelPath, string fallback)
         {
             using var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(modelPath, "genai_config.json")));
             var model = config.RootElement.GetProperty("model");
-            return model.TryGetProperty("default_user_prompt", out var prompt)
-                ? prompt.GetString() ?? throw new JsonException("model.default_user_prompt must be a string")
+            return model.TryGetProperty("type", out var type) && type.GetString() == "nemotron_parse"
+                ? "</s><s><predict_bbox><predict_classes><output_markdown>"
                 : fallback;
         }
 

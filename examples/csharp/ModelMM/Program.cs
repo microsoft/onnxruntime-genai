@@ -270,7 +270,7 @@ RootCommand GetArgs()
     )
     {
         Arity = ArgumentArity.ExactlyOne,
-        Description = "User prompt. Defaults to the package prompt when omitted."
+        Description = "User prompt. Defaults to the example prompt for the model type when omitted."
     };
 
     var rewind = new Option<bool>(

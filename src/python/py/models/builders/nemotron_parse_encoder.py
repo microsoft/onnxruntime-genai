@@ -7,7 +7,6 @@ import copy
 import math
 import types
 
-import onnx_ir as ir
 import torch
 import torch.nn.functional as functional
 

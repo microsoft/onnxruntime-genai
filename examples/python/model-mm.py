@@ -229,7 +229,7 @@ if __name__ == "__main__":
         help="System prompt to use for the model.",
     )
     parser.add_argument(
-        "-up", "--user_prompt", type=str, default=None, help="User prompt. Defaults to the package prompt when omitted."
+        "-up", "--user_prompt", type=str, default=None, help="User prompt. Defaults to the example prompt for the model type when omitted."
     )
     parser.add_argument(
         "--image_paths",

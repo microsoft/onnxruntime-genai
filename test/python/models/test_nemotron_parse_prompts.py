@@ -34,7 +34,7 @@ def _save_graph(path, nodes, inputs, outputs, initializers=()):
 def model_factory(tmp_path):
     def create(prefill_length=8, fixed_length=None, provider="cpu", fail_decoder=False,
                decoder_run_options=None, invalid_cache=False, cache_dtype=np.float32,
-               default_user_prompt=DEFAULT_TASK, normalization=None,
+               normalization=None,
                vision_config_filename="vision_processing.json", add_bos_token=True, add_eos_token=True,
                profile_keys=("min", "opt", "max")):
         cache_type = helper.np_dtype_to_tensor_dtype(np.dtype(cache_dtype))
@@ -43,10 +43,6 @@ def model_factory(tmp_path):
         config_path = Path(__file__).parents[2] / "configs/nemotron-parse/genai_config.json"
         config = json.loads(config_path.read_text())
         config["model"].update(context_length=CONTEXT_LENGTH, vocab_size=32)
-        if default_user_prompt is None:
-            config["model"].pop("default_user_prompt", None)
-        else:
-            config["model"]["default_user_prompt"] = default_user_prompt
         config["model"]["vision"]["num_visual_tokens"] = 1
         config["model"]["vision"]["config_filename"] = vision_config_filename
         config["model"]["decoder"].update(
@@ -345,11 +341,10 @@ def test_single_prompt_list_matches_string(model_factory, images, prompt):
 
 
 @pytest.mark.parametrize("prompt", ["", [""], []])
-@pytest.mark.parametrize("default_prompt", [DEFAULT_TASK, "x"])
-def test_empty_prompt_forms_select_default_task(model_factory, images, prompt, default_prompt):
-    processor = model_factory(default_user_prompt=default_prompt).create_multimodal_processor()
+def test_empty_prompt_forms_select_default_task(model_factory, images, prompt):
+    processor = model_factory().create_multimodal_processor()
     actual = processor(prompt, images=images)
-    expected = processor(default_prompt, images=images)
+    expected = processor(DEFAULT_TASK, images=images)
     for name in ("input_ids", "pixel_values"):
         np.testing.assert_array_equal(actual[name].as_numpy(), expected[name].as_numpy())
 
@@ -368,21 +363,22 @@ def example_common(monkeypatch):
     return common
 
 
-@pytest.mark.parametrize("configured", [None, DEFAULT_TASK, "", "custom"])
-def test_example_package_prompt_default(tmp_path, example_common, configured):
-    model = {} if configured is None else {"default_user_prompt": configured}
+@pytest.mark.parametrize("model_type", [None, "nemotron_parse", "gemma3", "phi3v", "unknown"])
+@pytest.mark.parametrize("fallback", ["What color is the sky?", "custom fallback"])
+def test_example_model_type_prompt_default(tmp_path, example_common, model_type, fallback):
+    model = {} if model_type is None else {"type": model_type}
     (tmp_path / "genai_config.json").write_text(json.dumps({"model": model}))
-    fallback = "What color is the sky?"
     assert example_common.get_default_user_prompt(str(tmp_path), fallback) == (
-        fallback if configured is None else configured
+        DEFAULT_TASK if model_type == "nemotron_parse" else fallback
     )
 
 
-@pytest.mark.parametrize("configured", [None, 42, [], {}])
-def test_example_rejects_invalid_prompt_default(tmp_path, example_common, configured):
-    (tmp_path / "genai_config.json").write_text(json.dumps({"model": {"default_user_prompt": configured}}))
-    with pytest.raises(ValueError, match="must be a string"):
-        example_common.get_default_user_prompt(str(tmp_path), "fallback")
+def test_example_default_matches_exported_task(tmp_path, monkeypatch, example_common):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[3] / "src/python/py/models"))
+    from builders.nemotron_parse import NemotronParseModel
+
+    (tmp_path / "genai_config.json").write_text(json.dumps({"model": {"type": "nemotron_parse"}}))
+    assert example_common.get_default_user_prompt(str(tmp_path), "fallback") == NemotronParseModel.default_user_prompt
 
 
 @pytest.mark.parametrize("prompt", ["custom", "What color is the sky?", DEFAULT_TASK])
@@ -398,16 +394,15 @@ def test_example_interactive_empty_input_reprompts(example_common, monkeypatch, 
     assert capsys.readouterr().out.count("Error, input cannot be empty") == 2
 
 
-@pytest.mark.parametrize("configured", [None, DEFAULT_TASK, "x", ""])
-def test_processor_uses_package_prompt_default(model_factory, images, configured):
-    model = model_factory(default_user_prompt=configured)
+def test_processor_uses_builtin_default_task(model_factory, images):
+    model = model_factory()
     actual = model.create_multimodal_processor()("", images=images)["input_ids"].as_numpy()
-    task = DEFAULT_TASK if configured is None else configured
-    expected = [2, 0, *og.Tokenizer(model).encode(task).tolist(), 2]
+    expected = [2, 0, *og.Tokenizer(model).encode(DEFAULT_TASK).tolist(), 2]
     np.testing.assert_array_equal(actual, [expected])
 
 
 @pytest.mark.parametrize("model_type", ["nemotron_parse", "gemma3"])
+@pytest.mark.parametrize("user_prompt", [None, "custom", "What color is the sky?"])
 @pytest.mark.parametrize("package_max, explicit_max, expected", [
     (1032, None, 1032),
     (4096, None, 4096),
@@ -417,8 +412,9 @@ def test_processor_uses_package_prompt_default(model_factory, images, configured
     (1032, 2048, 2048),
 ])
 def test_multimodal_example_max_length(
-    example_common, monkeypatch, model_type, package_max, explicit_max, expected
+    example_common, monkeypatch, tmp_path, model_type, user_prompt, package_max, explicit_max, expected
 ):
+    (tmp_path / "genai_config.json").write_text(json.dumps({"model": {"type": model_type}}))
     main = runpy.run_path(str(Path(__file__).parents[3] / "examples/python/model-mm.py"))["main"]
     runtime = Mock()
     runtime.Model.return_value.type = model_type
@@ -435,14 +431,16 @@ def test_multimodal_example_max_length(
     }.items():
         monkeypatch.setitem(main.__globals__, name, Mock(return_value=result))
     args = Namespace(
-        model_path="unused", execution_provider="cpu", ep_path=None, use_winml=False,
-        user_prompt=DEFAULT_TASK, system_prompt="system", debug=False, verbose=False,
+        model_path=str(tmp_path), execution_provider="cpu", ep_path=None, use_winml=False,
+        user_prompt=user_prompt, system_prompt="system", debug=False, verbose=False,
         response_format="", timings=False, non_interactive=True, image_paths=[], audio_paths=[],
     )
     if explicit_max is not None:
         args.max_length = explicit_max
     main(args)
     assert params.set_search_options.call_args.kwargs["max_length"] == expected
+    default = DEFAULT_TASK if model_type == "nemotron_parse" else "What color is the sky?"
+    assert args.user_prompt == (default if user_prompt is None else user_prompt)
 
 
 @pytest.mark.parametrize("structured", [False, True])
@@ -473,7 +471,7 @@ def test_exported_chat_template_preserves_task(
 
 
 def test_example_preserves_conversational_template(model_factory, tmp_path, example_common):
-    model = model_factory(default_user_prompt=None)
+    model = model_factory()
     (tmp_path / "chat_template.jinja").write_text(
         "{{ messages[0]['content'] }}|{{ messages[-1]['content'] }}|assistant:"
     )
@@ -646,18 +644,20 @@ def test_uses_configured_vision_processing_filename(model_factory, images):
 
 
 @pytest.mark.parametrize("field", ["image_height", "image_width"])
-@pytest.mark.parametrize("value", [0, -1, 3, 2.5, "2", None])
+@pytest.mark.parametrize("value", [0, -1, 3, 2.5, "2", None, True, 1e100])
 def test_rejects_processing_dimensions_inconsistent_with_graph(model_factory, field, value):
     model = model_factory(normalization={**DEFAULT_NORMALIZATION, field: value})
-    with pytest.raises(RuntimeError, match="Invalid Nemotron Parse vision processing config"):
+    with pytest.raises(RuntimeError, match=rf"vision processing config.*{field}"):
         model.create_multimodal_processor()
 
 
-def test_legacy_processing_dimensions_come_from_graph(model_factory, tmp_path, images):
+@pytest.mark.parametrize("omitted", [("image_height",), ("image_width",), ("image_height", "image_width")])
+def test_legacy_processing_dimensions_come_from_graph(model_factory, tmp_path, images, omitted):
     model = model_factory()
     path = tmp_path / "model_8_None" / "vision_processing.json"
     config = json.loads(path.read_text())
-    del config["image_height"], config["image_width"]
+    for field in omitted:
+        del config[field]
     path.write_text(json.dumps(config))
     processor = model.create_multimodal_processor()
     assert processor("", images=images)["pixel_values"].as_numpy().shape == (1, 3, 2, 2)
@@ -667,4 +667,19 @@ def test_missing_vision_processing_file_has_clear_error(model_factory, tmp_path)
     model = model_factory()
     (tmp_path / "model_8_None" / "vision_processing.json").unlink()
     with pytest.raises(RuntimeError, match="Cannot open.*vision_processing.json"):
+        model.create_multimodal_processor()
+
+
+@pytest.mark.parametrize("value", [1, [], {}])
+def test_rejects_unknown_vision_processing_setting(model_factory, value):
+    model = model_factory(normalization={**DEFAULT_NORMALIZATION, "unexpected": value})
+    with pytest.raises(RuntimeError, match="vision processing config.*unexpected"):
+        model.create_multimodal_processor()
+
+
+@pytest.mark.parametrize("document", ["{", "[]", "null"])
+def test_invalid_vision_processing_document_reports_path(model_factory, tmp_path, document):
+    model = model_factory(vision_config_filename="custom_vision.json")
+    (tmp_path / "model_8_None" / "custom_vision.json").write_text(document)
+    with pytest.raises(RuntimeError, match="Invalid vision processing config.*custom_vision.json"):
         model.create_multimodal_processor()
