@@ -34,7 +34,7 @@ Qwen38GraphSession::~Qwen38GraphSession() {
 }
 
 size_t Qwen38GraphSession::MaxRequestLength() const {
-  return static_cast<size_t>(device_->Capacity() - Qwen38DecodeDevice::kReservedTail);
+  return static_cast<size_t>(device_->Capacity() - device_->ReservedTail());
 }
 
 bool Qwen38GraphSession::IsStopToken(int32_t token) const {
@@ -103,11 +103,15 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
   }
 
   const Qwen38CycleRecord record = device_->WaitCycle();
-  const std::array<int32_t, 4> predictions{
+  const std::array<int32_t, 8> predictions{
       static_cast<int32_t>(record.pred0),
       static_cast<int32_t>(record.pred1),
       static_cast<int32_t>(record.pred2),
       static_cast<int32_t>(record.pred3),
+      static_cast<int32_t>(record.pred4),
+      static_cast<int32_t>(record.pred5),
+      static_cast<int32_t>(record.pred6),
+      static_cast<int32_t>(record.pred7),
   };
   const size_t produced = record.TokenCount();
   size_t count = produced;

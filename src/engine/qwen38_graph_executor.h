@@ -42,7 +42,7 @@ struct Qwen38StepRequest {
 };
 
 struct Qwen38StepResult {
-  std::array<int32_t, 4> tokens{};
+  std::array<int32_t, 8> tokens{};
   size_t count{};  // 0 for a step that only advanced the prompt
 };
 

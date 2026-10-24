@@ -22,6 +22,10 @@ struct Qwen38CycleRecord {
   int64_t pred1{};
   int64_t pred2{};
   int64_t pred3{};
+  int64_t pred4{};
+  int64_t pred5{};
+  int64_t pred6{};
+  int64_t pred7{};
   bool accepted{};
   int accepted_count{};
   int proposed_count{1};
@@ -74,6 +78,7 @@ class Qwen38DecodeDevice {
 
   // Positions at the end of the KV store that are never filled: a verify step writes two rows past the committed length.
   static constexpr int kReservedTail = 4;
+  virtual int ReservedTail() const { return kReservedTail; }
 };
 
 // Host mirror of the device loop's committed state: how many tokens are committed and which recurrent bank of the ring the
@@ -84,9 +89,18 @@ class Qwen38DecodeLedger {
   static constexpr int kBanks = 3;
 
   explicit Qwen38DecodeLedger(int capacity, int num_banks = kBanks)
-      : capacity_{capacity}, num_banks_{num_banks} {}
+      : capacity_{capacity}, num_banks_{num_banks}, max_step_{static_cast<size_t>(num_banks - 1)} {}
 
-  void SetNumBanks(int num_banks) { num_banks_ = num_banks; }
+  void SetNumBanks(int num_banks) {
+    num_banks_ = num_banks;
+    max_step_ = static_cast<size_t>(num_banks - 1);
+    ping_pong_ = false;
+  }
+  void SetCompactPingPong(bool enabled, int max_step) {
+    ping_pong_ = enabled;
+    num_banks_ = enabled ? 2 : (max_step + 1);
+    max_step_ = static_cast<size_t>(max_step);
+  }
   int NumBanks() const { return num_banks_; }
 
   void Reset() {
@@ -97,12 +111,13 @@ class Qwen38DecodeLedger {
   int Bank() const { return bank_; }
   size_t Length() const { return length_; }
 
-  // Commits `step` rows (1 .. num_banks_ - 1).
+  // Commits `step` rows (1 .. max_step_).
   void Advance(size_t step) {
-    const size_t max_step = static_cast<size_t>(num_banks_ - 1);
-    if (step < 1 || step > max_step)
+    if (step < 1 || step > max_step_)
       throw std::logic_error("qwen38_graph: a step commits 1 or 2 rows, not " + std::to_string(step));
-    bank_ = static_cast<int>((static_cast<size_t>(bank_) + step) % static_cast<size_t>(num_banks_));
+    bank_ = ping_pong_
+                ? static_cast<int>((static_cast<size_t>(bank_) + 1) % static_cast<size_t>(num_banks_))
+                : static_cast<int>((static_cast<size_t>(bank_) + step) % static_cast<size_t>(num_banks_));
     length_ += step;
   }
 
@@ -128,6 +143,8 @@ class Qwen38DecodeLedger {
  private:
   int capacity_;
   int num_banks_{kBanks};
+  size_t max_step_{kBanks - 1};
+  bool ping_pong_{false};
   int bank_{};
   size_t length_{};
 };

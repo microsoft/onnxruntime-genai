@@ -21,8 +21,9 @@ namespace Generators {
 
 // The loaded plane library: one function pointer per entry of QWEN38_PLANE_FUNCTIONS, named like the entry.
 struct Qwen38Plane {
-  // Loads `path`, resolves every symbol and checks the ABI version and structure layout.
-  explicit Qwen38Plane(const std::filesystem::path& path);
+  // Loads `path` (or the built-in onnxruntime-genai-cuda library when `path` is empty),
+  // resolves every symbol and checks the ABI version and structure layout.
+  explicit Qwen38Plane(const std::filesystem::path& path = {});
   ~Qwen38Plane();
   Qwen38Plane(const Qwen38Plane&) = delete;
   Qwen38Plane& operator=(const Qwen38Plane&) = delete;
@@ -38,6 +39,8 @@ struct Qwen38Plane {
   void (*embed_rows)(void* stream, const void* table, const void* ids, void* out, int rows, int width){};
   int (*host_get_device_pointer)(void** dev_ptr, void* host_ptr, unsigned flags){};
   int (*dflash_select)(void* stream, const void* candidates, const void* scores, void* control, int drafts, int top_k){};
+  int (*replay_state_updates)(void* stream, const void* descs, int fast_count, int generic_count,
+                              int fast_blocks_per_descriptor, int kept_count){};
 
  private:
   void* handle_{};
