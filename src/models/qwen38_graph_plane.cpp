@@ -745,6 +745,7 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       void* base = mmap(nullptr, bytes + delta, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(aligned));
       close(fd);
       if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full.string());
+      (void)madvise(base, bytes + delta, MADV_WILLNEED);
       mappings_.push_back(Mapping{base, bytes + delta, nullptr});
       auto* rows = static_cast<unsigned char*>(base) + delta;
       // cudaHostRegisterMapped | cudaHostRegisterReadOnly: the gather kernel reads the table zero-copy over PCIe.
