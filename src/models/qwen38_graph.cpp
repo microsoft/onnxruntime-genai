@@ -140,6 +140,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     dflash_model_ = std::make_shared<Dflash2Model>(
         std::move(draft_config), GetOrtEnv(), nullptr,
         [this](OrtSessionOptions& opts) {
+          const char* skip_san = std::getenv("ORT_PAGED_ATTENTION_SKIP_SANITIZER");
+          opts.AddConfigEntry("session.paged_attention.skip_input_sanitizer",
+                              (skip_san != nullptr && std::string(skip_san) == "0") ? "0" : "1");
           if (model_.pool_) model_.pool_->AddTo(opts, "dflash2");
           if (!model_.embed_values_.empty()) {
             opts.AddInitializer("model.embed_tokens.weight", *model_.embed_values_.front());
