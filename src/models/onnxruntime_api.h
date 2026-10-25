@@ -73,10 +73,26 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <stdexcept>
 
 #include "onnxruntime_c_api.h"
-#if ORT_API_VERSION >= 31
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 32
+#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 0
+#define ORT_GENAI_HAS_MODEL_PACKAGE 1
+#else
+#if defined(__has_include)
+#if __has_include("onnxruntime_experimental_c_api.h")
+#include "onnxruntime_experimental_c_api.h"
+#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
+#else
+#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 0
+#endif
+#else
+#include "onnxruntime_experimental_c_api.h"
+#define ORT_GENAI_HAS_EXPERIMENTAL_C_API 1
+#endif
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 28 && ORT_GENAI_HAS_EXPERIMENTAL_C_API
 #define ORT_GENAI_HAS_MODEL_PACKAGE 1
 #else
 #define ORT_GENAI_HAS_MODEL_PACKAGE 0
+#endif
 #endif
 
 #include "../span.h"
@@ -1537,7 +1553,40 @@ struct OrtModelPackageComponentContext;
 
 namespace Ort {
 
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 32
 const OrtModelPackageApi& GetModelPackageApi();
+#else
+struct ModelPackageApi {
+  OrtExperimental_OrtModelPackageApi_CreateModelPackageOptionsFromSessionOptions_SinceV28_Fn
+      CreateModelPackageOptionsFromSessionOptions{nullptr};
+  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageOptions_SinceV28_Fn
+      ReleaseModelPackageOptions{nullptr};
+  OrtExperimental_OrtModelPackageApi_CreateModelPackageContext_SinceV28_Fn
+      CreateModelPackageContext{nullptr};
+  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageContext_SinceV28_Fn
+      ReleaseModelPackageContext{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetComponentCount_SinceV28_Fn
+      ModelPackage_GetComponentCount{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetComponentNames_SinceV28_Fn
+      ModelPackage_GetComponentNames{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantCount_SinceV28_Fn
+      ModelPackage_GetVariantCount{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantNames_SinceV28_Fn
+      ModelPackage_GetVariantNames{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_GetVariantEpName_SinceV28_Fn
+      ModelPackage_GetVariantEpName{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackage_ResolveStringRef_SinceV28_Fn
+      ModelPackage_ResolveStringRef{nullptr};
+  OrtExperimental_OrtModelPackageApi_SelectComponent_SinceV28_Fn
+      SelectComponent{nullptr};
+  OrtExperimental_OrtModelPackageApi_ReleaseModelPackageComponentContext_SinceV28_Fn
+      ReleaseModelPackageComponentContext{nullptr};
+  OrtExperimental_OrtModelPackageApi_ModelPackageComponent_GetSelectedVariantFolderPath_SinceV28_Fn
+      ModelPackageComponent_GetSelectedVariantFolderPath{nullptr};
+};
+
+const ModelPackageApi& GetModelPackageApi();
+#endif
 
 }  // namespace Ort
 

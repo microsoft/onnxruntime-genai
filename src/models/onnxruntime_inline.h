@@ -1562,6 +1562,7 @@ inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* a
 
 namespace Ort {
 
+#if defined(ORT_API_VERSION) && ORT_API_VERSION >= 32
 inline const OrtModelPackageApi& GetModelPackageApi() {
   if (api == nullptr || api_version < 31) {
     throw std::runtime_error("Model packages require ONNX Runtime 1.31 or newer.");
@@ -1573,6 +1574,45 @@ inline const OrtModelPackageApi& GetModelPackageApi() {
   }
   return *model_package_api;
 }
+#else
+inline const ModelPackageApi& GetModelPackageApi() {
+  static const ModelPackageApi fns = []() {
+    ModelPackageApi f;
+    if (api == nullptr) {
+      return f;
+    }
+#define GENAI_MP_V28_FN(NAME)                                                \
+  reinterpret_cast<OrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_Fn>( \
+      api->GetExperimentalFunction(                                          \
+          kOrtExperimental_OrtModelPackageApi_##NAME##_SinceV28_FnName))
+
+    f.CreateModelPackageOptionsFromSessionOptions =
+        GENAI_MP_V28_FN(CreateModelPackageOptionsFromSessionOptions);
+    f.ReleaseModelPackageOptions = GENAI_MP_V28_FN(ReleaseModelPackageOptions);
+    f.CreateModelPackageContext = GENAI_MP_V28_FN(CreateModelPackageContext);
+    f.ReleaseModelPackageContext = GENAI_MP_V28_FN(ReleaseModelPackageContext);
+    f.ModelPackage_GetComponentCount = GENAI_MP_V28_FN(ModelPackage_GetComponentCount);
+    f.ModelPackage_GetComponentNames = GENAI_MP_V28_FN(ModelPackage_GetComponentNames);
+    f.ModelPackage_GetVariantCount = GENAI_MP_V28_FN(ModelPackage_GetVariantCount);
+    f.ModelPackage_GetVariantNames = GENAI_MP_V28_FN(ModelPackage_GetVariantNames);
+    f.ModelPackage_GetVariantEpName = GENAI_MP_V28_FN(ModelPackage_GetVariantEpName);
+    f.ModelPackage_ResolveStringRef = GENAI_MP_V28_FN(ModelPackage_ResolveStringRef);
+    f.SelectComponent = GENAI_MP_V28_FN(SelectComponent);
+    f.ReleaseModelPackageComponentContext = GENAI_MP_V28_FN(ReleaseModelPackageComponentContext);
+    f.ModelPackageComponent_GetSelectedVariantFolderPath =
+        GENAI_MP_V28_FN(ModelPackageComponent_GetSelectedVariantFolderPath);
+
+#undef GENAI_MP_V28_FN
+    return f;
+  }();
+  if (fns.CreateModelPackageContext == nullptr) {
+    throw std::runtime_error(
+        "Model package API is not available in this ONNX Runtime build. "
+        "Model packages require ONNX Runtime with the OrtModelPackageApi experimental functions.");
+  }
+  return fns;
+}
+#endif
 
 }  // namespace Ort
 
