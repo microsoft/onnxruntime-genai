@@ -718,6 +718,406 @@ def test_qwen3_5_openvino_partitioned_requires_patch_image(test_data_path, relat
         process()
 
 
+def _qwen35_position_table():
+    row, col = np.indices((48, 48))
+    return np.stack((row * row, col * col, row * col, row % 3 - col % 5), axis=-1).astype(np.float32)
+
+
+def _write_qwen35_partitioned_math_fixture(test_data_path, model_path):
+    onnx = pytest.importorskip("onnx")
+    source = Path(test_data_path) / "qwen3-5"
+    if not source.exists():
+        pytest.skip("qwen3-5 test model not found")
+    model_path.mkdir()
+    for name in (
+        "genai_config.json",
+        "processor_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ):
+        shutil.copyfile(source / name, model_path / name)
+    helper = onnx.helper
+    tp = onnx.TensorProto
+
+    def value(name, dtype, shape):
+        return helper.make_tensor_value_info(name, dtype, shape)
+
+    def save(name, inputs, outputs, nodes, constants):
+        graph = helper.make_graph(
+            nodes, name, inputs, outputs, [onnx.numpy_helper.from_array(v, k) for k, v in constants.items()]
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
+        onnx.checker.check_model(model, full_check=True)
+        onnx.save(model, model_path / f"{name}.onnx")
+
+    save(
+        "patch_embed",
+        [value("pixel_values", tp.FLOAT, ["N", 1536])],
+        [value("hidden_states", tp.FLOAT, ["N", 4])],
+        [
+            helper.make_node("Gather", ["pixel_values", "columns"], ["selected"], axis=1),
+            helper.make_node("Add", ["selected", "bias"], ["hidden_states"]),
+        ],
+        {
+            "columns": np.arange(4, dtype=np.int64),
+            "bias": np.array([0.125, 0.25, 0.375, 0.5], dtype=np.float32),
+        },
+    )
+    save(
+        "pos",
+        [value("position_indices", tp.INT64, [4, "N"])],
+        [value("position_embeddings", tp.FLOAT, [4, "N", 4])],
+        [helper.make_node("Gather", ["table", "position_indices"], ["position_embeddings"], axis=0)],
+        {"table": _qwen35_position_table().reshape(2304, 4)},
+    )
+    # Preserve every host-produced value in the final features, including the mask's infinity categories.
+    save(
+        "merger",
+        [
+            value("hidden_states", tp.FLOAT, ["N", 4]),
+            value("vision_attention_mask", tp.FLOAT, [1, "N", "N"]),
+            value("rotary_pos_emb", tp.FLOAT, ["N", 4]),
+        ],
+        [value("image_features", tp.FLOAT, ["image_tokens", 224])],
+        [
+            helper.make_node(
+                "IsInf", ["vision_attention_mask"], ["negative_inf"], detect_negative=1, detect_positive=0
+            ),
+            helper.make_node("Where", ["negative_inf", "zero", "vision_attention_mask"], ["finite_mask"]),
+            helper.make_node("Cast", ["negative_inf"], ["mask_indicator"], to=tp.FLOAT),
+            *[
+                helper.make_node("Reshape", [name, "flat_shape"], [f"{name}_flat"])
+                for name in ("hidden_states", "rotary_pos_emb", "finite_mask", "mask_indicator")
+            ],
+            helper.make_node(
+                "Concat",
+                ["hidden_states_flat", "rotary_pos_emb_flat", "finite_mask_flat", "mask_indicator_flat"],
+                ["payload"],
+                axis=0,
+            ),
+            helper.make_node("Shape", ["hidden_states"], ["hidden_shape"]),
+            helper.make_node("Gather", ["hidden_shape", "first"], ["patch_count"], axis=0),
+            helper.make_node("Mul", ["patch_count", "capacity_per_patch"], ["capacity"]),
+            helper.make_node("Shape", ["payload"], ["payload_size"]),
+            helper.make_node("Sub", ["capacity", "payload_size"], ["padding_size"]),
+            helper.make_node("Concat", ["first", "padding_size"], ["pads"], axis=0),
+            helper.make_node("Pad", ["payload", "pads", "zero"], ["padded"]),
+            helper.make_node("Reshape", ["padded", "feature_shape"], ["image_features"]),
+        ],
+        {
+            "zero": np.array(0, dtype=np.float32),
+            "flat_shape": np.array([-1], dtype=np.int64),
+            "first": np.array([0], dtype=np.int64),
+            "capacity_per_patch": np.array([56], dtype=np.int64),
+            "feature_shape": np.array([-1, 224], dtype=np.int64),
+        },
+    )
+    save(
+        "embedding",
+        [value("input_ids", tp.INT32, ["B", "S"])],
+        [value("inputs_embeds", tp.FLOAT, ["B", "S", 224])],
+        [
+            helper.make_node("Cast", ["input_ids"], ["float_ids"], to=tp.FLOAT),
+            helper.make_node("Unsqueeze", ["float_ids", "last_axis"], ["expanded_ids"]),
+            helper.make_node("Mul", ["expanded_ids", "scale"], ["scaled_ids"]),
+            helper.make_node("Add", ["scaled_ids", "offset"], ["inputs_embeds"]),
+        ],
+        {
+            "last_axis": np.array([2], dtype=np.int64),
+            "scale": np.array(0.001, dtype=np.float32),
+            "offset": (0.25 + 0.0001 * np.arange(224)).astype(np.float32),
+        },
+    )
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    model = config["model"]
+    scores = np.zeros(model["vocab_size"], dtype=np.float32)
+    scores[2] = 1
+    save(
+        "decoder",
+        [
+            value("inputs_embeds", tp.FLOAT, ["B", "S", 224]),
+            value("attention_mask", tp.INT64, ["B", "totalS"]),
+            value("position_ids", tp.INT64, [4, "B", "S"]),
+        ],
+        [value("logits", tp.FLOAT, ["B", "S", model["vocab_size"]])],
+        [
+            helper.make_node("Shape", ["inputs_embeds"], ["embedding_shape"]),
+            helper.make_node("Gather", ["embedding_shape", "batch_sequence"], ["batch_sequence_shape"], axis=0),
+            helper.make_node("Concat", ["batch_sequence_shape", "vocab"], ["logits_shape"], axis=0),
+            helper.make_node("Expand", ["scores", "logits_shape"], ["logits"]),
+        ],
+        {
+            "batch_sequence": np.array([0, 1], dtype=np.int64),
+            "vocab": np.array([model["vocab_size"]], dtype=np.int64),
+            "scores": scores,
+        },
+    )
+    model["partitioning"] = "openvino"
+    decoder = model["decoder"]
+    decoder.update(
+        filename="decoder.onnx",
+        hidden_size=224,
+        head_size=224,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        num_hidden_layers=1,
+        session_options={"provider_options": []},
+    )
+    decoder.pop("pipeline", None)
+    model["embedding"] = {
+        "filename": "embedding.onnx",
+        "inputs": {"input_ids": "input_ids"},
+        "outputs": {"inputs_embeds": "inputs_embeds"},
+        "session_options": {"provider_options": []},
+    }
+    vision = model["vision"]
+    vision["filename"] = ""
+    vision["session_options"] = {"provider_options": []}
+    vision["pipeline"] = [
+        {
+            name: {
+                "filename": f"{name}.onnx",
+                "inputs": inputs,
+                "outputs": outputs,
+                "run_on_cpu": True,
+            }
+        }
+        for name, inputs, outputs in (
+            ("patch_embed", ["pixel_values"], ["hidden_states"]),
+            ("pos", ["position_indices"], ["position_embeddings"]),
+            ("merger", ["hidden_states", "vision_attention_mask", "rotary_pos_emb"], ["image_features"]),
+        )
+    ]
+    config["search"]["past_present_share_buffer"] = False
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    processor_path = model_path / "processor_config.json"
+    processor = json.loads(processor_path.read_text(encoding="utf-8"))
+    for transform in processor["processor"]["transforms"]:
+        operation = transform["operation"]
+        if operation["type"] == "Resize":
+            operation["attrs"].update(min_pixels=1024, max_pixels=6144)
+    processor_path.write_text(json.dumps(processor), encoding="utf-8")
+    return config
+
+
+def _qwen35_reference_features(patches, grid):
+    t, h, w = map(int, grid)
+    assert h % 2 == w % 2 == 0
+    n = t * h * w
+    assert n <= 24
+    y = np.linspace(0, 47, h)
+    x = np.linspace(0, 47, w)
+    low_y, low_x = y.astype(np.int64), x.astype(np.int64)
+    high_y, high_x = np.minimum(low_y + 1, 47), np.minimum(low_x + 1, 47)
+    dy, dx = (y - low_y)[:, None, None], (x - low_x)[None, :, None]
+    table = _qwen35_position_table().astype(np.float64)
+    positions = (
+        table[low_y[:, None], low_x[None, :]] * (1 - dy) * (1 - dx)
+        + table[low_y[:, None], high_x[None, :]] * (1 - dy) * dx
+        + table[high_y[:, None], low_x[None, :]] * dy * (1 - dx)
+        + table[high_y[:, None], high_x[None, :]] * dy * dx
+    )
+    np.testing.assert_array_equal(positions[0, 0], [0, 0, 0, 0])
+    np.testing.assert_array_equal(positions[-1, -1], [2209, 2209, 2209, 0])
+
+    def block_order(array):
+        return array.reshape(t, h // 2, 2, w // 2, 2, -1).transpose(0, 1, 3, 2, 4, 5).reshape(n, -1)
+
+    positions = block_order(np.broadcast_to(positions, (t, h, w, 4)))
+    hidden = patches[:, :4].astype(np.float64) + np.array([0.125, 0.25, 0.375, 0.5]) + positions
+    rows, cols = np.indices((h, w))
+    rotary = np.stack((rows, rows * 0.01, cols, cols * 0.01), axis=-1)
+    rotary = block_order(np.broadcast_to(rotary, (t, h, w, 4)))
+    np.testing.assert_allclose(
+        rotary[:4], [[0, 0, 0, 0], [0, 0, 1, 0.01], [1, 0.01, 0, 0], [1, 0.01, 1, 0.01]], rtol=0, atol=1e-12
+    )
+    frames = np.repeat(np.arange(t), h * w)
+    cross_frame = frames[:, None] != frames[None, :]
+    payload = np.concatenate((hidden.ravel(), rotary.ravel(), np.zeros(n * n), cross_frame.ravel()))
+    return np.pad(payload, (0, n * 56 - payload.size)).reshape(n // 4, 224).astype(np.float32)
+
+
+def _qwen35_controlled_inputs(config, grids, *, padded=False):
+    model = config["model"]
+    patches = [
+        (0.01 * np.arange(np.prod(grid))[:, None] + 0.0001 * np.arange(1536)[None, :] + i).astype(np.float32)
+        for i, grid in enumerate(grids)
+    ]
+    ids = [10]
+    for grid in grids:
+        ids += [model["vision_start_token_id"]] + [model["image_token_id"]] * (int(np.prod(grid)) // 4)
+        ids += [151653, 11]
+    inputs = og.NamedTensors()
+    inputs["input_ids"] = np.asarray([ids], dtype=np.int32)
+    if padded:
+        pixels = np.full((len(grids), max(map(len, patches)), 1536), -123, dtype=np.float32)
+        for i, image_patches in enumerate(patches):
+            pixels[i, : len(image_patches)] = image_patches
+    else:
+        pixels = np.concatenate(patches)
+    inputs["pixel_values"] = pixels
+    inputs["image_grid_thw"] = np.asarray(grids, dtype=np.int64)
+    inputs["num_image_tokens"] = np.asarray([len(p) // 4 for p in patches], dtype=np.int64)
+    return inputs, patches
+
+
+def _qwen35_text_embeddings(ids):
+    return (0.25 + 0.001 * ids[..., None] + 0.0001 * np.arange(224)).astype(np.float32)
+
+
+def _qwen35_reference_embeddings(ids, patches, grids, image_token_id):
+    ids = ids.as_numpy()
+    expected = _qwen35_text_embeddings(ids)
+    expected[ids == image_token_id] = np.concatenate(
+        [_qwen35_reference_features(p, grid) for p, grid in zip(patches, grids, strict=True)]
+    )
+    return expected
+
+
+def _assert_qwen35_embeddings(actual, expected, ids, grids, image_token_id):
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-4)
+    image_rows = ids.as_numpy() == image_token_id
+    np.testing.assert_allclose(actual[~image_rows], expected[~image_rows], rtol=1e-5, atol=1e-4)
+    features, reference = actual[image_rows], expected[image_rows]
+    offset = 0
+    for grid in grids:
+        n = int(np.prod(grid))
+        observed = features[offset : offset + n // 4].ravel()
+        wanted = reference[offset : offset + n // 4].ravel()
+        bounds = [0, 4 * n, 8 * n, 8 * n + n * n, 8 * n + 2 * n * n, 56 * n]
+        for name, start, end in zip(
+            ("hidden", "rotary", "finite_mask", "negative_inf", "padding"), bounds[:-1], bounds[1:], strict=True
+        ):
+            error = np.abs(observed[start:end].astype(np.float64) - wanted[start:end])
+            relative = error / np.maximum(np.abs(wanted[start:end]), 1e-12)
+            print(
+                f"grid={list(grid)} stream={name} "
+                f"max_abs={error.max(initial=0):.9g} max_rel={relative.max(initial=0):.9g}"
+            )
+            if name in ("finite_mask", "negative_inf", "padding"):
+                np.testing.assert_array_equal(observed[start:end], wanted[start:end])
+        offset += n // 4
+    assert offset == len(features)
+
+
+@pytest.mark.parametrize("case", ["non_square", "unequal_packed", "unequal_padded", "temporal"])
+def test_qwen3_5_openvino_partitioned_host_math(test_data_path, tmp_path, case):
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path)
+    grids = [[2, 2, 4]] if case == "temporal" else [[1, 4, 6]]
+    if case.startswith("unequal"):
+        grids.append([1, 2, 4])
+    inputs, patches = _qwen35_controlled_inputs(config, grids, padded=case == "unequal_padded")
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=inputs["input_ids"].as_numpy().shape[1] + 4, do_sample=False, num_beams=1)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.get_logits()
+    expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+    _assert_qwen35_embeddings(
+        generator.get_output("inputs_embeds").copy(),
+        expected,
+        inputs["input_ids"],
+        grids,
+        config["model"]["image_token_id"],
+    )
+
+
+@pytest.mark.parametrize("case", ["single", "unequal"])
+def test_qwen3_5_openvino_partitioned_processor_math(test_data_path, tmp_path, case):
+    image_module = pytest.importorskip("PIL.Image")
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path)
+    paths = []
+    sizes = [(96, 64)] if case == "single" else [(96, 64), (64, 32)]
+    for i, (width, height) in enumerate(sizes):
+        row, col = np.indices((height, width))
+        pixels = np.stack(((row + i * 31) % 256, (col * 3 + i * 17) % 256, (row + col * 2) % 256), axis=-1)
+        path = tmp_path / f"image-{i}.png"
+        image_module.fromarray(pixels.astype(np.uint8)).save(path)
+        paths.append(os.fspath(path))
+    model = og.Model(os.fspath(model_path))
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>" * len(paths) + "Describe"
+    inputs = model.create_multimodal_processor()(prompt, images=og.Images.open(*paths))
+    grids = inputs["image_grid_thw"].as_numpy()
+    np.testing.assert_array_equal(grids, [[1, 4, 6]] if case == "single" else [[1, 4, 6], [1, 2, 4]])
+    counts = np.prod(grids, axis=1)
+    np.testing.assert_array_equal(inputs["num_image_tokens"].as_numpy(), [counts.sum() // 4])
+    assert np.count_nonzero(inputs["input_ids"].as_numpy() == config["model"]["image_token_id"]) == counts.sum() // 4
+    pixels = inputs["pixel_values"].as_numpy().reshape(-1, 1536)
+    if len(pixels) == counts.sum():
+        patches = np.split(pixels, np.cumsum(counts)[:-1])
+    else:
+        assert len(pixels) == len(grids) * max(counts)
+        patches = [pixels[i * max(counts) : i * max(counts) + count] for i, count in enumerate(counts)]
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=inputs["input_ids"].as_numpy().shape[1] + 4, do_sample=False, num_beams=1)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.get_logits()
+    expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+    _assert_qwen35_embeddings(
+        generator.get_output("inputs_embeds").copy(),
+        expected,
+        inputs["input_ids"],
+        grids,
+        config["model"]["image_token_id"],
+    )
+
+
+def test_qwen3_5_openvino_partitioned_decode_embeddings(test_data_path, tmp_path):
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path)
+    grids = [[1, 4, 6], [1, 2, 4]]
+    inputs, patches = _qwen35_controlled_inputs(config, grids)
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=inputs["input_ids"].as_numpy().shape[1] + 4, do_sample=False, num_beams=1)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.get_logits()
+    expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+    _assert_qwen35_embeddings(
+        generator.get_output("inputs_embeds").copy(),
+        expected,
+        inputs["input_ids"],
+        grids,
+        config["model"]["image_token_id"],
+    )
+    generator.generate_next_token()
+    assert generator.get_next_tokens() == [2]
+    for _ in range(2):
+        generator.get_logits()
+        np.testing.assert_allclose(
+            generator.get_output("inputs_embeds"),
+            _qwen35_text_embeddings(np.array([[2]], dtype=np.int32)),
+            rtol=1e-5,
+            atol=1e-4,
+        )
+        generator.generate_next_token()
+        assert generator.get_next_tokens() == [2]
+
+
+def test_qwen3_5_openvino_partitioned_fixture_routing(test_data_path, tmp_path):
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path)
+    assert config["model"]["partitioning"] == "openvino"
+    assert "pipeline" not in config["model"]["decoder"]
+    assert "image_features" not in config["model"]["embedding"]["inputs"]
+    config["model"]["vision"]["pipeline"] = [
+        stage for stage in config["model"]["vision"]["pipeline"] if "pos" not in stage
+    ]
+    (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20)
+    with pytest.raises(RuntimeError):
+        og.Generator(model, params)
+
+
 # ---------------------------------------------------------------------------
 # Qwen3.5 hybrid model tests — CUDA EP (RecurrentState with shared buffers)
 # ---------------------------------------------------------------------------
