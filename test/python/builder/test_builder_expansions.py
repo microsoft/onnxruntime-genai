@@ -74,9 +74,15 @@ def test_webgpu_graph_capture_override_lives_in_webgpu(capture):
 
     model.make_ep_expansions_init()
 
-    expected = WebGPU if capture else Model
-    assert model.make_attention_mask_reformatting_for_gqa.__func__ is expected.make_attention_mask_reformatting_for_gqa
-    assert WebGPU.make_attention_mask_reformatting_for_gqa.__module__ == "models.builders.expansions.webgpu"
+    expected = (
+        WebGPU.make_attention_mask_graph_capture_reformatting_for_gqa
+        if capture
+        else Model.make_attention_mask_reformatting_for_gqa
+    )
+    assert model.make_attention_mask_reformatting_for_gqa.__func__ is expected
+    assert (
+        WebGPU.make_attention_mask_graph_capture_reformatting_for_gqa.__module__ == "models.builders.expansions.webgpu"
+    )
     assert not hasattr(Standard, "make_attention_mask_reformatting_for_gqa")
 
 
@@ -166,7 +172,13 @@ def test_expansion_methods_have_existing_builder_counterparts():
             if isinstance(cls, ast.ClassDef):
                 for method in cls.body:
                     if isinstance(method, ast.FunctionDef):
-                        assert method.name in names, f"{path.name}:{cls.name}.{method.name}"
+                        name = (
+                            "make_attention_mask_reformatting_for_gqa"
+                            if cls.name == "WebGPU"
+                            and method.name == "make_attention_mask_graph_capture_reformatting_for_gqa"
+                            else method.name
+                        )
+                        assert name in names, f"{path.name}:{cls.name}.{method.name}"
                     elif isinstance(method, ast.Assign) and isinstance(method.value, ast.Attribute):
                         for target in method.targets:
                             assert isinstance(target, ast.Name)

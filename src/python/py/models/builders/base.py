@@ -570,7 +570,7 @@ class Model:
 
             if self.extra_options.get("enable_webgpu_graph", False):
                 self.make_attention_mask_reformatting_for_gqa = (
-                    WebGPU.make_attention_mask_reformatting_for_gqa.__get__(self, self.__class__)
+                    WebGPU.make_attention_mask_graph_capture_reformatting_for_gqa.__get__(self, self.__class__)
                 )
 
         else:
