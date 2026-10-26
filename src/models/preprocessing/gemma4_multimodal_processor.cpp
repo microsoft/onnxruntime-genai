@@ -3,14 +3,53 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/parallel_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/gemma4_multimodal_processor.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <limits>
 
 namespace Generators {
 
 namespace {
 
 constexpr int64_t kGemma4PoolingKernelSize = 3;
+
+void ParallelCopyStridedRows(ThreadPool* thread_pool, const void* source,
+                             size_t source_row_elements, void* destination,
+                             size_t destination_row_elements, size_t row_count,
+                             size_t element_size) {
+  if (row_count != 0 &&
+      destination_row_elements > std::numeric_limits<size_t>::max() / row_count) {
+    throw std::overflow_error("Strided copy size overflow");
+  }
+  const size_t total_elements = row_count * destination_row_elements;
+  const double cost_per_element =
+      static_cast<double>(element_size * 2) * ParallelCost::kSchedulingCostScale /
+      (row_count == 1 ? 2.0 : 1.0);
+  ThreadPool::TryParallelFor(
+      thread_pool, detail::CheckedParallelSize(total_elements), cost_per_element,
+      [=](std::ptrdiff_t first, std::ptrdiff_t last) {
+        auto offset = static_cast<size_t>(first);
+        const auto end = static_cast<size_t>(last);
+        while (offset < end) {
+          const size_t row = offset / destination_row_elements;
+          const size_t offset_in_row = offset % destination_row_elements;
+          const size_t count =
+              std::min(end - offset, destination_row_elements - offset_in_row);
+          std::memcpy(static_cast<uint8_t*>(destination) +
+                          (row * destination_row_elements + offset_in_row) *
+                              element_size,
+                      static_cast<const uint8_t*>(source) +
+                          (row * source_row_elements + offset_in_row) * element_size,
+                      count * element_size);
+          offset += count;
+        }
+      });
+}
 
 // Simple literal string count (no regex overhead for fixed tokens)
 size_t CountOccurrences(const std::string& text, const std::string& token) {
@@ -384,7 +423,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     OrtxTensor* audio_features = audio_features_owner.get();
     OrtxTensor* audio_attention_mask = audio_attention_mask_owner.get();
 
-    EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
+    EmplaceProcessedTensor(thread_pool_, *named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
 
     const float* audio_data{};
     const int64_t* audio_shape{};
@@ -402,7 +441,8 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     // Preserve the extractor's actual mask. Current single-clip frames are all
     // valid; retaining the mask also respects padding bounds if batching evolves.
     named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
-                           std::make_shared<Tensor>(ProcessTensor<bool>(audio_attention_mask, allocator)));
+                           std::make_shared<Tensor>(
+                               ProcessTensor<bool>(thread_pool_, audio_attention_mask, allocator)));
 
     // Compute audio_sizes / audio-token count.
     // Unified: each 640-sample frame is exactly one audio soft token, so the
@@ -475,8 +515,13 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       const size_t src_row = static_cast<size_t>(num_padded_patches * patch_dim);
       const size_t dst_row = static_cast<size_t>(target_patches * patch_dim);
       const size_t copy_row = static_cast<size_t>(std::min(num_padded_patches, target_patches) * patch_dim);
-      for (int64_t b = 0; b < batch; ++b) {
-        std::memcpy(dst + b * dst_row, src + b * src_row, copy_row * sizeof(float));
+      if (copy_row == dst_row) {
+        ParallelCopyStridedRows(thread_pool_, src, src_row, dst, dst_row,
+                                static_cast<size_t>(batch), sizeof(float));
+      } else {
+        for (int64_t b = 0; b < batch; ++b) {
+          std::memcpy(dst + b * dst_row, src + b * src_row, copy_row * sizeof(float));
+        }
       }
     }
 

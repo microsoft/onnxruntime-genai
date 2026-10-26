@@ -192,6 +192,7 @@ class PrefixCache final : private BlockReferenceObserver {
                              const std::shared_ptr<const FixedStatePrefixCheckpoint>& fixed_checkpoint,
                              std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint);
   void DropUnleasedDraftCheckpoints();
+  bool ReclaimDraftCheckpoint();
   size_t ReclaimCheckpoints(size_t checkpoints_needed);
   bool ReclaimCheckpoint(const FixedStatePrefixCheckpoint* checkpoint);
   size_t ReclaimableCheckpoints() const;
@@ -222,6 +223,11 @@ class PrefixCache final : private BlockReferenceObserver {
 
   // Indexed blocks no request currently references, which is the capacity Reclaim can hand back.
   size_t ReclaimableBlocks() const;
+
+  // The supplied retained blocks that are included in ReclaimableBlocks(). Checkpoint and draft
+  // leases protect their complete physical ancestry, even when the cache is the block's only owner.
+  std::vector<size_t> ReclaimableBlockIds(
+      std::span<const std::shared_ptr<Block>> blocks) const;
 
   size_t IndexedBlocks() const { return entries_.size(); }
 
@@ -269,7 +275,7 @@ class PrefixCache final : private BlockReferenceObserver {
       const Entry& endpoint, size_t block_count,
       std::span<const int32_t> tokens = {},
       std::vector<std::shared_ptr<Block>>* blocks = nullptr) const;
-  bool IsProtectedByLeasedCheckpoint(const Entry& entry) const;
+  size_t MarkLeasedReclaimableBlocks() const;
   static bool IsCheckpointUnleased(const Entry& entry);
   bool HasCheckpointedDescendant(const Entry& ancestor) const;
   void PromoteCheckpoint(Entry& entry) noexcept;
@@ -290,6 +296,8 @@ class PrefixCache final : private BlockReferenceObserver {
   std::list<Entry*> referenced_entries_;
   std::list<Entry*> reclaimable_entries_;
   std::vector<Entry*> entries_by_block_id_;
+  // Scratch is rebuilt for each query: shared checkpoint leases can change without cache callbacks.
+  mutable std::vector<uint8_t> leased_ancestry_;
   // LRU checkpoint endpoints. Capacity is reserved at construction, so promotion and publication
   // are allocation-free after checkpoint capture starts.
   std::vector<Entry*> checkpoint_entries_;

@@ -6,10 +6,10 @@
 #include "generator/generators.h"
 #include "models/utils.h"
 #include "ortx_tokenizer.h"
+#include "span.h"
 
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <vector>
 
@@ -22,8 +22,12 @@ struct Tokenizer;
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {
   TokenizerStream(const Tokenizer& tokenizer);
+  ~TokenizerStream();
+  TokenizerStream(const TokenizerStream&) = delete;
+  TokenizerStream& operator=(const TokenizerStream&) = delete;
 
   const std::string& Decode(int32_t token);
+  void Reset();
 
  private:
   std::shared_ptr<const Tokenizer> tokenizer_;
@@ -63,6 +67,12 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
+  friend struct TokenizerStream;
+  friend class TokenPostProcessor;
+  friend class TokenPostProcessorInternal;
+  OrtxWordPieceInfo GetWordPieceInfo(int32_t vocab_id) const;
+
+  bool literal_ = false;
   int32_t bos_token_id_;
   std::vector<int32_t> eos_token_id_;
   int32_t pad_token_id_;

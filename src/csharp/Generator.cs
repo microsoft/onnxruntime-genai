@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -9,6 +10,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         private IntPtr _generatorHandle;
         private bool _disposed = false;
+
+        internal IntPtr Handle
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(Generator));
+                return _generatorHandle;
+            }
+        }
 
         public Generator(Model model, GeneratorParams generatorParams)
         {

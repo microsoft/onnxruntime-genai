@@ -611,8 +611,8 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 @pytest.mark.parametrize(
     ("use_paged_attention", "linear_attn_op", "state_window", "ep", "message"),
     [
-        (True, "linear_attention", 0, "webgpu", "CUDA execution provider"),
-        (False, "gated_delta_net", 0, "webgpu", "CUDA execution provider"),
+        (True, "linear_attention", 0, "cpu", "CUDA or WebGPU execution provider"),
+        (False, "gated_delta_net", 0, "cpu", "CUDA or WebGPU execution provider"),
         (True, "linear_attention", 1, "cuda", "require state_window=0"),
         (False, "gated_delta_net", 1, "cuda", "require state_window=0"),
     ],
@@ -631,7 +631,42 @@ def test_qwen35_gated_delta_net_option_validation(
             linear_attn_op,
             state_window,
             ep,
+            base_module.ir.DataType.FLOAT16,
         )
+
+
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_qwen35_gated_delta_net_supported_providers(ep):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.validate_gated_delta_net_options(True, "linear_attention", 0, ep, base_module.ir.DataType.FLOAT16)
+
+
+@pytest.mark.parametrize("use_paged_attention", [False, True])
+def test_qwen35_gated_delta_net_accepts_webgpu(use_paged_attention):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+
+    model.validate_gated_delta_net_options(
+        use_paged_attention,
+        "gated_delta_net",
+        0,
+        "webgpu",
+        base_module.ir.DataType.FLOAT16,
+    )
+
+
+def test_qwen35_non_paged_gated_delta_net_accepts_webgpu_fp32():
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.validate_gated_delta_net_options(False, "gated_delta_net", 0, "webgpu", base_module.ir.DataType.FLOAT)
+
+
+@pytest.mark.parametrize(
+    "use_paged_attention,io_dtype",
+    [(True, base_module.ir.DataType.FLOAT), (False, base_module.ir.DataType.BFLOAT16)],
+)
+def test_qwen35_gated_delta_net_rejects_unsupported_webgpu_dtype(use_paged_attention, io_dtype):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    with pytest.raises(ValueError, match="WebGPU require FP16"):
+        model.validate_gated_delta_net_options(use_paged_attention, "gated_delta_net", 0, "webgpu", io_dtype)
 
 
 def _packed_gated_delta_net_model(

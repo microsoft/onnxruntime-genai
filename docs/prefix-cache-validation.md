@@ -156,6 +156,46 @@ loading GenAI or a model. `--pressure-num-blocks` controls the separate churn
 budget; churn count grows to exceed it. Regular and pressure models are loaded
 sequentially.
 
+### Focused numerical-parity reproductions
+
+Run `--plan-only` without `--scenarios` to list available names for the selected
+suites and profiles. Use `--scenarios` with those exact names to isolate a failing
+sequence without changing its actions, retained owners, or cache-disabled
+admission controls. Only prompts used by the selected scenarios are referenced;
+their token construction is unchanged. Unknown names fail for each profile
+rather than silently disappearing during a chunk-size sweep.
+
+For the branching and simultaneous-admission follow-ups in #2698:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/python/engine/prefix-cache-qa.py \
+  --model-path /models/qwen-hybrid-dflash --num-blocks 1024 \
+  --chunk-sizes 512 --max-batch-size 8 --generated-tokens 64 \
+  --suites branching concurrency random \
+  --scenarios branch-1024 branch-1025 random-branch-3 \
+    simultaneous-short-long simultaneous-long-short \
+  --draft-mode both --include-prompt-tokens \
+  --output prefix-cache-numerical-repro.json
+```
+
+`--include-prompt-tokens` additionally records the exact input IDs alongside
+their hashes. It is opt-in because a custom corpus or user prompt can contain
+sensitive content. Each checked output includes `parity_difference`: `null`
+for exact equality, otherwise the first zero-based divergent index, actual and
+expected token IDs, and both output lengths. A missing token is `null`, not
+token zero. Cancellation still compares only the emitted reference prefix.
+
+Reports explicitly record the coverage selection and scenario names. A passing
+focused run does **not** qualify omitted scenarios or the complete matrix.
+Selection is a reproduction tool, not a failing-test exclusion or parity waiver.
+
+Keep generation limits identical when comparing revisions. Reducing
+`--generated-tokens` changes speculative verification near the end of a turn
+and the lifetime of concurrently scheduled requests. It can change the first
+divergence or make a failure disappear; do not truncate a longer reference and
+call that a shorter-run oracle. The runner recomputes sequential references and
+admission controls for the requested limit.
+
 ## Reading the results
 
 JSON reports include runtime/configuration identity, overlays, Engine capacities,
@@ -198,6 +238,57 @@ shows adoption is not a necessary trigger, not which operation caused it.
 Reversed admission and the pinned-slot control help separate batching from
 state-slot effects. Preserve seed/profile/prompt hashes and minimize failures
 into named regressions; never waive them as numerical noise.
+
+## Measuring checkpoint protection in scheduler planning
+
+`PagedKeyValueCache::PlanStepResources()` queries reclaimable prefix capacity
+on every planned step. The opt-in component benchmark measures that exact
+`PrefixCache::ReclaimableBlocks()` query with real fixed-state checkpoints from
+the checked-in hybrid test model:
+
+```powershell
+.\engine_unit_tests.exe --gtest_also_run_disabled_tests `
+  --gtest_filter=PrefixCacheBenchmark.DISABLED_HybridCheckpointReclamationScaling:PrefixCacheBenchmark.DISABLED_SparseHybridCheckpointReclamation:PrefixCacheBenchmark.DISABLED_SharedEvictedCheckpointAncestry
+```
+
+On Linux, use `./engine_unit_tests` with the same arguments. This benchmark is
+disabled in ordinary test runs because timings are diagnostic, not portable
+pass/fail thresholds; the lease-safety regressions run normally.
+
+The benchmarks cover dense indexed ancestry, large pools with few cached
+blocks, and leased endpoints sharing evicted ancestors. The shared-evicted case
+reuses every ancestor's physical block ID for an unrelated chain and checks
+both reclaimable counts and actual reclamation: stale identities must not
+protect replacements.
+
+Each row checks the exact reclaimable count, then calibrates batched calls,
+warms up, and collects repeated samples. The accumulated result is checked
+across all calls. Output reports per-call mean/p50/p95 microseconds and the
+batch/sample/call counts. The `batch` column counts checkpoint histories, not
+model execution batches; `matched_blocks` counts indexed blocks. These are
+metadata benchmarks, not long-context model execution or context-length
+qualification.
+
+Compare the same benchmark source and Release compiler settings against the
+baseline and candidate. Checkpoint protection uses one preallocated CPU byte
+per physical pool block, no additional GPU storage, and no query-time
+allocation. Unleased queries inspect checkpoint endpoints without scanning
+blocks. Leased queries clear that bounded scratch buffer and walk each
+retained physical ancestor once, deduplicating shared ancestry. Scratch is
+rebuilt for each query because fixed/draft leases can change without a cache
+mutation.
+
+Two costs remain: leased queries clear pool-sized scratch even in a sparse
+cache, and missing physical ancestors can be revisited by each leased
+endpoint. The sparse and shared-evicted cases expose these limits. Do not
+replace exact identity validation with a block-ID-only check to avoid them.
+
+Component timings isolate the scheduler scan, not end-to-end token latency.
+Also run the operator matrix on an available GPU with fixed pool sizing,
+long prompts, multiple requests, retained owners, and repeated uncached
+controls. Compare host RSS and per-process GPU high-water marks through
+alternation/churn; neither the microbenchmark nor a single peak snapshot
+establishes a memory plateau or deployment-device fit.
 
 ## Testing the runner
 

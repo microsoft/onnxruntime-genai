@@ -7,6 +7,7 @@
 #include "model_state_manifest.h"
 #include "model_type.h"
 #include "generator/generators.h"
+#include "engine/graph_annotation_ids.h"
 #include "utils.h"
 #include <map>
 #include <mutex>
@@ -19,6 +20,7 @@ namespace Generators {
 
 struct Tokenizer;
 struct MultiModalProcessor;
+class ThreadPool;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
@@ -102,21 +104,16 @@ struct State {
  protected:
   void Run(OrtSession& session, bool graph_capture_this_run = false, int graph_capture_length = 1,
            int graph_capture_variant = 0);
+  int GraphIdForLength(int graph_capture_length, int graph_capture_variant);
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
-  // CUDA graph annotation id per captured input length. The decode path captures
-  // sequence_length == 1; speculative decoding (MTP) also captures the 2-token verify shape.
-  // Each distinct length gets its own annotation id so ORT captures/replays an independent graph
-  // bound to that shape's (static) buffers.
-  struct GraphId {
-    int value{};       // integer form, so the destructor never has to re-parse (std::stoi throws)
-    std::string text;  // string form passed to the "gpu_graph_id" run option
-  };
-  const std::string& GraphIdForLength(int graph_capture_length, int graph_capture_variant);
-  std::unordered_map<int, GraphId> graph_ids_{};
+  // Capture identity includes input length, execution variant, and active adapters.
+  // IDs are unique across states sharing a session and stay owned until destruction.
+  GraphAnnotationIds graph_ids_;
+  bool graph_capture_fallback_logged_{};
   // Session used for graph capture; not owned. Lifetime invariant: the OrtSession
   // outlives this State because State is owned by Generator, and Generator is
   // destroyed before the Model (and its session) that produced it.
@@ -183,6 +180,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
   SessionInfo session_info_;
+  mutable std::once_flag preprocessing_thread_pool_once_;
+  mutable std::shared_ptr<ThreadPool> preprocessing_thread_pool_;
 
   // Lazily initialized, model-local constrained-decoding assets. The concrete state lives in
   // constrained_logits_processor.cpp so builds without llguidance do not depend on its types.
@@ -205,6 +204,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                                   bool append_providers = true);
 
  protected:
+  std::shared_ptr<ThreadPool> GetOrCreatePreprocessingThreadPool() const;
   void CreateSessionOptions();
   void AddSharedInitializers();
 

@@ -981,6 +981,10 @@ void PagedKeyValueCache::DropUnleasedDraftCheckpoints() {
   prefix_cache_->DropUnleasedDraftCheckpoints();
 }
 
+bool PagedKeyValueCache::ReclaimDraftCheckpoint() {
+  return prefix_cache_->ReclaimDraftCheckpoint();
+}
+
 size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
     size_t checkpoints_needed) {
   return prefix_cache_->ReclaimCheckpoints(checkpoints_needed);
@@ -1072,11 +1076,21 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
     const size_t reserved_slots =
         std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
     std::vector<size_t> claimed_retained_blocks;
-    if (entry.prefix_match) {
-      for (const auto& block : entry.prefix_match->blocks) {
-        if (block->RefCount() == 1 &&
-            charged_retained_blocks.count(block->Id()) == 0) {
-          claimed_retained_blocks.push_back(block->Id());
+    if (entry.prefix_match &&
+        !entry.prefix_match->fixed_state_checkpoint) {
+      // A hybrid Match returns one complete physical history together with a shared fixed-state
+      // checkpoint. That shared checkpoint leases its endpoint, and prefix-cache reclamation
+      // protects the endpoint's complete physical ancestry. None of the adopted blocks can
+      // contribute to available_blocks, so avoid rebuilding the pool-sized leased-ancestry bitmap
+      // for every queued candidate. An optional draft checkpoint is attached only at the same
+      // endpoint; this fast path relies on the fixed checkpoint, not on draft coverage.
+      for (const size_t block_id :
+           prefix_cache_->ReclaimableBlockIds(entry.prefix_match->blocks)) {
+        // Charge only paged-only retained blocks that contribute to available_blocks. Claiming a
+        // shared block once prevents later candidates from planning against capacity that the
+        // first selected adoption protects.
+        if (charged_retained_blocks.count(block_id) == 0) {
+          claimed_retained_blocks.push_back(block_id);
         }
       }
     }

@@ -369,6 +369,14 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
           "model.dflash2 packed vector inputs must have dynamic lengths and unique names.");
     }
   }
+  if (!inputs.anchor_row_index.empty()) {
+    RequireTensor(drafter_metadata, inputs.anchor_row_index, true, Ort::TypeToTensorType<int32_t>, 1);
+    if (drafter_metadata.GetInputShape(inputs.anchor_row_index)[0] >= 0 ||
+        !input_names.insert(inputs.anchor_row_index).second) {
+      throw std::runtime_error(
+          "model.dflash2 anchor_row_index must have a dynamic length and a unique name.");
+    }
+  }
   RequireTensor(drafter_metadata, inputs.input_ids, true,
                 Ort::TypeToTensorType<int64_t>, 1);
   if (drafter_metadata.GetInputShape(inputs.input_ids)[0] >= 0 ||
@@ -384,12 +392,14 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
     throw std::runtime_error(
         "model.dflash2 block_table must have two dynamic dimensions and a unique name.");
   }
-  RequireTensor(drafter_metadata, inputs.attention_metadata, true,
-                Ort::TypeToTensorType<int32_t>, 1);
-  const auto metadata_shape = drafter_metadata.GetInputShape(inputs.attention_metadata);
-  if (metadata_shape[0] != 3 || !input_names.insert(inputs.attention_metadata).second) {
-    throw std::runtime_error(
-        "model.dflash2 attention_metadata must contain three values and have a unique name.");
+  if (!inputs.attention_metadata.empty()) {
+    RequireTensor(drafter_metadata, inputs.attention_metadata, true,
+                  Ort::TypeToTensorType<int32_t>, 1);
+    const auto metadata_shape = drafter_metadata.GetInputShape(inputs.attention_metadata);
+    if (metadata_shape[0] != 3 || !input_names.insert(inputs.attention_metadata).second) {
+      throw std::runtime_error(
+          "model.dflash2 attention_metadata must contain three values and have a unique name.");
+    }
   }
   if (!input_names.insert(inputs.aux_hidden_states).second) {
     throw std::runtime_error("model.dflash2 input names must be unique.");
@@ -535,9 +545,20 @@ size_t Dflash2Drafter::PrefixCheckpointBytes(const Config& config, size_t paged_
 
 bool CanReserveDflash2PrefixCheckpoint(size_t target_budget_bytes, size_t reserved_bytes,
                                        size_t snapshot_bytes, size_t target_block_bytes) {
-  return target_budget_bytes > reserved_bytes &&
-         snapshot_bytes < target_budget_bytes - reserved_bytes &&
-         target_block_bytes <= target_budget_bytes - reserved_bytes - snapshot_bytes;
+  return Dflash2PrefixCheckpointCapacity(
+             target_budget_bytes, reserved_bytes, snapshot_bytes, target_block_bytes, 1) != 0;
+}
+
+size_t Dflash2PrefixCheckpointCapacity(size_t target_budget_bytes, size_t reserved_bytes,
+                                       size_t snapshot_bytes, size_t target_block_bytes,
+                                       size_t max_checkpoints) {
+  if (snapshot_bytes == 0 || target_block_bytes == 0 ||
+      target_budget_bytes <= reserved_bytes ||
+      target_budget_bytes - reserved_bytes < target_block_bytes) {
+    return 0;
+  }
+  const size_t available = target_budget_bytes - reserved_bytes - target_block_bytes;
+  return std::min(max_checkpoints, available / snapshot_bytes);
 }
 
 void CopyDflash2RingBlocks(Tensor& destination, std::span<const int32_t> destination_blocks,
@@ -818,9 +839,25 @@ bool Dflash2Drafter::CanCapturePrefix(const Request* request, size_t token_count
          it->second.blocks.size() == ring_blocks_;
 }
 
+void Dflash2Drafter::SetPrefixCheckpointCapacity(size_t capacity) {
+  if (AvailablePrefixCheckpoints() != prefix_checkpoints_.size()) {
+    throw std::logic_error("Cannot resize the DFlash 2 prefix snapshot pool while snapshots are leased.");
+  }
+  prefix_checkpoints_.resize(capacity);
+}
+
+size_t Dflash2Drafter::AvailablePrefixCheckpoints() const noexcept {
+  return static_cast<size_t>(std::count_if(
+      prefix_checkpoints_.begin(), prefix_checkpoints_.end(),
+      [](const auto& checkpoint) { return checkpoint.expired(); }));
+}
+
 std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
     const Request* request, size_t token_count) {
-  if (!CanCapturePrefix(request, token_count) || !prefix_checkpoint_.expired()) {
+  const auto slot = std::find_if(
+      prefix_checkpoints_.begin(), prefix_checkpoints_.end(),
+      [](const auto& checkpoint) { return checkpoint.expired(); });
+  if (!CanCapturePrefix(request, token_count) || slot == prefix_checkpoints_.end()) {
     return nullptr;
   }
   const auto it = requests_.find(request);
@@ -856,7 +893,7 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
     throw;
   }
   model_->p_device_kvcache_->Synchronize();
-  prefix_checkpoint_ = checkpoint;
+  *slot = checkpoint;
   return checkpoint;
 }
 
@@ -1122,6 +1159,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   auto source_bytes = aux_hidden_states.GetByteSpan();
   auto destination_bytes = packed_aux.GetByteSpan();
   size_t destination_row = 0;
+  // Packed row of each feed's last ingested context row (-1: none), for drafters that score from it.
+  std::vector<int32_t> last_context_row(feeds.size(), -1);
   for (const size_t i : served) {
     if (ingest_count[i] == 0) {
       continue;
@@ -1129,6 +1168,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     destination_bytes.subspan(destination_row * aux_row_bytes, ingest_count[i] * aux_row_bytes)
         .CopyFrom(source_bytes.subspan(ingest_begin[i] * aux_row_bytes,
                                        ingest_count[i] * aux_row_bytes));
+    last_context_row[i] = CheckedMetadataValue(destination_row + ingest_count[i] - 1,
+                                               "DFlash 2 anchor context row");
     destination_row += ingest_count[i];
   }
 
@@ -1166,6 +1207,26 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   auto& block_row_index = StepTensor(step_tensors_.block_row_index, device, int32_type,
                                      {static_cast<int64_t>(num_block_rows)});
   fill_int32(block_row_index, layout.block_row_index);
+  Tensor* anchor_row_index = nullptr;
+  if (!config_.inputs.anchor_row_index.empty()) {
+    anchor_row_index = &StepTensor(step_tensors_.anchor_row_index, device, int32_type,
+                                   {static_cast<int64_t>(block_feed_indices.size())});
+    std::vector<int32_t> anchor_rows;
+    anchor_rows.reserve(block_feed_indices.size());
+    for (const size_t feed_index : block_feed_indices) {
+      int32_t row = last_context_row[feed_index];
+      if (row < 0) {
+        // Only the borrowed placeholder block (lattice dropped) can lack a context row; give it a valid
+        // index so the in-graph gather stays in bounds.
+        if (drafts_wanted || num_ctx_rows == 0) {
+          throw std::logic_error("A DFlash 2 query block with an anchor_row_index input needs a context row.");
+        }
+        row = 0;
+      }
+      anchor_rows.push_back(row);
+    }
+    fill_int32(*anchor_row_index, anchor_rows);
+  }
   auto& cumulative = StepTensor(step_tensors_.cumulative_sequence_lengths, device, int32_type,
                                 {static_cast<int64_t>(served.size() + 1)});
   fill_int32(cumulative, layout.cumulative_sequence_lengths);
@@ -1253,13 +1314,15 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       config_.inputs.aux_hidden_states.c_str(), config_.inputs.input_ids.c_str(),
       config_.inputs.qkv_row_map.c_str(),
       config_.inputs.block_row_index.c_str(), config_.inputs.cumulative_sequence_lengths.c_str(),
-      config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str(),
-      config_.inputs.attention_metadata.c_str()};
+      config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str()};
   std::vector<OrtValue*> inputs{packed_aux.GetOrtTensor(), input_ids.GetOrtTensor(),
                                 qkv_row_map.GetOrtTensor(),
                                 block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
-                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor(),
-                                metadata.GetOrtTensor()};
+                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor()};
+  if (!config_.inputs.attention_metadata.empty()) {
+    input_names.push_back(config_.inputs.attention_metadata.c_str());
+    inputs.push_back(metadata.GetOrtTensor());
+  }
   if (q_row_map) {
     input_names.push_back(config_.inputs.q_row_map.c_str());
     inputs.push_back(q_row_map->GetOrtTensor());
@@ -1267,6 +1330,10 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   if (embeddings) {
     input_names.push_back(config_.inputs.embeddings.c_str());
     inputs.push_back(embeddings->GetOrtTensor());
+  }
+  if (anchor_row_index) {
+    input_names.push_back(config_.inputs.anchor_row_index.c_str());
+    inputs.push_back(anchor_row_index->GetOrtTensor());
   }
   std::vector<const char*> output_names{config_.outputs.candidate_ids.c_str(),
                                         config_.outputs.scores.c_str()};
