@@ -28,6 +28,7 @@ void ApplySessionOptionsFromConfig(
     const Config& config,
     const Config::SessionOptions& config_session_options,
     OrtSessionOptions& session_options, bool cloned_from_parent = false);
+void ApplyRunOption(OrtRunOptions& run_options, const char* key, const char* value);
 
 // Returns true when the model was exported with an OpenVINO graph partitioning (text-only embedding
 // graph + host-side image feature merge).

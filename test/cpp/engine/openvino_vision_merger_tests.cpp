@@ -113,6 +113,59 @@ TEST(OpenVINOVisionStageSessionOptionsTest, PrefersStageThenVisionThenDecoderOpt
   EXPECT_EQ(GetOpenVINOVisionStageSessionOptions(config, config.model.vision.pipeline[1]).log_id, "vision");
 }
 
+TEST(OpenVINOVisionStageRunOptionsTest, InheritsVisionKeysAndOverridesConflicts) {
+  Config config;
+  Config::Model::Vision::PipelineModel stage;
+  config.model.decoder.run_options = Config::RunOptions{{"decoder_only", "ignored"}};
+  EXPECT_TRUE(GetOpenVINOVisionStageRunOptions(config, stage).empty());
+
+  stage.run_options = Config::RunOptions{{"shared", "stage"}, {"stage_only", "keep"}};
+  EXPECT_EQ(GetOpenVINOVisionStageRunOptions(config, stage), *stage.run_options);
+
+  config.model.vision.run_options = Config::RunOptions{{"shared", "vision"}, {"vision_only", "keep"}};
+  EXPECT_EQ(GetOpenVINOVisionStageRunOptions(config, stage),
+            (Config::RunOptions{{"shared", "stage"}, {"stage_only", "keep"}, {"vision_only", "keep"}}));
+
+  stage.run_options = Config::RunOptions{};
+  EXPECT_EQ(GetOpenVINOVisionStageRunOptions(config, stage), *config.model.vision.run_options);
+  stage.run_options.reset();
+  EXPECT_EQ(GetOpenVINOVisionStageRunOptions(config, stage), *config.model.vision.run_options);
+}
+
+TEST(OpenVINOVisionStageRunOptionsTest, KeepsStageOptionsIndependent) {
+  Config config;
+  config.model.vision.run_options = Config::RunOptions{{"terminate_session", "1"}};
+  std::array<Config::Model::Vision::PipelineModel, 3> stages;
+  stages[0].run_options = Config::RunOptions{{"terminate_session", "0"}};
+  stages[1].run_options = Config::RunOptions{{"enable_profiling", "0"}};
+
+  EXPECT_EQ(GetOpenVINOVisionStageRunOptions(config, stages[0]),
+            (Config::RunOptions{{"terminate_session", "0"}}));
+  EXPECT_EQ(GetOpenVINOVisionStageRunOptions(config, stages[1]),
+            (Config::RunOptions{{"enable_profiling", "0"}, {"terminate_session", "1"}}));
+  EXPECT_EQ(GetOpenVINOVisionStageRunOptions(config, stages[2]),
+            (Config::RunOptions{{"terminate_session", "1"}}));
+  EXPECT_EQ(*config.model.vision.run_options, (Config::RunOptions{{"terminate_session", "1"}}));
+}
+
+TEST(OpenVINOVisionRunOptionsTest, AppliesSpecialAndOrdinaryOptions) {
+  GetOrtEnv();
+  auto options = OrtRunOptions::Create();
+  EXPECT_NO_THROW(ApplyRunOption(*options, "terminate_session", "1"));
+  EXPECT_NO_THROW(ApplyRunOption(*options, "terminate_session", "0"));
+  for (const auto* value : {"", "2", "true", "-1"}) {
+    EXPECT_THROW(ApplyRunOption(*options, "terminate_session", value), std::runtime_error);
+  }
+  EXPECT_NO_THROW(ApplyRunOption(*options, "memory.enable_memory_arena_shrinkage", "cpu:0"));
+#if ORT_API_VERSION >= 25
+  EXPECT_NO_THROW(ApplyRunOption(*options, "enable_profiling", "0"));
+  EXPECT_NO_THROW(ApplyRunOption(*options, "enable_profiling", "1"));
+  EXPECT_NO_THROW(ApplyRunOption(*options, "enable_profiling", "vision_profile"));
+#else
+  EXPECT_THROW(ApplyRunOption(*options, "enable_profiling", "0"), std::runtime_error);
+#endif
+}
+
 TEST(OpenVINOVlmInputsDeviceTest, RequiresCpuMemoryInputs) {
   // OpenVINO (any device_type) and the CPU EP both keep GenAI inputs in CPU memory.
   EXPECT_NO_THROW(ValidateOpenVINOVlmInputsDevice(DeviceType::CPU, DeviceType::OpenVINO));

@@ -15,6 +15,9 @@ namespace Generators {
 const Config::SessionOptions& GetOpenVINOVisionStageSessionOptions(const Config& config,
                                                                    const Config::Model::Vision::PipelineModel& stage);
 
+Config::RunOptions GetOpenVINOVisionStageRunOptions(const Config& config,
+                                                    const Config::Model::Vision::PipelineModel& stage);
+
 void ValidateOpenVINOVlmBeamSearch(int num_beams);
 void ValidateOpenVINOVlmInputsDevice(DeviceType inputs_device, DeviceType model_device);
 
