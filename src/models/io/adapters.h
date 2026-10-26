@@ -5,13 +5,17 @@
 namespace Generators {
 
 struct Model;
+struct MappedModelFile;
+struct ExternalInitializerFileSources;
 
 struct Adapter {
   Adapter() = delete;
   Adapter(const Adapter&) = delete;
   Adapter& operator=(const Adapter&) = delete;
 
-  explicit Adapter(const char* adapter_file_path);
+  explicit Adapter(const char* adapter_file_path,
+                   const std::shared_ptr<const ExternalInitializerFileSources>& sources = {});
+  ~Adapter();
 
  private:
   // AcquireRef/ReleaseRef/RefCount are intentionally private so that all
@@ -29,6 +33,7 @@ struct Adapter {
   int32_t RefCount() const;
 
   int32_t ref_count_{};
+  std::unique_ptr<MappedModelFile> mapping_;
   std::unique_ptr<OrtLoraAdapter> adapter_;
 };
 
@@ -53,6 +58,7 @@ struct Adapters : std::enable_shared_from_this<Adapters>, ExternalRefCounted<Ada
   // pattern in UnloadAdapter (and concurrent std::unordered_map mutation) is a
   // use-after-free hazard.
   mutable std::mutex mutex_;
+  std::shared_ptr<const ExternalInitializerFileSources> file_sources_;
   std::unordered_map<std::string, std::unique_ptr<Adapter>> adapters_;
 };
 
