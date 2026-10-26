@@ -5,13 +5,30 @@ import ast
 from pathlib import Path
 
 import pytest
+
 from models.builders.base import Model
 from models.builders.expansions.engram import Qwen38Engram as PagedEngram
 from models.builders.expansions.qwen3_5 import Qwen35, Qwen35MoE
 from models.builders.expansions.qwen3_8 import Qwen38, Qwen38Graph, Qwen38Vision
+from models.builders.expansions.standard import Standard
+from models.builders.expansions.webgpu import WebGPU
 from models.builders.qwen3_5 import Qwen35MoETextModel, Qwen35MTPModel, Qwen35TextModel
 from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel, Qwen38Engram
 from models.builders.qwen3_8_graph import Qwen4ExpGraphModel
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_webgpu_graph_capture_override_lives_in_webgpu(capture):
+    model = object.__new__(Model)
+    model.ep = "webgpu"
+    model.extra_options = {"enable_webgpu_graph": capture}
+
+    model.make_ep_expansions_init()
+
+    expected = WebGPU if capture else Model
+    assert model.make_attention_mask_reformatting_for_gqa.__func__ is expected.make_attention_mask_reformatting_for_gqa
+    assert WebGPU.make_attention_mask_reformatting_for_gqa.__module__ == "models.builders.expansions.webgpu"
+    assert not hasattr(Standard, "make_attention_mask_reformatting_for_gqa")
 
 
 @pytest.mark.parametrize(
