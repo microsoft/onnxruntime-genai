@@ -345,6 +345,81 @@ TEST_F(MemoryAssetsTest, GeneratesExpectedTokensFromRegisteredBuffers) {
   EXPECT_GT(sequence->SequenceCount(0), 0u);
 }
 
+TEST_F(MemoryAssetsTest, EncoderDecoderGeneratesFromRegisteredBuffers) {
+  const std::filesystem::path source{MODEL_PATH "marian-cache/dynamic"};
+  const auto json = ReadAsset(source / "genai_config.json");
+  const auto encoder = ReadAsset(source / "external-data/encoder.onnx");
+  const auto decoder = ReadAsset(source / "external-data/decoder.onnx");
+  const auto encoder_weights = ReadAsset(source / "external-data/encoder-weights.data");
+  const auto decoder_weights = ReadAsset(source / "external-data/decoder-weights.data");
+
+  ScopedAssetDirectory assets;
+  assets.Write("genai_config.json", json);
+  assets.Write("encoder.onnx", encoder);
+  assets.Write("decoder.onnx", decoder);
+  assets.Write("encoder-weights.data", encoder_weights);
+  assets.Write("decoder-weights.data", decoder_weights);
+
+  const auto check_generation = [](OgaModel& model) {
+    auto parameters = OgaGeneratorParams::Create(model);
+    parameters->SetSearchOption("batch_size", 2);
+    parameters->SetSearchOption("max_length", 5);
+    auto generator = OgaGenerator::Create(model, *parameters);
+    const std::array<int32_t, 4> input{2, 3, 4, 5};
+    generator->AppendTokens(input.data(), input.size());
+    for (int step = 0; step < 3; ++step) {
+      ASSERT_FALSE(generator->IsDone());
+      generator->GenerateNextToken();
+    }
+    EXPECT_TRUE(generator->IsDone());
+    const std::array<std::array<int32_t, 5>, 2> expected{
+        {{2, 3, 61, 62, 63}, {4, 5, 97, 98, 99}}};
+    for (size_t row = 0; row < expected.size(); ++row) {
+      ASSERT_EQ(generator->GetSequenceCount(row), expected[row].size());
+      EXPECT_EQ(std::vector<int32_t>(generator->GetSequenceData(row),
+                                     generator->GetSequenceData(row) + generator->GetSequenceCount(row)),
+                std::vector<int32_t>(expected[row].begin(), expected[row].end()));
+    }
+  };
+  {
+    auto config = OgaConfig::Create(assets.path.string().c_str());
+    config->ClearProviders();
+    auto model = OgaModel::Create(*config);
+    check_generation(*model);
+  }
+  for (const auto* filename :
+       {"genai_config.json", "encoder.onnx", "decoder.onnx",
+        "encoder-weights.data", "decoder-weights.data"}) {
+    ASSERT_TRUE(std::filesystem::remove(assets.path / filename));
+  }
+
+  for (const auto* omitted : {"encoder-weights.data", "decoder-weights.data", ""}) {
+    SCOPED_TRACE(omitted);
+    auto config = OgaConfig::CreateFromBuffer(json);
+    config->ClearProviders();
+    config->AddModelData("encoder.onnx", encoder.data(), encoder.size());
+    config->AddModelData("decoder.onnx", decoder.data(), decoder.size());
+    if (std::string_view{omitted} != "encoder-weights.data") {
+      config->AddExternalInitializerData("encoder-weights.data", encoder_weights.data(),
+                                         encoder_weights.size());
+    }
+    if (std::string_view{omitted} != "decoder-weights.data") {
+      config->AddExternalInitializerData("decoder-weights.data", decoder_weights.data(),
+                                         decoder_weights.size());
+    }
+    if (*omitted) {
+      EXPECT_THROW(OgaModel::Create(*config), std::runtime_error);
+      continue;
+    }
+    auto model = OgaModel::Create(*config);
+    config.reset();
+    for (int iteration = 0; iteration < 2; ++iteration) {
+      SCOPED_TRACE(iteration);
+      check_generation(*model);
+    }
+  }
+}
+
 TEST_F(MemoryAssetsTest, PipelineSessionResetPreservesLoadingMode) {
   enum class LoadingMode { kPath,
                            kLegacyModelData,
