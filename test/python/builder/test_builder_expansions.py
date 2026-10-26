@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from models.builders.base import Model
-from models.builders.expansions.engram import Qwen38Engram as PagedEngram
 from models.builders.expansions.standard import Standard
 from models.builders.expansions.webgpu import WebGPU
 from models.builders.qwen import Qwen3VLTextModel
@@ -133,7 +132,7 @@ def test_qwen_expansion_modules_are_removed():
 
 
 @pytest.mark.parametrize("paged", [False, True])
-def test_qwen38_engram_dispatches_to_dense_builder_or_paged_expansion(monkeypatch, paged):
+def test_qwen38_engram_dispatches_to_dense_or_paged_builder(monkeypatch, paged):
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = paged
     ple = object()
@@ -148,9 +147,9 @@ def test_qwen38_engram_dispatches_to_dense_builder_or_paged_expansion(monkeypatc
         return "paged_output"
 
     monkeypatch.setattr(Qwen38Engram, "make_ple", dense)
-    monkeypatch.setattr(PagedEngram, "make_ple", packed)
+    monkeypatch.setattr(Qwen4ExpTextModel, "make_paged_ple", packed)
     kind = "paged" if paged else "dense"
     assert model.make_ple(2, ple, "hidden_states") == f"{kind}_output"
     assert calls == [(kind, model, 2, ple, "hidden_states")]
     assert Qwen38Engram.__module__ == "models.builders.qwen3_8"
-    assert PagedEngram.__module__ == "models.builders.expansions.engram"
+    assert "make_paged_ple" in Qwen4ExpTextModel.__dict__
