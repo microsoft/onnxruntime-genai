@@ -1696,9 +1696,11 @@ commits the target's staged final state without replay.
 This requires a published ORT core containing the `ConvStateReplay` schema and
 a matching WebGPU plugin containing its kernel, from
 [microsoft/onnxruntime#33493](https://github.com/microsoft/onnxruntime/pull/33493)
-(merged October 21, 2026). The Windows WebGPU CI package pins must both advance
-to builds containing that change before this integration can merge. Missing
-schemas/kernels are errors, not CPU retries or skipped GPU tests. The required
+(merged October 21, 2026). Windows WebGPU CI pins core
+`1.32.0-dev-20261025-0507-bd6010c`, which contains the schema. The WebGPU plugin
+pin must still advance to a published build containing the kernel before this
+integration can merge. Missing schemas/kernels are errors, not CPU retries or
+skipped GPU tests. The required
 CI checks run the replay and fixed-state-pool suites and verify that every
 required GPU case executed; no local experimental ORT build is substituted.
 

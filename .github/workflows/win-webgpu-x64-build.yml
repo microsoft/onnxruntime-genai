@@ -24,11 +24,11 @@ env:
   # Use an API-32 SDK for both the native build and runtime tests.
   # PagedAttention requires the extended schema with attention_metadata at input 16.
   # This core/plugin pair includes the GatedDeltaNetStateReplay schema and WebGPU kernel.
-  # ConvStateReplay needs both packages rebuilt after microsoft/onnxruntime#33493
-  # (merged 2026-10-21). These are still the newest published packages in ORT-Nightly;
-  # advance both pins when that pair is published. Required replay tests fail, not skip,
-  # until the core schema and WebGPU kernel are available.
-  ORT_TEST_VERSION: '1.32.0-dev-20261018-0507-c1ea5bf'
+  # The core includes the ConvStateReplay schema from microsoft/onnxruntime#33493.
+  # The newest published WebGPU plugin still predates that change (merged 2026-10-21).
+  # Advance its pin when a build containing the kernel is published.
+  # Required replay tests fail, not skip, until the WebGPU kernel is available.
+  ORT_TEST_VERSION: '1.32.0-dev-20261025-0507-bd6010c'
 
 jobs:
   windows-webgpu-x64-build:
