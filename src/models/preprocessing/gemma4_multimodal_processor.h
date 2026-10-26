@@ -19,6 +19,7 @@ struct Gemma4MultiModalProcessor : Processor {
   ONNXTensorElementDataType pixel_position_ids_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64};
   ONNXTensorElementDataType audio_features_type_;
 
+  int64_t vision_fixed_num_patches_{-1};
   bool has_speech_{false};
   bool unified_{false};  // gemma-4-12B encoder-free "unified" variant
   size_t vision_soft_tokens_per_image_{260};

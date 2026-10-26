@@ -15,6 +15,8 @@ namespace Generators {
 
 namespace {
 
+constexpr int64_t kGemma4PoolingKernelSize = 3;
+
 void ParallelCopyStridedRows(ThreadPool* thread_pool, const void* source,
                              size_t source_row_elements, void* destination,
                              size_t destination_row_elements, size_t row_count,
@@ -23,7 +25,9 @@ void ParallelCopyStridedRows(ThreadPool* thread_pool, const void* source,
       destination_row_elements > std::numeric_limits<size_t>::max() / row_count) {
     throw std::overflow_error("Strided copy size overflow");
   }
-  const size_t total_elements = row_count * destination_row_elements;
+  const size_t copy_row_elements = std::min(source_row_elements, destination_row_elements);
+  if (copy_row_elements == 0) return;
+  const size_t total_elements = row_count * copy_row_elements;
   const double cost_per_element =
       static_cast<double>(element_size * 2) * ParallelCost::kSchedulingCostScale /
       (row_count == 1 ? 2.0 : 1.0);
@@ -33,10 +37,10 @@ void ParallelCopyStridedRows(ThreadPool* thread_pool, const void* source,
         auto offset = static_cast<size_t>(first);
         const auto end = static_cast<size_t>(last);
         while (offset < end) {
-          const size_t row = offset / destination_row_elements;
-          const size_t offset_in_row = offset % destination_row_elements;
+          const size_t row = offset / copy_row_elements;
+          const size_t offset_in_row = offset % copy_row_elements;
           const size_t count =
-              std::min(end - offset, destination_row_elements - offset_in_row);
+              std::min(end - offset, copy_row_elements - offset_in_row);
           std::memcpy(static_cast<uint8_t*>(destination) +
                           (row * destination_row_elements + offset_in_row) *
                               element_size,
@@ -56,7 +60,9 @@ void ParallelTransformStridedRows(ThreadPool* thread_pool, const Source* source,
       destination_row_elements > std::numeric_limits<size_t>::max() / row_count) {
     throw std::overflow_error("Strided transform size overflow");
   }
-  const size_t total_elements = row_count * destination_row_elements;
+  const size_t copy_row_elements = std::min(source_row_elements, destination_row_elements);
+  if (copy_row_elements == 0) return;
+  const size_t total_elements = row_count * copy_row_elements;
   ThreadPool::TryParallelFor(
       thread_pool, detail::CheckedParallelSize(total_elements),
       ParallelCost::ConvertPerElement<Source, Destination>(),
@@ -64,10 +70,10 @@ void ParallelTransformStridedRows(ThreadPool* thread_pool, const Source* source,
         auto offset = static_cast<size_t>(first);
         const auto end = static_cast<size_t>(last);
         while (offset < end) {
-          const size_t row = offset / destination_row_elements;
-          const size_t offset_in_row = offset % destination_row_elements;
+          const size_t row = offset / copy_row_elements;
+          const size_t offset_in_row = offset % copy_row_elements;
           const size_t count =
-              std::min(end - offset, destination_row_elements - offset_in_row);
+              std::min(end - offset, copy_row_elements - offset_in_row);
           std::transform(source + row * source_row_elements + offset_in_row,
                          source + row * source_row_elements + offset_in_row + count,
                          destination + offset,
@@ -262,6 +268,13 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
   // SigLIP/log-mel "gemma4" path — no pixel trimming or conv-subsampling of the
   // audio-token count is applied.
   unified_ = config.model.type == "gemma4_unified";
+  if (!unified_) {
+    const auto pixel_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_values);
+    if (pixel_shape.size() != 2 && pixel_shape.size() != 3) {
+      throw std::runtime_error("Gemma4 vision pixel_values input must have rank 2 or 3");
+    }
+    vision_fixed_num_patches_ = pixel_shape[pixel_shape.size() - 2];
+  }
 
   // Query pixel_position_ids type (int32 or int64) if the vision model has this input
   if (session_info.HasInput(config.model.vision.inputs.pixel_position_ids)) {
@@ -270,6 +283,24 @@ Gemma4MultiModalProcessor::Gemma4MultiModalProcessor(Config& config, const Sessi
         pixel_position_ids_type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
       throw std::runtime_error("Gemma4 pixel_position_ids input must have type INT32 or INT64");
     }
+    if (!unified_) {
+      const auto pixel_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_values);
+      const auto position_shape = session_info.GetInputShape(config.model.vision.inputs.pixel_position_ids);
+      if (position_shape.size() != pixel_shape.size()) {
+        throw std::runtime_error("Gemma4 vision pixel_values and pixel_position_ids must have matching ranks");
+      }
+      const int64_t position_patches = position_shape[position_shape.size() - 2];
+      if (position_patches > 0) {
+        if (vision_fixed_num_patches_ > 0 && position_patches != vision_fixed_num_patches_) {
+          throw std::runtime_error("Gemma4 vision pixel_values and pixel_position_ids must have the same num_patches dimension");
+        }
+        vision_fixed_num_patches_ = position_patches;
+      }
+    }
+  }
+  if (!unified_ && vision_fixed_num_patches_ > 0 &&
+      vision_fixed_num_patches_ % (kGemma4PoolingKernelSize * kGemma4PoolingKernelSize) != 0) {
+    throw std::runtime_error("Gemma4 vision fixed num_patches must be divisible by 9");
   }
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
@@ -432,16 +463,22 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
   if (payload.images) {
     // The Gemma4ImageTransform pads pixel_values and position_ids to max_patches.
     //
-    // Standard gemma4: the SigLIP vision ONNX expects the actual (unpadded)
-    // number of teacher patches, so the tensors are trimmed to
-    // actual_patches = actual_soft_tokens * pooling_kernel_size².
+    // Standard gemma4 uses the valid patch count for dynamic inputs or the
+    // declared capacity for fixed inputs.
     //
     // Unified (gemma4_unified): the encoder-free vision graph consumes the full
     // padded (max_soft_tokens, 6912) tensors and strips padding internally using
     // position_ids (== -1 marks padding). No trimming is applied; actual_patches
     // is computed but the trim branches below are gated on !unified_.
-    constexpr int64_t kPoolingKernelSize = 3;
-    const int64_t actual_patches = static_cast<int64_t>(max_soft_tokens) * kPoolingKernelSize * kPoolingKernelSize;
+    const int64_t actual_patches =
+        static_cast<int64_t>(max_soft_tokens) * kGemma4PoolingKernelSize * kGemma4PoolingKernelSize;
+    if (vision_fixed_num_patches_ > 0 && vision_fixed_num_patches_ < actual_patches) {
+      throw std::runtime_error("Gemma4 vision model accepts " + std::to_string(vision_fixed_num_patches_) +
+                               " patches, but preprocessing produced " + std::to_string(actual_patches) +
+                               " valid patches");
+    }
+    const int64_t target_patches =
+        !unified_ && vision_fixed_num_patches_ > 0 ? vision_fixed_num_patches_ : actual_patches;
 
     // Get padded pixel_values shape
     const float* pv_data{};
@@ -451,23 +488,28 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
     // Determine the patches dimension and patch_dim based on tensor rank
     // 2D: (num_patches, patch_dim) or 3D: (batch, num_patches, patch_dim)
+    if (pv_dims != 2 && pv_dims != 3) {
+      throw std::runtime_error("pixel_values has unexpected rank " + std::to_string(pv_dims) +
+                               ". Expected 2 (num_patches, patch_dim) or 3 (batch, num_patches, patch_dim).");
+    }
     const int64_t num_padded_patches = (pv_dims == 3) ? pv_shape[1] : pv_shape[0];
     const int64_t patch_dim = (pv_dims == 3) ? pv_shape[2] : pv_shape[1];
 
-    if (!unified_ && actual_patches < num_padded_patches) {
-      // Trim: copy only the first actual_patches from the padded tensor.
-      // The preprocessor outputs float32 data, so we trim using float32 strides,
-      // then cast to the model's pixel_values type (float, fp16, or bf16).
+    if (!unified_ && target_patches != num_padded_patches) {
+      // Resize in float32 before casting to the model's pixel_values type.
       const int64_t batch = (pv_dims == 3) ? pv_shape[0] : 1;
-      auto trimmed_shape = (pv_dims == 3) ? std::vector<int64_t>{batch, actual_patches, patch_dim}
-                                          : std::vector<int64_t>{actual_patches, patch_dim};
+      auto trimmed_shape = (pv_dims == 3) ? std::vector<int64_t>{batch, target_patches, patch_dim}
+                                          : std::vector<int64_t>{target_patches, patch_dim};
 
       // Trim in float32 (source is always float32 from the preprocessor)
       auto trimmed_fp32 = OrtValue::CreateTensor<float>(allocator, trimmed_shape);
       float* dst = trimmed_fp32->GetTensorMutableData<float>();
+      if (target_patches > num_padded_patches) {
+        std::fill_n(dst, batch * target_patches * patch_dim, 0.0f);
+      }
       const float* src = pv_data;
       const size_t src_row = static_cast<size_t>(num_padded_patches * patch_dim);
-      const size_t dst_row = static_cast<size_t>(actual_patches * patch_dim);
+      const size_t dst_row = static_cast<size_t>(target_patches * patch_dim);
       ParallelCopyStridedRows(thread_pool_, src, src_row, dst, dst_row,
                               static_cast<size_t>(batch), sizeof(float));
 
@@ -495,6 +537,10 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       size_t pos_dims;
       CheckResult(OrtxGetTensorData(pixel_position_ids, &pos_data_raw, &pos_shape, &pos_dims));
 
+      if (pos_dims != 2 && pos_dims != 3) {
+        throw std::runtime_error("pixel_position_ids has unexpected rank " + std::to_string(pos_dims) +
+                                 ". Expected 2 (num_patches, 2) or 3 (batch, num_patches, 2).");
+      }
       const int64_t num_padded_pos = (pos_dims == 3) ? pos_shape[1] : pos_shape[0];
       const int64_t pos_last_dim = (pos_dims == 3) ? pos_shape[2] : pos_shape[1];
 
@@ -503,9 +549,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       // standard grids and full padded unified grids, converting values rather
       // than reinterpreting the source bytes when the graph expects INT32.
       const int64_t pos_batch = (pos_dims == 3) ? pos_shape[0] : 1;
-      const int64_t output_patches = (!unified_ && actual_patches < num_padded_pos)
-                                         ? actual_patches
-                                         : num_padded_pos;
+      const int64_t output_patches = unified_ ? num_padded_pos : target_patches;
       auto output_pos_shape = (pos_dims == 3) ? std::vector<int64_t>{pos_batch, output_patches, pos_last_dim}
                                               : std::vector<int64_t>{output_patches, pos_last_dim};
       auto output_pos = OrtValue::CreateTensor(allocator, output_pos_shape, pixel_position_ids_type_);
@@ -514,11 +558,17 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       const size_t dst_stride = static_cast<size_t>(output_patches * pos_last_dim);
       if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
         auto* dst = output_pos->GetTensorMutableData<int32_t>();
+        if (output_patches > num_padded_pos) {
+          std::fill_n(dst, pos_batch * output_patches * pos_last_dim, int32_t{-1});
+        }
         ParallelTransformStridedRows(
             thread_pool_, src, src_stride, dst, dst_stride,
             static_cast<size_t>(pos_batch));
       } else if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
         auto* dst = output_pos->GetTensorMutableData<int64_t>();
+        if (output_patches > num_padded_pos) {
+          std::fill_n(dst, pos_batch * output_patches * pos_last_dim, int64_t{-1});
+        }
         ParallelCopyStridedRows(
             thread_pool_, src, src_stride, dst, dst_stride,
             static_cast<size_t>(pos_batch), sizeof(int64_t));
