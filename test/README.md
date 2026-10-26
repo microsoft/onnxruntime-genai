@@ -28,6 +28,27 @@ python test/python/create/create_qwen_position_inputs.py
 The existing three-row Qwen3-VL fixture is retained as a control. These tests do not
 establish numerical vision-embedding or end-to-end generation parity.
 
+## Qwen partitioned host-vision regression
+
+Run the CPU host-runtime regression from `test/python`:
+
+```sh
+python -m pytest -q --test_models ../models models/test_qwen_fara_models.py -k qwen3_5_openvino_partitioned
+```
+
+The numerical cases generate small ONNX stages and PNG images in pytest temporary
+directories automatically. They use the actual partitioned Qwen3.5 runtime with
+independent NumPy references for interpolation, spatial-merge order, rotary values,
+frame masks, image-feature concatenation and host injection. A diagnostic merger
+preserves its complete inputs in the features so elementwise embedding comparisons
+observe each host calculation. Non-square, unequal packed/padded and temporal grids,
+real image preprocessing, and image prefill followed by text decoding are covered.
+ONNX and Pillow are required to execute all cases; the existing Qwen3.5 tokenizer
+and processor assets supply the fixture metadata.
+
+These are synthetic host-math and wiring tests, not pretrained-model feature parity,
+learned attention validation, public video support, or OpenVINO EP/device validation.
+
 ## Parallel preprocessing checks
 
 After building a Release configuration, run the focused C++ suite:
