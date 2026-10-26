@@ -15,6 +15,57 @@ from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwe
 from models.builders.qwen3_8_graph import Qwen4ExpGraphModel
 
 
+@pytest.mark.parametrize(
+    ("model_class", "methods"),
+    [
+        (
+            Model,
+            [
+                "uses_windowed_kv_cache",
+                "make_decoder_state_groups",
+                "make_paged_key_value_state_group",
+                "make_key_value_cache_names",
+                "is_windowed_paged_layer",
+                "has_windowed_paged_layers",
+                "make_key_value_cache_shape",
+            ],
+        ),
+        (
+            Model,
+            ["make_causal_conv_state_at_last_real_token", "make_varlen_causal_conv_with_state", "make_gated_rms_norm"],
+        ),
+        (
+            Model,
+            [
+                "make_paged_mrope_inputs",
+                "make_paged_mrope_output",
+                "make_mrotary_embedding",
+                "make_rotary_embedding_multi_cache",
+                "make_paged_rotary_multi_cache_subgraph",
+                "make_qk_norm",
+            ],
+        ),
+        (Model, ["make_gated_delta_net", "make_varlen_gated_delta_net", "make_linear_attention_gate"]),
+        (Model, ["make_sparse_attention", "make_paged_attention", "make_attention"]),
+        (Model, ["prunes_hidden_rows", "make_selected_hidden_rows", "make_last_real_token_position"]),
+        (
+            Qwen35TextModel,
+            [
+                "make_attention_input_proj",
+                "make_attention_output_proj",
+                "make_qwen_gated_delta_net",
+                "make_linear_attention_input_proj",
+                "make_linear_attention_output_proj",
+                "make_decoder_state_groups",
+            ],
+        ),
+    ],
+)
+def test_builder_methods_retain_original_grouping(model_class, methods):
+    positions = [getattr(model_class, name).__code__.co_firstlineno for name in methods]
+    assert positions == sorted(positions)
+
+
 @pytest.mark.parametrize("capture", [False, True])
 def test_webgpu_graph_capture_override_lives_in_webgpu(capture):
     model = object.__new__(Model)
@@ -35,8 +86,16 @@ def test_webgpu_graph_capture_override_lives_in_webgpu(capture):
         (Qwen3VLTextModel, ["make_qk_norm"]),
         (Qwen35TextModel, ["make_attention_input_proj", "make_attention_output_proj"]),
         (Qwen35MoETextModel, ["make_moe_preprocessing", "make_moe_router", "make_moe_subgraph", "make_shared_expert"]),
-        (Qwen4ExpTextModel, ["make_moe_preprocessing", "make_moe_expert_names", "make_moe_op",
-                            "make_attention_input_proj", "make_gated_rms_norm"]),
+        (
+            Qwen4ExpTextModel,
+            [
+                "make_moe_preprocessing",
+                "make_moe_expert_names",
+                "make_moe_op",
+                "make_attention_input_proj",
+                "make_gated_rms_norm",
+            ],
+        ),
         (Qwen4ExpGraphModel, ["make_cast"]),
         (Qwen4ExpVisionModel, ["make_attention", "make_gelu"]),
     ],
@@ -117,7 +176,9 @@ def test_expansion_methods_have_existing_builder_counterparts():
 def test_qwen38_super_dispatch_preserves_qwen35_projection_fallback():
     model = object.__new__(Qwen4ExpTextModel)
 
-    assert super(Qwen4ExpTextModel, model).make_attention_input_proj.__func__ is Qwen35TextModel.make_attention_input_proj
+    assert (
+        super(Qwen4ExpTextModel, model).make_attention_input_proj.__func__ is Qwen35TextModel.make_attention_input_proj
+    )
     assert super(Qwen4ExpTextModel, model).make_moe_preprocessing.__func__ is Qwen35MoETextModel.make_moe_preprocessing
     assert super(Qwen35TextModel, model).make_attention_input_proj.__func__ is Model.make_attention_input_proj
     assert (

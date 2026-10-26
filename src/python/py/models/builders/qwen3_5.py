@@ -154,51 +154,11 @@ class Qwen35TextModel(Model):
         return layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
 
 
-    def make_decoder_state_groups(self, inputs, outputs):
-        if not self.use_paged_attention:
-            return []
+    def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
+        """Split Qwen3.5's doubled, per-head Q projection into Q and gate."""
+        super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
 
-        full_attention_layers = [
-            layer_id
-            for layer_id, layer_type in enumerate(self.layer_types)
-            if layer_type in {"full_attention", "sliding_attention"}
-        ]
-        conv_layers = [
-            layer_id
-            for layer_id, layer_type in enumerate(self.layer_types)
-            if layer_type in {"conv", "linear_attention"}
-        ]
-        linear_attention_layers = [
-            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
-        ]
-        state_groups = []
-        if full_attention_layers:
-            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
-        if not linear_attention_layers:
-            return state_groups
-
-        state_update_capacity = (
-            self.context_length_attrs["state_update_capacity"] if "state_update_capture_count" in inputs else 0
-        )
-
-        for state_name, layer_ids in (
-            ("conv", conv_layers),
-            ("recurrent", linear_attention_layers),
-        ):
-            group = {
-                "kind": f"fixed_{state_name}",
-                "layer_ids": layer_ids,
-            }
-            if state_update_capacity:
-                state_update = {
-                    "capacity": state_update_capacity,
-                }
-                if state_name == "recurrent":
-                    state_update["key_head_count"] = self.linear_num_key_heads
-                group["state_update"] = state_update
-            state_groups.append(group)
-
-        return state_groups
+        self.split_attention_query_gate(layer_id)
 
     def split_attention_query_gate(self, layer_id):
         """Split the doubled per-head query projection into query and output gate."""
@@ -251,6 +211,29 @@ class Qwen35TextModel(Model):
 
         self.attention_attrs["q_path"] = f"{rs_q_name}/output_0"
         self.attention_attrs["gate_path"] = f"{rs_g_name}/output_0"
+    def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
+        """Apply Qwen3.5's attention output gate before the shared output projection."""
+        q_size = self.num_attn_heads * self.head_size
+        output_shape = self.make_hidden_state_shape(last_dim=q_size)
+        sigmoid_name = f"/model/layers.{layer_id}/attn/gate/Sigmoid"
+        self.make_sigmoid(
+            sigmoid_name,
+            self.attention_attrs["gate_path"],
+            self.io_dtype,
+            output_shape,
+        )
+
+        gated_name = f"/model/layers.{layer_id}/attn/gate/Mul"
+        self.make_mul(
+            gated_name,
+            [self.attention_attrs["o_path"], f"{sigmoid_name}/output_0"],
+            self.io_dtype,
+            output_shape,
+        )
+        self.attention_attrs["o_path"] = f"{gated_name}/output_0"
+
+        super().make_attention_output_proj(layer_id, attention, root_input, **kwargs)
+
     def make_gated_delta_net_expansion(self, layer_id, attention, conv_out_3d, b_name, a_name):
         """Expand dense GatedDeltaNet into gate preprocessing plus LinearAttention."""
         q_path, k_path, v_path, decay, beta = self.make_gated_delta_net_gates_expansion(
@@ -565,33 +548,51 @@ class Qwen35TextModel(Model):
 
         self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
 
-    def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
-        """Apply Qwen3.5's attention output gate before the shared output projection."""
-        q_size = self.num_attn_heads * self.head_size
-        output_shape = self.make_hidden_state_shape(last_dim=q_size)
-        sigmoid_name = f"/model/layers.{layer_id}/attn/gate/Sigmoid"
-        self.make_sigmoid(
-            sigmoid_name,
-            self.attention_attrs["gate_path"],
-            self.io_dtype,
-            output_shape,
+    def make_decoder_state_groups(self, inputs, outputs):
+        if not self.use_paged_attention:
+            return []
+
+        full_attention_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"full_attention", "sliding_attention"}
+        ]
+        conv_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"conv", "linear_attention"}
+        ]
+        linear_attention_layers = [
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        ]
+        state_groups = []
+        if full_attention_layers:
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
+        if not linear_attention_layers:
+            return state_groups
+
+        state_update_capacity = (
+            self.context_length_attrs["state_update_capacity"] if "state_update_capture_count" in inputs else 0
         )
 
-        gated_name = f"/model/layers.{layer_id}/attn/gate/Mul"
-        self.make_mul(
-            gated_name,
-            [self.attention_attrs["o_path"], f"{sigmoid_name}/output_0"],
-            self.io_dtype,
-            output_shape,
-        )
-        self.attention_attrs["o_path"] = f"{gated_name}/output_0"
+        for state_name, layer_ids in (
+            ("conv", conv_layers),
+            ("recurrent", linear_attention_layers),
+        ):
+            group = {
+                "kind": f"fixed_{state_name}",
+                "layer_ids": layer_ids,
+            }
+            if state_update_capacity:
+                state_update = {
+                    "capacity": state_update_capacity,
+                }
+                if state_name == "recurrent":
+                    state_update["key_head_count"] = self.linear_num_key_heads
+                group["state_update"] = state_update
+            state_groups.append(group)
 
-        super().make_attention_output_proj(layer_id, attention, root_input, **kwargs)
-    def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
-        """Split Qwen3.5's doubled, per-head Q projection into Q and gate."""
-        super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
-
-        self.split_attention_query_gate(layer_id)
+        return state_groups
 
 
 class Qwen35MoETextModel(Qwen35TextModel):
