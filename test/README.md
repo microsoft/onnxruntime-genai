@@ -14,6 +14,20 @@ This directory contains assets, scripts, and definitions used by the test suite.
     - `test/python/models/*` contains Python scripts used to test ONNX models. Scripts follow the `test_*.py` naming format.
 - `test/tool-definitions/*` contains all tool definitions used for testing.
 
+## Qwen position-input component tests
+
+`RopeRows/QwenPositionValuesTest.*` in `engine_unit_tests` checks exact image-prefill
+and successive decode position tensors for three-row and four-row Qwen mRoPE inputs.
+The four-row fixture is a tiny identity graph used only for real session metadata,
+not language-model inference. Regenerate it from the repository root with:
+
+```sh
+python test/python/create/create_qwen_position_inputs.py
+```
+
+The existing three-row Qwen3-VL fixture is retained as a control. These tests do not
+establish numerical vision-embedding or end-to-end generation parity.
+
 ## Parallel preprocessing checks
 
 After building a Release configuration, run the focused C++ suite:
