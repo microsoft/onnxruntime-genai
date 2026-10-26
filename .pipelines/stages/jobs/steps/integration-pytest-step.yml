@@ -118,6 +118,7 @@ steps:
             model_dir=\$(\$PYTHON_EXE -c 'from test.python.integration.resolver import get_path_for; print(get_path_for(\"${{ parameters.model }}\", \"${{ parameters.ep }}\"))')
             \$PYTHON_EXE benchmark/python/toolcalling/benchmark_toolcalling.py \
               -m \"\$model_dir\" -e ${{ parameters.ep }} \
+              --model_id '${{ parameters.model }}' \
               --mode end_to_end --max_new_tokens 256 \
               -o /results/toolcalling-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.json
           fi

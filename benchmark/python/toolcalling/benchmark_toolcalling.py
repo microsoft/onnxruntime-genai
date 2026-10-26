@@ -285,6 +285,7 @@ def run(args):
     total = len(rows)
     summary = {
         "model_path": args.model_path,
+        "model_id": args.model_id or Path(args.model_path).name,
         "execution_provider": args.execution_provider,
         "runner": runner,
         "mode": args.mode,
@@ -320,6 +321,7 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark tool calling for an ONNX chat model")
     parser.add_argument("-m", "--model_path", required=True)
+    parser.add_argument("--model_id", help="stable logical model identity recorded in the report")
     parser.add_argument("-e", "--execution_provider", required=True, choices=["cpu", "cuda", "dml", "webgpu"])
     parser.add_argument("-o", "--output", help="write the full report, including per-case output")
     parser.add_argument("--cases", default=str(DEFAULT_CASES))
