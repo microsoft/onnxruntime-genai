@@ -1,13 +1,13 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+import numpy as np
 import onnx_ir as ir
 
-from .expansions.qwen3_8 import Qwen38Vision
 from .qwen3_8_graph import Qwen4ExpGraphModel
 
 
-class Qwen4ExpVisionModel(Qwen38Vision, Qwen4ExpGraphModel):
+class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
     def __init__(self, config, visual, io_dtype):
         super().__init__(io_dtype, "vision.onnx", "qwen4_exp_vision")
         self.config = config
@@ -598,3 +598,128 @@ class Qwen4ExpVisionModel(Qwen38Vision, Qwen4ExpGraphModel):
             ir.DataType.BOOL,
             ["num_patches", "num_patches"],
         )
+
+    def make_attention(self, layer_id, attention, root_input, cos, sin):
+        qkv = self.make_linear(
+            f"visual.blocks.{layer_id}.attn.qkv",
+            attention.qkv,
+            root_input,
+            ["num_patches", 3 * self.hidden_size],
+        )
+        qkv_4d = f"/visual/blocks/{layer_id}/attn/qkv/Reshape/output_0"
+        self.make_reshape(
+            f"/visual/blocks/{layer_id}/attn/qkv/Reshape",
+            [qkv, f"/model/constants/INT64/[-1, 3, {self.num_heads}, {self.head_size}]"],
+            self.io_dtype,
+            ["num_patches", 3, self.num_heads, self.head_size],
+        )
+        split_outputs = [f"/visual/blocks/{layer_id}/attn/qkv/Split/output_{index}" for index in range(3)]
+        self.make_split(
+            f"/visual/blocks/{layer_id}/attn/qkv/Split",
+            [qkv_4d, "/model/constants/INT64/[1, 1, 1]"],
+            split_outputs,
+            [self.io_dtype] * 3,
+            [["num_patches", 1, self.num_heads, self.head_size]] * 3,
+            axis=1,
+        )
+        squeezed = []
+        for label, value in zip(("q", "k", "v"), split_outputs, strict=True):
+            output = f"/visual/blocks/{layer_id}/attn/{label}/Squeeze/output_0"
+            self.make_squeeze(
+                f"/visual/blocks/{layer_id}/attn/{label}/Squeeze",
+                [value, "/model/constants/INT64/[1]"],
+                self.io_dtype,
+                ["num_patches", self.num_heads, self.head_size],
+            )
+            squeezed.append(output)
+        query = self.apply_rotary(layer_id, "q", squeezed[0], cos, sin)
+        key = self.apply_rotary(layer_id, "k", squeezed[1], cos, sin)
+        query_t = f"/visual/blocks/{layer_id}/attn/q/Transpose/output_0"
+        key_t = f"/visual/blocks/{layer_id}/attn/k/Transpose/output_0"
+        value_t = f"/visual/blocks/{layer_id}/attn/v/Transpose/output_0"
+        self.make_transpose(
+            f"/visual/blocks/{layer_id}/attn/q/Transpose",
+            query,
+            self.io_dtype,
+            [self.num_heads, "num_patches", self.head_size],
+            [1, 0, 2],
+        )
+        self.make_transpose(
+            f"/visual/blocks/{layer_id}/attn/k/Transpose",
+            key,
+            self.io_dtype,
+            [self.num_heads, self.head_size, "num_patches"],
+            [1, 2, 0],
+        )
+        self.make_transpose(
+            f"/visual/blocks/{layer_id}/attn/v/Transpose",
+            squeezed[2],
+            self.io_dtype,
+            [self.num_heads, "num_patches", self.head_size],
+            [1, 0, 2],
+        )
+        scores = self.make_binary(
+            "MatMul",
+            f"/visual/blocks/{layer_id}/attn/scores/MatMul",
+            [query_t, key_t],
+            self.io_dtype,
+            [self.num_heads, "num_patches", "num_patches"],
+        )
+        scaled = self.make_binary(
+            "Mul",
+            f"/visual/blocks/{layer_id}/attn/scores/Mul",
+            [scores, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{attention.scaling}"],
+            self.io_dtype,
+            [self.num_heads, "num_patches", "num_patches"],
+        )
+        probabilities = f"/visual/blocks/{layer_id}/attn/Softmax/output_0"
+        frame_mask = self.make_frame_attention_mask(layer_id)
+        masked = f"/visual/blocks/{layer_id}/attn/scores/Where"
+        mask_value = f"/visual/blocks/{layer_id}/attn/mask_value"
+        self.make_initializer(np.asarray(-np.inf, dtype=np.float32), mask_value, to=self.io_dtype)
+        self.make_where(
+            masked,
+            [frame_mask, scaled, mask_value],
+            self.io_dtype,
+            [self.num_heads, "num_patches", "num_patches"],
+        )
+        self.make_softmax(
+            f"/visual/blocks/{layer_id}/attn/Softmax",
+            f"{masked}/output_0",
+            self.io_dtype,
+            [self.num_heads, "num_patches", "num_patches"],
+            axis=-1,
+        )
+        context = self.make_binary(
+            "MatMul",
+            f"/visual/blocks/{layer_id}/attn/context/MatMul",
+            [probabilities, value_t],
+            self.io_dtype,
+            [self.num_heads, "num_patches", self.head_size],
+        )
+        context_t = f"/visual/blocks/{layer_id}/attn/context/Transpose/output_0"
+        self.make_transpose(
+            f"/visual/blocks/{layer_id}/attn/context/Transpose",
+            context,
+            self.io_dtype,
+            ["num_patches", self.num_heads, self.head_size],
+            [1, 0, 2],
+        )
+        context_flat = f"/visual/blocks/{layer_id}/attn/context/Reshape/output_0"
+        self.make_reshape(
+            f"/visual/blocks/{layer_id}/attn/context/Reshape",
+            [context_t, f"/model/constants/INT64/[-1, {self.hidden_size}]"],
+            self.io_dtype,
+            ["num_patches", self.hidden_size],
+        )
+        return self.make_linear(
+            f"visual.blocks.{layer_id}.attn.proj",
+            attention.proj,
+            context_flat,
+            ["num_patches", self.hidden_size],
+        )
+    def make_gelu(self, name, root_input, shape, approximate="none"):
+        output = f"{name}/output_0"
+        self.make_node("Gelu", [root_input], [output], name=name, approximate=approximate)
+        self.make_value(output, self.io_dtype, shape)
+        return output

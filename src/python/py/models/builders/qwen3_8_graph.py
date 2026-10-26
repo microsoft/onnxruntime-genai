@@ -6,10 +6,9 @@ import os
 import onnx_ir as ir
 
 from .base import Model
-from .expansions.qwen3_8 import Qwen38Graph
 
 
-class Qwen4ExpGraphModel(Qwen38Graph, Model):
+class Qwen4ExpGraphModel(Model):
     def __init__(self, io_dtype, filename, graph_name):
         # Companion graphs reuse emission helpers without decoder configuration or cache state.
         self.io_dtype = ir.DataType(io_dtype)
@@ -70,3 +69,7 @@ class Qwen4ExpGraphModel(Qwen38Graph, Model):
         self.make_node(op_type, inputs, [output], name=name)
         self.make_value(output, dtype, shape)
         return output
+
+    def make_cast(self, name, root_input, dtype, shape):
+        super().make_cast(name, root_input, dtype, shape)
+        return f"{name}/output_0"

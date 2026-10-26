@@ -8,10 +8,9 @@ import pytest
 
 from models.builders.base import Model
 from models.builders.expansions.engram import Qwen38Engram as PagedEngram
-from models.builders.expansions.qwen3_5 import Qwen35, Qwen35MoE
-from models.builders.expansions.qwen3_8 import Qwen38, Qwen38Graph, Qwen38Vision
 from models.builders.expansions.standard import Standard
 from models.builders.expansions.webgpu import WebGPU
+from models.builders.qwen import Qwen3VLTextModel
 from models.builders.qwen3_5 import Qwen35MoETextModel, Qwen35MTPModel, Qwen35TextModel
 from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel, Qwen38Engram
 from models.builders.qwen3_8_graph import Qwen4ExpGraphModel
@@ -32,19 +31,21 @@ def test_webgpu_graph_capture_override_lives_in_webgpu(capture):
 
 
 @pytest.mark.parametrize(
-    ("model_class", "expansion_class", "method"),
+    ("model_class", "methods"),
     [
-        (Qwen35TextModel, Qwen35, "make_attention_input_proj"),
-        (Qwen35MoETextModel, Qwen35MoE, "make_moe_router"),
-        (Qwen35MoETextModel, Qwen35MoE, "make_shared_expert"),
-        (Qwen4ExpTextModel, Qwen38, "make_attention_input_proj"),
-        (Qwen4ExpGraphModel, Qwen38Graph, "make_cast"),
-        (Qwen4ExpVisionModel, Qwen38Vision, "make_attention"),
+        (Qwen3VLTextModel, ["make_qk_norm"]),
+        (Qwen35TextModel, ["make_attention_input_proj", "make_attention_output_proj"]),
+        (Qwen35MoETextModel, ["make_moe_preprocessing", "make_moe_router", "make_moe_subgraph", "make_shared_expert"]),
+        (Qwen4ExpTextModel, ["make_moe_preprocessing", "make_moe_expert_names", "make_moe_op",
+                            "make_attention_input_proj", "make_gated_rms_norm"]),
+        (Qwen4ExpGraphModel, ["make_cast"]),
+        (Qwen4ExpVisionModel, ["make_attention", "make_gelu"]),
     ],
 )
-def test_model_uses_architecture_expansion(model_class, expansion_class, method):
-    assert method not in model_class.__dict__
-    assert getattr(model_class, method) is getattr(expansion_class, method)
+def test_qwen_overrides_are_defined_directly_in_builders(model_class, methods):
+    for method in methods:
+        assert method in model_class.__dict__
+        assert getattr(model_class, method).__module__ == model_class.__module__
 
 
 @pytest.mark.parametrize(
@@ -117,18 +118,18 @@ def test_expansion_methods_have_existing_builder_counterparts():
 def test_qwen38_super_dispatch_preserves_qwen35_projection_fallback():
     model = object.__new__(Qwen4ExpTextModel)
 
-    assert super(Qwen38, model).make_attention_input_proj.__func__ is Qwen35.make_attention_input_proj
-    assert super(Qwen38, model).make_moe_preprocessing.__func__ is Qwen35MoE.make_moe_preprocessing
-    assert super(Qwen35, model).make_attention_input_proj.__func__ is Model.make_attention_input_proj
+    assert super(Qwen4ExpTextModel, model).make_attention_input_proj.__func__ is Qwen35TextModel.make_attention_input_proj
+    assert super(Qwen4ExpTextModel, model).make_moe_preprocessing.__func__ is Qwen35MoETextModel.make_moe_preprocessing
+    assert super(Qwen35TextModel, model).make_attention_input_proj.__func__ is Model.make_attention_input_proj
     assert (
         super(Qwen4ExpTextModel, model).make_linear_attention_qkv_z_proj.__func__
         is Qwen35TextModel.make_linear_attention_qkv_z_proj
     )
 
 
-@pytest.mark.parametrize("expansion_class", [Qwen38Graph, Qwen38Vision])
-def test_qwen38_auxiliary_expansions_live_in_architecture_module(expansion_class):
-    assert expansion_class.__module__ == "models.builders.expansions.qwen3_8"
+def test_qwen_expansion_modules_are_removed():
+    expansions = Path(__file__).parents[3] / "src/python/py/models/builders/expansions"
+    assert not any((expansions / name).exists() for name in ("qwen.py", "qwen3_5.py", "qwen3_8.py"))
 
 
 @pytest.mark.parametrize("paged", [False, True])
