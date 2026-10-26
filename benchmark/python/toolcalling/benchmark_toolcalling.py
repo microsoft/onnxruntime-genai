@@ -45,6 +45,11 @@ METRICS = [
 # Second turn: the model has been handed the tool's result and must answer with it.
 E2E_METRICS = ["end_to_end_correct", "answer_uses_result", "no_repeat_call", "final_clean_stop"]
 
+PLUGIN_EP_PACKAGES = {
+    "cuda": "onnxruntime_ep_cuda",
+    "webgpu": "onnxruntime_ep_webgpu",
+}
+
 
 def load_cases(path, tools_path):
     """Expand each case's tool names from the shared OpenAI tool definitions."""
@@ -74,6 +79,11 @@ def is_paged(model_path):
 
 
 def build_model(args):
+    plugin_package = PLUGIN_EP_PACKAGES.get(args.execution_provider)
+    if plugin_package is not None:
+        plugin = importlib.import_module(plugin_package)
+        og.register_execution_provider_library(plugin.get_ep_name(), plugin.get_library_path())
+
     config = og.Config(args.model_path)
     config.clear_providers()
     if args.execution_provider != "cpu":
