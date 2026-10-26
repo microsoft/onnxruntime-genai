@@ -32,7 +32,8 @@ def main(args):
         print("Loading model...")
 
     # Create model
-    config = get_config(args.model_path, args.execution_provider, args.ep_path)
+    search_options = get_search_options(args)
+    config = get_config(args.model_path, args.execution_provider, args.ep_path, search_options=search_options)
     model = og.Model(config)
     if args.verbose:
         print("Model loaded")
@@ -47,9 +48,6 @@ def main(args):
     processor = model.create_multimodal_processor()
     if args.verbose:
         print("Processor created")
-
-    # Get search options for generator params
-    search_options = get_search_options(args)
 
     # Create running list of messages
     input_list = [
@@ -258,5 +256,4 @@ if __name__ == "__main__":
     get_guidance_args(parser)
 
     args = parser.parse_args()
-    args.max_length = args.max_length if hasattr(args, "max_length") else 7680
     main(args)

@@ -67,7 +67,7 @@ void Block::SetIdentity(std::shared_ptr<const BlockIdentity> identity) {
   if (!IsFull()) {
     throw std::runtime_error("Only a full block can carry a content identity.");
   }
-  if (identity->tokens.size() != Capacity()) {
+  if (identity->Tokens().size() != Capacity()) {
     throw std::runtime_error("Block content identity does not cover every slot in the block.");
   }
   identity_ = std::move(identity);

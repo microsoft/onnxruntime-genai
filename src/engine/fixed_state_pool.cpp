@@ -924,10 +924,9 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
         "Fixed state pools require qualified transactional device semantics.");
   }
   if (SupportsStateUpdates() &&
-      impl_->device->GetType() != DeviceType::CPU &&
-      impl_->device->GetType() != DeviceType::CUDA) {
+      !impl_->device->SupportsCompactStateReplay()) {
     throw std::runtime_error(
-        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+        "Compact fixed state replay is not supported by this device.");
   }
   if (impl_->state_update_capacity != 0) {
     impl_->persistent_bytes = CheckedAdd(
@@ -1722,6 +1721,19 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
          ++tensor_index) {
       const auto& spec = impl_->tensors[tensor_index];
       auto& staged = *views.staged_outputs[tensor_index];
+      // Shared wrappers let device replay coalesce host mirrors across rows of the same backing.
+      DeviceSpan<uint8_t> input_backing, value_backing, capsule_backing;
+      std::array<DeviceSpan<uint8_t>, 2> bank_backings;
+      const auto row_view = [&](DeviceSpan<uint8_t>& backing, OrtValue* tensor,
+                                size_t row, size_t row_bytes) {
+        if (!tensor) {
+          return DeviceSpan<uint8_t>{};
+        }
+        if (backing.empty()) {
+          backing = ByteWrapTensor(*impl_->device, *tensor);
+        }
+        return backing.subspan(row * row_bytes, row_bytes);
+      };
       for (size_t row = 0; row < storage.handles.size(); ++row) {
         const auto& slot = impl_->slots[storage.handles[row].slot];
         const uint8_t inactive_bank = slot.active_bank ^ 1u;
@@ -1734,34 +1746,33 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
           continue;
         }
 
-        // Raw data pointers: wrapping each tensor in a DeviceSpan allocates, and this loop runs for
-        // every fixed tensor on every partially accepted step.
         const auto& updates = views.state_update_tensors[tensor_index];
-        const auto row_pointer = [row](const std::unique_ptr<OrtValue>& tensor,
-                                       size_t row_bytes) -> const uint8_t* {
-          if (!tensor) {
-            return nullptr;
-          }
-          return tensor->GetTensorMutableData<uint8_t>() + row * row_bytes;
-        };
-        const uint8_t* source = row_pointer(views.gathered_inputs[tensor_index], spec.row_bytes);
-        uint8_t* destination = spec.banks[inactive_bank]->GetTensorMutableData<uint8_t>() +
-                               storage.handles[row].slot * spec.row_bytes;
-        const auto* capsule = reinterpret_cast<const float*>(
-            row_pointer(updates.capsule, spec.state_update_capsule.row_bytes));
-        const float* decay = capsule;
-        const float* key = capsule
-                               ? capsule + spec.state_update_capacity * spec.state_update_channel_count
-                               : nullptr;
-        const float* delta = key
-                                 ? key + spec.state_update_capacity *
-                                             spec.state_update_key_head_count *
-                                             spec.state_update_key_width
-                                 : nullptr;
+        const auto source = row_view(input_backing, views.gathered_inputs[tensor_index].get(),
+                                     row, spec.row_bytes);
+        auto destination = row_view(bank_backings[inactive_bank], spec.banks[inactive_bank].get(),
+                                    storage.handles[row].slot, spec.row_bytes);
+        auto capsule = row_view(capsule_backing, updates.capsule.get(),
+                                row, spec.state_update_capsule.row_bytes);
+        DeviceSpan<const uint8_t> decay;
+        DeviceSpan<const uint8_t> key;
+        DeviceSpan<const uint8_t> delta;
+        if (!capsule.empty()) {
+          const size_t decay_bytes =
+              spec.state_update_capacity * spec.state_update_channel_count * sizeof(float);
+          const size_t key_bytes =
+              spec.state_update_capacity * spec.state_update_key_head_count *
+              spec.state_update_key_width * sizeof(float);
+          const size_t delta_bytes =
+              spec.state_update_capacity * spec.state_update_channel_count *
+              spec.state_update_state_width * sizeof(float);
+          decay = capsule.subspan(0, decay_bytes);
+          key = capsule.subspan(decay_bytes, key_bytes);
+          delta = capsule.subspan(decay_bytes + key_bytes, delta_bytes);
+        }
         replay_descriptors.push_back(StateUpdateReplayDesc{
             source,
             destination,
-            row_pointer(updates.value, spec.state_update_value.row_bytes),
+            row_view(value_backing, updates.value.get(), row, spec.state_update_value.row_bytes),
             decay,
             key,
             delta,

@@ -4,11 +4,13 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include "token_outputs.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include "config_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/token_post_processor.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
@@ -32,6 +34,7 @@
 #include "ep/openvino/interface.h"
 #include "ep/ryzenai/interface.h"
 #include "ep/amdgpu/interface.h"
+#include "ep/amdgpu/session_options.h"
 #include "engine/engine.h"
 
 #if defined(_WIN32)
@@ -67,13 +70,14 @@ static bool _ = (Ort::InitApi(), false);
 bool SupportsContinuousDecoding(DeviceType device_type) noexcept {
   // Some models fall back to CPU attention, where continuation is valid because their KV cache is
   // also on CPU. Other listed providers preserve appendable KV state across generation turns.
-  constexpr std::array<DeviceType, 6> supported_devices{
+  constexpr std::array<DeviceType, 7> supported_devices{
       DeviceType::CPU,
       DeviceType::CUDA,
       DeviceType::WEBGPU,
       DeviceType::OpenVINO,
       DeviceType::NvTensorRtRtx,
-      DeviceType::RyzenAI};
+      DeviceType::RyzenAI,
+      DeviceType::AMDGPU};
   return std::find(supported_devices.begin(), supported_devices.end(), device_type) !=
          supported_devices.end();
 }
@@ -333,6 +337,13 @@ OrtGlobals::~OrtGlobals() {
   //    entry session_ is declared before allocator_, so ~allocator_ runs first.
   for (auto& a : device_allocators_) a = {};
 
+  // 3.5 Release a genai-owned AMDGPU umbrella-EP registration while env_ is still valid, in case a host
+  //     retains the env past step 4 (then ORT's auto-unregister never fires) or a Model ctor threw
+  //     before ~Model could release. Passed by reference to avoid re-locking g_ort_globals_mutex; no-op
+  //     unless genai owns it. Skipped at process exit (env_ released; __cxa_finalize teardown can abort).
+  if (!g_process_exiting && env_)
+    AMDGPUExecutionProvider::ReleaseOwnedUmbrellaEp(*env_, amdgpu_owns_ep_registration_);
+
   // 4. Finally the env. If genai held the last reference, ORT destroys the environment here,
   //    unregistering / unloading any still-registered EP libraries — by now nothing references them.
   env_.reset();
@@ -389,6 +400,11 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
     return GetDmlInterface();
 #endif
 
+  // AMDGPU, like DML, is NOT cached: g_amdgpu_device is destroyed per-Model in CloseAMDGPUInterface(),
+  // so a cached pointer would dangle. Always fetch the current instance.
+  if (type == DeviceType::AMDGPU)
+    return GetAMDGPUInterface();
+
   auto& slot = device_interfaces_[type];
   if (slot)
     return slot;
@@ -415,9 +431,7 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
       owned_interfaces_.push_back(CreateRyzenAIInterface(*env_));
       slot = owned_interfaces_.back().get();
       break;
-    case DeviceType::AMDGPU:
-      slot = GetAMDGPUInterface();
-      break;
+    // DeviceType::AMDGPU is handled by the early return above (not cached).
     case DeviceType::CPU:
     default:
       owned_interfaces_.push_back(CreateCpuInterface());
@@ -808,7 +822,9 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
-  if (ModelType::IsLLM(model_->config_->model.type) || ModelType::IsPipe(model_->config_->model.type)) {
+  const auto& model_type = model_->config_->model.type;
+  if (ModelType::IsLLM(model_type) ||
+      (ModelType::IsPipe(model_type) && !ModelType::IsVLM(model_type) && !ModelType::IsMMM(model_type))) {
     throw std::runtime_error("Please use generator.AppendTokens for " + model_->config_->model.type + ". SetInputs is not supported for this model type.");
   }
 
@@ -957,6 +973,20 @@ void Generator::GenerateNextToken() {
                                          ? static_cast<int64_t>(transducer_state_->GetStepTokens().size())
                                          : static_cast<int64_t>(search_->params_->BatchBeamSize());
   generation_telemetry_.OnTokenGenerated(active_token_count);
+}
+
+TokenOutputs Generator::GetTokenOutputs() const {
+  if (const auto* transducer = dynamic_cast<const TransducerState*>(state_.get())) {
+    const auto tokens = transducer->GetStepTokens();
+    if (model_->config_->model.timestamp_level != Config::TimestampLevel::Off) {
+      const auto intervals = transducer->GetStepTokenIntervals();
+      if (intervals.size() != tokens.size())
+        throw std::runtime_error("Generator timing count does not match emitted tokens");
+      return TokenOutputs{tokens, intervals};
+    }
+    return TokenOutputs{tokens};
+  }
+  return TokenOutputs{search_->GetNextTokens().CopyDeviceToCpu()};
 }
 
 SpeculativeStats Generator::GetSpeculativeStats() const {

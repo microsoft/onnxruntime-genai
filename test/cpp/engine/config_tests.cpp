@@ -14,6 +14,61 @@
 
 namespace Generators::test {
 
+TEST(ConfigTest, ParsesTimestampConfiguration) {
+  Config config;
+
+  OverlayConfig(config, R"({"model":{
+    "type":"nemotron_speech",
+    "timestamp_level":"all",
+    "sample_rate":16000,
+    "hop_length":160,
+    "subsampling_factor":8,
+    "segment_separators":[".","!?"] ,
+    "segment_gap_threshold_seconds":1.25
+  }})");
+
+  EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::All);
+  EXPECT_EQ(config.model.segment_separators, (std::vector<std::string>{".", "!?"}));
+  EXPECT_EQ(config.model.segment_gap_threshold_seconds, 1.25);
+}
+
+TEST(ConfigTest, ParsesDisabledTimestampGap) {
+  Config config;
+  config.model.segment_gap_threshold_seconds = 1.0;
+
+  OverlayConfig(config, R"({"model":{"segment_gap_threshold_seconds":null}})");
+
+  EXPECT_FALSE(config.model.segment_gap_threshold_seconds.has_value());
+}
+
+TEST(ConfigTest, RejectsInvalidTimestampConfiguration) {
+  for (const char* json : {
+           R"({"model":{"timestamp_level":"token"}})",
+           R"({"model":{"segment_gap_threshold_frames":12}})",
+           R"({"model":{"segment_gap_threshold_seconds":-1}})"}) {
+    Config config;
+    EXPECT_THROW(OverlayConfig(config, json), std::runtime_error);
+  }
+}
+
+TEST(ConfigTest, RejectsInvalidTimestampOverlayWithoutChangingConfig) {
+  Config config;
+  for (const auto& overlay : {
+           R"({"model":{"type":"nemotron_speech","timestamp_level":"word"}})",
+           R"({"model":{"type":"gpt2","timestamp_level":"word","sample_rate":100,"hop_length":10,"subsampling_factor":1}})",
+           R"({"model":{"type":"nemotron_speech","timestamp_level":"segment","sample_rate":16000,"hop_length":160,"subsampling_factor":8,"segment_gap_threshold_seconds":1e20}})"}) {
+    EXPECT_THROW(OverlayConfig(config, overlay), std::runtime_error);
+    EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::Off);
+  }
+}
+
+TEST(ConfigTest, AcceptsZeroTimestampGap) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"segment_gap_threshold_seconds":0}})");
+  ASSERT_TRUE(config.model.segment_gap_threshold_seconds.has_value());
+  EXPECT_EQ(GetSegmentGapThresholdFrames(config.model.segment_gap_threshold_seconds, 100, 10, 1), 0);
+}
+
 TEST(ConfigTest, ParsesStaticBatching) {
   Config config;
 
@@ -87,6 +142,58 @@ TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
 
   ASSERT_TRUE(config.engine.dynamic_batching->num_blocks);
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
+}
+
+TEST(ConfigTest, Dflash2SnapshotsDefaultToOneAndAllowZeroOrLargerPools) {
+  Config defaults;
+  OverlayConfig(defaults, R"({"engine":{"dynamic_batching":{"num_blocks":32}}})");
+  ASSERT_TRUE(defaults.engine.dynamic_batching);
+  EXPECT_EQ(defaults.engine.dynamic_batching->dflash2_max_snapshots, 1u);
+
+  for (const size_t capacity : {size_t{0}, size_t{1}, size_t{3}, size_t{2147483647}}) {
+    Config config;
+    OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                              std::to_string(capacity) + "}}}");
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity);
+    OverlayConfig(config, R"({"runtime_profiles":[{
+      "id":"snapshot-pool",
+      "eligibility":{"minimum_total_device_memory_bytes":100},
+      "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                              std::to_string(capacity == 0 ? 3 : 0) + "}}}}]}");
+    ApplyRuntimeProfile(config, 99);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity);
+    ApplyRuntimeProfile(config, 100);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, capacity == 0 ? 3u : 0u);
+  }
+}
+
+TEST(ConfigTest, Dflash2SnapshotLimitRejectsInvalidValuesTransactionally) {
+  for (const auto* value : {"-1", "1.5", "2147483648", "true", "\"3\"", "null"}) {
+    Config config;
+    OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":3}}})");
+    EXPECT_THROW(OverlayConfig(config, R"({"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                                           std::string{value} + "}}}"),
+                 std::runtime_error);
+    EXPECT_EQ(config.engine.dynamic_batching->dflash2_max_snapshots, 3u);
+    EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+      "id":"invalid",
+      "eligibility":{"minimum_total_device_memory_bytes":0},
+      "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":)" +
+                                           std::string{value} + "}}}}]}"),
+                 std::runtime_error);
+    EXPECT_TRUE(config.runtime_profiles.empty());
+  }
+}
+
+TEST(ConfigTest, Dflash2SnapshotOnlyProfileRequiresDynamicBatchingEvenWhenDisabled) {
+  Config config;
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"disabled",
+    "eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":0}}}
+  }]})");
+  EXPECT_THROW(ApplyRuntimeProfile(config, 0), std::runtime_error);
+  EXPECT_FALSE(config.engine.dynamic_batching);
 }
 
 TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
@@ -642,6 +749,96 @@ TEST(ConfigTest, RejectsMtpScaleBindings) {
     Config config;
     EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << json;
   }
+}
+
+template <typename PipelineModels>
+void ExpectPipelineOverlayMerged(const PipelineModels& pipeline) {
+  ASSERT_EQ(pipeline.size(), 3u);
+
+  const auto& untouched_model = pipeline[0];
+  EXPECT_EQ(untouched_model.model_id, "untouched_model");
+  EXPECT_EQ(untouched_model.filename, "untouched.onnx");
+  ASSERT_TRUE(untouched_model.session_options);
+  ASSERT_TRUE(untouched_model.session_options->log_id);
+  EXPECT_EQ(*untouched_model.session_options->log_id, "untouched");
+  EXPECT_FALSE(untouched_model.session_options->enable_profiling);
+
+  const auto& existing_model = pipeline[1];
+  EXPECT_EQ(existing_model.model_id, "existing_model");
+  EXPECT_EQ(existing_model.filename, "existing.onnx");
+  ASSERT_TRUE(existing_model.session_options);
+  ASSERT_TRUE(existing_model.session_options->log_id);
+  EXPECT_EQ(*existing_model.session_options->log_id, "original");
+  ASSERT_TRUE(existing_model.session_options->enable_profiling);
+  EXPECT_EQ(*existing_model.session_options->enable_profiling, "profile");
+  ASSERT_EQ(existing_model.session_options->provider_options.size(), 1u);
+  EXPECT_EQ(existing_model.session_options->provider_options[0].name, "CPU");
+
+  const auto& new_model = pipeline[2];
+  EXPECT_EQ(new_model.model_id, "new_model");
+  EXPECT_EQ(new_model.filename, "new.onnx");
+}
+
+TEST(ConfigTest, PipelineOverlayMergesByModelId) {
+  Config config;
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "pipeline": [{
+          "untouched_model": {
+            "filename": "untouched.onnx",
+            "session_options": {"log_id": "untouched"}
+          },
+          "existing_model": {
+            "filename": "existing.onnx",
+            "session_options": {
+              "log_id": "original",
+              "provider_options": [{"CPU": {}}]
+            }
+          }
+        }]
+      },
+      "vision": {
+        "pipeline": [{
+          "untouched_model": {
+            "filename": "untouched.onnx",
+            "session_options": {"log_id": "untouched"}
+          },
+          "existing_model": {
+            "filename": "existing.onnx",
+            "session_options": {
+              "log_id": "original",
+              "provider_options": [{"CPU": {}}]
+            }
+          }
+        }]
+      }
+    }
+  })");
+
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "pipeline": [{
+          "existing_model": {
+            "session_options": {"enable_profiling": "profile"}
+          },
+          "new_model": {"filename": "new.onnx"}
+        }]
+      },
+      "vision": {
+        "pipeline": [{
+          "existing_model": {
+            "session_options": {"enable_profiling": "profile"}
+          },
+          "new_model": {"filename": "new.onnx"}
+        }]
+      }
+    }
+  })");
+
+  ExpectPipelineOverlayMerged(config.model.decoder.pipeline);
+  ExpectPipelineOverlayMerged(config.model.vision.pipeline);
 }
 
 }  // namespace Generators::test

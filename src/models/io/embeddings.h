@@ -13,7 +13,8 @@ struct Embeddings {
     Output
   };
 
-  Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size = 0);
+  Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size = 0,
+             int64_t feature_count = 0);
   Embeddings(const Embeddings&) = delete;
   Embeddings& operator=(const Embeddings&) = delete;
 
@@ -34,18 +35,19 @@ struct Embeddings {
   void UseChunkView(size_t offset, size_t length);
   void RestoreFullView();
 
-  OrtValue* Get() { return embeddings_.get(); }
+  OrtValue* Get() { return embeddings_ ? embeddings_->GetOrtTensor() : nullptr; }
 
   auto& GetShape() const { return shape_; }
 
  private:
   State& state_;
   const Model& model_{state_.model_};
-  std::array<int64_t, 3> shape_{};  // [batch_size, sequence_length, hidden_size]
+  std::vector<int64_t> shape_;  // [batch_size, sequence_length, optional feature dimensions..., hidden_size]
   ONNXTensorElementDataType type_;
   const Mode mode_{};
   const std::string name_;
-  std::unique_ptr<OrtValue> embeddings_;
+  // Tensor preserves the captured decode buffer across uncaptured prefills.
+  std::unique_ptr<Tensor> embeddings_;
   std::unique_ptr<OrtValue> chunk_view_;  // Non-owning view into embeddings_ used during prefill chunking
 
   // Output mode, cross-device pipelines only: buffer this session writes instead of the

@@ -378,6 +378,46 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                               out IntPtr /* const char** */ outStr);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaCreateTokenPostProcessor(IntPtr generator, out IntPtr processor);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaDestroyTokenPostProcessor(IntPtr processor);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenPostProcessorProcessNextTokens(IntPtr processor);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenPostProcessorFinalize(IntPtr processor);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenPostProcessorReset(IntPtr processor);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern UIntPtr OgaTokenPostProcessorGetResultCount(IntPtr processor);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenPostProcessorGetResult(IntPtr processor, UIntPtr index);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenPostProcessorResultGetText(IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenPostProcessorResultGetTimestamps(IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern UIntPtr OgaTokenPostProcessorTimestampGetWordCount(IntPtr timestamps);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern UIntPtr OgaTokenPostProcessorTimestampGetSegmentCount(IntPtr timestamps);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenPostProcessorTimestampGetWord(IntPtr timestamps, UIntPtr index);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenPostProcessorTimestampGetSegment(IntPtr timestamps, UIntPtr index);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr OgaTokenPostProcessorTimestampRecordGetText(IntPtr record);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern long OgaTokenPostProcessorTimestampRecordGetStartFrame(IntPtr record);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern long OgaTokenPostProcessorTimestampRecordGetStopFrame(IntPtr record);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern double OgaTokenPostProcessorTimestampRecordGetStartTime(IntPtr record);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern double OgaTokenPostProcessorTimestampRecordGetStopTime(IntPtr record);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamReset(IntPtr /* OgaTokenizerStream* */ tokenizerStream);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateTensorFromBuffer(IntPtr /* data* */ data,
                                                                                long[] shapeDims,
                                                                                UIntPtr shapeDimsCount,

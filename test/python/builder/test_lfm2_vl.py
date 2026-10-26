@@ -12,6 +12,8 @@ its `embedding_norm` there, and label the export `lfm2_vl` (a vision pipeline st
 from __future__ import annotations
 
 import importlib.util
+import json
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -32,17 +34,6 @@ def _load_builder_module(module_name):
 
 
 def _load_builder_entrypoint_module():
-    # `builder.py` imports every model class via `from builders import (...)`; stub the package so
-    # the architecture dispatch in `create_model` can be exercised with fake model classes.
-    builders_stub = types.ModuleType("builders")
-
-    def _stub_getattr(name):  # PEP 562: satisfies `from builders import <ModelClass>`
-        return type(name, (), {})
-
-    builders_stub.__getattr__ = _stub_getattr
-    builders_stub.__path__ = [str(BUILDERS_DIR)]
-    sys.modules["builders"] = builders_stub
-
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -95,6 +86,21 @@ def test_lfm2_vl_architecture_uses_lfm2_builder_and_labels_the_export(
     assert captured["model_type"] == expected_type
 
 
+def test_d1_config_with_auto_map_loads_without_remote_code(tmp_path):
+    # LiquidAI/d1-3B is a stock Lfm2VlForConditionalGeneration whose config.json also names its own
+    # AutoModel class (auto_map). The builder must load it without trust_remote_code and modeling_d1.py.
+    auto_map = {"AutoModel": "modeling_d1.D1Model"}
+    config = {"architectures": ["Lfm2VlForConditionalGeneration"], "auto_map": auto_map, "model_type": "lfm2_vl"}
+    (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    for name in ("tokenizer.json", "tokenizer_config.json"):
+        shutil.copy(Path(__file__).parents[2] / "models" / "lfm2-vl" / name, tmp_path / name)
+
+    hf_config = builder_module.get_hf_details("LiquidAI/d1-3B", str(tmp_path), str(tmp_path / "cache"), {})["hf_config"]
+
+    assert type(hf_config).__name__ == "Lfm2VlConfig"
+    assert hf_config.auto_map == auto_map
+
+
 @pytest.mark.parametrize("model_type", ["lfm2_vl", "lfm2_vl_text"])
 def test_lfm2_vl_loads_the_vlm_transformers_model(monkeypatch, model_type):
     # The auto-class lookup is a substring match, so the single "lfm2_vl" entry must also cover
@@ -110,8 +116,10 @@ def test_lfm2_vl_loads_the_vlm_transformers_model(monkeypatch, model_type):
     class FakeCausalLM(FakeLfm2VlModel):
         pass
 
-    monkeypatch.setattr(base_module, "Lfm2VlForConditionalGeneration", FakeLfm2VlModel)
-    monkeypatch.setattr(base_module, "AutoModelForCausalLM", FakeCausalLM)
+    transformers_stub = types.ModuleType("transformers")
+    transformers_stub.Lfm2VlForConditionalGeneration = FakeLfm2VlModel
+    transformers_stub.AutoModelForCausalLM = FakeCausalLM
+    monkeypatch.setattr(base_module, "transformers", transformers_stub)
 
     model = Model.__new__(Model)
     model.model_type = model_type

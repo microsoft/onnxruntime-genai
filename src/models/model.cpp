@@ -10,7 +10,6 @@
 #include <functional>
 #include <fstream>
 #include <mutex>
-#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -27,6 +26,7 @@
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "threadpool.h"
 #include "runtime_profiles.h"
 #include "model_package.h"
 #include "gpt.h"
@@ -41,6 +41,7 @@
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
+#include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
 #include "ep/openvino/interface.h"
 #include "ep/qnn/interface.h"
@@ -92,24 +93,33 @@ State::State(const GeneratorParams& params, const Model& model, DeviceInterface*
       p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
-  // Generate a random id for graph capture of the default (1-token) decode shape.
+  // Reserve the default (1-token) decode capture identity.
   if (params_->use_graph_capture) {
     GraphIdForLength(1, 0);
   }
 }
 
-const std::string& State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
-  const int graph_key = graph_capture_length * 2 + graph_capture_variant;
-  auto it = graph_ids_.find(graph_key);
-  if (it != graph_ids_.end()) {
-    return it->second.text;
+int State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
+  // Activation is additive: each successful SetActiveAdapter appends one name.
+  // Replaying an older adapter set would bypass the new inputs and kernel selection.
+  const auto known_ids = graph_ids_.size();
+  const int id = graph_ids_.Id({static_cast<size_t>(graph_capture_length), static_cast<size_t>(graph_capture_variant),
+                                adapter_names_.size()});
+  if (g_log.enabled && g_log.graph_capture) {
+    if (graph_ids_.size() != known_ids) {
+      Log("graph_capture") << "State graph id=" << id << " length=" << graph_capture_length
+                           << " variant=" << graph_capture_variant << " adapters=" << adapter_names_.size() << std::endl;
+    } else if (id < 0 && !graph_capture_fallback_logged_) {
+      Log("graph_capture") << "State graph capture fallback: "
+                           << (graph_ids_.size() >= GraphAnnotationIds::kMaxCapturedShapes
+                                   ? "capture budget exhausted"
+                                   : "annotation IDs exhausted")
+                           << "; running new keys without capture (" << graph_ids_.size() << "/"
+                           << GraphAnnotationIds::kMaxCapturedShapes << " keys assigned)" << std::endl;
+      graph_capture_fallback_logged_ = true;
+    }
   }
-  // Distinct random annotation id per captured length (ORT captures one graph per id).
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<> dis(1, INT_MAX);
-  const int id_value = dis(gen);
-  return graph_ids_.emplace(graph_key, GraphId{id_value, std::to_string(id_value)}).first->second.text;
+  return id;
 }
 
 void State::DumpInputs() {
@@ -141,7 +151,8 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
     if (graph_capture_this_run) {
-      run_options_->AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
+      run_options_->AddConfigEntry("gpu_graph_id",
+                                   std::to_string(GraphIdForLength(graph_capture_length, graph_capture_variant)).c_str());
     } else {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
@@ -276,13 +287,8 @@ State::~State() {
   // would call std::terminate.
 #if ORT_API_VERSION >= 27
   if (graph_capture_session_) {
-    // Speculative decoding (MTP) may capture more than one input length, each with its
-    // own annotation id, so release every id that was handed out.
-    for (const auto& length_and_id : graph_ids_) {
-      const int id_value = length_and_id.second.value;
-      if (id_value <= 0) {
-        continue;
-      }
+    // Include captures from earlier adapter sets, as well as all input lengths.
+    graph_ids_.ForEachAssignedId([&](int id_value) {
       try {
         graph_capture_session_->ReleaseCapturedGraph(id_value);
       } catch (...) {
@@ -292,7 +298,7 @@ State::~State() {
                          << ") failed: unknown exception" << std::endl;
         }
       }
-    }
+    });
   }
 #endif
 
@@ -348,6 +354,10 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
     init_session_provider_options.device_filtering_options = user_provider_options->device_filtering_options;
 
   device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
+  if (type == DeviceType::WEBGPU) {
+    // Native provider factories capture this option when appended, before options are cloned.
+    init_session_provider_options.options.emplace_back("enableGraphCapture", "0");
+  }
 
   provider_options_list.emplace_back(std::move(init_session_provider_options));
   const std::vector<std::string> providers{provider_name};
@@ -375,6 +385,9 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // decode inputs). Devices that offer none leave the defaults in place.
   device.InitDeviceAllocators(user_provider_options, allocator.device_id_);
   allocator.host_accessible_allocator_ = device.GetHostAccessibleAllocator();
+  if (type == DeviceType::WEBGPU) {
+    allocator.session_options_ = std::move(session_options);
+  }
 }
 
 // Update provider options using values from a parent if they are not already specified in the child.
@@ -523,6 +536,11 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
+
+  // Acquire the shared AMDGPU singleton, released in ~Model. Done last, after everything that can
+  // throw: a failed construction never runs ~Model, so acquiring earlier would pin the device forever.
+  if (p_device_->GetType() == DeviceType::AMDGPU)
+    AcquireAMDGPUInterface();
 }
 
 void Model::AddSharedInitializers() {
@@ -582,8 +600,11 @@ void Model::AddSharedInitializers() {
 }
 
 Model::~Model() {
+  // Snapshot the type before teardown: CloseDmlInterface() frees the singleton p_device_ points to,
+  // so reading p_device_->GetType() afterwards would be a use-after-free.
+  const DeviceType device_type = p_device_ ? p_device_->GetType() : DeviceType::CPU;
 #if USE_DML
-  if (p_device_->GetType() == DeviceType::DML) {
+  if (device_type == DeviceType::DML) {
     auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::DML)];
     allocator.session_.reset();
     allocator.allocator_.reset();
@@ -595,6 +616,14 @@ Model::~Model() {
     CloseDmlInterface();
   }
 #endif
+  if (device_type == DeviceType::AMDGPU) {
+    // Drop EP factory references before unregistering the library, and release device-backed
+    // initializers while the AMDGPU allocator is still alive.
+    pipeline_session_options_.clear();
+    session_options_.reset();
+    shared_initializer_entries_.clear();
+    CloseAMDGPUInterface();
+  }
 }
 
 // Returns the device the session will run on: CPU when the options name no device-backed provider.
@@ -684,23 +713,22 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
     }
   }
 
-  // Register custom ops libraries only if explicitly configured
+  // Register custom ops libraries only if explicitly configured. custom_ops_library comes first, then every entry of
+  // custom_ops_libraries in order. All paths pass the allow-list checks before registration starts; registration then
+  // runs in order, so a later library load failure can still leave earlier libraries registered on session_options.
+  std::vector<std::string> custom_ops_libraries;
   if (config_session_options.custom_ops_library.has_value()) {
+    custom_ops_libraries.push_back(config_session_options.custom_ops_library.value());
+  }
+  custom_ops_libraries.insert(custom_ops_libraries.end(), config_session_options.custom_ops_libraries.begin(),
+                              config_session_options.custom_ops_libraries.end());
+
+  // Build the set of allowed directories once. The resolved library path must fall
+  // within one of these to prevent loading arbitrary libraries from disk.
+  std::vector<std::filesystem::path> allowed_dirs;
+  if (!custom_ops_libraries.empty()) {
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
-
-    std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
-
-    std::filesystem::path custom_library_path{custom_library_file_prefix};
-
-    // Reject path traversal components regardless of absolute/relative
-    if (custom_library_file_prefix.find("..") != std::string::npos) {
-      throw std::runtime_error("custom_ops_library must not contain path traversal (..): " + custom_library_file_prefix);
-    }
-
-    // Build the set of allowed directories. The resolved library path must fall
-    // within one of these to prevent loading arbitrary libraries from disk.
-    std::vector<std::filesystem::path> allowed_dirs;
 
     // 1. GenAI model folder
     std::error_code ec;
@@ -737,6 +765,21 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
         if (!ec) allowed_dirs.push_back(cwd_canonical);
       }
     }
+  }
+
+  std::vector<fs::path> validated_custom_ops_libraries;
+  std::vector<std::string> registered_library_names;
+  for (const std::string& configured_library : custom_ops_libraries) {
+    std::string custom_library_file_prefix = configured_library;
+
+    std::filesystem::path custom_library_path{custom_library_file_prefix};
+
+    // Reject path traversal components regardless of absolute/relative
+    if (custom_library_file_prefix.find("..") != std::string::npos) {
+      throw std::runtime_error("custom ops library must not contain path traversal (..): " + custom_library_file_prefix);
+    }
+
+    std::error_code ec;
 
     // Resolve the library path. For relative paths, search allowed directories in order.
     // For absolute paths, use as-is and validate against the allowlist.
@@ -759,12 +802,21 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
       }
     }
 
+    // Entries that cannot be resolved are rejected rather than handed to the platform loader, which would search
+    // locations (e.g. LD_LIBRARY_PATH, PATH) that are not part of the allow-list.
+    if (!resolved) {
+      throw std::runtime_error(
+          "custom ops library was not found in any allowed directory (model folder, EP library directories, "
+          "current working directory): " +
+          configured_library);
+    }
+
     // Validate that the resolved path is under one of the allowed directories
-    if (resolved) {
+    {
       std::filesystem::path resolved_canonical =
           std::filesystem::canonical(std::filesystem::path(custom_library_file_prefix), ec);
       if (ec) {
-        throw std::runtime_error("Failed to canonicalize custom_ops_library path: " + custom_library_file_prefix);
+        throw std::runtime_error("Failed to canonicalize custom ops library path: " + custom_library_file_prefix);
       }
       bool in_allowed_dir = false;
       auto resolved_str = resolved_canonical.string();
@@ -781,12 +833,21 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
       }
       if (!in_allowed_dir) {
         throw std::runtime_error(
-            "custom_ops_library path is not within an allowed directory: " + custom_library_file_prefix);
+            "custom ops library path is not within an allowed directory: " + custom_library_file_prefix);
       }
     }
 
-    // Convert to fs::path for proper wide string handling on Windows
+    // Convert to fs::path for proper wide string handling on Windows. A library that was already listed (for
+    // example in both custom_ops_library and custom_ops_libraries) is only registered once.
     fs::path custom_ops_lib_path(custom_library_file_prefix);
+    if (std::find(registered_library_names.begin(), registered_library_names.end(), custom_library_file_prefix) ==
+        registered_library_names.end()) {
+      registered_library_names.push_back(custom_library_file_prefix);
+      validated_custom_ops_libraries.push_back(std::move(custom_ops_lib_path));
+    }
+  }
+  // Path validation is complete; load and register each library in order.
+  for (const fs::path& custom_ops_lib_path : validated_custom_ops_libraries) {
     session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
   }
 
@@ -948,9 +1009,12 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
-  // Check if it's a pipeline model by checking if decoder.pipeline is configured
-  if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())
+  if (!config->model.decoder.pipeline.empty() &&
+      (ModelType::IsVLM(config->model.type) || ModelType::IsMMM(config->model.type))) {
+    if (!ModelType::IsPipe(config->model.type))
+      throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
+  }
   if (ModelType::IsLFM2(config->model.type))
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
@@ -969,8 +1033,6 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
-  if (ModelType::IsPipe(config->model.type))
-    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (ModelType::IsMMM(config->model.type)) {
     // Auto-detect speech support: require both the speech ONNX model filename
     // and the preprocessing config to be present. If only one is set, throw
@@ -989,6 +1051,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     }
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
   }
+  if (ModelType::IsPipe(config->model.type))
+    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (config->model.type == "marian-ssru")
     return std::make_shared<MarianModel>(std::move(config), ort_env);
 
