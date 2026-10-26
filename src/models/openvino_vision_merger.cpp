@@ -517,7 +517,10 @@ void Qwen3_5OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra
   }
   const int64_t total_patches = static_cast<int64_t>(pixel_element_count / static_cast<size_t>(patch_dim));
 
-  OrtValue* grid_thw = FindExtraInput(extra_inputs, model_.config_->model.vision.inputs.image_grid_thw);
+  OrtValue* grid_thw = FindExtraInput(extra_inputs, Config::Defaults::ImageGridThwName);
+  if (!grid_thw) {
+    grid_thw = FindExtraInput(extra_inputs, model_.config_->model.vision.inputs.image_grid_thw);
+  }
   if (!grid_thw) throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw input missing.");
   const auto grid_info = grid_thw->GetTensorTypeAndShapeInfo();
   const size_t grid_count = grid_info->GetElementCount();
