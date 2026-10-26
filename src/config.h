@@ -907,6 +907,8 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // the main model's device, batching and paged-attention contract, but replaces model-specific
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
+void InheritNamedStrings(const std::vector<Config::NamedString>& parent,
+                         std::vector<Config::NamedString>& child);
 // Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
 // custom_ops_library and custom_ops_libraries are inherited together only when the child sets neither; because
 // custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.

@@ -194,13 +194,21 @@ std::unique_ptr<OrtValue> WrapCpuTensor(std::vector<T>& data, std::span<const in
 // by token_type_ids == 1 (produced by GemmaImageProcessor); Gemma configs carry no image_token_id, so the
 // token_type_ids channel is used to locate the image rows for host-side feature injection.
 struct Gemma3OpenVINOVisionMerger : OpenVINOVisionMerger {
-  explicit Gemma3OpenVINOVisionMerger(const OpenVINOMultiModalModel& model) : model_{model} {}
+  explicit Gemma3OpenVINOVisionMerger(const OpenVINOMultiModalModel& model)
+      : model_{model}, run_options_{OrtRunOptions::Create()} {
+    if (model_.config_->model.vision.run_options) {
+      for (const auto& [key, value] : *model_.config_->model.vision.run_options) {
+        ApplyRunOption(*run_options_, key.c_str(), value.c_str());
+      }
+    }
+  }
 
   void RunVision(const std::vector<ExtraInput>& extra_inputs) override;
   void Merge(OrtValue& inputs_embeds, const OrtValue& input_ids) override;
 
  private:
   const OpenVINOMultiModalModel& model_;
+  std::unique_ptr<OrtRunOptions> run_options_;
   std::unique_ptr<OrtValue> image_features_;  // produced for the current prompt (null when no image)
   std::vector<int32_t> token_type_ids_;       // host copy of token_type_ids for the current prompt
 };
@@ -226,7 +234,7 @@ void Gemma3OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra_
   const OrtValue* input_values[] = {pixel_input};
   const char* output_names[] = {image_features_name.c_str()};
 
-  auto outputs = model_.ov_vision_session_->Run(nullptr, input_names, input_values, 1, output_names, 1);
+  auto outputs = model_.ov_vision_session_->Run(run_options_.get(), input_names, input_values, 1, output_names, 1);
   if (outputs[0]->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     Cast(*outputs[0], image_features_, *model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   } else {
@@ -418,6 +426,7 @@ struct Qwen3_5OpenVINOVisionMerger : OpenVINOVisionMerger {
   OrtSession* patch_embed_session_{};
   OrtSession* pos_session_{};
   OrtSession* merger_session_{};
+  std::unique_ptr<OrtRunOptions> patch_embed_run_options_, pos_run_options_, merger_run_options_;
 
   // Stage I/O names, resolved from the config pipeline stage inputs/outputs arrays.
   std::string patch_embed_input_, patch_embed_output_;
@@ -450,6 +459,17 @@ Qwen3_5OpenVINOVisionMerger::Qwen3_5OpenVINOVisionMerger(const OpenVINOMultiModa
   if (merger->inputs.size() < 3) {
     throw std::runtime_error("Qwen3.5 OpenVINO merger stage expects 3 inputs (hidden_states, attention_mask, rotary_pos_emb).");
   }
+
+  auto create_run_options = [&](const Config::Model::Vision::PipelineModel& stage) {
+    auto options = OrtRunOptions::Create();
+    for (const auto& [key, value] : GetOpenVINOVisionStageRunOptions(*model_.config_, stage)) {
+      ApplyRunOption(*options, key.c_str(), value.c_str());
+    }
+    return options;
+  };
+  patch_embed_run_options_ = create_run_options(*patch_embed);
+  pos_run_options_ = create_run_options(*pos);
+  merger_run_options_ = create_run_options(*merger);
 
   patch_embed_input_ = patch_embed->inputs.at(0);
   patch_embed_output_ = patch_embed->outputs.at(0);
@@ -552,7 +572,7 @@ void Qwen3_5OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra
     const char* pe_in[] = {patch_embed_input_.c_str()};
     const OrtValue* pe_vals[] = {image_pixel_values.get()};
     const char* pe_out[] = {patch_embed_output_.c_str()};
-    auto hidden_states = std::move(patch_embed_session_->Run(nullptr, pe_in, pe_vals, 1, pe_out, 1)[0]);
+    auto hidden_states = std::move(patch_embed_session_->Run(patch_embed_run_options_.get(), pe_in, pe_vals, 1, pe_out, 1)[0]);
     std::unique_ptr<OrtValue> hidden_states_fp32;
     if (hidden_states->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       Cast(*hidden_states, hidden_states_fp32, *model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
@@ -582,7 +602,7 @@ void Qwen3_5OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra
     const char* pos_in[] = {pos_input_.c_str()};
     const OrtValue* pos_vals[] = {indices_tensor.get()};
     const char* pos_out[] = {pos_output_.c_str()};
-    auto pos_embeds = std::move(pos_session_->Run(nullptr, pos_in, pos_vals, 1, pos_out, 1)[0]);
+    auto pos_embeds = std::move(pos_session_->Run(pos_run_options_.get(), pos_in, pos_vals, 1, pos_out, 1)[0]);
     const auto pos_info = pos_embeds->GetTensorTypeAndShapeInfo();
     if (pos_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       throw std::runtime_error("Qwen3.5 OpenVINO vision: pos output must contain float elements");
@@ -613,7 +633,7 @@ void Qwen3_5OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra
     const char* merger_in[] = {merger_hidden_input_.c_str(), merger_mask_input_.c_str(), merger_rope_input_.c_str()};
     const OrtValue* merger_vals[] = {hidden_states.get(), mask_tensor.get(), rope_tensor.get()};
     const char* merger_out[] = {merger_output_.c_str()};
-    auto features = std::move(merger_session_->Run(nullptr, merger_in, merger_vals, 3, merger_out, 1)[0]);
+    auto features = std::move(merger_session_->Run(merger_run_options_.get(), merger_in, merger_vals, 3, merger_out, 1)[0]);
     if (features->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       std::unique_ptr<OrtValue> features_fp32;
       Cast(*features, features_fp32, *model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);

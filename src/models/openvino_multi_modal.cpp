@@ -13,6 +13,15 @@ const Config::SessionOptions& GetOpenVINOVisionStageSessionOptions(const Config&
   return config.model.decoder.session_options;
 }
 
+Config::RunOptions GetOpenVINOVisionStageRunOptions(const Config& config,
+                                                    const Config::Model::Vision::PipelineModel& stage) {
+  auto options = stage.run_options.value_or(Config::RunOptions{});
+  if (config.model.vision.run_options) {
+    InheritNamedStrings(*config.model.vision.run_options, options);
+  }
+  return options;
+}
+
 // The host-side mergers produce one feature set per prompt, and stateful OVEP can't follow beam reordering.
 void ValidateOpenVINOVlmBeamSearch(int num_beams) {
   if (num_beams > 1) {

@@ -24,6 +24,7 @@ class ThreadPool;
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
 void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config);
+void ApplyRunOption(OrtRunOptions& run_options, const char* key, const char* value);
 
 // Returns true when the model was exported with an OpenVINO graph partitioning (text-only embedding
 // graph + host-side image feature merge).
