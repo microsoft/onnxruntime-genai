@@ -2161,6 +2161,25 @@ def test_exclude_mtp_suppresses_the_head(mtp_init):
     assert "include_hidden_states" not in decoder_options
 
 
+# `Qwen3_5ForCausalLM.save_pretrained` keeps `mtp_num_hidden_layers` in config.json but writes no
+# `mtp.*` tensors; the head cannot be built, so it is skipped before the decoder is exported.
+@pytest.mark.parametrize("with_mtp_weights", [False, True], ids=["text_only_checkpoint", "full_checkpoint"])
+def test_mtp_head_follows_the_checkpoint_weights(monkeypatch, tmp_path, with_mtp_weights):
+    tensors = {"model.embed_tokens.weight": torch.zeros(4, 2)}
+    if with_mtp_weights:
+        tensors["mtp.fc.weight"] = torch.zeros(2, 4)
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+    model = object.__new__(Qwen35MoEModel)
+    model.mtp_attrs = {}
+    monkeypatch.setattr(MTPModel, "make_mtp_init", lambda self, _c, opts: dict(opts))
+    config = types.SimpleNamespace(mtp_num_hidden_layers=1, _name_or_path=str(tmp_path))
+
+    decoder_options = Qwen35MoEModel.make_mtp_init(model, config, {})
+
+    assert model.mtp_attrs["build"] is with_mtp_weights
+    assert ("include_hidden_states" in decoder_options) is with_mtp_weights
+
+
 def test_exclude_mtp_admits_a_pruned_lm_head(mtp_init):
     build, _ = mtp_init({"exclude_mtp": True, "prune_lm_head": True})
 

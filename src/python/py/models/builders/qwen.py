@@ -7,6 +7,7 @@
 # Portions of this file consist of AI generated content.
 
 import copy
+import glob
 import json
 import os
 
@@ -959,6 +960,17 @@ class Qwen35MoEModel(MTPModel):
             print("Skipping the MTP head: exclude_mtp is set.")
             self.mtp_attrs["build"] = False
 
+        # `save_pretrained` of a text-only `Qwen3_5ForCausalLM` keeps `mtp_num_hidden_layers` in the
+        # config but writes no `mtp.*` tensors, so the head cannot be built. Decide that here, before
+        # the decoder is built with the MTP-only `include_hidden_states` output, instead of failing in
+        # the MTP weight loader after the whole decoder has been exported.
+        if self.mtp_attrs["build"] and self.checkpoint_has_mtp_weights(getattr(config, "_name_or_path", None)) is False:
+            print(
+                f"Skipping the MTP head: the config declares mtp_num_hidden_layers={num_mtp_layers} but the "
+                "checkpoint has no 'mtp.*' weights. Pass exclude_mtp=true to skip it explicitly."
+            )
+            self.mtp_attrs["build"] = False
+
         quant_method = getattr(config, "quantization_config", {}).get("quant_method", "")
         if self.mtp_attrs["build"] and quant_method == "quark":
             print("Skipping the MTP head: Quark pre-quantized checkpoints do not include MTP weights.")
@@ -974,6 +986,26 @@ class Qwen35MoEModel(MTPModel):
             raise ValueError("Qwen3.5 MTP export cannot be combined with " + ", ".join(incompatible_options) + ".")
         decoder_options["include_hidden_states"] = True
         return decoder_options
+
+    @staticmethod
+    def checkpoint_has_mtp_weights(model_dir):
+        """Whether a local safetensors checkpoint stores `mtp.*` tensors.
+
+        Returns ``None`` when that cannot be told from local safetensors headers (a hub ID, or a
+        checkpoint in another format), in which case the MTP weight loader decides as before.
+        """
+        if not model_dir or not os.path.isdir(model_dir):
+            return None
+        shards = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
+        if not shards:
+            return None
+        from safetensors import safe_open  # noqa: PLC0415
+
+        for shard in shards:
+            with safe_open(shard, framework="pt") as safetensors_file:
+                if any(key.startswith("mtp.") for key in safetensors_file.keys()):  # noqa: SIM118
+                    return True
+        return False
 
     def make_mtp_model(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.mtp_attrs["io_dtype"] = io_dtype
