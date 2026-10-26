@@ -104,7 +104,8 @@ TEST_P(BFloat16CacheTest, RewindPreservesBfloat16PrefixPerHead) {
     const auto shape = input.GetTensorTypeAndShapeInfo()->GetShape();
     ASSERT_EQ(shape[2], 2);
     auto values = Generators::WrapTensor<Ort::BFloat16_t>(
-        *model_->p_device_kvcache_, input).CopyDeviceToCpu();
+                      *model_->p_device_kvcache_, input)
+                      .CopyDeviceToCpu();
     const size_t width = static_cast<size_t>(shape[3]);
     for (size_t head = 0; head < static_cast<size_t>(shape[0] * shape[1]); ++head) {
       for (size_t i = 0; i < 2 * width; ++i) {
@@ -127,7 +128,8 @@ TEST_P(BFloat16CacheTest, BeamReorderPreservesBfloat16Bits) {
               Ort::TypeToTensorType<Ort::BFloat16_t>);
     ASSERT_EQ(input.GetTensorTypeAndShapeInfo()->GetShape()[2], 3);
     auto values = Generators::WrapTensor<Ort::BFloat16_t>(
-        *model_->p_device_kvcache_, input).CopyDeviceToCpu();
+                      *model_->p_device_kvcache_, input)
+                      .CopyDeviceToCpu();
     const size_t beam_size = values.size() / 2;
     for (size_t beam = 0; beam < 2; ++beam) {
       for (size_t i = 0; i < beam_size; ++i) {
