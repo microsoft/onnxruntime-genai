@@ -53,6 +53,7 @@ def main():
     parser.add_argument("--kind", default="text", choices=("text", "random", "prose"))
     parser.add_argument("--new", type=int, default=256)
     parser.add_argument("--reps", type=int, default=3)
+    parser.add_argument("--no-warmup", action="store_true")
     parser.add_argument("--no-mtp", action="store_true")
     parser.add_argument("--stop-token-id", type=int, default=248319,
                         help="benchmark stop token (default: unused token 248319, for fixed-length runs)")
@@ -73,7 +74,7 @@ def main():
 
     result = {"args": {k: str(v) for k, v in vars(args).items()}, "contexts": {}}
     for n in [int(x) for x in args.contexts.split(",")]:
-        seeds = [1000 + n] + [i * 7 + n for i in range(args.reps)]
+        seeds = ([] if args.no_warmup else [1000 + n]) + [i * 7 + n for i in range(args.reps)]
         runs = []
         for index, seed in enumerate(seeds):
             prompt = prompts.make(args.kind, n, seed)
@@ -92,7 +93,7 @@ def main():
             head_calls = after["draft_forward_passes"] - before["draft_forward_passes"]
             before_hist = before.get("acceptance_length_histogram", [])
             after_hist = after.get("acceptance_length_histogram", [])
-            hist_len = min(4, len(after_hist), len(before_hist))
+            hist_len = min(8, len(after_hist), len(before_hist))
             accept_hist = [after_hist[i] - before_hist[i] for i in range(hist_len)]
             while len(accept_hist) < 4:
                 accept_hist.append(0)
@@ -110,7 +111,7 @@ def main():
                 ge3 / ge2 if ge2 else 0.0,
             ]
             record = {
-                "label": "warmup" if index == 0 else f"run{index}",
+                "label": ("warmup" if index == 0 and not args.no_warmup else f"run{index if not args.no_warmup else index + 1}"),
                 "seed": seed,
                 "tokens": count,
                 "finish_reason": str(turn.finish_reason),
@@ -133,7 +134,7 @@ def main():
             }
             runs.append(record)
             print(json.dumps({"ctx": n, **record}), flush=True)
-        measured = sorted((r for r in runs if r["label"] != "warmup"), key=lambda r: r["tps"])
+        measured = sorted((r for r in runs if r["label"] != "warmup"), key=lambda r: r["tps"]) or runs
         median = measured[len(measured) // 2]
         result["contexts"][n] = {"median": median, "runs": runs}
         print(

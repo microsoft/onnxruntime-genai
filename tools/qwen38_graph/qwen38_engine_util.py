@@ -18,7 +18,12 @@ from pathlib import Path
 _WIN_DLL_HANDLES = []
 if os.name == "nt":
     _extra_dirs = [d for d in os.environ.get("ORT_GENAI_DLL_DIRS", "").split(os.pathsep) if d]
-    _cudnn_home = os.environ.get("CUDNN_HOME", r"C:\cuDNN\9.27.0.42_cuda13")
+    _cudnn_home = os.environ.get("CUDNN_HOME")
+    if not _cudnn_home:
+        for _cand in (r"D:\cudnn\9.24.1.1_cuda13", r"C:\cuDNN\9.27.0.42_cuda13"):
+            if os.path.isdir(_cand):
+                _cudnn_home = _cand
+                break
     if _cudnn_home:
         for _sub in (os.path.join("bin", "x64"), "bin"):
             _extra_dirs.append(os.path.join(_cudnn_home, _sub))
@@ -129,6 +134,9 @@ def load_model(package, provider=None, overlay=None):
                 _WIN_DLL_HANDLES.append(os.add_dll_directory(str(prov_dir)))
         og.register_execution_provider_library("CUDAExecutionProvider", provider)
     config = og.Config(str(package))
+    env_overlay = os.environ.get("QWEN38_OVERLAY_JSON")
+    if env_overlay:
+        config.overlay(env_overlay)
     if overlay:
         config.overlay(json.dumps(overlay))
     return og.Model(config)

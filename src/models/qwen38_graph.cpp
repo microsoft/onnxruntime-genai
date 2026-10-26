@@ -231,8 +231,9 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
         dflash_->ReleaseAll();
         SyncStream();
       }
-      if (fast_->chunk > 512) {
-        Draft(d_dflash_prompt_.data(), static_cast<size_t>(fast_->chunk), static_cast<size_t>(capacity_), 1000, false);
+      const size_t warm_dflash_chunk = std::min<size_t>(static_cast<size_t>(fast_->chunk), 2048);
+      if (warm_dflash_chunk > 512) {
+        Draft(d_dflash_prompt_.data(), warm_dflash_chunk, static_cast<size_t>(capacity_), 1000, false);
         dflash_->ReleaseAll();
       }
       const int warm_len = std::min<int>(fast_->chunk, 512);
@@ -2203,16 +2204,56 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   }
 
   bool moe_offload_constrained = false;
+  bool moe_offload_enabled = false;
+  bool has_source_root = false;
+  bool has_reserve_bytes = false;
+  uint64_t configured_expert_bytes = 0;
+  bool has_explicit_expert_bytes = false;
+  uint64_t configured_reserve_bytes = 6442450944ULL;
   for (const auto& [k, v] : config_->model.decoder.session_options.config_entries) {
-    if (k == "session.moe.offload.mode" && v == "required") {
-      moe_offload_constrained = true;
+    if (k == "session.moe.offload.mode" && (v == "required" || v == "auto" || v == "1" || v == "on")) {
+      moe_offload_enabled = true;
+      if (v == "required" || v == "1" || v == "on") moe_offload_constrained = true;
     } else if (k == "session.moe.offload.device_expert_bytes" && v != "auto" && v != "0") {
       moe_offload_constrained = true;
+      moe_offload_enabled = true;
+      try {
+        configured_expert_bytes = std::stoull(v);
+        has_explicit_expert_bytes = true;
+      } catch (...) {
+      }
+    } else if (k == "session.moe.offload.source_root" && !v.empty()) {
+      has_source_root = true;
+    } else if (k == "session.moe.offload.reserve_device_bytes" && !v.empty() && v != "auto") {
+      has_reserve_bytes = true;
+      try {
+        configured_reserve_bytes = std::stoull(v);
+      } catch (...) {
+      }
     }
   }
 
   std::string target_filename = config_->model.decoder.filename;
-  if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
+  if (const char* ctx_env = std::getenv("ORT_QWEN38_CONTEXT_LENGTH")) {
+    std::string tier(ctx_env);
+    std::transform(tier.begin(), tier.end(), tier.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (tier == "2048") tier = "2k";
+    else if (tier == "8192") tier = "8k";
+    else if (tier == "16384") tier = "16k";
+    else if (tier == "32768") tier = "32k";
+    else if (tier == "65536") tier = "64k";
+    else if (tier == "131072") tier = "128k";
+    if (tier == "32k") {
+      target_filename = "model.onnx";
+    } else if (!tier.empty()) {
+      const std::string cand = "model_" + tier + ".onnx";
+      if (std::filesystem::exists(root / cand)) {
+        target_filename = cand;
+      } else if (std::filesystem::exists(root / "model_dynamic_ctx.onnx")) {
+        target_filename = "model_dynamic_ctx.onnx";
+      }
+    }
+  } else if (const char* drafts_env = std::getenv("ORT_QWEN38_MTP_DRAFTS")) {
     const int d = std::atoi(drafts_env);
     if (d >= 1 && d <= 3) {
       const std::filesystem::path parent = std::filesystem::path(target_filename).parent_path();
@@ -2229,18 +2270,63 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     target_filename = "model_s4.onnx";
   }
 
-  if (target_filename.find("64k") != std::string::npos) {
-    config_->model.qwen38_graph.kv_capacity = 65796;
+  if (target_filename.find("128k") != std::string::npos) {
+    config_->model.qwen38_graph.kv_capacity = 133128;
+    config_->model.context_length = 133120;
+    config_->search.max_length = 133120;
+  } else if (target_filename.find("64k") != std::string::npos) {
+    config_->model.qwen38_graph.kv_capacity = 65800;
     config_->model.context_length = 65792;
     config_->search.max_length = 65792;
     if (config_->model.qwen38_graph.fold.head_r2.filename == "mtp.onnx" &&
         std::filesystem::exists(root / "mtp_64k.onnx")) {
       config_->model.qwen38_graph.fold.head_r2.filename = "mtp_64k.onnx";
     }
+  } else if (target_filename.find("2k") != std::string::npos) {
+    config_->model.qwen38_graph.kv_capacity = 2312;
+    config_->model.context_length = 2304;
+    config_->search.max_length = 2304;
+  } else if (target_filename.find("8k") != std::string::npos) {
+    config_->model.qwen38_graph.kv_capacity = 8456;
+    config_->model.context_length = 8448;
+    config_->search.max_length = 8448;
+  }
+
+  if (moe_offload_enabled) {
+    if (!has_source_root) {
+      session_options_->AddConfigEntry("session.moe.offload.source_root", root.string().c_str());
+    }
+    const char* adaptive_env = std::getenv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
+    const bool adaptive_ctx = (adaptive_env != nullptr && std::string(adaptive_env) == "1");
+    const int64_t diff_tokens = static_cast<int64_t>(config_->model.qwen38_graph.kv_capacity) - 33032LL;
+    const int64_t delta_kv_bytes = diff_tokens * (diff_tokens > 0 ? 38912LL : 16384LL);
+    if (adaptive_ctx && delta_kv_bytes != 0) {
+      if (has_explicit_expert_bytes && delta_kv_bytes > 0) {
+        const int64_t adj_expert = std::max<int64_t>(
+            1000000000LL, static_cast<int64_t>(configured_expert_bytes) - delta_kv_bytes);
+        session_options_->AddConfigEntry("session.moe.offload.device_expert_bytes",
+                                         std::to_string(adj_expert).c_str());
+      }
+      const int64_t adj_reserve = std::max<int64_t>(
+          2147483648LL, static_cast<int64_t>(configured_reserve_bytes) + delta_kv_bytes);
+      session_options_->AddConfigEntry("session.moe.offload.reserve_device_bytes",
+                                       std::to_string(adj_reserve).c_str());
+    } else if (!has_reserve_bytes) {
+      session_options_->AddConfigEntry("session.moe.offload.reserve_device_bytes",
+                                       std::to_string(configured_reserve_bytes).c_str());
+    }
   }
 
   session_target_ = CreateSession(ort_env, target_filename, session_options_.get());
   session_info_.Add(*session_target_);
+  if (session_info_.HasInput("past_position_ids")) {
+    const auto pos_shape = session_info_.GetInputShape("past_position_ids");
+    if (pos_shape.size() == 2 && pos_shape[1] > 0) {
+      config_->model.qwen38_graph.kv_capacity = static_cast<int>(pos_shape[1]);
+      config_->model.context_length = std::max(1, static_cast<int>(pos_shape[1]) - 8);
+      config_->search.max_length = config_->model.context_length;
+    }
+  }
   if (g_log.enabled) Log("qwen38_graph") << "target session " << SecondsSince(start) << " s" << std::endl;
 
   auto make_options = [&](const std::optional<Config::SessionOptions>& configured, bool inherit, const char* label) {

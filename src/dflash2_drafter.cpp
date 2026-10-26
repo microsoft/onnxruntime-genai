@@ -1037,8 +1037,13 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     const auto& feed = feeds[i];
     auto& state = requests_[feed.request];
     if (state.cached_positions != feed.first_position) {
-      throw std::logic_error(
-          "The DFlash 2 drafter's cached context is not contiguous with the target's step.");
+      if (context_window_ != 0 && state.cached_positions == 0 &&
+          feed.first_position > 0 && feed.aux_row_count >= context_window_) {
+        state.cached_positions = feed.first_position;
+      } else {
+        throw std::logic_error(
+            "The DFlash 2 drafter's cached context is not contiguous with the target's step.");
+      }
     }
 
     size_t dropped = 0;
