@@ -130,11 +130,15 @@ def followup_messages(case, row):
 
 
 def require_request_event(event):
-    if event.flags & og.EngineEventFlags.FAILED:
+    if event.flags & og.EngineEventFlags.FAILED and (
+        event.request is None or event.error_code != og.EngineErrorCode.REQUEST_UNSERVICEABLE
+    ):
         raise RuntimeError(f"Generation failed; error_code={event.error_code}")
-    if event.request is None:
-        raise RuntimeError(f"Engine returned a request-less event; error_code={event.error_code}")
-    return event.request
+    if event.request is not None:
+        return event.request
+    if event.flags & (og.EngineEventFlags.CAPACITY_BLOCKED | og.EngineEventFlags.RETRYABLE):
+        return None
+    raise RuntimeError(f"Engine returned an invalid request-less event; error_code={event.error_code}")
 
 
 def run_with_engine(model, tokenizer, prompts, max_new_tokens, concurrency):
@@ -147,20 +151,27 @@ def run_with_engine(model, tokenizer, prompts, max_new_tokens, concurrency):
         wave = enumerate(prompts[start : start + concurrency], start=start)
         live, by_request = {}, {}
         for index, tokens in wave:
-            params = og.GeneratorParams(model)
-            params.set_search_options(do_sample=False, max_length=len(tokens) + max_new_tokens)
-            request = engine.create_request(params)
+            request_options = og.RequestOptions()
+            request_options.set_max_session_tokens(len(tokens) + max_new_tokens)
+            request = engine.create_request(options=request_options)
+            turn_options = og.TurnOptions(request)
+            turn_options.set_do_sample(False)
+            turn_options.set_max_generated_tokens(max_new_tokens)
             live[index] = []
             by_request[request] = index
-            request.begin_turn(np.asarray(tokens, dtype=np.int32))
+            request.begin_turn(np.asarray(tokens, dtype=np.int32), turn_options)
         try:
             while engine.has_pending_requests():
                 for event in engine.run(event_buffer):
-                    index = by_request.get(require_request_event(event))
+                    request = require_request_event(event)
+                    index = by_request.get(request) if request is not None else None
                     if index is not None and event.flags & og.EngineEventFlags.TOKEN:
                         live[index].append(int(event.token))
+                    if index is not None and event.flags & og.EngineEventFlags.TURN_FINISHED:
+                        request.close()
+                        del by_request[request]
         finally:
-            for request in by_request:
+            for request in list(by_request):
                 request.close()
         for index, tokens in live.items():
             outputs[index] = tokenizer.decode(tokens)
