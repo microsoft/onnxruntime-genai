@@ -964,7 +964,14 @@ class Qwen35MoEModel(MTPModel):
         # config but writes no `mtp.*` tensors, so the head cannot be built. Decide that here, before
         # the decoder is built with the MTP-only `include_hidden_states` output, instead of failing in
         # the MTP weight loader after the whole decoder has been exported.
-        if self.mtp_attrs["build"] and self.checkpoint_has_mtp_weights(getattr(config, "_name_or_path", None)) is False:
+        # An explicit drafter_type=mtp request fails here instead of silently dropping the head.
+        model_dir = getattr(config, "_name_or_path", None)
+        if self.mtp_attrs["build"] and self.checkpoint_has_mtp_weights(model_dir) is False:
+            if extra_options.get("_mtp_requested", False):
+                raise ValueError(
+                    f"drafter_options.drafter_type=mtp requires an MTP head, but the checkpoint in '{model_dir}' "
+                    f"has no 'mtp.*' weights although the config declares mtp_num_hidden_layers={num_mtp_layers}."
+                )
             print(
                 f"Skipping the MTP head: the config declares mtp_num_hidden_layers={num_mtp_layers} but the "
                 "checkpoint has no 'mtp.*' weights. Pass exclude_mtp=true to skip it explicitly."
@@ -991,11 +998,18 @@ class Qwen35MoEModel(MTPModel):
     def checkpoint_has_mtp_weights(model_dir):
         """Whether a local safetensors checkpoint stores `mtp.*` tensors.
 
-        Returns ``None`` when that cannot be told from local safetensors headers (a hub ID, or a
-        checkpoint in another format), in which case the MTP weight loader decides as before.
+        Returns ``None`` when that cannot be told from a local safetensors index or shard headers (a
+        hub ID, or a checkpoint in another format), in which case the MTP weight loader decides as before.
         """
         if not model_dir or not os.path.isdir(model_dir):
             return None
+        # A sharded checkpoint lists every tensor in its index, including shards in subdirectories.
+        index_path = os.path.join(model_dir, "model.safetensors.index.json")
+        if os.path.isfile(index_path):
+            with open(index_path, encoding="utf-8") as index_file:
+                weight_map = json.load(index_file).get("weight_map")
+            if isinstance(weight_map, dict) and weight_map:
+                return any(name.startswith("mtp.") for name in weight_map)
         shards = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
         if not shards:
             return None
