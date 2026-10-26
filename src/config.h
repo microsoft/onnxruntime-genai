@@ -19,10 +19,30 @@ struct TokenizerMemoryData {
   std::string tokenizer_json;
 };
 
+struct MappedModelFile {
+  MappedModelFile() = default;
+  MappedModelFile(const MappedModelFile&) = delete;
+  MappedModelFile& operator=(const MappedModelFile&) = delete;
+  ~MappedModelFile();
+  void* data = nullptr;
+  size_t size = 0;
+};
+
+struct ExternalInitializerFileSources {
+  ExternalInitializerFileSources() = default;
+  ExternalInitializerFileSources(const ExternalInitializerFileSources&) = delete;
+  ExternalInitializerFileSources& operator=(const ExternalInitializerFileSources&) = delete;
+  ~ExternalInitializerFileSources();
+  std::unique_ptr<MappedModelFile> Map(const std::string& name) const;
+  std::vector<std::string> names;
+  std::vector<int> descriptors;
+};
+
 struct Config {
   Config() = default;
   Config(const fs::path& path, std::string_view json_overlay,
          std::optional<std::string_view> memory_json = std::nullopt);
+  std::string ReadFileSource(const std::string& name) const;
 
   struct Defaults {
     // Decoder names
@@ -887,6 +907,9 @@ struct Config {
   std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
   bool memory_assets_only_{};
   std::unordered_map<std::string, std::span<const std::byte>> external_data_spans_;
+  std::shared_ptr<const ExternalInitializerFileSources> external_file_sources_;
+  std::unordered_map<std::string, std::shared_ptr<const std::vector<std::byte>>>
+      owned_file_source_graphs_;
   std::shared_ptr<const TokenizerMemoryData> tokenizer_memory_data_;
 };
 

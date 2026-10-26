@@ -358,6 +358,18 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_
                                                              OgaConfig** out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
     OgaConfig* config, const char* filename, const void* data, size_t length);
+/**
+ * Linux CPU/WebGPU graph and external-weight sources for configs created from JSON bytes.
+ * Registers the complete set atomically, duplicating read-only regular-file
+ * descriptors. Original descriptors may be closed after success. Files must not
+ * be modified while dependent models/sessions exist. Missing sources fail without
+ * reopening paths. Cannot be combined with external initializer buffers.
+ * Registered graph-buffer overrides (e.g. decrypted translation graphs) are copied
+ * into model-owned storage during model creation for subsequent session recreation.
+ * Requires ORT's experimental file-source API; absence is an explicit error.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetModelFileDescriptors(
+    OgaConfig* config, const char* const* names, const int* descriptors, size_t count);
 // Tokenizer JSON is copied and retained by models/tokenizers using this config.
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetTokenizerData(
     OgaConfig* config, const char* config_json, size_t config_length,

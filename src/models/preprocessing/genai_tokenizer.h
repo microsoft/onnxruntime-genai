@@ -67,6 +67,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 
  private:
   std::shared_ptr<const TokenizerMemoryData> memory_data_;
+  std::string memory_module_;
   std::optional<OrtxTokenizerBlob> memory_blob_;
 
  public:

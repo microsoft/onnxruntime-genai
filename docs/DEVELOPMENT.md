@@ -28,6 +28,34 @@ For the Marian variant, run the same script twice with `--model-dir test/models/
 
 ---
 
+### Linux CPU/WebGPU file-source loading
+
+`OgaConfigSetModelFileDescriptors` (`OgaConfig::SetModelFileDescriptors` in C++)
+registers a complete flat model directory as named, pre-opened, read-only files
+on a JSON-backed config. Supply tokenizer JSON through `OgaConfigSetTokenizerData`.
+GenAI resolves graph names and ORT resolves external-weight names; the host does
+not need to parse ONNX tensors. CPU/WebGPU provider selection is unchanged.
+
+Descriptors are duplicated and shared across config copies and session recreation.
+Original handles may be closed and paths unlinked after registration. Graph-buffer
+overrides, such as decrypted translation graphs, are copied into model-owned
+storage during model creation. Tokenizers own their JSON and optional module data;
+speech/vision processor JSON and adapters can also come from the file sources.
+Files must remain immutable. Nested names, packages and external tensor attributes
+are outside this contract.
+
+This requires ORT's experimental
+`OrtApi_SessionOptionsSetExternalInitializerFileDescriptors_SinceV32` entry.
+An unavailable API, missing file or invalid range is an explicit error, not
+filesystem or CPU fallback. ORT maps initializer ranges rather than entire weight
+files; small or unaligned tensors may be copied. Windows file loading is unchanged.
+Driver initialization must still occur before sandbox lockdown when required.
+
+`FileSourceAssetsTest.*` covers closed/unlinked descriptors, graph and weight
+sources for both encoder/decoder sessions, failed registration, truncation,
+config-independent ownership and pipeline session recreation. It explicitly skips
+when the selected ORT lacks the API; those skips are not file-source validation.
+
 ## 1. Prerequisites
 
 | Tool | Notes |

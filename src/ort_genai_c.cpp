@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include <memory>
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 #include <cstdint>
@@ -8,6 +9,11 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include "span.h"
 #include "ort_genai_c.h"
 #include "generator/generators.h"
@@ -392,7 +398,8 @@ OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
 OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
     OgaConfig* config, const char* filename, const void* data, size_t length) {
   OGA_TRY
-  if (!config || !config->memory_assets_only_ || !filename || !data || length == 0) {
+  if (!config || !config->memory_assets_only_ || config->external_file_sources_ ||
+      !filename || !data || length == 0) {
     throw std::invalid_argument("Expected external initializer bytes and a memory-only config.");
   }
   const std::string name{filename};
@@ -406,6 +413,54 @@ OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
            .second) {
     throw std::invalid_argument("Duplicate external initializer asset: " + name);
   }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetModelFileDescriptors(
+    OgaConfig* config, const char* const* names, const int* descriptors, size_t count) {
+  OGA_TRY
+#if defined(__linux__)
+  if (!config || !config->memory_assets_only_ || !config->external_data_spans_.empty() ||
+      (count != 0 && (!names || !descriptors))) {
+    throw std::invalid_argument("Expected initializer file sources and a memory-only config without weight buffers.");
+  }
+  (void)Generators::GetOrtEnv();
+  if (Ort::api_version < 28 ||
+      !Ort::api->GetExperimentalFunction(
+          "OrtApi_SessionOptionsSetExternalInitializerFileDescriptors_SinceV32")) {
+    throw std::runtime_error("ORT lacks the required initializer file-source API.");
+  }
+  auto sources = std::make_shared<Generators::ExternalInitializerFileSources>();
+  sources->names.reserve(count);
+  sources->descriptors.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    if (!names[i]) {
+      throw std::invalid_argument("Null initializer file-source name.");
+    }
+    const std::string name{names[i]};
+    if (name.empty() || name == "." || name == ".." ||
+        name.find_first_of("/\\:") != std::string::npos ||
+        std::find(sources->names.begin(), sources->names.end(), name) != sources->names.end()) {
+      throw std::invalid_argument("Initializer file-source names must be unique flat relative names.");
+    }
+    const int copy = fcntl(descriptors[i], F_DUPFD_CLOEXEC, 0);
+    if (copy < 0) {
+      throw std::runtime_error("Cannot duplicate external initializer descriptor.");
+    }
+    sources->descriptors.push_back(copy);
+    struct stat info{};
+    const int flags = fcntl(copy, F_GETFL);
+    if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY || (flags & O_PATH) != 0 ||
+        fstat(copy, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0) {
+      throw std::invalid_argument("External initializer sources must be read-only regular files.");
+    }
+    sources->names.push_back(name);
+  }
+  config->external_file_sources_ = std::move(sources);
+#else
+  throw std::runtime_error("External initializer file descriptors require Linux.");
+#endif
   return nullptr;
   OGA_CATCH
 }

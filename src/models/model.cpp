@@ -504,6 +504,13 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
+  if (config_->external_file_sources_) {
+    for (auto& [name, bytes] : config_->model_data_spans_) {
+      auto storage = std::make_shared<const std::vector<std::byte>>(bytes.begin(), bytes.end());
+      config_->owned_file_source_graphs_[name] = storage;
+      bytes = *storage;
+    }
+  }
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
   AddSharedInitializers();
@@ -930,6 +937,30 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
   std::unique_ptr<OrtSession> session;
   if (config_->memory_assets_only_) {
     auto graph = config_->model_data_spans_.find(model_filename);
+    if (config_->external_file_sources_) {
+      if (Ort::api_version < 28) {
+        throw std::runtime_error("ORT does not support experimental initializer file sources.");
+      }
+      using RegisterFiles = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, const char* const*, const int*, size_t) noexcept;
+      const auto register_files = reinterpret_cast<RegisterFiles>(
+          Ort::api->GetExperimentalFunction(
+              "OrtApi_SessionOptionsSetExternalInitializerFileDescriptors_SinceV32"));
+      if (!register_files) {
+        throw std::runtime_error("ORT lacks the required initializer file-source API.");
+      }
+      auto options = session_options->Clone();
+      std::vector<const char*> names;
+      const auto& sources = *config_->external_file_sources_;
+      for (const auto& name : sources.names) {
+        names.push_back(name.c_str());
+      }
+      Ort::ThrowOnError(register_files(options.get(), names.data(), sources.descriptors.data(), names.size()));
+      if (graph != config_->model_data_spans_.end() && !graph->second.empty()) {
+        return OrtSession::Create(ort_env, graph->second.data(), graph->second.size(), options.get());
+      }
+      auto mapping = sources.Map(model_filename);
+      return OrtSession::Create(ort_env, mapping->data, mapping->size, options.get());
+    }
     if (graph == config_->model_data_spans_.end() || graph->second.empty()) {
       throw std::runtime_error("Memory asset bundle is missing graph: " + model_filename);
     }
