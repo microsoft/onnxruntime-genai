@@ -599,14 +599,14 @@ def test_disable_qkv_fusion_is_a_deprecated_inverse_alias(monkeypatch, capsys, e
     assert "'disable_qkv_fusion' is deprecated" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("value,expected", [("0", False), ("1", True), ("false", False), ("true", True)])
-def test_target_gate_up_fusion_cli_boolean_normalization(monkeypatch, value, expected):
+@pytest.mark.parametrize("value", ["0", "1", "false", "true"])
+def test_target_gate_up_fusion_cli_option_is_removed(monkeypatch, value):
     options = {"fuse_mlp_gate_up": value}
-    _run_check_extra_options(monkeypatch, options)
-    assert options["fuse_mlp_gate_up"] is expected
+    with pytest.raises(ValueError, match="no longer configurable"):
+        _run_check_extra_options(monkeypatch, options)
 
 
-def test_target_gate_up_fusion_help_documents_default_off(monkeypatch):
+def test_target_gate_up_fusion_help_omits_removed_option(monkeypatch):
     help_text = []
 
     def inspect_help(parser):
@@ -617,8 +617,7 @@ def test_target_gate_up_fusion_help_documents_default_off(monkeypatch):
     with pytest.raises(SystemExit) as error:
         builder_module.get_args()
     assert error.value.code == 0
-    fusion_help = help_text[0].split("fuse_mlp_gate_up =", 1)[1].split("dflash2_precision =", 1)[0]
-    assert "Default is false." in fusion_help
+    assert "fuse_mlp_gate_up =" not in help_text[0]
 
 
 def test_mtp_quant_config_json_is_parsed(monkeypatch):

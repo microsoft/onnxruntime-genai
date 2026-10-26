@@ -682,7 +682,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
         intermediate_size = self.intermediate_size
         try:
             self.intermediate_size = self.shared_expert_intermediate_size
-            if self.mlp_attrs.get("fuse_gate_up", False):
+            if self.mlp_attrs.get("fuse_gate_up", True) and self.is_mlp_gate_up_fusion_supported(layer_id, shared_expert):
                 self.make_mlp_proj_fused(layer_id, shared_expert, root_input)
             else:
                 self.make_mlp_proj(layer_id, shared_expert, root_input)

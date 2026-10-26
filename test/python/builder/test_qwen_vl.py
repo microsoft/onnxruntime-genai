@@ -37,7 +37,7 @@ Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen35MoETextModel = qwen_module.Qwen35MoETextModel
 
 
-def test_base_mlp_fusion_remains_opt_in():
+def test_base_mlp_fusion_is_automatic():
     config = LlamaConfig(
         hidden_size=8,
         intermediate_size=16,
@@ -51,7 +51,41 @@ def test_base_mlp_fusion_remains_opt_in():
 
     model = Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", "", {})
 
-    assert model.mlp_attrs["fuse_gate_up"] is False
+    assert model.mlp_attrs["fuse_gate_up"] is True
+
+
+def test_default_mlp_fusion_executes_without_extra_options():
+    config = LlamaConfig(
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+        max_position_embeddings=128,
+        architectures=["LlamaForCausalLM"],
+    )
+    model = Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", "", {})
+    model.model.graph.inputs.append(model.make_value("hidden", ir.DataType.FLOAT, [1, 3, 8]))
+    generator = torch.Generator().manual_seed(42)
+    mlp = types.SimpleNamespace(
+        gate_proj=types.SimpleNamespace(weight=torch.randn(16, 8, generator=generator), bias=None),
+        up_proj=types.SimpleNamespace(weight=torch.randn(16, 8, generator=generator), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.randn(8, 16, generator=generator), bias=None),
+    )
+    model.make_mlp(0, mlp, "hidden")
+    model.model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+    proto = ir.to_proto(model.model)
+    assert sum(node.op_type == "MatMul" for node in proto.graph.node) == 2
+    assert sum(node.op_type == "Split" for node in proto.graph.node) == 1
+    hidden = torch.randn(1, 3, 8, generator=generator)
+    expected = (
+        torch.nn.functional.silu(hidden @ mlp.gate_proj.weight.T)
+        * (hidden @ mlp.up_proj.weight.T)
+    ) @ mlp.down_proj.weight.T
+    session = ort.InferenceSession(proto.SerializeToString(), providers=["CPUExecutionProvider"])
+    actual = session.run(None, {"hidden": hidden.numpy()})[0]
+    np.testing.assert_allclose(actual, expected.numpy(), rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("provider", ["cuda", "cpu", "webgpu", "dml", "trt-rtx"])
@@ -136,6 +170,7 @@ def test_base_mlp_assigns_published_output_to_skip_input(monkeypatch):
     model.layernorm_attrs = {"skip_input": "existing_skip"}
 
     monkeypatch.setattr(model, "make_mlp_unpacked", lambda *_args: None)
+    monkeypatch.setattr(model, "is_mlp_gate_up_fusion_supported", lambda *_args: False)
 
     def make_mlp_proj(*_args, **_kwargs):
         model.mlp_attrs["output_0"] = "mlp_output"
@@ -1061,6 +1096,7 @@ def test_qwen35_shared_expert_reuses_mlp_builder(monkeypatch):
         model.mlp_attrs["output_0"] = "shared_output"
 
     monkeypatch.setattr(model, "make_mlp_proj", make_mlp_proj)
+    monkeypatch.setattr(model, "is_mlp_gate_up_fusion_supported", lambda *_args: False)
     monkeypatch.setattr(model, "make_matmul", lambda *_args: "/shared_expert_gate/MatMul")
     monkeypatch.setattr(model, "make_sigmoid", lambda *_args, **_kwargs: None)
 
@@ -1093,6 +1129,7 @@ def test_qwen35_shared_expert_uses_fused_mlp_builder(monkeypatch):
         model.mlp_attrs["output_0"] = "shared_output"
 
     monkeypatch.setattr(model, "make_mlp_proj_fused", make_mlp_proj_fused)
+    monkeypatch.setattr(model, "is_mlp_gate_up_fusion_supported", lambda *_args: True)
     monkeypatch.setattr(model, "make_matmul", lambda *_args: "/shared_expert_gate/MatMul")
     monkeypatch.setattr(model, "make_sigmoid", lambda *_args, **_kwargs: None)
 

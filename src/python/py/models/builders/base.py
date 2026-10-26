@@ -425,13 +425,10 @@ class Model:
         self.make_kv_cache_init()
 
         # MLP-specific variables
-        fuse_gate_up = str(extra_options.get("fuse_mlp_gate_up", False)).lower()
-        if fuse_gate_up not in ("true", "false"):
-            raise ValueError("fuse_mlp_gate_up must be true or false.")
         self.mlp_attrs = {
             "use_proj": True,                                # Use projection style for MLP (GateProj/UpProj/DownProj)
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
-            "fuse_gate_up": fuse_gate_up == "true",  # Fuse gate/up projections before quantization
+            "fuse_gate_up": True,  # Fuse compatible gate/up projections before quantization
             "output_0": "",                                  # Output 0 for MLP subgraph
         }
 
@@ -1613,11 +1610,7 @@ class Model:
                 if lt == "linear_attention":
                     for proj in ("qkv_proj", "z_proj", "out_proj"):
                         customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": bits}
-                    mlp_projections = (
-                        ("gate_up_proj", "down_proj")
-                        if self.mlp_attrs.get("fuse_gate_up", False)
-                        else ("gate_proj", "up_proj", "down_proj")
-                    )
+                    mlp_projections = ("gate_up_proj", "gate_proj", "up_proj", "down_proj")
                     for proj in mlp_projections:
                         customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": bits}
 
@@ -4977,7 +4970,7 @@ class Model:
         self.make_mlp_unpacked(layer_id, mlp, root_input)
 
         if self.mlp_attrs["use_proj"]:
-            if self.mlp_attrs.get("fuse_gate_up", False):
+            if self.mlp_attrs.get("fuse_gate_up", True) and self.is_mlp_gate_up_fusion_supported(layer_id, mlp):
                 self.make_mlp_proj_fused(layer_id, mlp, root_input)
             else:
                 self.make_mlp_proj(layer_id, mlp, root_input)
@@ -5141,6 +5134,30 @@ class Model:
             down_name = down_add_name
 
         self.mlp_attrs["output_0"] = f"{down_name}/output_0"
+
+    def is_mlp_gate_up_fusion_supported(self, layer_id, mlp):
+        projections = (mlp.gate_proj, mlp.up_proj)
+        for projection in projections:
+            if hasattr(projection, "base_layer") or getattr(projection, "quant_type", "none") != "none":
+                return False
+            if not hasattr(projection, "weight") or not projection.weight.is_floating_point():
+                return False
+        names = [f"/model/layers.{layer_id}/mlp/{kind}_proj/MatMul" for kind in ("gate", "up")]
+        overrides = getattr(self, "exact_quant_override_names", set())
+        if any(name in overrides for name in names):
+            return False
+        placement = getattr(self, "int4_customized_weight_config", {})
+        if placement.get(names[0]) != placement.get(names[1]):
+            return False
+        fused_name = f"/model/layers.{layer_id}/mlp/gate_up_proj/MatMul"
+        if placement.get(names[0]) is not None and placement.get(fused_name) != placement[names[0]]:
+            return False
+        excluded = set(getattr(self, "quant_attrs", {}).get("nodes_to_exclude", ()))
+        exclusions = [
+            getattr(projection, "exclude_from_quantization", False) or name in excluded
+            for projection, name in zip(projections, names, strict=True)
+        ]
+        return exclusions[0] == exclusions[1]
 
     def make_mlp_proj_fused(self, layer_id, mlp, root_input):
         #      root_input

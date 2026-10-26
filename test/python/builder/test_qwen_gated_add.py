@@ -169,6 +169,7 @@ def test_shared_expert_gate_preserves_hidden_layout(use_paged_attention, hidden_
     model.intermediate_size = 16
     model.shared_expert_intermediate_size = 8
     model.mlp_attrs = {"output_0": "shared"}
+    model.is_mlp_gate_up_fusion_supported = lambda *_args: False
     model.make_mlp_proj = lambda *args: None
     model.make_matmul = lambda projection, name, root_input: name
 

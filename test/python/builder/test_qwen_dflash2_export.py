@@ -12,13 +12,14 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from safetensors.torch import save_file
+
 from models.builders.base import Model
 from models.builders.block_drafter import BlockDrafterBuilder
 from models.builders.dflash2 import DFlash2Builder
 from models.builders.mtp import MTPModel
 from models.builders.qwen import Qwen35MoEModel
 from models.quantization.quant_config import QuantConfig
-from safetensors.torch import save_file
 
 TARGET_LAYER_IDS = [1, 11, 21]
 AUX_LAYERS = [layer_id + 1 for layer_id in TARGET_LAYER_IDS]
@@ -278,12 +279,15 @@ def test_builder_exposes_the_api_the_composite_drives():
     assert all(hasattr(DFlash2Builder, name) for name in ("make_model", "save_model", "genai_config_section"))
 
 
-def test_target_mlp_gate_up_fusion_preserves_projection_order():
+@pytest.mark.parametrize("provider", ["cpu", "cuda", "webgpu", "dml", "trt-rtx"])
+def test_target_mlp_gate_up_fusion_preserves_projection_order(provider):
     model = object.__new__(Model)
+    model.ep = provider
     model.io_dtype = ir.DataType.FLOAT16
     model.intermediate_size = 2
     model.hidden_size = 3
-    model.mlp_attrs = {"output_0": ""}
+    model.mlp_attrs = {"output_0": "", "use_proj": True}
+    model.layernorm_attrs = {}
     calls = {}
 
     def make_matmul(self, projection, basename, root_input):
@@ -305,7 +309,7 @@ def test_target_mlp_gate_up_fusion_preserves_projection_order():
         down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
     )
 
-    model.make_mlp_proj_fused(4, mlp, "residual")
+    model.make_mlp(4, mlp, "residual")
 
     fused_name, fused_input, fused_weight = calls["matmuls"][0]
     assert fused_name == "/model/layers.4/mlp/gate_up_proj/MatMul"
@@ -318,6 +322,40 @@ def test_target_mlp_gate_up_fusion_preserves_projection_order():
     ]
     assert calls["split"][-1] == 2
     assert model.mlp_attrs["output_0"] == "/model/layers.4/mlp/down_proj/MatMul/output_0"
+
+
+@pytest.mark.parametrize("incompatibility", ["adapter", "packed", "integer", "exclusion", "override", "precision"])
+def test_automatic_gate_up_fusion_preserves_unsupported_projection_paths(monkeypatch, incompatibility):
+    model = object.__new__(Model)
+    model.mlp_attrs = {"use_proj": True}
+    model.layernorm_attrs = {}
+    mlp = types.SimpleNamespace(
+        gate_proj=types.SimpleNamespace(weight=torch.ones(2, 3), bias=None),
+        up_proj=types.SimpleNamespace(weight=torch.ones(2, 3), bias=None),
+    )
+    gate_name = "/model/layers.0/mlp/gate_proj/MatMul"
+    if incompatibility == "adapter":
+        mlp.gate_proj.base_layer = object()
+    elif incompatibility == "packed":
+        mlp.gate_proj.quant_type = "fp8"
+    elif incompatibility == "integer":
+        mlp.gate_proj.weight = torch.ones(2, 3, dtype=torch.int8)
+    elif incompatibility == "exclusion":
+        model.quant_attrs = {"nodes_to_exclude": [gate_name]}
+    elif incompatibility == "override":
+        model.exact_quant_override_names = {gate_name}
+    elif incompatibility == "precision":
+        model.int4_customized_weight_config = {gate_name: {"bits": 8}}
+    calls = []
+
+    def unfused(layer_id, weights, root_input):
+        calls.append((layer_id, weights, root_input))
+        model.mlp_attrs["output_0"] = "unfused_output"
+
+    monkeypatch.setattr(model, "make_mlp_proj", unfused)
+    model.make_mlp(0, mlp, "hidden")
+    assert calls == [(0, mlp, "hidden")]
+    assert model.layernorm_attrs["skip_input"] == "unfused_output"
 
 
 def test_target_mlp_gate_up_fusion_zero_fills_a_missing_bias():

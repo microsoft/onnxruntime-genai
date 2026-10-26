@@ -985,10 +985,7 @@ def flatten_target_options(
             flattened[legacy_key] = kv_cache[field_name]
 
     optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "target_options.optimizations")
-    if "fuse_mlp_gate_up" in optimizations:
-        warn_structured_override(legacy_options, "fuse_mlp_gate_up", "target_options.optimizations.fuse_mlp_gate_up")
-        flattened["fuse_mlp_gate_up"] = optimizations["fuse_mlp_gate_up"]
+    check_fields(optimizations, {"fuse_qkv"}, "target_options.optimizations")
     if "fuse_qkv" in optimizations:
         warn_structured_override(legacy_options, "fuse_qkv", "target_options.optimizations.fuse_qkv")
         warn_structured_override(legacy_options, "disable_qkv_fusion", "target_options.optimizations.fuse_qkv")
@@ -1258,6 +1255,8 @@ def normalize_builder_config(
     here, although block-drafter config.json is read to resolve auxiliary taps.
     """
     legacy_options = copy.deepcopy(extra_options or {})
+    if "fuse_mlp_gate_up" in legacy_options:
+        raise ValueError("fuse_mlp_gate_up is no longer configurable; compatible MLP gate/up projections fuse automatically.")
     structured_present = any(
         value is not None
         for value in (target_options, drafter_options, speculative_options, runtime_config, component_options)

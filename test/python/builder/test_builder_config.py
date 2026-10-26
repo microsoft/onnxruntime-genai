@@ -151,7 +151,7 @@ def test_device_allocator_option_is_preserved(option, value, version):
     assert effective.extra_options[option] == value
 
 
-@pytest.mark.parametrize("option", ["fuse_mlp_gate_up", "dflash2_fuse_gate_up"])
+@pytest.mark.parametrize("option", ["dflash2_fuse_gate_up"])
 @pytest.mark.parametrize("value", [True, False, "true", "false"])
 @pytest.mark.parametrize("version", [1, 2])
 def test_upstream_fusion_options_are_preserved(option, value, version):
@@ -195,9 +195,16 @@ def test_structured_weight_packing_options_are_preserved(section, field, compone
 
 
 @pytest.mark.parametrize("value", [True, False])
-def test_target_fusion_optimization_reaches_builder(value):
-    effective = normalize_builder_config("int4", "cuda", target_options={"optimizations": {"fuse_mlp_gate_up": value}})
-    assert effective.extra_options["fuse_mlp_gate_up"] is value
+def test_target_fusion_optimization_is_removed(value):
+    with pytest.raises(ValueError, match="fuse_mlp_gate_up"):
+        normalize_builder_config("int4", "cuda", target_options={"optimizations": {"fuse_mlp_gate_up": value}})
+
+
+@pytest.mark.parametrize("value", [True, False, "true", "false"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_target_fusion_legacy_option_is_removed(value, version):
+    with pytest.raises(ValueError, match="no longer configurable"):
+        normalize_builder_config("int4", "cuda", {"fuse_mlp_gate_up": value}, builder_config_version=version)
 
 
 @pytest.mark.parametrize("drafter_type", ["none", "mtp", "dspark"])

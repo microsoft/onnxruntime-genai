@@ -99,7 +99,7 @@ Pool size, scheduler limits, utilization targets, and prefill chunk size belong 
 
 ### Projection Fusion
 
-Target MLP gate/up fusion is configurable through `target_options.optimizations.fuse_mlp_gate_up` (default `false`), corresponding to `fuse_mlp_gate_up`. DFlash2 fusion is independently configurable through `drafter_options.optimizations.fuse_mlp_gate_up` (default `false`), corresponding to `dflash2_fuse_gate_up`. When enabled, fusion produces a single projection (`MatMulNBits` for INT4) followed by `Split`. This does not apply fusion to vision components.
+Target MLP gate/up fusion is automatic for compatible unpacked, unadapted floating-point projections; there is no target fusion option. Projections with distinct quantization policies remain separate. DFlash2 fusion is independently configurable through `drafter_options.optimizations.fuse_mlp_gate_up` (default `false`), corresponding to `dflash2_fuse_gate_up`. Fusion produces a single projection (`MatMulNBits` for INT4) followed by `Split`. This does not apply fusion to vision components.
 
 Fusion requires a supported exporter and compatible projection shapes, biases, and quantization policy. Current target fusion requires unpacked floating-point gate/up weights and does not support adapted projections. Reject unsupported requests, including any per-projection exclusion or precision rule that cannot be preserved. Resolve exact-name overrides against the final emitted graph; do not silently drop old gate/up names after fusion or change one projection's policy to match the other.
 
@@ -391,7 +391,6 @@ The JSON blocks are example file contents embedded in this proposal, not separat
           }
         },
         "optimizations": {
-          "fuse_mlp_gate_up": true,
           "fuse_qkv": true
         }
       },
@@ -610,7 +609,6 @@ The same component ownership can later accommodate audio without changing the ta
 | `dflash2_path`, `dspark_path` | Drafter selection and `path` |
 | `dflash2_precision` | Drafter weight policy plus explicit legacy-derived settings |
 | `dflash2_num_draft_tokens`, `dspark_num_draft_tokens` | `drafter_options.num_draft_tokens` |
-| `fuse_mlp_gate_up` | `target_options.optimizations.fuse_mlp_gate_up` |
 | `fuse_qkv` | `target_options.optimizations.fuse_qkv` |
 | `disable_qkv_fusion` | Deprecated inverse alias for `target_options.optimizations.fuse_qkv` |
 | `dflash2_fuse_gate_up` | `drafter_options.optimizations.fuse_mlp_gate_up` |

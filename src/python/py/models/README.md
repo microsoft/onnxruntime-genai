@@ -126,7 +126,7 @@ python src/python/py/models/builder.py -i path_to_dense_checkpoint -o output -e 
   --runtime_config '{"search":{"max_length":128}}'
 ```
 
-`target_options` routes `quant_config`, `attention`, `optimizations.fuse_mlp_gate_up`, and `optimizations.fuse_qkv` to the existing exporter. `quant_config.format` is the canonical graph-layout key; `runtime` remains a parsing alias. The target rejects an explicit checkpoint policy until its loaders implement both paths. Root CLI `precision` is optional when target weight type is explicit.
+`target_options` routes `quant_config`, `attention`, and `optimizations.fuse_qkv` to the existing exporter. Target MLP gate/up fusion is automatic for compatible projections and has no configuration option. `quant_config.format` is the canonical graph-layout key; `runtime` remains a parsing alias. The target rejects an explicit checkpoint policy until its loaders implement both paths. Root CLI `precision` is optional when target weight type is explicit.
 
 DFlash2 and DSpark selection requires a local checkpoint `path` and paged target attention. DSpark uses BF16 body I/O; DFlash2 defaults to BF16 but also supports FP16 through `drafter_options.quant_config.io_dtype`. Omitted target taps are inferred from checkpoint `target_layer_ids + 1` before construction. DFlash2 parses `auto`, `required`, and `off` sharing modes and validates adopted quantized-head node attributes. MTP/DSpark currently accept only `auto`. Structured drafter selections that conflict with legacy drafter paths are rejected.
 
@@ -481,7 +481,7 @@ python builder.py -i path_to_target_model -o path_to_output_folder -p bf16 -e cu
 
 #### Fuse Target MLP Gate/Up Projections
 
-Target model MLP gate and up projections are combined into one `MatMul` or `MatMulNBits` followed by `Split` by default. Set `fuse_mlp_gate_up=false`, or structured `target_options.optimizations.fuse_mlp_gate_up=false`, to disable fusion. Fusion happens before target weight quantization and requires unpacked, unadapted floating-point projections. Re-export the target to apply fusion and validate latency and quality on the deployment workload.
+Target model MLP gate and up projections are automatically combined into one `MatMul` or `MatMulNBits` followed by `Split` before target weight quantization. No extra option is needed. Adapted, pre-quantized, non-floating-point, or independently configured projections retain separate operations to preserve their weights and quantization policies. The former `fuse_mlp_gate_up` extra option and `target_options.optimizations.fuse_mlp_gate_up` field are no longer accepted. DFlash2's independent fusion option is unchanged. Re-export the target to apply fusion and validate latency and quality on the deployment workload.
 
 ```bash
 # From wheel:

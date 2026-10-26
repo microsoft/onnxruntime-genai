@@ -176,8 +176,8 @@ def test_make_config_linear_attn_remaps_fused_gate_up_projection():
 
     cfg = model.int4_customized_weight_config
     assert cfg["/model/layers.0/mlp/gate_up_proj/MatMul"] == {"bits": 8}
-    assert "/model/layers.0/mlp/gate_proj/MatMul" not in cfg
-    assert "/model/layers.0/mlp/up_proj/MatMul" not in cfg
+    assert cfg["/model/layers.0/mlp/gate_proj/MatMul"] == {"bits": 8}
+    assert cfg["/model/layers.0/mlp/up_proj/MatMul"] == {"bits": 8}
 
 
 def test_make_config_supports_distinct_types_per_selector():
