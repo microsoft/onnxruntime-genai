@@ -2204,6 +2204,24 @@ def test_mtp_weights_are_detected_from_the_safetensors_index(tmp_path, mtp_name)
     assert Qwen35MoEModel.checkpoint_has_mtp_weights(str(tmp_path)) is (mtp_name is not None)
 
 
+# The MTP weight loader reads every root shard, so a root `mtp.safetensors` the index omits counts.
+def test_a_root_mtp_shard_missing_from_the_index_keeps_the_head(monkeypatch, tmp_path):
+    weight_map = {"model.embed_tokens.weight": "model-00001-of-00001.safetensors"}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
+    save_file({"model.embed_tokens.weight": torch.zeros(4, 2)}, str(tmp_path / "model-00001-of-00001.safetensors"))
+    save_file({"mtp.fc.weight": torch.zeros(2, 4)}, str(tmp_path / "mtp.safetensors"))
+    model = object.__new__(Qwen35MoEModel)
+    model.mtp_attrs = {}
+    monkeypatch.setattr(MTPModel, "make_mtp_init", lambda self, _c, opts: dict(opts))
+    config = types.SimpleNamespace(mtp_num_hidden_layers=1, _name_or_path=str(tmp_path))
+
+    assert Qwen35MoEModel.checkpoint_has_mtp_weights(str(tmp_path)) is True
+    for extra_options in ({}, {"_mtp_requested": True}):
+        decoder_options = Qwen35MoEModel.make_mtp_init(model, config, extra_options)
+        assert model.mtp_attrs["build"] is True
+        assert decoder_options["include_hidden_states"] is True
+
+
 def test_exclude_mtp_admits_a_pruned_lm_head(mtp_init):
     build, _ = mtp_init({"exclude_mtp": True, "prune_lm_head": True})
 
