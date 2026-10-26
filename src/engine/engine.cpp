@@ -2110,7 +2110,7 @@ void Engine::ValidateRequestCanContinue(
   }
 
   if (!allow_nonresident &&
-      !cache_manager_->SupportsDynamicBatching() &&
+      !cache_manager_->SupportsContinuousMultiSlotDecoding() &&
       cache_manager_->ResidentRequestCount() > 1) {
     throw std::runtime_error(
         "Continuous decoding requires exactly one resident request in a "
@@ -3020,7 +3020,7 @@ EngineCapabilities Engine::GetCapabilities() const {
   } else {
     capabilities.configured_max_batch_size = kDefaultStaticBatchSize;
   }
-  if (!model_->config_->engine.dynamic_batching) {
+  if (!cache_manager_->SupportsDynamicBatching()) {
     if (const size_t rows = cache_manager_->MaxStaticBatchSize()) {
       capabilities.configured_max_batch_size = rows;
     }
