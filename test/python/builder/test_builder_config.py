@@ -194,17 +194,8 @@ def test_structured_weight_packing_options_are_preserved(section, field, compone
     assert result["quant_config"]["format" if section == "runtime" else section][field] == 0
 
 
-@pytest.mark.parametrize("value", [True, False])
-def test_target_fusion_optimization_is_removed(value):
-    with pytest.raises(ValueError, match="fuse_mlp_gate_up"):
-        normalize_builder_config("int4", "cuda", target_options={"optimizations": {"fuse_mlp_gate_up": value}})
 
 
-@pytest.mark.parametrize("value", [True, False, "true", "false"])
-@pytest.mark.parametrize("version", [1, 2])
-def test_target_fusion_legacy_option_is_removed(value, version):
-    with pytest.raises(ValueError, match="no longer configurable"):
-        normalize_builder_config("int4", "cuda", {"fuse_mlp_gate_up": value}, builder_config_version=version)
 
 
 @pytest.mark.parametrize("drafter_type", ["none", "mtp", "dspark"])
@@ -966,28 +957,8 @@ def test_structured_target_overrides_legacy_alias():
     assert effective.target_options["quant_config"]["weights"]["block_size"] == 128
 
 
-@pytest.mark.parametrize("fuse_qkv", [False, True])
-def test_target_qkv_fusion_maps_to_legacy_option(fuse_qkv):
-    effective = normalize_builder_config(
-        "int4",
-        "cuda",
-        target_options={"optimizations": {"fuse_qkv": fuse_qkv}},
-    )
-
-    assert effective.extra_options["fuse_qkv"] is fuse_qkv
 
 
-@pytest.mark.parametrize("legacy_option", ["fuse_qkv", "disable_qkv_fusion"])
-def test_structured_target_qkv_fusion_overrides_legacy_option(legacy_option):
-    with pytest.warns(UserWarning, match=f"fuse_qkv overrides legacy extra_options.{legacy_option}"):
-        effective = normalize_builder_config(
-            "int4",
-            "cuda",
-            {legacy_option: True},
-            target_options={"optimizations": {"fuse_qkv": False}},
-        )
-
-    assert effective.extra_options["fuse_qkv"] is False
 
 
 @pytest.mark.parametrize(

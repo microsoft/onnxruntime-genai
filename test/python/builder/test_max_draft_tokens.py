@@ -141,22 +141,12 @@ def test_check_extra_options_normalizes_max_draft_tokens_to_an_int(monkeypatch):
     assert options["max_draft_tokens"] == 6
 
 
-@pytest.mark.parametrize("value", ["false", "False", "0", False])
-def test_check_extra_options_rejects_indexshare_opt_out(monkeypatch, value):
-    with pytest.raises(ValueError, match="share indices by default"):
-        _check_extra_options(monkeypatch, {"indexshare_mtp": value})
 
 
-@pytest.mark.parametrize("value", range(1, 8))
-def test_check_extra_options_rejects_separate_indexshare_width(monkeypatch, value):
-    with pytest.raises(ValueError, match="Use max_draft_tokens"):
-        _check_extra_options(monkeypatch, {"indexshare_max_draft_tokens": str(value)})
 
 
-@pytest.mark.parametrize("value", [0, -1, 8, 6.5, "6.5", ""])
-def test_check_extra_options_rejects_invalid_indexshare_width(monkeypatch, value):
-    with pytest.raises(ValueError, match="indexshare_max_draft_tokens must be an integer between 1 and 7"):
-        _check_extra_options(monkeypatch, {"indexshare_max_draft_tokens": value})
+
+
 
 
 @pytest.mark.parametrize("value", [0, -1, 17])

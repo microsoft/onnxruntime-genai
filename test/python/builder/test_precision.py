@@ -584,26 +584,8 @@ def test_structured_unquantized_moe_completes_cli_option_parsing(monkeypatch):
     assert "moe_quant_type" not in options
 
 
-@pytest.mark.parametrize(
-    ("extra_options", "expected"),
-    [
-        ({"disable_qkv_fusion": "true"}, False),
-        ({"disable_qkv_fusion": "false"}, True),
-        ({"disable_qkv_fusion": "true", "fuse_qkv": "true"}, True),
-    ],
-)
-def test_disable_qkv_fusion_is_a_deprecated_inverse_alias(monkeypatch, capsys, extra_options, expected):
-    _run_check_extra_options(monkeypatch, extra_options)
-
-    assert extra_options["fuse_qkv"] is expected
-    assert "'disable_qkv_fusion' is deprecated" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("value", ["0", "1", "false", "true"])
-def test_target_gate_up_fusion_cli_option_is_removed(monkeypatch, value):
-    options = {"fuse_mlp_gate_up": value}
-    with pytest.raises(ValueError, match="no longer configurable"):
-        _run_check_extra_options(monkeypatch, options)
 
 
 def test_target_gate_up_fusion_help_omits_removed_option(monkeypatch):
@@ -618,6 +600,8 @@ def test_target_gate_up_fusion_help_omits_removed_option(monkeypatch):
         builder_module.get_args()
     assert error.value.code == 0
     assert "fuse_mlp_gate_up =" not in help_text[0]
+    for removed in ("fuse_qkv", "disable_qkv_fusion", "fuse_qk_norm_gqa", "indexshare_max_draft_tokens"):
+        assert not any(line.strip().startswith(f"{removed} =") for line in help_text[0].splitlines())
 
 
 def test_mtp_quant_config_json_is_parsed(monkeypatch):

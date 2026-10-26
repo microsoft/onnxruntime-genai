@@ -1605,7 +1605,7 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
     wrapper = object.__new__(Qwen4ExpModel)
     wrapper.text_only = text_only
     wrapper.input_path = "unused"
-    wrapper.extra_options = {"indexshare_mtp": False}
+    wrapper.extra_options = {}
     wrapper.config = SimpleNamespace(text_config=text_config, vision_config=SimpleNamespace(out_hidden_size=8))
     wrapper.decoder = component("model.onnx")
     wrapper.decoder.io_dtype = ir.DataType.FLOAT16

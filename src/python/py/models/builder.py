@@ -191,8 +191,6 @@ def check_extra_options(
     """
     Check key-value pairs and set values correctly
     """
-    if "fuse_mlp_gate_up" in extra_options:
-        raise ValueError("fuse_mlp_gate_up is no longer configurable; compatible MLP gate/up projections fuse automatically.")
     bools = [
         "is_symmetric",
         "exclude_embeds",
@@ -207,9 +205,6 @@ def check_extra_options(
         "use_cuda_bf16",
         "shared_embeddings",
         "hf_remote",
-        "fuse_qkv",
-        "disable_qkv_fusion",
-        "fuse_qk_norm_gqa",
         "prune_lm_head",
         "use_paged_attention",
         "windowed_kv_cache",
@@ -230,10 +225,6 @@ def check_extra_options(
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
 
-    if "disable_qkv_fusion" in extra_options:
-        print("WARNING: 'disable_qkv_fusion' is deprecated. Use 'fuse_qkv=false' instead.")
-        if "fuse_qkv" not in extra_options:
-            extra_options["fuse_qkv"] = not extra_options["disable_qkv_fusion"]
 
     if "state_window" in extra_options:
         try:
@@ -260,17 +251,15 @@ def check_extra_options(
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
         extra_options["state_update_capacity"] = state_update_capacity
 
-    for option, draft_tokens_limit in (("max_draft_tokens", 16), ("indexshare_max_draft_tokens", 7)):
-        if option not in extra_options:
-            continue
-        message = f"{option} must be an integer between 1 and {draft_tokens_limit}."
+    if "max_draft_tokens" in extra_options:
+        message = "max_draft_tokens must be an integer between 1 and 16."
         try:
-            max_draft_tokens = int(str(extra_options[option]).strip())
+            max_draft_tokens = int(str(extra_options["max_draft_tokens"]).strip())
         except (TypeError, ValueError) as e:
             raise ValueError(message) from e
-        if not 1 <= max_draft_tokens <= draft_tokens_limit:
+        if not 1 <= max_draft_tokens <= 16:
             raise ValueError(message)
-        extra_options[option] = max_draft_tokens
+        extra_options["max_draft_tokens"] = max_draft_tokens
 
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
@@ -360,9 +349,6 @@ def check_extra_options(
             extra_options[key] = int(extra_options[key])
             if extra_options[key] not in allowed:
                 raise ValueError(f"{key} must be one of {allowed}.")
-    for key in ("indexshare_mtp", "indexshare_max_draft_tokens"):
-        if key in extra_options:
-            raise ValueError(f"{key} is no longer configurable; paged main/MTP graphs share indices by default. Use max_draft_tokens to set the draft budget.")
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
@@ -1254,13 +1240,6 @@ def get_args():
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
                     An optional "qmax" records the divisor the file was calibrated with (128 for int8, 8 for int4, 448 for fp8);
                     the builder then rescales to the requested scheme, so one file can serve several bit widths.
-                fuse_qkv = Fuse the model's Q, K, and V projections. Default is true.
-                    Set to false to keep separate projections. Fusion is automatically disabled for unsupported EPs
-                    and incompatible projection or quantization configurations.
-                disable_qkv_fusion = [DEPRECATED] Use 'fuse_qkv=false' instead.
-                    This inverse alias remains supported for compatibility. Default is false.
-                fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.
-                    Set to false to keep explicit Q/K normalization nodes instead of passing Q/K norm weights into GroupQueryAttention.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.

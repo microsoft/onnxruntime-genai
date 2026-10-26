@@ -103,7 +103,7 @@ Target MLP gate/up fusion is automatic for compatible unpacked, unadapted floati
 
 Fusion requires a supported exporter and compatible projection shapes, biases, and quantization policy. Current target fusion requires unpacked floating-point gate/up weights and does not support adapted projections. Reject unsupported requests, including any per-projection exclusion or precision rule that cannot be preserved. Resolve exact-name overrides against the final emitted graph; do not silently drop old gate/up names after fusion or change one projection's policy to match the other.
 
-`target_options.optimizations.fuse_qkv` controls target Q/K/V projection fusion and defaults to `true`. It maps to the `fuse_qkv` exporter option. The legacy inverse option `disable_qkv_fusion` is deprecated but remains supported; when both spellings are present, `fuse_qkv` takes precedence. Fusion remains automatically disabled for unsupported execution providers and incompatible projection or quantization configurations.
+Target Q/K/V projection fusion and eligible Q/K normalization fusion are automatic, without target optimization fields or extra options. Unsupported execution providers and incompatible projection or quantization configurations retain separate operations. Index sharing is intrinsic to paged main/MTP graphs; `max_draft_tokens` remains the draft-budget control.
 
 `drafter_options.optimizations.fuse_qkv` (DFlash2 only, default `false`) maps to `dflash2_fuse_qkv`. Each layer stacks its query-block rows over the shared context rows and projects both with one Q/K/V projection whose gathered output feeds `PagedAttention` as packed QKV. The fused drafter has no `q_row_map` input and therefore requires a runtime that treats `q_row_map` as optional.
 
@@ -389,9 +389,6 @@ The JSON blocks are example file contents embedded in this proposal, not separat
             "scheme": "int4_per_channel",
             "scale_file": "kv_scales_int8_per_channel.json"
           }
-        },
-        "optimizations": {
-          "fuse_qkv": true
         }
       },
       "drafter_options": {
@@ -609,8 +606,6 @@ The same component ownership can later accommodate audio without changing the ta
 | `dflash2_path`, `dspark_path` | Drafter selection and `path` |
 | `dflash2_precision` | Drafter weight policy plus explicit legacy-derived settings |
 | `dflash2_num_draft_tokens`, `dspark_num_draft_tokens` | `drafter_options.num_draft_tokens` |
-| `fuse_qkv` | `target_options.optimizations.fuse_qkv` |
-| `disable_qkv_fusion` | Deprecated inverse alias for `target_options.optimizations.fuse_qkv` |
 | `dflash2_fuse_gate_up` | `drafter_options.optimizations.fuse_mlp_gate_up` |
 | `dflash2_fuse_qkv` | `drafter_options.optimizations.fuse_qkv` |
 | `dspark_top_k` | `drafter_options.dspark.top_k` |
