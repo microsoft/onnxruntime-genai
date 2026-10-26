@@ -166,8 +166,22 @@ Qwen38GraphEngine::Qwen38GraphEngine(Qwen38GraphModel& model)
     if (std::getenv("ORT_FORCE_DETERMINISTIC_MOE") == nullptr) {
       _putenv_s("ORT_FORCE_DETERMINISTIC_MOE", "1");
     }
+    struct DflashWarmupEnvGuard {
+      DflashWarmupEnvGuard() { _putenv_s("ORT_QMOE_IN_WARMUP", "1"); }
+      ~DflashWarmupEnvGuard() {
+        _putenv_s("ORT_QMOE_IN_WARMUP", "0");
+        _putenv_s("ORT_QMOE_PREFILL_NEW_TURN", "0");
+      }
+    } warmup_guard;
 #else
     setenv("ORT_FORCE_DETERMINISTIC_MOE", "1", 0);
+    struct DflashWarmupEnvGuard {
+      DflashWarmupEnvGuard() { setenv("ORT_QMOE_IN_WARMUP", "1", 1); }
+      ~DflashWarmupEnvGuard() {
+        setenv("ORT_QMOE_IN_WARMUP", "0", 1);
+        setenv("ORT_QMOE_PREFILL_NEW_TURN", "0", 1);
+      }
+    } warmup_guard;
 #endif
     if (q.warmup && fast_ && fast_->unified) {
       if (fast_->chunk > 512) {
@@ -781,6 +795,7 @@ void Qwen38GraphEngine::Reset() {
   SyncStream();
   if (dflash_) dflash_->ReleaseAll();
   dflash_prompt_rows_ = 0;
+  dflash_ingested_in_turn_ = false;
   for (auto& bank : banks_) {
     if (bank.arena.size() > 0)
       plane_.Check(plane_.device_memset(bank.arena.data(), 0, bank.arena.size(), stream_), "clear bank");
