@@ -7,9 +7,7 @@
 import copy
 import os
 
-import onnx
 import onnx_ir as ir
-from onnx import TensorProto, helper
 from quantization import QuantConfig
 
 
@@ -31,36 +29,34 @@ class MTPModel:
     def export_indexshare_graphs(self, output_dir, source_file, max_draft_tokens=7):
         if not 1 <= max_draft_tokens <= 7:
             raise ValueError("IndexShare export requires between one and seven draft tokens.")
-        source = onnx.load(os.path.join(output_dir, source_file), load_external_data=False)
-        indexers = [node for node in source.graph.node if node.op_type == "PackedSparseAttentionIndexer"]
+        source = ir.load(os.path.join(output_dir, source_file))
+        indexers = [node for node in source.graph if node.op_type == "PackedSparseAttentionIndexer"]
         if len(indexers) != 1:
             raise ValueError("IndexShare export currently requires exactly one packed QSA indexer.")
         indexer = indexers[0]
-        if any(indexer.input[18:]):
+        if any(value is not None for value in indexer.inputs[18:]):
             raise ValueError("IndexShare export requires a graph that has not already been converted.")
-        attributes = {attribute.name: helper.get_attribute_value(attribute) for attribute in indexer.attribute}
-        if attributes.get("policy_mode") != b"qsa":
+        attributes = indexer.attributes
+        if "policy_mode" not in attributes or attributes["policy_mode"].as_string() != "qsa":
             raise ValueError("IndexShare MTP export requires QSA raw-token selections.")
-        capacity = attributes["token_budget"] + attributes["compress_ratio"] - 1
+        capacity = attributes["token_budget"].as_int() + attributes["compress_ratio"].as_int() - 1
         attention_nodes = [
             node
-            for node in source.graph.node
-            if node.op_type == "SparsePagedAttention" and list(node.input[9:11]) == list(indexer.output[:2])
+            for node in source.graph
+            if node.op_type == "SparsePagedAttention" and tuple(node.inputs[9:11]) == tuple(indexer.outputs[:2])
         ]
         if len(attention_nodes) != 1:
             raise ValueError("The packed indexer must feed exactly one SparsePagedAttention node.")
-        past_lengths = indexer.input[7]
-        input_types = {value.name: value.type.tensor_type.elem_type for value in source.graph.input}
-        if input_types.get(past_lengths) != TensorProto.INT32:
+        past_lengths = indexer.inputs[7]
+        if past_lengths not in source.graph.inputs or past_lengths.dtype != ir.DataType.INT32:
             raise ValueError("IndexShare requires packed int32 past sequence lengths.")
         return self.export_packed_indexshare_graph(
             source, indexer, capacity, output_dir, source_file, max_draft_tokens
         )
 
     def export_packed_indexshare_graph(self, source, indexer, capacity, output_dir, source_file, max_draft_tokens):
-        model = ir.serde.deserialize_model(source)
+        model = source
         graph = model.graph
-        indexer = next(node for node in graph if node.op_type == indexer.op_type)
         existing_names = {value.name for value in graph.inputs}
         existing_names.update(graph.initializers)
         existing_names.update(value.name for node in graph for value in node.outputs)
@@ -212,13 +208,8 @@ class MTPModel:
         graph.remove(indexer, safe=True)
         if split is not None:
             graph.remove(split, safe=True)
-        for node in tuple(graph):
-            if node.op_type == "Constant" and not any(value.uses() or value.is_graph_output() for value in node.outputs):
-                graph.remove(node, safe=True)
-        for name, value in tuple(graph.initializers.items()):
-            if not value.uses() and not value.is_graph_output() and not value.is_graph_input():
-                del graph.initializers[name]
-        onnx.save_model(ir.serde.serialize_model(model), os.path.join(output_dir, source_file))
+        self.remove_unused_constants(graph)
+        ir.save(model, os.path.join(output_dir, source_file))
         return {
             "enabled": True,
             "base_capacity": capacity,
@@ -229,18 +220,12 @@ class MTPModel:
         }
 
     def remove_unused_constants(self, graph):
-        used_names = {name for node in graph.node for name in node.input if name}
-        used_names.update(value.name for value in graph.output)
-        nodes = [
-            node for node in graph.node
-            if node.op_type != "Constant" or any(name in used_names for name in node.output)
-        ]
-        del graph.node[:]
-        graph.node.extend(nodes)
-        used_names.update(value.name for value in graph.input)
-        initializers = [value for value in graph.initializer if value.name in used_names]
-        del graph.initializer[:]
-        graph.initializer.extend(initializers)
+        for node in tuple(graph):
+            if node.op_type == "Constant" and not any(value.uses() or value.is_graph_output() for value in node.outputs):
+                graph.remove(node, safe=True)
+        for name, value in tuple(graph.initializers.items()):
+            if not value.uses() and not value.is_graph_output() and not value.is_graph_input():
+                del graph.initializers[name]
 
     def resolve_mtp_model_config(self, extra_options):
         mtp_quant_config_value = extra_options.get("mtp_quant_config")

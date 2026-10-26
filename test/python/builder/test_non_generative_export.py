@@ -7,10 +7,12 @@ import sys
 import types
 
 import numpy as np
+import onnx_ir as ir
 import pytest
 import torch
 import torch.nn.functional as F
 from _builder_test_utils import load_builder_module
+from onnx import checker
 from onnx.reference import ReferenceEvaluator
 
 clm = load_builder_module("clm")
@@ -75,14 +77,15 @@ def _torch_clm_head(value, state):
 def test_clm_tiny_graph_structure_weights_and_math():
     checkpoint = _tiny_clm_checkpoint()
     model = clm.build_clm_model(checkpoint)
-    op_types = [node.op_type for node in model.graph.node]
+    assert isinstance(model, ir.Model)
+    op_types = [node.op_type for node in model.graph]
 
     assert op_types.count("Gemm") == 6
     assert op_types.count("Gelu") == 4
     assert op_types.count("LayerNormalization") == 2
     assert op_types.count("ReduceL2") == 4
     assert op_types.count("Max") == 4
-    assert {item.name for item in model.graph.initializer} >= {
+    assert set(model.graph.initializers) >= {
         "state.inp.weight",
         "state.hidden.0.weight",
         "state.norms.0.weight",
@@ -91,7 +94,7 @@ def test_clm_tiny_graph_structure_weights_and_math():
 
     state_input = torch.tensor([[0.2, -0.3, 0.7]], dtype=torch.float32)
     action_input = torch.tensor([[-0.1, 0.5, 0.4]], dtype=torch.float32)
-    actual = ReferenceEvaluator(model).run(
+    actual = ReferenceEvaluator(ir.serde.serialize_model(model)).run(
         None,
         {
             "state_hidden_states": state_input.numpy(),
@@ -103,7 +106,7 @@ def test_clm_tiny_graph_structure_weights_and_math():
         actual[1], _torch_clm_head(action_input, checkpoint["action_head"]), rtol=2e-5, atol=2e-5
     )
     assert actual[2] == np.float32(100.0)
-    scaled = ReferenceEvaluator(model).run(
+    scaled = ReferenceEvaluator(ir.serde.serialize_model(model)).run(
         None,
         {
             "state_hidden_states": (state_input * 7).numpy(),
@@ -119,7 +122,7 @@ def test_clm_l2_normalization_matches_f_normalize_epsilon_for_zero_output():
     for state in (checkpoint["state_head"], checkpoint["action_head"]):
         state["out.weight"].zero_()
         state["out.bias"].zero_()
-    outputs = ReferenceEvaluator(clm.build_clm_model(checkpoint)).run(
+    outputs = ReferenceEvaluator(ir.serde.serialize_model(clm.build_clm_model(checkpoint))).run(
         None,
         {
             "state_hidden_states": np.zeros((1, 3), dtype=np.float32),
@@ -133,7 +136,7 @@ def test_clm_l2_normalization_matches_f_normalize_epsilon_for_zero_output():
 def test_clm_logit_scale_is_finite_and_clamped_before_exp():
     checkpoint = _tiny_clm_checkpoint()
     checkpoint["logit_scale"] = torch.tensor(1000.0)
-    outputs = ReferenceEvaluator(clm.build_clm_model(checkpoint)).run(
+    outputs = ReferenceEvaluator(ir.serde.serialize_model(clm.build_clm_model(checkpoint))).run(
         None,
         {
             "state_hidden_states": np.ones((1, 3), dtype=np.float32),
@@ -257,6 +260,7 @@ def _write_kev_artifact(path, checkpoint=None):
 def test_kev_tiny_graph_weights_masked_grouped_softmax_math():
     checkpoint = _tiny_kev_checkpoint()
     model = kev.build_kev_model(checkpoint)
+    assert isinstance(model, ir.Model)
     hidden = torch.tensor(
         [
             [[1.0, 0.0, 0.5], [0.0, 1.0, -0.5], [0.5, 0.5, 1.0]],
@@ -267,7 +271,7 @@ def test_kev_tiny_graph_weights_masked_grouped_softmax_math():
     options = np.asarray([[1, 2], [0, 2]], dtype=np.int64)
     mask = np.asarray([[True, False], [True, True]])
 
-    probabilities, scores = ReferenceEvaluator(model).run(
+    probabilities, scores = ReferenceEvaluator(ir.serde.serialize_model(model)).run(
         None,
         {
             "hidden_states": hidden.numpy(),
@@ -293,12 +297,12 @@ def test_kev_tiny_graph_weights_masked_grouped_softmax_math():
 
     np.testing.assert_allclose(scores, expected_scores.numpy(), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(probabilities, expected_probabilities.numpy(), rtol=1e-6, atol=1e-6)
-    assert [node.op_type for node in model.graph.node][-3:] == [
+    assert [node.op_type for node in model.graph][-3:] == [
         "Where",
         "Softmax",
         "Where",
     ]
-    all_masked, _ = ReferenceEvaluator(model).run(
+    all_masked, _ = ReferenceEvaluator(ir.serde.serialize_model(model)).run(
         None,
         {
             "hidden_states": hidden.numpy(),
@@ -308,6 +312,82 @@ def test_kev_tiny_graph_weights_masked_grouped_softmax_math():
         },
     )
     np.testing.assert_array_equal(all_masked, np.zeros_like(all_masked))
+
+
+@pytest.mark.parametrize("component", ["clm", "kev"])
+def test_component_ir_export_roundtrip_preserves_contract(component, monkeypatch, tmp_path):
+    if component == "clm":
+        checkpoint = _tiny_clm_checkpoint()
+        module, loader, builder, exporter = (
+            clm, "load_clm_checkpoint", clm.build_clm_model, clm.export_clm_components
+        )
+        revision, base_revision = clm.clm_artifact_revision(), "caller-pin"
+        filename, component_name, opset = "clm_heads.onnx", "clm_heads", 20
+        input_contract = [
+            ("state_hidden_states", ir.DataType.FLOAT, [None, 3]),
+            ("action_hidden_states", ir.DataType.FLOAT, [None, 3]),
+        ]
+        output_contract = [
+            ("state_embedding", ir.DataType.FLOAT, [None, 2]),
+            ("action_embedding", ir.DataType.FLOAT, [None, 2]),
+            ("effective_logit_scale", ir.DataType.FLOAT, []),
+        ]
+        weight_name, weight = "state.inp.weight", checkpoint["state_head"]["inp.weight"]
+        feeds = {
+            "state_hidden_states": np.ones((2, 3), dtype=np.float32),
+            "action_hidden_states": np.zeros((2, 3), dtype=np.float32),
+        }
+    else:
+        checkpoint = _tiny_kev_checkpoint()
+        module, loader, builder, exporter = (
+            kev, "load_kev_checkpoint", kev.build_kev_model, kev.export_kev_components
+        )
+        policy = kev.kev_policy()
+        revision, base_revision = policy["adapter_revision"], policy["base_revision"]
+        filename, component_name, opset = "kev_head.onnx", "kev_head", 18
+        input_contract = [
+            ("hidden_states", ir.DataType.FLOAT, [None, None, 3]),
+            ("decide_indices", ir.DataType.INT64, [None]),
+            ("option_indices", ir.DataType.INT64, [None, None]),
+            ("option_mask", ir.DataType.BOOL, [None, None]),
+        ]
+        output_contract = [
+            ("probabilities", ir.DataType.FLOAT, [None, None]),
+            ("scores", ir.DataType.FLOAT, [None, None]),
+        ]
+        weight_name, weight = "q.weight", checkpoint["state"]["q.weight"]
+        feeds = {
+            "hidden_states": np.ones((1, 2, 3), dtype=np.float32),
+            "decide_indices": np.asarray([0], dtype=np.int64),
+            "option_indices": np.asarray([[0, 1]], dtype=np.int64),
+            "option_mask": np.asarray([[True, False]]),
+        }
+
+    monkeypatch.setattr(module, loader, lambda _: checkpoint)
+    options = types.SimpleNamespace(
+        model_source="synthetic", artifact_revision=revision,
+        base_revision=base_revision, backbone_filename="backbone.onnx",
+    )
+    expected = builder(checkpoint)
+    manifest = exporter(options, tmp_path)
+    loaded = ir.load(tmp_path / filename)
+    assert isinstance(loaded, ir.Model)
+    assert loaded.graph.opset_imports == {"": opset}
+    assert loaded.producer_name == "onnxruntime-genai"
+    assert loaded.metadata_props == expected.metadata_props
+    assert manifest["components"][component_name]["filename"] == filename
+    for values, contract in ((loaded.graph.inputs, input_contract), (loaded.graph.outputs, output_contract)):
+        assert [(value.name, value.dtype, list(value.shape)) for value in values] == contract
+    assert list(loaded.graph.initializers) == list(expected.graph.initializers)
+    for name, value in expected.graph.initializers.items():
+        np.testing.assert_array_equal(loaded.graph.initializers[name].const_value.numpy(), value.const_value.numpy())
+    np.testing.assert_array_equal(loaded.graph.initializers[weight_name].const_value.numpy(), weight.numpy().T)
+    # ONNX's checker independently validates the serialized IR at the file boundary.
+    checker.check_model(str(tmp_path / filename))
+    expected_outputs = ReferenceEvaluator(ir.serde.serialize_model(expected)).run(None, feeds)
+    actual_outputs = ReferenceEvaluator(str(tmp_path / filename)).run(None, feeds)
+    for actual, expected_output in zip(actual_outputs, expected_outputs, strict=True):
+        np.testing.assert_array_equal(actual, expected_output)
 
 
 def test_artifact_layout_dispatch_and_ambiguity(tmp_path):

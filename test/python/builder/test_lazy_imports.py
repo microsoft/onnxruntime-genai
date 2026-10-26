@@ -12,6 +12,26 @@ from unittest.mock import Mock
 import pytest
 
 
+def test_model_builder_uses_ir_instead_of_onnx_graph_helpers():
+    models_dir = Path(__file__).parents[3] / "src/python/py/models"
+    forbidden = {"helper", "numpy_helper", "external_data_helper"}
+    for path in models_dir.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert not (
+                        alias.name.startswith("onnx.") and alias.name.split(".")[1] in forbidden
+                    ), f"{path}:{node.lineno}"
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == "onnx":
+                    assert not any(alias.name in forbidden for alias in node.names), f"{path}:{node.lineno}"
+                elif node.module and node.module.startswith("onnx."):
+                    assert node.module.split(".")[1] not in forbidden, f"{path}:{node.lineno}"
+            elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "onnx":
+                assert node.attr not in forbidden, f"{path}:{node.lineno}"
+
+
 @pytest.mark.parametrize(
     ("relative_path", "dependency"),
     [

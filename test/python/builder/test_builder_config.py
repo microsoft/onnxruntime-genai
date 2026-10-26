@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import onnx
+import onnx_ir as ir
 import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
@@ -18,6 +19,8 @@ from builder_config import (  # noqa: E402
     apply_runtime_config,
     component_manifest_dict,
     export_component_package,
+    find_external_data_files,
+    load_component_model,
     load_json_object,
     normalize_builder_config,
     serialize_genai_config,
@@ -486,6 +489,114 @@ def test_component_package_rejects_invalid_external_data_ranges(
     with pytest.raises(ValueError, match=match):
         export_component_package(options, str(output_dir))
     assert not (output_dir / "head.onnx").exists()
+
+
+@pytest.mark.parametrize("location", [None, ""])
+def test_component_model_rejects_missing_external_location(tmp_path, location):
+    graph = tmp_path / "head.onnx"
+    _write_external_component_model(graph, location)
+
+    with pytest.raises(ValueError, match="without a location"):
+        load_component_model(graph, "head")
+
+
+@pytest.mark.parametrize(
+    ("offset", "length", "match"),
+    [
+        ("", None, "offset is invalid"),
+        ("invalid", None, "offset is invalid"),
+        (None, "", "length is invalid"),
+        (None, "invalid", "length is invalid"),
+        (-1, None, "range is too small"),
+        (0, -1, "range is too small"),
+    ],
+)
+def test_component_model_rejects_malformed_external_ranges(
+    tmp_path, offset, length, match
+):
+    graph = tmp_path / "head.onnx"
+    _write_external_component_model(graph, "weights.bin", offset=offset, length=length)
+    (tmp_path / "weights.bin").write_bytes(b"\0" * 16)
+
+    with pytest.raises(ValueError, match=match):
+        load_component_model(graph, "head")
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [
+        "initializer",
+        "tensor",
+        "tensors",
+        "graph",
+        "graphs",
+        "function",
+        "function_default",
+        "sparse_initializer",
+        "sparse_attribute",
+        "training",
+        "malformed_attribute",
+        "non_external",
+    ],
+)
+def test_component_model_checks_original_nested_external_metadata(tmp_path, placement):
+    graph = tmp_path / "head.onnx"
+    _write_external_component_model(graph, "../outside.bin")
+    model = onnx.load(graph, load_external_data=False)
+    tensor = copy.deepcopy(model.graph.initializer[0])
+    del model.graph.initializer[:]
+    attribute = onnx.helper.make_attribute("value", tensor)
+    if placement == "initializer":
+        model.graph.initializer.append(tensor)
+    elif placement == "non_external":
+        tensor.data_location = onnx.TensorProto.DEFAULT
+        model.graph.initializer.append(tensor)
+    elif placement == "sparse_initializer":
+        model.graph.sparse_initializer.add().values.CopyFrom(tensor)
+    elif placement == "training":
+        model.training_info.add().initialization.initializer.append(tensor)
+    elif placement == "function_default":
+        model.functions.add().attribute_proto.append(attribute)
+    else:
+        if placement == "tensors":
+            attribute = onnx.helper.make_attribute("values", [tensor])
+        elif placement in ("graph", "graphs"):
+            nested = onnx.helper.make_graph([], "nested", [], [], [tensor])
+            attribute = onnx.helper.make_attribute(
+                "body", [nested] if placement == "graphs" else nested
+            )
+        elif placement == "sparse_attribute":
+            attribute = onnx.AttributeProto(
+                name="sparse", type=onnx.AttributeProto.SPARSE_TENSOR
+            )
+            attribute.sparse_tensor.values.CopyFrom(tensor)
+        elif placement == "malformed_attribute":
+            attribute.type = onnx.AttributeProto.INT
+        node = (
+            model.functions.add().node.add()
+            if placement == "function"
+            else model.graph.node[0]
+        )
+        node.attribute.append(attribute)
+    graph.write_bytes(model.SerializeToString())
+
+    with pytest.raises(ValueError, match="unsafe external data location"):
+        load_component_model(graph, "head")
+
+
+def test_component_model_uses_ir_without_reading_external_payload(tmp_path):
+    graph = tmp_path / "head.onnx"
+    _write_external_component_model(graph, "weights.bin", offset=4, length=16)
+    (tmp_path / "weights.bin").write_bytes(b"\0" * 20)
+
+    model = load_component_model(graph, "head")
+
+    assert isinstance(model, ir.Model)
+    assert [value.name for value in model.graph.inputs] == ["hidden_states"]
+    assert isinstance(model.graph.initializers["weight"].const_value, ir.ExternalTensor)
+    assert find_external_data_files(model, graph, "head") == [
+        ("weights.bin", tmp_path / "weights.bin")
+    ]
 
 
 @pytest.mark.parametrize(

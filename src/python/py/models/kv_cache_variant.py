@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 import numpy as np
-import onnx
+import onnx_ir as ir
 from quantization import KV_CACHE_CALIBRATION_QMAX
 
 
@@ -34,7 +34,7 @@ class KVCacheVariant:
         if source_model_path.resolve() == output_model_path.resolve():
             raise ValueError("Output graph must not overwrite the source graph.")
         scale_data = self.load_scale_data(Path(scale_file), source_model_path.stem)
-        model = onnx.load(source_model_path, load_external_data=False)
+        model = ir.load(source_model_path)
 
         layer_ids = self.update_paged_attention_nodes(model)
         scale_indices = self.validate_scale_layers(scale_data, layer_ids)
@@ -42,7 +42,7 @@ class KVCacheVariant:
         self.update_cache_values(model, layer_ids, head_size)
 
         output_model_path.parent.mkdir(parents=True, exist_ok=True)
-        onnx.save(model, output_model_path)
+        ir.save(model, output_model_path)
 
     def load_scale_data(self, scale_path: Path, scale_section: str) -> dict:
         with scale_path.open(encoding="utf-8") as stream:
@@ -58,25 +58,29 @@ class KVCacheVariant:
             raise ValueError("Scales file must contain scales.k_scales and scales.v_scales.") from error
         return scale_data
 
-    def update_paged_attention_nodes(self, model: onnx.ModelProto) -> list[int]:
+    def update_paged_attention_nodes(self, model: ir.Model) -> list[int]:
         layer_ids = []
-        for node in model.graph.node:
+        for node in model.graph:
             if node.op_type != "PagedAttention" or node.domain != "com.microsoft":
                 continue
             match = self.layer_pattern.search(node.name)
             if not match:
                 raise ValueError(f"Cannot determine the layer ID from PagedAttention node {node.name!r}.")
-            attributes = {attribute.name: attribute for attribute in node.attribute}
+            attributes = node.attributes
             if attributes.get("k_quant_type") is None or attributes.get("v_quant_type") is None:
                 raise ValueError(f"PagedAttention node {node.name!r} is not statically KV-cache quantized.")
-            if attributes["k_quant_type"].s != b"PER_CHANNEL" or attributes["v_quant_type"].s != b"PER_CHANNEL":
+            if (
+                attributes["k_quant_type"].as_string() != "PER_CHANNEL"
+                or attributes["v_quant_type"].as_string() != "PER_CHANNEL"
+            ):
                 raise ValueError(f"PagedAttention node {node.name!r} does not use per-channel KV quantization.")
 
             cache_dtype_names = ("k_cache_dtype", "v_cache_dtype")
-            del node.attribute[:]
-            node.attribute.extend(attribute for name, attribute in attributes.items() if name not in cache_dtype_names)
+            for name in cache_dtype_names:
+                attributes.pop(name, None)
             if self.target_bits == 4:
-                node.attribute.extend(onnx.helper.make_attribute(name, "int4") for name in cache_dtype_names)
+                for name in cache_dtype_names:
+                    attributes[name] = ir.AttrString(name, "int4")
             layer_ids.append(int(match.group(1)))
 
         if not layer_ids:
@@ -111,9 +115,9 @@ class KVCacheVariant:
             raise ValueError("KV-cache scale qmax must be a positive number.")
         return float(file_qmax) / KV_CACHE_CALIBRATION_QMAX[f"int{self.target_bits}"]
 
-    def update_scale_initializers(self, model: onnx.ModelProto, scale_data: dict, scale_indices: dict[int, int]) -> int:
+    def update_scale_initializers(self, model: ir.Model, scale_data: dict, scale_indices: dict[int, int]) -> int:
         scale_factor = self.get_calibration_factor(scale_data.get("qmax"))
-        initializers = {initializer.name: initializer for initializer in model.graph.initializer}
+        initializers = model.graph.initializers
         scale_shape = None
         for layer_id in scale_indices:
             for kind in ("k", "v"):
@@ -121,7 +125,7 @@ class KVCacheVariant:
                 if name not in initializers:
                     raise ValueError(f"Source graph is missing KV-cache scale initializer {name!r}.")
                 initializer = initializers[name]
-                shape = tuple(initializer.dims)
+                shape = tuple(initializer.shape)
                 if len(shape) != 3 or shape[1] != 1 or shape[0] <= 0 or shape[2] <= 0:
                     raise ValueError(f"KV-cache scale {name!r} must have shape (num_kv_heads, 1, head_size).")
                 if scale_shape is not None and shape != scale_shape:
@@ -136,9 +140,9 @@ class KVCacheVariant:
         return scale_shape[-1]
 
     def replace_scale_initializer(
-        self, initializer: onnx.TensorProto, values: list[float], scale_factor: float
+        self, initializer: ir.Value, values: list[float], scale_factor: float
     ) -> None:
-        shape = tuple(initializer.dims)
+        shape = tuple(initializer.shape)
         scale = np.asarray(values, dtype=np.float32).reshape(-1)
         if scale.size != np.prod(shape, dtype=np.int64):
             raise ValueError(f"KV-cache scale {initializer.name} has {scale.size} values, expected {np.prod(shape)}.")
@@ -150,11 +154,18 @@ class KVCacheVariant:
         if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
             raise ValueError(f"Rescaled KV-cache scale {initializer.name} must contain finite positive values.")
 
-        initializer.CopyFrom(onnx.numpy_helper.from_array(scale.reshape(shape), initializer.name))
+        previous = initializer.const_value
+        initializer.const_value = ir.Tensor(
+            scale.reshape(shape),
+            name=initializer.name,
+            doc_string=previous.doc_string,
+            metadata_props=previous.metadata_props,
+        )
+        initializer.type = ir.TensorType(ir.DataType.FLOAT)
 
-    def update_cache_values(self, model: onnx.ModelProto, layer_ids: list[int], head_size: int) -> None:
+    def update_cache_values(self, model: ir.Model, layer_ids: list[int], head_size: int) -> None:
         # INT4 packs two values per byte, rounding up like the builder's packed_head_size.
-        cache_dtype = onnx.TensorProto.UINT8 if self.target_bits == 4 else onnx.TensorProto.INT8
+        cache_dtype = ir.DataType.UINT8 if self.target_bits == 4 else ir.DataType.INT8
         cache_width = (head_size + 1) // 2 if self.target_bits == 4 else head_size
         cache_names = {
             f"{prefix}.{layer_id}.{kind}"
@@ -163,15 +174,16 @@ class KVCacheVariant:
             for kind in ("key", "value")
         }
         updated_cache_values = set()
-        for value_info in (*model.graph.input, *model.graph.output):
+        for value_info in (*model.graph.inputs, *model.graph.outputs):
             if value_info.name not in cache_names:
                 continue
-            tensor_type = value_info.type.tensor_type
-            tensor_type.elem_type = cache_dtype
-            dimensions = tensor_type.shape.dim
-            if not dimensions or not dimensions[-1].HasField("dim_value"):
+            value_info.dtype = cache_dtype
+            dimensions = value_info.shape
+            if dimensions is None or not dimensions or not isinstance(dimensions[-1], int):
                 raise ValueError(f"KV-cache value {value_info.name} must have a concrete final dimension.")
-            dimensions[-1].dim_value = cache_width
+            dimensions = dimensions.copy()
+            dimensions[-1] = cache_width
+            value_info.shape = dimensions
             updated_cache_values.add(value_info.name)
         if updated_cache_values != cache_names:
             raise ValueError(

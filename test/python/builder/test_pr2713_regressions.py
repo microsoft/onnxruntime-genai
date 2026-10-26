@@ -85,14 +85,15 @@ def test_matmul_prepack_preserves_unsupported_payloads(monkeypatch, reason, bits
             ]
         )
     proto = onnx.helper.make_model(onnx.helper.make_graph(nodes, "packing", [], [], initializers))
-    original = proto.SerializeToString()
+    graph_model = ir.from_proto(proto)
+    original = ir.to_proto(graph_model).SerializeToString()
 
     def reject_prepack(*args):
         pytest.fail("Unsupported weight buffers must never be repacked")
 
     monkeypatch.setattr(base.CudaQuantizer, "prepack_matmulnbits_weight", reject_prepack)
-    model.prepack_matmulnbits_weights(proto)
-    assert proto.SerializeToString() == original
+    model.prepack_matmulnbits_weights(graph_model)
+    assert ir.to_proto(graph_model).SerializeToString() == original
 
 
 @pytest.mark.parametrize("frames", [1, 2])

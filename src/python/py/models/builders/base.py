@@ -1988,10 +1988,11 @@ class Model:
         # fpA_intB mixed-GEMM kernel and is independent of the quantization method or bit
         # width above, so it is applied here as an orthogonal post-pass over the quantized
         # MatMulNBits nodes.
-        self.prepack_matmulnbits_weights(model_proto)
-        return ir.from_proto(model_proto)
+        model = ir.from_proto(model_proto)
+        self.prepack_matmulnbits_weights(model)
+        return model
 
-    def prepack_matmulnbits_weights(self, model_proto):
+    def prepack_matmulnbits_weights(self, model):
         """CUDA-only post-pass that converts eligible MatMulNBits weights to the fpA_intB layout.
 
         Prepacking only rearranges the already-quantized weight bytes into the layout the
@@ -2011,31 +2012,29 @@ class Model:
         if self.ep != "cuda" or prepack_mode <= 0 or not self.quant_attrs["is_symmetric"]:
             return
 
-        from onnx import helper as onnx_helper  # noqa: PLC0415
-        from onnx import numpy_helper
-
         force_arch = 90 if prepack_mode == 2 else 80
         allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
-        initializers = {init.name: init for init in model_proto.graph.initializer}
+        graph = model.graph
+        initializers = graph.initializers
 
         candidates = 0
         prepacked = 0
         redundant_zero_points = set()
 
-        for node in model_proto.graph.node:
+        for node in graph:
             if node.op_type != "MatMulNBits" or node.domain != "com.microsoft":
                 continue
-            attrs = {a.name: a for a in node.attribute}
+            attrs = node.attributes
             if "weight_prepacked" in attrs:
                 continue
             if not all(key in attrs for key in ("bits", "block_size", "K", "N")):
                 continue
 
             candidates += 1
-            bits = attrs["bits"].i
-            block_size = attrs["block_size"].i
-            k = attrs["K"].i
-            n = attrs["N"].i
+            bits = attrs["bits"].as_int()
+            block_size = attrs["block_size"].as_int()
+            k = attrs["K"].as_int()
+            n = attrs["N"].as_int()
             fpa_intb_eligible = (
                 bits in (4, 8)
                 and block_size in allowed_block_sizes
@@ -2044,39 +2043,40 @@ class Model:
             )
             if not fpa_intb_eligible or self.io_dtype not in (ir.DataType.FLOAT16, ir.DataType.BFLOAT16):
                 continue
-            if len(node.input) > 4 and node.input[4]:
+            if len(node.inputs) > 4 and node.inputs[4] is not None:
                 continue
 
-            init = initializers.get(node.input[1])
-            if init is None:
+            init = node.inputs[1]
+            if init is None or init.name not in initializers or init.const_value is None:
                 continue
             # Shared embedding lookups must continue to read the original blockwise bytes.
-            if any(
-                other is not node and init.name in other.input
-                for other in model_proto.graph.node
-            ):
+            if any(use.node is not node for use in init.uses()) or init.is_graph_output():
                 continue
-            if len(node.input) > 3 and node.input[3]:
-                zero_points = initializers.get(node.input[3])
-                if zero_points is None or not np.all(
-                    numpy_helper.to_array(zero_points) == (0x88 if bits == 4 else 0x80)
+            if len(node.inputs) > 3 and node.inputs[3] is not None:
+                zero_points = node.inputs[3]
+                if zero_points.const_value is None or not np.all(
+                    zero_points.const_value.numpy() == (0x88 if bits == 4 else 0x80)
                 ):
                     continue
 
-            packed = CudaQuantizer.prepack_matmulnbits_weight(numpy_helper.to_array(init), n, k, bits, force_arch)
-            init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
-            node.attribute.append(onnx_helper.make_attribute("weight_prepacked", prepack_mode))
-            if len(node.input) > 3 and node.input[3]:
-                redundant_zero_points.add(node.input[3])
-                node.input[3] = ""
+            packed = CudaQuantizer.prepack_matmulnbits_weight(init.const_value.numpy(), n, k, bits, force_arch)
+            init.const_value = ir.Tensor(
+                np.ascontiguousarray(packed),
+                name=init.name,
+                doc_string=init.const_value.doc_string,
+                metadata_props=init.const_value.metadata_props,
+            )
+            node.attributes["weight_prepacked"] = ir.AttrInt64("weight_prepacked", prepack_mode)
+            if len(node.inputs) > 3 and node.inputs[3] is not None:
+                redundant_zero_points.add(node.inputs[3].name)
+                node.replace_input_with(3, None)
             prepacked += 1
 
         if redundant_zero_points:
-            referenced_initializers = {name for node in model_proto.graph.node for name in node.input if name}
-            for index in reversed(range(len(model_proto.graph.initializer))):
-                initializer = model_proto.graph.initializer[index]
-                if initializer.name in redundant_zero_points and initializer.name not in referenced_initializers:
-                    del model_proto.graph.initializer[index]
+            for name in redundant_zero_points:
+                initializer = initializers[name]
+                if not initializer.uses() and not initializer.is_graph_output() and not initializer.is_graph_input():
+                    del initializers[name]
 
         if candidates:
             print(f"Prepacked {prepacked}/{candidates} MatMulNBits weights into the SM{force_arch} fpA_intB layout.")

@@ -461,7 +461,19 @@ def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch, mod
         lambda value, n, k, bits, force_arch: value,
     )
 
-    model.prepack_matmulnbits_weights(model_proto)
+    graph_model = ir.from_proto(model_proto)
+    graph_model.metadata_props["packing-test"] = "model"
+    graph_model.graph.initializers["weight"].const_value = ir.Tensor(
+        weight,
+        name="weight",
+        doc_string="Original packed weight",
+        metadata_props={"packing-test": "tensor"},
+    )
+    model.prepack_matmulnbits_weights(graph_model)
+    assert graph_model.metadata_props["packing-test"] == "model"
+    assert graph_model.graph.initializers["weight"].const_value.doc_string == "Original packed weight"
+    assert graph_model.graph.initializers["weight"].const_value.metadata_props["packing-test"] == "tensor"
+    model_proto = ir.to_proto(graph_model)
 
     attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in model_proto.graph.node[0].attribute}
     assert attrs.get("weight_prepacked", 0) == expected

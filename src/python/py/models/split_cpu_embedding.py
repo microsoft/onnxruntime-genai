@@ -14,100 +14,157 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import onnx
-from onnx import TensorProto, helper
+import onnx_ir as ir
 
 
 def split_graph(model, input_name, hidden_size, output_name="inputs_embeds"):
-    """Return (embedding graph, removed initializer names), modifying model in place."""
-    ids = next((i for i in model.graph.input if i.name == input_name), None)
-    if ids is None or ids.type.tensor_type.elem_type != TensorProto.INT64:
+    """Split an IR model or ModelProto in place, returning an embedding model of the same type."""
+    if not isinstance(model, ir.Model):
+        # Preserve the public ModelProto contract at the serialization boundary.
+        converted = ir.serde.deserialize_model(model)
+        embedding, removed = _split_graph(converted, input_name, hidden_size, output_name)
+        model.CopyFrom(ir.serde.serialize_model(converted))
+        return ir.serde.serialize_model(embedding), removed
+    return _split_graph(model, input_name, hidden_size, output_name)
+
+
+def _graphs(graph):
+    yield graph
+    for node in graph:
+        for attribute in node.attributes.values():
+            if attribute.type == ir.AttributeType.GRAPH:
+                yield from _graphs(attribute.as_graph())
+            elif attribute.type == ir.AttributeType.GRAPHS:
+                for subgraph in attribute.as_graphs():
+                    yield from _graphs(subgraph)
+
+
+def _split_graph(model, input_name, hidden_size, output_name):
+    graph = model.graph
+    ids = next((i for i in graph.inputs if i.name == input_name), None)
+    if ids is None or ids.dtype != ir.DataType.INT64:
         raise ValueError("Expected an int64 token input")
-    dims = ids.type.tensor_type.shape.dim
-    if len(dims) != 1 or not dims[0].dim_param:
+    dims = ids.shape
+    if dims is None or len(dims) != 1 or not isinstance(dims[0], ir.SymbolicDim) or not dims[0].value:
         raise ValueError("Only packed dynamic token inputs are supported")
-    token_dimension = dims[0].dim_param
+    token_dimension = dims[0]
     candidates = [
         n
-        for n in model.graph.node
-        if n.op_type in ("Gather", "GatherBlockQuantized") and len(n.input) >= 2 and n.input[1] == input_name
+        for n in graph
+        if n.op_type in ("Gather", "GatherBlockQuantized") and len(n.inputs) >= 2 and n.inputs[1] is ids
     ]
     if len(candidates) != 1:
         raise ValueError("Expected exactly one token embedding Gather or GatherBlockQuantized")
     node = candidates[0]
-    attributes = {a.name: helper.get_attribute_value(a) for a in node.attribute}
+    attributes = {name: a.value for name, a in node.attributes.items()}
     if attributes.get("gather_axis", attributes.get("axis", 0)) != 0:
         raise ValueError("Embedding gather axis must be zero")
-    initializers = {i.name: i for i in model.graph.initializer}
-    weight_names = {name for index, name in enumerate(node.input) if index != 1 and name}
+    initializers = graph.initializers
+    weight_names = {value.name for index, value in enumerate(node.inputs) if index != 1 and value is not None}
     if not weight_names <= initializers.keys():
         raise ValueError("Embedding parameters must be initializers")
-    weight = initializers[node.input[0]]
-    if len(weight.dims) != 2 or weight.dims[1] != hidden_size:
+    weight = node.inputs[0]
+    if weight.shape is None or len(weight.shape) != 2 or weight.shape[1] != hidden_size:
         raise ValueError("Embedding weight does not match hidden_size (packed UINT8 weights are not supported)")
-    if node.op_type == "GatherBlockQuantized" and (len(node.input) < 3 or node.input[2] not in initializers):
+    if node.op_type == "GatherBlockQuantized" and (
+        len(node.inputs) < 3 or node.inputs[2] is None or node.inputs[2].name not in initializers
+    ):
         raise ValueError("Quantized embedding scales must be an initializer")
-    dtype = initializers[node.input[2]].data_type if node.op_type == "GatherBlockQuantized" else weight.data_type
-    if dtype not in (TensorProto.FLOAT, TensorProto.FLOAT16, TensorProto.BFLOAT16):
+    dtype = node.inputs[2].dtype if node.op_type == "GatherBlockQuantized" else weight.dtype
+    if dtype not in (ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16):
         raise ValueError("CPU embedding output must be float32, float16, or bfloat16")
-    old_output = node.output[0]
+    old_output = node.outputs[0]
     if (
-        output_name in {i.name for i in model.graph.input}
+        output_name in {i.name for i in graph.inputs}
         or output_name in initializers
-        or any(output_name in other.output for other in model.graph.node if other is not node)
+        or any(output_name == value.name for other in graph if other is not node for value in other.outputs)
     ):
         raise ValueError(f"Tensor name already exists: {output_name}")
-    lookup = copy.deepcopy(node)
-    lookup.input[1] = "input_ids"
-    lookup.output[0] = "inputs_embeds"
-    embedding = helper.make_model(
-        helper.make_graph(
-            [lookup],
-            "cpu_embedding",
-            [helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"])],
-            [helper.make_tensor_value_info("inputs_embeds", dtype, ["num_tokens", hidden_size])],
-            [copy.deepcopy(initializers[name]) for name in sorted(weight_names)],
+    if any(old_output is output for subgraph in _graphs(graph) for output in subgraph.outputs):
+        raise ValueError("Embedding output is also a graph output")
+    weights = [initializers[name] for name in sorted(weight_names)]
+    if any(
+        any(usage.node is not node for usage in value.uses())
+        or any(value is output for subgraph in _graphs(graph) for output in subgraph.outputs)
+        for value in weights
+    ):
+        raise ValueError("Embedding weights have other consumers; cannot offload them safely")
+    embedding_ids = ir.Value(name="input_ids", type=ir.TensorType(ir.DataType.INT64), shape=ir.Shape(["num_tokens"]))
+    embedding_output = ir.Value(
+        name="inputs_embeds", type=ir.TensorType(dtype), shape=ir.Shape(["num_tokens", hidden_size])
+    )
+    embedding_weights = {}
+    for value in weights:
+        copied = ir.Value(
+            name=value.name,
+            type=copy.deepcopy(value.type),
+            shape=copy.deepcopy(value.shape),
+            const_value=value.const_value,
+            doc_string=value.doc_string,
+        )
+        copied.metadata_props.update(value.metadata_props)
+        embedding_weights[value.name] = copied
+    lookup = ir.Node(
+        node.domain,
+        node.op_type,
+        [
+            embedding_ids if index == 1 else embedding_weights[value.name] if value is not None else None
+            for index, value in enumerate(node.inputs)
+        ],
+        attributes=copy.deepcopy(node.attributes),
+        outputs=[embedding_output],
+        name=node.name,
+        doc_string=node.doc_string,
+        metadata_props=node.metadata_props,
+    )
+    embedding = ir.Model(
+        ir.Graph(
+            [embedding_ids],
+            [embedding_output],
+            nodes=[lookup],
+            name="cpu_embedding",
+            initializers=list(embedding_weights.values()),
+            opset_imports=dict(graph.opset_imports),
         ),
-        opset_imports=list(model.opset_import),
         ir_version=model.ir_version,
     )
-    model.graph.node.remove(node)
-    for consumer in model.graph.node:
-        for index, name in enumerate(consumer.input):
-            if name == old_output:
-                consumer.input[index] = output_name
-    if any(o.name == old_output for o in model.graph.output):
-        raise ValueError("Embedding output is also a graph output")
-    used = {name for n in model.graph.node for name in n.input}
-    if weight_names & used:
-        raise ValueError("Embedding weights have other consumers; cannot offload them safely")
+    replacement = ir.Value(
+        name=output_name,
+        type=ir.TensorType(dtype),
+        shape=ir.Shape([token_dimension, hidden_size]),
+        doc_string=old_output.doc_string,
+    )
+    replacement.metadata_props.update(old_output.metadata_props)
+    for usage in tuple(old_output.uses()):
+        usage.node.replace_input_with(usage.idx, replacement)
+    graph.remove(node, safe=True)
     for name in weight_names:
-        model.graph.initializer.remove(initializers[name])
+        del initializers[name]
     # DFlash's selector still consumes token IDs after the lookup has been removed.
-    if input_name not in used:
-        model.graph.input.remove(ids)
-    model.graph.input.append(helper.make_tensor_value_info(output_name, dtype, [token_dimension, hidden_size]))
-    kept_info = [v for v in model.graph.value_info if v.name != old_output and v.name not in weight_names]
-    del model.graph.value_info[:]
-    model.graph.value_info.extend(kept_info)
+    if not ids.uses() and not any(ids is output for subgraph in _graphs(graph) for output in subgraph.outputs):
+        graph.inputs.remove(ids)
+    graph.inputs.append(replacement)
     return embedding, weight_names
 
 
 def lookup_signature(model, source_dir):
     """Compare the operator and exact shared storage, ignoring graph-local tensor names."""
-    node = model.graph.node[0]
+    if not isinstance(model, ir.Model):
+        model = ir.serde.deserialize_model(model)
+    node = model.graph[0]
     weights = []
-    initializers = {tensor.name: tensor for tensor in model.graph.initializer}
-    for index, name in enumerate(node.input):
-        if index == 1 or not name:
+    for index, value in enumerate(node.inputs):
+        if index == 1 or value is None:
             continue
-        value = copy.deepcopy(initializers[name])
-        value.ClearField("name")
-        for entry in value.external_data:
-            if entry.key == "location":
-                entry.value = str((source_dir / entry.value).resolve())
-        weights.append(value.SerializeToString())
-    return node.op_type, node.domain, sorted(a.SerializeToString() for a in node.attribute), weights
+        tensor = value.const_value
+        if isinstance(tensor, ir.ExternalTensor):
+            storage = (str((source_dir / tensor.location).resolve()), tensor.offset, tensor.length)
+        else:
+            storage = tensor.tobytes()
+        weights.append((tensor.dtype, tuple(tensor.shape), tensor.doc_string, dict(tensor.metadata_props), storage))
+    return node.op_type, node.domain, sorted(
+        ir.serde.serialize_attribute(a).SerializeToString() for a in node.attributes.values()
+    ), weights
 
 
 def convert(source, destination):
@@ -134,7 +191,7 @@ def convert(source, destination):
         filename = settings["filename"]
         if Path(filename).name != filename:
             raise ValueError("Converter requires graph files in the model directory")
-        graph = onnx.load(source / filename, load_external_data=False)
+        graph = ir.load(source / filename)
         inputs = settings.setdefault("inputs", {})
         extracted, removed = split_graph(graph, inputs.get("input_ids", "input_ids"), hidden_size)
         if embedding is None:
@@ -160,12 +217,13 @@ def convert(source, destination):
     graphs[embedding_filename] = embedding
     # ORT rejects external-data symlinks that resolve outside the model directory.
     for graph in graphs.values():
-        for tensor in graph.graph.initializer:
-            for entry in tensor.external_data:
-                if entry.key == "location" and (
-                    Path(entry.value).name != entry.value or not (source / entry.value).is_file()
+        for subgraph in _graphs(graph.graph):
+            for value in subgraph.initializers.values():
+                tensor = value.const_value
+                if isinstance(tensor, ir.ExternalTensor) and (
+                    Path(tensor.location).name != tensor.location or not (source / tensor.location).is_file()
                 ):
-                    raise ValueError(f"Unsupported external data location: {entry.value}")
+                    raise ValueError(f"Unsupported external data location: {tensor.location}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=destination.name + ".", dir=destination.parent))
     try:
@@ -174,7 +232,7 @@ def convert(source, destination):
                 os.link(path.resolve(), staging / path.name)
         for name, graph in graphs.items():
             # Serialization preserves external offsets and does not load or rewrite multi-GB weights.
-            (staging / name).write_bytes(graph.SerializeToString())
+            ir.save(graph, staging / name)
         (staging / "genai_config.json").write_text(json.dumps(config, indent=2) + "\n")
         staging.rename(destination)
     finally:

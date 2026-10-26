@@ -10,9 +10,8 @@ import math
 from pathlib import Path
 
 import numpy as np
-import onnx
+import onnx_ir as ir
 import torch
-from onnx import TensorProto, helper, numpy_helper
 
 
 def kev_policy() -> dict:
@@ -107,119 +106,104 @@ def load_kev_checkpoint(source: str | Path) -> dict:
     return {"state": state, "head_dim": 256, "temperature": float(temperature)}
 
 
-def build_kev_model(checkpoint: dict) -> onnx.ModelProto:
-    """Build KEV's grouped option-scoring ONNX graph.
+def build_kev_model(checkpoint: dict) -> ir.Model:
+    """Build KEV's grouped option-scoring IR model.
 
     ``checkpoint`` is the normalized result of ``load_kev_checkpoint`` (or an
     equivalent validated synthetic fixture). The graph gathers caller-selected
     decision and box-end token states, projects Q/K, scales their dot products,
     masks invalid options, and returns raw scores plus per-question
-    probabilities. ONNX checker failures propagate to the caller.
+    probabilities.
     """
     state = checkpoint["state"]
     policy = kev_policy()
     head_dim, hidden_size = state["q.weight"].shape
-    initializers = []
+    initializers = {}
+
+    def initializer(array, name):
+        value = ir.Value(
+            name=name,
+            type=ir.TensorType(ir.DataType.from_numpy(array.dtype)),
+            shape=ir.Shape(array.shape),
+            const_value=ir.tensor(array, name=name),
+        )
+        initializers[name] = value
+        return value
+
     for name in policy["head_keys"]:
         array = state[name].detach().cpu().float().numpy()
         if name.endswith(".weight"):
             array = array.T
-        initializers.append(numpy_helper.from_array(array, name))
+        initializer(array, name)
     scale = np.asarray(math.sqrt(head_dim) * checkpoint["temperature"], dtype=np.float32)
-    initializers.extend(
-        [
-            numpy_helper.from_array(scale, "score_denominator"),
-            numpy_helper.from_array(np.asarray(-3.4028235e38, dtype=np.float32), "masked_score"),
-            numpy_helper.from_array(np.asarray(0.0, dtype=np.float32), "zero_probability"),
-            numpy_helper.from_array(np.asarray([1], dtype=np.int64), "unsqueeze_axis"),
-            numpy_helper.from_array(np.asarray([1, 2], dtype=np.int64), "query_unsqueeze_axes"),
-            numpy_helper.from_array(np.asarray([2], dtype=np.int64), "option_unsqueeze_axis"),
-            numpy_helper.from_array(np.asarray([1, hidden_size], dtype=np.int64), "query_shape_suffix"),
-            numpy_helper.from_array(np.asarray([hidden_size], dtype=np.int64), "option_shape_suffix"),
-            numpy_helper.from_array(np.asarray([-1], dtype=np.int64), "reduce_axis"),
-        ]
-    )
-    nodes = [
-        # GatherElements selects sequence positions independently for each
-        # batch row while retaining the hidden dimension.
-        helper.make_node("Shape", ["decide_indices"], ["query_batch_shape"]),
-        helper.make_node(
-            "Concat", ["query_batch_shape", "query_shape_suffix"],
-            ["query_gather_shape"], axis=0,
-        ),
-        helper.make_node(
-            "Unsqueeze", ["decide_indices", "query_unsqueeze_axes"],
-            ["query_indices"],
-        ),
-        helper.make_node(
-            "Expand", ["query_indices", "query_gather_shape"],
-            ["expanded_query_indices"],
-        ),
-        helper.make_node(
-            "GatherElements", ["hidden_states", "expanded_query_indices"],
-            ["grouped_decide_states"], axis=1,
-        ),
-        helper.make_node(
-            "Squeeze", ["grouped_decide_states", "unsqueeze_axis"],
-            ["decide_states"],
-        ),
-        helper.make_node("Shape", ["option_indices"], ["option_batch_shape"]),
-        helper.make_node(
-            "Concat", ["option_batch_shape", "option_shape_suffix"],
-            ["option_gather_shape"], axis=0,
-        ),
-        helper.make_node(
-            "Unsqueeze", ["option_indices", "option_unsqueeze_axis"],
-            ["grouped_option_indices"],
-        ),
-        helper.make_node(
-            "Expand", ["grouped_option_indices", "option_gather_shape"],
-            ["expanded_option_indices"],
-        ),
-        helper.make_node(
-            "GatherElements", ["hidden_states", "expanded_option_indices"],
-            ["option_states"], axis=1,
-        ),
-        helper.make_node("Gemm", ["decide_states", "q.weight", "q.bias"], ["q"], name="q/Gemm"),
-        helper.make_node("MatMul", ["option_states", "k.weight"], ["k_linear"], name="k/MatMul"),
-        helper.make_node("Add", ["k_linear", "k.bias"], ["k"], name="k/Add"),
-        helper.make_node("Unsqueeze", ["q", "unsqueeze_axis"], ["q_grouped"]),
-        helper.make_node("Mul", ["q_grouped", "k"], ["qk"]),
-        helper.make_node("ReduceSum", ["qk", "reduce_axis"], ["dot"], keepdims=0),
-        helper.make_node("Div", ["dot", "score_denominator"], ["scores"]),
-        # Mask before the final axis softmax so normalization occurs separately
-        # within every question and padded options receive no probability mass.
-        helper.make_node("Where", ["option_mask", "scores", "masked_score"], ["masked_scores"]),
-        helper.make_node("Softmax", ["masked_scores"], ["raw_probabilities"], axis=-1),
-        helper.make_node(
-            "Where",
-            ["option_mask", "raw_probabilities", "zero_probability"],
-            ["probabilities"],
-        ),
+    denominator = initializer(scale, "score_denominator")
+    masked_score = initializer(np.asarray(-3.4028235e38, dtype=np.float32), "masked_score")
+    zero = initializer(np.asarray(0.0, dtype=np.float32), "zero_probability")
+    unsqueeze_axis = initializer(np.asarray([1], dtype=np.int64), "unsqueeze_axis")
+    query_axes = initializer(np.asarray([1, 2], dtype=np.int64), "query_unsqueeze_axes")
+    option_axis = initializer(np.asarray([2], dtype=np.int64), "option_unsqueeze_axis")
+    query_suffix = initializer(np.asarray([1, hidden_size], dtype=np.int64), "query_shape_suffix")
+    option_suffix = initializer(np.asarray([hidden_size], dtype=np.int64), "option_shape_suffix")
+    reduce_axis = initializer(np.asarray([-1], dtype=np.int64), "reduce_axis")
+    inputs = [
+        ir.Value(name=name, type=ir.TensorType(dtype), shape=ir.Shape(shape))
+        for name, dtype, shape in (
+            ("hidden_states", ir.DataType.FLOAT, [None, None, hidden_size]),
+            ("decide_indices", ir.DataType.INT64, [None]),
+            ("option_indices", ir.DataType.INT64, [None, None]),
+            ("option_mask", ir.DataType.BOOL, [None, None]),
+        )
     ]
-    graph = helper.make_graph(
-        nodes,
-        "kev_head",
-        [
-            helper.make_tensor_value_info(
-                "hidden_states", TensorProto.FLOAT,
-                [None, None, hidden_size],
-            ),
-            helper.make_tensor_value_info("decide_indices", TensorProto.INT64, [None]),
-            helper.make_tensor_value_info("option_indices", TensorProto.INT64, [None, None]),
-            helper.make_tensor_value_info("option_mask", TensorProto.BOOL, [None, None]),
-        ],
-        [
-            helper.make_tensor_value_info("probabilities", TensorProto.FLOAT, [None, None]),
-            helper.make_tensor_value_info("scores", TensorProto.FLOAT, [None, None]),
-        ],
-        initializers,
+    hidden_states, decide_indices, option_indices, option_mask = inputs
+    nodes = []
+
+    def emit(op_type, inputs, output_name, *, name=None, **attributes):
+        node = ir.Node(
+            "", op_type, inputs, ir.convenience.convert_attributes(attributes),
+            outputs=[ir.Value(name=output_name)], name=name,
+        )
+        nodes.append(node)
+        return node.outputs[0]
+
+    # GatherElements selects sequence positions independently for each
+    # batch row while retaining the hidden dimension.
+    query_batch_shape = emit("Shape", [decide_indices], "query_batch_shape")
+    query_gather_shape = emit("Concat", [query_batch_shape, query_suffix], "query_gather_shape", axis=0)
+    query_indices = emit("Unsqueeze", [decide_indices, query_axes], "query_indices")
+    expanded_query_indices = emit("Expand", [query_indices, query_gather_shape], "expanded_query_indices")
+    grouped_decide_states = emit(
+        "GatherElements", [hidden_states, expanded_query_indices], "grouped_decide_states", axis=1
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
-    model.producer_name = "onnxruntime-genai"
-    helper.set_model_props(
-        model,
-        {
+    decide_states = emit("Squeeze", [grouped_decide_states, unsqueeze_axis], "decide_states")
+    option_batch_shape = emit("Shape", [option_indices], "option_batch_shape")
+    option_gather_shape = emit("Concat", [option_batch_shape, option_suffix], "option_gather_shape", axis=0)
+    grouped_option_indices = emit("Unsqueeze", [option_indices, option_axis], "grouped_option_indices")
+    expanded_option_indices = emit(
+        "Expand", [grouped_option_indices, option_gather_shape], "expanded_option_indices"
+    )
+    option_states = emit("GatherElements", [hidden_states, expanded_option_indices], "option_states", axis=1)
+    q = emit("Gemm", [decide_states, initializers["q.weight"], initializers["q.bias"]], "q", name="q/Gemm")
+    k_linear = emit("MatMul", [option_states, initializers["k.weight"]], "k_linear", name="k/MatMul")
+    k = emit("Add", [k_linear, initializers["k.bias"]], "k", name="k/Add")
+    q_grouped = emit("Unsqueeze", [q, unsqueeze_axis], "q_grouped")
+    qk = emit("Mul", [q_grouped, k], "qk")
+    dot = emit("ReduceSum", [qk, reduce_axis], "dot", keepdims=0)
+    scores = emit("Div", [dot, denominator], "scores")
+    # Mask before the final axis softmax so normalization occurs separately
+    # within every question and padded options receive no probability mass.
+    masked_scores = emit("Where", [option_mask, scores, masked_score], "masked_scores")
+    raw_probabilities = emit("Softmax", [masked_scores], "raw_probabilities", axis=-1)
+    probabilities = emit("Where", [option_mask, raw_probabilities, zero], "probabilities")
+    for output in (probabilities, scores):
+        output.type = ir.TensorType(ir.DataType.FLOAT)
+        output.shape = ir.Shape([None, None])
+    graph = ir.Graph(
+        inputs, [probabilities, scores], nodes=nodes, name="kev_head",
+        initializers=list(initializers.values()), opset_imports={"": 18},
+    )
+    return ir.Model(
+        graph, ir_version=10, producer_name="onnxruntime-genai",
+        metadata_props={
             "model_type": "jaredpalmer/kev-4b",
             "head_dim": str(head_dim),
             "temperature": repr(policy["temperature"]),
@@ -229,8 +213,6 @@ def build_kev_model(checkpoint: dict) -> onnx.ModelProto:
             "base_revision": policy["base_revision"],
         },
     )
-    onnx.checker.check_model(model)
-    return model
 
 
 def export_kev_components(options, output_root: Path) -> dict:
@@ -250,7 +232,7 @@ def export_kev_components(options, output_root: Path) -> dict:
         raise ValueError(f"KEV base_revision must be {policy['base_revision']}")
     checkpoint = load_kev_checkpoint(options.model_source)
     filename = "kev_head.onnx"
-    onnx.save(build_kev_model(checkpoint), output_root / filename)
+    ir.save(build_kev_model(checkpoint), output_root / filename)
     return {
         "schema_version": 1,
         "model_type": "jaredpalmer/kev-4b",

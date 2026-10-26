@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import onnx
+import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
@@ -95,6 +96,51 @@ def test_rejects_embedding_weights_used_by_other_nodes():
         split_graph(model, "input_ids", 32)
 
 
+@pytest.mark.parametrize("captured", ["lookup", "input_ids", "embedding.weight"])
+def test_split_handles_nested_graph_captures(captured):
+    model = lookup_model()
+    dtype = TensorProto.INT64 if captured == "input_ids" else TensorProto.FLOAT
+    shape = ["tokens"] if captured == "input_ids" else [8, 32] if captured == "embedding.weight" else ["tokens", 32]
+    branch = helper.make_graph(
+        [helper.make_node("Identity", [captured], ["branch_output"])],
+        "branch", [], [helper.make_tensor_value_info("branch_output", dtype, shape)],
+    )
+    model.graph.input.append(helper.make_tensor_value_info("condition", TensorProto.BOOL, []))
+    model.graph.node.append(helper.make_node("If", ["condition"], ["conditional"], then_branch=branch, else_branch=branch))
+    model.graph.output.append(helper.make_tensor_value_info("conditional", dtype, shape))
+    if captured == "embedding.weight":
+        with pytest.raises(ValueError, match="other consumers"):
+            split_graph(model, "input_ids", 32)
+        return
+    split_graph(model, "input_ids", 32)
+    onnx.checker.check_model(model)
+    assert ("input_ids" in {value.name for value in model.graph.input}) == (captured == "input_ids")
+    expected = "inputs_embeds" if captured == "lookup" else captured
+    for attribute in model.graph.node[-1].attribute:
+        assert attribute.g.node[0].input[0] == expected
+
+
+def test_split_ir_contract_and_metadata():
+    proto = lookup_model()
+    proto.doc_string = "model documentation"
+    proto.metadata_props.add(key="model_key", value="model_value")
+    proto.graph.doc_string = "graph documentation"
+    proto.graph.node[0].doc_string = "lookup documentation"
+    proto.graph.initializer[0].doc_string = "weight documentation"
+    model = ir.serde.deserialize_model(proto)
+    embedding, removed = split_graph(model, "input_ids", 32, output_name="custom_embeds")
+    assert isinstance(embedding, ir.Model)
+    assert removed == {"embedding.weight"}
+    assert model.graph.inputs[0].name == "custom_embeds"
+    result = ir.serde.serialize_model(model)
+    extracted = ir.serde.serialize_model(embedding)
+    assert result.doc_string == proto.doc_string
+    assert result.metadata_props == proto.metadata_props
+    assert result.graph.doc_string == proto.graph.doc_string
+    assert extracted.graph.node[0].doc_string == proto.graph.node[0].doc_string
+    assert extracted.graph.initializer[0] == proto.graph.initializer[0]
+
+
 @pytest.mark.parametrize("collision", ["input", "node", "initializer"])
 def test_rejects_embedding_output_name_collisions(collision):
     model = lookup_model()
@@ -110,7 +156,9 @@ def test_rejects_embedding_output_name_collisions(collision):
 
 @pytest.mark.parametrize("decoder_filename", ["model.onnx", "embedding.onnx"])
 @pytest.mark.parametrize("rename_drafter_weight", [False, True])
-def test_conversion_preserves_external_offsets_and_shared_head(tmp_path, decoder_filename, rename_drafter_weight):
+def test_conversion_preserves_external_offsets_and_shared_head(
+    tmp_path, decoder_filename, rename_drafter_weight, monkeypatch
+):
     source = tmp_path / "source"
     source.mkdir()
     target = lookup_model(retain_ids=False)
@@ -142,6 +190,11 @@ def test_conversion_preserves_external_offsets_and_shared_head(tmp_path, decoder
     }
     (source / "genai_config.json").write_text(json.dumps(config))
     before = (source / decoder_filename).read_bytes()
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("External tensors must not be read")
+
+    monkeypatch.setattr(ir.ExternalTensor, "numpy", unexpected_read)
+    monkeypatch.setattr(ir.ExternalTensor, "tobytes", unexpected_read)
     destination = convert(source, tmp_path / "split")
     result = json.loads((destination / "genai_config.json").read_text())
     assert result["model"]["decoder"]["shared_initializers"] == [{"name": "lm_head.weight"}]

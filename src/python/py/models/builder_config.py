@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import onnx
+import onnx_ir as ir
 from quantization import QuantConfig
 
 
@@ -585,7 +586,7 @@ def validate_component_backbone_destination(
         )
     if require_exists:
         model = load_component_model(destination, "backbone")
-        output_names = {value.name for value in model.graph.output}
+        output_names = {value.name for value in model.graph.outputs}
         if "hidden_states" not in output_names:
             raise ValueError(
                 "component backbone must expose a hidden_states output"
@@ -595,19 +596,26 @@ def validate_component_backbone_destination(
 
 def load_component_model(
     model_path: Path, component_name: str
-) -> onnx.ModelProto:
+) -> ir.Model:
     """Load one component graph without materializing external tensor data."""
     try:
-        return onnx.load(model_path, load_external_data=False)
+        proto = onnx.load(model_path, load_external_data=False)
     except Exception as error:
         raise ValueError(
             f"component {component_name!r} source is not a readable ONNX model: "
             f"{model_path}"
         ) from error
+    # IR does not preserve sparse/training tensors or external metadata on
+    # non-EXTERNAL tensors. Validate the original metadata before that boundary.
+    external_tensors = list(iter_external_tensors(proto, component_name))
+    _find_external_tensor_files(external_tensors, model_path, component_name)
+    model = ir.serde.deserialize_model(proto)
+    model.meta["builder_config.external_tensors"] = external_tensors
+    return model
 
 
 def validate_component_model(model_path: Path, component_name: str) -> None:
-    """Run the ONNX structural checker after external paths are validated."""
+    """Run the ONNX structural checker (IR has no equivalent schema checker)."""
     try:
         onnx.checker.check_model(model_path)
     except Exception as error:
@@ -618,11 +626,11 @@ def validate_component_model(model_path: Path, component_name: str) -> None:
 
 
 def validate_component_graph_bindings(
-    head: HeadComponent, model: onnx.ModelProto
+    head: HeadComponent, model: ir.Model
 ) -> None:
     """Require configured graph bindings to name actual graph values."""
-    graph_inputs = {value.name for value in model.graph.input}
-    graph_outputs = {value.name for value in model.graph.output}
+    graph_inputs = {value.name for value in model.graph.inputs}
+    graph_outputs = {value.name for value in model.graph.outputs}
     for binding in head.inputs:
         if binding.graph_name not in graph_inputs:
             raise ValueError(
@@ -638,7 +646,7 @@ def validate_component_graph_bindings(
 
 
 def find_external_data_files(
-    model: onnx.ModelProto, model_path: Path, component_name: str
+    model: ir.Model, model_path: Path, component_name: str
 ) -> list[tuple[str, Path]]:
     """Resolve a head graph's external tensor files without loading their data.
 
@@ -646,13 +654,18 @@ def find_external_data_files(
     traversing, malformed, or missing locations raise ``ValueError`` to prevent
     external-data references from escaping either source or destination roots.
     """
+    return _find_external_tensor_files(
+        model.meta["builder_config.external_tensors"], model_path, component_name
+    )
+
+
+def _find_external_tensor_files(
+    tensors: list[ir.ExternalTensor], model_path: Path, component_name: str
+) -> list[tuple[str, Path]]:
     source_root = model_path.parent.resolve()
     files = {}
-    for tensor in iter_tensor_protos(model):
-        entries = {entry.key: entry.value for entry in tensor.external_data}
-        if tensor.data_location != onnx.TensorProto.EXTERNAL and not entries:
-            continue
-        location = entries.get("location")
+    for tensor in tensors:
+        location = str(tensor.location)
         if not location:
             raise ValueError(f"component {component_name!r} has external tensor data without a location")
         relative = Path(location)
@@ -674,22 +687,11 @@ def find_external_data_files(
             raise ValueError(
                 f"component {component_name!r} external data file does not exist: {location}"
             )
-        try:
-            offset = int(entries.get("offset", "0"))
-        except ValueError as error:
-            raise ValueError(
-                f"component {component_name!r} external data offset is invalid"
-            ) from error
-        element_size = onnx.helper.tensor_dtype_to_np_dtype(
-            tensor.data_type
-        ).itemsize
-        required_bytes = math.prod(tensor.dims) * element_size
-        try:
-            length = int(entries.get("length", str(required_bytes)))
-        except ValueError as error:
-            raise ValueError(
-                f"component {component_name!r} external data length is invalid"
-            ) from error
+        offset = tensor.offset if tensor.offset is not None else 0
+        required_bytes = math.ceil(
+            math.prod(tensor.shape.dims) * tensor.dtype.itemsize
+        )
+        length = tensor.length if tensor.length is not None else required_bytes
         if offset < 0 or length < required_bytes:
             raise ValueError(
                 f"component {component_name!r} external data range is too small"
@@ -703,17 +705,42 @@ def find_external_data_files(
     return list(files.items())
 
 
-def iter_tensor_protos(message):
-    """Yield every nested TensorProto that may carry external-data metadata."""
+def iter_external_tensors(message, component_name: str):
+    """Adapt raw external metadata before IR can normalize or discard it.
+
+    This protobuf-only security boundary also visits sparse tensors, training
+    graphs, function defaults, and malformed attribute payloads unsupported by IR.
+    """
     if isinstance(message, onnx.TensorProto):
-        yield message
+        entries = {entry.key: entry.value for entry in message.external_data}
+        if message.data_location != onnx.TensorProto.EXTERNAL and not entries:
+            return
+        location = entries.get("location")
+        if not location:
+            raise ValueError(f"component {component_name!r} has external tensor data without a location")
+        ranges = {}
+        for key in ("offset", "length"):
+            try:
+                ranges[key] = int(entries[key]) if key in entries else None
+            except ValueError as error:
+                raise ValueError(
+                    f"component {component_name!r} external data {key} is invalid"
+                ) from error
+        yield ir.ExternalTensor(
+            location,
+            offset=ranges["offset"],
+            length=ranges["length"],
+            dtype=ir.DataType(message.data_type),
+            shape=ir.Shape(message.dims),
+            name=message.name,
+        )
         return
     for field, value in message.ListFields():
         if field.type != field.TYPE_MESSAGE:
             continue
         children = value if field.is_repeated else (value,)
         for child in children:
-            yield from iter_tensor_protos(child)
+            yield from iter_external_tensors(child, component_name)
 
 
 def reject_duplicate_key(pairs):

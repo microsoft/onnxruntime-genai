@@ -8,12 +8,41 @@ from pathlib import Path
 
 import numpy as np
 import onnx
+import onnx_ir as ir
 import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
 sys.path.insert(0, str(MODELS_DIR))
 
 from kv_cache_variant import KVCacheVariant  # noqa: E402
+
+
+def test_variant_preserves_metadata_and_never_reads_external_weights(tmp_path, monkeypatch):
+    source, scales = _write_source_model(tmp_path, head_size=4)
+    model = onnx.load(source, load_external_data=False)
+    model.doc_string = "model documentation"
+    model.metadata_props.add(key="model_key", value="model_value")
+    model.graph.doc_string = "graph documentation"
+    model.graph.node[0].doc_string = "attention documentation"
+    model.graph.initializer[0].doc_string = "scale documentation"
+    model.graph.input[0].type.tensor_type.shape.dim[0].denotation = "DATA_BATCH"
+    onnx.save(model, source)
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("External tensors must not be read")
+
+    monkeypatch.setattr(ir.ExternalTensor, "numpy", unexpected_read)
+    monkeypatch.setattr(ir.ExternalTensor, "tobytes", unexpected_read)
+    output = tmp_path / "variant.onnx"
+    KVCacheVariant("int4_per_channel").create(source, output, scales)
+    result = onnx.load(output, load_external_data=False)
+    assert result.doc_string == model.doc_string
+    assert result.metadata_props == model.metadata_props
+    assert result.graph.doc_string == model.graph.doc_string
+    assert result.graph.node[0].doc_string == model.graph.node[0].doc_string
+    assert result.graph.initializer[0].doc_string == model.graph.initializer[0].doc_string
+    assert result.graph.input[0].type.tensor_type.shape.dim[0].denotation == "DATA_BATCH"
+    assert result.graph.initializer[-1] == model.graph.initializer[-1]
 
 
 def _external_initializer(name: str, shape: list[int], offset: int, length: int) -> onnx.TensorProto:
