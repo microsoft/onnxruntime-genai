@@ -12,6 +12,10 @@
 #include <string>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 #include <nlohmann/json.hpp>
 
 #include "ort_genai.h"
@@ -49,16 +53,23 @@ std::vector<ScenarioConfig> ParseScenarioConfigs(const nlohmann::json& root) {
       if (e.contains("prompt_length_k")) {
         config.prompt_length_k = e.at("prompt_length_k").get<int>();
       }
+      if (e.contains("prompt_tokens")) {
+        config.prompt_tokens = e.at("prompt_tokens").get<int>();
+      }
       config.model_path = e.value("model_path", std::string{});
       config.execution_provider = e.value("execution_provider", config.execution_provider);
       config.execution_provider_library = e.value("execution_provider_library", std::string{});
       config.generation_tokens = e.value("generation_tokens", config.generation_tokens);
       config.warmup_runs = e.value("warmup_runs", config.warmup_runs);
       config.measured_runs = e.value("measured_runs", config.measured_runs);
+      config.model_config = e.value("model_config", nlohmann::json::object());
+      if (!config.model_config.is_object()) {
+        throw std::invalid_argument("model_config must be a JSON object");
+      }
       configs.push_back(std::move(config));
     }
-  } catch (const std::exception&) {
-    throw std::runtime_error("Error parsing config.");
+  } catch (const std::exception& ex) {
+    throw std::runtime_error(std::string("Error parsing config: ") + ex.what());
   }
 
   return configs;
@@ -172,8 +183,20 @@ int main(int argc, char** argv) {
       }
     }
 
-    // /proc/self/exe is a Linux virtual path that points to the currently running executable
-    return engine_benchmark::DispatchScenarios(fs::canonical("/proc/self/exe"), config_path, out_dir);
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> path(size);
+    if (_NSGetExecutablePath(path.data(), &size) != 0) {
+      throw std::runtime_error("Unable to resolve benchmark executable path");
+    }
+    const auto executable = fs::canonical(path.data());
+#elif defined(__linux__)
+    const auto executable = fs::canonical("/proc/self/exe");
+#else
+    const auto executable = fs::canonical(argv[0]);
+#endif
+    return engine_benchmark::DispatchScenarios(executable, config_path, out_dir);
   } catch (const std::exception& ex) {
     std::cerr << "engine_benchmark failed: " << ex.what() << std::endl;
     return 1;

@@ -6,7 +6,8 @@ and results are written to per-scenario JSON files.
 See [benchmark-design.md](docs/benchmark-design.md) for the architecture and
 [benchmark-requirements.md](docs/benchmark-requirements.md) for the metrics contract.
 
-**Note:** currently hardcoded for linux platform, tested on a100 linux-x64 vm
+Supports Linux/CUDA and macOS/WebGPU. WebGPU requires a compatible ONNX Runtime host and
+provider plugin, plus a model exported for WebGPU.
 
 ## Environment setup
 
@@ -23,11 +24,12 @@ python -m pip install -r requirements-dev.txt
 python -m pip install -r benchmark/requirements.txt
 
 python --version
+# Linux only:
 patchelf --version
 ```
 
-The benchmark requirements file must be installed because it provides the `patchelf` dependency
-used while staging the benchmark's runtime libraries.
+On Linux, the benchmark requirements file provides the `patchelf` dependency used while staging
+the benchmark's runtime libraries. macOS does not use `patchelf`.
 
 Run these commands from the `onnxruntime-genai` repository root. The CUDA Toolkit and a C++20
 compiler must also be installed separately for a CUDA build.
@@ -52,6 +54,23 @@ Delete the `dependencies/` folder to force a re-download after changing the pinn
 
 `patchelf` must be on `PATH` (`pip install patchelf`) so the staged GenAI libraries load the pinned
 ONNX Runtime rather than the one baked into their build-time RPATH.
+
+### macOS / WebGPU build
+
+Use a local ONNX Runtime SDK with `include/` and `lib/libonnxruntime.dylib`, and a matching
+`libonnxruntime_providers_webgpu.dylib`. The SDK and plugin must target the same ORT API.
+An Apple Clang toolchain, CMake, and the normal GenAI build dependencies are required; CUDA is not.
+
+```bash
+python build.py --update --build --config Release --parallel --skip_tests --skip_examples \
+  --build_engine_benchmark --ort_home /path/to/ort-sdk
+```
+
+The build stages the local GenAI and ORT dylibs and a `versions.json` containing the runtime's
+reported version in `build/macOS/Release/benchmark/engine/`. It does not download Linux/CUDA
+packages. The executable locates its staged libraries via `@loader_path`; provide the WebGPU
+plugin path in the scenario config or via the runner override below. Custom `--build_dir` values
+change the executable's parent directory accordingly.
 
 ### Prefix-cache and scheduler microbenchmark
 
@@ -108,8 +127,74 @@ python benchmark/engine/run.py \
   --cuda_visible_devices 0,1,2,3
 ```
 
-The runner requires `--executable`, `--config`, `--out`, and `--cuda_visible_devices`. Verbose
-child benchmark output is opt-in with `--verbose`.
+The runner requires `--executable`, `--config`, and `--out`. CUDA scenarios additionally require
+`--cuda_visible_devices`. WebGPU scenarios run serially on the default adapter and do not set
+`CUDA_VISIBLE_DEVICES`. The runner saves a log alongside every result, prints child errors on
+failure, and treats missing/failed result files as failures. `--verbose` prints successful child
+output as well.
+
+### WebGPU decode/prefill smoke
+
+`configs/webgpu-decode-prefill-smoke.json` contains only the smallest existing decode/prefill
+matrix entries: concurrency 1, a 4K RULER decode prompt (64 generated tokens), and a 32K RULER
+prefill prompt (one generated token). Each has one warmup and three measured runs. The RULER bucket
+is a nominal length; results report actual token counts for the model's tokenizer.
+
+The example defaults refer to the sibling Qwen3.8-27B WebGPU/DFlash2 width-3 export and ORT main
+WebGPU build used for this smoke test. Override the paths for your checkout:
+
+```bash
+BENCH="$PWD/build/macOS/Release/benchmark/engine"
+ORT_LIB_PATH="$BENCH/libonnxruntime.dylib" \
+  python benchmark/engine/run.py \
+    --executable "$BENCH/engine_benchmark" \
+    --config benchmark/engine/configs/webgpu-decode-prefill-smoke.json \
+    --model_path /path/to/webgpu-model \
+    --execution_provider_library /path/to/libonnxruntime_providers_webgpu.dylib \
+    --out benchmark/engine/out-webgpu --verbose
+```
+
+Paths in JSON are relative to the working directory, not the config file. Run these examples from
+the repository root. `--model_path` and `--execution_provider_library` override every scenario's path.
+`ORT_LIB_PATH` explicitly selects the matching staged host, rather than an inherited runtime path.
+
+The smoke config uses `model_config` overlays to reserve 256 paged-cache blocks, limit the batch to
+one, disable prefix caching between repeats, and keep DFlash2 at three drafts when present. The
+larger cache fits the 32K prefill and the drafter's cache without editing the exported model. For
+other models, adjust the block budget and speculative settings as needed. An overlay cannot add
+a missing drafter graph; DFlash2 must already be exported in the model.
+
+Use normal WebGPU routing for these scenarios. Do not globally force the experimental small-M
+SIMT diagnostic: it cannot execute large-M prefill. These smoke results are ORT main/WebGPU, not
+the earlier benchmarks that switched to strict SIMT only after prefill.
+
+### WebGPU prefill scaling
+
+`configs/webgpu-prefill-scaling.json` measures exact 4,096, 8,192, 16,384, and 32,768-token
+prefixes of the same deterministically selected 32K RULER fixture. This controls prompt content
+across lengths and avoids assuming the fixture's nominal bucket matches the model's tokenizer.
+The config uses `long_prefill`, one generated token, concurrency 1, one discarded warmup and three
+measured runs per length. Cache capacity, scheduling budget and DFlash2 settings are identical at
+every length, and prefix caching is disabled.
+
+Use the same build, runtime and model/provider overrides as the smoke example:
+
+```bash
+ORT_LIB_PATH="$BENCH/libonnxruntime.dylib" \
+  python benchmark/engine/run.py \
+    --executable "$BENCH/engine_benchmark" \
+    --config benchmark/engine/configs/webgpu-prefill-scaling.json \
+    --model_path /path/to/webgpu-model \
+    --execution_provider_library /path/to/libonnxruntime_providers_webgpu.dylib \
+    --out benchmark/engine/out-webgpu-prefill-scaling --verbose
+```
+
+Use `scenario_metrics.prefill_ms` for measured TTFT samples and `scenario_metrics.prompt_tokens`
+for the graph's actual token counts. Plot the median with a measured min/max range, not a
+confidence interval from only three samples. Check `prompt_truncated` before interpreting a
+requested length as measured. These measurements exclude model loading and tokenization, and
+include the prefill/first-token engine work. One-token requests measure target prefill rather than
+speculative decode speedup.
 
 ## Configuration
 
@@ -138,13 +223,18 @@ Each config is a list of scenario entries:
 | `scenario` | `decode_baseline`, `long_prefill`, `mixed_workload`, `capacity_pressure`, or `continuation`. |
 | `concurrency` | Requests issued per run. One of 1, 2, 4, 8; `long_prefill` requires 1. |
 | `prompt_length_k` | RULER prompt length in thousands of tokens; active decode length for `mixed_workload`. Required by scenarios that use it and rejected by `capacity_pressure`, which has a fixed prompt profile. |
+| `prompt_tokens` | Optional positive exact prefix length for `long_prefill`. Must fit within the tokenized source fixture selected by `prompt_length_k`; the normal model-session limit can still truncate it. Other scenarios reject this field. |
 | `model_path` | Folder containing the ONNX model and `genai_config.json`. |
-| `execution_provider` | e.g. `cuda`. |
-| `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
+| `execution_provider` | e.g. `cuda` or `webgpu`. |
+| `execution_provider_library` | Path to the provider plugin. Required for `cuda` and `webgpu`, registered once per process. |
 | `generation_tokens` | Tokens generated per request. |
+| `warmup_runs`, `measured_runs` | Defaults: 5 warmups, 20 measured runs. Smoke config uses 1 and 3. |
+| `model_config` | Optional GenAI config overlay applied before model creation; effective overrides are recorded in results. Useful for cache capacity, scheduler budgets, and speculation. |
 
 `long_prefill` and `mixed_workload` truncate a RULER prompt that would leave no room for generation
 within the model-configured session limit, reporting both requested and actual token counts.
+`long_prefill` also reports `source_prompt_tokens`, the tokenized fixture length before an optional
+`prompt_tokens` prefix is selected.
 `capacity_pressure` does not truncate; over-ceiling prompts are reported as rejected admissions.
 
 `mixed_workload` runs one long-prefill request alongside active decode requests. The full and
@@ -194,3 +284,19 @@ driver. When the driver reports per-process usage those numbers are attributed t
 otherwise they are the device-wide growth since before the model was loaded, so run on an otherwise
 idle GPU for meaningful values. Note that ONNX Runtime and the CUDA driver cache allocations, so
 these measure reserved rather than live memory.
+
+On macOS, WebGPU device-memory telemetry is unavailable: its device-memory fields remain
+0, **not an indication of zero GPU usage**, and `config_metadata.device_memory_source` identifies
+the unavailable source. On macOS, `scenario_metrics.peak_host_memory_mb` reports process peak RSS
+using the platform's byte-valued `ru_maxrss`. On Apple Silicon this is not a separate measurement
+of Metal allocations or a device-memory substitute.
+
+`decode_baseline.scenario_metrics.tokens_per_s` is end-to-end generated throughput including
+prefill, not decode-only throughput. With speculative decoding, tokens arrive in bursts, so median
+inter-token latency can be near zero; do not invert it to estimate decode throughput.
+
+Runner regression tests (no model/GPU required):
+
+```bash
+python -m unittest discover -s benchmark/engine -p 'test_*.py'
+```

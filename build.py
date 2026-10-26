@@ -452,6 +452,9 @@ def _validate_args(args: argparse.Namespace):
     _validate_ios_args(args)
     _validate_cmake_args(args)
 
+    if args.build_engine_benchmark and util.is_mac() and not args.ort_home:
+        raise ValueError("macOS engine benchmarks require --ort_home pointing at the matching ONNX Runtime SDK")
+
     if args.ort_home:
         if not args.ort_home.exists() or not args.ort_home.is_dir():
             raise ValueError(f"{args.ort_home} does not exist or is not a directory.")
@@ -823,8 +826,8 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
     engine_benchmark_dir = args.build_dir / "benchmark" / "engine"
-    if args.build_engine_benchmark and util.is_linux() and engine_benchmark_dir.is_dir():
-        util.setup_engine_benchmark_dependencies(args.build_dir, engine_benchmark_dir)
+    if args.build_engine_benchmark and (util.is_linux() or util.is_mac()) and engine_benchmark_dir.is_dir():
+        util.setup_engine_benchmark_dependencies(args.build_dir, engine_benchmark_dir, ort_home=args.ort_home)
 
 
 def install_core(args: argparse.Namespace, env: dict[str, str]):

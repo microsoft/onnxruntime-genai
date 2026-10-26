@@ -63,7 +63,13 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
 
   std::mt19937 prompt_random(kRandomSeed);
   auto prompt_tokens = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
-  const size_t requested_prompt_token_count = prompt_tokens->SequenceCount(0);
+  const size_t source_prompt_token_count = prompt_tokens->SequenceCount(0);
+  const size_t requested_prompt_token_count = config.prompt_tokens
+                                                ? static_cast<size_t>(*config.prompt_tokens)
+                                                : source_prompt_token_count;
+  if (requested_prompt_token_count > source_prompt_token_count) {
+    throw std::invalid_argument("prompt_tokens exceeds the selected RULER fixture's token count");
+  }
   const size_t prompt_token_count = FitPromptToSessionLimit(
       requested_prompt_token_count, static_cast<size_t>(config.generation_tokens),
       engineResources.model_max_session_tokens);
@@ -147,6 +153,7 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
       {"prefill_ms", std::move(prefill_ms_values)},
       {"prompt_processing_tps", std::move(prompt_processing_tps_values)},
       {"requested_prompt_tokens", requested_prompt_token_count},
+      {"source_prompt_tokens", source_prompt_token_count},
       {"prompt_tokens", prompt_token_count},
       {"prompt_truncated", prompt_token_count != requested_prompt_token_count},
       {"peak_host_memory_mb", BytesToMb(memory.PeakHostBytes())},

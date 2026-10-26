@@ -32,12 +32,14 @@ struct ScenarioConfig {
   std::string scenario{"decode_baseline"};
   int concurrency{1};
   std::optional<int> prompt_length_k;
+  std::optional<int> prompt_tokens;
   std::string model_path;
   std::string execution_provider{"cuda"};
   std::string execution_provider_library;
   int generation_tokens{kDefaultGenerationTokens};
   int warmup_runs{kDefaultWarmupRuns};
   int measured_runs{kDefaultMeasuredRuns};
+  nlohmann::json model_config{nlohmann::json::object()};
 };
 
 struct BenchmarkContext {

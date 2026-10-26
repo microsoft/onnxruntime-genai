@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import platform
 import shutil
@@ -10,6 +11,7 @@ import subprocess
 from os import PathLike, listdir
 from os.path import isfile
 from pathlib import Path
+from typing import ClassVar
 from xml.etree import ElementTree
 
 import requests
@@ -221,14 +223,41 @@ def _download_and_unpack_nupkg(package_name: str, version: str, package_url: str
     return unpacked_dir
 
 
-def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir: PathLike) -> Path:
+def setup_engine_benchmark_dependencies(
+    genai_lib_dir: PathLike, destination_dir: PathLike, *, ort_home: PathLike | None = None
+) -> Path:
     """
     Populate the engine_benchmark output directory with the shared libraries it loads at runtime:
-    the **linux-x64** ONNX Runtime and CUDA execution provider plugin libraries from the ORT-Nightly
-    feed, plus the locally built onnxruntime-genai libraries.
+    On Linux, use the pinned linux-x64 ORT/CUDA packages. On macOS, use the matching local
+    ONNX Runtime SDK (--ort_home); the WebGPU provider is supplied by the scenario config.
     """
     genai_lib_dir = Path(genai_lib_dir)
     destination_dir = Path(destination_dir)
+    if platform.system() == "Darwin":
+        if ort_home is None:
+            raise ValueError("macOS engine benchmarks require --ort_home pointing at the matching ONNX Runtime SDK")
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        ort_library = Path(ort_home) / "lib" / "libonnxruntime.dylib"
+        genai_library = genai_lib_dir / "libonnxruntime-genai.dylib"
+        for library in (ort_library, genai_library):
+            if not library.is_file():
+                raise FileNotFoundError(f"Required benchmark library not found: {library}")
+            shutil.copy2(library, destination_dir / library.name)
+
+        class OrtApiBase(ctypes.Structure):
+            _fields_: ClassVar[list[tuple[str, type]]] = [
+                ("GetApi", ctypes.c_void_p),
+                ("GetVersionString", ctypes.CFUNCTYPE(ctypes.c_char_p)),
+            ]
+
+        ort = ctypes.CDLL(str(ort_library.resolve()))
+        ort.OrtGetApiBase.restype = ctypes.POINTER(OrtApiBase)
+        version = ort.OrtGetApiBase().contents.GetVersionString().decode()
+        (destination_dir / "versions.json").write_text(
+            json.dumps({"ort_version": version, "ort_library": str(ort_library.resolve())}, indent=2) + "\n"
+        )
+        return destination_dir
+
     # Downloaded packages are kept in a subdir; only the .so files are copied next to the executable.
     dependencies_dir = destination_dir / "dependencies"
     dependencies_dir.mkdir(parents=True, exist_ok=True)
