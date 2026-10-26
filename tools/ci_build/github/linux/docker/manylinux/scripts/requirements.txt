@@ -1,5 +1,6 @@
 numpy
 mypy
+pybind11-stubgen
 pytest
 setuptools>=68.2.2
 wheel
