@@ -78,6 +78,7 @@ The tool currently supports the following model architectures.
 - InternLM2
 - LFM2 (text and the decoders of LFM2-VL / LFM2.5-VL / d1-3B and LFM2-Audio / LFM2.5-Audio)
 - LFM2 MoE
+- LFM3 (text and the decoders of LFM3-VL / LFM3-Audio / LFM3-Omni)
 - Llama
 - Mistral
 - Nemotron

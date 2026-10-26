@@ -509,7 +509,7 @@ struct Config {
       int state_update_capacity{};
 
       // Hybrid SSM+Attention (LFM2) parameters
-      std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
+      std::vector<std::string> layer_types;  // Per-layer type: "conv", "full_attention" or "sliding_attention"
       int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks

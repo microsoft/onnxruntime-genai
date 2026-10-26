@@ -34,7 +34,7 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
 
   // Classify layers into attention (KV) and conv types
   for (int i = 0; i < layer_count_; ++i) {
-    if (layer_types_[i] == "full_attention") {
+    if (layer_types_[i] == "full_attention" || layer_types_[i] == "sliding_attention") {
       kv_layer_indices_.push_back(i);
     } else {
       conv_layer_indices_.push_back(i);
