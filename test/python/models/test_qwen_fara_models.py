@@ -1077,11 +1077,37 @@ def test_qwen3_5_openvino_partitioned_processor_math(test_data_path, tmp_path, c
 
 
 @pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
-def test_qwen3_5_openvino_partitioned_decode_embeddings(test_data_path, tmp_path, embedding_dtype):
+@pytest.mark.parametrize(
+    "grid_input_case",
+    [
+        "canonical",
+        "configured_only",
+        "canonical_with_configured_name",
+        "both_canonical_first",
+        "both_configured_first",
+    ],
+)
+def test_qwen3_5_openvino_partitioned_decode_embeddings(test_data_path, tmp_path, embedding_dtype, grid_input_case):
     model_path = tmp_path / "qwen35-math"
     config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path, embedding_dtype=embedding_dtype)
     grids = [[1, 4, 6], [1, 2, 4]]
     inputs, patches = _qwen35_controlled_inputs(config, grids)
+    if grid_input_case != "canonical":
+        config["model"]["vision"]["inputs"]["image_grid_thw"] = "custom_image_grid"
+        (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+        grid = inputs["image_grid_thw"]
+        renamed_inputs = og.NamedTensors()
+        for name in ("input_ids", "pixel_values", "num_image_tokens"):
+            renamed_inputs[name] = inputs[name]
+        if grid_input_case == "configured_only":
+            renamed_inputs["custom_image_grid"] = grid
+        else:
+            if grid_input_case == "both_configured_first":
+                renamed_inputs["custom_image_grid"] = np.array([[-1, -1, -1]], dtype=np.int64)
+            renamed_inputs["image_grid_thw"] = grid
+            if grid_input_case == "both_canonical_first":
+                renamed_inputs["custom_image_grid"] = np.array([[-1, -1, -1]], dtype=np.int64)
+        inputs = renamed_inputs
     model = og.Model(os.fspath(model_path))
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=inputs["input_ids"].as_numpy().shape[1] + 4, do_sample=False, num_beams=1)
@@ -1089,6 +1115,7 @@ def test_qwen3_5_openvino_partitioned_decode_embeddings(test_data_path, tmp_path
     generator.set_inputs(inputs)
     generator.get_logits()
     expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+    assert generator.get_output("inputs_embeds").shape == (1, 15, 224)
     _assert_qwen35_embeddings(
         generator.get_output("inputs_embeds").copy(),
         expected,
