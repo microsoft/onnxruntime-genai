@@ -17,6 +17,18 @@ qwen = load_builder_module("qwen3_8")
 graph_module = load_builder_module("qwen3_8.graph")
 
 
+@pytest.mark.parametrize(
+    "builder,method",
+    [
+        (qwen.Qwen4ExpVisionModel, "make_attention"),
+        (qwen.Qwen4ExpVisionModel, "make_gelu"),
+        (load_builder_module("dspark").DSparkBuilder, "make_mlp"),
+    ],
+)
+def test_component_helpers_do_not_shadow_decoder_method_contracts(builder, method):
+    assert getattr(builder, method) is getattr(base.Model, method)
+
+
 @pytest.mark.parametrize("eos,expected", [(0, 0), (42, 42), ([7, 8], 7), ((9, 10), 9)])
 def test_engram_pad_id_normalizes_scalar_or_multiple_eos_ids(eos, expected):
     model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
@@ -115,7 +127,7 @@ def test_vision_attention_never_mixes_frames(frames):
     qkv.weight.data[8:] = torch.eye(4)
     proj = torch.nn.Linear(4, 4, bias=False)
     proj.weight.data.copy_(torch.eye(4))
-    output = model.make_attention(0, SimpleNamespace(qkv=qkv, proj=proj, scaling=0.5), "x", "cos", "sin")
+    output = model.make_vision_attention(0, SimpleNamespace(qkv=qkv, proj=proj, scaling=0.5), "x", "cos", "sin")
     model.graph.outputs.append(model.values[output])
     session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
     values = np.repeat(np.arange(frames, dtype=np.float32) * 2 + 1, 4)[:, None].repeat(4, axis=1)

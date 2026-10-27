@@ -58,11 +58,25 @@ def _tiny_clm_checkpoint():
     }
 
 
+def _tiny_kev_checkpoint():
+    generator = torch.Generator().manual_seed(3)
+    return {
+        "state": {
+            "q.weight": torch.randn(2, 3, generator=generator),
+            "q.bias": torch.randn(2, generator=generator),
+            "k.weight": torch.randn(2, 3, generator=generator),
+            "k.bias": torch.randn(2, generator=generator),
+        },
+        "head_dim": 2,
+        "temperature": 2.5,
+    }
+
+
 @pytest.mark.parametrize(
     "builder_class,build_model,checkpoint_factory,graph_name,opset",
     [
         (clm.CLMModel, clm.build_clm_model, _tiny_clm_checkpoint, "clm_heads", 20),
-        (kev.KEVModel, kev.build_kev_model, lambda: _tiny_kev_checkpoint(), "kev_head", 18),
+        (kev.KEVModel, kev.build_kev_model, _tiny_kev_checkpoint, "kev_head", 18),
     ],
 )
 def test_component_builders_use_inherited_model_emitters(
@@ -233,20 +247,6 @@ def test_clm_checkpoint_preflight_validates_heads_and_scale(tmp_path):
     torch.save(checkpoint, path)
     with pytest.raises(ValueError, match="logit_scale must be finite"):
         clm.load_clm_checkpoint(path)
-
-
-def _tiny_kev_checkpoint():
-    generator = torch.Generator().manual_seed(3)
-    return {
-        "state": {
-            "q.weight": torch.randn(2, 3, generator=generator),
-            "q.bias": torch.randn(2, generator=generator),
-            "k.weight": torch.randn(2, 3, generator=generator),
-            "k.bias": torch.randn(2, generator=generator),
-        },
-        "head_dim": 2,
-        "temperature": 2.5,
-    }
 
 
 def _expanded(shape):

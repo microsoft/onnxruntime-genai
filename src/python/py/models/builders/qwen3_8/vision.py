@@ -80,7 +80,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             norm1 = self.make_layer_norm(
                 f"visual.blocks.{layer_id}.norm1", block.norm1, hidden_states, ["num_patches", self.hidden_size]
             )
-            attention = self.make_attention(layer_id, block.attn, norm1, cos, sin)
+            attention = self.make_vision_attention(layer_id, block.attn, norm1, cos, sin)
             hidden_states = self.make_binary(
                 "Add",
                 f"/visual/blocks/{layer_id}/attn/residual/Add",
@@ -97,7 +97,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
                 norm2,
                 ["num_patches", self.config.intermediate_size],
             )
-            activated = self.make_gelu(
+            activated = self.make_vision_gelu(
                 f"/visual/blocks/{layer_id}/mlp/Gelu",
                 fc1,
                 ["num_patches", self.config.intermediate_size],
@@ -135,7 +135,9 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             merged_input,
             ["num_image_tokens", merged_hidden_size],
         )
-        merger_activated = self.make_gelu("/visual/merger/Gelu", merger_fc1, ["num_image_tokens", merged_hidden_size])
+        merger_activated = self.make_vision_gelu(
+            "/visual/merger/Gelu", merger_fc1, ["num_image_tokens", merged_hidden_size]
+        )
         self.make_linear(
             "visual.merger.linear_fc2",
             merger.linear_fc2,
@@ -606,7 +608,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             ["num_patches", "num_patches"],
         )
 
-    def make_attention(self, layer_id, attention, root_input, cos, sin):
+    def make_vision_attention(self, layer_id, attention, root_input, cos, sin):
         qkv = self.make_linear(
             f"visual.blocks.{layer_id}.attn.qkv",
             attention.qkv,
@@ -726,7 +728,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             ["num_patches", self.hidden_size],
         )
 
-    def make_gelu(self, name, root_input, shape, approximate="none"):
+    def make_vision_gelu(self, name, root_input, shape, approximate="none"):
         output = f"{name}/output_0"
         self.make_node("Gelu", [root_input], [output], name=name, approximate=approximate)
         self.make_value(output, self.io_dtype, shape)

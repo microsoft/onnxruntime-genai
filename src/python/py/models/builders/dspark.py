@@ -250,7 +250,7 @@ class DSparkBuilder(BlockDrafterBuilder):
                 w[f"layers.{i}.post_attention_layernorm.weight"],
                 rows_q,
             )
-            hidden = self.make_mlp(i, y, w, rows_q)
+            hidden = self.make_draft_mlp(i, y, w, rows_q)
 
         final, _ = self.skip_rms_norm("/dspark/norm", residual, hidden, w["norm.weight"], rows_q, want_sum=False)
 
@@ -376,7 +376,7 @@ class DSparkBuilder(BlockDrafterBuilder):
             rows_q,
         )
 
-    def make_mlp(self, i, x, w, rows_q):
+    def make_draft_mlp(self, i, x, w, rows_q):
         p = f"/dspark/layers.{i}/mlp"
         gate = self.matmul(
             f"{p}/gate_proj/MatMul",

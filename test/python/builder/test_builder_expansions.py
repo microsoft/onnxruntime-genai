@@ -102,7 +102,6 @@ def test_webgpu_graph_capture_override_lives_in_webgpu(capture):
             ],
         ),
         (Qwen4ExpGraphModel, ["make_cast"]),
-        (Qwen4ExpVisionModel, ["make_attention", "make_gelu"]),
     ],
 )
 def test_qwen_overrides_are_defined_directly_in_builders(model_class, methods):
@@ -139,7 +138,16 @@ def test_qwen_overrides_are_defined_directly_in_builders(model_class, methods):
             ],
         ),
         (Qwen4ExpGraphModel, ["make_linear", "make_layer_norm", "make_binary"]),
-        (Qwen4ExpVisionModel, ["make_position_embeddings", "make_rotary_embeddings", "make_frame_attention_mask"]),
+        (
+            Qwen4ExpVisionModel,
+            [
+                "make_position_embeddings",
+                "make_rotary_embeddings",
+                "make_frame_attention_mask",
+                "make_vision_attention",
+                "make_vision_gelu",
+            ],
+        ),
         (Qwen4ExpMTPTextModel, ["make_mtp_input_projection"]),
     ],
 )
