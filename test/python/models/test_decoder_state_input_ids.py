@@ -141,6 +141,7 @@ def _write_gemma3_partitioned_fixture(
     marker_dtype,
     *,
     embedding_dtype=np.int32,
+    embedding_output_dtype=np.float32,
     vision_input_dtype=np.float32,
     vision_output_dtype=np.float32,
 ):
@@ -164,8 +165,10 @@ def _write_gemma3_partitioned_fixture(
         model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
         onnx.checker.check_model(model, full_check=True)
         onnx.save(model, model_path / f"{name}.onnx")
+        saved = onnx.load(model_path / f"{name}.onnx")
+        for expected, actual in zip([*inputs, *outputs], [*saved.graph.input, *saved.graph.output], strict=True):
+            assert actual.type.tensor_type.elem_type == expected.type.tensor_type.elem_type
         if name == "embedding":
-            saved = onnx.load(model_path / f"{name}.onnx")
             assert saved.graph.input[0].type.tensor_type.elem_type == onnx.helper.np_dtype_to_tensor_dtype(
                 np.dtype(embedding_dtype)
             )
@@ -193,14 +196,21 @@ def _write_gemma3_partitioned_fixture(
     vision = onnx.load(model_path / "vision.onnx")
     assert vision.graph.input[0].type.tensor_type.elem_type == vision_input_type
     assert vision.graph.output[0].type.tensor_type.elem_type == vision_output_type
+    embedding_output_type = helper.np_dtype_to_tensor_dtype(np.dtype(embedding_output_dtype))
+    embeddings = "float_embeddings" if embedding_output_type != tp.FLOAT else "inputs_embeds"
     save(
         "embedding",
         [value("input_ids", tp.INT32 if embedding_dtype == np.int32 else tp.INT64, ["B", "S"])],
-        [value("inputs_embeds", tp.FLOAT, ["B", "S", 4])],
+        [value("inputs_embeds", embedding_output_type, ["B", "S", 4])],
         [
             helper.make_node("Cast", ["input_ids"], ["float_ids"], to=tp.FLOAT),
             helper.make_node("Unsqueeze", ["float_ids", "last_axis"], ["expanded_ids"]),
-            helper.make_node("Add", ["expanded_ids", "offset"], ["inputs_embeds"]),
+            helper.make_node("Add", ["expanded_ids", "offset"], [embeddings]),
+            *(
+                [helper.make_node("Cast", [embeddings], ["inputs_embeds"], to=embedding_output_type)]
+                if embeddings != "inputs_embeds"
+                else []
+            ),
         ],
         {"last_axis": np.array([2], dtype=np.int64), "offset": (0.1 * np.arange(4)).astype(np.float32)},
     )
@@ -208,21 +218,24 @@ def _write_gemma3_partitioned_fixture(
     save(
         "decoder",
         [
-            value("inputs_embeds", tp.FLOAT, ["B", "S", 4]),
+            value("inputs_embeds", embedding_output_type, ["B", "S", 4]),
             value("attention_mask", tp.INT64, ["B", "totalS"]),
             value("position_ids", tp.INT64, ["B", "S"]),
             value("decoder_markers", tp.INT32 if marker_dtype == np.int32 else tp.INT64, ["B", "S"]),
         ],
         [value("logits", tp.FLOAT, ["B", "S", 10])],
         [
+            *(
+                [helper.make_node("Cast", ["inputs_embeds"], [embeddings], to=tp.FLOAT)]
+                if embeddings != "inputs_embeds"
+                else []
+            ),
             helper.make_node("Cast", ["decoder_markers"], ["float_markers"], to=tp.FLOAT),
             helper.make_node("Unsqueeze", ["float_markers", "last_axis"], ["marker_column"]),
-            helper.make_node("Mul", ["inputs_embeds", "zero"], ["padding"]),
+            helper.make_node("Mul", [embeddings, "zero"], ["padding"]),
             helper.make_node("Mul", ["marker_column", "zero"], ["zero_column"]),
             helper.make_node("Add", ["zero_column", "winner"], ["winning_column"]),
-            helper.make_node(
-                "Concat", ["marker_column", "inputs_embeds", "padding", "winning_column"], ["logits"], axis=2
-            ),
+            helper.make_node("Concat", ["marker_column", embeddings, "padding", "winning_column"], ["logits"], axis=2),
         ],
         {
             "last_axis": np.array([2], dtype=np.int64),
@@ -328,14 +341,71 @@ def _enable_gemma3_vision_profile(model_path):
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
 
-def _assert_gemma3_vision_runs(model_path, expected):
+def _assert_gemma3_session_runs(model_path, name, expected):
     gc.collect()
-    profiles = list(model_path.glob("vision_profile*.json"))
+    profiles = list(model_path.glob(f"{name}_profile*.json"))
     assert len(profiles) == 1
     events = json.loads(profiles[0].read_text(encoding="utf-8"))
     runs = sum(event.get("name") == "model_run" for event in events)
-    print(f"Gemma3 vision model_run count={runs}, expected={expected}")
+    print(f"Gemma3 {name} model_run count={runs}, expected={expected}")
     assert runs == expected
+
+
+def _assert_gemma3_vision_runs(model_path, expected):
+    _assert_gemma3_session_runs(model_path, "vision", expected)
+
+
+@pytest.mark.parametrize("embedding_output_dtype", [np.float32, np.float16])
+def test_gemma3_partitioned_embedding_dtype_contract(test_data_path, tmp_path, embedding_output_dtype):
+    model_path = tmp_path / "gemma3-partitioned"
+    _write_gemma3_partitioned_fixture(
+        test_data_path, model_path, np.int32, embedding_output_dtype=embedding_output_dtype
+    )
+    _enable_gemma3_vision_profile(model_path)
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    for name in ("embedding", "decoder"):
+        config["model"][name]["session_options"]["enable_profiling"] = os.fspath(model_path / f"{name}_profile")
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=32, do_sample=False)
+    text_generator = og.Generator(model, params)
+    text_ids = np.array([[2, 3]], dtype=np.int32)
+    text_generator.append_tokens(text_ids)
+    actual = text_generator.get_output("inputs_embeds").copy()
+    expected = (text_ids[..., None] + 0.1 * np.arange(4)).astype(embedding_output_dtype)
+    assert actual.shape == (1, 2, 4)
+    assert actual.dtype == embedding_output_dtype
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+    print(
+        f"Gemma3 text embeddings shape={actual.shape} dtype={actual.dtype} max_abs={np.max(np.abs(actual - expected))}"
+    )
+    del text_generator
+
+    inputs = og.NamedTensors()
+    ids = np.array([[2, 3, 4, 5, 6]], dtype=np.int32)
+    inputs["input_ids"] = ids
+    inputs["token_type_ids"] = np.array([[0, 1, 1, 0, 0]], dtype=np.int32)
+    inputs["pixel_values"] = np.arange(1, 9, dtype=np.float32).reshape(2, 4)
+    inputs["num_image_tokens"] = np.array([2], dtype=np.int64)
+    generator = og.Generator(model, params)
+    if embedding_output_dtype == np.float16:
+        with pytest.raises(RuntimeError):
+            generator.set_inputs(inputs)
+    else:
+        generator.set_inputs(inputs)
+        generator.get_logits()
+        expected = ids[..., None] + 0.1 * np.arange(4)
+        expected[0, 1:3] = [[2.5, 4.5, 6.5, 8.5], [10.5, 12.5, 14.5, 16.5]]
+        actual = generator.get_output("inputs_embeds").copy()
+        assert actual.shape == (1, 5, 4)
+        assert actual.dtype == np.float32
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-4)
+    del generator, params, model
+    _assert_gemma3_session_runs(model_path, "embedding", 2)
+    _assert_gemma3_session_runs(model_path, "decoder", 1 if embedding_output_dtype == np.float16 else 2)
+    _assert_gemma3_vision_runs(model_path, 1)
 
 
 @pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
