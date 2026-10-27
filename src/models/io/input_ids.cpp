@@ -27,6 +27,25 @@ DefaultInputIDs::DefaultInputIDs(State& state)
 
     past_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, past_sequence_length_shape, model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
     *past_sequence_length_->GetTensorMutableData<int32_t>() = -1;
+  } else if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.total_sequence_length) &&
+             model_.session_info_.HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
+    if (state_.params_->BatchBeamSize() != 1) {
+      throw std::runtime_error("Batch size must be 1 for total_sequence_length and past_sequence_length inputs");
+    }
+    const std::array<int64_t, 1> total_sequence_length_shape{1};
+    const std::array<int64_t, 2> past_sequence_length_shape{1, 1};
+
+    if (model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.total_sequence_length) != Ort::TypeToTensorType<int32_t> ||
+        model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length) != Ort::TypeToTensorType<int32_t>)
+      throw std::runtime_error("total_sequence_length and past_sequence_length must be int32");
+
+    total_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, total_sequence_length_shape,
+                                                    model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.total_sequence_length));
+    *total_sequence_length_->GetTensorMutableData<int32_t>() = static_cast<int32_t>(state_.params_->search.max_length);
+
+    past_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, past_sequence_length_shape,
+                                                   model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
+    *past_sequence_length_->GetTensorMutableData<int32_t>() = -1;
   }
 
   value_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int32_t>);
@@ -42,6 +61,11 @@ void DefaultInputIDs::Add() {
   if (current_sequence_length_ && past_sequence_length_) {
     state_.input_names_.push_back(model_.config_->model.decoder.inputs.current_sequence_length.c_str());
     state_.inputs_.push_back(current_sequence_length_.get());
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.past_sequence_length.c_str());
+    state_.inputs_.push_back(past_sequence_length_.get());
+  } else if (total_sequence_length_ && past_sequence_length_) {
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.total_sequence_length.c_str());
+    state_.inputs_.push_back(total_sequence_length_.get());
     state_.input_names_.push_back(model_.config_->model.decoder.inputs.past_sequence_length.c_str());
     state_.inputs_.push_back(past_sequence_length_.get());
   }
@@ -64,6 +88,21 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
     auto new_sequence_length = get_unpadded_sequence_length(new_tokens_cpu, model_.config_->model.pad_token_id);
     *current_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
     *past_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
+  } else if (total_sequence_length_ && past_sequence_length_) {
+    if (state_.params_->BatchBeamSize() != 1) {
+      throw std::runtime_error("Batch size must be 1 for total_sequence_length and past_sequence_length inputs");
+    }
+    auto new_sequence_length = get_unpadded_sequence_length(new_tokens_cpu, model_.config_->model.pad_token_id);
+    if (is_prompt_) {
+      historical_num_tokens_ = new_sequence_length;
+      *past_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
+    } else if (new_tokens_cpu.size() == 1) {
+      *past_sequence_length_->GetTensorMutableData<int32_t>() += 1;
+      historical_num_tokens_ = *past_sequence_length_->GetTensorMutableData<int32_t>();
+    } else {
+      historical_num_tokens_ += new_sequence_length;
+      *past_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
+    }
   }
 
   // For beam search, resize input_ids shape based on new_tokens

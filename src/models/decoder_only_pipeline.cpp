@@ -65,6 +65,20 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
       // cuda is not listed as one of the providers. This session does not support the cuda device type.
       return false;
     }
+  } else if (model_.p_device_->GetType() == DeviceType::AMDGPU) {
+    if (!model_.config_->model.decoder.pipeline[id_].session_options.has_value()) {
+      // No session options, so this session uses the default session options.
+      // Default session options supports the AMDGPU device type.
+      return true;
+    } else if (auto& provider_options = (*model_.config_->model.decoder.pipeline[id_].session_options).provider_options;
+               std::any_of(provider_options.begin(), provider_options.end(),
+                           [](const Config::ProviderOptions& elem) { return elem.name == "AMDGPU"; })) {
+      // AMDGPU is listed as one of the providers. This session supports the AMDGPU device type.
+      return true;
+    } else {
+      // AMDGPU is not listed as one of the providers. This session does not support the AMDGPU device type.
+      return false;
+    }
   }
 
   return false;
