@@ -307,3 +307,25 @@ def test_gemma3_partitioned_text_only_and_decode(test_data_path, tmp_path, marke
     generator.set_inputs(inputs)
     expected = prompt[:, :, None].astype(np.float64) + 0.1 * np.arange(4)
     _assert_gemma3_partitioned_generation(generator, expected, np.zeros(prompt.shape, dtype=marker_dtype))
+
+
+@pytest.mark.parametrize("vision_filename", ["", "vision.onnx"])
+def test_gemma3_partitioned_rejects_vision_pipeline(test_data_path, tmp_path, vision_filename):
+    model_path = tmp_path / "gemma3-partitioned"
+    _write_gemma3_partitioned_fixture(test_data_path, model_path, np.int64)
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["model"]["vision"]["filename"] = vision_filename
+    config["model"]["vision"]["pipeline"] = [
+        {
+            "vision": {
+                "filename": "vision.onnx",
+                "inputs": ["pixel_values"],
+                "outputs": ["image_features"],
+                "run_on_cpu": True,
+            }
+        }
+    ]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        og.Model(os.fspath(model_path))
