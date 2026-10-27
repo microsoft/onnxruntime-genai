@@ -80,7 +80,15 @@ def load_text_backbone_adapter(
 
 
 class Model:
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+    def __init__(
+        self, config=None, io_dtype=None, onnx_dtype=None, ep=None, cache_dir=None, extra_options=None,
+        *, graph_name=None, graph_opset=20,
+    ):
+        if graph_name is not None:
+            Model.make_graph(self, graph_name, opset=graph_opset)
+            return
+        if config is None or extra_options is None:
+            raise ValueError("Decoder construction requires a configuration and extra_options.")
         self.extra_options = extra_options
         self.make_config_init(config)
 
@@ -2373,6 +2381,29 @@ class Model:
         self.model.graph.append(node)
         self.node_names.add(name)
 
+    def rename_value(self, name, output_name):
+        value = self.values[name]
+        if name == output_name:
+            return output_name
+        if value.is_graph_input() or value.is_initializer():
+            raise ValueError(f"Cannot rename graph input or initializer '{name}' to '{output_name}'.")
+        previous = self.values.get(output_name)
+        if previous is not None and previous is not value:
+            if previous.producer() is not None or previous.const_value is not None or previous.is_graph_input():
+                raise ValueError(f"Graph value '{output_name}' is already defined.")
+            if value.type is None:
+                value.type = previous.type
+            if value.shape is None:
+                value.shape = previous.shape
+            value.metadata_props.update(previous.metadata_props)
+            graph = self.model.graph
+            graph.outputs[:] = [value if output is previous else output for output in graph.outputs]
+            ir.convenience.replace_all_uses_with(previous, value)
+        value.name = output_name
+        self.values[output_name] = value
+        del self.values[name]
+        return output_name
+
     def make_value(self, name, dtype: ir.DataType | int | None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
         """Obtain or create an IR value by value name.
 
@@ -3527,12 +3558,7 @@ class Model:
             name: override for name, override in self.exact_quant_overrides.items()
             if name in component.node_names
         }
-        component.make_node(
-            "Identity",
-            inputs=[component.layernorm_attrs["root_input"]],
-            outputs=["inputs_embeds"],
-            name="/model/embedding_output/Identity",
-        )
+        component.rename_value(component.layernorm_attrs["root_input"], "inputs_embeds")
         component.model.graph.outputs.append(
             component.make_value("inputs_embeds", self.io_dtype, self.make_hidden_state_shape())
         )

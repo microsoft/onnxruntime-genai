@@ -117,7 +117,7 @@ class KEVModel(Model):
     """Build grouped option scoring using the shared Model emitters."""
 
     def __init__(self, checkpoint):
-        self.make_graph("kev_head", opset=18)
+        super().__init__(graph_name="kev_head", graph_opset=18)
         self.make_model(checkpoint)
 
     def make_model(self, checkpoint):

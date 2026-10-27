@@ -13,7 +13,7 @@ class Qwen4ExpGraphModel(Model):
         # Companion graphs reuse emission helpers without decoder configuration or cache state.
         self.io_dtype = ir.DataType(io_dtype)
         self.filename = filename
-        self.make_graph(graph_name, opset=22)
+        super().__init__(graph_name=graph_name, graph_opset=22)
 
     def save_model(self, output_dir):
         self.save_onnx_model(self.model, os.path.join(output_dir, self.filename))
@@ -27,9 +27,7 @@ class Qwen4ExpGraphModel(Model):
         self.make_value(matmul_output, self.io_dtype, shape)
         if linear.bias is None:
             if output is not None:
-                self.make_node("Identity", [matmul_output], [output], name=f"/{name.replace('.', '/')}/Identity")
-                self.make_value(output, self.io_dtype, shape)
-                return output
+                return self.rename_value(matmul_output, output)
             return matmul_output
         bias_name = f"{name}.bias"
         self.make_initializer(linear.bias, bias_name, to=self.io_dtype)

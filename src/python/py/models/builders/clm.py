@@ -151,7 +151,7 @@ class CLMModel(Model):
     """Build the released contrastive heads with the shared Model emitters."""
 
     def __init__(self, checkpoint=None):
-        self.make_graph("clm_heads", opset=20)
+        super().__init__(graph_name="clm_heads", graph_opset=20)
         if checkpoint is not None:
             self.make_model(checkpoint)
 
@@ -232,13 +232,7 @@ class CLMModel(Model):
         if not math.isfinite(logit_scale):
             raise ValueError("CLM logit_scale must be finite")
         scale = math.exp(min(logit_scale, math.log(100.0)))
-        self.make_initializer(np.asarray(scale, dtype=np.float32), "effective_logit_scale.value")
-        self.make_node(
-            "Identity",
-            ["effective_logit_scale.value"],
-            ["effective_logit_scale"],
-            name="effective_logit_scale/Identity",
-        )
+        self.make_initializer(np.asarray(scale, dtype=np.float32), "effective_logit_scale")
         self.model.graph.outputs.append(self.make_value("effective_logit_scale", ir.DataType.FLOAT, []))
         self.model.metadata_props.update(
             {

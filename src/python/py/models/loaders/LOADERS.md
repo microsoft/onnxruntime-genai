@@ -26,3 +26,16 @@ The IR presents model structure and tensors through a consistent set of Python o
 CUDA packing settings are loader inputs, not properties inferred from the export host GPU. Integer QMoE and NVFP4 have different `weights_prepacked` contracts: NVFP4 defaults to legacy N-packed storage, and only explicit mode `1` preserves the newer K-packed layout. Synthetic loader instances in tests must initialize `quant_attrs` just as normal loader construction does.
 
 New source formats should be implemented here and should expose the same model structure consumed by the builders, keeping source-specific logic out of the ONNX graph construction code.
+
+## ONNX API boundary
+
+The loader ONNX import inventory is:
+
+- `component.py`: `onnx` for public `onnx.load(..., load_external_data=False)`, `onnx.TensorProto` identification/external-storage markers, and `onnx.checker.check_model(path)`; `onnx_ir` for public `ir.serde.deserialize_model`, `ir.ExternalTensor`, `ir.DataType`, and `ir.Shape`.
+- `gptoss.py`: `onnx_ir` for `ir.DataType.FLOAT8E8M0`.
+- `modelopt.py`: `onnx_ir` for `ir.DataType.FLOAT8E4M3FN`.
+- All other loader Python modules have no ONNX or ONNX IR imports. No loader uses `onnx.helper`, `onnx.numpy_helper`, or private ONNX/ONNX IR APIs.
+
+The raw dependency in `component.py` is intentional, not an alternative graph construction or serialization path. Public `ir.load(path)` also parses with external data disabled, but immediately deserializes the protobuf. That loses training graphs, sparse initializers, and tensor payloads inconsistent with an attribute's declared type; sparse tensor attributes are currently unsupported. Consequently, traversing only the resulting IR cannot validate every original external-data location and byte range. The loader recursively inspects the raw protobuf first, rejects unsafe paths (including symlink escapes), missing files, and invalid byte ranges without materializing tensor data, and only then converts to IR through public serde.
+
+ONNX IR also has no public equivalent of the ONNX schema checker. Checking a protobuf reserialized from IR is not equivalent to checking the source: IR can normalize an invalid attribute into a valid one. `validate()` therefore checks the original source path, after source external-data validation in the package loading flow. Dedicated component-loader tests demonstrate these normalization losses, the unsupported sparse-attribute case, and the original-source checker requirement.

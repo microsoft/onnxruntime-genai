@@ -186,7 +186,9 @@ def test_multimodal_qwen38_builds_decoder_and_mtp_without_blanket_restriction():
 @pytest.mark.parametrize("paged", [False, True])
 def test_indexer_rotary_caches_preserve_full_thw_history(paged):
     model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
-    graph_module.Qwen4ExpGraphModel.__init__(model, ir.DataType.FLOAT, "rotary.onnx", "rotary")
+    base.Model.__init__(model, graph_name="rotary", graph_opset=22)
+    model.graph.opset_imports["com.microsoft"] = 1
+    model.io_dtype = ir.DataType.FLOAT
     model.use_paged_attention = paged
     model.head_size = 12
     model.sparse_indexer_attrs = {"head_dim": 12}
@@ -223,7 +225,9 @@ def test_indexer_rotary_caches_preserve_full_thw_history(paged):
 
 def test_text_indexer_uses_full_split_half_rotary_table():
     model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
-    graph_module.Qwen4ExpGraphModel.__init__(model, ir.DataType.FLOAT, "rotary.onnx", "rotary")
+    base.Model.__init__(model, graph_name="rotary", graph_opset=22)
+    model.graph.opset_imports["com.microsoft"] = 1
+    model.io_dtype = ir.DataType.FLOAT
     model.sparse_indexer_attrs = {"head_dim": 12}
     cos = np.arange(18, dtype=np.float32).reshape(3, 6)
     sin = cos + 20
@@ -240,7 +244,9 @@ def test_text_indexer_uses_full_split_half_rotary_table():
 @pytest.mark.parametrize("paged", [False, True])
 def test_sparse_attention_mrope_keeps_height_and_width(paged):
     model = qwen.Qwen4ExpTextModel.__new__(qwen.Qwen4ExpTextModel)
-    graph_module.Qwen4ExpGraphModel.__init__(model, ir.DataType.FLOAT, "mrope.onnx", "mrope")
+    base.Model.__init__(model, graph_name="mrope", graph_opset=22)
+    model.graph.opset_imports["com.microsoft"] = 1
+    model.io_dtype = ir.DataType.FLOAT
     model.use_paged_attention = paged
     model.hidden_rows_dim = "num_tokens" if paged else "sequence_length"
     model.head_size, model.num_attn_heads, model.num_kv_heads = 12, 2, 1
@@ -274,7 +280,12 @@ def test_sparse_attention_mrope_keeps_height_and_width(paged):
     model.graph.outputs.extend(model.values[model.attention_attrs[path]] for path in ("q_path", "k_path"))
     model.graph.opset_imports["com.microsoft"] = 1
     model.graph.sort()
-    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    try:
+        session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    except ort.capi.onnxruntime_pybind11_state.Fail as error:
+        if "com.microsoft:MRotaryEmbedding(-1) is not a registered function/op" in str(error):
+            pytest.skip("Installed ORT does not register MRotaryEmbedding")
+        raise
     rng = np.random.default_rng(14)
     query, key = (rng.standard_normal((*tokens, size)).astype(np.float32) for size in (24, 12))
     actual = session.run(None, {"q": query, "k": key, "position_ids": positions})
@@ -288,6 +299,27 @@ def test_sparse_attention_mrope_keeps_height_and_width(paged):
         rotated = np.concatenate([-normalized[..., 6:], normalized[..., :6]], axis=-1)
         expected = normalized * np.cos(full)[:, None, :] + rotated * np.sin(full)[:, None, :]
         np.testing.assert_allclose(result, expected.reshape(value.shape), rtol=2e-6, atol=2e-6)
+
+
+@pytest.mark.parametrize("missing_operator", [True, False])
+def test_sparse_mrope_only_skips_unregistered_operator(monkeypatch, missing_operator):
+    message = (
+        "Fatal error: com.microsoft:MRotaryEmbedding(-1) is not a registered function/op"
+        if missing_operator
+        else "Node (MRotaryEmbedding) [ShapeInferenceError] invalid shape"
+    )
+    error = ort.capi.onnxruntime_pybind11_state.Fail(message)
+
+    def fail_session(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(ort, "InferenceSession", fail_session)
+    if missing_operator:
+        with pytest.raises(pytest.skip.Exception, match="does not register MRotaryEmbedding"):
+            test_sparse_attention_mrope_keeps_height_and_width(False)
+    else:
+        with pytest.raises(ort.capi.onnxruntime_pybind11_state.Fail, match="invalid shape"):
+            test_sparse_attention_mrope_keeps_height_and_width(False)
 
 
 def test_qwen38_qkv_fusion_honors_projection_packability(monkeypatch):

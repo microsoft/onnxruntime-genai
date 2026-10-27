@@ -993,8 +993,11 @@ def test_final_hidden_states_output_connects_to_post_mix(paged, pre_final):
 
     def mix(self, layer_id, weights, root_input, location, combine=True):
         self.calls.append(("mix", (layer_id, root_input, location), {"combine": combine}))
+        if location == "final":
+            Model.make_value(self, "final_output", self.io_dtype, [1, 8])
         return "final_output" if location == "final" else ("mixed", "residual", "injection")
 
+    model.values = {}
     model.make_hyper_connection_mix = MethodType(mix, model)
     layer = SimpleNamespace(attn_hyper_connection=object(), mlp_hyper_connection=object())
     model.make_layer(0, layer)
@@ -1010,8 +1013,8 @@ def test_final_hidden_states_output_connects_to_post_mix(paged, pre_final):
         assert model.layernorm_attrs["root_input"] == "hidden_states_out"
         assert model.layernorm_attrs["output_0"] == "final_output"
     else:
-        assert identities[0]["inputs"] == ["final_output"]
-        assert identities[0]["outputs"] == ["hidden_states_out"]
+        assert not identities
+        assert model.values["hidden_states_out"].name == "hidden_states_out"
         assert model.layernorm_attrs["output_0"] == "hidden_states_out"
 
 
@@ -1671,6 +1674,7 @@ def test_text_only_config_connects_external_engram(
 
 def test_qwen38_decoder_config_needs_no_embedding_provider_assignment():
     model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = False
     model.ep = "cuda"
     model.ple_attrs = {"token_pad_id": 248044, "external": False}
     model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": True}
@@ -1685,6 +1689,7 @@ def test_qwen38_decoder_config_needs_no_embedding_provider_assignment():
 
 def test_qwen38_external_engram_keeps_decoder_cuda_only():
     model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = False
     model.ep = "cuda"
     model.ple_attrs = {"token_pad_id": 248044, "external": True}
     model.sparse_indexer_attrs = {"compress_ratio": 4, "fixed_cache": True}

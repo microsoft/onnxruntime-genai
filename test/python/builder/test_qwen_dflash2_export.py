@@ -2089,7 +2089,7 @@ def test_drafter_reuses_decoder_embedding_during_export(tmp_path, tied):
     name = "lm_head.MatMul.weight" if tied else "model.embed_tokens.weight"
     assert builder.graph.initializers[name].const_value is decoder.graph.initializers[name].const_value
     assert builder.embedding_initializers() == frozenset({name})
-    copied = builder.values[decoder.layernorm_attrs["root_input"]]
+    copied = builder.values[output]
     assert copied.metadata_props["embedding_test"] == "decoder"
     assert copied.shape == ir.Shape(["num_block", 8])
     saved = ir.load(tmp_path / "dflash2.onnx")

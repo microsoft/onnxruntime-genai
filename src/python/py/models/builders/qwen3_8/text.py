@@ -24,13 +24,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
     def make_ple_token_state(self, layer_id):
         basename = f"/model/layers.{layer_id}/ple/token_state"
         past = self.input_names["past.ple_tokens"][layer_id]
-        if not self.use_paged_attention:
-            self.make_node(
-                "Identity",
-                [past],
-                [self.output_names["present.ple_tokens"][layer_id]],
-                name=f"{basename}/Identity",
-            )
         capacity = (
             getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0) if self.use_paged_attention else 0
         )
@@ -312,6 +305,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         ple_token_state = {layer_id: f"past.{layer_id}.ple_tokens" for layer_id in self.ple_attrs["layer_ids"]}
         ple_conv_state = {layer_id: f"past.{layer_id}.ple_conv" for layer_id in self.ple_attrs["layer_ids"]}
         present_ple_tokens = {layer_id: f"present.{layer_id}.ple_tokens" for layer_id in self.ple_attrs["layer_ids"]}
+        if not self.use_paged_attention:
+            present_ple_tokens = ple_token_state
         present_ple_conv = {layer_id: f"present.{layer_id}.ple_conv" for layer_id in self.ple_attrs["layer_ids"]}
         self.input_names["past.ple_tokens"] = ple_token_state
         self.input_types["past.ple_tokens"] = ir.DataType.INT64
@@ -407,7 +402,9 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         decoder["inputs"]["past_indexer_state_lengths_names"] = "past.%d.indexer_state_lengths"
         if self.sparse_indexer_attrs["fixed_cache"]:
             decoder["inputs"]["past_sequence_length"] = self.input_names["past_sequence_length"]
-        decoder["outputs"]["present_ple_token_names"] = "present.%d.ple_tokens"
+        decoder["outputs"]["present_ple_token_names"] = (
+            "present.%d.ple_tokens" if self.use_paged_attention else "past.%d.ple_tokens"
+        )
         decoder["outputs"]["present_ple_conv_names"] = "present.%d.ple_conv"
         decoder["outputs"]["present_indexer_names"] = "present.%d.indexer_key"
         decoder["outputs"]["present_indexer_kv_buffer_names"] = "present.%d.indexer_kv_buffer"
@@ -527,13 +524,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                 combine=False,
             )
             if (self.include_hidden_states or self.exclude_lm_head) and not self.hyper_connection_attrs["emit_pre_final_hidden_states"]:
-                self.make_node(
-                    "Identity",
-                    inputs=[final_output],
-                    outputs=[self.output_names["hidden_states"]],
-                    name="/model/final_hidden_states/Identity",
-                )
-                final_output = self.output_names["hidden_states"]
+                final_output = self.rename_value(final_output, self.output_names["hidden_states"])
             self.layernorm_attrs["output_0"] = final_output
 
     def get_final_hyper_connection_mixer(self):

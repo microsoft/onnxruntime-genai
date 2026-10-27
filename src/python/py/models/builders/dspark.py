@@ -131,7 +131,7 @@ class DSparkBuilder(BlockDrafterBuilder):
             raise ValueError(f"top_k must be between 1 and the vocabulary size ({self.vocab_size}).")
         self.selector_top_k = self.top_k
         self.aux_hidden_size = self.hidden_size * len(self.target_layer_ids)
-        self.make_graph("dspark_graph", "dspark")
+        super().__init__("dspark_graph", "dspark")
 
     # ------------------------------------------------------------ rope caches
 

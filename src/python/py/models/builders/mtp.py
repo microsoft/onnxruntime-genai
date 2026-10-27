@@ -18,7 +18,7 @@ class MTPModel(Model):
     """Base class for composite models with an optional MTP graph."""
 
     def __init__(self):
-        self.make_graph("mtp_package")
+        super().__init__(graph_name="mtp_package")
 
     def make_mtp_init(self, config, extra_options):
         self.mtp_attrs = {

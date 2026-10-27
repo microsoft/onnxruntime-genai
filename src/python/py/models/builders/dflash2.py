@@ -132,7 +132,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.num_draft_tokens = self.block_size - 1
         self.input_embedding_scale = float(dfl.get("input_embedding_scale", 1.0))
         self.aux_hidden_size = self.hidden_size * len(self.target_layer_ids)
-        self.make_graph("dflash2_graph", "dflash2")
+        super().__init__("dflash2_graph", "dflash2")
 
     # ------------------------------------------------------------ rope caches
 

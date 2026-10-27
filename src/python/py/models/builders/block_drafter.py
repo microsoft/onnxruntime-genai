@@ -17,7 +17,7 @@ from .base import Model
 
 
 # Block drafters share Model's graph lifecycle while retaining their packed block I/O.
-class BlockDrafterBuilder:
+class BlockDrafterBuilder(Model):
     """Shared graph, initializer, I/O, and file plumbing for block drafters."""
 
     # Weight-only quantization of the drafter body. ``quant_bits = None`` keeps every
@@ -37,6 +37,12 @@ class BlockDrafterBuilder:
     # `adopt_target_tensors` to fill from the saved target.
     lm_head_adoption = None
     embed_adoption = None
+
+    def __init__(self, graph_name="block_drafter", const_prefix="drafter"):
+        super().__init__(graph_name=graph_name, graph_opset=21)
+        self.graph.opset_imports["com.microsoft"] = 1
+        self.const_cache = {}
+        self.const_prefix = const_prefix
 
     def make_graph(self, graph_name, const_prefix):
         Model.make_graph(self, graph_name, opset=21)
@@ -355,7 +361,7 @@ class BlockDrafterBuilder:
         if missing:
             self.embed_adoption = {"initializers": tuple(missing)}
         output = self.out(name)
-        self.make_node("Identity", [root], [output], name=name)
+        self.rename_value(root, output)
         self.make_value(output, self.external_dtype, [rows, self.hidden_size])
         return output
 
@@ -377,9 +383,10 @@ class BlockDrafterBuilder:
                 for input_value in value.producer().inputs:
                     visit(input_value)
 
-        for node in self.graph:
-            if node.name in ("/dflash2/embed_tokens/Gather", "/dspark/embed_tokens/Gather"):
-                visit(node.outputs[0])
+        for prefix in ("dflash2", "dspark"):
+            output = self.values.get(f"/{prefix}/embed_tokens/Gather/output_0")
+            if output is not None:
+                visit(output)
         return frozenset(names)
 
     def adopt_target_tensors(self, target_model_path, embedding_model_path=None):
