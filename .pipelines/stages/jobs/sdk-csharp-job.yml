@@ -131,33 +131,32 @@ jobs:
   # genai_version is inherited from the enclosing stage (computed once by the
   # 'version' stage), so no per-job version computation is needed here.
 
-  # --- Feed isolation: NuGet restore → Lotus --------------------------------
+  # --- Feed isolation: NuGet restore → ORT-Nightly --------------------------
   - task: NuGetAuthenticate@1
-    displayName: 'Authenticate NuGet to Lotus feed'
+    displayName: 'Authenticate NuGet to ORT-Nightly feed'
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
       # The NuGet SDK resolver runs while evaluating the project, before
       # dotnet restore applies --source or --configfile. Put an isolated config
-      # beside the project so MSBuild.Sdk.Extras is also resolved from Lotus.
+      # beside the project so MSBuild.Sdk.Extras is also resolved from ORT-Nightly.
       $nugetConfig = Join-Path $PWD 'NuGet.config'
-      $lotusFeed = [System.Security.SecurityElement]::Escape('$(lotusNuGetFeed)')
       @"
       <?xml version="1.0" encoding="utf-8"?>
       <configuration>
         <packageSources>
           <clear />
-          <add key="Lotus" value="$lotusFeed" />
+          <add key="ORT-Nightly" value="https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json" />
         </packageSources>
       </configuration>
       "@ | Set-Content -Path $nugetConfig -Encoding UTF8
-    displayName: Create Lotus Config
+    displayName: 'Create ORT-Nightly NuGet config'
     workingDirectory: '$(Build.Repository.LocalPath)/src/csharp'
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
       dotnet --info
-      # Feed isolation: install the mobile workload packs from the Lotus feed
+      # Feed isolation: install the mobile workload packs from the ORT-Nightly feed
       # (which upstreams nuget.org). --skip-manifest-update uses the manifests
       # baked into the SDK so no public SDK feed is contacted.
 
@@ -174,7 +173,7 @@ jobs:
       $ErrorActionPreference = 'Stop'
       # The NuGet SDK resolver runs while evaluating the project, before
       # dotnet restore applies --source or --configfile. Put an isolated config
-      # beside the project so MSBuild.Sdk.Extras is also resolved from Lotus.
+      # beside the project so MSBuild.Sdk.Extras is also resolved from ORT-Nightly.
       $nugetConfig = Join-Path $PWD 'NuGet.config'
 
       try {

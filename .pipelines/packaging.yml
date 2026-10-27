@@ -4,8 +4,8 @@
 # Single entry point that builds the core once per (EP, os, arch) and layers the
 # SDKs (Python, C#, Java) incrementally against the prebuilt core, plus the
 # bespoke Apple (iOS xcframework) and Android (AAR) artifacts and the .Foundry
-# NuGet. Feed-isolated to the internal Lotus feed; every published binary/package
-# is ESRP-signed where the platform supports it.
+# NuGet. Feed-isolated to Lotus, except C# managed restores and mobile workloads
+# use ORT-Nightly. Every published binary/package is ESRP-signed where supported.
 #
 # The matrix is fixed per EP; the pipeline inputs only select the EP(s),
 # the build-time ORT versions, and the CUDA toolkit version:
