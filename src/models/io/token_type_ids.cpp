@@ -41,10 +41,12 @@ void TokenTypeIds::SetPending(std::span<const int32_t> markers) {
 
 void TokenTypeIds::Update(size_t sequence_length) {
   // Generated tokens are text; prompt updates reinstate the cached image markers once.
-  shape_[1] = static_cast<int64_t>(sequence_length);
-  value_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape_, type_);
+  if (shape_[1] != static_cast<int64_t>(sequence_length)) {
+    shape_[1] = static_cast<int64_t>(sequence_length);
+    value_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape_, type_);
+    state_.inputs_[input_index_] = value_.get();
+  }
   UpdatePendingTokenTypeIds(*value_, pending_);
-  state_.inputs_[input_index_] = value_.get();
 }
 
 std::vector<int32_t> ReadTokenTypeIds(const OrtValue& token_type_ids) {
