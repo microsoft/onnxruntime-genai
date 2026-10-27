@@ -49,6 +49,9 @@ and processor assets supply the fixture metadata.
 These are synthetic host-math and wiring tests, not pretrained-model feature parity,
 learned attention validation, public video support, or OpenVINO EP/device validation.
 
+Partitioned vision mergers are released after prompt injection; these regressions
+check output behavior across decoding, not memory usage or allocator reclamation.
+
 ## Gemma3 partitioned image-injection regression
 
 Run the CPU runtime regression from `test/python`:
