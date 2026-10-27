@@ -617,15 +617,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.Contains(reason, error.Message);
         }
 
-        [Fact(DisplayName = "TestTokenPostProcessorResults")]
-        public void TestTokenPostProcessorResults()
+        [Fact(DisplayName = "TestASRPostProcessorResults")]
+        public void TestASRPostProcessorResults()
         {
             using var model = new Model(_tinyRandomGpt2ModelPath);
             using var tokenizer = new Tokenizer(model);
             using var parameters = new GeneratorParams(model);
             parameters.SetSearchOption("max_length", 10);
             using var generator = new Generator(model, parameters);
-            using var processor = new TokenPostProcessor(generator);
+            using var processor = new ASRPostProcessor(generator);
             Assert.Empty(processor.GetNextResults());
             processor.FinalizeProcessing();
             Assert.Null(Assert.Single(processor.GetNextResults()).GetTimestamps());
@@ -635,7 +635,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             using var plain = tokenizer.CreateStream();
             var tokenId = generator.GetNextTokens()[0];
             processor.ProcessNext();
-            var result = Assert.Single(processor.GetNextResults());
+            ASRPostProcessorResult result = Assert.Single(processor.GetNextResults());
             var expectedText = plain.Decode(tokenId);
             var copiedText = result.GetText();
             Assert.Equal(expectedText, result.GetText());
@@ -667,18 +667,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [Theory]
         [InlineData("batch_size")]
         [InlineData("num_beams")]
-        public void TestTokenPostProcessorRejectsMultipleSequences(string option)
+        public void TestASRPostProcessorRejectsMultipleSequences(string option)
         {
             using var model = new Model(_tinyRandomGpt2ModelPath);
             using var parameters = new GeneratorParams(model);
             parameters.SetSearchOption(option, 2);
             using var generator = new Generator(model, parameters);
-            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new TokenPostProcessor(generator));
+            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new ASRPostProcessor(generator));
             Assert.Contains("batch_size=1 and num_beams=1", error.Message);
         }
 
         [Fact]
-        public void TestTokenPostProcessorUsesGeneratorsModel()
+        public void TestASRPostProcessorUsesGeneratorsModel()
         {
             using var model = new Model(_tinyRandomGpt2ModelPath);
             using var tokenizer = new Tokenizer(model);
@@ -687,7 +687,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             parameters.SetSearchOption("max_length", 10);
             using var generator = new Generator(model, parameters);
             model.Dispose();
-            using var processor = new TokenPostProcessor(generator);
+            using var processor = new ASRPostProcessor(generator);
             generator.AppendTokens(new int[] { 0, 0, 0, 52 });
             generator.GenerateNextToken();
             processor.ProcessNext();
@@ -695,9 +695,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         }
 
         [Fact]
-        public void TestTokenPostProcessorRejectsNullGenerator()
+        public void TestASRPostProcessorRejectsNullGenerator()
         {
-            Assert.Throws<ArgumentNullException>(() => new TokenPostProcessor(null));
+            Assert.Throws<ArgumentNullException>(() => new ASRPostProcessor(null));
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]

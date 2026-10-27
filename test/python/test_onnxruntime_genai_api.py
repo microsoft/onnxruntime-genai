@@ -78,7 +78,7 @@ def test_requested_timestamps_reject_invalid_model_config(test_data_path, model_
         config.overlay(json.dumps({"model": {"type": model_type, "timestamp_level": "word", **timing}}))
 
 
-def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
+def test_asr_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
@@ -86,7 +86,7 @@ def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=10)
     generator = og.Generator(model, params)
-    processor = og.TokenPostProcessor(generator)
+    processor = og.ASRPostProcessor(generator)
     assert processor.get_next_results() == []
     processor.finalize()
     initial = processor.get_next_results()[0]
@@ -112,7 +112,7 @@ def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_
         results = processor.get_next_results()
         assert len(results) == 1
         result = results[0]
-        assert isinstance(result, og.TokenPostProcessorResult)
+        assert isinstance(result, og.ASRPostProcessorResult)
         assert result.get_text() == expected
         assert result.get_timestamps() is None
         assert processor.get_next_results()[0].get_text() == expected
@@ -138,17 +138,17 @@ def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_
 
 
 @pytest.mark.parametrize("search", [{"batch_size": 2}, {"num_beams": 2}])
-def test_token_postprocessor_rejects_multiple_sequences(test_data_path, search):
+def test_asr_postprocessor_rejects_multiple_sequences(test_data_path, search):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=10, **search)
     generator = og.Generator(model, params)
     with pytest.raises(RuntimeError, match="batch_size=1 and num_beams=1"):
-        og.TokenPostProcessor(generator)
+        og.ASRPostProcessor(generator)
 
 
-def test_token_postprocessor_uses_generators_model(test_data_path):
+def test_asr_postprocessor_uses_generators_model(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
@@ -157,16 +157,16 @@ def test_token_postprocessor_uses_generators_model(test_data_path):
     params.set_search_options(max_length=10)
     generator = og.Generator(model, params)
     del model
-    processor = og.TokenPostProcessor(generator)
+    processor = og.ASRPostProcessor(generator)
     generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
     generator.generate_next_token()
     processor.process_next()
     assert processor.get_next_results()[0].get_text() == plain.decode(int(generator.get_next_tokens()[0]))
 
 
-def test_token_postprocessor_rejects_null_generator():
+def test_asr_postprocessor_rejects_null_generator():
     with pytest.raises(TypeError):
-        og.TokenPostProcessor(None)
+        og.ASRPostProcessor(None)
 
 
 def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):

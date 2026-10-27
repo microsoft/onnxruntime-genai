@@ -118,7 +118,7 @@ void MetadataCoreState::ProcessCompletedWords(TimestampResult& result) {
 }
 
 void MetadataCoreState::ProcessDecoded(
-    const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, PostProcessorResult& result) {
+    const TokenMetadataInput& token, const OrtxWordPieceInfo& piece, ASRPostProcessorResult& result) {
   if (TimestampsEnabled()) {
     auto& timestamps = result.timestamps.emplace();
     pending_token_intervals_.push_back(*token.token_acoustic_frame_interval);
@@ -127,7 +127,7 @@ void MetadataCoreState::ProcessDecoded(
   }
 }
 
-void MetadataCoreState::ProcessFinalized(PostProcessorResult& result) {
+void MetadataCoreState::ProcessFinalized(ASRPostProcessorResult& result) {
   if (TimestampsEnabled()) {
     auto& timestamps = result.timestamps.emplace();
     word_grouping_.Finalize();

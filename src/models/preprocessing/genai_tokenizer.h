@@ -68,8 +68,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 
  private:
   friend struct TokenizerStream;
-  friend class TokenPostProcessor;
-  friend class TokenPostProcessorInternal;
+  friend class ASRPostProcessor;
+  friend class ASRPostProcessorInternal;
   OrtxWordPieceInfo GetWordPieceInfo(int32_t vocab_id) const;
 
   bool literal_ = false;

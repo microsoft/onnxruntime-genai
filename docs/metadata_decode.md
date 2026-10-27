@@ -1,16 +1,25 @@
-# Token Post-Processing
+# ASR Post-Processing
 
 `PostProcessor` is the native base class for generator-facing postprocessors. It
-holds the borrowed generator reference shared by output-specific wrappers and has
-no token-specific processing interface.
+holds the borrowed generator reference shared by output-specific wrappers and
+declares virtual `ProcessNext()`, `Finalize()`, and `Reset()` methods.
+`ProcessNext()` advances the concrete processor using the generator's current
+output without returning a result. The base has no result getter or shared
+result contract.
 
-`TokenPostProcessor(generator)` derives from that base. It retrieves token and
+`ASRPostProcessor(generator)` derives from that base. It retrieves token and
 optional timing views from the generator and delegates to its private
-`TokenPostProcessorInternal` member. The internal processor accepts token/timing
+`ASRPostProcessorInternal` member. The internal processor accepts token/timing
 values rather than a generator and owns a tokenizer, an ordinary tokenizer stream,
 `MetadataCoreState`, grouping/timing state, and the current results. Configuration
 comes from the generator's model and its `genai_config.json`. Callers do not pass a
 model or create token metadata records.
+
+Callers explicitly select `ASRPostProcessor` to obtain incremental text and
+optional speech timestamps. Its non-virtual `GetNextResults()` returns
+ASR-specific `ASRPostProcessorResult` values; other subclasses can expose their
+own result types. This processor also supports untimed text when timestamps
+are disabled.
 
 ## Processing Loop
 
@@ -21,7 +30,7 @@ or separate model ownership is required. The generator must outlive the processo
 `batch_size=1` and `num_beams=1` are supported; other values are rejected.
 
 ```cpp
-auto postprocessor = OgaTokenPostProcessor::Create(*generator);
+auto postprocessor = OgaASRPostProcessor::Create(*generator);
 while (!generator->IsDone()) {
   generator->GenerateNextToken();
   postprocessor->ProcessNext();
@@ -70,12 +79,12 @@ enabled; the internal stream handles the supplied tokens in order, including emp
 decoded fragments. The language bindings forward processing to this same native path.
 
 ```text
-TokenPostProcessor.ProcessNext()
+ASRPostProcessor.ProcessNext()
   -> Generator.GetTokenOutputs(): view existing output without advancing generation
       -> transducer: GetStepTokens() and optional GetStepTokenIntervals()
           -> validate token/interval counts
       -> search: GetNextTokens().CopyDeviceToCpu()
-  -> TokenPostProcessorInternal.Process(outputs)
+  -> ASRPostProcessorInternal.Process(outputs)
       -> clear previous processing results
       -> TokenOutputs.GetTokens() / GetAcousticFrameIntervals()
       -> validate token/interval counts
@@ -89,8 +98,8 @@ TokenPostProcessor.ProcessNext()
           -> MetadataCoreState.ProcessDecoded(token, lexical facts, result)
   -> return to application
 
-TokenPostProcessor.GetNextResults()
-  -> TokenPostProcessorInternal.GetNextResults(): read only
+ASRPostProcessor.GetNextResults()
+  -> ASRPostProcessorInternal.GetNextResults(): read only
   -> GetText() / nullable GetTimestamps()
 ```
 
@@ -106,7 +115,7 @@ not a heap-allocated PImpl. Token IDs and optional timing are separate collectio
 `GetAcousticFrameIntervals()` returns null when timing is absent. The spans borrow their
 producer's storage and must remain valid for `Process()`. Native timing uses
 `AcousticFrameInterval` and `std::optional`, not the public C interval layout or an
-integer presence flag. Public result handles are unchanged.
+integer presence flag. Public result handles remain opaque.
 
 ### Batch and Offline Input
 
@@ -117,7 +126,7 @@ producer, followed by `Finalize()` to flush trailing records. Batch and incremen
 processing preserve the same text and timestamps for identical ordered inputs.
 
 This does not add a public offline factory or another producer API. The public
-wrapper remains `TokenPostProcessor(generator)`. A different offline producer
+wrapper remains `ASRPostProcessor(generator)`. A different offline producer
 would need an adapter and must supply timing to obtain timestamps. Stateful
 grouping does not imply an online-only input source.
 
@@ -159,7 +168,7 @@ flowchart TD
   pending --> separator["EndsWithSeparator() for configured suffixes"]
   separator -->|Suffix completes segment| finish["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
   completed --> release["After all completed words:<br/>TokenWordGroupingState::FirstPendingTokenIndex()<br/>Release intervals before that watermark"]
-  release --> returned["Return to TokenPostProcessorInternal with result populated"]
+  release --> returned["Return to ASRPostProcessorInternal with result populated"]
 ```
 
 The grouper buffers incomplete words, whitespace, and UTF-8 output. It may
@@ -173,7 +182,7 @@ After the last generation step, flush pending work without decoding a token:
 
 ```mermaid
 flowchart TD
-  finalize["TokenPostProcessor::Finalize()"] --> stream["TokenPostProcessorInternal::Finalize()<br/>Clear previous results; create final result"]
+  finalize["ASRPostProcessor::Finalize()"] --> stream["ASRPostProcessorInternal::Finalize()<br/>Clear previous results; create final result"]
   stream --> state["MetadataCoreState::ProcessFinalized()"]
   state --> enabled["TimestampsEnabled()"]
   enabled --> group["TokenWordGroupingState::Finalize()<br/>Append() pending delimiter; CompleteWord()"]
@@ -208,11 +217,16 @@ origins and interval semantics. Diarization is not implemented by this processor
 
 ## Bindings and Lifetime
 
-C exposes opaque `OgaTokenPostProcessor`, `OgaTokenPostProcessorResult`,
-`OgaTokenPostProcessorTimestamp`, and
-`OgaTokenPostProcessorTimestampRecord` handles. Processing uses
-`OgaTokenPostProcessorProcessNext()`; results are read through
-`OgaTokenPostProcessorGetResultCount()` and `OgaTokenPostProcessorGetResult()`,
+C exposes opaque `OgaASRPostProcessor`, `OgaASRPostProcessorResult`,
+`OgaASRPostProcessorTimestamp`, and
+`OgaASRPostProcessorTimestampRecord` handles. Call
+`OgaASRPostProcessorAsPostProcessor()` to obtain a borrowed `OgaPostProcessor`
+base handle, then use `OgaPostProcessorProcessNext()` to dispatch processing
+through the native virtual method. The base handle does not transfer ownership
+and is valid until the ASR processor is destroyed; do not free it separately.
+C++ `OgaASRPostProcessor::ProcessNext()` and the managed bindings perform this
+conversion automatically. Results remain ASR-specific and are read through
+`OgaASRPostProcessorGetResultCount()` and `OgaASRPostProcessorGetResult()`,
 with typed getters for text,
 timestamp presence, word/segment counts, records, frame bounds, and second bounds.
 Result and record layouts are private. An out-of-range C result or record lookup
@@ -227,16 +241,16 @@ must be externally serialized. Independent processors have independent state.
 is no intermediate metadata output or conversion to a second result model. The
 internal stream owns one immutable configuration; metadata state reads that same object.
 
-Python uses `TokenPostProcessor(generator)`, `process_next()`,
+Python uses `ASRPostProcessor(generator)`, `process_next()`,
 `get_next_results()`, `finalize()`, and `reset()`. Borrowed
-`TokenPostProcessorResult` objects expose `get_text()` and nullable
+`ASRPostProcessorResult` objects expose `get_text()` and nullable
 `get_timestamps()`. Timestamp objects expose `get_words()` and `get_segments()`;
 records expose `get_text()`, `get_start_frame()`, `get_stop_frame()`,
 `get_start_time()`, and `get_stop_time()`.
 
-C# uses `TokenPostProcessor(generator)`, `ProcessNext()`,
+C# uses `ASRPostProcessor(generator)`, `ProcessNext()`,
 `GetNextResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
-`TokenPostProcessorResult` objects expose `GetText()` and nullable `GetTimestamps()`.
+`ASRPostProcessorResult` objects expose `GetText()` and nullable `GetTimestamps()`.
 Timestamp objects expose `GetWords()` and `GetSegments()`; records expose
 `GetText()`, `GetStartFrame()`, `GetStopFrame()`, `GetStartTime()`, and `GetStopTime()`.
 

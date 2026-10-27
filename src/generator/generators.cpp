@@ -10,7 +10,7 @@
 #include <cstring>
 #include "config_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
-#include "models/preprocessing/token_post_processor.h"
+#include "models/preprocessing/asr_post_processor.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"

@@ -45,8 +45,8 @@ thresholds are rejected while loading the configuration.
 ## Decoding flows
 
 Both paths start with audio processed into features, followed by generated token IDs. Model
-configuration determines whether acoustic timing is produced. `TokenPostProcessor`
-forwards borrowed token and optional timing views to its internal `TokenPostProcessorInternal`, which
+configuration determines whether acoustic timing is produced. `ASRPostProcessor`
+forwards borrowed token and optional timing views to its internal `ASRPostProcessorInternal`, which
 owns decoding and timestamp processing. Ordinary tokenizer decoding is unchanged.
 `timestamp_level` controls timestamp generation:
 ```mermaid
@@ -62,8 +62,8 @@ flowchart TB
 
   subgraph timed[With timestamps: word, segment, or all]
     setup[Processor copies model configuration] --> stream
-    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNext]
-    stream --> internal[Internal TokenPostProcessorInternal.Process]
+    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[ASRPostProcessor.ProcessNext]
+    stream --> internal[Internal ASRPostProcessorInternal.Process]
     internal --> ortx[Extensions: vocabulary facts + ordinary cached decode]
     ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
     align --> events[Per-call word / segment events with frame and second bounds]
@@ -88,7 +88,7 @@ For a locally installed Nemotron model outside the test fixtures, set
 `AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
 That test uses CPU session options, even when the model package specifies CUDA.
 
-For the timed path, create `TokenPostProcessor(generator)` after configuring
+For the timed path, create `ASRPostProcessor(generator)` after configuring
 the model and creating the generator. The processor obtains its model from the
 generator rather than taking a separate model argument. The generator supplies
 *when* each token occurred; Extensions supplies
@@ -117,7 +117,7 @@ hop length, and subsampling factor. Native token input uses an optional
 ## Decoding
 
 Configure timestamp level and segment rules before creating the generator and
-`TokenPostProcessor`. After each generation step, call `ProcessNext()`
+`ASRPostProcessor`. After each generation step, call `ProcessNext()`
 (C++/C#) or `process_next()` (Python), then read `GetNextResults()` or
 `get_next_results()`. All sequential emissions are processed in order,
 including steps that emit zero or multiple tokens. Reading results repeatedly

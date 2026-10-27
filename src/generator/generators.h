@@ -124,7 +124,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 };
 
 class TokenOutputs;
-class TokenPostProcessor;
+class ASRPostProcessor;
 
 struct Generator : LeakChecked<Generator> {
   enum class Action {
@@ -179,7 +179,7 @@ struct Generator : LeakChecked<Generator> {
   bool IsGreedySampling() const;
 
  private:
-  friend class TokenPostProcessor;
+  friend class ASRPostProcessor;
   TokenOutputs GetTokenOutputs() const;
 #if defined(_MSC_VER)
   [[msvc::no_unique_address]]
