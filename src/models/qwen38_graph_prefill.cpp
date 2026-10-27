@@ -484,7 +484,6 @@ void Qwen38GraphEngine::FastAppendSlot(int slot, std::span<const int32_t> tokens
   if (slot == 0) {
     prompt_tokens_.insert(prompt_tokens_.end(), tokens.begin(), tokens.end());
   }
-  const size_t row_bytes = static_cast<size_t>(hidden_width_) * 2;
   const int embed_width = model_.config_->model.decoder.hidden_size;
   const size_t embed_row_bytes = static_cast<size_t>(embed_width) * 2;
   const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;

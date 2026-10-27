@@ -277,12 +277,12 @@ void Qwen38GraphSession::StepBatch(std::span<const Qwen38StepRequest> requests,
     bool counted_pass = false;
     for (size_t i = 0; i < inflight_slots_.size(); ++i) {
       const size_t s = inflight_slots_[i];
-      ssize_t match_idx = -1;
+      ptrdiff_t match_idx = -1;
       for (size_t r = 0; r < requests.size(); ++r) {
         if (requests[r].slot == s &&
             requests[r].owner == inflight_owners_[i] &&
             requests[r].turn_id == inflight_turns_[i]) {
-          match_idx = static_cast<ssize_t>(r);
+          match_idx = static_cast<ptrdiff_t>(r);
           break;
         }
       }
@@ -453,17 +453,17 @@ void Qwen38GraphCacheManager::Allocate(const std::vector<std::shared_ptr<Request
     if (IsResident(req)) {
       continue;
     }
-    ssize_t target_slot = -1;
+    ptrdiff_t target_slot = -1;
     for (size_t s = 0; s < max_slots_; ++s) {
       if (!slots_[s] || IsClosed(slots_[s]->status_)) {
-        target_slot = static_cast<ssize_t>(s);
+        target_slot = static_cast<ptrdiff_t>(s);
         break;
       }
     }
     if (target_slot < 0) {
       for (size_t s = 0; s < max_slots_; ++s) {
         if (IsTurnComplete(slots_[s]->status_)) {
-          target_slot = static_cast<ssize_t>(s);
+          target_slot = static_cast<ptrdiff_t>(s);
           break;
         }
       }
