@@ -72,6 +72,10 @@ only image rows, while a diagnostic decoder exposes all received embeddings and
 token-type markers in its raw logits. Image/text-only prefill and two successive
 decode forwards cover int32/int64 embedding IDs, all int32/int64 source/decoder
 marker combinations, and a configured decoder input name.
+Native `TokenTypeIdsLifecycleTest` cases cover int32/int64 decoder metadata and
+batch sizes one/two. Unchanged sequence lengths reuse the bound marker tensor,
+but every update still applies staged markers once or clears the buffer to text
+zeros; shape changes and invalid pending-marker lengths are also checked.
 Image cases also check full-prefill fallback when chunking is requested.
 Session profiles verify invalid marker dtypes and out-of-int32-range values are
 rejected before vision executes, while valid markers execute vision once.
