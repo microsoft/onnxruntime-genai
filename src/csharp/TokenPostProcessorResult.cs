@@ -7,33 +7,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         private readonly TokenPostProcessor _owner;
         private readonly object _lifetime;
-        private readonly IntPtr _text;
-        private readonly IntPtr _timestamps;
-
-        internal TokenPostProcessorResult(TokenPostProcessor owner, object lifetime, IntPtr text, IntPtr timestamps)
-        {
-            _owner = owner;
-            _lifetime = lifetime;
-            _text = text;
-            _timestamps = timestamps;
-        }
-
-        public string GetText() => StringUtils.FromUtf8(_owner.GetResultHandle(_text, _lifetime));
-
-        public TokenPostProcessorTimestamp GetTimestamps()
-        {
-            var handle = _owner.GetResultHandle(_timestamps, _lifetime);
-            return handle == IntPtr.Zero ? null : new TokenPostProcessorTimestamp(_owner, _lifetime, handle);
-        }
-    }
-
-    public sealed class TokenPostProcessorTimestamp
-    {
-        private readonly TokenPostProcessor _owner;
-        private readonly object _lifetime;
         private readonly IntPtr _handle;
 
-        internal TokenPostProcessorTimestamp(TokenPostProcessor owner, object lifetime, IntPtr handle)
+        internal TokenPostProcessorResult(TokenPostProcessor owner, object lifetime, IntPtr handle)
         {
             _owner = owner;
             _lifetime = lifetime;
@@ -42,21 +18,47 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         private IntPtr Handle => _owner.GetResultHandle(_handle, _lifetime);
 
-        public IReadOnlyList<TokenPostProcessorTimestampRecord> GetWords() => GetRecords(false);
-        public IReadOnlyList<TokenPostProcessorTimestampRecord> GetSegments() => GetRecords(true);
+        public string Text => StringUtils.FromUtf8(NativeMethods.OgaTokenPostProcessorResultGetText(Handle));
+
+        public TokenPostProcessorTimestampResult TimestampResult
+        {
+            get
+            {
+                var handle = NativeMethods.OgaTokenPostProcessorResultGetTimestampResult(Handle);
+                return handle == IntPtr.Zero ? null : new TokenPostProcessorTimestampResult(_owner, _lifetime, handle);
+            }
+        }
+    }
+
+    public sealed class TokenPostProcessorTimestampResult
+    {
+        private readonly TokenPostProcessor _owner;
+        private readonly object _lifetime;
+        private readonly IntPtr _handle;
+
+        internal TokenPostProcessorTimestampResult(TokenPostProcessor owner, object lifetime, IntPtr handle)
+        {
+            _owner = owner;
+            _lifetime = lifetime;
+            _handle = handle;
+        }
+
+        private IntPtr Handle => _owner.GetResultHandle(_handle, _lifetime);
+
+        public IReadOnlyList<TokenPostProcessorTimestampRecord> Words => GetRecords(false);
+        public IReadOnlyList<TokenPostProcessorTimestampRecord> Segments => GetRecords(true);
 
         private TokenPostProcessorTimestampRecord[] GetRecords(bool segments)
         {
             var handle = Handle;
-            var kind = segments ? NativeMethods.TimestampRecordKind.Segments : NativeMethods.TimestampRecordKind.Words;
-            int count = checked((int)NativeMethods.OgaTokenPostProcessorGetTimestampRecordCount(handle, kind).ToUInt64());
+            int count = checked((int)(segments ? NativeMethods.OgaTokenPostProcessorTimestampResultGetSegmentCount(handle)
+                : NativeMethods.OgaTokenPostProcessorTimestampResultGetWordCount(handle)).ToUInt64());
             var records = new TokenPostProcessorTimestampRecord[count];
             for (int index = 0; index < count; ++index)
             {
-                Result.VerifySuccess(NativeMethods.OgaTokenPostProcessorGetTimestampRecordData(handle, kind, (UIntPtr)index,
-                    out IntPtr text, out long startFrame, out long stopFrame, out double startTime, out double stopTime));
-                records[index] = new TokenPostProcessorTimestampRecord(_owner, _lifetime, text,
-                    (startFrame, stopFrame), (startTime, stopTime));
+                var kind = segments ? NativeMethods.TimestampRecordKind.Segments : NativeMethods.TimestampRecordKind.Words;
+                var record = NativeMethods.OgaTokenPostProcessorTimestampResultGetTimestampRecord(handle, kind, (UIntPtr)index);
+                records[index] = new TokenPostProcessorTimestampRecord(_owner, _lifetime, record);
             }
             return records;
         }
@@ -66,31 +68,36 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         private readonly TokenPostProcessor _owner;
         private readonly object _lifetime;
-        private readonly IntPtr _text;
-        private readonly (long Start, long Stop) _frameInterval;
-        private readonly (double Start, double Stop) _timeInterval;
+        private readonly IntPtr _handle;
 
-        internal TokenPostProcessorTimestampRecord(TokenPostProcessor owner, object lifetime, IntPtr text,
-            (long Start, long Stop) frameInterval, (double Start, double Stop) timeInterval)
+        internal TokenPostProcessorTimestampRecord(TokenPostProcessor owner, object lifetime, IntPtr handle)
         {
             _owner = owner;
             _lifetime = lifetime;
-            _text = text;
-            _frameInterval = frameInterval;
-            _timeInterval = timeInterval;
+            _handle = handle;
         }
 
-        public string GetText() => StringUtils.FromUtf8(_owner.GetResultHandle(_text, _lifetime));
-        public (long Start, long Stop) GetFrameInterval()
+        private IntPtr Handle => _owner.GetResultHandle(_handle, _lifetime);
+
+        public string Text => StringUtils.FromUtf8(NativeMethods.OgaTokenPostProcessorTimestampRecordGetText(Handle));
+        public (long Start, long Stop) FrameInterval
         {
-            _owner.GetResultHandle(_text, _lifetime);
-            return _frameInterval;
+            get
+            {
+                var handle = Handle;
+                return (NativeMethods.OgaTokenPostProcessorTimestampRecordGetStartFrame(handle),
+                    NativeMethods.OgaTokenPostProcessorTimestampRecordGetStopFrame(handle));
+            }
         }
 
-        public (double Start, double Stop) GetTimeInterval()
+        public (double Start, double Stop) TimeInterval
         {
-            _owner.GetResultHandle(_text, _lifetime);
-            return _timeInterval;
+            get
+            {
+                var handle = Handle;
+                return (NativeMethods.OgaTokenPostProcessorTimestampRecordGetStartTime(handle),
+                    NativeMethods.OgaTokenPostProcessorTimestampRecordGetStopTime(handle));
+            }
         }
     }
 }

@@ -219,26 +219,25 @@ TEST(CAPITests, TokenPostProcessorOpaqueResults) {
   const auto results = processor->GetNextTokenResults();
   ASSERT_EQ(results.size(), 1U);
   const auto& result = results[0];
-  EXPECT_EQ(processor->GetNextTokenResults()[0].GetText(), result.GetText());
+  EXPECT_EQ(processor->GetNextTokenResults()[0].Text.data(), result.Text.data());
   const std::string expected = plain->Decode(generator->GetNextTokens()[0]);
-  EXPECT_EQ(result.GetText(), expected);
-  EXPECT_EQ(result.GetTimestamps(), nullptr);
-  EXPECT_EQ(OgaTokenPostProcessorGetTimestampRecordCount(nullptr, OgaTimestampRecordKind_Words), 0U);
-  EXPECT_EQ(OgaTokenPostProcessorGetTimestampRecordCount(nullptr, OgaTimestampRecordKind_Segments), 0U);
-  const char* text = "unchanged";
-  const OgaTokenPostProcessorTimestamp* timestamps = nullptr;
-  OgaCheckResult(OgaTokenPostProcessorGetResultData(processor.get(), 0, &text, &timestamps));
-  EXPECT_EQ(text, result.GetText());
-  EXPECT_EQ(timestamps, nullptr);
-  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetResultData(processor.get(), 1, &text, &timestamps)), std::runtime_error);
-  EXPECT_EQ(text, result.GetText());
-  EXPECT_EQ(timestamps, nullptr);
+  EXPECT_EQ(result.Text, expected);
+  EXPECT_FALSE(result.TimestampResult.has_value());
+  const auto* native_result = OgaTokenPostProcessorGetResult(processor.get(), 0);
+  EXPECT_EQ(result.Text.data(), OgaTokenPostProcessorResultGetText(native_result));
+  EXPECT_EQ(OgaTokenPostProcessorResultGetTimestampResult(native_result), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorResultGetTimestampResult(nullptr), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetWordCount(nullptr), 0U);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetSegmentCount(nullptr), 0U);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Words, 0), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Segments, 0), nullptr);
+  EXPECT_EQ(OgaTokenPostProcessorGetResult(processor.get(), 1), nullptr);
   generator->GenerateNextToken();
-  EXPECT_EQ(result.GetText(), expected);
+  EXPECT_EQ(result.Text, expected);
   processor->Finalize();
   processor->Finalize();
   ASSERT_EQ(processor->GetNextTokenResults().size(), 1U);
-  EXPECT_STREQ(processor->GetNextTokenResults()[0].GetText(), "");
+  EXPECT_TRUE(processor->GetNextTokenResults()[0].Text.empty());
   processor->Reset();
   EXPECT_TRUE(processor->GetNextTokenResults().empty());
   processor.reset();
@@ -255,41 +254,6 @@ TEST(CAPITests, TokenPostProcessorRejectsInvalidCreation) {
   EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorProcessNextTokens(nullptr)), std::runtime_error);
   EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorFinalize(nullptr)), std::runtime_error);
   EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorReset(nullptr)), std::runtime_error);
-}
-
-TEST(CAPITests, TokenPostProcessorOuterReadRejectsInvalidArguments) {
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  auto params = OgaGeneratorParams::Create(*model);
-  auto generator = OgaGenerator::Create(*model, *params);
-  auto processor = OgaTokenPostProcessor::Create(*generator);
-  const char* text = "unchanged";
-  const OgaTokenPostProcessorTimestamp* timestamps = nullptr;
-  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetResultData(nullptr, 0, &text, &timestamps)), std::runtime_error);
-  EXPECT_STREQ(text, "unchanged");
-  EXPECT_EQ(timestamps, nullptr);
-  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetResultData(processor.get(), 0, &text, &timestamps)), std::runtime_error);
-  EXPECT_STREQ(text, "unchanged");
-  EXPECT_EQ(timestamps, nullptr);
-  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetResultData(processor.get(), 0, nullptr, &timestamps)), std::runtime_error);
-  EXPECT_EQ(timestamps, nullptr);
-  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetResultData(processor.get(), 0, &text, nullptr)), std::runtime_error);
-  EXPECT_STREQ(text, "unchanged");
-}
-
-TEST(CAPITests, TokenPostProcessorIndexedReadRejectsNullTimestamps) {
-  EXPECT_EQ(OgaTokenPostProcessorGetTimestampRecordCount(nullptr, OgaTimestampRecordKind_Words), 0U);
-  EXPECT_EQ(OgaTokenPostProcessorGetTimestampRecordCount(nullptr, OgaTimestampRecordKind_Segments), 0U);
-  const char* text = "unchanged";
-  int64_t start_frame = 7;
-  int64_t stop_frame = 9;
-  double start_time = 0.7;
-  double stop_time = 0.9;
-  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetTimestampRecordData(nullptr, OgaTimestampRecordKind_Words, 0, &text, &start_frame, &stop_frame, &start_time, &stop_time)), std::runtime_error);
-  EXPECT_STREQ(text, "unchanged");
-  EXPECT_EQ(start_frame, 7);
-  EXPECT_EQ(stop_frame, 9);
-  EXPECT_DOUBLE_EQ(start_time, 0.7);
-  EXPECT_DOUBLE_EQ(stop_time, 0.9);
 }
 
 TEST(CAPITests, EncodeBatchEmptyInputThrows) {

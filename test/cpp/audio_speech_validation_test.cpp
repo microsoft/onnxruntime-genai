@@ -565,7 +565,7 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
   EXPECT_EQ(words[1].frame_interval.second, 23);
 }
 
-TEST_F(MetadataCoreStateTests, IndexedTimestampReadsReturnBorrowedRecords) {
+TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
   auto processor = OgaTokenPostProcessor::Create(*reinterpret_cast<const OgaGenerator*>(generator.get()));
   size_t record_count = 0;
   std::string words;
@@ -573,74 +573,39 @@ TEST_F(MetadataCoreStateTests, IndexedTimestampReadsReturnBorrowedRecords) {
   const auto check_records = [&] {
     size_t result_index = 0;
     for (const auto& result : processor->GetNextTokenResults()) {
-      const auto* timestamps = result.GetTimestamps();
+      const auto* native_result = OgaTokenPostProcessorGetResult(processor.get(), result_index);
+      EXPECT_EQ(result.Text.data(), OgaTokenPostProcessorResultGetText(native_result));
+      ASSERT_TRUE(result.TimestampResult.has_value());
+      const auto& timestamp_result = *result.TimestampResult;
+      const auto* timestamps = OgaTokenPostProcessorResultGetTimestampResult(native_result);
       ASSERT_NE(timestamps, nullptr);
-      const char* outer_text = nullptr;
-      const OgaTokenPostProcessorTimestamp* outer_timestamps = nullptr;
-      ASSERT_NO_THROW(OgaCheckResult(OgaTokenPostProcessorGetResultData(processor.get(), result_index, &outer_text, &outer_timestamps)));
-      EXPECT_EQ(outer_text, result.GetText());
-      EXPECT_EQ(outer_timestamps, timestamps);
-      EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetResultData(processor.get(), OgaTokenPostProcessorGetResultCount(processor.get()), &outer_text, &outer_timestamps)), std::runtime_error);
-      EXPECT_EQ(outer_text, result.GetText());
-      EXPECT_EQ(outer_timestamps, timestamps);
-      EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetResultData(processor.get(), result_index, nullptr, &outer_timestamps)), std::runtime_error);
-      EXPECT_EQ(outer_timestamps, timestamps);
-      EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetResultData(processor.get(), result_index, &outer_text, nullptr)), std::runtime_error);
-      EXPECT_EQ(outer_text, result.GetText());
       ++result_index;
-      EXPECT_EQ(timestamps->GetTimestampRecordCount(static_cast<OgaTimestampRecordKind>(99)), 0U);
-      for (auto kind : {OgaTimestampRecordKind_Words, OgaTimestampRecordKind_Segments}) {
-        const auto count = timestamps->GetTimestampRecordCount(kind);
-        EXPECT_EQ(count, kind == OgaTimestampRecordKind_Words ? timestamps->GetWordCount() : timestamps->GetSegmentCount());
+      EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetTimestampRecord(timestamps, static_cast<OgaTimestampRecordKind>(99), 0), nullptr);
+      for (bool use_segments : {false, true}) {
+        const auto& records = use_segments ? timestamp_result.Segments : timestamp_result.Words;
+        const auto kind = use_segments ? OgaTimestampRecordKind_Segments : OgaTimestampRecordKind_Words;
+        const auto count = records.size();
+        EXPECT_EQ(count, use_segments ? OgaTokenPostProcessorTimestampResultGetSegmentCount(timestamps)
+                                      : OgaTokenPostProcessorTimestampResultGetWordCount(timestamps));
         for (size_t index = 0; index < count; ++index) {
-          const auto record = timestamps->GetTimestampRecordData(kind, index);
+          const auto& record = records[index];
+          const auto* native_record = OgaTokenPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, index);
+          ASSERT_NE(native_record, nullptr);
           ++record_count;
-          const auto frames = record.GetFrameInterval();
+          const auto frames = record.FrameInterval;
           EXPECT_EQ(frames.first, 4);
           EXPECT_EQ(frames.second, 5);
-          const auto times = record.GetTimeInterval();
+          const auto times = record.TimeInterval;
           EXPECT_DOUBLE_EQ(times.first, 0.4);
           EXPECT_DOUBLE_EQ(times.second, 0.5);
-          (kind == OgaTimestampRecordKind_Words ? words : segments) += record.GetText();
-          const char* text = nullptr;
-          int64_t start_frame = 0;
-          int64_t stop_frame = 0;
-          double start_time = 0;
-          double stop_time = 0;
-          EXPECT_NO_THROW(OgaCheckResult(OgaTokenPostProcessorGetTimestampRecordData(timestamps, kind, index, &text, &start_frame, &stop_frame, &start_time, &stop_time)));
-          EXPECT_EQ(text, record.GetText());
-          EXPECT_EQ(start_frame, frames.first);
-          EXPECT_EQ(stop_frame, frames.second);
-          EXPECT_DOUBLE_EQ(start_time, times.first);
-          EXPECT_DOUBLE_EQ(stop_time, times.second);
+          (use_segments ? segments : words).append(record.Text);
+          EXPECT_EQ(record.Text.data(), OgaTokenPostProcessorTimestampRecordGetText(native_record));
+          EXPECT_EQ(frames.first, OgaTokenPostProcessorTimestampRecordGetStartFrame(native_record));
+          EXPECT_EQ(frames.second, OgaTokenPostProcessorTimestampRecordGetStopFrame(native_record));
+          EXPECT_DOUBLE_EQ(times.first, OgaTokenPostProcessorTimestampRecordGetStartTime(native_record));
+          EXPECT_DOUBLE_EQ(times.second, OgaTokenPostProcessorTimestampRecordGetStopTime(native_record));
         }
-
-        const char* text = "unchanged";
-        int64_t start_frame = 7;
-        int64_t stop_frame = 9;
-        double start_time = 0.7;
-        double stop_time = 0.9;
-        const auto expect_unchanged = [&] {
-          EXPECT_STREQ(text, "unchanged");
-          EXPECT_EQ(start_frame, 7);
-          EXPECT_EQ(stop_frame, 9);
-          EXPECT_DOUBLE_EQ(start_time, 0.7);
-          EXPECT_DOUBLE_EQ(stop_time, 0.9);
-        };
-        EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetTimestampRecordData(timestamps, kind, count, &text, &start_frame, &stop_frame, &start_time, &stop_time)), std::runtime_error);
-        expect_unchanged();
-        EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetTimestampRecordData(timestamps, static_cast<OgaTimestampRecordKind>(99), 0, &text, &start_frame, &stop_frame, &start_time, &stop_time)), std::runtime_error);
-        expect_unchanged();
-        EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetTimestampRecordData(timestamps, kind, 0, nullptr, &start_frame, &stop_frame, &start_time, &stop_time)), std::runtime_error);
-        expect_unchanged();
-        EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetTimestampRecordData(timestamps, kind, 0, &text, nullptr, &stop_frame, &start_time, &stop_time)), std::runtime_error);
-        expect_unchanged();
-        EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetTimestampRecordData(timestamps, kind, 0, &text, &start_frame, nullptr, &start_time, &stop_time)), std::runtime_error);
-        expect_unchanged();
-        EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetTimestampRecordData(timestamps, kind, 0, &text, &start_frame, &stop_frame, nullptr, &stop_time)), std::runtime_error);
-        expect_unchanged();
-        EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorGetTimestampRecordData(timestamps, kind, 0, &text, &start_frame, &stop_frame, &start_time, nullptr)), std::runtime_error);
-        expect_unchanged();
+        EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, count), nullptr);
       }
     }
   };

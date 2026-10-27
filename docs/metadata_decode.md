@@ -26,22 +26,22 @@ while (!generator->IsDone()) {
   generator->GenerateNextToken();
   postprocessor->ProcessNextTokens();
   for (const auto& result : postprocessor->GetNextTokenResults()) {
-    ProcessText(result.GetText());
-    if (const auto* timestamps = result.GetTimestamps()) {
-      for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
-        ProcessWord(timestamps->GetWord(index));
-      for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index)
-        ProcessSegment(timestamps->GetSegment(index));
+    ProcessText(result.Text);
+    if (result.TimestampResult) {
+      for (const auto& word : result.TimestampResult->Words)
+        ProcessWord(word.Text, word.FrameInterval, word.TimeInterval);
+      for (const auto& segment : result.TimestampResult->Segments)
+        ProcessSegment(segment.Text, segment.FrameInterval, segment.TimeInterval);
     }
   }
 }
 postprocessor->Finalize();
 for (const auto& result : postprocessor->GetNextTokenResults()) {
-  if (const auto* timestamps = result.GetTimestamps()) {
-    for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
-      ProcessWord(timestamps->GetWord(index));
-    for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index)
-      ProcessSegment(timestamps->GetSegment(index));
+  if (result.TimestampResult) {
+    for (const auto& word : result.TimestampResult->Words)
+      ProcessWord(word.Text, word.FrameInterval, word.TimeInterval);
+    for (const auto& segment : result.TimestampResult->Segments)
+      ProcessSegment(segment.Text, segment.FrameInterval, segment.TimeInterval);
   }
 }
 ```
@@ -91,7 +91,7 @@ TokenPostProcessor.ProcessNextTokens()
 
 TokenPostProcessor.GetNextTokenResults()
   -> TokenPostProcessorInternal.GetNextTokenResults(): read only
-  -> GetText() / nullable GetTimestamps()
+  -> GetText() / nullable GetTimestampResult()
 ```
 
 The private generator getter borrows existing transducer token and interval storage,
@@ -106,21 +106,10 @@ not a heap-allocated PImpl. Token IDs and optional timing are separate collectio
 `GetAcousticFrameIntervals()` returns null when timing is absent. The spans borrow their
 producer's storage and must remain valid for `Process()`. Native timing uses
 `std::pair<int64_t, int64_t>` and `std::optional`, not a public C interval layout or
-an integer presence flag. The first value is the start frame and the second is the
-exclusive stop frame. Native timestamp records store frame bounds in
-`frame_interval` and rounded second bounds in `time_interval`, a
-`std::pair<double, double>`. Public result handles remain opaque.
-
-The C timestamp API uses two helpers. `OgaTokenPostProcessorGetTimestampRecordCount()`
-selects words or segments with `OgaTimestampRecordKind` and returns zero for an
-empty collection, null timestamp handle, or invalid selector.
-`OgaTokenPostProcessorGetTimestampRecordData()` reads one index, returning a borrowed
-text pointer and copying both frame bounds and both second bounds into caller-owned
-outputs. It returns an `OgaResult*`: null on success or an error for a null argument,
-invalid selector, or out-of-range index. Errors leave all outputs unchanged. The
-text pointer expires on the next processor mutation or destruction. Neither helper
-copies the native vector, record, or string contents, and no native record handle
-or separate boundary getter is exposed.
+an integer presence flag. Timestamp records store frame bounds as an integer pair
+and rounded second bounds as a `std::pair<double, double>`. The first element is
+the start and the second is the exclusive stop. Public C declarations and result
+handles remain field-based and opaque.
 
 ### Batch and Offline Input
 
@@ -222,27 +211,25 @@ origins and interval semantics. Diarization is not implemented by this processor
 
 ## Bindings and Lifetime
 
-C exposes opaque `OgaTokenPostProcessor` and `OgaTokenPostProcessorTimestamp`
-handles. `OgaTokenPostProcessorGetResultCount()` and
-`OgaTokenPostProcessorGetResultData()` read outer results by index. The indexed
-read returns the borrowed decoded text and an optional borrowed timestamp-container
-pointer together; the latter is null when timestamps are disabled. The timestamp
-container has its own count and indexed-data helpers for words and segments. These
-return borrowed record text and copied frame/time bounds. Neither layer exposes
-individual native result or record handles. An invalid indexed read returns an
-`OgaResult*` error without modifying either layer's outputs; C++ wrappers convert
-that error into an exception.
+C exposes opaque `OgaTokenPostProcessor`, `OgaTokenPostProcessorResult`,
+`OgaTokenPostProcessorTimestampResult`, and
+`OgaTokenPostProcessorTimestampRecord` handles, with typed getters for text,
+timestamp presence, word/segment counts, records, frame bounds, and second bounds.
+Result and record layouts are private. An out-of-range C result or record lookup
+returns null. `OgaTokenPostProcessorTimestampResultGetTimestampRecord()` selects
+words or segments through `OgaTimestampRecordKind`; it also returns null for an
+unknown kind. Word and segment counts have separate field accessors.
 
-Timestamp-container handles and native strings are borrowed until
-the next processor mutation or destruction, not the next getter or generator
-operation. Never free them; copy anything needed afterward. Numeric bounds returned
-by an indexed read are independent values. Operations and borrowed reads on one processor
+Each C getter reads one field or returns one opaque child handle. Adding a native
+record field does not change existing getter signatures; expose a new field through
+a new accessor rather than extending a combined output-parameter list. The C#
+P/Invoke declarations mirror these C functions directly. Public language properties
+hide those accessor calls without exposing native layouts.
+
+Results, nested timestamp records, and native strings are borrowed until the next processor mutation
+or destruction, not the next getter or generator operation. Never free them;
+copy anything needed afterward. Operations and borrowed reads on one processor
 must be externally serialized. Independent processors have independent state.
-
-C++, C#, and Python outer result objects hold the two borrowed pointers obtained
-by the outer indexed read. They do not retain a native result handle or copy decoded
-text. Their `GetText()` / `GetTimestamps()` convenience methods need no additional
-native call; managed bindings still reject reads after processor mutation or disposal.
 
 `MetadataCoreState` populates the processor's canonical results directly. There
 is no intermediate metadata output or conversion to a second result model. The
@@ -250,23 +237,31 @@ internal stream owns one immutable configuration; metadata state reads that same
 
 Python uses `TokenPostProcessor(generator)`, `process_next_tokens()`,
 `get_next_token_results()`, `finalize()`, and `reset()`. Borrowed
-`TokenPostProcessorResult` objects expose `get_text()` and nullable
-`get_timestamps()`. Timestamp objects expose `get_words()` and `get_segments()`;
-records expose `get_text()`, `get_frame_interval()`, and `get_time_interval()`.
+`TokenPostProcessorResult` objects expose read-only `text` and nullable
+`timestamp_result` properties. `TokenPostProcessorTimestampResult` objects expose
+`words` and `segments`;
+records expose `text`, `frame_interval`, and `time_interval`. Interval properties
+return two-element tuples ordered as `(start, stop)`.
 
 C# uses `TokenPostProcessor(generator)`, `ProcessNextTokens()`,
 `GetNextTokenResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
-`TokenPostProcessorResult` objects expose `GetText()` and nullable `GetTimestamps()`.
-Timestamp objects expose `GetWords()` and `GetSegments()`; records expose
-`GetText()`, `GetFrameInterval()`, and `GetTimeInterval()`.
+`TokenPostProcessorResult` objects expose read-only `Text` and nullable `TimestampResult`
+properties. `TokenPostProcessorTimestampResult` objects expose `Words` and `Segments`; records expose `Text`,
+`FrameInterval`, and `TimeInterval`. Interval properties return named `(Start, Stop)`
+value tuples. For example, read `record.Text` and `record.TimeInterval.Start`.
 
-The C++ timestamp wrapper offers `GetTimestampRecordCount(kind)` and `GetTimestampRecordData(kind, index)`;
-its word/segment convenience methods use these same two C helpers. Reading a record
-copies its numeric bounds and borrows its text pointer. C#/Python collection methods
-similarly read the count once and make one indexed native call per record. They
+C++ returns public value views in namespace `Oga`, separate from the opaque C
+handles. `TokenPostProcessorResult` has `Text` and optional `TimestampResult` fields;
+the latter contains `Words` and `Segments` vectors of
+`TokenPostProcessorTimestampRecord` values. Each record has `Text`, `FrameInterval`,
+and `TimeInterval` fields. Numeric pairs and record descriptors are copied; `Text`
+is a borrowed `std::string_view`, so native string contents are not copied. Use
+`result.TimestampResult->Words[index].Text` or `record.TimeInterval.first` without
+primitive getter calls. Do not retain borrowed text across processor mutation.
+
+Python and C# wrap the same native results without copying their payload. They
 reject access to results or nested records invalidated by processing, finalization,
-reset, or disposal. Repeated getters do not invalidate results. Native C++ callers
-must respect the borrowed text lifetime themselves. Read the result,
+reset, or disposal. Repeated getters do not invalidate results. Read the result,
 append needed strings and scalar values to application-owned transcript storage,
 and discard the borrowed object before processing more tokens. Returned strings
 and scalar values are independent values; the result wrappers are not snapshots.

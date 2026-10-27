@@ -50,9 +50,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             var results = new TokenPostProcessorResult[count];
             for (int index = 0; index < count; ++index)
             {
-                Result.VerifySuccess(NativeMethods.OgaTokenPostProcessorGetResultData(Handle, (UIntPtr)index,
-                    out IntPtr text, out IntPtr timestamps));
-                results[index] = new TokenPostProcessorResult(this, _resultLifetime, text, timestamps);
+                var result = NativeMethods.OgaTokenPostProcessorGetResult(Handle, (UIntPtr)index);
+                results[index] = new TokenPostProcessorResult(this, _resultLifetime, result);
             }
             return results;
         }

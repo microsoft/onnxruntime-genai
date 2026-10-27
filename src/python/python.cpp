@@ -329,26 +329,9 @@ struct PyPostProcessorOutput {
   }
 };
 
-struct PyTokenPostProcessorResult {
-  OgaTokenPostProcessorResult output;
-  std::weak_ptr<bool> lifetime;
-
-  const OgaTokenPostProcessorResult& Get() const {
-    if (lifetime.expired()) throw std::runtime_error("The postprocessor result expired after a processor mutation or destruction.");
-    return output;
-  }
-};
-
-using PyTokenPostProcessorTimestamp = PyPostProcessorOutput<OgaTokenPostProcessorTimestamp>;
-struct PyTokenPostProcessorTimestampRecord {
-  OgaTokenPostProcessorTimestampRecord output;
-  std::weak_ptr<bool> lifetime;
-
-  const OgaTokenPostProcessorTimestampRecord& Get() const {
-    if (lifetime.expired()) throw std::runtime_error("The postprocessor result expired after a processor mutation or destruction.");
-    return output;
-  }
-};
+using PyTokenPostProcessorResult = PyPostProcessorOutput<OgaTokenPostProcessorResult>;
+using PyTokenPostProcessorTimestampResult = PyPostProcessorOutput<OgaTokenPostProcessorTimestampResult>;
+using PyTokenPostProcessorTimestampRecord = PyPostProcessorOutput<OgaTokenPostProcessorTimestampRecord>;
 
 struct PyTokenPostProcessor {
   explicit PyTokenPostProcessor(std::unique_ptr<OgaTokenPostProcessor> processor)
@@ -371,7 +354,10 @@ struct PyTokenPostProcessor {
 
   std::vector<PyTokenPostProcessorResult> GetNextTokenResults() const {
     std::vector<PyTokenPostProcessorResult> results;
-    for (const auto& result : processor_->GetNextTokenResults()) results.push_back({result, result_lifetime_});
+    const auto count = OgaTokenPostProcessorGetResultCount(processor_.get());
+    results.reserve(count);
+    for (size_t index = 0; index < count; ++index)
+      results.push_back({OgaTokenPostProcessorGetResult(processor_.get(), index), result_lifetime_});
     return results;
   }
 
@@ -562,32 +548,42 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
   pybind11::class_<PyTokenPostProcessorTimestampRecord>(m, "TokenPostProcessorTimestampRecord")
-      .def("get_text", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
-      .def("get_frame_interval", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetFrameInterval(); })
-      .def("get_time_interval", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetTimeInterval(); });
+      .def_property_readonly("text", [](const PyTokenPostProcessorTimestampRecord& record) { return OgaTokenPostProcessorTimestampRecordGetText(&record.Get()); })
+      .def_property_readonly("frame_interval", [](const PyTokenPostProcessorTimestampRecord& record) {
+        const auto* value = &record.Get();
+        return std::pair{OgaTokenPostProcessorTimestampRecordGetStartFrame(value), OgaTokenPostProcessorTimestampRecordGetStopFrame(value)};
+      })
+      .def_property_readonly("time_interval", [](const PyTokenPostProcessorTimestampRecord& record) {
+        const auto* value = &record.Get();
+        return std::pair{OgaTokenPostProcessorTimestampRecordGetStartTime(value), OgaTokenPostProcessorTimestampRecordGetStopTime(value)};
+      });
 
-  pybind11::class_<PyTokenPostProcessorTimestamp>(m, "TokenPostProcessorTimestamp")
-      .def("get_words", [](const PyTokenPostProcessorTimestamp& result) {
+  pybind11::class_<PyTokenPostProcessorTimestampResult>(m, "TokenPostProcessorTimestampResult")
+      .def_property_readonly("words", [](const PyTokenPostProcessorTimestampResult& result) {
         std::vector<PyTokenPostProcessorTimestampRecord> records;
-        const auto& timestamps = result.Get();
-        for (size_t index = 0; index < timestamps.GetWordCount(); ++index)
-          records.push_back({timestamps.GetWord(index), result.lifetime});
+        const auto* timestamps = &result.Get();
+        const auto count = OgaTokenPostProcessorTimestampResultGetWordCount(timestamps);
+        records.reserve(count);
+        for (size_t index = 0; index < count; ++index)
+          records.push_back({OgaTokenPostProcessorTimestampResultGetTimestampRecord(timestamps, OgaTimestampRecordKind_Words, index), result.lifetime});
         return records;
       })
-      .def("get_segments", [](const PyTokenPostProcessorTimestamp& result) {
+      .def_property_readonly("segments", [](const PyTokenPostProcessorTimestampResult& result) {
         std::vector<PyTokenPostProcessorTimestampRecord> records;
-        const auto& timestamps = result.Get();
-        for (size_t index = 0; index < timestamps.GetSegmentCount(); ++index)
-          records.push_back({timestamps.GetSegment(index), result.lifetime});
+        const auto* timestamps = &result.Get();
+        const auto count = OgaTokenPostProcessorTimestampResultGetSegmentCount(timestamps);
+        records.reserve(count);
+        for (size_t index = 0; index < count; ++index)
+          records.push_back({OgaTokenPostProcessorTimestampResultGetTimestampRecord(timestamps, OgaTimestampRecordKind_Segments, index), result.lifetime});
         return records;
       });
 
   pybind11::class_<PyTokenPostProcessorResult>(m, "TokenPostProcessorResult")
-      .def("get_text", [](const PyTokenPostProcessorResult& result) { return result.Get().GetText(); })
-      .def("get_timestamps", [](const PyTokenPostProcessorResult& result) -> std::optional<PyTokenPostProcessorTimestamp> {
-        const auto* timestamps = result.Get().GetTimestamps();
+      .def_property_readonly("text", [](const PyTokenPostProcessorResult& result) { return OgaTokenPostProcessorResultGetText(&result.Get()); })
+      .def_property_readonly("timestamp_result", [](const PyTokenPostProcessorResult& result) -> std::optional<PyTokenPostProcessorTimestampResult> {
+        const auto* timestamps = OgaTokenPostProcessorResultGetTimestampResult(&result.Get());
         if (!timestamps) return std::nullopt;
-        return PyTokenPostProcessorTimestamp{timestamps, result.lifetime};
+        return PyTokenPostProcessorTimestampResult{timestamps, result.lifetime};
       });
 
   pybind11::class_<PyTokenPostProcessor>(m, "TokenPostProcessor")
