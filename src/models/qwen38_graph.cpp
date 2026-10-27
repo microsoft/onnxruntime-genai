@@ -596,16 +596,18 @@ void Qwen38GraphEngine::BuildTarget() {
   }
 
   if (fold_) {
-    // fold.* control inputs alias the device control block; fold.ptrs = (pinned result ring address, ring size)
+    // fold.* control inputs alias the device control block; fold.ptrs = (pinned result ring address, ring size).
+    // SpeculativePrefixCommit serves head_rows in [3, 8] and reads 16 ctl words and >= 2 * head_rows ctx_a words per slot.
+    if (verify_rows_ < 3 || verify_rows_ > kMaxVerifyRows)
+      throw std::runtime_error("qwen38_graph: the fold stack needs 3..8 verify rows (SpeculativePrefixCommit head_rows)");
     fold_ptrs_ = PlaneBuffer(plane_, 2 * sizeof(int64_t), stream_);
     const int64_t ptrs[2] = {static_cast<int64_t>(reinterpret_cast<intptr_t>(result_host_)), kRing};
     plane_.Check(plane_.memcpy_h2d(fold_ptrs_.data(), ptrs, sizeof(ptrs), stream_), "fold ptrs");
     SyncStream();  // ptrs lives on the stack
     const auto i64 = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
-    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), {verify_rows_ > 2 ? 16 : 8}, i64);
-    fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {2}, i64);
-    fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {verify_rows_ > 2 ? 2 * verify_rows_ : 2}, i64);
-    fold_tensors_["fold.ctx_b"] = MakeTensor(ctx_a_.data() + 16, {2}, i64);
+    fold_tensors_["fold.ctl"] = MakeTensor(ctl_.data(), {kFoldCtlWords}, i64);
+    fold_tensors_["fold.ctx_commit"] = MakeTensor(ctx_commit_.data(), {kFoldCtxCommitWords}, i64);
+    fold_tensors_["fold.ctx_a"] = MakeTensor(ctx_a_.data(), {2 * verify_rows_}, i64);
     fold_tensors_["fold.ptrs"] = MakeTensor(fold_ptrs_.data(), {2}, i64);
   }
 
@@ -749,6 +751,8 @@ void Qwen38GraphEngine::BuildTarget() {
           t = add_own(name, {1, 1, 1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
         else if (fold_ && name == "fold.tail_done")
           t = add_own(name, {1}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+        else if (fold_ && Qwen38FoldStateInput(name))
+          t = fold_tensors_.at(Qwen38FoldStateInput(name)).get();  // updated state lands in the persistent control buffers
         else if (name == "present_position_ids")
           t = max_batch_ == 1 ? store_["past_position_ids"].get()
                               : add_view(name, store_["past_position_ids"]->ptr,
@@ -862,11 +866,11 @@ void Qwen38GraphEngine::BuildTarget() {
               break;
             case Kind::kFold:
               if (name == "fold.ctl")
-                t = add_view(name, ctl_.data(), {B * (verify_rows_ > 2 ? 16 : 8)}, i64);
+                t = add_view(name, ctl_.data(), {B * kFoldCtlWords}, i64);
               else if (name == "fold.ctx_commit")
-                t = add_view(name, ctx_commit_.data(), {B * 2}, i64);
-              else if (name == "fold.ctx_a")
-                t = add_view(name, ctx_a_.data(), {B * (verify_rows_ > 2 ? 2 * verify_rows_ : 2)}, i64);
+                t = add_view(name, ctx_commit_.data(), {B * kFoldCtxCommitWords}, i64);
+              else if (name == "fold.ctx_a")  // the op derives the per-slot stride from the size: keep it equal to ctx_a_slot()
+                t = add_view(name, ctx_a_.data(), {B * 2 * kMaxVerifyRows}, i64);
               else
                 t = fold_tensors_.at(name).get();
               break;
@@ -900,6 +904,10 @@ void Qwen38GraphEngine::BuildTarget() {
           };
           if (name == "fold.tail_done")
             t = add_own(name, {B}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+          else if (name == kQwen38FoldCtlOut)
+            t = add_view(name, ctl_.data(), {B * kFoldCtlWords}, i64);
+          else if (name == kQwen38FoldCtxCommitOut)
+            t = add_view(name, ctx_commit_.data(), {B * kFoldCtxCommitWords}, i64);
           else if (name == "present_position_ids")
             t = add_view(name, store_["past_position_ids"]->ptr,
                          with_batch(store_slot_shape_["past_position_ids"], B), store_["past_position_ids"]->type);
