@@ -33,6 +33,12 @@ def add_onnxruntime_dependency(package_id: str):
         # Only manually load the dlls if onnxruntime.dll is not already loaded.
         # This allows WinML to use its packed dlls.
         if not ort_handle:
+            local_dir = os.path.dirname(os.path.abspath(__file__))
+            local_ort = os.path.join(local_dir, "onnxruntime.dll")
+            if os.path.exists(local_ort):
+                os.add_dll_directory(local_dir)
+                _ = ctypes.CDLL(local_ort)
+                return
             ort_package = importlib.util.find_spec("onnxruntime")
             if not ort_package:
                 raise ImportError("Could not find the onnxruntime package.")
@@ -84,5 +90,8 @@ def add_cuda_dependency():
         cuda_path = os.getenv("CUDA_PATH", None)
         if cuda_path:
             os.add_dll_directory(os.path.join(cuda_path, "bin"))
+            bin_x64 = os.path.join(cuda_path, "bin", "x64")
+            if os.path.exists(bin_x64):
+                os.add_dll_directory(bin_x64)
         else:
             raise ImportError("Could not find the CUDA libraries. Please set the CUDA_PATH environment variable.")
