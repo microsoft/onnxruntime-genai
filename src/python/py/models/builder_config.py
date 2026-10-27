@@ -1562,7 +1562,7 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         if (
             dspark.get("filename")
             or (mtp.get("filename") and mtp.get("enabled", True))
-            or (dflash2.get("filename") and dflash2.get("sliding_window", 0) <= 0)
+            or (dflash2.get("filename") and (dflash2.get("sliding_window") or 0) <= 0)
             or (windowed_layers and decoder.get("inputs", {}).get("block_table_windowed"))
         ):
             raise ValueError(

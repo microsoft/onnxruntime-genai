@@ -15,6 +15,7 @@
 
 #ifndef _WIN32
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include <gtest/gtest.h>
@@ -35,6 +36,37 @@ namespace Generators::test {
 namespace {
 
 namespace fs_std = std::filesystem;
+
+class ScopedSnapshotDirectory {
+ public:
+  explicit ScopedSnapshotDirectory(std::string_view name) {
+    std::random_device random;
+    for (size_t attempt = 0; attempt < 32; ++attempt) {
+      const auto candidate = fs_std::temp_directory_path() /
+                             (std::string{name} + "-" + std::to_string(random()) + "-" + std::to_string(random()));
+      if (fs_std::create_directory(candidate)) {
+        path_ = candidate;
+        return;
+      }
+    }
+    throw std::system_error(std::make_error_code(std::errc::file_exists),
+                            "Unable to create snapshot test directory.");
+  }
+
+  ScopedSnapshotDirectory(const ScopedSnapshotDirectory&) = delete;
+  ScopedSnapshotDirectory& operator=(const ScopedSnapshotDirectory&) = delete;
+
+  ~ScopedSnapshotDirectory() {
+    std::error_code error;
+    fs_std::remove_all(path_, error);
+    if (error) ADD_FAILURE() << "Unable to remove " << path_ << ": " << error.message();
+  }
+
+  const fs_std::path& Path() const { return path_; }
+
+ private:
+  fs_std::path path_;
+};
 
 Config MakeDflash2Config() {
   Config config;
@@ -1572,7 +1604,7 @@ TEST_P(Dflash2StorageRestoreTest, ExecutesWindowedRestoreAcrossRingWrap) {
 
 INSTANTIATE_TEST_SUITE_P(RamAndDisk, Dflash2StorageRestoreTest, ::testing::Bool());
 
-TEST(Dflash2ConfigTest, SnapshotIoFailuresPreserveHealthyDraftContextAndAllowRetry) {
+TEST(Dflash2ConfigTest, SnapshotRestoreIoFailurePreservesHealthyDraftContextAndAllowsRetry) {
   auto config = MakeDflash2Config();
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
   auto& draft = config.model.dflash2;
@@ -1584,9 +1616,8 @@ TEST(Dflash2ConfigTest, SnapshotIoFailuresPreserveHealthyDraftContextAndAllowRet
   draft.num_draft_tokens = 3;
   draft.selector_top_k = 2;
   draft.sliding_window = 8;
-  const auto parent = fs_std::temp_directory_path() /
-                      ("oga-dflash-io-" + std::to_string(std::random_device{}()));
-  ASSERT_FALSE(fs_std::exists(parent));
+  ScopedSnapshotDirectory test_directory{"oga-dflash-io"};
+  const auto& parent = test_directory.Path();
   auto& limits = config.engine.dynamic_batching->snapshot_cache;
   limits.ram_bytes = 0;
   limits.disk_bytes = 1024 * 1024;
@@ -1606,9 +1637,6 @@ TEST(Dflash2ConfigTest, SnapshotIoFailuresPreserveHealthyDraftContextAndAllowRet
   const std::array initial{Dflash2Drafter::Feed{
       .request = source, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
   ASSERT_TRUE(drafter.Propose(aux, initial, proposals));
-  EXPECT_EQ(drafter.CapturePrefix(source, 8), nullptr);
-  EXPECT_TRUE(drafter.CanCapturePrefix(source, 8));
-  ASSERT_TRUE(fs_std::create_directory(parent));
   auto checkpoint = drafter.CapturePrefix(source, 8);
   ASSERT_NE(checkpoint, nullptr);
   const auto directory = fs_std::directory_iterator(parent)->path();
@@ -2713,9 +2741,8 @@ TEST(PrefixSnapshotCacheTest, DiskOnlyStorageOutlivesManagerAndCleansUpAfterLast
   } scoped_umask;
 #endif
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  const auto parent = fs_std::temp_directory_path() /
-                      ("oga-snapshot-test-" + std::to_string(reinterpret_cast<uintptr_t>(cpu)));
-  ASSERT_TRUE(fs_std::create_directory(parent));
+  ScopedSnapshotDirectory test_directory{"oga-snapshot-test"};
+  const auto& parent = test_directory.Path();
   std::shared_ptr<PrefixSnapshotCache::Entry> entry;
   {
     PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
@@ -2738,9 +2765,8 @@ TEST(PrefixSnapshotCacheTest, DiskOnlyStorageOutlivesManagerAndCleansUpAfterLast
 
 TEST(PrefixSnapshotCacheTest, CleanupFailureRespectsLoggingAndWarningSettings) {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  const auto parent = fs_std::temp_directory_path() /
-                      ("oga-snapshot-cleanup-" + std::to_string(reinterpret_cast<uintptr_t>(cpu)));
-  ASSERT_TRUE(fs_std::create_directory(parent));
+  ScopedSnapshotDirectory test_directory{"oga-snapshot-cleanup"};
+  const auto& parent = test_directory.Path();
   for (const auto [enabled, warning] :
        {std::pair{false, true}, std::pair{true, false}, std::pair{true, true}}) {
     SCOPED_TRACE(testing::Message() << "enabled=" << enabled << ", warning=" << warning);
@@ -2771,33 +2797,133 @@ TEST(PrefixSnapshotCacheTest, CleanupFailureRespectsLoggingAndWarningSettings) {
   EXPECT_TRUE(fs_std::remove(parent));
 }
 
-TEST(PrefixSnapshotCacheTest, FailedSpillPreservesSourceAndBudgetThenRetries) {
+TEST(PrefixSnapshotCacheTest, FailedDemotionDisablesDiskAndReclaimsUnleasedVictims) {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  const auto parent = fs_std::temp_directory_path() /
-                      ("oga-snapshot-retry-" + std::to_string(reinterpret_cast<uintptr_t>(cpu)));
-  ASSERT_FALSE(fs_std::exists(parent));
-  PrefixSnapshotCache cache{{0, 16, 16}, 2, parent};
+  ScopedSnapshotDirectory test_directory{"oga-snapshot-failure"};
+  const auto& parent = test_directory.Path();
+  PrefixSnapshotCache cache{{0, 16, 16}, 8, parent};
   auto first = MakeStorageEntry(cache, cpu);
-  EXPECT_THROW(MakeStorageEntry(cache, cpu), fs_std::filesystem_error);
-  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Resident);
-  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Ram);
-  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 16, 0}));
-  CheckStorageEntry(*first);
-  ASSERT_TRUE(fs_std::create_directory(parent));
+  ASSERT_NE(first, nullptr);
+  ASSERT_TRUE(fs_std::remove(parent));
   auto second = MakeStorageEntry(cache, cpu);
   ASSERT_NE(second, nullptr);
-  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Disk);
-  CheckStorageEntry(*first);
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+  CheckStorageEntry(*second);
+
+  ASSERT_TRUE(fs_std::create_directory(parent));
+  auto third = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(third, nullptr);
+  EXPECT_EQ(second->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(third->tier, PrefixSnapshotCache::Tier::Ram);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 16, 0}));
+  EXPECT_TRUE(fs_std::is_empty(parent));
+  CheckStorageEntry(*third);
   first.reset();
   second.reset();
+  third.reset();
   EXPECT_TRUE(fs_std::remove(parent));
+}
+
+TEST(PrefixSnapshotCacheTest, DiskAllocationFailureIsNotRetriedUntilRecreation) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  ScopedSnapshotDirectory test_directory{"oga-snapshot-allocation-failure"};
+  const auto& parent = test_directory.Path();
+  PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
+  ASSERT_TRUE(fs_std::remove(parent));
+  EXPECT_THROW(MakeStorageEntry(cache, cpu), std::system_error);
+  ASSERT_TRUE(fs_std::create_directory(parent));
+  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
+  EXPECT_TRUE(fs_std::is_empty(parent));
+  PrefixSnapshotCache recreated{{0, 0, 16}, 1, parent};
+  auto entry = MakeStorageEntry(recreated, cpu);
+  ASSERT_NE(entry, nullptr);
+  CheckStorageEntry(*entry);
+}
+
+#ifndef _WIN32
+// Windows cannot rename a directory containing an open spill file.
+TEST(PrefixSnapshotCacheTest, DiskFailurePreservesExistingDiskReadsAndLeases) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  ScopedSnapshotDirectory test_directory{"oga-snapshot-leased-failure"};
+  const auto parent = test_directory.Path() / "spill";
+  const auto moved = test_directory.Path() / "moved";
+  ASSERT_TRUE(fs_std::create_directory(parent));
+  PrefixSnapshotCache cache{{0, 16, 32}, 8, parent};
+  auto first = MakeStorageEntry(cache, cpu);
+  auto second = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  ASSERT_EQ(first->tier, PrefixSnapshotCache::Tier::Disk);
+  auto disk_lease = first;
+  fs_std::rename(parent, moved);
+  auto third = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(third, nullptr);
+  EXPECT_EQ(second->state, PrefixSnapshotCache::State::Evicted);
+  CheckStorageEntry(*disk_lease);
+  auto ram_lease = third;
+  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
+  EXPECT_EQ(disk_lease->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(ram_lease->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 16, 16}));
+  CheckStorageEntry(*ram_lease);
+  fs_std::rename(moved, parent);
+}
+#endif
+
+TEST(PrefixSnapshotCacheTest, InvalidDiskParentFailsBeforeTheEngineServesRequests) {
+  ScopedSnapshotDirectory test_directory{"oga-snapshot-invalid-parent"};
+  const auto missing = test_directory.Path() / "missing";
+  const auto file = test_directory.Path() / "file";
+  std::ofstream{file}.put('x');
+  for (const auto& parent : {missing, file}) {
+    auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+    auto& limits = model->config_->engine.dynamic_batching->snapshot_cache;
+    limits.disk_bytes = 1024 * 1024;
+    limits.directory = parent.string();
+    try {
+      Engine engine{model};
+      FAIL() << "Expected invalid disk directory to fail Engine construction";
+    } catch (const std::system_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("engine.dynamic_batching.snapshot_cache.directory"),
+                std::string::npos);
+      EXPECT_NE(std::string{error.what()}.find(parent.string()), std::string::npos);
+    }
+  }
+  EXPECT_NO_THROW((PrefixSnapshotCache{{0, 16, 0}, 1, missing}));
+  EXPECT_NO_THROW((PrefixSnapshotCache{{0, 0, 16}, 1, missing, true}));
+}
+
+#ifndef _WIN32
+TEST(PrefixSnapshotCacheTest, UnwritableDiskParentFailsDuringConstruction) {
+  if (::geteuid() == 0) GTEST_SKIP() << "Root bypasses directory write permissions.";
+  ScopedSnapshotDirectory test_directory{"oga-snapshot-unwritable"};
+  fs_std::permissions(test_directory.Path(), fs_std::perms::owner_read | fs_std::perms::owner_exec);
+  EXPECT_THROW((PrefixSnapshotCache{{0, 0, 16}, 1, test_directory.Path()}), std::system_error);
+  fs_std::permissions(test_directory.Path(), fs_std::perms::owner_all);
+}
+#endif
+
+TEST(PrefixSnapshotCacheTest, RelativeDiskParentIsResolvedBeforeTheWorkingDirectoryChanges) {
+  ScopedSnapshotDirectory test_directory{"oga-snapshot-relative"};
+  ScopedSnapshotDirectory other_directory{"oga-snapshot-working-directory"};
+  struct ScopedWorkingDirectory {
+    fs_std::path previous{fs_std::current_path()};
+    ~ScopedWorkingDirectory() { fs_std::current_path(previous); }
+  } working_directory;
+  const auto relative = fs_std::relative(test_directory.Path(), fs_std::current_path());
+  PrefixSnapshotCache cache{{0, 0, 16}, 1, relative};
+  fs_std::current_path(other_directory.Path());
+  auto entry = MakeStorageEntry(cache, GetDeviceInterface(DeviceType::CPU));
+  ASSERT_NE(entry, nullptr);
+  EXPECT_FALSE(fs_std::is_empty(test_directory.Path()));
+  EXPECT_TRUE(fs_std::is_empty(other_directory.Path()));
+  CheckStorageEntry(*entry);
 }
 
 TEST(PrefixSnapshotCacheTest, RejectsInvalidRangesAndReportsTruncatedDiskPayload) {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  const auto parent = fs_std::temp_directory_path() /
-                      ("oga-snapshot-truncate-" + std::to_string(reinterpret_cast<uintptr_t>(cpu)));
-  ASSERT_TRUE(fs_std::create_directory(parent));
+  ScopedSnapshotDirectory test_directory{"oga-snapshot-truncate"};
+  const auto& parent = test_directory.Path();
   PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
   auto entry = MakeStorageEntry(cache, cpu);
   ASSERT_NE(entry, nullptr);
@@ -2818,10 +2944,8 @@ namespace {
 // Captures whatever the action logs as a warning.
 template <typename Action>
 std::string CapturedWarnings(Action&& action) {
-  const fs_std::path log_path =
-      fs_std::temp_directory_path() /
-      ("draft_width_warning_" + std::to_string(reinterpret_cast<uintptr_t>(&action)) + ".log");
-  fs_std::remove(log_path);
+  ScopedSnapshotDirectory test_directory{"draft-width-warning"};
+  const auto log_path = test_directory.Path() / "warnings.log";
   SetLogString("filename", log_path.string());
   SetLogBool("enabled", true);
   SetLogBool("warning", true);

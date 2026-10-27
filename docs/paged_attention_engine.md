@@ -272,8 +272,9 @@ caching. The DFlash count is also capped by the hybrid fixed-state checkpoint
 capacity (`max_batch_size`). `max_snapshots` is an optional additional count cap
 shared by every producer; zero disables all snapshot publication. Neither count
 increases a tier budget or enables storage when an explicit policy sets all byte
-budgets to zero on CPU or CUDA. Without an explicit policy, legacy device-resident
-snapshots remain enabled. WebGPU does not require byte budgets.
+budgets to zero on CPU or CUDA. Without an explicit policy, device-resident
+snapshots retain the previous residency and count defaults, but not the previous
+eviction order (see below). WebGPU does not require byte budgets.
 Snapshot counts must be integers from zero through 2147483647; byte limits must
 be non-negative exact integers no greater than 9007199254740991 and fit the
 platform's `size_t`. Prefix caching may be enabled without enabling any draft
@@ -291,6 +292,14 @@ move or be overwritten, and its bytes continue counting against its tier.
 If all suitable capacity is leased, publication is refused and counted in the
 existing prefix-publication refusal metric.
 
+**Intentional behavior change:** LRU replacement also applies when `snapshot_cache`
+is omitted. The previous descendant-before-ancestor preference is not retained:
+an older, shorter checkpoint can be evicted before a newer descendant during
+chunked prefill. A target-prefix hit at that shorter boundary can therefore lack
+a draft snapshot and require draft-context rebuilding. This policy favors recent
+capture/restore activity, not prefix breadth; it is not a claim that LRU wins for
+every branching workload. Target-prefix identity and target KV eviction are unchanged.
+
 VRAM snapshot capacity is rounded down to whole rings and reserved from the
 shared target/drafter KV budget before target sizing. It is reduced when necessary
 to preserve at least one target block, for both `num_blocks` and automatic sizing.
@@ -299,22 +308,46 @@ CPU/CUDA capture and restore transfer only selected ring blocks and synchronize 
 publication. WebGPU stages each backing buffer once per layer, gathers/scatters
 the selected blocks on the CPU, and uploads the destination once. Tier moves copy into separately budgeted destination storage before
 releasing the source. A failed move leaves its source intact; completed independent
-demotions remain valid even if a later operation fails.
+demotions remain valid even if a later operation fails. If a disk demotion fails
+operationally, the policy then evicts that unleased source when no usable lower
+tier remains, allowing admission to continue.
+
+Pinned allocation and release (`cudaHostAlloc`/`cudaFreeHost`) can implicitly
+synchronize and take milliseconds for large rings. They occur on the serving
+path during cold capture, demotion, eviction and lazy transfer-scratch creation;
+compatible count replacement reuses storage but does not eliminate these costs.
+Allocations use `cudaHostAllocPortable` for CUDA-context portability. These
+operations must run outside an active CUDA stream capture. This implementation
+does not preallocate the RAM tier or provide a pinned-buffer pool, and byte
+budgets are not allocation-latency guarantees.
 
 Disk spill files are uniquely owned, Engine-local temporary payloads, never a persistent
 cache. `directory` optionally names an existing parent directory; otherwise the
-system temporary directory is used. Only the manager's own generated files and
+system temporary directory is used. With disk enabled, Engine construction
+resolves this path to an absolute path, checks that it is an existing directory,
+and creates, writes and removes a private probe payload to check usability.
+Configuration errors name `engine.dynamic_batching.snapshot_cache.directory`;
+later working-directory changes do not redirect spill. Only the manager's own generated files and
 directories are removed after their final owners release them. A lease may outlive
-the drafter, including its disk storage. Disk transfer scratch is bounded to
+the drafter, including its disk storage. A process crash can leave `oga-prefix-*`
+directories behind. There is no startup sweep because another live Engine may own
+them; operators may remove confirmed orphan directories only after ensuring that
+no live process or outstanding owner is using them. Disk transfer scratch is bounded to
 one reusable 1 MiB buffer per cache manager and is separate from retained payload budgets;
 tensor/index metadata and filesystem allocation overhead are also excluded.
 Adjacent disk ranges share transfer-buffer batches instead of synchronizing per
 ring block, and capture flushes once before publishing the complete snapshot.
 Disk I/O remains synchronous and can increase inference-loop latency; budgets
 are capacity limits, not latency guarantees.
-Operational disk failures are logged and refuse capture or discard the failed
-restore snapshot, without clearing healthy drafter context or spending its
-proposal-failure budget. Contract violations and device failures still propagate.
+An operational disk allocation or demotion failure disables further disk writes
+for that Engine and logs a warning when warning logging is enabled. Recreating the
+Engine is required to re-enable disk writes. Existing disk snapshots remain readable,
+but their storage is not reused for new captures. RAM/VRAM admission can reclaim
+unleased victims rather than repeatedly retrying the failing disk path; leased
+payloads remain protected. A disk-only policy refuses subsequent captures.
+Other operational disk failures refuse capture or discard the failed restore snapshot,
+without clearing healthy drafter context or spending its proposal-failure budget.
+Contract violations and device failures still propagate.
 Cleanup failures are logged as warnings.
 Spill directories request owner-only filesystem permissions. Windows inherits
 the parent directory's ACL, so a custom parent must restrict access appropriately.

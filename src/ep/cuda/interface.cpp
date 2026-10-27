@@ -728,7 +728,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
   std::shared_ptr<void> AllocatePinnedHost(size_t bytes) override {
     void* memory = nullptr;
-    const auto status = ::cudaHostAlloc(&memory, bytes, cudaHostAllocDefault);
+    const auto status = ::cudaHostAlloc(&memory, bytes, cudaHostAllocPortable);
     if (status == cudaErrorMemoryAllocation) {
       throw std::bad_alloc{};
     }

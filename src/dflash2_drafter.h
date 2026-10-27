@@ -13,7 +13,7 @@
 #include "models/cpu_embedding.h"
 #include "engine/graph_annotation_ids.h"
 #include "decoding/speculative_sampling.h"
-#include "engine/prefix-snapshot-cache.h"
+#include "engine/prefix_snapshot_cache.h"
 
 namespace Generators {
 

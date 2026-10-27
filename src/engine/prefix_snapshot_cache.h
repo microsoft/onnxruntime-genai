@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "../models/model.h"
@@ -83,6 +84,7 @@ class PrefixSnapshotCache {
   void LogEvent(const char* action, const Entry* entry = nullptr,
                 const char* reason = "none", int64_t elapsed_us = 0) const noexcept;
   bool MakeRoom(Tier tier, size_t bytes, DeviceInterface* device);
+  void DisableDisk(const std::system_error& error);
   void Move(Entry& entry, Tier tier, DeviceInterface* device);
   void AllocateStorage(Entry& entry, Tier tier, DeviceInterface* device);
   void Prune();
@@ -94,6 +96,7 @@ class PrefixSnapshotCache {
   size_t max_entries_;
   std::filesystem::path directory_;
   bool device_resident_;
+  bool disk_writes_disabled_{};
   std::shared_ptr<Accounting> accounting_{std::make_shared<Accounting>()};
   // The prefix index is the only non-lease owner. Extra strong references protect adoption.
   std::vector<std::weak_ptr<Entry>> entries_;

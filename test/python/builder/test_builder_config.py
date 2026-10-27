@@ -1742,6 +1742,7 @@ def test_snapshot_limits_in_runtime_config_and_profiles(in_profile, field, error
         ({"decoder": {}, "mtp": {"filename": "mtp.onnx"}}, False),
         ({"decoder": {}, "mtp": {"filename": "mtp.onnx", "enabled": False}}, True),
         ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx"}}, False),
+        ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx", "sliding_window": None}}, False),
         ({"decoder": {}, "dflash2": {"filename": "dflash2.onnx", "sliding_window": 8}}, True),
         (
             {"decoder": {"sliding_window": {"layers": [0]}, "inputs": {"block_table_windowed": "windowed"}}},

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "prefix-snapshot-cache.h"
+#include "prefix_snapshot_cache.h"
 
 #include <algorithm>
 #include <chrono>
@@ -255,6 +255,24 @@ PrefixSnapshotCache::PrefixSnapshotCache(
     std::array<size_t, 3> limits, size_t max_entries, std::filesystem::path directory,
     bool device_resident)
     : limits_{limits}, max_entries_{max_entries}, directory_{std::move(directory)}, device_resident_{device_resident} {
+  if (limits_[static_cast<size_t>(Tier::Disk)] != 0 && !device_resident_) {
+    try {
+      directory_ = std::filesystem::absolute(
+          directory_.empty() ? std::filesystem::temp_directory_path() : directory_);
+      if (!std::filesystem::is_directory(directory_)) {
+        throw std::filesystem::filesystem_error(
+            "Expected an existing directory.", directory_,
+            std::make_error_code(std::errc::not_a_directory));
+      }
+      Entry probe;
+      probe.bytes = 1;
+      AllocateStorage(probe, Tier::Disk, nullptr);
+    } catch (const std::system_error& error) {
+      throw std::system_error(error.code(),
+                              "Invalid engine.dynamic_batching.snapshot_cache.directory '" +
+                                  directory_.string() + "': " + error.what());
+    }
+  }
   LogEvent("configured");
 }
 
@@ -298,7 +316,8 @@ bool PrefixSnapshotCache::EvictOldest(std::string_view component) {
   for (auto& weak : entries_) {
     if (weak.use_count() != 1) continue;
     auto entry = weak.lock();
-    if (entry && (component.empty() || entry->component == component) &&
+    if (entry && entry->state == State::Resident &&
+        (component.empty() || entry->component == component) &&
         entry->recency < oldest) {
       selected = &weak;
       oldest = entry->recency;
@@ -327,6 +346,7 @@ bool PrefixSnapshotCache::ReuseOldest(Entry& destination, std::string_view compo
   }
   if (!selected) return false;
   auto source = selected->lock();
+  if (source->tier == Tier::Disk && disk_writes_disabled_) return false;
   if (source->type != destination.type || source->shapes != destination.shapes) return false;
   destination.TakeStorage(*source);
   source->state = State::Evicted;
@@ -336,6 +356,7 @@ bool PrefixSnapshotCache::ReuseOldest(Entry& destination, std::string_view compo
 }
 
 bool PrefixSnapshotCache::MakeRoom(Tier tier, size_t bytes, DeviceInterface* device) {
+  if (tier == Tier::Disk && disk_writes_disabled_) return false;
   const size_t index = static_cast<size_t>(tier);
   if (bytes > limits_[index]) return false;
   while (bytes > limits_[index] - accounting_->used[index]) {
@@ -354,7 +375,13 @@ bool PrefixSnapshotCache::MakeRoom(Tier tier, size_t bytes, DeviceInterface* dev
     bool moved = false;
     for (size_t lower = index + 1; lower < limits_.size(); ++lower) {
       if (MakeRoom(static_cast<Tier>(lower), victim->bytes, device)) {
-        Move(*victim, static_cast<Tier>(lower), device);
+        try {
+          Move(*victim, static_cast<Tier>(lower), device);
+        } catch (const std::system_error& error) {
+          if (static_cast<Tier>(lower) != Tier::Disk) throw;
+          DisableDisk(error);
+          continue;
+        }
         moved = true;
         break;
       }
@@ -368,6 +395,17 @@ bool PrefixSnapshotCache::MakeRoom(Tier tier, size_t bytes, DeviceInterface* dev
   return true;
 }
 
+void PrefixSnapshotCache::DisableDisk(const std::system_error& error) {
+  disk_writes_disabled_ = true;
+  LogEvent("disabled", nullptr, "disk_failure");
+  if (g_log.enabled && g_log.warning) {
+    Log("warning",
+        "Prefix snapshot disk writes disabled until Engine recreation after an operational error "
+        "in engine.dynamic_batching.snapshot_cache.directory '%s': %s",
+        directory_.string().c_str(), error.what());
+  }
+}
+
 void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterface* device) {
   entry.tier = tier;
   if (tier == Tier::Disk) {
@@ -375,7 +413,7 @@ void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterfa
       throw std::overflow_error("Prefix snapshot exceeds the disk stream offset range.");
     }
     auto disk = std::make_unique<Entry::DiskStorage>();
-    const auto parent = directory_.empty() ? std::filesystem::temp_directory_path() : directory_;
+    const auto& parent = directory_;
     std::random_device random;
     for (size_t attempt = 0; attempt < 32; ++attempt) {
       const auto candidate = parent / ("oga-prefix-" + std::to_string(random()) + "-" + std::to_string(random()));
@@ -544,7 +582,13 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     staged.type = entry->type;
     staged.bytes = entry->bytes;
     staged.layer_offsets = entry->layer_offsets;
-    AllocateStorage(staged, static_cast<Tier>(index), device);
+    try {
+      AllocateStorage(staged, static_cast<Tier>(index), device);
+    } catch (const std::system_error& error) {
+      if (static_cast<Tier>(index) != Tier::Disk) throw;
+      DisableDisk(error);
+      throw;
+    }
     entry->TakeStorage(staged);
     return publish();
   }
