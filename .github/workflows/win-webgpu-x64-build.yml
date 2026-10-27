@@ -28,7 +28,7 @@ env:
   # The newest published WebGPU plugin still predates that change (merged 2026-10-21).
   # Advance its pin when a build containing the kernel is published.
   # Required replay tests fail, not skip, until the WebGPU kernel is available.
-  ORT_TEST_VERSION: '1.32.0-dev-20261025-0507-bd6010c'
+  ORT_TEST_VERSION: '1.32.0-dev-20261027-0506-7617fc8'
 
 jobs:
   windows-webgpu-x64-build:
