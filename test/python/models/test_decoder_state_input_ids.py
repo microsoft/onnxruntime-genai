@@ -138,6 +138,8 @@ def test_multimodal_prefill_chunking_falls_back_for_batched_prompts(test_data_pa
 def _write_gemma3_partitioned_fixture(test_data_path, model_path, marker_dtype, *, embedding_dtype=np.int32):
     onnx = pytest.importorskip("onnx")
     source = Path(test_data_path) / "multimodal-decoder-no-input-ids"
+    if not source.exists():
+        pytest.skip(f"Test model not found: {source}")
     model_path.mkdir()
     for name in ("tokenizer.json", "tokenizer_config.json"):
         shutil.copyfile(source / name, model_path / name)
@@ -249,6 +251,25 @@ def _write_gemma3_partitioned_fixture(test_data_path, model_path, marker_dtype, 
         "search": {"do_sample": False, "num_beams": 1, "max_length": 9, "past_present_share_buffer": False},
     }
     (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+
+
+def test_gemma3_partitioned_fixture_skips_missing_source(tmp_path):
+    pytest.importorskip("onnx")
+    model_path = tmp_path / "gemma3-partitioned"
+    with pytest.raises(pytest.skip.Exception):
+        _write_gemma3_partitioned_fixture(tmp_path, model_path, np.int64)
+    assert not model_path.exists()
+
+
+@pytest.mark.parametrize("missing_asset", ["tokenizer.json", "tokenizer_config.json"])
+def test_gemma3_partitioned_fixture_rejects_incomplete_source(tmp_path, missing_asset):
+    pytest.importorskip("onnx")
+    source = tmp_path / "multimodal-decoder-no-input-ids"
+    source.mkdir()
+    if missing_asset == "tokenizer_config.json":
+        (source / "tokenizer.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
+        _write_gemma3_partitioned_fixture(tmp_path, tmp_path / "gemma3-partitioned", np.int64)
 
 
 def _assert_gemma3_partitioned_generation(generator, expected_embeddings, expected_markers):

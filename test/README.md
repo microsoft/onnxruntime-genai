@@ -76,6 +76,8 @@ Missing/empty image markers retain their existing downstream error after vision.
 Partitioned Gemma3 requires a single vision graph; nonempty `vision.pipeline`
 configurations are rejected during model loading.
 ONNX and the existing `multimodal-decoder-no-input-ids` tokenizer assets are required.
+Cases skip if the optional model directory is absent; an existing directory with
+missing tokenizer assets still fails explicitly.
 
 These are synthetic runtime-wiring tests, not image-preprocessing, pretrained-model
 parity, chunked image-prefill support, or OpenVINO EP/device validation.
