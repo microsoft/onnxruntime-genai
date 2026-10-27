@@ -8,6 +8,10 @@ that best matches the local hardware at load time. Files that are common across 
 such as tokenizer or processor configuration, can live in a sibling directory and be
 referenced from each variant's configuration with a path scheme.
 
+Model package support requires building against ONNX Runtime 1.31 or newer and
+loading a runtime that exposes the stable `OrtModelPackageApi`. Builds using older
+ONNX Runtime headers continue to support flat model directories.
+
 ## Package layout
 
 A model package is a directory containing a top-level `manifest.json`. The package owns a
@@ -265,8 +269,19 @@ two profiles may share the same memory range with
 - `engine.dynamic_batching.num_blocks`
 - `engine.dynamic_batching.max_batch_size`
 - `engine.dynamic_batching.max_scheduled_tokens`
+- `engine.dynamic_batching.dflash2_max_snapshots`
 - `search.chunk_size`
 - `speculative.max_draft_tokens`
+
+`dflash2_max_snapshots` defaults to `1`, accepts integers from `0` through
+`2147483647`, and uses `0` to disable windowed DFlash 2 prefix snapshots without
+disabling target prefix caching. The effective count is limited by the shared
+cache memory budget and target fixed-state checkpoint capacity (`max_batch_size`);
+it is not a guaranteed allocation. The selected runtime profile overrides the
+base configuration, including an explicit `0` opt-out. The Engine uses the
+resolved GenAI configuration when allocating its snapshot pool.
+See [Engine prefix caching](paged_attention_engine.md)
+for snapshot capture, lease protection, and replacement behavior.
 
 Omitted fields retain their base values. Every other config field is rejected from a runtime
 profile overlay. In particular, profiles cannot override `search.max_length`; applications set

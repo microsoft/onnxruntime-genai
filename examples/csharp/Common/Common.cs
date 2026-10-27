@@ -1,6 +1,12 @@
-﻿using Microsoft.ML.OnnxRuntime;
+﻿#nullable enable
+
+using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntimeGenAI;
+using System;
+using System.Collections.Generic;
 using System.CommandLine;
+using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Metadata.Ecma335;
 using System.Text;
@@ -75,6 +81,29 @@ namespace CommonUtils
         /// </returns>
         public static Config GetConfig(string path, string ep, Dictionary<string, string>? ep_options, GeneratorParamsArgs search_options)
         {
+            if (search_options.max_length.HasValue && search_options.max_length.Value <= 0)
+            {
+                throw new ArgumentException("max_length must be greater than 0");
+            }
+            // Match the generator's limits before providers use these values for model profiles.
+            if (search_options.batch_size < 1 || search_options.batch_size > 32)
+            {
+                throw new ArgumentException($"batch_size ({search_options.batch_size}) must be in [1, 32]");
+            }
+            if (search_options.num_beams < 1 || search_options.num_beams > 32)
+            {
+                throw new ArgumentException($"num_beams ({search_options.num_beams}) must be in [1, 32]");
+            }
+            if (search_options.max_length.HasValue)
+            {
+                // Config has no context_length getter. Check before constructing the model.
+                using var configFile = JsonDocument.Parse(File.ReadAllText(Path.Combine(path, "genai_config.json")));
+                var contextLength = configFile.RootElement.GetProperty("model").GetProperty("context_length").GetInt64();
+                if (search_options.max_length.Value > contextLength)
+                {
+                    throw new ArgumentException($"max_length ({search_options.max_length.Value}) cannot be greater than model context_length ({contextLength})");
+                }
+            }
             var config = new Config(path);
             if (ep != "follow_config")
             {
@@ -118,7 +147,7 @@ namespace CommonUtils
 
             // Set any search-specific options that need to be known before constructing a Model object
             // Otherwise they can be set with generatorParams.SetSearchOptions(search_options)
-            config.Overlay(json);
+            config.Overlay("{\"search\":" + json + "}");
             return config;
         }
 

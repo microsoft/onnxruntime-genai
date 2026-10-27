@@ -137,7 +137,13 @@ struct Config {
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
+    // Custom-op library or libraries registered on the session options: custom_ops_library is registered first,
+    // followed by custom_ops_libraries in order, with duplicate resolved paths registered once. Every entry must
+    // resolve to an existing file in the model folder, a registered EP library directory, or the current working
+    // directory (entries are not searched via LD_LIBRARY_PATH / PATH). OverlayConfig appends to custom_ops_libraries
+    // (an empty [] overlay leaves existing entries unchanged).
     std::optional<std::string> custom_ops_library;
+    std::vector<std::string> custom_ops_libraries;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
 
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
@@ -149,6 +155,13 @@ struct Config {
   };
 
   using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry
+
+  enum class TimestampLevel {
+    Off,      // Do not collect or return timestamp metadata.
+    Word,     // Return completed word records.
+    Segment,  // Return completed segment records while constructing words internally.
+    All,      // Return completed word and segment records; character records are out of scope.
+  };
 
   struct Model {
     std::string type;
@@ -196,6 +209,13 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+
+    // Controls timestamp output: off, completed words, completed segments, or words and segments.
+    TimestampLevel timestamp_level{TimestampLevel::Off};
+    // Punctuation strings that complete a segment. An empty list disables punctuation segmentation.
+    std::vector<std::string> segment_separators{".", "?", "!"};
+    // Optional minimum inter-word gap in seconds that starts a new segment.
+    std::optional<double> segment_gap_threshold_seconds;
 
     // Parakeet TDT (Token-and-Duration Transducer) parameters
     int left_context_samples{};
@@ -725,6 +745,8 @@ struct Config {
         std::string q_row_map{"q_row_map"};
         std::string qkv_row_map{"qkv_row_map"};
         std::string block_row_index{"block_row_index"};
+        // Optional (LiLiCorr): packed aux_hidden_states row of each request's last context row.
+        std::string anchor_row_index;
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
@@ -797,6 +819,7 @@ struct Config {
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       bool prefix_caching{true};
       bool prefix_caching_explicitly_set{};
+      size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -834,6 +857,7 @@ struct Config {
         std::optional<size_t> num_blocks;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
+        std::optional<size_t> dflash2_max_snapshots;
       } dynamic_batching;
 
       struct Search {
@@ -864,6 +888,10 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
 // the main model's device, batching and paged-attention contract, but replaces model-specific
 // decoder state with the single MTP attention layer.
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
+// Fills unset fields of `child` session options from `parent` (providers, provider options, config entries, custom ops).
+// custom_ops_library and custom_ops_libraries are inherited together only when the child sets neither; because
+// custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
@@ -876,6 +904,10 @@ struct RuntimeProfileDeviceFacts {
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
+void ValidateTimestampConfiguration(const Config::Model& model);
+std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model);
+std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
+                                                int hop_length, int subsampling_factor);
 
 // Logs a warning when the drafter's exported geometry is narrower than
 // speculative.max_draft_tokens. The engine clamps to the smallest bound at dispatch rather than

@@ -26,6 +26,12 @@ class LFM2Model(Model):
         self.make_intermediate_size_init(config)
 
         self.conv_L_cache = config.conv_L_cache
+        self.conv_attrs = {
+            # Write each row's conv state at its last real token, so a padded batch keeps the right state.
+            # The last real token comes from the attention mask, so exports without one (paged) keep the
+            # op's own state.
+            "state_per_row": "attention_mask" in self.input_names,
+        }
 
     def make_intermediate_size_init(self, config):
         # Calculate the dynamic intermediate_size for the MLP.
@@ -103,17 +109,33 @@ class LFM2Model(Model):
             conv_bias_name = f"model.layers.{layer_id}.conv.conv.bias"
             self.make_initializer(conv_module.conv.bias, conv_bias_name, to=self.io_dtype)
 
+        past_conv_state = self.input_names["past.conv"][layer_id]
+        present_conv_state = self.output_names["present.conv"][layer_id]
+        state_per_row = self.conv_attrs["state_per_row"]
         conv_op_name = f"{basename}/CausalConvWithState"
+        # present_state is a required output of CausalConvWithState, so it cannot be left out. In the
+        # per-row case it goes to an unused value and the gather below writes the graph output instead.
+        conv_op_state = f"{conv_op_name}/output_1" if state_per_row else present_conv_state
         self.make_causal_conv_with_state(
             conv_op_name,
             root_input=f"{mul_1_name}/output_0",
             weight=conv_weight_name,
             bias=conv_bias_name,
-            past_conv_state=self.input_names["past.conv"][layer_id],
-            present_conv_state=self.output_names["present.conv"][layer_id],
+            past_conv_state=past_conv_state,
+            present_conv_state=conv_op_state,
             activation="none",
             channels=self.hidden_size,
         )
+        if state_per_row:
+            self.make_causal_conv_state_at_last_real_token(
+                f"{basename}/present_conv_state",
+                root_input=root_input,
+                past_conv_state=past_conv_state,
+                conv_input=f"{mul_1_name}/output_0",
+                present_conv_state=present_conv_state,
+                channels=self.hidden_size,
+                state_size=self.conv_L_cache - 1,
+            )
 
         # Element-wise multiply: result = c * conv_out
         mul_2_name = f"{basename}/Mul_2"

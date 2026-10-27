@@ -79,13 +79,23 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
   if (!child.log_severity_level) child.log_severity_level = parent.log_severity_level;
   if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
   if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
-  if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
+  // custom_ops_library and custom_ops_libraries form one setting: the child inherits both only when it sets neither.
+  // Because custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and
+  // still inherits the parent's custom-op libraries unless custom_ops_library is set.
+  if (!child.custom_ops_library && child.custom_ops_libraries.empty()) {
+    child.custom_ops_library = parent.custom_ops_library;
+    child.custom_ops_libraries = parent.custom_ops_libraries;
+  }
   if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
   InheritNamedStrings(parent.config_entries, child.config_entries);
   InheritProviderOptions(parent, child);
 }
 
 }  // namespace
+
+void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child) {
+  InheritSessionOptions(parent, child);
+}
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
@@ -336,6 +346,18 @@ GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
   }
 }
 
+// Appends parsed string elements to `v`; an empty array leaves `v` unchanged.
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
@@ -360,6 +382,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     } else if (name == "custom_ops_library") {
       v_.custom_ops_library = JSON::Get<std::string_view>(value);
+    } else if (name == "custom_ops_libraries") {
+      throw std::runtime_error("custom_ops_libraries must be an array of strings");
     } else {
       // Session options that are set with AddConfigEntry
       v_.config_entries.emplace_back(name, JSON::Get<std::string_view>(value));
@@ -370,12 +394,18 @@ struct SessionOptions_Element : JSON::Element {
     if (name == "provider_options") {
       return provider_options_;
     }
+    if (name == "custom_ops_libraries") {
+      // Overlays append to custom_ops_libraries (and [] leaves existing entries unchanged), matching config_entries
+      // and provider_options.
+      return custom_ops_libraries_;
+    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
+  StringArray_Element custom_ops_libraries_{v_.custom_ops_libraries};
 };
 
 struct RunOptions_Element : JSON::Element {
@@ -582,17 +612,6 @@ struct DecoderOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
-};
-
-struct StringArray_Element : JSON::Element {
-  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
-  }
-
- private:
-  std::vector<std::string>& v_;
 };
 
 struct IntArray_Element : JSON::Element {
@@ -805,7 +824,9 @@ struct PipelineModel_Element : JSON::Element {
 
   JSON::Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options) {
+        v_.session_options.emplace();
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -838,19 +859,36 @@ struct PipelineModel_Element : JSON::Element {
   StringStringMap_Element output_names_forwarder_{v_.output_names_forwarder};
 };
 
+namespace {
+
+template <typename PipelineModel>
+PipelineModel& GetOrCreatePipelineModel(std::vector<PipelineModel>& models, std::string_view model_id) {
+  auto model = std::find_if(models.begin(), models.end(),
+                            [model_id](const auto& model) { return model.model_id == model_id; });
+  if (model != models.end()) {
+    return *model;
+  }
+
+  auto& new_model = models.emplace_back();
+  new_model.model_id = model_id;
+  return new_model;
+}
+
+}  // namespace
+
 struct PipelineModelObject_Element : JSON::Element {
   explicit PipelineModelObject_Element(std::vector<Config::Model::Decoder::PipelineModel>& v) : v_{v} {}
 
   Element& OnObject(std::string_view name) override {
-    auto& model = v_.emplace_back();
-    model.model_id = name;
-    pipeline_model_elements_.emplace_back(model);
-    return pipeline_model_elements_.back();
+    pipeline_model_element_.reset();  // Appending below may reallocate v_.
+    auto& model = GetOrCreatePipelineModel(v_, name);
+    pipeline_model_element_ = std::make_unique<PipelineModel_Element>(model);
+    return *pipeline_model_element_;
   }
 
  private:
   std::vector<Config::Model::Decoder::PipelineModel>& v_;
-  std::vector<PipelineModel_Element> pipeline_model_elements_;
+  std::unique_ptr<PipelineModel_Element> pipeline_model_element_;
 };
 
 struct Pipeline_Element : JSON::Element {
@@ -1164,6 +1202,8 @@ struct Dflash2Inputs_Element : JSON::Element {
       v_.qkv_row_map = JSON::Get<std::string_view>(value);
     } else if (name == "block_row_index") {
       v_.block_row_index = JSON::Get<std::string_view>(value);
+    } else if (name == "anchor_row_index") {
+      v_.anchor_row_index = JSON::Get<std::string_view>(value);
     } else if (name == "past_key_scale_names") {
       v_.past_key_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_scale_names") {
@@ -1404,7 +1444,9 @@ struct VisionPipelineModel_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options) {
+        v_.session_options.emplace();
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -1438,15 +1480,15 @@ struct VisionPipelineModelObject_Element : JSON::Element {
   explicit VisionPipelineModelObject_Element(std::vector<Config::Model::Vision::PipelineModel>& v) : v_{v} {}
 
   Element& OnObject(std::string_view name) override {
-    auto& model = v_.emplace_back();
-    model.model_id = name;
-    elements_.emplace_back(model);
-    return elements_.back();
+    element_.reset();  // Appending below may reallocate v_.
+    auto& model = GetOrCreatePipelineModel(v_, name);
+    element_ = std::make_unique<VisionPipelineModel_Element>(model);
+    return *element_;
   }
 
  private:
   std::vector<Config::Model::Vision::PipelineModel>& v_;
-  std::vector<VisionPipelineModel_Element> elements_;
+  std::unique_ptr<VisionPipelineModel_Element> element_;
 };
 
 struct VisionPipeline_Element : JSON::Element {
@@ -2243,6 +2285,29 @@ struct Model_Element : JSON::Element {
       v_.blank_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "timestamp_level") {
+      const auto level = JSON::Get<std::string_view>(value);
+      if (level == "off") {
+        v_.timestamp_level = Config::TimestampLevel::Off;
+      } else if (level == "word") {
+        v_.timestamp_level = Config::TimestampLevel::Word;
+      } else if (level == "segment") {
+        v_.timestamp_level = Config::TimestampLevel::Segment;
+      } else if (level == "all") {
+        v_.timestamp_level = Config::TimestampLevel::All;
+      } else {
+        throw std::runtime_error("timestamp_level must be one of: off, word, segment, all");
+      }
+    } else if (name == "segment_gap_threshold_seconds") {
+      if (std::holds_alternative<std::nullptr_t>(value)) {
+        v_.segment_gap_threshold_seconds.reset();
+      } else {
+        const double threshold = JSON::Get<double>(value);
+        if (!std::isfinite(threshold) || threshold < 0.0) {
+          throw std::runtime_error("segment_gap_threshold_seconds must be finite and >= 0");
+        }
+        v_.segment_gap_threshold_seconds = threshold;
+      }
     } else if (name == "left_context_samples") {
       v_.left_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "right_context_samples") {
@@ -2265,6 +2330,10 @@ struct Model_Element : JSON::Element {
       return eos_token_id_;
     if (name == "tdt_durations")
       return tdt_durations_;
+    if (name == "segment_separators") {
+      v_.segment_separators.clear();
+      return segment_separators_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -2327,6 +2396,7 @@ struct Model_Element : JSON::Element {
   std::unique_ptr<Decoder_Element> draft_;
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
+  StringArray_Element segment_separators_{v_.segment_separators};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
@@ -2371,6 +2441,40 @@ int SafeDoubleToInt(double x, std::string_view name) {
 
   // 4. Perform the cast.
   return static_cast<int>(x);
+}
+
+void ValidateTimestampConfiguration(const Config::Model& model) {
+  if (model.timestamp_level == Config::TimestampLevel::Off) return;
+  if (!ModelType::IsRNNT(model.type))
+    throw std::runtime_error("Timestamp metadata requires a nemotron_speech model");
+  if (model.sample_rate <= 0 || model.hop_length <= 0 || model.subsampling_factor <= 0)
+    throw std::runtime_error("Timestamp metadata requires positive sample_rate, hop_length, and subsampling_factor");
+  (void)GetSegmentGapThresholdFrames(model);
+}
+
+std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model) {
+  return GetSegmentGapThresholdFrames(model.segment_gap_threshold_seconds, model.sample_rate,
+                                      model.hop_length, model.subsampling_factor);
+}
+
+std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
+                                                int hop_length, int subsampling_factor) {
+  if (!seconds) return std::nullopt;
+  if (!std::isfinite(*seconds) || *seconds < 0.0) {
+    throw std::runtime_error("segment_gap_threshold_seconds must be finite and >= 0");
+  }
+  if (sample_rate <= 0 || hop_length <= 0 || subsampling_factor <= 0) {
+    throw std::runtime_error(
+        "segment_gap_threshold_seconds requires positive sample_rate, hop_length, and subsampling_factor");
+  }
+
+  const int64_t samples_per_frame = static_cast<int64_t>(hop_length) * subsampling_factor;
+  const double rounded_frames = std::round(
+      *seconds * sample_rate / samples_per_frame);
+  if (rounded_frames > std::numeric_limits<int>::max()) {
+    throw std::runtime_error("segment_gap_threshold_seconds is too large");
+  }
+  return static_cast<int>(rounded_frames);
 }
 
 int64_t SafeDoubleToInt64(double x, std::string_view name) {
@@ -2542,6 +2646,11 @@ struct DynamicBatching_Element : JSON::Element {
     } else if (name == "prefix_caching") {
       v_->prefix_caching = JSON::Get<bool>(value);
       v_->prefix_caching_explicitly_set = true;
+    } else if (name == "dflash2_max_snapshots") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value < 0)
+        throw std::out_of_range("dflash2_max_snapshots must be >= 0");
+      v_->dflash2_max_snapshots = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2632,8 +2741,9 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     const auto parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
-    if (parsed <= 0) {
-      throw std::out_of_range(std::string{name} + " must be > 0");
+    if (parsed < 0 || (parsed == 0 && name != "dflash2_max_snapshots")) {
+      throw std::out_of_range(std::string{name} +
+                              (name == "dflash2_max_snapshots" ? " must be >= 0" : " must be > 0"));
     }
     if (name == "num_blocks") {
       v_.num_blocks = static_cast<size_t>(parsed);
@@ -2641,6 +2751,8 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
       v_.max_batch_size = static_cast<size_t>(parsed);
     } else if (name == "max_scheduled_tokens") {
       v_.max_scheduled_tokens = static_cast<size_t>(parsed);
+    } else if (name == "dflash2_max_snapshots") {
+      v_.dflash2_max_snapshots = static_cast<size_t>(parsed);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2914,7 +3026,7 @@ void ValidateRuntimeProfiles(const Config& config) {
                          "runtime profile '" + profile.id + "' model.decoder.filename");
     }
     if (!profile.overlay.model.decoder_filename && !batching.num_blocks && !batching.max_batch_size &&
-        !batching.max_scheduled_tokens && !search.chunk_size &&
+        !batching.max_scheduled_tokens && !batching.dflash2_max_snapshots && !search.chunk_size &&
         !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
@@ -3043,7 +3155,7 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   }
 
   // JSON-escape all caller-supplied string fragments before concatenating them into the
-  // JSON document. Without escaping, quote/backslash characters in provider_name,
+  // JSON document. Without escaping, quote/backslash characters in the provider name,
   // option_name, or option_value would let a caller inject arbitrary JSON structure
   // (sibling keys, new provider entries, etc.) into the parsed configuration.
   std::ostringstream json;
@@ -3085,6 +3197,16 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         }
         return true;
       } else if (provider_options->name == "AMDGPU") {
+        // Graph capture defaults to ON for the AMDGPU umbrella EP (both the MIGraphX and DirectX
+        // backends) and can be opted out per model via the provider option "enable_graph_capture": "0"
+        // (like DML). The MIGraphX backend relies on capture being on by default; non-decoder
+        // sub-sessions are already forced off via the disable_graph_capture flag in
+        // AppendExecutionProvider.
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_graph_capture" && value.second == "0") {
+            return false;
+          }
+        }
         return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {
@@ -3270,6 +3392,7 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
   ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
+  ValidateTimestampConfiguration(candidate.model);
   std::swap(config, candidate);
 }
 
@@ -3310,7 +3433,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
   }
   const auto& batching = selected->overlay.dynamic_batching;
   const bool has_batching_overlay = batching.num_blocks || batching.max_batch_size ||
-                                    batching.max_scheduled_tokens;
+                                    batching.max_scheduled_tokens || batching.dflash2_max_snapshots;
   if (has_batching_overlay && !config.engine.dynamic_batching) {
     throw std::runtime_error("runtime profile '" + selected->id +
                              "' requires engine.dynamic_batching in the base config");
@@ -3324,6 +3447,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     if (batching.num_blocks) effective.num_blocks = batching.num_blocks;
     if (batching.max_batch_size) effective.max_batch_size = *batching.max_batch_size;
     if (batching.max_scheduled_tokens) effective.max_scheduled_tokens = *batching.max_scheduled_tokens;
+    if (batching.dflash2_max_snapshots) effective.dflash2_max_snapshots = *batching.dflash2_max_snapshots;
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;
@@ -3489,6 +3613,8 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   // Validate all config-specified filenames/paths after parsing so downstream loaders
   // (model/processor/adapter creation) can rely on them being safe.
   ValidateModelPaths(*this);
+
+  ValidateTimestampConfiguration(model);
 
   WarnOnClampedDraftWidth(*this);
 }

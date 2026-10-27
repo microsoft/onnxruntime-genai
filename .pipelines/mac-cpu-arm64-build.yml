@@ -24,7 +24,7 @@ pr:
 
 variables:
   ORT_BUILD_VERSION: '1.26.0'
-  ORT_RUNTIME_VERSION: '1.28.0'
+  ORT_RUNTIME_VERSION: '1.31.0'
   ORT_BUILD_SOURCE: 'https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json'
   ORT_RUNTIME_SOURCE: 'https://api.nuget.org/v3/index.json'
   ORT_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime'

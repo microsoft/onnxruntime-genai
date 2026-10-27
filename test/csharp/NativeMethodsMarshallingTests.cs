@@ -12,6 +12,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
     public class NativeMethodsMarshallingTests
     {
         [Fact]
+        public void TokenPostProcessorOutputsUseOpaquePointers()
+        {
+            var nativeMethods = typeof(TokenPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
+            foreach (var name in new[] { "OgaTokenPostProcessorGetResult", "OgaTokenPostProcessorResultGetTimestamps",
+                "OgaTokenPostProcessorTimestampGetWord", "OgaTokenPostProcessorTimestampGetSegment" })
+            {
+                var method = nativeMethods.GetMethod(name, BindingFlags.Public | BindingFlags.Static)!;
+                Assert.Equal(typeof(IntPtr), method.ReturnType);
+            }
+        }
+
+        [Fact]
         public void NativeBoolParametersUseOneByteMarshalling()
         {
             Type nativeMethods = typeof(Utils).Assembly.GetType(

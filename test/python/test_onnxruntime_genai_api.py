@@ -67,6 +67,108 @@ def test_tokenizer_create_from_config_and_path(test_data_path):
     assert tokenizer_from_path.decode(tokenizer_from_config.encode(text)) == text
 
 
+@pytest.mark.parametrize("model_type,timing,reason", [
+    ("nemotron_speech", {}, "positive sample_rate"),
+    ("gpt2", {"sample_rate": 100, "hop_length": 10, "subsampling_factor": 1}, "nemotron_speech model"),
+])
+def test_requested_timestamps_reject_invalid_model_config(test_data_path, model_type, timing, reason):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    config = og.Config(model_path)
+    with pytest.raises(RuntimeError, match=reason):
+        config.overlay(json.dumps({"model": {"type": model_type, "timestamp_level": "word", **timing}}))
+
+
+def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    plain = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10)
+    generator = og.Generator(model, params)
+    processor = og.TokenPostProcessor(generator)
+    assert processor.get_next_token_results() == []
+    processor.finalize()
+    initial = processor.get_next_token_results()[0]
+    assert initial.get_text() == ""
+    assert initial.get_timestamps() is None
+    processor.reset()
+    with pytest.raises(RuntimeError, match="expired"):
+        initial.get_text()
+    generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
+    retained = []
+    for _ in range(2):
+        generator.generate_next_token()
+        for previous, expected_text in retained:
+            assert previous.get_text() == expected_text
+        expected = plain.decode(int(generator.get_next_tokens()[0]))
+        processor.process_next_tokens()
+        for previous, _ in retained:
+            with pytest.raises(RuntimeError, match="expired"):
+                previous.get_text()
+            with pytest.raises(RuntimeError, match="expired"):
+                previous.get_timestamps()
+        retained.clear()
+        results = processor.get_next_token_results()
+        assert len(results) == 1
+        result = results[0]
+        assert isinstance(result, og.TokenPostProcessorResult)
+        assert result.get_text() == expected
+        assert result.get_timestamps() is None
+        assert processor.get_next_token_results()[0].get_text() == expected
+        retained.append((result, expected))
+    del generator
+    processor.finalize()
+    with pytest.raises(RuntimeError, match="expired"):
+        result.get_text()
+    processor.finalize()
+    final_result = processor.get_next_token_results()[0]
+    assert final_result.get_text() == ""
+    processor.reset()
+    assert processor.get_next_token_results() == []
+    with pytest.raises(RuntimeError, match="expired"):
+        final_result.get_text()
+    processor.finalize()
+    before_destruction = processor.get_next_token_results()[0]
+    copied_text = before_destruction.get_text()
+    del processor
+    with pytest.raises(RuntimeError, match="expired"):
+        before_destruction.get_text()
+    assert copied_text == ""
+
+
+@pytest.mark.parametrize("search", [{"batch_size": 2}, {"num_beams": 2}])
+def test_token_postprocessor_rejects_multiple_sequences(test_data_path, search):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10, **search)
+    generator = og.Generator(model, params)
+    with pytest.raises(RuntimeError, match="batch_size=1 and num_beams=1"):
+        og.TokenPostProcessor(generator)
+
+
+def test_token_postprocessor_uses_generators_model(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    plain = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10)
+    generator = og.Generator(model, params)
+    del model
+    processor = og.TokenPostProcessor(generator)
+    generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
+    generator.generate_next_token()
+    processor.process_next_tokens()
+    assert processor.get_next_token_results()[0].get_text() == plain.decode(int(generator.get_next_tokens()[0]))
+
+
+def test_token_postprocessor_rejects_null_generator():
+    with pytest.raises(TypeError):
+        og.TokenPostProcessor(None)
+
+
 def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):
     # What is left after the prompt when generation stops on its first token; it used to SIGFPE.
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")

@@ -153,6 +153,9 @@ __global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scor
       atomicExch(top_k_distributed_lock, 0);
     }
 
+    // Every reader must wait for the leader's check that all shards have finished.
+    __syncthreads();
+
     // Number of shards is atmost `kTopKDistributedSelectSortMaxShards` and top_k for this kernel is atmost `kTopKDistributedSelectSortMaxTopK`
     __shared__ float shared_distributed_scores_out[topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK];
     __shared__ int shared_distributed_indices_out[topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK];
