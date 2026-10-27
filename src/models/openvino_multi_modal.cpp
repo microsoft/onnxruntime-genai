@@ -44,6 +44,11 @@ OpenVINOMultiModalModel::OpenVINOMultiModalModel(std::unique_ptr<Config> config,
     : MultiModalLanguageModel(std::move(config), ort_env, /*vision=*/false, /*speech=*/false) {
   ValidateOpenVINOVlmInputsDevice(p_device_inputs_->GetType(), p_device_->GetType());
 
+  if (config_->model.type == "gemma3" && !config_->model.vision.pipeline.empty()) {
+    throw std::runtime_error(
+        "OpenVINO-partitioned Gemma3 requires a single vision filename; vision.pipeline is not supported");
+  }
+
   // Build session options for the host-side vision sub-model(s). Fall back to the decoder session
   // options when the config does not specify vision-specific ones, matching MultiModalLanguageModel.
   vision_session_options_ov_ = OrtSessionOptions::Create();
