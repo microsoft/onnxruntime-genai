@@ -19,9 +19,12 @@ struct ExtraInputs {
   void Add(const std::vector<ExtraInput>& extra_inputs, const std::vector<std::string>& required_input_names = {});
 
  private:
+  OrtValue* MakeDeviceResident(Tensor& tensor);
+
   State& state_;
   const Model& model_{state_.model_};
   PresetExtraInputs registrar_{state_};
+  std::unordered_map<const Tensor*, std::unique_ptr<OrtValue>> device_inputs_;
 };
 
 }  // namespace Generators

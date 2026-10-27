@@ -1,6 +1,7 @@
 #include "generator/generators.h"
-#include "models/model.h"
 #include "models/io/extra_inputs.h"
+#include "models/model.h"
+#include "models/utils.h"
 
 namespace Generators {
 
@@ -47,13 +48,35 @@ void PresetExtraInputs::Add() {
 ExtraInputs::ExtraInputs(State& state)
     : state_{state} {}
 
+// Extra inputs are bound once and then stay bound for the whole generation, but they are
+// created in CPU memory. ORT cannot know their contents never change, so a CPU-resident feed
+// consumed by a device model is copied across devices on every Run. For a large constant input
+// (LoRA adapter weights bound as graph inputs are tens of megabytes) that per-Run copy dominates
+// decode. Copy once into device-allocator memory here so the feed already sits on the device the
+// model runs on and ORT skips the copy entirely.
+OrtValue* ExtraInputs::MakeDeviceResident(Tensor& tensor) {
+  OrtValue* host_value = tensor.ort_tensor_.get();
+  auto& device = *model_.p_device_inputs_;
+  if (device.GetType() == DeviceType::CPU ||
+      host_value->GetTensorMemoryInfo().GetDeviceType() != OrtMemoryInfoDeviceType_CPU)
+    return host_value;
+
+  auto [entry, inserted] = device_inputs_.try_emplace(&tensor);
+  if (inserted) {
+    auto info = host_value->GetTensorTypeAndShapeInfo();
+    entry->second = OrtValue::CreateTensor(device.GetAllocator(), info->GetShape(), info->GetElementType());
+    ByteWrapTensor(device, *entry->second).CopyFrom(ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *host_value));
+  }
+  return entry->second.get();
+}
+
 void ExtraInputs::Add(const std::vector<ExtraInput>& extra_inputs, const std::vector<std::string>& required_input_names) {
   std::unordered_set<std::string> required_input_names_set(required_input_names.begin(), required_input_names.end());
   // Add extra user inputs
   for (int i = 0; i < extra_inputs.size(); i++) {
     if (required_input_names_set.empty() || required_input_names_set.count(extra_inputs[i].name)) {
       state_.input_names_.push_back(extra_inputs[i].name.c_str());
-      state_.inputs_.push_back(extra_inputs[i].tensor->ort_tensor_.get());
+      state_.inputs_.push_back(MakeDeviceResident(*extra_inputs[i].tensor));
     }
   }
 

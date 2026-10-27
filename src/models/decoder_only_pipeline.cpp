@@ -201,9 +201,14 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
 }
 
 void DecoderOnlyPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  for (auto& session : model_.sessions_) {
-    extra_inputs_.Add(extra_inputs, session->GetInputNames());
+  std::unordered_set<std::string> session_input_names;
+  for (const auto& session : model_.sessions_) {
+    for (const auto& name : session->GetInputNames()) {
+      session_input_names.insert(name);
+    }
   }
+  extra_inputs_.Add(extra_inputs,
+                    std::vector<std::string>(session_input_names.begin(), session_input_names.end()));
 }
 
 void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
@@ -269,8 +274,34 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
                          " is expecting it to reside elsewhere."));
         }
         pipeline_state->input_names_.push_back(input_name);
-        pipeline_state->inputs_.push_back(State::GetInput(input_name));
+        auto* input = State::GetInput(input_name);
+        if (input == nullptr) {
+          throw std::runtime_error(
+              MakeString("Managed pipeline input ", input_name, " is not bound in generator state."));
+        }
+        pipeline_state->inputs_.push_back(input);
       }
+    }
+
+    // Pass user-provided extra inputs (e.g. LoRA weights as graph inputs) that this pipeline stage expects.
+    const auto session_input_names = model_.sessions_[pipeline_state->id_]->GetInputNames();
+    std::unordered_set<std::string> already_added(
+        pipeline_state->input_names_.begin(), pipeline_state->input_names_.end());
+    for (size_t i = 0; i < input_names_.size(); ++i) {
+      const std::string input_name{input_names_[i]};
+      if (already_added.count(input_name)) {
+        continue;
+      }
+      if (std::find(session_input_names.begin(), session_input_names.end(), input_name) ==
+          session_input_names.end()) {
+        continue;
+      }
+      if (inputs_[i] == nullptr) {
+        continue;
+      }
+      pipeline_state->input_names_.push_back(input_names_[i]);
+      pipeline_state->inputs_.push_back(inputs_[i]);
+      already_added.insert(input_name);
     }
 
     // Add outputs from the previous pipeline states to the current pipeline state
