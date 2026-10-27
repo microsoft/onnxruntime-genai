@@ -709,6 +709,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     // the embedding graph runs and before the decoder consumes the shared inputs_embeds buffer.
     if (vision_merger_) {
       vision_merger_->Merge(*decoder_state_->inputs_embeds_.Get(), *embedding_state_->input_ids_.Get());
+      vision_merger_.reset();
     }
 
     auto logits = chunk_prefill
