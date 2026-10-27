@@ -285,7 +285,9 @@ def _export_attention_graph(tmp_path, monkeypatch, *, drafter):
         if name
     ]
     outputs = [
-        onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT16, shapes[0] if index == 0 else cache_shape)
+        onnx.helper.make_tensor_value_info(
+            name, onnx.TensorProto.FLOAT16, ["num_tokens", num_heads * head_size] if index == 0 else cache_shape
+        )
         for index, name in enumerate(node.output)
     ]
     model = onnx.helper.make_model(
@@ -406,6 +408,39 @@ def _numpy_drafter_attention(query, key, value, past_key, past_value, q_weight, 
     return output.reshape(len(query), -1), key, value
 
 
+def _make_drafter_attention_feeds(node, qkv, caches, past, table, q_weight, k_weight):
+    count = qkv[0].shape[0]
+    return {
+        node.input[0]: np.concatenate([value.reshape(count, -1) for value in qkv], axis=-1),
+        node.input[3]: caches[0].copy(),
+        node.input[4]: caches[1].copy(),
+        node.input[5]: np.asarray([0, count], dtype=np.int32),
+        node.input[6]: np.asarray([past], dtype=np.int32),
+        node.input[7]: table,
+        node.input[8]: np.ones((2560, 64), dtype=np.float16),
+        node.input[9]: np.zeros((2560, 64), dtype=np.float16),
+        node.input[12]: q_weight,
+        node.input[13]: k_weight,
+    }
+
+
+def test_drafter_attention_feeds_match_exported_packed_qkv(tmp_path, monkeypatch):
+    path, node = _export_attention_graph(tmp_path, monkeypatch, drafter=True)
+    qkv = [np.full((3, heads, 128), value, dtype=np.float16) for heads, value in ((32, 1), (8, 2), (8, 3))]
+    caches = [np.zeros((12, _BLOCK_SIZE, 8, 128), dtype=np.float16) for _ in range(2)]
+    weights = np.ones(128, dtype=np.float16)
+    feeds = _make_drafter_attention_feeds(node, qkv, caches, 2303, _BLOCK_TABLE, weights, weights)
+    graph = onnx.load(path).graph
+    assert set(feeds) == {value.name for value in graph.input}
+    assert graph.output[0].type.tensor_type.shape.dim[1].dim_value == 32 * 128
+    assert node.input[1:3] == ["", ""]
+    assert node.input[16] == ""
+    packed = feeds[node.input[0]]
+    assert packed.shape == (3, 48 * 128)
+    for actual, expected in zip(np.split(packed, [32 * 128, 40 * 128], axis=-1), qkv, strict=True):
+        np.testing.assert_array_equal(actual, expected.reshape(3, -1))
+
+
 def test_webgpu_paged_attention_drafter_window_qk_norm(tmp_path, monkeypatch):
     path, node = _export_attention_graph(tmp_path, monkeypatch, drafter=True)
     session, provider = _profiled_attention_session(path, tmp_path)
@@ -425,29 +460,7 @@ def test_webgpu_paged_attention_drafter_window_qk_norm(tmp_path, monkeypatch):
     for step, count in enumerate((3, 2)):
         qkv = [rng.normal(1.0, 0.15, (count, heads, 128)).astype(np.float16) for heads in (32, 8, 8)]
         qkv[2] = (rng.normal(0, 0.4, qkv[2].shape) + np.arange(count)[:, None, None] * 3 + step).astype(np.float16)
-        feeds = dict(
-            zip(
-                node.input[:5], [*[value.reshape(count, -1) for value in qkv], *[c.copy() for c in caches]], strict=True
-            )
-        )
-        feeds.update(
-            dict(
-                zip(
-                    node.input[5:10],
-                    [
-                        np.asarray([0, count], dtype=np.int32),
-                        np.asarray([past], dtype=np.int32),
-                        table,
-                        np.ones((2560, 64), dtype=np.float16),
-                        np.zeros((2560, 64), dtype=np.float16),
-                    ],
-                    strict=True,
-                )
-            )
-        )
-        feeds[node.input[12]] = q_weight
-        feeds[node.input[13]] = k_weight
-        feeds[node.input[16]] = np.asarray([count, past + count, past + count], dtype=np.int32)
+        feeds = _make_drafter_attention_feeds(node, qkv, caches, past, table, q_weight, k_weight)
         attention, *next_caches = session.run(None, feeds)
         expected, *cpu_caches = _numpy_drafter_attention(*qkv, *cpu_caches, q_weight, k_weight)
         _assert_close(attention, expected, f"drafter step {step} attention")
