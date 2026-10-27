@@ -6,6 +6,9 @@
 This is a partial implementation of docs/ModelBuilderConfiguration.md. The
 result bridges structured policy to existing exporters; it is not proof that
 the resulting graph, shared tensors, or runtime profile meet the full contract.
+
+Component source parsing and format-level validation belong to
+``loaders.component.ComponentModelLoader``; this module handles IR models only.
 """
 
 from __future__ import annotations
@@ -21,8 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import onnx
 import onnx_ir as ir
+from loaders.component import ComponentModelLoader
 from quantization import QuantConfig
 
 
@@ -598,31 +601,12 @@ def load_component_model(
     model_path: Path, component_name: str
 ) -> ir.Model:
     """Load one component graph without materializing external tensor data."""
-    try:
-        proto = onnx.load(model_path, load_external_data=False)
-    except Exception as error:
-        raise ValueError(
-            f"component {component_name!r} source is not a readable ONNX model: "
-            f"{model_path}"
-        ) from error
-    # IR does not preserve sparse/training tensors or external metadata on
-    # non-EXTERNAL tensors. Validate the original metadata before that boundary.
-    external_tensors = list(iter_external_tensors(proto, component_name))
-    _find_external_tensor_files(external_tensors, model_path, component_name)
-    model = ir.serde.deserialize_model(proto)
-    model.meta["builder_config.external_tensors"] = external_tensors
-    return model
+    return ComponentModelLoader(model_path, component_name).load()
 
 
 def validate_component_model(model_path: Path, component_name: str) -> None:
-    """Run the ONNX structural checker (IR has no equivalent schema checker)."""
-    try:
-        onnx.checker.check_model(model_path)
-    except Exception as error:
-        raise ValueError(
-            f"component {component_name!r} source is not a valid ONNX model: "
-            f"{model_path}"
-        ) from error
+    """Delegate source structure/schema validation to the component loader."""
+    ComponentModelLoader(model_path, component_name).validate()
 
 
 def validate_component_graph_bindings(
@@ -654,93 +638,9 @@ def find_external_data_files(
     traversing, malformed, or missing locations raise ``ValueError`` to prevent
     external-data references from escaping either source or destination roots.
     """
-    return _find_external_tensor_files(
-        model.meta["builder_config.external_tensors"], model_path, component_name
+    return ComponentModelLoader(model_path, component_name).external_data_files(
+        model.meta["builder_config.external_tensors"]
     )
-
-
-def _find_external_tensor_files(
-    tensors: list[ir.ExternalTensor], model_path: Path, component_name: str
-) -> list[tuple[str, Path]]:
-    source_root = model_path.parent.resolve()
-    files = {}
-    for tensor in tensors:
-        location = str(tensor.location)
-        if not location:
-            raise ValueError(f"component {component_name!r} has external tensor data without a location")
-        relative = Path(location)
-        if (
-            relative.is_absolute()
-            or "\\" in location
-            or ":" in location
-            or any(part in ("", ".", "..") for part in relative.parts)
-        ):
-            raise ValueError(f"component {component_name!r} has unsafe external data location {location!r}")
-        source = (source_root / relative).resolve()
-        try:
-            source.relative_to(source_root)
-        except ValueError as error:
-            raise ValueError(
-                f"component {component_name!r} has unsafe external data location {location!r}"
-            ) from error
-        if not source.is_file():
-            raise ValueError(
-                f"component {component_name!r} external data file does not exist: {location}"
-            )
-        offset = tensor.offset if tensor.offset is not None else 0
-        required_bytes = math.ceil(
-            math.prod(tensor.shape.dims) * tensor.dtype.itemsize
-        )
-        length = tensor.length if tensor.length is not None else required_bytes
-        if offset < 0 or length < required_bytes:
-            raise ValueError(
-                f"component {component_name!r} external data range is too small"
-            )
-        if offset + length > source.stat().st_size:
-            raise ValueError(
-                f"component {component_name!r} external data range exceeds "
-                f"{location!r}"
-            )
-        files[location] = source
-    return list(files.items())
-
-
-def iter_external_tensors(message, component_name: str):
-    """Adapt raw external metadata before IR can normalize or discard it.
-
-    This protobuf-only security boundary also visits sparse tensors, training
-    graphs, function defaults, and malformed attribute payloads unsupported by IR.
-    """
-    if isinstance(message, onnx.TensorProto):
-        entries = {entry.key: entry.value for entry in message.external_data}
-        if message.data_location != onnx.TensorProto.EXTERNAL and not entries:
-            return
-        location = entries.get("location")
-        if not location:
-            raise ValueError(f"component {component_name!r} has external tensor data without a location")
-        ranges = {}
-        for key in ("offset", "length"):
-            try:
-                ranges[key] = int(entries[key]) if key in entries else None
-            except ValueError as error:
-                raise ValueError(
-                    f"component {component_name!r} external data {key} is invalid"
-                ) from error
-        yield ir.ExternalTensor(
-            location,
-            offset=ranges["offset"],
-            length=ranges["length"],
-            dtype=ir.DataType(message.data_type),
-            shape=ir.Shape(message.dims),
-            name=message.name,
-        )
-        return
-    for field, value in message.ListFields():
-        if field.type != field.TYPE_MESSAGE:
-            continue
-        children = value if field.is_repeated else (value,)
-        for child in children:
-            yield from iter_external_tensors(child, component_name)
 
 
 def reject_duplicate_key(pairs):
@@ -1117,7 +1017,6 @@ def flatten_drafter_options(
             "shared_weights",
             "quant_config",
             "attention",
-            "optimizations",
             "dspark",
         },
         "drafter_options",
@@ -1125,10 +1024,6 @@ def flatten_drafter_options(
     drafter_type = options.get("drafter_type")
     if drafter_type not in ("none", "mtp", "dflash2", "dspark"):
         raise ValueError("drafter_options.drafter_type must be mtp, dflash2, dspark, or none")
-    optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "drafter_options.optimizations")
-    if "fuse_mlp_gate_up" in optimizations and drafter_type != "dflash2":
-        raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
     if drafter_type == "mtp" and flattened.get("exclude_mtp", False):
         raise ValueError("drafter_options.drafter_type=mtp conflicts with legacy extra_options.exclude_mtp")
 
@@ -1209,18 +1104,6 @@ def flatten_drafter_options(
             raise ValueError(f"{drafter_type} KV cache quantization is not supported")
         if kv_cache.get("windowed", False):
             raise ValueError(f"{drafter_type} windowed KV cache is not supported")
-
-    optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "drafter_options.optimizations")
-    fuse_gate_up = optimizations.get("fuse_mlp_gate_up", False)
-    if fuse_gate_up and drafter_type != "dflash2":
-        raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
-    fuse_qkv = optimizations.get("fuse_qkv", False)
-    if "fuse_qkv" in optimizations and drafter_type != "dflash2":
-        raise ValueError(f"fuse_qkv is not supported for drafter_type={drafter_type}")
-    if drafter_type == "dflash2":
-        flattened["dflash2_fuse_gate_up"] = fuse_gate_up
-        flattened["dflash2_fuse_qkv"] = fuse_qkv
 
     shared_weights = options.get("shared_weights", {})
     check_fields(shared_weights, {"embedding", "lm_head"}, "drafter_options.shared_weights")

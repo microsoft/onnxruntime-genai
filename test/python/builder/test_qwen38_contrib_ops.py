@@ -519,6 +519,9 @@ def test_qwen_attention_packs_gated_qkv_before_splitting():
 def test_qwen_linear_attention_packs_qkv_and_z():
     model = object.__new__(Qwen4ExpTextModel)
     model.io_dtype = ir.DataType.FLOAT16
+    model.onnx_dtype = ir.DataType.FLOAT16
+    model.quant_attrs = {"nodes_to_exclude": []}
+    model.exact_quant_override_names = set()
     model.make_hidden_state_shape = MethodType(
         lambda self, last_dim: ["batch_size", "sequence_length", last_dim], model
     )
@@ -548,6 +551,9 @@ def test_qwen_linear_attention_packs_qkv_and_z():
 def test_qwen_linear_attention_packs_prequantized_qkv_and_z():
     model = object.__new__(Qwen4ExpTextModel)
     model.io_dtype = ir.DataType.FLOAT16
+    model.onnx_dtype = ir.DataType.INT4
+    model.quant_attrs = {"nodes_to_exclude": [], "use_qdq": False}
+    model.exact_quant_override_names = set()
     model.make_hidden_state_shape = MethodType(
         lambda self, last_dim: ["batch_size", "sequence_length", last_dim], model
     )
@@ -604,7 +610,8 @@ def test_qwen_linear_attention_packs_a_and_b():
         "/model/layers.3/linear_attn/a_proj/MatMul/output_0",
         "/model/layers.3/linear_attn/b_proj/MatMul/output_0",
     ]
-    assert not any(call[0] == "exclude_node_from_quantization" for call in model.calls)
+    exclusions = [call[1][0] for call in model.calls if call[0] == "exclude_node_from_quantization"]
+    assert exclusions == ["/model/layers.3/linear_attn/a_b_proj/MatMul"]
     assert b_name == "/model/layers.3/linear_attn/b_proj/MatMul/output_0"
     assert a_name == "/model/layers.3/linear_attn/a_proj/MatMul/output_0"
 
@@ -1001,13 +1008,16 @@ def test_final_hidden_states_output_connects_to_post_mix(paged, pre_final):
 
 
 @pytest.mark.parametrize("ep", ["dml", "trt-rtx"])
-def test_qwen_hyper_connection_expansions_emit_standard_onnx(ep):
+def test_qwen_hyper_connection_expansions_use_provider_normalization(ep):
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
     model.hyper_connection_attrs = {"num_branches": 4}
     model.hidden_size = 8
     model.layernorm_attrs = {"epsilon": 1e-6}
+    model.values = {
+        "/norm/Reshape/output_0": SimpleNamespace(shape=ir.Shape(["batch_size", "sequence_length", 4, 8]))
+    }
     model.ep = ep
     model.extra_options = {}
     model.make_ep_expansions_init()
@@ -1028,14 +1038,17 @@ def test_qwen_hyper_connection_expansions_emit_standard_onnx(ep):
     )
 
     model.make_branchwise_rms_norm("/norm", "streams", SimpleNamespace(weight=torch.zeros(32)), 8)
-    model.make_scaled_silu("/silu", "down", ["batch_size", "sequence_length", 4])
-    model.make_hyper_connection_pre_mix("/pre", "normalized", "pre_mix", ["batch_size", "sequence_length"])
+    model.make_scaled_silu("/silu", "down", ["batch_size", "sequence_length", 4], 4)
+    model.make_hyper_connection_pre_mix("/pre", "normalized", "pre_mix", ["batch_size", "sequence_length"], 4)
     model.make_hyper_connection_post_mix(
-        "/post", "streams", "block_output", "post_mix", ["batch_size", "sequence_length"])
+        "/post", "streams", "block_output", "post_mix", ["batch_size", "sequence_length"], 4
+    )
 
     standard_nodes = [op_type for op_type, _ in emitted_nodes(model)]
-    assert standard_nodes == ["Cast", "Pow", "Sqrt", "Cast", "Mul", "Add"]
-    assert all(onnx.defs.has(op_type) for op_type in standard_nodes)
+    assert standard_nodes == (
+        ["Cast", "Pow", "Sqrt", "Cast", "Mul", "Add"] if ep == "trt-rtx" else ["SimplifiedLayerNormalization", "Add"]
+    )
+    assert all(onnx.defs.has(op_type) for op_type in standard_nodes if op_type != "SimplifiedLayerNormalization")
     assert not {
         "BranchwiseRMSNorm",
         "ScaledSiLU",
@@ -1043,9 +1056,9 @@ def test_qwen_hyper_connection_expansions_emit_standard_onnx(ep):
         "HyperConnectionPostMix",
     }.intersection(standard_nodes)
     assert [call[0] for call in model.calls].count("make_reshape") == 5
-    assert [call[0] for call in model.calls].count("make_mul") == 5
-    assert [call[0] for call in model.calls].count("make_reduce_mean") == 2
-    assert [call[0] for call in model.calls].count("make_add") == 1
+    assert [call[0] for call in model.calls].count("make_mul") == (5 if ep == "trt-rtx" else 4)
+    assert [call[0] for call in model.calls].count("make_reduce_mean") == (2 if ep == "trt-rtx" else 1)
+    assert [call[0] for call in model.calls].count("make_add") == (1 if ep == "trt-rtx" else 0)
 
 
 def test_gated_rms_norm_emits_configured_activation():
@@ -1649,11 +1662,11 @@ def test_qwen4_exp_models_have_independent_engram_data(tmp_path, monkeypatch, te
     wrapper.share_initializers = lambda *args: []
     saved_components = []
     monkeypatch.setattr(
-        "models.builders.qwen3_8.Qwen4ExpEmbeddingModel",
+        "models.builders.qwen3_8.model.Qwen4ExpEmbeddingModel",
         lambda *args: SimpleNamespace(save_model=lambda _: saved_components.append("embedding")),
     )
     monkeypatch.setattr(
-        "models.builders.qwen3_8.Qwen4ExpVisionModel",
+        "models.builders.qwen3_8.model.Qwen4ExpVisionModel",
         lambda *args: SimpleNamespace(save_model=lambda _: saved_components.append("vision")),
     )
 

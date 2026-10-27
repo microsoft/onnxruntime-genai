@@ -7,8 +7,8 @@ import onnx_ir as ir
 import torch
 from loaders.engram import EngramWeights
 
-from .base import Model
-from .qwen3_5 import Qwen35MoETextModel
+from ..base import Model
+from ..qwen3_5 import Qwen35MoETextModel
 
 
 class Qwen4ExpTextModel(Qwen35MoETextModel):
@@ -21,7 +21,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
     def make_ple(self, layer_id, ple, root_input):
         if self.use_paged_attention:
             return self.make_paged_ple(layer_id, ple, root_input)
-        from .qwen3_8 import Qwen38Engram  # noqa: PLC0415
+        from .model import Qwen38Engram  # noqa: PLC0415
 
         return Qwen38Engram.make_ple(self, layer_id, ple, root_input)
 
@@ -429,6 +429,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         )
         engram_embeddings = f"{flatten_name}/output_0"
         return engram_embeddings
+
     def make_ple_projections(self, layer_id, ple, root_input, engram_embeddings, token_shape, grouped_dims):
         basename = f"/model/layers.{layer_id}/ple"
         key_scale = f"model.layers.{layer_id}.ple.key_norm_scale"
@@ -465,6 +466,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         )
         gate_inputs = [f"{key_reshape}/output_0", f"{query_reshape}/output_0", f"{value_matmul}/output_0"]
         return (gate_inputs, grouped_shape, key_scale, query_scale, conv_scale)
+
     def make_ple_gate(
         self, gate_name, gated_value, gated_value_normed, gate_inputs, key_scale, query_scale, conv_scale, gate_shape
     ):
@@ -479,6 +481,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         self.make_value(gated_value, self.io_dtype, gate_shape)
         self.make_value(gated_value_normed, self.io_dtype, gate_shape)
         return None
+
     def make_ple_conv_inputs(
         self, layer_id, ple, gate_name, gated_value, gated_value_normed, token_shape, flatten_dims
     ):
@@ -503,6 +506,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         conv_weight = f"model.layers.{layer_id}.ple.conv1d.weight"
         self.make_initializer(ple.conv1d.weight, conv_weight, to=self.io_dtype)
         return (ple_shape, gated_value_flat, gated_value_normed_flat, conv_weight)
+
     def select_projection_outputs(self, projection, indices):
         """Clone a projection while selecting output rows and their quantization metadata."""
         selected = copy.copy(projection)
@@ -529,44 +533,32 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             setattr(selected, attribute, value)
         selected.out_features = indices.numel()
         return selected
+
     def make_linear_attention_qkv_z_proj(self, layer_id, attention, root_input):
         qkv = attention.in_proj_qkv
         z = attention.in_proj_z
-        if any(getattr(projection, "quant_type", "none") != "none" for projection in (qkv, z)):
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        projection_names = {f"{basename}/{projection}_proj/MatMul" for projection in ("qkv", "z")}
+        if any(
+            getattr(projection, "quant_type", "none") != "none"
+            or hasattr(projection, "base_layer")
+            or getattr(projection, "exclude_from_quantization", False)
+            for projection in (qkv, z)
+        ) or not projection_names.isdisjoint(self.quant_attrs["nodes_to_exclude"]) or not projection_names.isdisjoint(
+            self.exact_quant_override_names
+        ):
             return super().make_linear_attention_qkv_z_proj(layer_id, attention, root_input)
 
-        basename = f"/model/layers.{layer_id}/linear_attn"
         packed_name = f"{basename}/qkv_z_proj/MatMul"
 
-        if hasattr(qkv, "qweight") and hasattr(z, "qweight"):
-            if qkv.bits != z.bits or qkv.group_size != z.group_size or qkv.in_features != z.in_features:
-                raise ValueError("QKV and Z must use compatible quantization to share a packed MatMul.")
-            if hasattr(qkv, "qzeros") != hasattr(z, "qzeros"):
-                raise ValueError("QKV and Z must use the same zero-point representation to share a packed MatMul.")
-
-            class PackedQkvZ:
-                qweight = torch.cat([qkv.qweight, z.qweight], dim=0)
-                scales = torch.cat([qkv.scales, z.scales], dim=0)
-                qzeros = torch.cat([qkv.qzeros, z.qzeros], dim=0) if hasattr(qkv, "qzeros") else None
-                g_idx = getattr(qkv, "g_idx", None)
-                in_features = qkv.in_features
-                out_features = qkv.out_features + z.out_features
-                bits = qkv.bits
-                group_size = qkv.group_size
-
-            packed_matmul = self.make_matmul_nbits(PackedQkvZ(), packed_name, root_input)
+        packed = self.make_packed_matmul_class(qkv, z)
+        packed_matmul = self.make_matmul(packed, packed_name, root_input)
+        if hasattr(packed, "qweight"):
             qkv_size = qkv.out_features
             z_size = z.out_features
-        elif hasattr(qkv, "weight") and hasattr(z, "weight"):
-
-            class PackedQkvZ:
-                weight = torch.cat([qkv.weight, z.weight], dim=0)
-
-            packed_matmul = self.make_matmul(PackedQkvZ(), packed_name, root_input)
+        else:
             qkv_size = qkv.weight.shape[0]
             z_size = z.weight.shape[0]
-        else:
-            raise ValueError("QKV and Z must use the same weight representation to share a packed MatMul.")
 
         qkv_name = f"{basename}/qkv_proj/MatMul"
         z_name = f"{basename}/z_proj/MatMul"
@@ -582,6 +574,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             axis=-1,
         )
         return f"{qkv_name}/output_0", f"{z_name}/output_0"
+
     def make_linear_attention_a_b_proj(self, layer_id, attention, root_input):
         basename = f"/model/layers.{layer_id}/linear_attn"
         a = attention.in_proj_a
@@ -590,13 +583,13 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         b_name = f"{basename}/b_proj/MatMul"
         self.require_dense_linear_attention_gate(a, a_name)
         self.require_dense_linear_attention_gate(b, b_name)
+        if any(hasattr(projection, "base_layer") for projection in (a, b)):
+            return super().make_linear_attention_a_b_proj(layer_id, attention, root_input)
 
         packed_name = f"{basename}/a_b_proj/MatMul"
-
-        class PackedAB:
-            weight = torch.cat([a.weight, b.weight], dim=0)
-
-        packed_matmul = self.make_matmul(PackedAB(), packed_name, root_input)
+        self.exclude_node_from_quantization(packed_name)
+        packed = self.make_packed_matmul_float_class(a, b)
+        packed_matmul = self.make_matmul(packed, packed_name, root_input)
         a_size = a.weight.shape[0]
         b_size = b.weight.shape[0]
         self.make_split(
@@ -611,6 +604,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             axis=-1,
         )
         return f"{b_name}/output_0", f"{a_name}/output_0"
+
     def make_branchwise_rms_norm(self, name, root_input, norm, hidden_size):
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
         output = f"{name}/output_0"
@@ -627,43 +621,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         )
         self.make_value(output, self.io_dtype, [*token_shape, self.hyper_connection_attrs["num_branches"] * hidden_size])
         return output
-    def make_scaled_silu(self, name, root_input, shape):
-        output = f"{name}/output_0"
-        self.make_node(
-            "ScaledSiLU",
-            inputs=[root_input],
-            outputs=[output],
-            name=name,
-            domain="com.microsoft",
-            alpha=1.0 / self.hyper_connection_attrs["num_branches"],
-        )
-        self.make_value(output, self.io_dtype, shape)
-        return output
-    def make_hyper_connection_pre_mix(self, name, streams, pre_mix, token_shape):
-        output = f"{name}/output_0"
-        self.make_node(
-            "HyperConnectionPreMix",
-            inputs=[streams, pre_mix],
-            outputs=[output],
-            name=name,
-            domain="com.microsoft",
-            num_branches=self.hyper_connection_attrs["num_branches"],
-            reduction_scale=1.0 / self.hyper_connection_attrs["num_branches"],
-        )
-        self.make_value(output, self.io_dtype, [*token_shape, self.hidden_size])
-        return output
-    def make_hyper_connection_post_mix(self, name, streams, block_output, post_mix, token_shape, output_name=None):
-        output = f"{name}/output_0" if output_name is None else output_name
-        self.make_node(
-            "HyperConnectionPostMix",
-            inputs=[streams, block_output, post_mix],
-            outputs=[output],
-            name=name,
-            domain="com.microsoft",
-            num_branches=self.hyper_connection_attrs["num_branches"],
-        )
-        self.make_value(output, self.io_dtype, [*token_shape, self.hyper_connection_attrs["hidden_size"]])
-        return output
+
     def make_hyper_connection_mix(self, layer_id, hyper_connection, root_input, location, combine=True):
         basename = f"/model/layers.{layer_id}/{location}_hyper_connection"
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
@@ -680,7 +638,9 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             )
         silu_shape = [*token_shape, hyper_connection.input_mix_weight_down.out_features]
         silu_name = f"{basename}/input_mix_weight_down/SiLU"
-        silu_output = self.make_scaled_silu(silu_name, f"{down_name}/output_0", silu_shape)
+        silu_output = self.make_scaled_silu(
+            silu_name, f"{down_name}/output_0", silu_shape, self.hyper_connection_attrs["num_branches"]
+        )
         up_name = self.make_matmul(
             hyper_connection.input_mix_weight_up,
             f"{basename}/input_mix_weight_up/MatMul",
@@ -700,6 +660,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             normalized,
             f"{mix_sigmoid}/output_0",
             token_shape,
+            self.hyper_connection_attrs["num_branches"],
         )
         if not combine:
             return mixed_output
@@ -722,6 +683,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             inject_shape,
         )
         return mixed_output, root_input, f"{inject_scale}/output_0"
+
     def make_hyper_connection_down_inject_proj(self, basename, hyper_connection, root_input, token_shape):
         down = hyper_connection.input_mix_weight_down
         inject = hyper_connection.block_inject_weight
@@ -752,20 +714,36 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             axis=-1,
         )
         return down_name, inject_name
+
     def make_hyper_connection_injection(
         self, layer_id, block_output, hyper_input, injection_weights, location, output_name=None
     ):
         basename = f"/model/layers.{layer_id}/{location}_hyper_connection/injection"
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
         return self.make_hyper_connection_post_mix(
-            basename, hyper_input, block_output, injection_weights, token_shape, output_name=output_name
+            basename, hyper_input, block_output, injection_weights, token_shape,
+            self.hyper_connection_attrs["num_branches"], output_name=output_name
         )
+
     def make_qwen_sparse_attention(self, layer_id, attention, root_input):
+        index_share = self.sparse_indexer_attrs.get("index_share")
+        indexer_root_input = root_input
+        if index_share:
+            gather_name = f"/model/layers.{layer_id}/attn/indexshare/GatherProjectionRows"
+            self.make_gather(
+                gather_name,
+                [root_input, self.input_names["projection_rows"]],
+                self.io_dtype,
+                ["indexer_projection_rows", self.hidden_size],
+                axis=0,
+            )
+            indexer_root_input = f"{gather_name}/output_0"
         self.make_attention_input_proj(
             layer_id,
             attention,
             root_input,
             indexer_proj=attention.indexer.index_qk_proj,
+            indexer_root_input=indexer_root_input,
         )
         q_norm_weight, k_norm_weight = self.get_qk_norm_weight_names(layer_id)
         self.make_initializer(attention.q_norm.weight + 1, q_norm_weight, to=self.io_dtype)
@@ -784,7 +762,11 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             index_matmul = self.make_matmul(
                 attention.indexer.index_qk_proj,
                 f"/model/layers.{layer_id}/attn/indexer/index_qk_proj/MatMul",
-                root_input,
+                indexer_root_input,
+                **(
+                    {"output_shape": ["indexer_projection_rows", (self.sparse_indexer_attrs["num_heads"] + 1) * self.sparse_indexer_attrs["head_dim"]]}
+                    if index_share else {}
+                ),
             )
             index_qk_path = f"{index_matmul}/output_0"
         index_q_scale = f"model.layers.{layer_id}.attn.indexer.q_norm.weight"
@@ -800,16 +782,29 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             index_key = f"{indexer_name}/key"
             query_size = self.sparse_indexer_attrs["num_heads"] * self.sparse_indexer_attrs["head_dim"]
             key_size = self.sparse_indexer_attrs["head_dim"]
-            self.make_split(
-                f"{indexer_name}/Split",
-                [index_qk_path, f"/model/constants/INT64/[{query_size}, {key_size}]"],
-                [index_query, index_key],
-                [self.io_dtype] * 2,
-                [["num_tokens", query_size], ["num_tokens", key_size]],
-                axis=-1,
-            )
-            selected_indices = f"{indexer_name}/output_0"
-            selected_counts = f"{indexer_name}/output_1"
+            extra_inputs = []
+            if index_share:
+                capacity += index_share["max_draft_tokens"] - 1
+                merge_name = f"/model/layers.{layer_id}/attn/indexshare/IndexerMerge"
+                self.make_packed_sparse_attention_indexer_merge(
+                    merge_name,
+                    [self.input_names[name] for name in ("past_indices", "past_counts", "base_row_indices", "range_starts", "range_ends")],
+                    capacity,
+                )
+                index_query, index_key = index_qk_path, ""
+                selected_indices, selected_counts = "present_indices", "present_counts"
+                extra_inputs = [self.input_names["mode"], *(f"{merge_name}/output_{i}" for i in range(3))]
+            else:
+                self.make_split(
+                    f"{indexer_name}/Split",
+                    [index_qk_path, f"/model/constants/INT64/[{query_size}, {key_size}]"],
+                    [index_query, index_key],
+                    [self.io_dtype] * 2,
+                    [["num_tokens", query_size], ["num_tokens", key_size]],
+                    axis=-1,
+                )
+                selected_indices = f"{indexer_name}/output_0"
+                selected_counts = f"{indexer_name}/output_1"
             self.make_node(
                 "PackedSparseAttentionIndexer",
                 inputs=[
@@ -835,8 +830,9 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                             self.input_names["state_update.active"],
                         ]
                         if getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
-                        else []
+                        else (["", ""] if index_share else [])
                     ),
+                    *extra_inputs,
                 ],
                 outputs=[
                     selected_indices,
@@ -848,8 +844,9 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                     *(
                         [self.output_names["state_update.indexer"][layer_id]]
                         if getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
-                        else []
+                        else ([""] if index_share else [])
                     ),
+                    *(["indexer_status"] if index_share else []),
                 ],
                 name=indexer_name,
                 domain="com.microsoft",
@@ -859,6 +856,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                 token_budget=self.sparse_indexer_attrs["token_budget"],
                 epsilon=self.layernorm_attrs["epsilon"],
                 scale=self.sparse_indexer_attrs["head_dim"]**-0.5,
+                **({"max_output_entries": capacity} if index_share else {}),
                 **(
                     {"state_update_capacity": self.context_length_attrs["state_update_capacity"]}
                     if getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
@@ -867,6 +865,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             )
             self.make_value(selected_indices, ir.DataType.INT32, ["num_tokens", capacity])
             self.make_value(selected_counts, ir.DataType.INT32, ["num_tokens"])
+            if index_share:
+                self.make_value("indexer_status", ir.DataType.INT32, ["num_tokens"])
         else:
             indexer_name = f"/model/layers.{layer_id}/attn/SparseAttentionIndexer"
             selected_indices = f"{indexer_name}/output_0"
@@ -1045,6 +1045,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         )
         self.attention_attrs["o_path"] = f"{name}/output_0"
         self.make_attention_output_proj(layer_id, attention, root_input)
+
     def make_sparse_mrope_projections(self, layer_id, attention, cos_cache, sin_cache):
         """Normalize and rotate current Q/K using all three coordinate streams."""
         if not self.attention_attrs["k_path"]:
@@ -1075,6 +1076,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                 sin_cache_name=sin_cache,
             )
             self.attention_attrs[path] = output
+
     def make_indexer_rope_caches(self, cos_cache, sin_cache):
         """QSA uses a full split-half rotary table, unlike attention's half-width cache."""
         outputs = tuple(f"/model/indexer_rotary/{kind}/Concat/output_0" for kind in ("cos", "sin"))
@@ -1091,6 +1093,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                     axis=-1,
                 )
         return outputs
+
     def make_indexer_mrope_caches(self, cos_cache, sin_cache):
         """Recompose request-specific tables indexed by chronological key position."""
         basename = "/model/indexer_rotary"
@@ -1168,6 +1171,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         self.make_initializer(down, names["down_weight"])
         self.make_initializer(down_scales, names["down_scales"], to=scale_dtype)
         return None
+
     def make_moe_expert_names(self, layer_id):
         names = super().make_moe_expert_names(layer_id)
         if self.moe_attrs.get("quant_type") == "fp8" and self.moe_attrs.get("block_size", 0) > 0:
@@ -1175,12 +1179,15 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                 names[name] = names[name].replace("gate_up_proj", "gate_proj")
             names["gate_up_bias"] = names["down_bias"] = ""
         return names
+
     def make_moe_op(self, name, **kwargs):
         if self.moe_attrs.get("quant_type") == "fp8" and self.moe_attrs.get("block_size", 0) > 0:
             kwargs["weight3"], kwargs["scales3"] = self.moe_attrs["up_projection_names"]
         return super().make_moe_op(name, **kwargs)
+
     def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
         indexer_proj = kwargs.pop("indexer_proj", None)
+        indexer_root_input = kwargs.pop("indexer_root_input", root_input)
         packable = self.is_qkv_projection_packable(layer_id, attention)
         if indexer_proj is not None and self.attention_attrs["use_packed_matmul"] and packable:
             q_size = self.q_size
@@ -1230,7 +1237,11 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             indexer_name = self.make_matmul(
                 indexer_proj,
                 f"/model/layers.{layer_id}/attn/indexer/index_qk_proj/MatMul",
-                root_input,
+                indexer_root_input,
+                **(
+                    {"output_shape": ["indexer_projection_rows", indexer_proj.out_features]}
+                    if indexer_root_input != root_input else {}
+                ),
             )
             indexer_output = f"{indexer_name}/output_0"
             indexer_bias = getattr(indexer_proj, "bias", None)
@@ -1256,6 +1267,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         finally:
             self.q_size = q_size
         return None
+
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
         self.make_node(

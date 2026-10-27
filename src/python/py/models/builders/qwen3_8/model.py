@@ -10,12 +10,12 @@ import torch
 from builder_config import serialize_genai_config
 from huggingface_hub import hf_hub_download, snapshot_download
 
-from .mtp import MTPModel
-from .qwen3_8_embedding import Qwen4ExpEmbeddingModel
-from .qwen3_8_engram import Qwen4ExpEngramModel
-from .qwen3_8_mtp import Qwen4ExpMTPTextModel
-from .qwen3_8_text import Qwen4ExpTextModel
-from .qwen3_8_vision import Qwen4ExpVisionModel
+from ..mtp import MTPModel
+from .embedding import Qwen4ExpEmbeddingModel
+from .engram import Qwen4ExpEngramModel
+from .mtp import Qwen4ExpMTPTextModel
+from .text import Qwen4ExpTextModel
+from .vision import Qwen4ExpVisionModel
 
 
 class Qwen38Engram:
@@ -293,6 +293,8 @@ class Qwen4ExpModel(MTPModel):
             mtp_options,
             multimodal_rotary=self.mtp_attrs.get("multimodal_rotary", False),
         )
+        if extra_options.get("use_paged_attention", False):
+            self.mtp_attrs["index_share"] = self.mtp.sparse_indexer_attrs["index_share"]
 
     def make_model(self, input_path):
         if self.decoder.quant_type == "fp8" and not os.path.isdir(input_path):
@@ -331,10 +333,6 @@ class Qwen4ExpModel(MTPModel):
             self.mtp_attrs["shared_initializers"] = self.share_initializers(
                 output_dir, self.decoder.filename, self.mtp.filename
             )
-            if self.mtp.use_paged_attention:
-                self.mtp_attrs["index_share"] = self.export_indexshare_graphs(
-                    output_dir, self.mtp.filename, min(int(self.extra_options.get("max_draft_tokens", 7)), 7)
-                )
         if self.text_only:
             return
         embedding_model = Qwen4ExpEmbeddingModel(

@@ -97,17 +97,7 @@ Explicit selections must not silently fall back. Head counts and other checkpoin
 
 Pool size, scheduler limits, utilization targets, and prefill chunk size belong to `runtime_config`. They remain constrained by the exported graph and supported runtime behavior even though they are not graph-construction options.
 
-### Projection Fusion
-
-Target MLP gate/up fusion combines compatible emitted `MatMul` or `MatMulNBits` projections automatically; there is no target fusion option. Projections with distinct quantization policies or incompatible layouts remain separate. DFlash2 fusion is independently configurable through `drafter_options.optimizations.fuse_mlp_gate_up` (default `false`), corresponding to `dflash2_fuse_gate_up`. Fusion produces a single projection (`MatMulNBits` for INT4) followed by `Split`. This does not apply fusion to vision components.
-
-Fusion requires compatible projection shapes, biases, dtypes, layouts, and quantization policy. Target fusion preserves packed bytes and scales for compatible `MatMulNBits` projections and retains separate operations for adapted or incompatible projections. Resolve exact-name overrides against the final emitted graph; do not silently drop old gate/up names after fusion or change one projection's policy to match the other.
-
-Target Q/K/V projection fusion and eligible Q/K normalization fusion are automatic, without target optimization fields or extra options. Unsupported execution providers and incompatible projection or quantization configurations retain separate operations. Index sharing is intrinsic to paged main/MTP graphs; `max_draft_tokens` remains the draft-budget control.
-
-`drafter_options.optimizations.fuse_qkv` (DFlash2 only, default `false`) maps to `dflash2_fuse_qkv`. Each layer stacks its query-block rows over the shared context rows and projects both with one Q/K/V projection whose gathered output feeds `PagedAttention` as packed QKV. The fused drafter has no `q_row_map` input and therefore requires a runtime that treats `q_row_map` as optional.
-
-Fusion is distinct from selecting the CUDA fpA/intB kernel family. The legacy `enable_cuda_fpa_intb_gemm` option maps to the runtime decoder session entry `ep.cuda.fpa_intb_gemm`, whereas offline weight layout remains in `quant_config.format`. Neither setting implies fusion. DFlash2's raw body must retain its own supported session settings rather than inherit target flags.
+Compatible projection optimizations are automatic and are not configuration options. Numeric precision and layouts remain controlled by the existing quantization settings.
 
 ## 4. Drafter Configuration
 
@@ -209,7 +199,7 @@ Allow supported settings under:
 
 When every memory class uses the same ONNX graphs, place `runtime_profiles` directly inside `runtime_config`. Model Builder validates and writes the array to `genai_config.json` in the first export pass. No post-processing pass is needed. A profile overlay may change `engine.dynamic_batching`, `search.chunk_size`, and `speculative.max_draft_tokens`. Profiles cannot override `search.max_length`; the Engine derives each GPU's request ceiling from the profile's cache allocation.
 
-An alternate graph may additionally set `model.decoder.filename`. The named graph must already be present in the package. Use the `KVCacheVariant` API below to derive a different KV-cache variant with its own copy of the base graph's weights. Do not set a different filename for a configuration-only profile.
+An alternate graph may additionally set `model.decoder.filename`. The named graph must already be present in the package. Export each KV-cache variant from the checkpoint using the builder settings below. Do not set a different filename for a configuration-only profile.
 
 ### Authoring KV-Cache Variants
 
@@ -218,10 +208,16 @@ Start with a supported checkpoint and a calibrated per-channel scale file as des
 ```bash
 python src/python/py/models/builder.py -i checkpoint -o package -p fp16 -e cuda \
   --extra_options use_paged_attention=true kv_cache_quant_scheme=int4_per_channel \
-  kv_cache_scale_file=scales.json num_blocks=128
+  kv_cache_scale_file=scales.json num_blocks=128 filename=model_int4_per_channel.onnx
 ```
 
-From the repository root, create the alternate graph and add a memory profile:
+Export the alternate graph directly from the same checkpoint, then add a runtime memory profile. Do not modify the completed graph:
+
+```bash
+python src/python/py/models/builder.py -i checkpoint -o package -p fp16 -e cuda \
+  --extra_options use_paged_attention=true kv_cache_quant_scheme=int8_per_channel \
+  kv_cache_scale_file=scales.json num_blocks=128 filename=model_int8_per_channel.onnx
+```
 
 ```python
 import json
@@ -230,24 +226,22 @@ from pathlib import Path
 
 sys.path.insert(0, "src/python/py/models")
 from builder_config import apply_runtime_config
-from kv_cache_variant import KVCacheVariant
 
 package = Path("package")
-KVCacheVariant("int8_per_channel").create(
-    package / "model.onnx", package / "model_int8.onnx", "scales.json"
-)
 config_path = package / "genai_config.json"
-config = apply_runtime_config(json.loads(config_path.read_text()), {
+config = json.loads(config_path.read_text())
+config["model"]["decoder"]["filename"] = "model_int4_per_channel.onnx"
+config = apply_runtime_config(config, {
     "runtime_profiles": [{
         "id": "int8-large-gpu",
         "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
-        "overlay": {"model": {"decoder": {"filename": "model_int8.onnx"}}},
+        "overlay": {"model": {"decoder": {"filename": "model_int8_per_channel.onnx"}}},
     }],
 })
 config_path.write_text(json.dumps(config, indent=2))
 ```
 
-The API accepts `int4_per_channel` and `int8_per_channel` for a statically per-channel-quantized `PagedAttention` export. Source and output ONNX files may reside in different directories. Only KV scale values are replaced; unchanged weights retain their original bytes. Every initializer, including the new scales, is saved in one variant-owned `<output filename>.data` file. Distribute that file alongside the variant ONNX graph; the source graph's data file is not needed. Scale `layer_ids` may be reordered but must cover exactly the exported attention layers, and every K/V scale must have consistent head geometry.
+Each export chooses its KV scheme and scales during graph construction and writes a private `<filename>.data` file. Distribute both graphs and their data files with the runtime profile configuration. Calibration `layer_ids` must cover the exported attention layers, and every K/V scale must have consistent head geometry.
 
 Memory profiles require visible CUDA ordinal 0; select a physical GPU with `CUDA_VISIBLE_DEVICES` before launching. Recreate the Model and Engine to apply a different profile. Batch/token limits must fit the runtime's signed 32-bit parser, `max_batch_size` cannot exceed 256, and batching overrides require an exported dynamic-batching configuration. Draft-token overrides are checked against the same exported drafter/state capacity as ordinary runtime overlays.
 
@@ -606,8 +600,6 @@ The same component ownership can later accommodate audio without changing the ta
 | `dflash2_path`, `dspark_path` | Drafter selection and `path` |
 | `dflash2_precision` | Drafter weight policy plus explicit legacy-derived settings |
 | `dflash2_num_draft_tokens`, `dspark_num_draft_tokens` | `drafter_options.num_draft_tokens` |
-| `dflash2_fuse_gate_up` | `drafter_options.optimizations.fuse_mlp_gate_up` |
-| `dflash2_fuse_qkv` | `drafter_options.optimizations.fuse_qkv` |
 | `dspark_top_k` | `drafter_options.dspark.top_k` |
 | Existing automatic target/drafter tensor adoption | New `drafter_options.shared_weights` policies; preserve existing decisions for legacy-only calls |
 | `shared_embeddings` | Existing within-model tying; not an alias for cross-model `shared_weights` |

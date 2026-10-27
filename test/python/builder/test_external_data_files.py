@@ -16,6 +16,25 @@ def external_location(initializer):
     return next(entry.value for entry in initializer.external_data if entry.key == "location")
 
 
+@pytest.mark.parametrize("opset,ir_version", [(20, 10), (18, 9)])
+def test_make_graph_initializes_minimal_model(opset, ir_version):
+    builder = Model.__new__(Model)
+
+    builder.make_graph("head", opset=opset, ir_version=ir_version)
+
+    assert builder.graph is builder.model.graph
+    assert builder.graph.name == "head"
+    assert builder.graph.opset_imports == {"": opset}
+    assert builder.model.ir_version == ir_version
+    assert builder.model.producer_name == "onnxruntime-genai"
+    assert builder.values == {}
+    assert builder.node_names == set()
+    assert not builder.graph.inputs
+    assert not builder.graph.outputs
+    assert not builder.graph.initializers
+    assert not list(builder.graph)
+
+
 def test_save_model_places_all_initializers_in_its_own_external_data(tmp_path):
     values = {
         "model.layers.1.ple.ngram_embedding.weight": np.arange(12, dtype=np.uint8).reshape(3, 4),

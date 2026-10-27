@@ -34,15 +34,18 @@ class Standard:
         reshape = f"/model/constants/INT64/{[*([0] * (len(shape) - 1)), *grouped_shape[-2:]]}"
         self.make_reshape(f"{name}/Reshape", [root_input, reshape], self.io_dtype, grouped_shape)
         normalized = f"{name}/SimplifiedLayerNormalization/output_0"
-        self.make_simplified_layer_norm(
+        self.make_layernorm_subgraph(
             f"{name}/SimplifiedLayerNormalization",
-            f"{name}/Reshape/output_0",
-            scale,
-            normalized,
-            self.io_dtype,
-            grouped_shape,
+            op_type="SimplifiedLayerNormalization",
+            inputs=[f"{name}/Reshape/output_0", scale],
+            outputs=[normalized],
+            skip=False,
+            new_io_dtype=self.io_dtype,
+            axis=-1,
+            stash_type=1,
             epsilon=epsilon,
         )
+        self.make_value(normalized, self.io_dtype, grouped_shape)
         restore = f"/model/constants/INT64/{[*([0] * (len(shape) - 1)), shape[-1]]}"
         self.make_reshape(f"{name}/Flatten", [normalized, restore], self.io_dtype, shape)
         self.make_cast(f"{name}/norm/Cast", f"{name}/Flatten/output_0", ir.DataType.FLOAT, shape)
@@ -287,15 +290,18 @@ class Standard:
         norm_scale_name = f"{name[1:].replace('/', '.')}.norm_scale"
         self.make_initializer(norm.weight.new_ones(hidden_size), norm_scale_name, to=self.io_dtype)
         normalized = f"{name}/SimplifiedLayerNormalization/output_0"
-        self.make_simplified_layer_norm(
+        self.make_layernorm_subgraph(
             f"{name}/SimplifiedLayerNormalization",
-            f"{name}/Reshape/output_0",
-            norm_scale_name,
-            normalized,
-            self.io_dtype,
-            grouped_shape,
+            op_type="SimplifiedLayerNormalization",
+            inputs=[f"{name}/Reshape/output_0", norm_scale_name],
+            outputs=[normalized],
+            skip=False,
+            new_io_dtype=self.io_dtype,
+            axis=-1,
+            stash_type=1,
             epsilon=self.layernorm_attrs["epsilon"],
         )
+        self.make_value(normalized, self.io_dtype, grouped_shape)
         flat_shape = [*token_shape, branches * hidden_size]
         flat_dims = [-1, branches * hidden_size] if self.use_paged_attention else [0, 0, branches * hidden_size]
         self.make_reshape(
@@ -306,8 +312,7 @@ class Standard:
         self.make_mul(name, [f"{name}/Flatten/output_0", scale_name], self.io_dtype, flat_shape)
         return f"{name}/output_0"
 
-    def make_scaled_silu(self, name, root_input, shape):
-        branches = self.hyper_connection_attrs["num_branches"]
+    def make_scaled_silu(self, name, root_input, shape, branches):
         self.make_div(
             f"{name}/Div",
             [root_input, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{branches}"],
@@ -318,8 +323,7 @@ class Standard:
         self.make_mul(name, [f"{name}/Div/output_0", f"{name}/Sigmoid/output_0"], self.io_dtype, shape)
         return f"{name}/output_0"
 
-    def make_hyper_connection_pre_mix(self, name, streams, pre_mix, token_shape):
-        branches = self.hyper_connection_attrs["num_branches"]
+    def make_hyper_connection_pre_mix(self, name, streams, pre_mix, token_shape, branches):
         grouped_shape = [*token_shape, branches, self.hidden_size]
         grouped_dims = (
             [-1, branches, self.hidden_size] if self.use_paged_attention else [0, 0, branches, self.hidden_size]
@@ -345,8 +349,9 @@ class Standard:
         )
         return f"{name}/output_0"
 
-    def make_hyper_connection_post_mix(self, name, streams, block_output, post_mix, token_shape, output_name=None):
-        branches = self.hyper_connection_attrs["num_branches"]
+    def make_hyper_connection_post_mix(
+        self, name, streams, block_output, post_mix, token_shape, branches, output_name=None
+    ):
         self.make_unsqueeze(
             f"{name}/output/Unsqueeze",
             [block_output, "/model/constants/INT64/[-2]"],

@@ -12,6 +12,8 @@ import numpy as np
 import onnx_ir as ir
 import torch
 
+from .base import Model
+
 
 def clm_artifact_revision() -> str:
     """Return the immutable released CLM artifact revision."""
@@ -20,11 +22,7 @@ def clm_artifact_revision() -> str:
 
 def checkpoint_path(source: Path) -> Path | None:
     """Return the sole CLM checkpoint candidate, excluding KEV's ``head.pt``."""
-    candidates = [
-        path
-        for path in sorted(source.glob("*.pt")) + sorted(source.glob("*.pth"))
-        if path.name != "head.pt"
-    ]
+    candidates = [path for path in sorted(source.glob("*.pt")) + sorted(source.glob("*.pth")) if path.name != "head.pt"]
     return candidates[0] if len(candidates) == 1 else None
 
 
@@ -36,8 +34,12 @@ def is_clm_artifact(source: str | Path) -> bool:
     """
     source = Path(source)
     required_keys = {
-        "state_head", "action_head", "logit_scale", "cfg",
-        "hidden_size", "projection_dim",
+        "state_head",
+        "action_head",
+        "logit_scale",
+        "cfg",
+        "hidden_size",
+        "projection_dim",
     }
     checkpoint = checkpoint_path(source) if source.is_dir() else source
     if checkpoint is None or not checkpoint.is_file() or checkpoint.name == "head.pt":
@@ -59,12 +61,22 @@ def load_clm_checkpoint(source: str | Path) -> dict:
     """
     source = Path(source)
     required_keys = {
-        "state_head", "action_head", "logit_scale", "cfg",
-        "hidden_size", "projection_dim",
+        "state_head",
+        "action_head",
+        "logit_scale",
+        "cfg",
+        "hidden_size",
+        "projection_dim",
     }
     cfg_keys = {
-        "model", "hidden_size", "width", "depth", "projection_dim",
-        "activation", "layernorm", "residual",
+        "model",
+        "hidden_size",
+        "width",
+        "depth",
+        "projection_dim",
+        "activation",
+        "layernorm",
+        "residual",
     }
     checkpoint = checkpoint_path(source) if source.is_dir() else source
     if checkpoint is None:
@@ -113,41 +125,6 @@ def load_clm_checkpoint(source: str | Path) -> dict:
     return data
 
 
-def append_linear(nodes, initializers, value, state, prefix, node_prefix):
-    """Append one named PyTorch-compatible affine layer to an ONNX graph.
-
-    Weights are transposed from ``torch.nn.Linear`` layout before becoming Gemm
-    initializers. The function returns the generated IR output value.
-    """
-    weight = state[f"{prefix}.weight"].detach().cpu().float().numpy()
-    bias = state[f"{prefix}.bias"].detach().cpu().float().numpy()
-    weight_value = _initializer(weight.T, f"{node_prefix}.{prefix}.weight")
-    bias_value = _initializer(bias, f"{node_prefix}.{prefix}.bias")
-    initializers.extend([weight_value, bias_value])
-    return _append_node(
-        nodes, "Gemm", [value, weight_value, bias_value],
-        f"{node_prefix}/{prefix}", name=f"{node_prefix}/{prefix}/Gemm",
-    )
-
-
-def _initializer(array, name):
-    return ir.Value(
-        name=name,
-        type=ir.TensorType(ir.DataType.from_numpy(array.dtype)),
-        shape=ir.Shape(array.shape),
-        const_value=ir.tensor(array, name=name),
-    )
-
-
-def _append_node(nodes, op_type, inputs, output_name, *, name=None, **attributes):
-    node = ir.Node(
-        "", op_type, inputs, ir.convenience.convert_attributes(attributes),
-        outputs=[ir.Value(name=output_name)], name=name,
-    )
-    nodes.append(node)
-    return node.outputs[0]
-
-
 def validate_head(name: str, state: dict, hidden_size: int, width: int, projection_dim: int, depth: int):
     """Validate exact CLM tensor names, tensor types, and architecture-derived shapes."""
     if not isinstance(state, dict) or any(not torch.is_tensor(value) for value in state.values()):
@@ -170,64 +147,131 @@ def validate_head(name: str, state: dict, hidden_size: int, width: int, projecti
             raise ValueError(f"CLM {name}.{tensor_name} must have shape {shape}")
 
 
-def build_head_nodes(input_value, output_name, state, prefix, hidden_size, width, projection_dim, depth):
-    """Construct one CLM projection head and return its nodes and initializers.
+class CLMModel(Model):
+    """Build the released contrastive heads with the shared Model emitters."""
 
-    The state is validated before graph construction. ``depth`` counts input and
-    output layers, so only ``depth - 2`` hidden blocks are emitted.
-    """
-    validate_head(prefix, state, hidden_size, width, projection_dim, depth)
-    nodes, initializers = [], []
-    input_axes = _initializer(np.asarray([-1], dtype=np.int64), f"{prefix}.input_l2_axes")
-    input_epsilon = _initializer(np.asarray(1e-12, dtype=np.float32), f"{prefix}.input_l2_epsilon")
-    initializers.extend([input_axes, input_epsilon])
-    input_norm = _append_node(
-        nodes, "ReduceL2", [input_value, input_axes], f"{prefix}/input_l2_norm",
-        name=f"{prefix}/InputReduceL2", keepdims=1,
-    )
-    input_denominator = _append_node(
-        nodes, "Max", [input_norm, input_epsilon], f"{prefix}/input_l2_denominator",
-        name=f"{prefix}/InputL2Epsilon",
-    )
-    value = _append_node(
-        nodes, "Div", [input_value, input_denominator], f"{prefix}/normalized_input",
-        name=f"{prefix}/InputL2Normalize",
-    )
-    value = append_linear(nodes, initializers, value, state, "inp", prefix)
-    value = _append_node(nodes, "Gelu", [value], f"{prefix}/inp_gelu", name=f"{prefix}/inp/Gelu")
-    # Released depth=3 checkpoints contain input, exactly one hidden block, and
-    # output; hidden/norm indices therefore use range(depth - 2).
-    for index in range(depth - 2):
-        value = append_linear(nodes, initializers, value, state, f"hidden.{index}", prefix)
-        scale = state[f"norms.{index}.weight"].detach().cpu().float().numpy()
-        bias = state[f"norms.{index}.bias"].detach().cpu().float().numpy()
-        scale_value = _initializer(scale, f"{prefix}.norms.{index}.weight")
-        bias_value = _initializer(bias, f"{prefix}.norms.{index}.bias")
-        initializers.extend([scale_value, bias_value])
-        norm = _append_node(
-            nodes, "LayerNormalization", [value, scale_value, bias_value],
-            f"{prefix}/norms.{index}",
-            name=f"{prefix}/norms.{index}/LayerNormalization",
-            axis=-1, epsilon=1e-5,
+    def __init__(self, checkpoint=None):
+        self.make_graph("clm_heads", opset=20)
+        if checkpoint is not None:
+            self.make_model(checkpoint)
+
+    def make_linear(self, value, state, prefix, node_prefix):
+        weight_name = f"{node_prefix}.{prefix}.weight"
+        bias_name = f"{node_prefix}.{prefix}.bias"
+        self.make_initializer(state[f"{prefix}.weight"].detach().cpu().float().numpy().T, weight_name)
+        self.make_initializer(state[f"{prefix}.bias"].detach().cpu().float().numpy(), bias_name)
+        output = f"{node_prefix}/{prefix}"
+        self.make_node("Gemm", [value, weight_name, bias_name], [output], name=f"{output}/Gemm")
+        return output
+
+    def make_head(self, input_name, output_name, state, prefix, hidden_size, width, projection_dim, depth):
+        """Emit input normalization, projection blocks, and output normalization."""
+        validate_head(prefix, state, hidden_size, width, projection_dim, depth)
+        input_axes = f"{prefix}.input_l2_axes"
+        input_epsilon = f"{prefix}.input_l2_epsilon"
+        self.make_initializer(np.asarray([-1], dtype=np.int64), input_axes)
+        self.make_initializer(np.asarray(1e-12, dtype=np.float32), input_epsilon)
+        input_norm = f"{prefix}/input_l2_norm"
+        self.make_node(
+            "ReduceL2",
+            [input_name, input_axes],
+            [input_norm],
+            name=f"{prefix}/InputReduceL2",
+            keepdims=1,
         )
-        value = _append_node(
-            nodes, "Gelu", [norm], f"{prefix}/hidden.{index}_gelu",
-            name=f"{prefix}/hidden.{index}/Gelu",
+        input_denominator = f"{prefix}/input_l2_denominator"
+        self.make_node("Max", [input_norm, input_epsilon], [input_denominator], name=f"{prefix}/InputL2Epsilon")
+        value = f"{prefix}/normalized_input"
+        self.make_node("Div", [input_name, input_denominator], [value], name=f"{prefix}/InputL2Normalize")
+        linear = self.make_linear(value, state, "inp", prefix)
+        value = f"{prefix}/inp_gelu"
+        self.make_node("Gelu", [linear], [value], name=f"{prefix}/inp/Gelu")
+        # Depth counts the input and output layers as well as hidden blocks.
+        for index in range(depth - 2):
+            linear = self.make_linear(value, state, f"hidden.{index}", prefix)
+            scale_name = f"{prefix}.norms.{index}.weight"
+            bias_name = f"{prefix}.norms.{index}.bias"
+            self.make_initializer(state[f"norms.{index}.weight"].detach().cpu().float().numpy(), scale_name)
+            self.make_initializer(state[f"norms.{index}.bias"].detach().cpu().float().numpy(), bias_name)
+            norm = f"{prefix}/norms.{index}"
+            self.make_node(
+                "LayerNormalization",
+                [linear, scale_name, bias_name],
+                [norm],
+                name=f"{norm}/LayerNormalization",
+                axis=-1,
+                epsilon=1e-5,
+            )
+            value = f"{prefix}/hidden.{index}_gelu"
+            self.make_node("Gelu", [norm], [value], name=f"{prefix}/hidden.{index}/Gelu")
+        value = self.make_linear(value, state, "out", prefix)
+        axes = f"{prefix}.l2_axes"
+        epsilon = f"{prefix}.l2_epsilon"
+        self.make_initializer(np.asarray([-1], dtype=np.int64), axes)
+        self.make_initializer(np.asarray(1e-12, dtype=np.float32), epsilon)
+        norm = f"{prefix}/l2_norm"
+        self.make_node("ReduceL2", [value, axes], [norm], name=f"{prefix}/ReduceL2", keepdims=1)
+        denominator = f"{prefix}/l2_denominator"
+        # F.normalize uses max(norm, eps), including for a zero projection.
+        self.make_node("Max", [norm, epsilon], [denominator], name=f"{prefix}/L2Epsilon")
+        self.make_node("Div", [value, denominator], [output_name], name=f"{prefix}/L2Normalize")
+
+    def make_model(self, checkpoint):
+        hidden_size = int(checkpoint["hidden_size"])
+        projection_dim = int(checkpoint["projection_dim"])
+        width = int(checkpoint["cfg"]["width"])
+        depth = int(checkpoint["cfg"]["depth"])
+        for input_name, output_name, key, prefix in (
+            ("state_hidden_states", "state_embedding", "state_head", "state"),
+            ("action_hidden_states", "action_embedding", "action_head", "action"),
+        ):
+            self.model.graph.inputs.append(self.make_value(input_name, ir.DataType.FLOAT, [None, hidden_size]))
+            self.make_head(input_name, output_name, checkpoint[key], prefix, hidden_size, width, projection_dim, depth)
+            self.model.graph.outputs.append(self.make_value(output_name, ir.DataType.FLOAT, [None, projection_dim]))
+        logit_scale = float(checkpoint["logit_scale"].item())
+        if not math.isfinite(logit_scale):
+            raise ValueError("CLM logit_scale must be finite")
+        scale = math.exp(min(logit_scale, math.log(100.0)))
+        self.make_initializer(np.asarray(scale, dtype=np.float32), "effective_logit_scale.value")
+        self.make_node(
+            "Identity",
+            ["effective_logit_scale.value"],
+            ["effective_logit_scale"],
+            name="effective_logit_scale/Identity",
         )
-    value = append_linear(nodes, initializers, value, state, "out", prefix)
-    axes = _initializer(np.asarray([-1], dtype=np.int64), f"{prefix}.l2_axes")
-    epsilon = _initializer(np.asarray(1e-12, dtype=np.float32), f"{prefix}.l2_epsilon")
-    initializers.extend([axes, epsilon])
-    norm = _append_node(
-        nodes, "ReduceL2", [value, axes], f"{prefix}/l2_norm",
-        name=f"{prefix}/ReduceL2", keepdims=1,
-    )
-    # torch.nn.functional.normalize divides by max(norm, eps), which keeps a
-    # zero projection finite while preserving ordinary L2 normalization.
-    denominator = _append_node(
-        nodes, "Max", [norm, epsilon], f"{prefix}/l2_denominator", name=f"{prefix}/L2Epsilon"
-    )
-    _append_node(nodes, "Div", [value, denominator], output_name, name=f"{prefix}/L2Normalize")
+        self.model.graph.outputs.append(self.make_value("effective_logit_scale", ir.DataType.FLOAT, []))
+        self.model.metadata_props.update(
+            {
+                "model_type": "clm-v0.1-8b",
+                "pooling": "last_token",
+                "scoring": "effective_logit_scale * dot(state_embedding, action_embedding)",
+                "artifact_revision": clm_artifact_revision(),
+            }
+        )
+
+
+def append_linear(nodes, initializers, value, state, prefix, node_prefix):
+    """Compatibility wrapper emitting one affine layer through Model."""
+    builder = CLMModel()
+    builder.values[value.name] = value
+    output = builder.make_linear(value.name, state, prefix, node_prefix)
+    emitted_nodes = list(builder.model.graph)
+    builder.model.graph.remove(emitted_nodes)
+    nodes.extend(emitted_nodes)
+    initializers.extend(builder.model.graph.initializers.values())
+    builder.model.graph.initializers.clear()
+    return builder.make_value(output)
+
+
+def build_head_nodes(input_value, output_name, state, prefix, hidden_size, width, projection_dim, depth):
+    """Compatibility wrapper returning a head's inherited-emitter nodes and weights."""
+    builder = CLMModel()
+    builder.values[input_value.name] = input_value
+    builder.make_head(input_value.name, output_name, state, prefix, hidden_size, width, projection_dim, depth)
+    nodes = list(builder.model.graph)
+    builder.model.graph.remove(nodes)
+    initializers = list(builder.model.graph.initializers.values())
+    builder.model.graph.initializers.clear()
     return nodes, initializers
 
 
@@ -238,51 +282,7 @@ def build_clm_model(checkpoint: dict) -> ir.Model:
     embeddings and the capped effective logit scale. Invalid head schemas raise
     ``ValueError``.
     """
-    hidden_size = int(checkpoint["hidden_size"])
-    projection_dim = int(checkpoint["projection_dim"])
-    width = int(checkpoint["cfg"]["width"])
-    depth = int(checkpoint["cfg"]["depth"])
-    nodes, initializers, inputs, outputs = [], [], [], []
-    for input_name, output_name, key, prefix in (
-        ("state_hidden_states", "state_embedding", "state_head", "state"),
-        ("action_hidden_states", "action_embedding", "action_head", "action"),
-    ):
-        input_value = ir.Value(
-            name=input_name, type=ir.TensorType(ir.DataType.FLOAT), shape=ir.Shape([None, hidden_size])
-        )
-        inputs.append(input_value)
-        head_nodes, head_initializers = build_head_nodes(
-            input_value, output_name, checkpoint[key], prefix, hidden_size, width, projection_dim, depth
-        )
-        nodes.extend(head_nodes)
-        initializers.extend(head_initializers)
-        output = head_nodes[-1].outputs[0]
-        output.type = ir.TensorType(ir.DataType.FLOAT)
-        output.shape = ir.Shape([None, projection_dim])
-        outputs.append(output)
-    logit_scale = float(checkpoint["logit_scale"].item())
-    if not math.isfinite(logit_scale):
-        raise ValueError("CLM logit_scale must be finite")
-    scale = math.exp(min(logit_scale, math.log(100.0)))
-    scale_value = _initializer(np.asarray(scale, dtype=np.float32), "effective_logit_scale.value")
-    initializers.append(scale_value)
-    output = _append_node(nodes, "Identity", [scale_value], "effective_logit_scale")
-    output.type = ir.TensorType(ir.DataType.FLOAT)
-    output.shape = ir.Shape([])
-    outputs.append(output)
-    graph = ir.Graph(
-        inputs, outputs, nodes=nodes, name="clm_heads",
-        initializers=initializers, opset_imports={"": 20},
-    )
-    return ir.Model(
-        graph, ir_version=10, producer_name="onnxruntime-genai",
-        metadata_props={
-            "model_type": "clm-v0.1-8b",
-            "pooling": "last_token",
-            "scoring": "effective_logit_scale * dot(state_embedding, action_embedding)",
-            "artifact_revision": clm_artifact_revision(),
-        },
-    )
+    return CLMModel(checkpoint).model
 
 
 def export_clm_components(options, output_root: Path) -> dict:
@@ -297,9 +297,8 @@ def export_clm_components(options, output_root: Path) -> dict:
         raise ValueError(f"CLM artifact_revision must be {revision}")
     checkpoint = load_clm_checkpoint(options.model_source)
     filename = "clm_heads.onnx"
-    from .base import Model  # noqa: PLC0415
-
-    Model.save_onnx_model(build_clm_model(checkpoint), output_root / filename)
+    builder = CLMModel(checkpoint)
+    builder.save_onnx_model(builder.model, output_root / filename)
     return {
         "schema_version": 1,
         "model_type": "clm-v0.1-8b",

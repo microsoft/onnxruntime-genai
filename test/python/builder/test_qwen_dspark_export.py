@@ -72,6 +72,7 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=Non
         context_length=32768,
         original_context_length=131072,
         ep=ep,
+        model=ir.Model(ir.Graph([], [], nodes=[]), ir_version=10),
     )
     return model
 
@@ -249,7 +250,7 @@ def test_webgpu_drafter_omits_attention_metadata(tmp_path):
         ir.DataType.FLOAT16,
         paged_block_size=256,
         max_position_embeddings=128,
-        include_attention_metadata=False,
+        ep="webgpu",
     )
 
     builder.declare_io()
@@ -453,7 +454,7 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     class StubDSparkBuilder:
         def __init__(self, _draft_dir, _target_dir, _io_dtype, _paged_block_size, max_position, **_kwargs):
             captured["max_position"] = max_position
-            captured["include_attention_metadata"] = _kwargs["include_attention_metadata"]
+            captured["ep"] = _kwargs["ep"]
 
         def make_model(self):
             pass
@@ -467,7 +468,7 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     model.make_dspark_model(str(tmp_path))
 
     assert captured["max_position"] == model.decoder.context_length
-    assert captured["include_attention_metadata"] is True
+    assert captured["ep"] == model.decoder.ep
 
 
 @pytest.mark.parametrize("prefix_caching", [None, False, True])

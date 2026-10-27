@@ -16,8 +16,7 @@ from tqdm import tqdm
 from .base import Model
 
 
-# Deliberately not a `Model` subclass: a block drafter emits a hand-written graph, so it shares
-# only the two stateless `Model` helpers below rather than the decoder builder's contract.
+# Block drafters share Model's graph lifecycle while retaining their packed block I/O.
 class BlockDrafterBuilder:
     """Shared graph, initializer, I/O, and file plumbing for block drafters."""
 
@@ -40,16 +39,8 @@ class BlockDrafterBuilder:
     embed_adoption = None
 
     def make_graph(self, graph_name, const_prefix):
-        self.values: dict[str, ir.Value] = {}
-        self.node_names: set[str] = set()
-        self.graph = ir.Graph(
-            inputs=(),
-            outputs=(),
-            nodes=(),
-            opset_imports={"": 21, "com.microsoft": 1},
-            name=graph_name,
-        )
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
+        Model.make_graph(self, graph_name, opset=21)
+        self.graph.opset_imports["com.microsoft"] = 1
         self.const_cache: dict[str, str] = {}
         self.const_prefix = const_prefix
 
@@ -264,9 +255,15 @@ class BlockDrafterBuilder:
         No weights are produced for the quantized form: `adopt_target_tensors` copies the
         target's once it has been saved.
         """
+        if self.exclude_embeds:
+            return "inputs_embeds"
+        if self.target_model is not None and self.embed_quant is None:
+            return self.make_decoder_embedding(name, rows)
         output = self.out(name)
         if self.embed_quant is None:
-            self.make_initializer(self.weights["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype)
+            self.make_initializer(
+                self.weights["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype
+            )
             self.make_node("Gather", ["model.embed_tokens.weight", "input_ids"], [output], name=name)
         else:
             bits = self.embed_quant["bits"]
@@ -296,11 +293,96 @@ class BlockDrafterBuilder:
         self.make_value(output, self.external_dtype, [rows, self.hidden_size])
         return output
 
+    def make_decoder_embedding(self, name, rows):
+        """Reuse the decoder's lookup, including tied-weight transforms and quantized tables."""
+        nodes = {node.name: node for node in self.target_model.graph}
+        source = next(
+            (
+                nodes[f"/model/embed_tokens/{op}"].outputs[0]
+                for op in ("Slice", "GatherBlockQuantized", "Gather")
+                if f"/model/embed_tokens/{op}" in nodes
+            ),
+            None,
+        )
+        if source is None:
+            raise ValueError("The decoder graph has no token embedding lookup to share.")
+        if source.dtype is not None and source.dtype != self.external_dtype:
+            raise ValueError("The decoder embedding must match the drafter's I/O dtype.")
+        missing = []
+
+        def copy_value(value):
+            producer = value.producer()
+            if producer is None and value.const_value is None and value in self.target_model.graph.inputs:
+                if value.dtype != ir.DataType.INT64:
+                    raise ValueError(f"Unexpected decoder embedding input '{value.name}'.")
+                return "input_ids"
+            if value.name in self.values:
+                return value.name
+            if producer is None:
+                copied = self.make_value(value.name, value.dtype, value.shape)
+                copied.const_value = value.const_value
+                copied.metadata_props.update(value.metadata_props)
+                if copied.const_value is None:
+                    missing.append(value.name)
+                else:
+                    self.graph.register_initializer(copied)
+                return value.name
+            inputs = [copy_value(input_value) if input_value is not None else "" for input_value in producer.inputs]
+            output_names = [output.name for output in producer.outputs]
+            node = self.make_node(
+                producer.op_type,
+                inputs,
+                output_names,
+                name=producer.name,
+                domain=producer.domain,
+                **{key: attribute.value for key, attribute in producer.attributes.items()},
+            )
+            node.metadata_props.update(producer.metadata_props)
+            for output in producer.outputs:
+                shape = (
+                    [
+                        rows if isinstance(dim, ir.SymbolicDim) and dim.value == "num_tokens" else dim
+                        for dim in output.shape
+                    ]
+                    if output.shape is not None
+                    else None
+                )
+                copied = self.make_value(output.name, output.dtype, shape)
+                copied.metadata_props.update(output.metadata_props)
+            return value.name
+
+        root = copy_value(source)
+        if missing:
+            self.embed_adoption = {"initializers": tuple(missing)}
+        output = self.out(name)
+        self.make_node("Identity", [root], [output], name=name)
+        self.make_value(output, self.external_dtype, [rows, self.hidden_size])
+        return output
+
     def pending_adoptions(self):
         """Return the adoption records still waiting on the target's saved bytes."""
         return [adoption for adoption in (self.embed_adoption, self.lm_head_adoption) if adoption is not None]
 
-    def adopt_target_tensors(self, target_model_path):
+    def embedding_initializers(self):
+        """Find the lookup's tensors, including a tied LM-head table."""
+        names = set()
+
+        def visit(value):
+            if value is None:
+                return
+            if value.name in self.graph.initializers:
+                if value.name.startswith(("model.embed_tokens.", "lm_head.MatMul.")):
+                    names.add(value.name)
+            elif value.producer() is not None:
+                for input_value in value.producer().inputs:
+                    visit(input_value)
+
+        for node in self.graph:
+            if node.name in ("/dflash2/embed_tokens/Gather", "/dspark/embed_tokens/Gather"):
+                visit(node.outputs[0])
+        return frozenset(names)
+
+    def adopt_target_tensors(self, target_model_path, embedding_model_path=None):
         """Fill the drafter's shared tensors from the saved target model.
 
         Called between the target's save and the drafter's, so `target_model_path` exists and
@@ -312,7 +394,25 @@ class BlockDrafterBuilder:
             return
         target = ir.load(target_model_path)
         for adoption in pending:
-            self.adopt_target_node(target, adoption, os.path.basename(target_model_path))
+            source = (
+                ir.load(embedding_model_path)
+                if adoption is self.embed_adoption and embedding_model_path is not None
+                else target
+            )
+            if "node" in adoption:
+                self.adopt_target_node(
+                    source,
+                    adoption,
+                    os.path.basename(embedding_model_path or target_model_path)
+                    if adoption is self.embed_adoption
+                    else os.path.basename(target_model_path),
+                )
+            else:
+                for initializer_name in adoption["initializers"]:
+                    tensor = source.graph.initializers[initializer_name].const_value
+                    value = self.make_value(initializer_name, tensor.dtype, tensor.shape)
+                    value.const_value = tensor
+                    self.graph.register_initializer(value)
         self.embed_adoption = None
         self.lm_head_adoption = None
 
@@ -431,8 +531,7 @@ class BlockDrafterBuilder:
             # `MatMulNBits` takes the activations first and the packed weight second.
             "weight_input": 1,
             "reason": (
-                "Both models run the same head, so a mismatch here means the target would "
-                "reject nearly every draft."
+                "Both models run the same head, so a mismatch here means the target would reject nearly every draft."
             ),
         }
 
@@ -544,7 +643,9 @@ class BlockDrafterBuilder:
             ("past_sequence_lengths", ir.DataType.INT32, ["batch_size"]),
             ("block_table", ir.DataType.INT32, ["batch_size", "max_num_blocks"]),
         ]
-        if self.include_attention_metadata:
+        if self.exclude_embeds:
+            declarations.append(("inputs_embeds", self.external_dtype, ["num_block", self.hidden_size]))
+        if self.ep == "cuda":
             declarations.append(("attention_metadata", ir.DataType.INT32, [3]))
         for name, dtype, shape in declarations:
             if name == "q_row_map" and not self.uses_q_row_map:
@@ -604,7 +705,7 @@ class BlockDrafterBuilder:
                 "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                 "past_sequence_lengths": "past_sequence_lengths",
                 "block_table": "block_table",
-                "attention_metadata": "attention_metadata" if self.include_attention_metadata else "",
+                "attention_metadata": "attention_metadata" if self.ep == "cuda" else "",
                 "past_key_names": "past_key_values.%d.key",
                 "past_value_names": "past_key_values.%d.value",
             },
@@ -617,4 +718,6 @@ class BlockDrafterBuilder:
         }
         if not self.uses_q_row_map:
             del section["inputs"]["q_row_map"]
+        if self.exclude_embeds:
+            section["inputs"]["inputs_embeds"] = "inputs_embeds"
         return section

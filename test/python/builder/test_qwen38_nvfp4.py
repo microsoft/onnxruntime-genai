@@ -260,7 +260,7 @@ def test_official_fp8_repository_uses_shared_cache(fp8_checkpoint, monkeypatch):
         download_options.update(kwargs)
         return str(fp8_checkpoint)
 
-    monkeypatch.setattr("models.builders.qwen3_8.snapshot_download", download)
+    monkeypatch.setattr("models.builders.qwen3_8.model.snapshot_download", download)
     wrapper = object.__new__(Qwen4ExpModel)
     wrapper.text_only = True
     wrapper.decoder = SimpleNamespace(
@@ -679,7 +679,7 @@ def test_nvfp4_mtp_unquantized_module_config_and_explicit_override(monkeypatch, 
 
     def mtp_builder(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options, multimodal_rotary=False):
         captured.update(io_dtype=io_dtype, options=extra_options, multimodal=multimodal_rotary)
-        return SimpleNamespace()
+        return SimpleNamespace(sparse_indexer_attrs={"index_share": {"enabled": True}})
 
     monkeypatch.setitem(Qwen4ExpModel.make_mtp_model.__globals__, "Qwen4ExpMTPTextModel", mtp_builder)
     wrapper.make_mtp_model(SimpleNamespace(), ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, options)
@@ -688,6 +688,7 @@ def test_nvfp4_mtp_unquantized_module_config_and_explicit_override(monkeypatch, 
     assert all(captured["options"][key] == value for key, value in runtime_options.items())
     assert config.moe.type == "nvfp4"
     assert captured["multimodal"] is multimodal
+    assert wrapper.mtp_attrs["index_share"]["enabled"]
 
 
 def test_fp8_blocks_validate_partial_blocks_without_conversion():

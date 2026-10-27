@@ -13,6 +13,8 @@ import numpy as np
 import onnx_ir as ir
 import torch
 
+from .base import Model
+
 
 def kev_policy() -> dict:
     """Return immutable KEV artifact and graph policy."""
@@ -23,10 +25,21 @@ def kev_policy() -> dict:
         "head_keys": ("q.weight", "q.bias", "k.weight", "k.bias"),
         "base_model": "Qwen/Qwen3.5-4B-Base",
         "checkpoint_keys": {
-            "args", "suite_sha256", "init_source", "temperature_fit",
-            "base", "head", "base_revision", "lora", "head_dim",
-            "option_isolation", "special_embeddings", "weights_dtype",
-            "temperature", "holdout", "lora_placement",
+            "args",
+            "suite_sha256",
+            "init_source",
+            "temperature_fit",
+            "base",
+            "head",
+            "base_revision",
+            "lora",
+            "head_dim",
+            "option_isolation",
+            "special_embeddings",
+            "weights_dtype",
+            "temperature",
+            "holdout",
+            "lora_placement",
         },
     }
 
@@ -62,10 +75,7 @@ def load_kev_checkpoint(source: str | Path) -> dict:
     if adapter_config.get("peft_type") != "LORA":
         raise ValueError("KEV adapter_config.json peft_type must be LORA")
     if adapter_config.get("base_model_name_or_path") != policy["base_model"]:
-        raise ValueError(
-            "KEV adapter base_model_name_or_path must be "
-            f"{policy['base_model']}"
-        )
+        raise ValueError(f"KEV adapter base_model_name_or_path must be {policy['base_model']}")
     try:
         checkpoint = torch.load(source / "head.pt", map_location="cpu", weights_only=True)
     except Exception as error:
@@ -73,10 +83,7 @@ def load_kev_checkpoint(source: str | Path) -> dict:
     if not isinstance(checkpoint, dict):
         raise ValueError("KEV head.pt must be an object")
     if set(checkpoint) != policy["checkpoint_keys"]:
-        raise ValueError(
-            "KEV head.pt keys must be exactly "
-            f"{sorted(policy['checkpoint_keys'])}"
-        )
+        raise ValueError(f"KEV head.pt keys must be exactly {sorted(policy['checkpoint_keys'])}")
     state = checkpoint["head"]
     if not isinstance(state, dict) or set(state) != set(policy["head_keys"]):
         raise ValueError("KEV head state must contain exactly q.weight/q.bias/k.weight/k.bias")
@@ -106,113 +113,131 @@ def load_kev_checkpoint(source: str | Path) -> dict:
     return {"state": state, "head_dim": 256, "temperature": float(temperature)}
 
 
-def build_kev_model(checkpoint: dict) -> ir.Model:
-    """Build KEV's grouped option-scoring IR model.
+class KEVModel(Model):
+    """Build grouped option scoring using the shared Model emitters."""
 
-    ``checkpoint`` is the normalized result of ``load_kev_checkpoint`` (or an
-    equivalent validated synthetic fixture). The graph gathers caller-selected
-    decision and box-end token states, projects Q/K, scales their dot products,
-    masks invalid options, and returns raw scores plus per-question
-    probabilities.
-    """
-    state = checkpoint["state"]
-    policy = kev_policy()
-    head_dim, hidden_size = state["q.weight"].shape
-    initializers = {}
+    def __init__(self, checkpoint):
+        self.make_graph("kev_head", opset=18)
+        self.make_model(checkpoint)
 
-    def initializer(array, name):
-        value = ir.Value(
-            name=name,
-            type=ir.TensorType(ir.DataType.from_numpy(array.dtype)),
-            shape=ir.Shape(array.shape),
-            const_value=ir.tensor(array, name=name),
+    def make_model(self, checkpoint):
+        state = checkpoint["state"]
+        policy = kev_policy()
+        head_dim, hidden_size = state["q.weight"].shape
+        for name in policy["head_keys"]:
+            array = state[name].detach().cpu().float().numpy()
+            if name.endswith(".weight"):
+                array = array.T
+            self.make_initializer(array, name)
+        self.make_initializer(
+            np.asarray(math.sqrt(head_dim) * checkpoint["temperature"], dtype=np.float32), "score_denominator"
         )
-        initializers[name] = value
-        return value
-
-    for name in policy["head_keys"]:
-        array = state[name].detach().cpu().float().numpy()
-        if name.endswith(".weight"):
-            array = array.T
-        initializer(array, name)
-    scale = np.asarray(math.sqrt(head_dim) * checkpoint["temperature"], dtype=np.float32)
-    denominator = initializer(scale, "score_denominator")
-    masked_score = initializer(np.asarray(-3.4028235e38, dtype=np.float32), "masked_score")
-    zero = initializer(np.asarray(0.0, dtype=np.float32), "zero_probability")
-    unsqueeze_axis = initializer(np.asarray([1], dtype=np.int64), "unsqueeze_axis")
-    query_axes = initializer(np.asarray([1, 2], dtype=np.int64), "query_unsqueeze_axes")
-    option_axis = initializer(np.asarray([2], dtype=np.int64), "option_unsqueeze_axis")
-    query_suffix = initializer(np.asarray([1, hidden_size], dtype=np.int64), "query_shape_suffix")
-    option_suffix = initializer(np.asarray([hidden_size], dtype=np.int64), "option_shape_suffix")
-    reduce_axis = initializer(np.asarray([-1], dtype=np.int64), "reduce_axis")
-    inputs = [
-        ir.Value(name=name, type=ir.TensorType(dtype), shape=ir.Shape(shape))
+        self.make_initializer(np.asarray(-3.4028235e38, dtype=np.float32), "masked_score")
+        self.make_initializer(np.asarray(0.0, dtype=np.float32), "zero_probability")
+        self.make_initializer(np.asarray([1], dtype=np.int64), "unsqueeze_axis")
+        self.make_initializer(np.asarray([1, 2], dtype=np.int64), "query_unsqueeze_axes")
+        self.make_initializer(np.asarray([2], dtype=np.int64), "option_unsqueeze_axis")
+        self.make_initializer(np.asarray([1, hidden_size], dtype=np.int64), "query_shape_suffix")
+        self.make_initializer(np.asarray([hidden_size], dtype=np.int64), "option_shape_suffix")
+        self.make_initializer(np.asarray([-1], dtype=np.int64), "reduce_axis")
         for name, dtype, shape in (
             ("hidden_states", ir.DataType.FLOAT, [None, None, hidden_size]),
             ("decide_indices", ir.DataType.INT64, [None]),
             ("option_indices", ir.DataType.INT64, [None, None]),
             ("option_mask", ir.DataType.BOOL, [None, None]),
+        ):
+            self.model.graph.inputs.append(self.make_value(name, dtype, shape))
+        # GatherElements selects sequence positions independently for each batch row.
+        self.make_node("Shape", ["decide_indices"], ["query_batch_shape"], name="query_batch_shape/Shape")
+        self.make_node(
+            "Concat",
+            ["query_batch_shape", "query_shape_suffix"],
+            ["query_gather_shape"],
+            name="query_gather_shape/Concat",
+            axis=0,
         )
-    ]
-    hidden_states, decide_indices, option_indices, option_mask = inputs
-    nodes = []
-
-    def emit(op_type, inputs, output_name, *, name=None, **attributes):
-        node = ir.Node(
-            "", op_type, inputs, ir.convenience.convert_attributes(attributes),
-            outputs=[ir.Value(name=output_name)], name=name,
+        self.make_node(
+            "Unsqueeze", ["decide_indices", "query_unsqueeze_axes"], ["query_indices"], name="query_indices/Unsqueeze"
         )
-        nodes.append(node)
-        return node.outputs[0]
+        self.make_node(
+            "Expand",
+            ["query_indices", "query_gather_shape"],
+            ["expanded_query_indices"],
+            name="expanded_query_indices/Expand",
+        )
+        self.make_node(
+            "GatherElements",
+            ["hidden_states", "expanded_query_indices"],
+            ["grouped_decide_states"],
+            name="grouped_decide_states/GatherElements",
+            axis=1,
+        )
+        self.make_node(
+            "Squeeze", ["grouped_decide_states", "unsqueeze_axis"], ["decide_states"], name="decide_states/Squeeze"
+        )
+        self.make_node("Shape", ["option_indices"], ["option_batch_shape"], name="option_batch_shape/Shape")
+        self.make_node(
+            "Concat",
+            ["option_batch_shape", "option_shape_suffix"],
+            ["option_gather_shape"],
+            name="option_gather_shape/Concat",
+            axis=0,
+        )
+        self.make_node(
+            "Unsqueeze",
+            ["option_indices", "option_unsqueeze_axis"],
+            ["grouped_option_indices"],
+            name="grouped_option_indices/Unsqueeze",
+        )
+        self.make_node(
+            "Expand",
+            ["grouped_option_indices", "option_gather_shape"],
+            ["expanded_option_indices"],
+            name="expanded_option_indices/Expand",
+        )
+        self.make_node(
+            "GatherElements",
+            ["hidden_states", "expanded_option_indices"],
+            ["option_states"],
+            name="option_states/GatherElements",
+            axis=1,
+        )
+        self.make_node("Gemm", ["decide_states", "q.weight", "q.bias"], ["q"], name="q/Gemm")
+        self.make_node("MatMul", ["option_states", "k.weight"], ["k_linear"], name="k/MatMul")
+        self.make_node("Add", ["k_linear", "k.bias"], ["k"], name="k/Add")
+        self.make_node("Unsqueeze", ["q", "unsqueeze_axis"], ["q_grouped"], name="q_grouped/Unsqueeze")
+        self.make_node("Mul", ["q_grouped", "k"], ["qk"], name="qk/Mul")
+        self.make_node("ReduceSum", ["qk", "reduce_axis"], ["dot"], name="dot/ReduceSum", keepdims=0)
+        self.make_node("Div", ["dot", "score_denominator"], ["scores"], name="scores/Div")
+        # Mask before softmax so normalization is per question, excluding padded options.
+        self.make_node(
+            "Where", ["option_mask", "scores", "masked_score"], ["masked_scores"], name="masked_scores/Where"
+        )
+        self.make_node("Softmax", ["masked_scores"], ["raw_probabilities"], name="raw_probabilities/Softmax", axis=-1)
+        self.make_node(
+            "Where",
+            ["option_mask", "raw_probabilities", "zero_probability"],
+            ["probabilities"],
+            name="probabilities/Where",
+        )
+        for name in ("probabilities", "scores"):
+            self.model.graph.outputs.append(self.make_value(name, ir.DataType.FLOAT, [None, None]))
+        self.model.metadata_props.update(
+            {
+                "model_type": "jaredpalmer/kev-4b",
+                "head_dim": str(head_dim),
+                "temperature": repr(policy["temperature"]),
+                "pooling": "gather decide_indices and option_indices (box_end)",
+                "grouping": "option_indices and option_mask are [question, option]",
+                "adapter_revision": policy["adapter_revision"],
+                "base_revision": policy["base_revision"],
+            }
+        )
 
-    # GatherElements selects sequence positions independently for each
-    # batch row while retaining the hidden dimension.
-    query_batch_shape = emit("Shape", [decide_indices], "query_batch_shape")
-    query_gather_shape = emit("Concat", [query_batch_shape, query_suffix], "query_gather_shape", axis=0)
-    query_indices = emit("Unsqueeze", [decide_indices, query_axes], "query_indices")
-    expanded_query_indices = emit("Expand", [query_indices, query_gather_shape], "expanded_query_indices")
-    grouped_decide_states = emit(
-        "GatherElements", [hidden_states, expanded_query_indices], "grouped_decide_states", axis=1
-    )
-    decide_states = emit("Squeeze", [grouped_decide_states, unsqueeze_axis], "decide_states")
-    option_batch_shape = emit("Shape", [option_indices], "option_batch_shape")
-    option_gather_shape = emit("Concat", [option_batch_shape, option_suffix], "option_gather_shape", axis=0)
-    grouped_option_indices = emit("Unsqueeze", [option_indices, option_axis], "grouped_option_indices")
-    expanded_option_indices = emit(
-        "Expand", [grouped_option_indices, option_gather_shape], "expanded_option_indices"
-    )
-    option_states = emit("GatherElements", [hidden_states, expanded_option_indices], "option_states", axis=1)
-    q = emit("Gemm", [decide_states, initializers["q.weight"], initializers["q.bias"]], "q", name="q/Gemm")
-    k_linear = emit("MatMul", [option_states, initializers["k.weight"]], "k_linear", name="k/MatMul")
-    k = emit("Add", [k_linear, initializers["k.bias"]], "k", name="k/Add")
-    q_grouped = emit("Unsqueeze", [q, unsqueeze_axis], "q_grouped")
-    qk = emit("Mul", [q_grouped, k], "qk")
-    dot = emit("ReduceSum", [qk, reduce_axis], "dot", keepdims=0)
-    scores = emit("Div", [dot, denominator], "scores")
-    # Mask before the final axis softmax so normalization occurs separately
-    # within every question and padded options receive no probability mass.
-    masked_scores = emit("Where", [option_mask, scores, masked_score], "masked_scores")
-    raw_probabilities = emit("Softmax", [masked_scores], "raw_probabilities", axis=-1)
-    probabilities = emit("Where", [option_mask, raw_probabilities, zero], "probabilities")
-    for output in (probabilities, scores):
-        output.type = ir.TensorType(ir.DataType.FLOAT)
-        output.shape = ir.Shape([None, None])
-    graph = ir.Graph(
-        inputs, [probabilities, scores], nodes=nodes, name="kev_head",
-        initializers=list(initializers.values()), opset_imports={"": 18},
-    )
-    return ir.Model(
-        graph, ir_version=10, producer_name="onnxruntime-genai",
-        metadata_props={
-            "model_type": "jaredpalmer/kev-4b",
-            "head_dim": str(head_dim),
-            "temperature": repr(policy["temperature"]),
-            "pooling": "gather decide_indices and option_indices (box_end)",
-            "grouping": "option_indices and option_mask are [question, option]",
-            "adapter_revision": policy["adapter_revision"],
-            "base_revision": policy["base_revision"],
-        },
-    )
+
+def build_kev_model(checkpoint: dict) -> ir.Model:
+    """Build grouped scores and probabilities from a normalized KEV checkpoint."""
+    return KEVModel(checkpoint).model
 
 
 def export_kev_components(options, output_root: Path) -> dict:
@@ -225,16 +250,13 @@ def export_kev_components(options, output_root: Path) -> dict:
     """
     policy = kev_policy()
     if options.artifact_revision != policy["adapter_revision"]:
-        raise ValueError(
-            f"KEV artifact_revision must be {policy['adapter_revision']}"
-        )
+        raise ValueError(f"KEV artifact_revision must be {policy['adapter_revision']}")
     if options.base_revision != policy["base_revision"]:
         raise ValueError(f"KEV base_revision must be {policy['base_revision']}")
     checkpoint = load_kev_checkpoint(options.model_source)
     filename = "kev_head.onnx"
-    from .base import Model  # noqa: PLC0415
-
-    Model.save_onnx_model(build_kev_model(checkpoint), output_root / filename)
+    builder = KEVModel(checkpoint)
+    builder.save_onnx_model(builder.model, output_root / filename)
     return {
         "schema_version": 1,
         "model_type": "jaredpalmer/kev-4b",

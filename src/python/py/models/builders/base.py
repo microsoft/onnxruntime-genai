@@ -165,15 +165,8 @@ class Model:
         self.revision = extra_options.get("base_revision")
 
         # States for building the model
-        self.graph = ir.Graph(
-            inputs=(),
-            outputs=(),
-            nodes=(),
-            opset_imports={"": 22, "com.microsoft": 1},
-            name="main_graph",
-        )
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
-        self.values = {}
+        self.make_graph("main_graph", opset=22)
+        self.graph.opset_imports["com.microsoft"] = 1
 
         # EP-specific variables
         self.ep = ep
@@ -1559,6 +1552,13 @@ class Model:
             ]
 
         self.update_genai_config(genai_config)
+        if hasattr(self, "embedding_model"):
+            genai_config["model"]["embedding"] = {
+                "filename": self.embedding_model.filename,
+                "session_options": {"intra_op_num_threads": 1},
+                "inputs": {"input_ids": "input_ids"},
+                "outputs": {"inputs_embeds": "inputs_embeds"},
+            }
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
@@ -2104,6 +2104,30 @@ class Model:
             commit_suffix = f"+{commit[:7]}" if (commit := cls.get_genai_commit()) else ""
             model.producer_version = f"{version}{commit_suffix}"
 
+    def make_packed_sparse_attention_indexer_merge(self, name, inputs, max_output_entries):
+        outputs = [f"{name}/output_{i}" for i in range(3)]
+        self.make_node(
+            "PackedSparseAttentionIndexerMerge",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            policy_mode="append_range",
+            max_output_entries=max_output_entries,
+        )
+        for output, shape in zip(
+            outputs,
+            (["indexshare_merge_queries", max_output_entries], ["indexshare_merge_queries"], ["indexshare_merge_queries"]),
+            strict=True,
+        ):
+            self.make_value(output, ir.DataType.INT32, shape)
+
+    def make_graph(self, graph_name, opset=20, ir_version=10):
+        self.graph = ir.Graph(inputs=(), outputs=(), nodes=(), name=graph_name, opset_imports={"": opset})
+        self.model = ir.Model(self.graph, ir_version=ir_version, producer_name="onnxruntime-genai")
+        self.values = {}
+        self.node_names = set()
+
     @classmethod
     def save_onnx_model(cls, model, path, callback=None):
         """Save weights and supported tensor attributes to one private data file."""
@@ -2247,6 +2271,8 @@ class Model:
         # cache dir and saves afterwards, so it may already be gone.
         if os.path.isdir(self.cache_dir) and not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
+        if hasattr(self, "embedding_model"):
+            self.embedding_model.save_model(out_dir)
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -2338,7 +2364,7 @@ class Model:
         node = ir.node(
             op_type,
             inputs=input_values,
-            attributes=kwargs,
+            attributes={key: int(value) if isinstance(value, bool) else value for key, value in kwargs.items()},
             domain=domain,
             outputs=output_values,
             name=name,
@@ -2809,6 +2835,48 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=shape)
 
+    def make_scaled_silu(self, name, root_input, shape, branches):
+        output = f"{name}/output_0"
+        self.make_node(
+            "ScaledSiLU",
+            inputs=[root_input],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            alpha=1.0 / branches,
+        )
+        self.make_value(output, self.io_dtype, shape)
+        return output
+
+    def make_hyper_connection_pre_mix(self, name, streams, pre_mix, token_shape, branches):
+        output = f"{name}/output_0"
+        self.make_node(
+            "HyperConnectionPreMix",
+            inputs=[streams, pre_mix],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            num_branches=branches,
+            reduction_scale=1.0 / branches,
+        )
+        self.make_value(output, self.io_dtype, [*token_shape, self.hidden_size])
+        return output
+
+    def make_hyper_connection_post_mix(
+        self, name, streams, block_output, post_mix, token_shape, branches, output_name=None
+    ):
+        output = f"{name}/output_0" if output_name is None else output_name
+        self.make_node(
+            "HyperConnectionPostMix",
+            inputs=[streams, block_output, post_mix],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            num_branches=branches,
+        )
+        self.make_value(output, self.io_dtype, [*token_shape, branches * self.hidden_size])
+        return output
+
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):
         output = f"{name}/output_0"
         self.make_node(
@@ -3202,6 +3270,8 @@ class Model:
     def make_packed_matmul_int4_class(self, *matmuls):
         if not matmuls:
             raise ValueError("Packed MatMul requires at least one projection.")
+        if any(hasattr(matmul, "qweight") != hasattr(matmuls[0], "qweight") for matmul in matmuls[1:]):
+            raise ValueError("All MatMuls must have the same weight representation for packed MatMul.")
         if not hasattr(matmuls[0], "qweight"):
             return self.make_packed_matmul_float_class(*matmuls)
 
@@ -3210,14 +3280,32 @@ class Model:
             raise ValueError("All MatMuls must have the same bits for packed MatMul.")
         if any(matmul.group_size != first.group_size for matmul in matmuls[1:]):
             raise ValueError("All MatMuls must have the same group size for packed MatMul.")
+        if any(matmul.in_features != first.in_features for matmul in matmuls[1:]):
+            raise ValueError("All MatMuls must have the same input size for packed MatMul.")
+        if any(
+            (getattr(matmul, "qzeros", None) is None) != (getattr(first, "qzeros", None) is None)
+            for matmul in matmuls[1:]
+        ):
+            raise ValueError("All MatMuls must have the same zero-point representation for packed MatMul.")
+        g_idx = getattr(first, "g_idx", None)
+        if any(
+            (getattr(matmul, "g_idx", None) is None) != (g_idx is None)
+            or (g_idx is not None and not torch.equal(matmul.g_idx, g_idx))
+            for matmul in matmuls[1:]
+        ):
+            raise ValueError("All MatMuls must have the same channel mapping for packed MatMul.")
 
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
                 self.qweight = torch.cat([matmul.qweight for matmul in matmuls], dim=0)
                 self.scales = torch.cat([matmul.scales for matmul in matmuls], dim=0)
-                self.qzeros = torch.cat([matmul.qzeros for matmul in matmuls], dim=0)
-                self.g_idx = first.g_idx
+                self.qzeros = (
+                    torch.cat([matmul.qzeros for matmul in matmuls], dim=0)
+                    if getattr(first, "qzeros", None) is not None
+                    else None
+                )
+                self.g_idx = g_idx
 
                 self.in_features = first.in_features
                 self.out_features = sum(matmul.out_features for matmul in matmuls)
@@ -3418,6 +3506,37 @@ class Model:
             )
 
         return gather_output
+
+    def make_embedding_component(self, embedding):
+        component = copy.copy(self)
+        if hasattr(component, "embedding_model"):
+            del component.embedding_model
+        component.filename = "embedding.onnx"
+        component.make_graph("token_embedding")
+        component.input_names = {"input_ids": "input_ids"}
+        component.layernorm_attrs = copy.deepcopy(self.layernorm_attrs)
+        component.layernorm_attrs["cast"]["use_fp32"] = False
+        component.model.graph.inputs.append(
+            component.make_value("input_ids", self.input_types["input_ids"], self.input_shapes["input_ids"])
+        )
+        component.make_embedding(embedding)
+        if hasattr(component, "weights"):
+            del component.weights
+        component.exact_quant_override_names = self.exact_quant_override_names.intersection(component.node_names)
+        component.exact_quant_overrides = {
+            name: override for name, override in self.exact_quant_overrides.items()
+            if name in component.node_names
+        }
+        component.make_node(
+            "Identity",
+            inputs=[component.layernorm_attrs["root_input"]],
+            outputs=["inputs_embeds"],
+            name="/model/embedding_output/Identity",
+        )
+        component.model.graph.outputs.append(
+            component.make_value("inputs_embeds", self.io_dtype, self.make_hidden_state_shape())
+        )
+        return component
 
     def make_embedding(self, embedding):
         basename = "/model/embed_tokens"
@@ -6719,6 +6838,8 @@ class Model:
                     self.make_embedding(module.weight)
                 else:
                     # Exclude embedding layer from model
+                    if self.extra_options.get("dflash2_path"):
+                        self.embedding_model = self.make_embedding_component(module.weight)
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
                     self.layernorm_attrs["skip_input"] = "inputs_embeds"
 

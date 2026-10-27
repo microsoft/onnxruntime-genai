@@ -26,8 +26,8 @@ MASK embedding otherwise, and predicts the token at ``anchor_position + j + 1``.
 row 0 predicts nothing, which is why its block is one row wider for the same draft count.)
 
 The drafter checkpoint ships no embedding and no LM head; both are the target's and are
-emitted with the target's initializer names so ``share_external_initializers`` can fold them
-back onto ``text.onnx.data``.
+emitted with the target's initializer names for runtime sharing. Each graph retains its
+own external-data file.
 """
 
 from __future__ import annotations
@@ -58,12 +58,16 @@ class DSparkBuilder(BlockDrafterBuilder):
         filename="dspark.onnx",
         num_draft_tokens=None,
         top_k=16,
-        include_attention_metadata=True,
+        ep="cuda",
         embed_quant=None,
         lm_head_quant=None,
+        target_model=None,
+        exclude_embeds=False,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
+        self.target_model = target_model
+        self.exclude_embeds = exclude_embeds
         # The drafter is a bf16 checkpoint whose activations leave the fp16 range (the fc output
         # alone reaches ~1e4), so the body runs in bf16. Only the tensors it shares with the fp16
         # target -- the aux hidden states, the embedding table and the FP8 LM head -- stay at the
@@ -74,7 +78,7 @@ class DSparkBuilder(BlockDrafterBuilder):
         self.lm_head_quant = lm_head_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
-        self.include_attention_metadata = include_attention_metadata
+        self.ep = ep
 
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)
@@ -334,7 +338,7 @@ class DSparkBuilder(BlockDrafterBuilder):
                 k_norm,
                 "",
                 "",  # k_scale / v_scale
-                "attention_metadata" if self.include_attention_metadata else "",
+                "attention_metadata" if self.ep == "cuda" else "",
             ],
             [attn_out, f"present.{i}.key", f"present.{i}.value"],
             name=attn_name,
@@ -540,13 +544,17 @@ class DSparkBuilder(BlockDrafterBuilder):
                 continue
             with safetensors_torch.safe_open(shard, framework="pt") as f:
                 for key in f.keys():  # noqa: SIM118 -- safetensors handles are not iterable
-                    if key in embed_keys:
+                    if key in embed_keys and self.target_model is None and not self.exclude_embeds:
                         weights["embed_tokens.weight"] = f.get_tensor(key)
                     elif key == "lm_head.weight":
                         weights["lm_head.weight"] = f.get_tensor(key)
                     elif key in ("lm_head.weight_scale", "lm_head.weight_global_scale"):
                         weights["lm_head.weight_scale"] = f.get_tensor(key)
-        for required in ("embed_tokens.weight", "lm_head.weight"):
+        for required in (
+            ("embed_tokens.weight", "lm_head.weight")
+            if self.target_model is None and not self.exclude_embeds
+            else ("lm_head.weight",)
+        ):
             if required not in weights:
                 raise ValueError(f"Could not find '{required}' in the target checkpoint '{self.target_dir}'.")
         self.validate_weights(weights)
@@ -558,7 +566,11 @@ class DSparkBuilder(BlockDrafterBuilder):
             weights,
             {
                 "fc.weight": (self.hidden_size, self.aux_hidden_size),
-                "embed_tokens.weight": (self.vocab_size, self.hidden_size),
+                **(
+                    {"embed_tokens.weight": (self.vocab_size, self.hidden_size)}
+                    if self.target_model is None and not self.exclude_embeds
+                    else {}
+                ),
                 "lm_head.weight": (self.vocab_size, self.hidden_size),
                 "markov_head.markov_w1.weight": (self.vocab_size, self.markov_rank),
                 "markov_head.markov_w2.weight": (self.vocab_size, self.markov_rank),

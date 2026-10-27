@@ -5,7 +5,7 @@ import onnx_ir as ir
 import torch
 from loaders.engram import EngramWeights
 
-from .qwen3_8_graph import Qwen4ExpGraphModel
+from .graph import Qwen4ExpGraphModel
 
 
 class Qwen4ExpEngramModel(Qwen4ExpGraphModel):

@@ -71,3 +71,12 @@ def test_paged_io_and_mrope_helpers_are_inlined():
 
 def test_mlp_fusion_has_no_builder_configuration_flag():
     assert "fuse_gate_up" not in make_model().mlp_attrs
+
+
+def test_model_node_converts_boolean_flags_to_onnx_integer_attributes():
+    model = make_model()
+    model.make_value("data", ir.DataType.FLOAT16, [1, 2])
+    model.make_node("ReduceSum", ["data"], ["sum"], name="/sum", keepdims=False)
+    node = next(node for node in model.graph if node.name == "/sum")
+    assert type(node.attributes["keepdims"].value) is int
+    ir.to_proto(model.model)

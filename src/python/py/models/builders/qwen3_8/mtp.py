@@ -4,7 +4,9 @@
 import copy
 import os
 
-from .qwen3_8_text import Qwen4ExpTextModel
+import onnx_ir as ir
+
+from .text import Qwen4ExpTextModel
 
 
 class Qwen4ExpMTPTextModel(Qwen4ExpTextModel):
@@ -33,6 +35,44 @@ class Qwen4ExpMTPTextModel(Qwen4ExpTextModel):
         self.input_names["hidden_states"] = "hidden_states"
         self.input_types["hidden_states"] = self.io_dtype
         self.input_shapes["hidden_states"] = self.make_hidden_state_shape(last_dim=self.hyper_connection_attrs["hidden_size"])
+        self.make_index_share_init(extra_options)
+
+    def make_index_share_init(self, extra_options):
+        if not self.use_paged_attention:
+            return
+        max_draft_tokens = int(extra_options.get("max_draft_tokens", 7))
+        if not 1 <= max_draft_tokens <= 7:
+            raise ValueError("IndexShare export requires between one and seven draft tokens.")
+        capacity = self.sparse_indexer_attrs["token_budget"] + self.sparse_indexer_attrs["compress_ratio"] - 1
+        self.sparse_indexer_attrs["index_share"] = {
+            "enabled": True,
+            "base_capacity": capacity,
+            "max_draft_tokens": max_draft_tokens,
+            "indices_output": "present_indices",
+            "counts_output": "present_counts",
+            "status_output": "indexer_status",
+        }
+        for name, dtype, shape in (
+            ("mode", ir.DataType.INT32, [1]),
+            ("projection_rows", ir.DataType.INT64, ["indexer_projection_rows"]),
+            ("past_indices", ir.DataType.INT32, ["indexshare_rows", capacity]),
+            ("past_counts", ir.DataType.INT32, ["indexshare_rows"]),
+            ("base_row_indices", ir.DataType.INT32, ["indexshare_merge_queries"]),
+            ("range_starts", ir.DataType.INT32, ["indexshare_merge_queries"]),
+            ("range_ends", ir.DataType.INT32, ["indexshare_merge_queries"]),
+        ):
+            self.input_names[name] = name
+            self.input_types[name] = dtype
+            self.input_shapes[name] = shape
+        output_capacity = capacity + max_draft_tokens - 1
+        for name, shape in (
+            ("present_indices", ["num_tokens", output_capacity]),
+            ("present_counts", ["num_tokens"]),
+            ("indexer_status", ["num_tokens"]),
+        ):
+            self.output_names[name] = name
+            self.output_types[name] = ir.DataType.INT32
+            self.output_shapes[name] = shape
 
     def get_final_hyper_connection_mixer(self):
         return self.mtp_weights.hyper_connection_mixer

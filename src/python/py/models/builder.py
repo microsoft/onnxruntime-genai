@@ -1034,8 +1034,9 @@ def get_args():
                     For models with multiple components, each component is exported to its own ONNX model.
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
-                text_only = Export only the standalone text model for Qwen4-Exp conditional-generation checkpoints.
-                    Includes token embeddings in model.onnx and omits the vision and multimodal embedding graphs.
+                text_only = Export only the text component of any supported multi-modal model.
+                    The text component may consist of one or more ONNX models, including auxiliary
+                    text models where applicable; non-text components are omitted.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.
                     Default behavior is to use the authentication token stored by `huggingface-cli login`.
                     If false, authentication with Hugging Face will be disabled.
@@ -1087,18 +1088,6 @@ def get_args():
                     dflash2_num_draft_tokens this does not change the exported drafter, so a model built
                     once can be re-tuned by editing the config. Default is unset, which leaves the runtime
                     default of 4 in effect.
-                dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
-                    Accepts true or false (default). Requires dflash2_path. Combines gate/up
-                    weights into one MatMul or MatMulNBits followed by Split. Preserves EP-specific
-                    activations and body quantization; does not change the target or LM head.
-                    Requires re-export and workload-specific performance/quality validation.
-                dflash2_fuse_qkv = Experimental DFlash 2 attention Q/K/V projection fusion.
-                    Accepts true or false (default). Requires dflash2_path. Stacks each layer's
-                    query-block rows over the shared context rows and projects both with one
-                    MatMul or MatMulNBits, feeding PagedAttention a packed QKV stream. Replaces
-                    five projections per layer with one; the Q computed for context rows is dropped.
-                    The fused drafter omits the q_row_map input, so it requires a runtime that
-                    treats q_row_map as optional; older runtimes reject the exported package.
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the

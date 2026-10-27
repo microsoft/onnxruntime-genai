@@ -218,10 +218,9 @@ def _export_attention_graph(tmp_path, monkeypatch, *, drafter):
     builder.num_kv_heads = kv_heads
     if drafter:
         builder.num_heads = num_heads
-        builder.attn_attrs = {"fuse_qkv": False}
         builder.hidden_size = 1
         builder.paged_block_size = _BLOCK_SIZE
-        builder.include_attention_metadata = True
+        builder.ep = "webgpu"
         builder.sliding_window = 2048
         builder.is_causal = False
         builder.rms_eps = 1e-5
@@ -233,7 +232,7 @@ def _export_attention_graph(tmp_path, monkeypatch, *, drafter):
         builder.weights[f"{prefix}.o_proj.weight"] = torch.zeros(1, num_heads * head_size)
         for kind in ("q", "k"):
             builder.weights[f"{prefix}.{kind}_norm.weight"] = torch.ones(head_size)
-        builder._make_attention(0, "hidden", ("context_key", "context_value"), "num_tokens")
+        builder._make_attention(0, "hidden", "context", "num_tokens")
     else:
         builder.num_attn_heads = num_heads
         builder.window_size = -1
@@ -264,7 +263,7 @@ def _export_attention_graph(tmp_path, monkeypatch, *, drafter):
         assert node.input[12] and node.input[13] and attributes["qk_norm_epsilon"] == pytest.approx(1e-5)
     cache_shape = ["num_blocks", _BLOCK_SIZE, kv_heads, head_size]
     shapes = {
-        0: ["num_tokens", num_heads * head_size],
+        0: ["num_tokens", (num_heads + (2 * kv_heads if drafter else 0)) * head_size],
         1: ["num_tokens", kv_heads * head_size],
         2: ["num_tokens", kv_heads * head_size],
         3: cache_shape,

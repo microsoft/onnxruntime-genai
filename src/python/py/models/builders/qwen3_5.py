@@ -1068,20 +1068,12 @@ class Qwen35MoEModel(MTPModel):
             if num_draft_tokens < 1:
                 raise ValueError("dflash2_num_draft_tokens must be a positive integer.")
 
-        fuse_gate_up = str(extra_options.get("dflash2_fuse_gate_up", False)).lower()
-        if fuse_gate_up not in ("true", "false"):
-            raise ValueError("dflash2_fuse_gate_up must be true or false.")
-        fuse_qkv = str(extra_options.get("dflash2_fuse_qkv", False)).lower()
-        if fuse_qkv not in ("true", "false"):
-            raise ValueError("dflash2_fuse_qkv must be true or false.")
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
             "compute_dtype": drafter_io_dtype,
             "num_draft_tokens": num_draft_tokens,
             "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
             "quant_config": drafter_quant_config,
-            "fuse_gate_up": fuse_gate_up == "true",
-            "fuse_qkv": fuse_qkv == "true",
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
@@ -1121,11 +1113,10 @@ class Qwen35MoEModel(MTPModel):
             quant=self.block_drafter_quant(self.dflash2_attrs["precision"], self.dflash2_attrs["quant_config"]),
             lm_head_quant=self.block_drafter_lm_head_quant(),
             embed_quant=self.block_drafter_embed_quant(),
-            fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
-            include_attention_metadata=True,
             ep=self.decoder.ep,
             compute_dtype=self.dflash2_attrs["compute_dtype"],
-            fuse_qkv=self.dflash2_attrs["fuse_qkv"],
+            target_model=(self.decoder.embedding_model if self.decoder.exclude_embeds else self.decoder).model,
+            exclude_embeds=self.decoder.exclude_embeds,
         )
         self.dflash2.make_model()
 
@@ -1140,16 +1131,28 @@ class Qwen35MoEModel(MTPModel):
         )
 
     def save_block_drafter_model(self, drafter, output_dir, drafter_name, shared_weight_policies=None):
-        """Adopt the target's tensors, save the drafter, and fold what the two share onto one copy."""
+        """Save model-owned data and describe matching target tensors for runtime sharing."""
         if hasattr(drafter, "adopt_target_tensors"):
-            drafter.adopt_target_tensors(os.path.join(output_dir, self.decoder.filename))
+            target_path = os.path.join(output_dir, self.decoder.filename)
+            embedding_model = getattr(self.decoder, "embedding_model", None)
+            if embedding_model is not None:
+                drafter.adopt_target_tensors(
+                    target_path,
+                    embedding_model_path=os.path.join(output_dir, embedding_model.filename),
+                )
+            else:
+                drafter.adopt_target_tensors(target_path)
         drafter.save_model(output_dir)
 
         initializer_names = set(getattr(getattr(drafter, "graph", None), "initializers", {}))
-        embedding_initializers = frozenset(name for name in initializer_names if name.startswith("model.embed_tokens."))
+        embedding_initializers = (
+            drafter.embedding_initializers()
+            if hasattr(drafter, "embedding_initializers")
+            else frozenset(name for name in initializer_names if name.startswith("model.embed_tokens."))
+        )
         head_initializers = frozenset(name for name in initializer_names if name.startswith("lm_head.MatMul."))
         embedding = getattr(drafter, "embed_quant", None)
-        if not embedding_initializers:
+        if not embedding_initializers and not getattr(drafter, "exclude_embeds", False):
             embedding_initializers = (
                 frozenset(
                     {
@@ -1174,6 +1177,8 @@ class Qwen35MoEModel(MTPModel):
         private = set(head_initializers - adopted) if head is not None else set()
 
         if shared_weight_policies is not None:
+            if embedding_initializers & head_initializers and set(shared_weight_policies.values()) == {"required", "off"}:
+                raise ValueError("A tied embedding and LM head cannot have conflicting required/off sharing policies.")
             for tensor_name, initializers in (
                 ("embedding", embedding_initializers),
                 ("lm_head", head_initializers),
@@ -1327,8 +1332,10 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
-            include_attention_metadata=True,
+            ep=self.decoder.ep,
             embed_quant=self.block_drafter_embed_quant(),
+            target_model=self.decoder.model,
+            exclude_embeds=self.decoder.exclude_embeds,
             lm_head_quant=self.block_drafter_lm_head_quant(),
         )
         self.dspark.make_model()

@@ -14,7 +14,7 @@ from transformers import LlamaConfig
 
 base = load_builder_module("base")
 qwen = load_builder_module("qwen3_8")
-graph_module = load_builder_module("qwen3_8_graph")
+graph_module = load_builder_module("qwen3_8.graph")
 
 
 @pytest.mark.parametrize("eos,expected", [(0, 0), (42, 42), ([7, 8], 7), ((9, 10), 9)])

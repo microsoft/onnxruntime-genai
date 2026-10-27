@@ -12,7 +12,7 @@ from models.builders.expansions.webgpu import WebGPU
 from models.builders.qwen import Qwen3VLTextModel
 from models.builders.qwen3_5 import Qwen35MoETextModel, Qwen35MTPModel, Qwen35TextModel
 from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel, Qwen38Engram
-from models.builders.qwen3_8_graph import Qwen4ExpGraphModel
+from models.builders.qwen3_8.graph import Qwen4ExpGraphModel
 
 
 @pytest.mark.parametrize(
@@ -190,7 +190,8 @@ def test_expansion_overrides_have_existing_builder_counterparts():
     builders = Path(__file__).parents[3] / "src/python/py/models/builders"
     names = {
         method.name
-        for path in builders.glob("*.py")
+        for path in builders.rglob("*.py")
+        if "expansions" not in path.relative_to(builders).parts
         for cls in ast.parse(path.read_text(encoding="utf-8")).body
         if isinstance(cls, ast.ClassDef)
         for method in cls.body
@@ -265,5 +266,5 @@ def test_qwen38_engram_dispatches_to_dense_or_paged_builder(monkeypatch, paged):
     kind = "paged" if paged else "dense"
     assert model.make_ple(2, ple, "hidden_states") == f"{kind}_output"
     assert calls == [(kind, model, 2, ple, "hidden_states")]
-    assert Qwen38Engram.__module__ == "models.builders.qwen3_8"
+    assert Qwen38Engram.__module__ == "models.builders.qwen3_8.model"
     assert "make_paged_ple" in Qwen4ExpTextModel.__dict__

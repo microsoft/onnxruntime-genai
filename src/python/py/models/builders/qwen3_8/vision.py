@@ -4,7 +4,7 @@
 import numpy as np
 import onnx_ir as ir
 
-from .qwen3_8_graph import Qwen4ExpGraphModel
+from .graph import Qwen4ExpGraphModel
 
 
 class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
@@ -149,6 +149,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
         self.make_node(op_type, [root_input], [output], name=name, **attributes)
         self.make_value(output, dtype, shape)
         return output
+
     def make_grid_values(self):
         flat = "/vision/grid/Reshape/output_0"
         self.make_reshape(
@@ -169,6 +170,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             )
             values.append(f"{name}/output_0")
         return values
+
     def make_patch_positions(self, num_patches, height, width):
         positions = "/vision/positions/Range/output_0"
         self.make_node(
@@ -239,6 +241,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             "Add", "/vision/positions/col/Add", [col_base, in_col], ir.DataType.INT64, ["num_patches"]
         )
         return row, col
+
     def make_axis_interpolation(self, label, position, size):
         position_float = self.make_cast(
             f"/vision/interpolation/{label}/position/Cast", position, ir.DataType.FLOAT, ["num_patches"]
@@ -350,6 +353,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             axis=1,
         )
         return tap_indices, tap_weights
+
     def make_position_embeddings(self, row, col, height, width):
         h_taps, h_weights = self.make_axis_interpolation("h", row, height)
         w_taps, w_weights = self.make_axis_interpolation("w", col, width)
@@ -455,6 +459,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             ["num_patches", self.hidden_size],
         )
         return output
+
     def make_rotary_embeddings(self, row, col):
         row_float = self.make_cast("/vision/rotary/row/Cast", row, ir.DataType.FLOAT, ["num_patches"])
         col_float = self.make_cast("/vision/rotary/col/Cast", col, ir.DataType.FLOAT, ["num_patches"])
@@ -517,6 +522,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             cos = self.make_cast("/vision/rotary/cos/Cast", cos, self.io_dtype, ["num_patches", self.head_size])
             sin = self.make_cast("/vision/rotary/sin/Cast", sin, self.io_dtype, ["num_patches", self.head_size])
         return cos, sin
+
     def apply_rotary(self, layer_id, label, tensor, cos, sin):
         basename = f"/visual/blocks/{layer_id}/attn/{label}_rotary"
         first = f"{basename}/Split/output_0"
@@ -575,6 +581,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             self.io_dtype,
             ["num_patches", self.num_heads, self.head_size],
         )
+
     def make_frame_attention_mask(self, layer_id):
         name = f"/visual/blocks/{layer_id}/attn/frame_mask"
         frame_ids = self.make_binary(
@@ -718,6 +725,7 @@ class Qwen4ExpVisionModel(Qwen4ExpGraphModel):
             context_flat,
             ["num_patches", self.hidden_size],
         )
+
     def make_gelu(self, name, root_input, shape, approximate="none"):
         output = f"{name}/output_0"
         self.make_node("Gelu", [root_input], [output], name=name, approximate=approximate)

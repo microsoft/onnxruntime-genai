@@ -32,6 +32,19 @@ def test_model_builder_uses_ir_instead_of_onnx_graph_helpers():
                 assert node.attr not in forbidden, f"{path}:{node.lineno}"
 
 
+def test_exported_graphs_use_base_model_initialization():
+    models_dir = Path(__file__).parents[3] / "src/python/py/models"
+    for path in (models_dir / "builders").rglob("*.py"):
+        if path.name == "base.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "ir":
+                    assert node.func.attr not in {"Model", "Graph"}, f"{path}:{node.lineno}"
+    assert not (models_dir / "split_cpu_embedding.py").exists()
+    assert not (models_dir / "kv_cache_variant.py").exists()
+
+
 @pytest.mark.parametrize(
     ("relative_path", "dependency"),
     [
@@ -117,9 +130,9 @@ def test_load_weights_requires_only_selected_transformers_class(weight_loader, m
 @pytest.mark.parametrize(
     ("weight_loader", "model_type"),
     [
-        (("qwen3_8_text", "Qwen4ExpTextModel"), "qwen3_5"),
-        (("qwen3_8_text", "Qwen4ExpTextModel"), "qwen4_exp_text"),
-        (("qwen3_8_mtp", "Qwen4ExpMTPTextModel"), "qwen3_5"),
+        (("qwen3_8.text", "Qwen4ExpTextModel"), "qwen3_5"),
+        (("qwen3_8.text", "Qwen4ExpTextModel"), "qwen4_exp_text"),
+        (("qwen3_8.mtp", "Qwen4ExpMTPTextModel"), "qwen3_5"),
     ],
     indirect=["weight_loader"],
 )
@@ -157,7 +170,7 @@ def test_qwen4_exp_weight_loader_is_independent_of_runtime_model_type(weight_loa
     [
         (("base", "Model"), "Qwen3_5ForConditionalGeneration", "4.45.0"),
         (("base", "Model"), "Qwen3_5ForConditionalGeneration", None),
-        (("qwen3_8_text", "Qwen4ExpTextModel"), "Qwen4ExpForConditionalGeneration", "5.20.1"),
+        (("qwen3_8.text", "Qwen4ExpTextModel"), "Qwen4ExpForConditionalGeneration", "5.20.1"),
         (("mistral", "Mistral3TextModel"), "Mistral3ForConditionalGeneration", "4.45.0"),
         (("qwen", "VideoChatFlashQwenModel"), "Qwen2ForCausalLM", "4.45.0"),
     ],

@@ -58,6 +58,76 @@ def _tiny_clm_checkpoint():
     }
 
 
+@pytest.mark.parametrize(
+    "builder_class,build_model,checkpoint_factory,graph_name,opset",
+    [
+        (clm.CLMModel, clm.build_clm_model, _tiny_clm_checkpoint, "clm_heads", 20),
+        (kev.KEVModel, kev.build_kev_model, lambda: _tiny_kev_checkpoint(), "kev_head", 18),
+    ],
+)
+def test_component_builders_use_inherited_model_emitters(
+    monkeypatch, builder_class, build_model, checkpoint_factory, graph_name, opset
+):
+    assert issubclass(builder_class, base.Model)
+    calls = {}
+    for method_name in ("make_graph", "make_node", "make_value", "make_initializer"):
+        original = getattr(base.Model, method_name)
+        assert getattr(builder_class, method_name) is original
+        calls[method_name] = []
+
+        def track(self, *args, method_name=method_name, original=original, **kwargs):
+            calls[method_name].append(self)
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(base.Model, method_name, track)
+
+    model = build_model(checkpoint_factory())
+    builder = calls["make_graph"][0]
+    assert isinstance(builder, builder_class)
+    assert builder.model is model
+    assert model.graph.name == graph_name
+    assert model.graph.opset_imports == {"": opset}
+    assert model.ir_version == 10
+    assert model.producer_name == "onnxruntime-genai"
+    assert len(calls["make_graph"]) == 1
+    assert len(calls["make_node"]) == len(model.graph)
+    assert len(calls["make_initializer"]) == len(model.graph.initializers)
+    for method_calls in calls.values():
+        assert method_calls
+        assert all(instance is builder for instance in method_calls)
+    for value in (*model.graph.inputs, *model.graph.outputs, *model.graph.initializers.values()):
+        assert builder.values[value.name] is value
+    for node in model.graph:
+        assert node.name in builder.node_names
+        for value in (*node.inputs, *node.outputs):
+            assert builder.values[value.name] is value
+    checker.check_model(ir.serde.serialize_model(model))
+
+
+def test_clm_head_compatibility_wrappers_use_shared_values_and_match_math():
+    builder = clm.CLMModel()
+    value = builder.make_value("hidden", ir.DataType.FLOAT, [None, 3])
+    state = _tiny_clm_head(1)
+    nodes, initializers = clm.build_head_nodes(value, "embedding", state, "state", 3, 4, 2, 3)
+    assert nodes[0].inputs[0] is value
+    builder.model.graph.inputs.append(value)
+    builder.model.graph.extend(nodes)
+    for initializer in initializers:
+        builder.model.graph.register_initializer(initializer)
+    output = nodes[-1].outputs[0]
+    output.dtype = ir.DataType.FLOAT
+    output.shape = ir.Shape([None, 2])
+    builder.model.graph.outputs.append(output)
+    hidden = torch.tensor([[0.2, -0.3, 0.7], [0.0, 0.0, 0.0]], dtype=torch.float32)
+    actual = ReferenceEvaluator(ir.serde.serialize_model(builder.model)).run(None, {"hidden": hidden.numpy()})[0]
+    np.testing.assert_allclose(actual, _torch_clm_head(hidden, state), rtol=2e-5, atol=2e-5)
+    linear_nodes, linear_initializers = [], []
+    linear = clm.append_linear(linear_nodes, linear_initializers, value, state, "inp", "state")
+    assert linear_nodes[0].inputs[0] is value
+    assert linear_nodes[0].outputs[0] is linear
+    assert {initializer.name for initializer in linear_initializers} == {"state.inp.weight", "state.inp.bias"}
+
+
 def _torch_clm_head(value, state):
     value = F.normalize(value, dim=-1)
     value = F.gelu(F.linear(value, state["inp.weight"], state["inp.bias"]))
@@ -150,9 +220,7 @@ def test_clm_logit_scale_is_finite_and_clamped_before_exp():
         clm.build_clm_model(checkpoint)
 
 
-def test_clm_checkpoint_preflight_validates_heads_and_scale(
-    tmp_path
-):
+def test_clm_checkpoint_preflight_validates_heads_and_scale(tmp_path):
     checkpoint = _real_clm_checkpoint()
     checkpoint["state_head"]["inp.weight"] = torch.zeros(5, 4096)
     path = tmp_path / "invalid-head.pt"
@@ -318,9 +386,7 @@ def test_kev_tiny_graph_weights_masked_grouped_softmax_math():
 def test_component_ir_export_roundtrip_preserves_contract(component, monkeypatch, tmp_path):
     if component == "clm":
         checkpoint = _tiny_clm_checkpoint()
-        module, loader, builder, exporter = (
-            clm, "load_clm_checkpoint", clm.build_clm_model, clm.export_clm_components
-        )
+        module, loader, builder, exporter = (clm, "load_clm_checkpoint", clm.build_clm_model, clm.export_clm_components)
         revision, base_revision = clm.clm_artifact_revision(), "caller-pin"
         filename, component_name, opset = "clm_heads.onnx", "clm_heads", 20
         input_contract = [
@@ -339,9 +405,7 @@ def test_component_ir_export_roundtrip_preserves_contract(component, monkeypatch
         }
     else:
         checkpoint = _tiny_kev_checkpoint()
-        module, loader, builder, exporter = (
-            kev, "load_kev_checkpoint", kev.build_kev_model, kev.export_kev_components
-        )
+        module, loader, builder, exporter = (kev, "load_kev_checkpoint", kev.build_kev_model, kev.export_kev_components)
         policy = kev.kev_policy()
         revision, base_revision = policy["adapter_revision"], policy["base_revision"]
         filename, component_name, opset = "kev_head.onnx", "kev_head", 18
@@ -365,8 +429,10 @@ def test_component_ir_export_roundtrip_preserves_contract(component, monkeypatch
 
     monkeypatch.setattr(module, loader, lambda _: checkpoint)
     options = types.SimpleNamespace(
-        model_source="synthetic", artifact_revision=revision,
-        base_revision=base_revision, backbone_filename="backbone.onnx",
+        model_source="synthetic",
+        artifact_revision=revision,
+        base_revision=base_revision,
+        backbone_filename="backbone.onnx",
     )
     expected = builder(checkpoint)
     manifest = exporter(options, tmp_path)
@@ -449,15 +515,11 @@ def test_dispatch_validates_provenance_and_backbone(tmp_path):
         dispatch.validate_model_specific_backbone(options, config)
 
 
-def test_kev_adapter_loads_on_text_backbone_and_rejects_missing_weights(
-    monkeypatch
-):
+def test_kev_adapter_loads_on_text_backbone_and_rejects_missing_weights(monkeypatch):
     base_text = object()
     container = types.SimpleNamespace(model=base_text)
     merged = object()
-    load_result = types.SimpleNamespace(
-        missing_keys=[], unexpected_keys=[]
-    )
+    load_result = types.SimpleNamespace(missing_keys=[], unexpected_keys=[])
 
     class FakeAdapted:
         def merge_and_unload(self):
@@ -490,9 +552,7 @@ def test_kev_adapter_loads_on_text_backbone_and_rejects_missing_weights(
     save_and_load.load_peft_weights = fake_load_weights
     save_and_load.set_peft_model_state_dict = fake_set_state
     monkeypatch.setitem(sys.modules, "peft", peft)
-    monkeypatch.setitem(
-        sys.modules, "peft.utils.save_and_load", save_and_load
-    )
+    monkeypatch.setitem(sys.modules, "peft.utils.save_and_load", save_and_load)
 
     assert base.load_text_backbone_adapter(container, "adapter") is container
     assert calls["model"] is base_text
@@ -500,20 +560,13 @@ def test_kev_adapter_loads_on_text_backbone_and_rejects_missing_weights(
 
     load_result.missing_keys = ["base_model.model.layer.lora_A.default.weight"]
     with pytest.raises(ValueError, match="did not load exactly"):
-        base.load_text_backbone_adapter(
-            types.SimpleNamespace(model=base_text), "adapter"
-        )
+        base.load_text_backbone_adapter(types.SimpleNamespace(model=base_text), "adapter")
 
     nested_text = object()
     outer = types.SimpleNamespace(language_model=nested_text)
     nested_container = types.SimpleNamespace(model=outer)
     load_result.missing_keys = []
-    assert (
-        base.load_text_backbone_adapter(
-            nested_container, "adapter"
-        )
-        is nested_container
-    )
+    assert base.load_text_backbone_adapter(nested_container, "adapter") is nested_container
     assert calls["model"] is nested_text
     assert nested_container.model is outer
     assert outer.language_model is merged
@@ -533,11 +586,7 @@ def test_qwen35_linear_attention_uses_adapter_aware_matmul_outputs():
     builder.require_dense_linear_attention_gate = lambda *_: None
     builder.exclude_node_from_quantization = lambda *_: None
     builder.make_initializer = lambda *_args, **_kwargs: None
-    builder.make_transpose = (
-        lambda name, value, *_args: calls["transpose"].append(
-            (name, value)
-        )
-    )
+    builder.make_transpose = lambda name, value, *_args: calls["transpose"].append((name, value))
     attention = types.SimpleNamespace(
         in_proj_qkv=object(),
         in_proj_z=object(),
@@ -546,35 +595,23 @@ def test_qwen35_linear_attention_uses_adapter_aware_matmul_outputs():
         conv1d=types.SimpleNamespace(weight=torch.ones(1)),
     )
 
-    z, b, a, conv, _ = builder.make_linear_attention_input_proj(
-        0, attention, "root"
-    )
+    z, b, a, conv, _ = builder.make_linear_attention_input_proj(0, attention, "root")
     assert z.endswith("z_proj/MatMul/with_lora/output_0")
     assert b.endswith("b_proj/MatMul/with_lora/output_0")
     assert a.endswith("a_proj/MatMul/with_lora/output_0")
-    assert calls["transpose"][0][1].endswith(
-        "qkv_proj/MatMul/with_lora/output_0"
-    )
+    assert calls["transpose"][0][1].endswith("qkv_proj/MatMul/with_lora/output_0")
     assert conv.endswith("qkv_proj/Transpose/output_0")
 
     builder.linear_value_dim = 4
     builder.linear_num_value_heads = 1
     builder.use_paged_attention = False
     builder.layernorm_attrs = {"epsilon": 1e-5}
-    builder.make_gated_rms_norm = (
-        lambda name, **kwargs: calls["gated_norm"].append(
-            (name, kwargs)
-        )
-    )
+    builder.make_gated_rms_norm = lambda name, **kwargs: calls["gated_norm"].append((name, kwargs))
     attention.norm = types.SimpleNamespace(weight=torch.ones(4))
     attention.out_proj = object()
-    builder.make_linear_attention_output_proj(
-        0, attention, "attention", z
-    )
+    builder.make_linear_attention_output_proj(0, attention, "attention", z)
     assert calls["gated_norm"][0][1]["gate"] == z
-    assert builder.layernorm_attrs["skip_input"].endswith(
-        "out_proj/MatMul/with_lora/output_0"
-    )
+    assert builder.layernorm_attrs["skip_input"].endswith("out_proj/MatMul/with_lora/output_0")
 
 
 def test_model_specific_hf_pipeline_keeps_base_tokenizer_and_component_separate(tmp_path):
@@ -602,9 +639,7 @@ def test_model_specific_hf_pipeline_keeps_base_tokenizer_and_component_separate(
 
     conflicting = {"adapter_path": str(tmp_path / "other-adapter")}
     with pytest.raises(ValueError, match="must match adapter_path"):
-        dispatch.prepare_model_specific_hf(
-            kev_options, conflicting, policy["base_model"]
-        )
+        dispatch.prepare_model_specific_hf(kev_options, conflicting, policy["base_model"])
 
     clm_source = tmp_path / "clm"
     clm_source.mkdir()

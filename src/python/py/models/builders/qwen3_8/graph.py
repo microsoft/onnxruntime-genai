@@ -5,7 +5,7 @@ import os
 
 import onnx_ir as ir
 
-from .base import Model
+from ..base import Model
 
 
 class Qwen4ExpGraphModel(Model):
@@ -13,10 +13,7 @@ class Qwen4ExpGraphModel(Model):
         # Companion graphs reuse emission helpers without decoder configuration or cache state.
         self.io_dtype = ir.DataType(io_dtype)
         self.filename = filename
-        self.graph = ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 22}, name=graph_name)
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
-        self.values = {}
-        self.node_names = set()
+        self.make_graph(graph_name, opset=22)
 
     def save_model(self, output_dir):
         self.save_onnx_model(self.model, os.path.join(output_dir, self.filename))
@@ -41,6 +38,7 @@ class Qwen4ExpGraphModel(Model):
         self.make_node("Add", [matmul_output, bias_name], [add_output], name=add_name)
         self.make_value(add_output, self.io_dtype, shape)
         return add_output
+
     def make_layer_norm(self, name, layer_norm, root_input, shape):
         scale_name = f"{name}.weight"
         bias_name = f"{name}.bias"
@@ -59,6 +57,7 @@ class Qwen4ExpGraphModel(Model):
         )
         self.make_value(output, self.io_dtype, shape)
         return output
+
     def make_binary(self, op_type, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node(op_type, inputs, [output], name=name)

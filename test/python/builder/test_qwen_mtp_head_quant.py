@@ -51,6 +51,16 @@ class FakeQwen4ExpComponent(FakeComponent):
         self.hyper_connection_attrs = {"hidden_size": 8}
         self.output_shapes = {"hidden_states": ["batch_size", "sequence_length", 2]}
         self.filename = extra_options.get("filename", "text.onnx")
+        self.sparse_indexer_attrs = {
+            "index_share": {
+                "enabled": True,
+                "base_capacity": 35,
+                "max_draft_tokens": int(extra_options.get("max_draft_tokens", 7)),
+                "indices_output": "present_indices",
+                "counts_output": "present_counts",
+                "status_output": "indexer_status",
+            }
+        }
 
     def make_hidden_state_shape(self, last_dim=None):
         return ["batch_size", "sequence_length", last_dim or 2]
