@@ -49,6 +49,25 @@ and processor assets supply the fixture metadata.
 These are synthetic host-math and wiring tests, not pretrained-model feature parity,
 learned attention validation, public video support, or OpenVINO EP/device validation.
 
+## Gemma3 partitioned image-injection regression
+
+Run the CPU runtime regression from `test/python`:
+
+```sh
+python -m pytest -q --test_models ../models models/test_decoder_state_input_ids.py -k gemma3_partitioned
+```
+
+Six cases generate tiny ONNX vision, text-embedding and decoder graphs in pytest
+temporary directories. Direct tensor inputs check that the host merger replaces
+only image rows, while a diagnostic decoder exposes all received embeddings and
+token-type markers in its raw logits. Image/text-only prefill and two successive
+decode forwards cover int32/int64 markers and a configured decoder input name.
+Image cases also check full-prefill fallback when chunking is requested.
+ONNX and the existing `multimodal-decoder-no-input-ids` tokenizer assets are required.
+
+These are synthetic runtime-wiring tests, not image-preprocessing, pretrained-model
+parity, chunked image-prefill support, or OpenVINO EP/device validation.
+
 ## Parallel preprocessing checks
 
 After building a Release configuration, run the focused C++ suite:
