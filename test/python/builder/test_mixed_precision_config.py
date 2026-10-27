@@ -156,7 +156,6 @@ def test_make_config_mixed_layers_upgrades_sensitive_matmuls():
 def test_make_config_linear_attn_upgrades_linear_layers_only():
     model = Model.__new__(Model)
     model.layer_types = ["linear_attention", "full_attention"]
-    model.mlp_attrs = {"fuse_gate_up": False}
     model.make_matmul_mixed_precision({"linear_attn": "int8"})
 
     cfg = model.int4_customized_weight_config
@@ -167,15 +166,14 @@ def test_make_config_linear_attn_upgrades_linear_layers_only():
     assert not any(node.startswith("/model/layers.1/") for node in cfg)
 
 
-def test_make_config_linear_attn_remaps_fused_gate_up_projection():
+def test_make_config_linear_attn_configures_separate_projections_before_fusion():
     model = Model.__new__(Model)
     model.layer_types = ["linear_attention"]
-    model.mlp_attrs = {"fuse_gate_up": True}
 
     model.make_matmul_mixed_precision({"linear_attn": "int8"})
 
     cfg = model.int4_customized_weight_config
-    assert cfg["/model/layers.0/mlp/gate_up_proj/MatMul"] == {"bits": 8}
+    assert "/model/layers.0/mlp/gate_up_proj/MatMul" not in cfg
     assert cfg["/model/layers.0/mlp/gate_proj/MatMul"] == {"bits": 8}
     assert cfg["/model/layers.0/mlp/up_proj/MatMul"] == {"bits": 8}
 

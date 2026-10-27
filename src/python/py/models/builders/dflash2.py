@@ -84,8 +84,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.filename = filename
         self.paged_block_size = paged_block_size
         self.include_attention_metadata = include_attention_metadata
-        self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
-        self.attn_attrs = {"fuse_qkv": fuse_qkv}
+        self.attn_attrs = {"fuse_qkv": fuse_qkv, "fuse_gate_up": fuse_gate_up}
         # An unconsumed graph input is copied to the CPU by ORT, which breaks CUDA graph capture.
         self.uses_q_row_map = not fuse_qkv
 
@@ -575,7 +574,7 @@ class DFlash2Builder(BlockDrafterBuilder):
 
     def _make_mlp(self, i, x, w, rows_q):
         p = f"/dflash2/layers.{i}/mlp"
-        if self.mlp_attrs["fuse_gate_up"]:
+        if self.attn_attrs["fuse_gate_up"]:
             gate_up = self.matmul(
                 f"{p}/gate_up_proj/MatMul",
                 x,

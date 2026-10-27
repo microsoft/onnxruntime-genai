@@ -12,6 +12,10 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from onnxruntime.quantization.matmul_nbits_quantizer import (
+    DefaultWeightOnlyQuantConfig,
+    DefaultWeightOnlyQuantizer,
+)
 from safetensors.torch import save_file
 
 from models.builders.base import Model
@@ -281,47 +285,45 @@ def test_builder_exposes_the_api_the_composite_drives():
 
 @pytest.mark.parametrize("provider", ["cpu", "cuda", "webgpu", "dml", "trt-rtx"])
 def test_target_mlp_gate_up_fusion_preserves_projection_order(provider):
-    model = object.__new__(Model)
-    model.ep = provider
-    model.io_dtype = ir.DataType.FLOAT16
-    model.intermediate_size = 2
-    model.hidden_size = 3
-    model.mlp_attrs = {"output_0": "", "use_proj": True}
-    model.layernorm_attrs = {}
-    calls = {}
-
-    def make_matmul(self, projection, basename, root_input):
-        calls.setdefault("matmuls", []).append((basename, root_input, projection.weight.clone()))
-        return basename
-
-    def make_split(self, name, inputs, outputs, dtypes, shapes, axis=-1, num_outputs=None):
-        calls["split"] = (name, inputs, outputs, dtypes, shapes, axis, num_outputs)
-
-    model.make_matmul = types.MethodType(make_matmul, model)
-    model.make_split = types.MethodType(make_split, model)
-    model.make_activation = types.MethodType(lambda self, layer_id, root_input: f"/act/{layer_id}", model)
-    model.make_mul = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_hidden_state_shape = types.MethodType(lambda self, last_dim: ["tokens", last_dim], model)
-
+    model = _mlp_graph_model(provider=provider)
     mlp = types.SimpleNamespace(
         gate_proj=types.SimpleNamespace(weight=torch.full((2, 3), 1.0), bias=None),
         up_proj=types.SimpleNamespace(weight=torch.full((2, 3), 2.0), bias=None),
         down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
     )
-
     model.make_mlp(4, mlp, "residual")
 
-    fused_name, fused_input, fused_weight = calls["matmuls"][0]
-    assert fused_name == "/model/layers.4/mlp/gate_up_proj/MatMul"
-    assert fused_input == "residual"
-    torch.testing.assert_close(fused_weight[:2], mlp.gate_proj.weight)
-    torch.testing.assert_close(fused_weight[2:], mlp.up_proj.weight)
-    assert calls["split"][2] == [
+    fused = next(node for node in model.graph if node.name == "/model/layers.4/mlp/gate_up_proj/MatMul")
+    assert fused.inputs[0].name == "residual"
+    np.testing.assert_array_equal(
+        fused.inputs[1].const_value.numpy(), torch.cat((mlp.gate_proj.weight, mlp.up_proj.weight)).T
+    )
+    split = next(node for node in model.graph if node.op_type == "Split")
+    assert [value.name for value in split.outputs] == [
         "/model/layers.4/mlp/gate_proj/MatMul/output_0",
         "/model/layers.4/mlp/up_proj/MatMul/output_0",
     ]
-    assert calls["split"][-1] == 2
     assert model.mlp_attrs["output_0"] == "/model/layers.4/mlp/down_proj/MatMul/output_0"
+
+
+def _mlp_graph_model(provider="cpu", dtype=ir.DataType.FLOAT):
+    model = object.__new__(Model)
+    model.ep = provider
+    model.io_dtype = dtype
+    model.onnx_dtype = dtype
+    model.hidden_size = 3
+    model.intermediate_size = 2
+    model.use_paged_attention = False
+    model.activation = "silu"
+    model.mlp_attrs = {"use_proj": True, "output_0": ""}
+    model.layernorm_attrs = {}
+    model.quant_attrs = {"nodes_to_exclude": [], "accuracy_level": 4, "use_qdq": False}
+    model.values = {}
+    model.node_names = set()
+    model.graph = ir.Graph([], [], nodes=[], opset_imports={"": 21, "com.microsoft": 1})
+    model.model = ir.Model(model.graph, ir_version=10)
+    model.graph.inputs.append(model.make_value("residual", dtype, [1, 2, 3]))
+    return model
 
 
 @pytest.mark.parametrize("incompatibility", ["adapter", "packed", "integer", "exclusion", "override", "precision"])
@@ -358,97 +360,269 @@ def test_automatic_gate_up_fusion_preserves_unsupported_projection_paths(monkeyp
     assert model.layernorm_attrs["skip_input"] == "unfused_output"
 
 
-def test_target_mlp_gate_up_fusion_zero_fills_a_missing_bias():
-    model = object.__new__(Model)
-    model.io_dtype = ir.DataType.FLOAT16
-    model.intermediate_size = 2
-    model.hidden_size = 3
-    model.mlp_attrs = {"output_0": ""}
-    calls = {}
-
-    def make_matmul(self, projection, basename, root_input):
-        calls.setdefault("projections", []).append(projection)
-        return basename
-
-    model.make_matmul = types.MethodType(make_matmul, model)
-    model.make_split = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_add_bias = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_activation = types.MethodType(lambda self, layer_id, root_input: f"/act/{layer_id}", model)
-    model.make_mul = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_hidden_state_shape = types.MethodType(lambda self, last_dim: ["tokens", last_dim], model)
-
+def test_target_mlp_gate_up_graph_fusion_preserves_a_missing_bias():
+    model = _mlp_graph_model()
     mlp = types.SimpleNamespace(
         gate_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=torch.ones(2)),
         up_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
         down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
     )
+    model.make_mlp(0, mlp, "residual")
+    assert sum(node.op_type == "MatMul" for node in model.graph) == 2
+    assert sum(node.op_type == "Add" for node in model.graph) == 1
+    model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+    hidden = torch.randn(1, 2, 3)
+    expected = (
+        torch.nn.functional.silu(hidden @ mlp.gate_proj.weight.T + 1) * (hidden @ mlp.up_proj.weight.T)
+    ) @ mlp.down_proj.weight.T
+    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    np.testing.assert_allclose(
+        session.run(None, {"residual": hidden.numpy()})[0], expected.numpy(), rtol=1e-5, atol=1e-5
+    )
 
-    model.make_mlp_proj_fused(0, mlp, "residual")
 
-    torch.testing.assert_close(calls["projections"][0].bias, torch.tensor([1.0, 1.0, 0.0, 0.0]))
-
-
-def test_target_mlp_gate_up_fusion_rejects_projection_shape_mismatch():
-    model = object.__new__(Model)
-    model.intermediate_size = 2
-    model.hidden_size = 3
+def test_target_mlp_gate_up_fusion_preserves_projection_shape_mismatch():
+    model = _mlp_graph_model()
     mlp = types.SimpleNamespace(
         gate_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
         up_proj=types.SimpleNamespace(weight=torch.ones((3, 3)), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
     )
-
-    with pytest.raises(ValueError, match="gate/up weights with shape"):
-        model.make_mlp_proj_fused(0, mlp, "residual")
+    model.make_mlp(0, mlp, "residual")
+    assert not any(node.op_type == "Split" for node in model.graph)
 
 
 def test_target_mlp_gate_up_fusion_maps_matching_exclusions():
-    model = object.__new__(Model)
-    model.io_dtype = ir.DataType.FLOAT16
-    model.intermediate_size = 2
-    model.hidden_size = 3
-    model.mlp_attrs = {"output_0": ""}
-    model.quant_attrs = {
-        "nodes_to_exclude": [
-            "/model/layers.0/mlp/gate_proj/MatMul",
-            "/model/layers.0/mlp/up_proj/MatMul",
-        ]
-    }
-    model.make_matmul = types.MethodType(
-        lambda self, projection, basename, root_input: (
-            self.exclude_node_from_quantization(basename)
-            if getattr(projection, "exclude_from_quantization", False)
-            else None
-        )
-        or basename,
-        model,
-    )
-    model.make_split = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_activation = types.MethodType(lambda self, layer_id, root_input: f"/act/{layer_id}", model)
-    model.make_mul = types.MethodType(lambda self, *args, **kwargs: None, model)
-    model.make_hidden_state_shape = types.MethodType(lambda self, last_dim: ["tokens", last_dim], model)
+    model = _mlp_graph_model()
+    model.quant_attrs["nodes_to_exclude"] = [
+        "/model/layers.0/mlp/gate_proj/MatMul",
+        "/model/layers.0/mlp/up_proj/MatMul",
+    ]
     mlp = types.SimpleNamespace(
         gate_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
         up_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
         down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
     )
 
-    model.make_mlp_proj_fused(0, mlp, "residual")
+    model.make_mlp(0, mlp, "residual")
 
     assert "/model/layers.0/mlp/gate_up_proj/MatMul" in model.quant_attrs["nodes_to_exclude"]
 
 
-def test_target_mlp_gate_up_fusion_rejects_one_sided_exclusion():
-    model = object.__new__(Model)
-    model.intermediate_size = 2
-    model.hidden_size = 3
-    model.quant_attrs = {"nodes_to_exclude": ["/model/layers.0/mlp/gate_proj/MatMul"]}
+def test_target_mlp_gate_up_fusion_preserves_one_sided_exclusion():
+    model = _mlp_graph_model()
+    model.quant_attrs["nodes_to_exclude"] = ["/model/layers.0/mlp/gate_proj/MatMul"]
     mlp = types.SimpleNamespace(
         gate_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
         up_proj=types.SimpleNamespace(weight=torch.ones((2, 3)), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.ones((3, 2)), bias=None),
+    )
+    model.make_mlp(0, mlp, "residual")
+    assert sum(node.op_type == "MatMul" for node in model.graph) == 3
+    assert not any(node.op_type == "Split" for node in model.graph)
+
+
+@pytest.mark.parametrize("bits,with_g_idx", [(4, False), (8, False), (4, True)])
+@pytest.mark.parametrize("symmetric", [False, True])
+def test_prequantized_gate_up_graph_fusion_matches_separate_projections(bits, symmetric, with_g_idx):
+    generator = torch.Generator().manual_seed(7)
+    quantizer = DefaultWeightOnlyQuantizer(
+        DefaultWeightOnlyQuantConfig(block_size=32, bits=bits, is_symmetric=symmetric)
     )
 
-    with pytest.raises(ValueError, match="applies to only one"):
-        model.make_mlp_proj_fused(0, mlp, "residual")
+    def projection():
+        weight = torch.randn(16, 64, generator=generator)
+        qweight, scales, zeros = quantizer.qbits_block_quant(weight.T.numpy())
+        if symmetric and with_g_idx:
+            zeros.fill(0x88 if bits == 4 else 128)
+        return types.SimpleNamespace(
+            qweight=torch.from_numpy(qweight),
+            scales=torch.from_numpy(scales),
+            qzeros=torch.from_numpy(zeros) if not symmetric or with_g_idx else None,
+            g_idx=torch.arange(64, dtype=torch.int32) // 32 if with_g_idx else None,
+            bits=bits,
+            group_size=32,
+            in_features=64,
+            out_features=16,
+            bias=None,
+        )
+
+    mlp = types.SimpleNamespace(
+        gate_proj=projection(),
+        up_proj=projection(),
+        down_proj=types.SimpleNamespace(weight=torch.randn(64, 16, generator=generator), bias=None),
+    )
+    hidden = torch.randn(1, 2, 64, generator=generator).numpy()
+    outputs = []
+    for fused in (False, True):
+        model = _mlp_graph_model()
+        model.onnx_dtype = ir.DataType.INT4 if bits == 4 else ir.DataType.INT8
+        model.hidden_size = 64
+        model.intermediate_size = 16
+        model.values["residual"].shape = ir.Shape([1, 2, 64])
+        if not fused:
+            model.exact_quant_override_names = {"/model/layers.0/mlp/gate_proj/MatMul"}
+        model.make_mlp(0, mlp, "residual")
+        model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+        nodes = [node for node in model.graph if node.op_type == "MatMulNBits"]
+        assert len(nodes) == (1 if fused else 2)
+        if fused:
+            assert nodes[0].attributes["N"].as_int() == 32
+        session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+        outputs.append(session.run(None, {"residual": hidden})[0])
+    np.testing.assert_allclose(outputs[0], outputs[1], rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "policy,fuses",
+    [
+        ("matching", True),
+        ("fused", True),
+        ("different", False),
+        ("exact", False),
+        ("excluded", False),
+        ("conflict", False),
+    ],
+)
+def test_mlp_graph_fusion_preserves_precision_policy(policy, fuses):
+    model = _mlp_graph_model()
+    gate = "/model/layers.0/mlp/gate_proj/MatMul"
+    up = "/model/layers.0/mlp/up_proj/MatMul"
+    fused = "/model/layers.0/mlp/gate_up_proj/MatMul"
+    model.int4_customized_weight_config = {gate: {"bits": 8}, up: {"bits": 8}}
+    if policy == "different":
+        model.int4_customized_weight_config[up] = {"bits": 4}
+    elif policy == "exact":
+        model.exact_quant_override_names = {gate}
+    elif policy == "excluded":
+        model.quant_attrs["nodes_to_exclude"] = [gate]
+    elif policy == "conflict":
+        model.int4_customized_weight_config[fused] = {"bits": 4}
+    elif policy == "fused":
+        model.int4_customized_weight_config = {fused: {"bits": 8}}
+    mlp = types.SimpleNamespace(
+        gate_proj=types.SimpleNamespace(weight=torch.ones(2, 3), bias=None),
+        up_proj=types.SimpleNamespace(weight=torch.ones(2, 3), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.ones(3, 2), bias=None),
+    )
+    model.make_mlp(0, mlp, "residual")
+    assert any(node.op_type == "Split" for node in model.graph) is fuses
+    if fuses:
+        assert model.int4_customized_weight_config[fused] == {"bits": 8}
+    else:
+        assert all(any(node.name == name for node in model.graph) for name in (gate, up))
+
+
+@pytest.mark.parametrize("incompatibility", ["bits", "g_idx", "prepacked", "exact", "exclusion"])
+def test_prequantized_gate_up_graph_fusion_preserves_unsupported_nodes(incompatibility):
+    model = _mlp_graph_model()
+    model.onnx_dtype = ir.DataType.INT4
+    model.hidden_size = 64
+    model.values["residual"].shape = ir.Shape([1, 2, 64])
+    names = []
+    for kind in ("gate", "up"):
+        bits = 8 if incompatibility == "bits" and kind == "up" else 4
+        projection = types.SimpleNamespace(
+            qweight=torch.full((2, 2, 32 * bits // 8), 0x99, dtype=torch.uint8),
+            scales=torch.ones(2, 2),
+            qzeros=torch.full((2, (2 * bits + 7) // 8), 0x88, dtype=torch.uint8),
+            g_idx=(torch.arange(64, dtype=torch.int32) // 32) if incompatibility == "g_idx" else None,
+            bits=bits,
+            group_size=32,
+            in_features=64,
+            out_features=2,
+        )
+        if incompatibility == "g_idx" and kind == "up":
+            projection.g_idx = projection.g_idx.flip(0)
+        name = model.make_matmul(projection, f"/model/layers.0/mlp/{kind}_proj/MatMul", "residual")
+        names.append(name)
+        if incompatibility == "prepacked":
+            model.values[f"{name}/output_0"].producer().attributes["weight_prepacked"] = ir.AttrInt64(
+                "weight_prepacked", 1
+            )
+    if incompatibility == "exact":
+        model.exact_quant_override_names = {names[0]}
+    elif incompatibility == "exclusion":
+        model.quant_attrs["nodes_to_exclude"] = [names[0]]
+    model.make_mlp_proj_fused(0, *names)
+    assert [node.name for node in model.graph] == names
+
+
+def test_mlp_graph_fusion_preserves_real_adapter_path():
+    model = _mlp_graph_model()
+    generator = torch.Generator().manual_seed(13)
+    gate_weight = torch.randn(2, 3, generator=generator)
+    lora_a = torch.randn(1, 3, generator=generator)
+    lora_b = torch.randn(2, 1, generator=generator)
+    mlp = types.SimpleNamespace(
+        gate_proj=types.SimpleNamespace(
+            base_layer=types.SimpleNamespace(weight=gate_weight, bias=None),
+            lora_A=types.SimpleNamespace(default=types.SimpleNamespace(weight=lora_a)),
+            lora_B=types.SimpleNamespace(default=types.SimpleNamespace(weight=lora_b.clone())),
+            scaling={"default": 0.5},
+            bias=None,
+        ),
+        up_proj=types.SimpleNamespace(weight=torch.randn(2, 3, generator=generator), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.randn(3, 2, generator=generator), bias=None),
+    )
+    model.make_mlp(0, mlp, "residual")
+    assert not any(node.op_type == "Split" for node in model.graph)
+    model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+    hidden = torch.randn(1, 2, 3, generator=generator)
+    gate = hidden @ gate_weight.T + (hidden @ lora_a.T) @ lora_b.T * 0.5
+    expected = (torch.nn.functional.silu(gate) * (hidden @ mlp.up_proj.weight.T)) @ mlp.down_proj.weight.T
+    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    np.testing.assert_allclose(
+        session.run(None, {"residual": hidden.numpy()})[0], expected.numpy(), rtol=1e-5, atol=1e-5
+    )
+
+
+@pytest.mark.parametrize("dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_mlp_graph_fusion_preserves_initializer_dtype(dtype):
+    model = _mlp_graph_model(dtype=dtype)
+    mlp = types.SimpleNamespace(
+        gate_proj=types.SimpleNamespace(weight=torch.ones(2, 3), bias=None),
+        up_proj=types.SimpleNamespace(weight=torch.full((2, 3), 2.0), bias=None),
+        down_proj=types.SimpleNamespace(weight=torch.ones(3, 2), bias=None),
+    )
+    model.make_mlp(0, mlp, "residual")
+    fused = next(node for node in model.graph if node.name == "/model/layers.0/mlp/gate_up_proj/MatMul")
+    assert fused.inputs[1].dtype == dtype
+    proto = ir.to_proto(model.model)
+    assert next(tensor for tensor in proto.graph.initializer if tensor.name == fused.inputs[1].name).data_type == dtype
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_mlp_graph_fusion_preserves_real_per_node_quantization(matching):
+    model = _mlp_graph_model()
+    model.hidden_size = model.intermediate_size = 64
+    model.values["residual"].shape = ir.Shape([1, 2, 64])
+    model.onnx_dtype = ir.DataType.INT4
+    model.quant_attrs.update(bits=4, matmul_block_size=32, is_symmetric=True, op_types_to_quantize=("MatMul",))
+    model.matmul_attrs = {"weights_prepacked": 0}
+    gate = "/model/layers.0/mlp/gate_proj/MatMul"
+    up = "/model/layers.0/mlp/up_proj/MatMul"
+    model.int4_customized_weight_config = {gate: {"bits": 8}}
+    if matching:
+        model.int4_customized_weight_config[up] = {"bits": 8}
+    generator = torch.Generator().manual_seed(23)
+    mlp = types.SimpleNamespace(
+        **{
+            f"{kind}_proj": types.SimpleNamespace(weight=torch.randn(64, 64, generator=generator), bias=None)
+            for kind in ("gate", "up", "down")
+        }
+    )
+    model.make_mlp(0, mlp, "residual")
+    model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+    quantized = model.to_nbits()
+    nodes = {node.name: node for node in quantized.graph if node.op_type == "MatMulNBits"}
+    expected = {"/model/layers.0/mlp/gate_up_proj/MatMul_Q8": 8} if matching else {f"{gate}_Q8": 8, f"{up}_Q4": 4}
+    expected["/model/layers.0/mlp/down_proj/MatMul_Q4"] = 4
+    assert {name: node.attributes["bits"].as_int() for name, node in nodes.items()} == expected
+    session = ort.InferenceSession(ir.to_proto(quantized).SerializeToString(), providers=["CPUExecutionProvider"])
+    result = session.run(None, {"residual": torch.randn(1, 2, 64, generator=generator).numpy()})[0]
+    assert result.shape == (1, 2, 64)
+    assert np.isfinite(result).all()
 
 
 @pytest.mark.parametrize("quant_type,bits", [("int4", 4), ("int8", 8)])
@@ -1528,7 +1702,7 @@ def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
             max_position_embeddings=128,
             quant={"bits": bits, "block_size": 32, "prepack": 0} if bits else None,
         )
-        builder.mlp_attrs["fuse_gate_up"] = fused
+        builder.attn_attrs["fuse_gate_up"] = fused
         builder.io_dtype = ir.DataType.FLOAT
         builder.hidden_size = 32
         builder.intermediate_size = 64
@@ -2068,7 +2242,7 @@ def test_gate_up_fusion_defaults_off(tmp_path):
 
     assert model.dflash2_attrs["fuse_gate_up"] is False
     builder = DFlash2Builder(model.dflash2_path, str(tmp_path), ir.DataType.BFLOAT16, 256, 128)
-    assert builder.mlp_attrs["fuse_gate_up"] is False
+    assert builder.attn_attrs["fuse_gate_up"] is False
 
 
 def test_qkv_fusion_defaults_off(tmp_path):
@@ -2129,14 +2303,11 @@ def test_failed_save_preserves_existing_dflash2_files(tmp_path, monkeypatch):
     data_path.write_bytes(b"old data")
     builder = object.__new__(DFlash2Builder)
     builder.filename = "dflash2.onnx"
-    # save_model stamps build metadata on the model, so the stub has to accept attributes.
-    builder.model = types.SimpleNamespace()
+    builder.model = ir.Model(ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 22}), ir_version=10)
 
     def fail_save(_model, staged_path, **kwargs):
         with open(staged_path, "wb") as staged_model:
             staged_model.write(b"partial model")
-        with open(os.path.join(os.path.dirname(staged_path), kwargs["external_data"]), "wb") as staged_data:
-            staged_data.write(b"partial data")
         raise OSError("injected save failure")
 
     monkeypatch.setattr(ir, "save", fail_save)

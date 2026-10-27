@@ -528,14 +528,11 @@ def test_failed_save_preserves_existing_dspark_files(tmp_path, monkeypatch):
     data_path.write_bytes(b"old data")
     builder = object.__new__(DSparkBuilder)
     builder.filename = "dspark.onnx"
-    # save_model stamps build metadata on the model, so the stub has to accept attributes.
-    builder.model = types.SimpleNamespace()
+    builder.model = ir.Model(ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 22}), ir_version=10)
 
     def fail_save(_model, staged_path, **kwargs):
         with open(staged_path, "wb") as staged_model:
             staged_model.write(b"partial model")
-        with open(os.path.join(os.path.dirname(staged_path), kwargs["external_data"]), "wb") as staged_data:
-            staged_data.write(b"partial data")
         raise OSError("injected save failure")
 
     monkeypatch.setattr(ir, "save", fail_save)
@@ -555,23 +552,15 @@ def test_failed_replacement_restores_existing_dspark_files(tmp_path, monkeypatch
     data_path.write_bytes(b"old data")
     builder = object.__new__(DSparkBuilder)
     builder.filename = "dspark.onnx"
-    # save_model stamps build metadata on the model, so the stub has to accept attributes.
-    builder.model = types.SimpleNamespace()
-
-    def save_staged_files(_model, staged_path, **kwargs):
-        with open(staged_path, "wb") as staged_model:
-            staged_model.write(b"new model")
-        with open(os.path.join(os.path.dirname(staged_path), kwargs["external_data"]), "wb") as staged_data:
-            staged_data.write(b"new data")
+    builder.model = ir.Model(ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 22}), ir_version=10)
 
     original_replace = os.replace
 
     def fail_model_install(source, destination):
-        if os.path.basename(source) == "dspark.onnx" and os.fspath(destination) == os.fspath(model_path):
+        if os.path.basename(source) == "dspark.onnx.saving" and os.fspath(destination) == os.fspath(model_path):
             raise OSError("injected replacement failure")
         original_replace(source, destination)
 
-    monkeypatch.setattr(ir, "save", save_staged_files)
     monkeypatch.setattr(os, "replace", fail_model_install)
 
     with pytest.raises(OSError, match="injected replacement failure"):

@@ -17,6 +17,7 @@ class Qwen4ExpMTPTextModel(Qwen4ExpTextModel):
         config.text_config.ple_layer_ids = []
         config.num_hidden_layers = 1
         config.layer_types = ["indexed_attention"]
+        self.mtp_layer_config = copy.deepcopy(config.text_config)
 
         extra_options = copy.deepcopy(extra_options)
         extra_options["num_hidden_layers"] = 1
@@ -72,7 +73,7 @@ class Qwen4ExpMTPTextModel(Qwen4ExpTextModel):
             self.quant_type,
             input_path,
             model_dir,
-            self.hf_load_config.text_config,
+            self.mtp_layer_config,
             preserve_quantization=self.quant_config.checkpoint_policy == "preserve",
             load_quantized_model=self.load_weights,
         )
@@ -90,11 +91,19 @@ class Qwen4ExpMTPTextModel(Qwen4ExpTextModel):
         )
         self.make_value(f"{embed_gather}/output_0", self.io_dtype, self.make_hidden_state_shape())
 
-        embedding_norm = self.make_offset_rmsnorm(
-            f"{basename}/pre_fc_norm_embedding",
-            f"{embed_gather}/output_0",
-            self.mtp_weights.pre_fc_norm_embedding.weight,
+        norm_name = f"{basename}/pre_fc_norm_embedding"
+        weight_name = f"{norm_name[1:].replace('/', '.')}.weight"
+        self.make_initializer(
+            self.mtp_weights.pre_fc_norm_embedding.weight + self.layernorm_attrs["add_offset"],
+            weight_name, to=self.io_dtype,
         )
+        embedding_norm = f"{norm_name}/output_0"
+        self.make_layernorm_subgraph(
+            norm_name, op_type="SimplifiedLayerNormalization",
+            inputs=[f"{embed_gather}/output_0", weight_name], outputs=[embedding_norm],
+            skip=False, new_io_dtype=self.io_dtype, epsilon=self.layernorm_attrs["epsilon"], axis=-1, stash_type=1,
+        )
+        self.make_value(embedding_norm, self.io_dtype, self.make_hidden_state_shape())
         hidden_norm = self.make_branchwise_rms_norm(
             f"{basename}/pre_fc_norm_hidden",
             self.input_names["hidden_states"],

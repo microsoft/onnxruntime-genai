@@ -69,8 +69,9 @@ def weight_loader(monkeypatch, request):
     model.quant_type = None
     model.num_layers = 2
     model.extra_options = {"num_hidden_layers": 2}
-    model.hf_load_config = SimpleNamespace()
     transformers = ModuleType("transformers")
+    transformers.AutoConfig = Mock()
+    transformers.AutoConfig.from_pretrained.return_value = SimpleNamespace()
     monkeypatch.setattr(importlib.import_module("builders.base"), "transformers", transformers)
     return model, transformers
 
@@ -126,8 +127,9 @@ def test_qwen4_exp_weight_loader_is_independent_of_runtime_model_type(weight_loa
     model, transformers = weight_loader
     model.model_type = model_type
     text_config = SimpleNamespace(num_hidden_layers=8, layer_types=["indexed_attention"] * 8)
-    model.hf_load_config = SimpleNamespace(text_config=text_config)
+    config = SimpleNamespace(text_config=text_config)
     loader = Mock()
+    transformers.AutoConfig.from_pretrained.return_value = config
     transformers.Qwen4ExpForConditionalGeneration = loader
     transformers.Qwen3_5ForConditionalGeneration = Mock()
 
@@ -137,9 +139,16 @@ def test_qwen4_exp_weight_loader_is_independent_of_runtime_model_type(weight_loa
         cache_dir=model.cache_dir,
         token=model.hf_token,
         trust_remote_code=model.hf_remote,
-        config=model.hf_load_config,
+        config=config,
     )
     assert text_config.layer_types == ["indexed_attention"] * model.num_layers
+    transformers.AutoConfig.from_pretrained.assert_called_once_with(
+        model.model_name_or_path,
+        cache_dir=model.cache_dir,
+        token=model.hf_token,
+        trust_remote_code=model.hf_remote,
+    )
+    assert not hasattr(model, "hf_load_config")
     transformers.Qwen3_5ForConditionalGeneration.from_pretrained.assert_not_called()
 
 

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import onnx
-import onnx_ir as ir
 import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
@@ -17,7 +16,7 @@ sys.path.insert(0, str(MODELS_DIR))
 from kv_cache_variant import KVCacheVariant  # noqa: E402
 
 
-def test_variant_preserves_metadata_and_never_reads_external_weights(tmp_path, monkeypatch):
+def test_variant_preserves_metadata_and_external_weight_bytes(tmp_path):
     source, scales = _write_source_model(tmp_path, head_size=4)
     model = onnx.load(source, load_external_data=False)
     model.doc_string = "model documentation"
@@ -25,14 +24,11 @@ def test_variant_preserves_metadata_and_never_reads_external_weights(tmp_path, m
     model.graph.doc_string = "graph documentation"
     model.graph.node[0].doc_string = "attention documentation"
     model.graph.initializer[0].doc_string = "scale documentation"
+    model.graph.initializer[0].metadata_props.add(key="tensor_key", value="tensor_value")
     model.graph.input[0].type.tensor_type.shape.dim[0].denotation = "DATA_BATCH"
     onnx.save(model, source)
 
-    def unexpected_read(*args, **kwargs):
-        pytest.fail("External tensors must not be read")
-
-    monkeypatch.setattr(ir.ExternalTensor, "numpy", unexpected_read)
-    monkeypatch.setattr(ir.ExternalTensor, "tobytes", unexpected_read)
+    original_data = (tmp_path / "model.onnx.data").read_bytes()
     output = tmp_path / "variant.onnx"
     KVCacheVariant("int4_per_channel").create(source, output, scales)
     result = onnx.load(output, load_external_data=False)
@@ -41,8 +37,17 @@ def test_variant_preserves_metadata_and_never_reads_external_weights(tmp_path, m
     assert result.graph.doc_string == model.graph.doc_string
     assert result.graph.node[0].doc_string == model.graph.node[0].doc_string
     assert result.graph.initializer[0].doc_string == model.graph.initializer[0].doc_string
+    assert result.graph.initializer[0].metadata_props == model.graph.initializer[0].metadata_props
     assert result.graph.input[0].type.tensor_type.shape.dim[0].denotation == "DATA_BATCH"
-    assert result.graph.initializer[-1] == model.graph.initializer[-1]
+    assert result.graph.initializer[-1].name == model.graph.initializer[-1].name
+    expected = onnx.load(source).graph.initializer[-1]
+    actual = onnx.load(output).graph.initializer[-1]
+    np.testing.assert_array_equal(onnx.numpy_helper.to_array(actual), onnx.numpy_helper.to_array(expected))
+    assert (tmp_path / "model.onnx.data").read_bytes() == original_data
+    assert all(
+        next(entry.value for entry in tensor.external_data if entry.key == "location") == "variant.onnx.data"
+        for tensor in result.graph.initializer
+    )
 
 
 def _external_initializer(name: str, shape: list[int], offset: int, length: int) -> onnx.TensorProto:
@@ -112,6 +117,7 @@ def _write_source_model(tmp_path: Path, head_size: int, layer_ids=(3,)) -> tuple
         graph.initializer.extend(layer.initializer)
     source_path = tmp_path / "model.onnx"
     onnx.save(onnx.helper.make_model(graph), source_path)
+    (tmp_path / "model.onnx.data").write_bytes(np.arange(max(48, 2 * scale_bytes) // 4, dtype=np.float32).tobytes())
     scale_path = tmp_path / "scales.json"
     scale_path.write_text(
         json.dumps(
@@ -144,7 +150,7 @@ def test_create_int4_kv_cache_variant_packs_odd_head_size(tmp_path):
         assert value_info.type.tensor_type.shape.dim[-1].dim_value == 2
 
 
-def test_create_kv_cache_variant_reuses_external_weights_and_inlines_scales(tmp_path):
+def test_create_kv_cache_variant_copies_weights_and_scales_to_its_own_data(tmp_path):
     weights = np.arange(12, dtype=np.float32)
     (tmp_path / "model.onnx.data").write_bytes(weights.tobytes())
     k_scale = _external_initializer("model.layers.3.attn.k_scale", [1, 1, 4], 0, 16)
@@ -206,31 +212,34 @@ def test_create_kv_cache_variant_reuses_external_weights_and_inlines_scales(tmp_
         assert value_info.type.tensor_type.elem_type == onnx.TensorProto.INT8
         assert value_info.type.tensor_type.shape.dim[-1].dim_value == 4
     initializers = {initializer.name: initializer for initializer in variant.graph.initializer}
-    assert initializers[k_scale.name].data_location == onnx.TensorProto.DEFAULT
-    assert initializers[v_scale.name].data_location == onnx.TensorProto.DEFAULT
+    for initializer in initializers.values():
+        assert initializer.data_location == onnx.TensorProto.EXTERNAL
+        assert next(entry.value for entry in initializer.external_data if entry.key == "location") == output_path.name + ".data"
+    loaded_variant = onnx.load(output_path, load_external_data=True)
+    loaded_initializers = {initializer.name: initializer for initializer in loaded_variant.graph.initializer}
     np.testing.assert_allclose(
-        onnx.numpy_helper.to_array(initializers[k_scale.name]),
+        onnx.numpy_helper.to_array(loaded_initializers[k_scale.name]),
         np.asarray([[[0.1, 0.2, 0.3, 0.4]]], dtype=np.float32),
     )
     assert initializers[weight.name].data_location == onnx.TensorProto.EXTERNAL
     assert {entry.key: entry.value for entry in initializers[weight.name].external_data} == {
-        "location": "model.onnx.data",
+        "location": output_path.name + ".data",
         "offset": "32",
         "length": "16",
     }
-    loaded_variant = onnx.load(output_path, load_external_data=True)
     loaded_weights = next(tensor for tensor in loaded_variant.graph.initializer if tensor.name == weight.name)
     np.testing.assert_array_equal(onnx.numpy_helper.to_array(loaded_weights), weights[8:])
 
 
-def test_create_kv_cache_variant_rejects_different_output_directory(tmp_path):
+def test_create_kv_cache_variant_supports_different_output_directory(tmp_path):
     source_path, scale_path = _write_source_model(tmp_path, head_size=4)
     output_path = tmp_path / "variant" / "model.onnx"
 
-    with pytest.raises(ValueError, match="must share a directory"):
-        KVCacheVariant("int4_per_channel").create(source_path, output_path, scale_path)
+    KVCacheVariant("int4_per_channel").create(source_path, output_path, scale_path)
 
-    assert not output_path.exists()
+    variant = onnx.load(output_path, load_external_data=True)
+    assert (output_path.parent / "model.onnx.data").is_file()
+    np.testing.assert_array_equal(onnx.numpy_helper.to_array(variant.graph.initializer[-1]), np.arange(8, 12))
 
 
 def test_create_kv_cache_variant_rejects_overwriting_source(tmp_path):
@@ -256,7 +265,7 @@ def test_create_kv_cache_variant_maps_scales_by_layer_id(tmp_path):
 
     KVCacheVariant("int8_per_channel").create(source_path, output_path, scale_path)
 
-    variant = onnx.load(output_path, load_external_data=False)
+    variant = onnx.load(output_path, load_external_data=True)
     initializers = {initializer.name: initializer for initializer in variant.graph.initializer}
     for layer_id in (3, 7):
         for kind, offset in (("k", 0), ("v", 1)):

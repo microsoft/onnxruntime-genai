@@ -11,6 +11,8 @@ import onnxruntime as ort
 import pytest
 import torch
 from _builder_test_utils import ort_runs_engram_op
+from transformers import LlamaConfig
+
 from models.builders.base import Model
 from models.builders.qwen3_5 import Qwen35MoETextModel
 from models.builders.qwen3_8 import (
@@ -19,7 +21,6 @@ from models.builders.qwen3_8 import (
     Qwen4ExpMTPTextModel,
     Qwen4ExpTextModel,
 )
-from transformers import LlamaConfig
 
 
 def record_calls(model, method_names):
@@ -749,7 +750,15 @@ def test_qwen_moe_emits_separate_shared_gate_up_and_router_matmuls():
     moe = SimpleNamespace(shared_expert=shared_expert, gate=projection(32))
     record_calls(
         model,
-        ["make_split", "make_reshape", "make_activation", "make_mul", "make_matmul", "make_sigmoid"],
+        [
+            "make_split",
+            "make_reshape",
+            "make_activation",
+            "make_mul",
+            "make_matmul",
+            "make_sigmoid",
+            "make_mlp_proj_fused",
+        ],
     )
 
     model.make_moe_router(3, moe, "hidden_states")
@@ -781,6 +790,7 @@ def test_mtp_residual_linear_shared_preserves_hyper_connection_shape():
     model.io_dtype = ir.DataType.FLOAT16
     model.use_paged_attention = False
     model.hidden_size = 8
+    model.layernorm_attrs = {"add_offset": 1.0, "epsilon": 1e-6}
     model.hyper_connection_attrs = {"num_branches": 4, "hidden_size": 32}
     model.input_names = {"input_ids": "input_ids", "hidden_states": "hidden_states"}
     model.mtp_weights = SimpleNamespace(
@@ -792,16 +802,28 @@ def test_mtp_residual_linear_shared_preserves_hyper_connection_shape():
     )
     record_calls(
         model,
-        ["make_initializer", "make_node", "make_value", "make_reshape", "make_matmul", "make_unsqueeze", "make_add"],
+        [
+            "make_initializer", "make_node", "make_value", "make_reshape", "make_matmul",
+            "make_unsqueeze", "make_add", "make_layernorm_subgraph",
+        ],
     )
     model.make_hidden_state_shape = MethodType(
         lambda self, last_dim=None: ["batch_size", "sequence_length", last_dim or self.hidden_size], model
     )
-    model.make_offset_rmsnorm = MethodType(lambda self, *args: "embedding_norm", model)
     model.make_branchwise_rms_norm = MethodType(lambda self, *args: "hidden_norm", model)
 
     output = model.make_mtp_input_projection()
 
+    norm_weight = next(
+        call for call in model.calls
+        if call[0] == "make_initializer" and call[1][1] == "model.mtp.pre_fc_norm_embedding.weight"
+    )
+    torch.testing.assert_close(norm_weight[1][0], torch.full((8,), 2.0))
+    norm = next(call for call in model.calls if call[0] == "make_layernorm_subgraph")
+    assert norm[2]["op_type"] == "SimplifiedLayerNormalization"
+    assert norm[2]["inputs"] == [
+        "/model/mtp/embed_tokens/Gather/output_0", "model.mtp.pre_fc_norm_embedding.weight"
+    ]
     hidden_projection = next(
         call for call in model.calls if call[0] == "make_matmul" and call[1][1].endswith("fc_hidden/MatMul")
     )
@@ -978,13 +1000,17 @@ def test_final_hidden_states_output_connects_to_post_mix(paged, pre_final):
         assert model.layernorm_attrs["output_0"] == "hidden_states_out"
 
 
-def test_qwen_hyper_connection_expansions_emit_standard_onnx():
+@pytest.mark.parametrize("ep", ["dml", "trt-rtx"])
+def test_qwen_hyper_connection_expansions_emit_standard_onnx(ep):
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
     model.hyper_connection_attrs = {"num_branches": 4}
     model.hidden_size = 8
     model.layernorm_attrs = {"epsilon": 1e-6}
+    model.ep = ep
+    model.extra_options = {}
+    model.make_ep_expansions_init()
     record_calls(
         model,
         [
@@ -1001,15 +1027,14 @@ def test_qwen_hyper_connection_expansions_emit_standard_onnx():
         ],
     )
 
-    model.make_branchwise_rms_norm_expansion("/norm", "streams", SimpleNamespace(weight=torch.zeros(32)), 8)
-    model.make_scaled_silu_expansion("/silu", "down", ["batch_size", "sequence_length", 4], 0.25)
-    model.make_hyper_connection_pre_mix_expansion("/pre", "normalized", "pre_mix", ["batch_size", "sequence_length"], 8)
-    model.make_hyper_connection_post_mix_expansion(
-        "/post", "streams", "block_output", "post_mix", ["batch_size", "sequence_length"], 8
-    )
+    model.make_branchwise_rms_norm("/norm", "streams", SimpleNamespace(weight=torch.zeros(32)), 8)
+    model.make_scaled_silu("/silu", "down", ["batch_size", "sequence_length", 4])
+    model.make_hyper_connection_pre_mix("/pre", "normalized", "pre_mix", ["batch_size", "sequence_length"])
+    model.make_hyper_connection_post_mix(
+        "/post", "streams", "block_output", "post_mix", ["batch_size", "sequence_length"])
 
     standard_nodes = [op_type for op_type, _ in emitted_nodes(model)]
-    assert standard_nodes == ["Cast", "Pow", "Sqrt", "Cast", "Mul"]
+    assert standard_nodes == ["Cast", "Pow", "Sqrt", "Cast", "Mul", "Add"]
     assert all(onnx.defs.has(op_type) for op_type in standard_nodes)
     assert not {
         "BranchwiseRMSNorm",
@@ -1020,7 +1045,7 @@ def test_qwen_hyper_connection_expansions_emit_standard_onnx():
     assert [call[0] for call in model.calls].count("make_reshape") == 5
     assert [call[0] for call in model.calls].count("make_mul") == 5
     assert [call[0] for call in model.calls].count("make_reduce_mean") == 2
-    assert [call[0] for call in model.calls].count("make_add") == 2
+    assert [call[0] for call in model.calls].count("make_add") == 1
 
 
 def test_gated_rms_norm_emits_configured_activation():
@@ -1304,7 +1329,7 @@ def test_dense_ple_emits_verified_contrib_schemas():
 
     model.make_ple(1, ple, "hidden_states")
 
-    assert model.external_data_files == {"model.ple.ngram_embedding.weight": "engram.onnx.data"}
+    assert not getattr(model, "external_data_files", {})
 
     nodes = emitted_nodes(model)
     ngram = next(kwargs for op_type, kwargs in nodes if op_type == "NGramHashMapping")
@@ -1376,7 +1401,7 @@ def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
         "model.ple.ngram_embedding.weight_scale",
     ]
     assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
-    assert model.external_data_files == {"model.ple.ngram_embedding.weight": "engram.onnx.data"}
+    assert not getattr(model, "external_data_files", {})
     conv = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenCausalConvWithState")
     assert conv["inputs"] == [
         "/model/layers.1/ple/EngramGate/FlattenNormed/output_0",
@@ -1564,7 +1589,7 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path, ple_layer_id
 @pytest.mark.parametrize("text_only", [False, True])
 @pytest.mark.parametrize("include_mtp", [False, True])
 @pytest.mark.parametrize("native_fp8", [False, True])
-def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, include_mtp, native_fp8):
+def test_qwen4_exp_models_have_independent_engram_data(tmp_path, monkeypatch, text_only, include_mtp, native_fp8):
     embedding = SimpleNamespace(
         layer_multipliers=torch.tensor([0, 1, 2], dtype=torch.int64),
         ngram_heads_vocab_sizes=torch.tensor([7, 7, 7, 7], dtype=torch.int64),
@@ -1599,7 +1624,6 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
         builder.cache_dir = str(tmp_path / "cache")
         builder.quant_type = None
         builder.onnx_dtype = ir.DataType.FLOAT16
-        builder.external_data_files = {table_name: "engram.onnx.data"}
         return builder
 
     wrapper = object.__new__(Qwen4ExpModel)
@@ -1641,12 +1665,11 @@ def test_qwen4_exp_models_share_engram_data(tmp_path, monkeypatch, text_only, in
     filenames = ("engram.onnx", "model.onnx") + (("mtp.onnx",) if include_mtp else ())
     exported = [onnx.load(tmp_path / filename, load_external_data=False) for filename in filenames]
     tables = [next(value for value in model.graph.initializer if value.name == table_name) for model in exported]
-    offsets = [next(entry.value for entry in value.external_data if entry.key == "offset") for value in tables]
-    assert offsets == [offsets[0]] * len(tables)
-    data_file = "engram.onnx.data"
     assert all(
-        next(entry.value for entry in value.external_data if entry.key == "location") == data_file for value in tables
+        next(entry.value for entry in value.external_data if entry.key == "location") == filename + ".data"
+        for value, filename in zip(tables, filenames, strict=True)
     )
+    assert {path.name for path in tmp_path.glob("*.data")} == {filename + ".data" for filename in filenames}
     loaded = [onnx.load(tmp_path / filename, load_external_data=True) for filename in filenames]
     table_values = [
         onnx.numpy_helper.to_array(next(value for value in model.graph.initializer if value.name == table_name))

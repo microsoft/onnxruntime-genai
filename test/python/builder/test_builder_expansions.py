@@ -37,8 +37,6 @@ from models.builders.qwen3_8_graph import Qwen4ExpGraphModel
         (
             Model,
             [
-                "make_paged_mrope_inputs",
-                "make_paged_mrope_output",
                 "make_mrotary_embedding",
                 "make_rotary_embedding_multi_cache",
                 "make_paged_rotary_multi_cache_subgraph",
@@ -48,6 +46,7 @@ from models.builders.qwen3_8_graph import Qwen4ExpGraphModel
         (Model, ["make_gated_delta_net", "make_varlen_gated_delta_net", "make_linear_attention_gate"]),
         (Model, ["make_sparse_attention", "make_paged_attention", "make_attention"]),
         (Model, ["prunes_hidden_rows", "make_selected_hidden_rows", "make_last_real_token_position"]),
+        (Model, ["make_cache_names", "make_inputs_init"]),
         (
             Qwen35TextModel,
             [
@@ -119,15 +118,10 @@ def test_qwen_overrides_are_defined_directly_in_builders(model_class, methods):
             Model,
             [
                 "make_paged_attention",
-                "make_paged_inputs_init",
-                "make_paged_outputs_init",
                 "make_paged_engine_config",
                 "make_varlen_gated_delta_net",
                 "make_selected_counts",
-                "make_mrope_positions",
-                "make_simplified_layer_norm",
-                "make_offset_rmsnorm",
-                "make_l2_normalize_expansion",
+                "get_mrope_owners",
             ],
         ),
         (
@@ -157,7 +151,42 @@ def test_non_overriding_helpers_are_defined_in_builders(model_class, methods):
         assert ".expansions." not in getattr(model_class, method).__module__
 
 
-def test_expansion_methods_have_existing_builder_counterparts():
+def test_standard_helpers_live_with_their_expansions():
+    for name in (
+        "make_skip_simplified_layer_norm",
+        "make_skip_layer_norm",
+        "make_simplified_layer_norm",
+        "make_mrope_positions",
+        "make_mrope_cache",
+        "make_mrope_rotation",
+        "make_mrope_output",
+        "make_l2_normalize",
+    ):
+        assert name in Standard.__dict__
+        assert name not in Model.__dict__
+    assert Qwen35TextModel.make_l2_normalize is Standard.make_l2_normalize
+    assert not hasattr(Model, "make_offset_rmsnorm")
+    assert not hasattr(Model, "make_expansion_constant")
+    assert not any(name.endswith("_expansion") for name in Model.__dict__)
+
+
+@pytest.mark.parametrize("ep", ["cuda", "cpu", "webgpu", "dml", "trt-rtx"])
+def test_hyper_connection_overrides_are_provider_specific(ep):
+    model = object.__new__(Qwen4ExpTextModel)
+    model.ep = ep
+    model.extra_options = {}
+    model.make_ep_expansions_init()
+    for name in (
+        "make_branchwise_rms_norm",
+        "make_scaled_silu",
+        "make_hyper_connection_pre_mix",
+        "make_hyper_connection_post_mix",
+    ):
+        expected = Standard if ep in {"dml", "trt-rtx"} else Qwen4ExpTextModel
+        assert getattr(model, name).__func__ is getattr(expected, name)
+
+
+def test_expansion_overrides_have_existing_builder_counterparts():
     builders = Path(__file__).parents[3] / "src/python/py/models/builders"
     names = {
         method.name
@@ -167,6 +196,18 @@ def test_expansion_methods_have_existing_builder_counterparts():
         for method in cls.body
         if isinstance(method, ast.FunctionDef)
     }
+    names.update(
+        {
+            "make_skip_simplified_layer_norm",
+            "make_skip_layer_norm",
+            "make_simplified_layer_norm",
+            "make_mrope_positions",
+            "make_mrope_cache",
+            "make_mrope_rotation",
+            "make_mrope_output",
+            "make_l2_normalize",
+        }
+    )
     for path in (builders / "expansions").glob("*.py"):
         for cls in ast.parse(path.read_text(encoding="utf-8")).body:
             if isinstance(cls, ast.ClassDef):

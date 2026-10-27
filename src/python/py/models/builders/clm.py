@@ -297,7 +297,9 @@ def export_clm_components(options, output_root: Path) -> dict:
         raise ValueError(f"CLM artifact_revision must be {revision}")
     checkpoint = load_clm_checkpoint(options.model_source)
     filename = "clm_heads.onnx"
-    ir.save(build_clm_model(checkpoint), output_root / filename)
+    from .base import Model  # noqa: PLC0415
+
+    Model.save_onnx_model(build_clm_model(checkpoint), output_root / filename)
     return {
         "schema_version": 1,
         "model_type": "clm-v0.1-8b",

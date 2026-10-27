@@ -97,6 +97,7 @@ def test_shared_expert_and_gated_add_node_names_are_unique():
     model.make_sigmoid = MethodType(make_sigmoid, model)
     model.make_hidden_state_shape = MethodType(make_hidden_state_shape, model)
     model.make_node = MethodType(make_node, model)
+    model.make_mlp_proj_fused = lambda *_args: None
 
     projection = SimpleNamespace(bias=None)
     shared_expert = SimpleNamespace(gate_proj=projection, up_proj=projection, down_proj=projection)
@@ -169,7 +170,6 @@ def test_shared_expert_gate_preserves_hidden_layout(use_paged_attention, hidden_
     model.intermediate_size = 16
     model.shared_expert_intermediate_size = 8
     model.mlp_attrs = {"output_0": "shared"}
-    model.is_mlp_gate_up_fusion_supported = lambda *_args: False
     model.make_mlp_proj = lambda *args: None
     model.make_matmul = lambda projection, name, root_input: name
 

@@ -156,12 +156,14 @@ def test_rejects_embedding_output_name_collisions(collision):
 
 @pytest.mark.parametrize("decoder_filename", ["model.onnx", "embedding.onnx"])
 @pytest.mark.parametrize("rename_drafter_weight", [False, True])
-def test_conversion_preserves_external_offsets_and_shared_head(
-    tmp_path, decoder_filename, rename_drafter_weight, monkeypatch
+def test_conversion_owns_external_data_and_preserves_runtime_shared_head(
+    tmp_path, decoder_filename, rename_drafter_weight
 ):
     source = tmp_path / "source"
     source.mkdir()
     target = lookup_model(retain_ids=False)
+    target.graph.initializer.append(numpy_helper.from_array(np.arange(6, dtype=np.float32), "lm_head.weight"))
+    target.metadata_props.add(key="source_key", value="source_value")
     onnx.save_model(
         target,
         source / decoder_filename,
@@ -171,36 +173,69 @@ def test_conversion_preserves_external_offsets_and_shared_head(
         size_threshold=0,
     )
     drafter = onnx.load(source / decoder_filename, load_external_data=False)
+    (source / "alternate.onnx").write_bytes(drafter.SerializeToString())
+    (source / "orphan.data").write_bytes(b"stale data")
+    (source / "tokenizer.json").write_text("{}")
     if rename_drafter_weight:
         drafter.graph.initializer[0].name = "draft.embedding.weight"
         drafter.graph.node[0].input[0] = "draft.embedding.weight"
     drafter.graph.node.append(helper.make_node("Identity", ["input_ids"], ["selector_ids"]))
     drafter.graph.output.append(helper.make_tensor_value_info("selector_ids", TensorProto.INT64, ["tokens"]))
     (source / "dflash2.onnx").write_bytes(drafter.SerializeToString())
-    shared = [{"name": "embedding.weight"}, {"name": "lm_head.weight"}]
+    head = next(value for value in drafter.graph.initializer if value.name == "lm_head.weight")
+    head_storage = {entry.key: entry.value for entry in head.external_data}
+    shared_head = {
+        "name": head.name, "data_file": head_storage["location"],
+        "offset": head_storage["offset"], "length": head_storage["length"],
+        "data_type": head.data_type, "shape": list(head.dims),
+    }
+    shared = [{"name": "embedding.weight"}, shared_head]
     config = {
         "model": {
             "decoder": {"filename": decoder_filename, "hidden_size": 32, "shared_initializers": shared},
             "dflash2": {
                 "filename": "dflash2.onnx",
-                "shared_initializers": [{"name": drafter.graph.initializer[0].name}, {"name": "lm_head.weight"}],
+                "shared_initializers": [{"name": drafter.graph.initializer[0].name}, shared_head],
             },
         },
         "engine": {"dynamic_batching": {"max_batch_size": 1}},
     }
     (source / "genai_config.json").write_text(json.dumps(config))
     before = (source / decoder_filename).read_bytes()
-    def unexpected_read(*args, **kwargs):
-        pytest.fail("External tensors must not be read")
-
-    monkeypatch.setattr(ir.ExternalTensor, "numpy", unexpected_read)
-    monkeypatch.setattr(ir.ExternalTensor, "tobytes", unexpected_read)
+    original_data = (source / "weights.data").read_bytes()
     destination = convert(source, tmp_path / "split")
     result = json.loads((destination / "genai_config.json").read_text())
-    assert result["model"]["decoder"]["shared_initializers"] == [{"name": "lm_head.weight"}]
-    assert result["model"]["dflash2"]["shared_initializers"] == [{"name": "lm_head.weight"}]
+    expected_head = {**shared_head, "data_file": decoder_filename + ".data", "offset": "0"}
+    assert result["model"]["decoder"]["shared_initializers"] == [expected_head]
+    assert result["model"]["dflash2"]["shared_initializers"] == [expected_head]
     assert (source / decoder_filename).read_bytes() == before
-    assert (destination / "weights.data").stat().st_ino == (source / "weights.data").stat().st_ino
+    assert (source / "weights.data").read_bytes() == original_data
+    assert (destination / "weights.data").read_bytes() == original_data
+    assert (destination / "weights.data").stat().st_ino != (source / "weights.data").stat().st_ino
+    assert not (destination / "orphan.data").exists()
+    assert (destination / "tokenizer.json").stat().st_ino == (source / "tokenizer.json").stat().st_ino
+    graph_paths = list(destination.glob("*.onnx"))
+    assert {path.name for path in destination.glob("*.data")} == {
+        *(path.name + ".data" for path in graph_paths if path.name != "alternate.onnx"), "weights.data"
+    }
+    for path in graph_paths:
+        if path.name == "alternate.onnx":
+            assert path.read_bytes() == (source / path.name).read_bytes()
+            np.testing.assert_array_equal(
+                ir.load(path).graph.initializers["lm_head.weight"].const_value.numpy(), np.arange(6, dtype=np.float32)
+            )
+            continue
+        graph = onnx.load(path, load_external_data=False)
+        assert all(
+            next(entry.value for entry in tensor.external_data if entry.key == "location") == path.name + ".data"
+            for tensor in graph.graph.initializer
+        )
+        loaded = onnx.load(path)
+        for tensor in loaded.graph.initializer:
+            if tensor.name == "lm_head.weight":
+                np.testing.assert_array_equal(numpy_helper.to_array(tensor), np.arange(6, dtype=np.float32))
+        if path.name != result["model"]["embedding"]["filename"]:
+            assert graph.metadata_props == target.metadata_props
     embedding_filename = result["model"]["embedding"]["filename"]
     assert embedding_filename != decoder_filename
     session = ort.InferenceSession(str(destination / embedding_filename), providers=["CPUExecutionProvider"])
@@ -216,6 +251,31 @@ def test_conversion_preserves_external_offsets_and_shared_head(
     with pytest.raises(ValueError, match="share identical"):
         convert(source, tmp_path / "invalid")
     assert not (tmp_path / "invalid").exists()
+
+
+def test_conversion_rejects_data_collision_with_unchanged_prebuilt_graph(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    model = lookup_model(retain_ids=False)
+    onnx.save_model(
+        model, source / "model.onnx", save_as_external_data=True, all_tensors_to_one_file=True,
+        location="model.onnx.data", size_threshold=0,
+    )
+    (source / "prebuilt.onnx").write_bytes((source / "model.onnx").read_bytes())
+    (source / "genai_config.json").write_text(json.dumps({
+        "model": {"decoder": {"filename": "model.onnx", "hidden_size": 32}},
+        "engine": {"dynamic_batching": {"max_batch_size": 1}},
+    }))
+    original_model = (source / "prebuilt.onnx").read_bytes()
+    original_data = (source / "model.onnx.data").read_bytes()
+
+    with pytest.raises(ValueError, match="overwrite unchanged model data"):
+        convert(source, tmp_path / "split")
+
+    assert not (tmp_path / "split").exists()
+    assert not (tmp_path / "split.saving").exists()
+    assert (source / "prebuilt.onnx").read_bytes() == original_model
+    assert (source / "model.onnx.data").read_bytes() == original_data
 
 
 def test_rejects_unsupported_embedding_output_type():

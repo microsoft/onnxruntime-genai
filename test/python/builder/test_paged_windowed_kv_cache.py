@@ -236,6 +236,7 @@ def _make_inputs_model(use_paged_attention, use_ring):
         "past_key_values.key": [],
         "past_key_values.value": [],
     }
+    model.input_types = dict.fromkeys(model.input_names)
     return model
 
 

@@ -1,9 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
-"""Split a packed decoder/DFlash embedding into one CPU session without re-exporting weights.
+"""Split a packed decoder/DFlash embedding into one shared CPU session.
 
 python -m onnxruntime_genai.models.split_cpu_embedding --input MODEL --output NEW_MODEL
-The output hard-links the original external data and tokenizer files (same filesystem).
+Every regenerated graph owns its data file; prebuilt data is copied and other auxiliary files are hard-linked.
 """
 
 import argparse
@@ -11,7 +11,6 @@ import copy
 import json
 import os
 import shutil
-import tempfile
 from pathlib import Path
 
 import onnx_ir as ir
@@ -167,6 +166,26 @@ def lookup_signature(model, source_dir):
     ), weights
 
 
+def external_tensors(model):
+    graphs = list(model.graphs())
+    for function in model.functions.values():
+        graphs.extend([function.graph, *function.graph.subgraphs()])
+    for graph in graphs:
+        for value in graph.initializers.values():
+            if isinstance(value.const_value, ir.ExternalTensor):
+                yield value.const_value
+        for node in graph:
+            for attribute in node.attributes.values():
+                if attribute.is_ref():
+                    continue
+                tensors = []
+                if attribute.type == ir.AttributeType.TENSOR:
+                    tensors = [attribute.as_tensor()]
+                elif attribute.type == ir.AttributeType.TENSORS:
+                    tensors = attribute.as_tensors()
+                yield from (tensor for tensor in tensors if isinstance(tensor, ir.ExternalTensor))
+
+
 def convert(source, destination):
     source, destination = Path(source).resolve(), Path(destination).resolve()
     if destination.exists():
@@ -215,24 +234,60 @@ def convert(source, destination):
         "outputs": {"inputs_embeds": "inputs_embeds"},
     }
     graphs[embedding_filename] = embedding
-    # ORT rejects external-data symlinks that resolve outside the model directory.
-    for graph in graphs.values():
+    source_data_files = set()
+    shared_storage = {}
+    for filename, graph in graphs.items():
         for subgraph in _graphs(graph.graph):
             for value in subgraph.initializers.values():
                 tensor = value.const_value
-                if isinstance(tensor, ir.ExternalTensor) and (
-                    Path(tensor.location).name != tensor.location or not (source / tensor.location).is_file()
-                ):
-                    raise ValueError(f"Unsupported external data location: {tensor.location}")
+                if isinstance(tensor, ir.ExternalTensor):
+                    shared_storage[filename, value.name] = (
+                        str(tensor.location), str(tensor.offset), str(tensor.length)
+                    )
+        for tensor in external_tensors(graph):
+            if Path(tensor.location).name != tensor.location or not (source / tensor.location).is_file():
+                raise ValueError(f"Unsupported external data location: {tensor.location}")
+            source_data_files.add(str(tensor.location))
+    retained_data_files = set()
+    for path in source.glob("*.onnx"):
+        if path.name not in graphs:
+            retained_data_files.update(str(tensor.location) for tensor in external_tensors(ir.load(path)))
+    collisions = retained_data_files & {name + ".data" for name in graphs}
+    if collisions:
+        raise ValueError(f"Generated data files would overwrite unchanged model data: {sorted(collisions)}")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=destination.name + ".", dir=destination.parent))
+    staging = destination.with_name(destination.name + ".saving")
+    staging.mkdir()
     try:
         for path in source.iterdir():
-            if path.name not in graphs and path.name != "genai_config.json":
-                os.link(path.resolve(), staging / path.name)
+            if (
+                path.name not in graphs and path.name != "genai_config.json"
+                and (
+                    path.name in retained_data_files
+                    or (path.name not in source_data_files and path.suffix != ".data")
+                )
+            ):
+                if path.name in retained_data_files:
+                    shutil.copyfile(path.resolve(), staging / path.name)
+                else:
+                    os.link(path.resolve(), staging / path.name)
+        from builders.base import Model  # noqa: PLC0415
+
+        shared_replacements = {}
         for name, graph in graphs.items():
-            # Serialization preserves external offsets and does not load or rewrite multi-GB weights.
-            ir.save(graph, staging / name)
+            Model.save_onnx_model(graph, staging / name)
+            saved = ir.load(staging / name)
+            for initializer_name, value in saved.graph.initializers.items():
+                if (name, initializer_name) in shared_storage:
+                    tensor = value.const_value
+                    shared_replacements.setdefault((initializer_name, *shared_storage[name, initializer_name]), {
+                        "data_file": str(tensor.location), "offset": str(tensor.offset), "length": str(tensor.length)
+                    })
+        for component in ("decoder", "dflash2", "dspark"):
+            for record in model_config.get(component, {}).get("shared_initializers", []):
+                key = (record["name"], record.get("data_file"), record.get("offset"), record.get("length"))
+                if key in shared_replacements:
+                    record.update(shared_replacements[key])
         (staging / "genai_config.json").write_text(json.dumps(config, indent=2) + "\n")
         staging.rename(destination)
     finally:

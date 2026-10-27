@@ -5,7 +5,6 @@
 # --------------------------------------------------------------------------
 
 import os
-import tempfile
 
 import numpy as np
 import onnx_ir as ir
@@ -569,51 +568,19 @@ class BlockDrafterBuilder:
         if self.pending_adoptions():
             raise ValueError("adopt_target_tensors must run before saving a drafter that adopts the target's tensors.")
         out_path = os.path.join(out_dir, self.filename)
-        data_path = out_path + ".data"
-        with tempfile.TemporaryDirectory(dir=out_dir, prefix=f".{self.filename}.") as staging_dir:
-            staged_path = os.path.join(staging_dir, self.filename)
-            staged_data_path = staged_path + ".data"
-            with tqdm() as progress:
-                total_set = False
+        with tqdm() as progress:
+            total_set = False
 
-                def callback(tensor, metadata):
-                    nonlocal total_set
-                    if not total_set:
-                        progress.total = metadata.total
-                        total_set = True
-                    progress.update()
-                    progress.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
+            def callback(tensor, metadata):
+                nonlocal total_set
+                if not total_set:
+                    progress.total = metadata.total
+                    total_set = True
+                progress.update()
+                progress.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
-                Model.stamp_build_metadata(self.model)
-                ir.save(
-                    self.model,
-                    staged_path,
-                    external_data=os.path.basename(staged_data_path),
-                    size_threshold_bytes=0,
-                    callback=callback,
-                )
-            self.replace_model_files(staged_path, staged_data_path, out_path, data_path, staging_dir)
-
-    def replace_model_files(self, staged_path, staged_data_path, out_path, data_path, staging_dir):
-        replacements = ((staged_data_path, data_path), (staged_path, out_path))
-        backups = []
-        installed = []
-        try:
-            for _, destination in replacements:
-                if os.path.exists(destination):
-                    backup = os.path.join(staging_dir, os.path.basename(destination) + ".bak")
-                    os.replace(destination, backup)
-                    backups.append((backup, destination))
-            for source, destination in replacements:
-                os.replace(source, destination)
-                installed.append(destination)
-        except Exception:
-            for path in reversed(installed):
-                if os.path.exists(path):
-                    os.remove(path)
-            for backup, destination in reversed(backups):
-                os.replace(backup, destination)
-            raise
+            Model.stamp_build_metadata(self.model)
+            Model.save_onnx_model(self.model, out_path, callback=callback)
 
     def genai_config_section(self):
         section = {

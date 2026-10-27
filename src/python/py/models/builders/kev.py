@@ -232,7 +232,9 @@ def export_kev_components(options, output_root: Path) -> dict:
         raise ValueError(f"KEV base_revision must be {policy['base_revision']}")
     checkpoint = load_kev_checkpoint(options.model_source)
     filename = "kev_head.onnx"
-    ir.save(build_kev_model(checkpoint), output_root / filename)
+    from .base import Model  # noqa: PLC0415
+
+    Model.save_onnx_model(build_kev_model(checkpoint), output_root / filename)
     return {
         "schema_version": 1,
         "model_type": "jaredpalmer/kev-4b",

@@ -19,12 +19,7 @@ class Qwen4ExpGraphModel(Model):
         self.node_names = set()
 
     def save_model(self, output_dir):
-        ir.save(
-            self.model,
-            os.path.join(output_dir, self.filename),
-            external_data=f"{self.filename}.data",
-            size_threshold_bytes=0,
-        )
+        self.save_onnx_model(self.model, os.path.join(output_dir, self.filename))
 
     def make_linear(self, name, linear, root_input, shape, output=None):
         weight_name = f"{name}.weight"

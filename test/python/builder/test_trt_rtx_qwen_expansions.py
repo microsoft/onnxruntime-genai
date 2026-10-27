@@ -1,15 +1,20 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+from types import SimpleNamespace
+
 import numpy as np
 import onnx_ir as ir
 import onnxruntime as ort
 import pytest
+import torch
+
 from models.builders.base import Model
+from models.builders.qwen3_8_text import Qwen4ExpTextModel
 
 
-def _model(ep, dtype):
-    model = Model.__new__(Model)
+def _model(ep, dtype, model_class=Model):
+    model = model_class.__new__(model_class)
     model.ep = ep
     model.io_dtype = dtype
     model.values = {}
@@ -39,6 +44,97 @@ def _run(model, outputs, feeds, model_path):
             pytest.skip("Installed ONNX Runtime does not include the fused reference operator")
         raise
     return session.run(None, feeds)
+
+
+@pytest.mark.parametrize("ep", ["dml", "trt-rtx"])
+@pytest.mark.parametrize("dtype", [ir.DataType.FLOAT, ir.DataType.FLOAT16])
+@pytest.mark.parametrize("paged", [False, True])
+def test_standard_hyper_connections_match_reference(ep, dtype, paged, tmp_path):
+    model = _model(ep, dtype, Qwen4ExpTextModel)
+    model.use_paged_attention = paged
+    model.hidden_size = 8
+    model.hyper_connection_attrs = {"num_branches": 4, "hidden_size": 32}
+    model.layernorm_attrs = {"epsilon": 1e-6}
+    np_dtype = np.float32 if dtype == ir.DataType.FLOAT else np.float16
+    token_shape = [6] if paged else [2, 3]
+    rng = np.random.default_rng(42)
+    feeds = {
+        "streams": rng.normal(size=(*token_shape, 32)).astype(np_dtype),
+        "pre": rng.normal(size=(*token_shape, 32)).astype(np_dtype),
+        "post": rng.normal(size=(*token_shape, 4)).astype(np_dtype),
+        "block": rng.normal(size=(*token_shape, 8)).astype(np_dtype),
+        "down": rng.normal(size=(*token_shape, 4)).astype(np_dtype),
+    }
+    for name, value in feeds.items():
+        _input(model, name, dtype, list(value.shape))
+    weight = torch.from_numpy(rng.normal(size=32).astype(np.float32))
+    norm = model.make_branchwise_rms_norm("/norm", "streams", SimpleNamespace(weight=weight), 8)
+    silu = model.make_scaled_silu("/silu", "down", [*token_shape, 4])
+    pre = model.make_hyper_connection_pre_mix("/pre_mix", "streams", "pre", token_shape)
+    post = model.make_hyper_connection_post_mix(
+        "/post_mix", "streams", "block", "post", token_shape, output_name="mixed"
+    )
+    reductions = [node.attributes["keepdims"].value for node in model.model.graph if node.op_type == "ReduceMean"]
+    assert reductions == [1, 0]
+    assert all(type(value) is int for value in reductions)
+    results = _run(model, [norm, silu, pre, post], feeds, tmp_path / "hyper.onnx")
+
+    grouped = feeds["streams"].astype(np.float32).reshape(*token_shape, 4, 8)
+    inverse_rms = 1.0 / np.sqrt(np.mean(grouped**2, axis=-1, keepdims=True) + 1e-6)
+    normalized = (grouped * inverse_rms).reshape(*token_shape, 32).astype(np_dtype)
+    scaled = (feeds["down"] / 4).astype(np_dtype)
+    expected = [
+        normalized * (weight.numpy() + 1.0).astype(np_dtype),
+        scaled / (1.0 + np.exp(-scaled.astype(np.float32))),
+        np.mean((feeds["streams"] * feeds["pre"]).reshape(*token_shape, 4, 8), axis=-2),
+        feeds["streams"] + (feeds["block"][..., None, :] * feeds["post"][..., None]).reshape(*token_shape, 32),
+    ]
+    for actual, reference in zip(results, expected, strict=False):
+        np.testing.assert_allclose(actual, reference, rtol=3e-3, atol=3e-3)
+    assert all(node.domain in ("", None) for node in model.model.graph)
+
+
+@pytest.mark.parametrize("dtype", [ir.DataType.FLOAT, ir.DataType.FLOAT16])
+@pytest.mark.parametrize("paged", [False, True])
+@pytest.mark.parametrize(
+    "op", ["SimplifiedLayerNormalization", "SkipSimplifiedLayerNormalization", "SkipLayerNormalization"]
+)
+def test_trt_rtx_layernorm_matches_fused_reference(dtype, paged, op, tmp_path):
+    np_dtype = np.float32 if dtype == ir.DataType.FLOAT else np.float16
+    shape = [6, 24] if paged else [2, 3, 24]
+    rng = np.random.default_rng(44)
+    feeds = {name: rng.normal(size=shape).astype(np_dtype) for name in ("root", "skip")}
+    feeds.update({name: rng.normal(size=24).astype(np_dtype) for name in ("weight", "bias")})
+    skip = op.startswith("Skip")
+    inputs = ["root", "skip", "weight"] if skip else ["root", "weight"]
+    if "Simplified" not in op:
+        inputs.append("bias")
+    outputs = ["normalized", "", "", "residual"] if skip else ["normalized"]
+    results = []
+    for ep in ("cuda", "trt-rtx"):
+        model = _model(ep, dtype)
+        model.use_paged_attention = paged
+        model.layernorm_attrs = {"epsilon": 1e-6}
+        for name in inputs:
+            _input(model, name, dtype, list(feeds[name].shape))
+        kwargs = {"epsilon": 1e-6}
+        if not skip:
+            kwargs.update(axis=-1, stash_type=1)
+        model.make_layernorm_subgraph(
+            "/norm", op_type=op, inputs=inputs, outputs=outputs, skip=skip, new_io_dtype=dtype, **kwargs
+        )
+        for name in ("normalized", "residual") if skip else ("normalized",):
+            model.make_value(name, dtype, shape)
+        results.append(
+            _run(
+                model,
+                ["normalized", "residual"] if skip else ["normalized"],
+                {name: feeds[name] for name in inputs},
+                tmp_path / f"{ep}.onnx",
+            )
+        )
+    for fused, expanded in zip(*results, strict=True):
+        np.testing.assert_allclose(expanded, fused, rtol=3e-3, atol=3e-3)
 
 
 @pytest.mark.parametrize("dtype", [ir.DataType.FLOAT, ir.DataType.FLOAT16])

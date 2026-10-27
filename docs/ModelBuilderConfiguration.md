@@ -99,9 +99,9 @@ Pool size, scheduler limits, utilization targets, and prefill chunk size belong 
 
 ### Projection Fusion
 
-Target MLP gate/up fusion is automatic for compatible unpacked, unadapted floating-point projections; there is no target fusion option. Projections with distinct quantization policies remain separate. DFlash2 fusion is independently configurable through `drafter_options.optimizations.fuse_mlp_gate_up` (default `false`), corresponding to `dflash2_fuse_gate_up`. Fusion produces a single projection (`MatMulNBits` for INT4) followed by `Split`. This does not apply fusion to vision components.
+Target MLP gate/up fusion combines compatible emitted `MatMul` or `MatMulNBits` projections automatically; there is no target fusion option. Projections with distinct quantization policies or incompatible layouts remain separate. DFlash2 fusion is independently configurable through `drafter_options.optimizations.fuse_mlp_gate_up` (default `false`), corresponding to `dflash2_fuse_gate_up`. Fusion produces a single projection (`MatMulNBits` for INT4) followed by `Split`. This does not apply fusion to vision components.
 
-Fusion requires a supported exporter and compatible projection shapes, biases, and quantization policy. Current target fusion requires unpacked floating-point gate/up weights and does not support adapted projections. Reject unsupported requests, including any per-projection exclusion or precision rule that cannot be preserved. Resolve exact-name overrides against the final emitted graph; do not silently drop old gate/up names after fusion or change one projection's policy to match the other.
+Fusion requires compatible projection shapes, biases, dtypes, layouts, and quantization policy. Target fusion preserves packed bytes and scales for compatible `MatMulNBits` projections and retains separate operations for adapted or incompatible projections. Resolve exact-name overrides against the final emitted graph; do not silently drop old gate/up names after fusion or change one projection's policy to match the other.
 
 Target Q/K/V projection fusion and eligible Q/K normalization fusion are automatic, without target optimization fields or extra options. Unsupported execution providers and incompatible projection or quantization configurations retain separate operations. Index sharing is intrinsic to paged main/MTP graphs; `max_draft_tokens` remains the draft-budget control.
 
@@ -145,7 +145,7 @@ Some drafters borrow the target embedding or LM head. That is an architectural d
 
 These policies are independent of drafter body precision. A dense BF16 DFlash2 or DSpark body can still adopt the target's supported quantized head. This follows the decoupling in the latest PR #2579 revision; do not resurrect the earlier coupling between `dflash2_precision=bf16` and disabling head adoption.
 
-For an adopted quantized tensor, reuse the saved target weights, scales, any zero points, and relevant node attributes. Do not infer them from requested precision or quantize the same source weights twice and assume equality. Quantized embedding adoption must reproduce the target lookup operator, not emit a dense `Gather` against the packed table. Verify external-data references/ranges and ensure both graphs reference one saved payload. Report each tensor's effective sharing or fallback decision independently.
+For an adopted quantized tensor, reuse the saved target weights, scales, any zero points, and relevant node attributes. Do not infer them from requested precision or quantize the same source weights twice and assume equality. Quantized embedding adoption must reproduce the target lookup operator, not emit a dense `Gather` against the packed table. Verify external-data references/ranges and copy the adopted bytes into each graph's own data file; runtime shared-initializer records may still reuse one payload in memory. Report each tensor's effective sharing or fallback decision independently.
 
 This is cross-model sharing, not the existing `shared_embeddings` option, which ties an embedding to the LM head within a model. Do not alias the two. Tied target graphs, QDQ, unsupported algorithms, or incompatible prepacked head layouts may prevent adoption. With `auto`, retain a supported fallback and warn about its storage and numerical implications; with `required`, fail with the exact reason. An INT8 embedding requires INT8 export **and** a compatible adoption path; PR #2579's INT4 lookup adoption alone does not supply that capability.
 
@@ -209,7 +209,7 @@ Allow supported settings under:
 
 When every memory class uses the same ONNX graphs, place `runtime_profiles` directly inside `runtime_config`. Model Builder validates and writes the array to `genai_config.json` in the first export pass. No post-processing pass is needed. A profile overlay may change `engine.dynamic_batching`, `search.chunk_size`, and `speculative.max_draft_tokens`. Profiles cannot override `search.max_length`; the Engine derives each GPU's request ceiling from the profile's cache allocation.
 
-An alternate graph may additionally set `model.decoder.filename`. The named graph must already be present in the package. Use the `KVCacheVariant` API below to derive a different KV-cache variant while retaining the base graph's external weights. Do not set a different filename for a configuration-only profile.
+An alternate graph may additionally set `model.decoder.filename`. The named graph must already be present in the package. Use the `KVCacheVariant` API below to derive a different KV-cache variant with its own copy of the base graph's weights. Do not set a different filename for a configuration-only profile.
 
 ### Authoring KV-Cache Variants
 
@@ -247,13 +247,13 @@ config = apply_runtime_config(json.loads(config_path.read_text()), {
 config_path.write_text(json.dumps(config, indent=2))
 ```
 
-The API accepts `int4_per_channel` and `int8_per_channel` for a statically per-channel-quantized `PagedAttention` export. Source and output ONNX files must share a directory. Only KV scale initializers are replaced and embedded in the variant; other external-data locations, offsets, and lengths remain unchanged. Keep the shared external-data files beside both graphs when distributing the package. Scale `layer_ids` may be reordered but must cover exactly the exported attention layers, and every K/V scale must have consistent head geometry.
+The API accepts `int4_per_channel` and `int8_per_channel` for a statically per-channel-quantized `PagedAttention` export. Source and output ONNX files may reside in different directories. Only KV scale values are replaced; unchanged weights retain their original bytes. Every initializer, including the new scales, is saved in one variant-owned `<output filename>.data` file. Distribute that file alongside the variant ONNX graph; the source graph's data file is not needed. Scale `layer_ids` may be reordered but must cover exactly the exported attention layers, and every K/V scale must have consistent head geometry.
 
 Memory profiles require visible CUDA ordinal 0; select a physical GPU with `CUDA_VISIBLE_DEVICES` before launching. Recreate the Model and Engine to apply a different profile. Batch/token limits must fit the runtime's signed 32-bit parser, `max_batch_size` cannot exceed 256, and batching overrides require an exported dynamic-batching configuration. Draft-token overrides are checked against the same exported drafter/state capacity as ordinary runtime overlays.
 
 Profile `eligibility` combines its required inclusive total-device-memory range with optional inclusive `minimum_free_device_memory_bytes` and `maximum_free_device_memory_bytes` bounds and optional `is_integrated: true|false`. Omitted free-memory bounds match any free-memory value; omitted `is_integrated` matches either device type. Equal total-memory ranges may use disjoint free-memory ranges or separate integrated and discrete profiles. The builder checks the same reachable-overlap rules as the C++ loader, rejects invalid byte counts and non-boolean `is_integrated`, and rejects a free-memory minimum above the maximum total memory. Further typed conditions belong in this existing eligibility object, with matching and intersection validation added on both sides. CUDA free memory is sampled once at Model creation, not reserved; on integrated devices it is not a measure of free OS memory. Select conservative `num_blocks` using measured peak OS-memory headroom.
 
-With a CUDA-enabled GenAI build and ORT built with INT4 KV-cache support, this integration test assembles a temporary shared-weight package, selects each INT4/INT8 profile, creates an Engine, and performs a short decode:
+With a CUDA-enabled GenAI build and ORT built with INT4 KV-cache support, this integration test assembles a package with independent variant data files, selects each INT4/INT8 profile, creates an Engine, and performs a short decode:
 
 ```bash
 ORTGENAI_PAGED_CUDA_GRAPH_MODEL="$PWD/package" python -m pytest -q \

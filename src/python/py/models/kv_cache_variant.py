@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Create a KV-cache quantization variant that reuses an ONNX graph's external weights."""
+"""Create a KV-cache quantization variant with its own external-data file."""
 
 import json
 import re
@@ -13,10 +13,10 @@ from quantization import KV_CACHE_CALIBRATION_QMAX
 
 
 class KVCacheVariant:
-    """Create a static per-channel KV-cache variant without duplicating external model weights.
+    """Create a static per-channel KV-cache variant with independent external model weights.
 
-    KV scales are recalculated from the scale file and stored inside the variant ONNX file. Every
-    other initializer keeps the source graph's external-data location, offset, and length.
+    KV scales are recalculated from the scale file. All initializers, including unchanged
+    weights, are saved in the variant's own data file without modifying the source.
     """
 
     def __init__(self, scheme: str):
@@ -29,8 +29,6 @@ class KVCacheVariant:
     def create(self, source_model_path: str | Path, output_model_path: str | Path, scale_file: str | Path) -> None:
         source_model_path = Path(source_model_path)
         output_model_path = Path(output_model_path)
-        if source_model_path.resolve().parent != output_model_path.resolve().parent:
-            raise ValueError("Source and output graphs must share a directory to reuse external weights.")
         if source_model_path.resolve() == output_model_path.resolve():
             raise ValueError("Output graph must not overwrite the source graph.")
         scale_data = self.load_scale_data(Path(scale_file), source_model_path.stem)
@@ -42,7 +40,9 @@ class KVCacheVariant:
         self.update_cache_values(model, layer_ids, head_size)
 
         output_model_path.parent.mkdir(parents=True, exist_ok=True)
-        ir.save(model, output_model_path)
+        from builders.base import Model  # noqa: PLC0415
+
+        Model.save_onnx_model(model, output_model_path)
 
     def load_scale_data(self, scale_path: Path, scale_section: str) -> dict:
         with scale_path.open(encoding="utf-8") as stream:

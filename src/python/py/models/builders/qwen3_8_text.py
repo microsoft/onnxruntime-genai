@@ -400,9 +400,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             self.make_initializer(
                 weight_scale.reshape(1, 1), "model.ple.ngram_embedding.weight_scale", to=ir.DataType.FLOAT
             )
-        if not hasattr(self, "external_data_files"):
-            self.external_data_files = {}
-        self.external_data_files[table_name] = "engram.onnx.data"
         gather_name = f"{basename}/ngram_embedding/GatherBlockQuantized"
         head_dim = self.ple_attrs["embed_dim"] // ngram_heads
         gather_shape = [*token_shape, ngram_heads, head_dim]

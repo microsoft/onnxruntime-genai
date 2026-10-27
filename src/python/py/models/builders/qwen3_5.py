@@ -8,10 +8,13 @@ import torch
 from builder_config import serialize_genai_config
 
 from .base import Model
+from .expansions.standard import Standard
 from .mtp import MTPModel
 
 
 class Qwen35TextModel(Model):
+    make_l2_normalize = Standard.make_l2_normalize
+
     def validate_gated_delta_net_options(self, state_window, ep):
         if self.use_paged_attention and ep not in {"cuda", "webgpu"}:
             raise ValueError("Paged GatedDeltaNet exports require the CUDA or WebGPU execution provider")
@@ -278,8 +281,8 @@ class Qwen35TextModel(Model):
             axis=-1,
         )
 
-        q_path = self.make_l2_normalize_expansion(f"{basename}/q_l2norm", q_path)
-        k_path = self.make_l2_normalize_expansion(f"{basename}/k_l2norm", k_path)
+        q_path = self.make_l2_normalize(f"{basename}/q_l2norm", q_path)
+        k_path = self.make_l2_normalize(f"{basename}/k_l2norm", k_path)
         scale = 1.0 / math.sqrt(self.linear_key_head_dim)
         q_scaled = f"{basename}/q_scaled/Mul"
         self.make_mul(
@@ -683,10 +686,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
         intermediate_size = self.intermediate_size
         try:
             self.intermediate_size = self.shared_expert_intermediate_size
-            if self.mlp_attrs.get("fuse_gate_up", True) and self.is_mlp_gate_up_fusion_supported(layer_id, shared_expert):
-                self.make_mlp_proj_fused(layer_id, shared_expert, root_input)
-            else:
-                self.make_mlp_proj(layer_id, shared_expert, root_input)
+            self.make_mlp_proj(layer_id, shared_expert, root_input)
         finally:
             self.intermediate_size = intermediate_size
         shared_output = self.mlp_attrs["output_0"]
@@ -1450,14 +1450,20 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         embed_output = self.make_mtp_embedding(basename)
         self.make_value(embed_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
-        embedding_norm = self.make_offset_rmsnorm(
-            f"{basename}/pre_fc_norm_embedding", embed_output, self.mtp_weights.pre_fc_norm_embedding.weight
-        )
-        hidden_states_norm = self.make_offset_rmsnorm(
-            f"{basename}/pre_fc_norm_hidden",
-            self.input_names["hidden_states"],
-            self.mtp_weights.pre_fc_norm_hidden.weight,
-        )
+        embedding_norm = f"{basename}/pre_fc_norm_embedding/output_0"
+        hidden_states_norm = f"{basename}/pre_fc_norm_hidden/output_0"
+        for location, root_input, norm, output in (
+            ("pre_fc_norm_embedding", embed_output, self.mtp_weights.pre_fc_norm_embedding, embedding_norm),
+            ("pre_fc_norm_hidden", self.input_names["hidden_states"], self.mtp_weights.pre_fc_norm_hidden, hidden_states_norm),
+        ):
+            norm_name = f"{basename}/{location}"
+            weight_name = f"{norm_name[1:].replace('/', '.')}.weight"
+            self.make_initializer(norm.weight + self.layernorm_attrs["add_offset"], weight_name, to=self.io_dtype)
+            self.make_layernorm_subgraph(
+                norm_name, op_type="SimplifiedLayerNormalization", inputs=[root_input, weight_name], outputs=[output],
+                skip=False, new_io_dtype=self.io_dtype, epsilon=self.layernorm_attrs["epsilon"], axis=-1, stash_type=1,
+            )
+            self.make_value(output, self.io_dtype, self.make_hidden_state_shape())
 
         concat_name = f"{basename}/fc/Concat"
         self.make_concat(

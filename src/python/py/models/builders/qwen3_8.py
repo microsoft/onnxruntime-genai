@@ -309,7 +309,6 @@ class Qwen4ExpModel(MTPModel):
             self.mtp.make_model(input_path)
 
     def save_model(self, output_dir):
-        table_name = "model.ple.ngram_embedding.weight"
         if self.input_path is None:
             raise RuntimeError("make_model must be called before save_model.")
         weights = self.decoder.load_weights(self.input_path)
@@ -326,11 +325,6 @@ class Qwen4ExpModel(MTPModel):
             scale_dtype=ir.DataType.FLOAT,
         )
         engram_model.save_model(output_dir)
-        table = ir.load(os.path.join(output_dir, engram_model.filename)).graph.initializers[table_name].const_value
-        for component in (self.decoder, self.mtp):
-            if component is not None and table_name in getattr(component, "external_data_files", {}):
-                component.external_data_tensors = {table_name: table}
-
         self.decoder.save_model(output_dir)
         if self.mtp is not None:
             self.mtp.save_model(output_dir)

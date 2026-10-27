@@ -702,7 +702,7 @@ def test_fp8_blocks_validate_partial_blocks_without_conversion():
     assert projection.weight_scale_inv is original_scale
 
 
-def test_mtp_rmsnorm_uses_onnx_domain():
+def test_mtp_layernorm_op_uses_onnx_domain():
     model = object.__new__(Qwen4ExpMTPTextModel)
     model.io_dtype = ir.DataType.FLOAT16
     model.hidden_size = 16
@@ -712,7 +712,17 @@ def test_mtp_rmsnorm_uses_onnx_domain():
     model.make_initializer = lambda *args, **kwargs: None
     model.make_value = lambda *args, **kwargs: None
     model.make_node = lambda *args, **kwargs: recorded.append(kwargs)
-    model.make_offset_rmsnorm("/model/mtp/norm", "hidden", torch.zeros(16))
+    model.make_layernorm_subgraph(
+        "/model/mtp/norm",
+        op_type="SimplifiedLayerNormalization",
+        inputs=["hidden", "weight"],
+        outputs=["normalized"],
+        skip=False,
+        new_io_dtype=model.io_dtype,
+        epsilon=model.layernorm_attrs["epsilon"],
+        axis=-1,
+        stash_type=1,
+    )
     assert recorded[0].get("domain", "") == ""
 
 
