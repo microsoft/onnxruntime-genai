@@ -44,6 +44,9 @@ preserves its complete inputs in the features so elementwise embedding compariso
 observe each host calculation. Non-square, unequal packed/padded and temporal grids,
 real image preprocessing, and image prefill followed by text decoding are covered.
 Embedding input IDs are tested with both int32 and int64 graph declarations.
+OpenVINO-partitioned Qwen image grids accept the configured input name when the
+canonical `image_grid_thw` key is absent. When both are supplied, the canonical
+tensor takes priority for both vision and position inputs, regardless of insertion order.
 Profiled dtype cases require non-int64 `image_grid_thw` to be rejected before any
 vision stage executes; an int64 control verifies all three stages execute normally.
 ONNX and Pillow are required to execute all cases; the existing Qwen3.5 tokenizer

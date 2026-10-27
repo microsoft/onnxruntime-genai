@@ -640,6 +640,15 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
       }
     }
 
+    if (!img_grid && IsOpenVINOPartitioned(*model_.config_)) {
+      for (const auto& input : extra_inputs) {
+        if (input.name == model_.config_->model.vision.inputs.image_grid_thw) {
+          img_grid = input.tensor;
+          break;
+        }
+      }
+    }
+
     if (img_grid || vid_grid) {
       qwen_pos_inputs->SetGridTensors(img_grid, vid_grid, sec_grid);
     }
