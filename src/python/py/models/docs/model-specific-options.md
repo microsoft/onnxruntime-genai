@@ -116,7 +116,7 @@ Engram token history follows the decoder's `past.%d.ple_tokens` / `present.%d.pl
 
 `model.decoder.ple_token_pad_id` is always emitted as a scalar integer. If the checkpoint lists multiple EOS IDs, the first is the Engram reset/padding ID. The decoder also records `indexer_compress_ratio` from the architecture config so dense speculative rollback does not assume a four-token compression block.
 
-For paged decoding, the runtime packs Engram's `[batch_size, sequence_length, ple_embed_dim]` output into the decoder's `[num_tokens, ple_embed_dim]` `engram_embeddings` input. It forwards the component's updated token history through the matching `present.%d.ple_tokens` decoder input/output binding. The standalone component uses packed hashing internally while keeping the existing per-request runtime interface. Compact speculative-state capture uses standard-ONNX gathers for accepted-prefix rollback snapshots rather than duplicating the hash operator or lookup.
+For paged decoding, the runtime invokes the original standalone `NGramHashMapping` lookup pipeline per request and packs its `[batch_size, sequence_length, ple_embed_dim]` output into the decoder's `[num_tokens, ple_embed_dim]` `engram_embeddings` input. It forwards the component's updated token history through the matching `present.%d.ple_tokens` decoder input/output binding. No varlen hashing adaptation or additional shape-processing subgraph is required in the standalone component. Compact speculative-state capture retains the separate standard-ONNX gathers for accepted-prefix rollback snapshots rather than duplicating the hash operator or lookup.
 
 ```bash
 python builder.py -i path_to_local_checkpoint \

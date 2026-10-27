@@ -1588,7 +1588,7 @@ def test_qwen4_exp_only_standalone_model_stores_engram_table(tmp_path, monkeypat
     assert (tmp_path / "engram.onnx.data").is_file()
     filenames = ("engram.onnx", "model.onnx") + (("mtp.onnx",) if include_mtp else ())
     exported = [onnx.load(tmp_path / filename, load_external_data=False) for filename in filenames]
-    assert any(node.op_type == ("VarlenNGramHashMapping" if paged else "NGramHashMapping")
+    assert any(node.op_type == "NGramHashMapping"
                for node in exported[0].graph.node)
     tables = [value for value in exported[0].graph.initializer if value.name == table_name]
     assert len(tables) == 1

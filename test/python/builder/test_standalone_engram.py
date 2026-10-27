@@ -36,7 +36,7 @@ def engram_models(request, engram_weights, tmp_path):
     ple, config = engram_weights
     models = []
     for paged in (False, True):
-        model = Qwen4ExpEngramModel(ple, config, request.param, use_paged_attention=paged)
+        model = Qwen4ExpEngramModel(ple, config, request.param)
         directory = tmp_path / ("paged" if paged else "dense")
         directory.mkdir()
         model.save_model(directory)
@@ -82,7 +82,7 @@ def test_standalone_engram_abi_metadata_and_external_data(engram_models, engram_
     exported = onnx.load(path, load_external_data=False)
     assert exported.producer_name == "onnxruntime-genai"
     assert {op.domain: op.version for op in exported.opset_import} == {"": 22, "com.microsoft": 1}
-    hash_op = "VarlenNGramHashMapping" if paged else "NGramHashMapping"
+    hash_op = "NGramHashMapping"
     hash_node = next(node for node in exported.graph.node if node.op_type == hash_op)
     assert hash_node.domain == "com.microsoft"
     assert {attribute.name: onnx.helper.get_attribute_value(attribute) for attribute in hash_node.attribute} == {
@@ -92,13 +92,9 @@ def test_standalone_engram_abi_metadata_and_external_data(engram_models, engram_
         "reset_on_eos": 1,
     }
     assert list(hash_node.output) == [f"/model/ple/{hash_op}/output_0", "present.4.ple_tokens"]
-    if paged:
-        assert hash_node.input[0] == "/model/ple/packed/Flatten/output_0"
-        assert hash_node.input[3] == "/model/ple/packed/CumulativeLengths/output_0"
-        assert {"Shape", "Range", "Mul", "Concat"} <= {node.op_type for node in exported.graph.node}
-        assert model.values[hash_node.input[3]].dtype == ir.DataType.INT32
-    else:
-        assert hash_node.input[0] == "input_ids"
+    assert hash_node.input[0] == "input_ids"
+    assert not any(node.op_type in {"Shape", "Range", "Mul", "Concat", "VarlenNGramHashMapping"}
+                   for node in exported.graph.node)
     assert list(hash_node.input[-3:]) == [
         "past.4.ple_tokens",
         "model.ple.head_offsets",
@@ -183,14 +179,9 @@ def test_standalone_engram_dense_empty_sequence_preserves_history(engram_session
     np.testing.assert_array_equal(present, history)
 
 
-def test_standalone_engram_paged_empty_sequence_if_supported(engram_sessions):
+def test_standalone_engram_paged_decoder_lookup_empty_sequence_preserves_history(engram_sessions):
     history = np.asarray([[7, 8], [0, 12]], dtype=np.int64)
-    try:
-        embeddings, present = run_engram(engram_sessions[1], np.empty((2, 0), dtype=np.int64), history)
-    except ort.capi.onnxruntime_pybind11_state.Fail as error:
-        if "every request must contain a token" in str(error):
-            pytest.skip("VarlenNGramHashMapping requires at least one token per request")
-        raise
+    embeddings, present = run_engram(engram_sessions[1], np.empty((2, 0), dtype=np.int64), history)
     assert embeddings.shape == (2, 0, 8)
     np.testing.assert_array_equal(present, history)
 
@@ -203,7 +194,7 @@ def test_standalone_engram_float_table_and_explicit_scale(engram_weights, tmp_pa
     history = np.asarray([[8, 9], [10, 11]], dtype=np.int64)
     results = []
     for paged in (False, True):
-        model = Qwen4ExpEngramModel(ple, config, ir.DataType.FLOAT, scale_dtype=scale_dtype, use_paged_attention=paged)
+        model = Qwen4ExpEngramModel(ple, config, ir.DataType.FLOAT, scale_dtype=scale_dtype)
         scale = model.graph.initializers["model.ple.ngram_embedding.weight_scale"]
         assert scale.dtype == scale_dtype
         assert model.graph.initializers["model.ple.ngram_embedding.weight"].dtype == ir.DataType.FLOAT8E4M3FN

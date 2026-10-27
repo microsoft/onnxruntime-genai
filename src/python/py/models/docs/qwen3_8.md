@@ -24,7 +24,7 @@ The existing `max_draft_tokens` setting controls the exported draft budget, boun
 
 The decoder retains projections, hidden-state-dependent gating, padding masking, convolution, and residual addition because those execute inside the decoder layer. Its small token-history bindings preserve the runtime state interface, and standard-ONNX gathers capture accepted-prefix token history for speculative rollback without duplicating hashing or lookup.
 
-The standalone component preserves its existing runtime interface: token IDs and history are rank two, and embeddings are rank three. The paged implementation uses packed hashing internally; the Engine invokes it per request and packs its output rows for the decoder. Each exported component owns one external-data file, and only the standalone Engram graph stores the Engram lookup table.
+The same standalone lookup pipeline serves both decoder layouts: `NGramHashMapping`, `GatherBlockQuantized`, an optional dtype `Cast`, and the final output `Reshape`. Token IDs and history are rank two, and embeddings are rank three. The Engine invokes this component per request and packs its output rows for the paged decoder; no dense-to-varlen shape adaptation is needed inside either graph. Each exported component owns one external-data file, and only the standalone Engram graph stores the Engram lookup table.
 
 ## Configuration and Layout
 

@@ -141,7 +141,6 @@ class Qwen4ExpModel(MTPModel):
             self.config.text_config,
             self.decoder.io_dtype,
             scale_dtype=ir.DataType.FLOAT,
-            use_paged_attention=self.decoder.use_paged_attention,
         )
         engram_model.save_model(output_dir)
         self.decoder.save_model(output_dir)
