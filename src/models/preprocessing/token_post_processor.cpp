@@ -27,7 +27,7 @@ MetadataCoreConfig GetPostProcessorConfig(const Generator& generator) {
 TokenPostProcessor::TokenPostProcessor(const Generator& generator)
     : PostProcessor{generator}, internal_{generator_.model_->CreateTokenizer(), GetPostProcessorConfig(generator_)} {}
 
-void TokenPostProcessor::ProcessNextTokens() {
+void TokenPostProcessor::ProcessNext() {
   internal_.Process(generator_.GetTokenOutputs());
 }
 

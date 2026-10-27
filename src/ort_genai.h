@@ -711,10 +711,10 @@ struct OgaTokenPostProcessor : OgaAbstract {
     OgaCheckResult(OgaCreateTokenPostProcessor(&generator, &processor));
     return std::unique_ptr<OgaTokenPostProcessor>(processor);
   }
-  void ProcessNextTokens() { OgaCheckResult(OgaTokenPostProcessorProcessNextTokens(this)); }
+  void ProcessNext() { OgaCheckResult(OgaTokenPostProcessorProcessNext(this)); }
   void Finalize() { OgaCheckResult(OgaTokenPostProcessorFinalize(this)); }
   void Reset() { OgaCheckResult(OgaTokenPostProcessorReset(this)); }
-  std::vector<const OgaTokenPostProcessorResult*> GetNextTokenResults() const {
+  std::vector<const OgaTokenPostProcessorResult*> GetNextResults() const {
     std::vector<const OgaTokenPostProcessorResult*> results;
     const size_t count = OgaTokenPostProcessorGetResultCount(this);
     results.reserve(count);

@@ -10,7 +10,7 @@ class TokenPostProcessorInternal {
  public:
   TokenPostProcessorInternal(std::shared_ptr<Tokenizer> tokenizer, MetadataCoreConfig config);
   void Process(const TokenOutputs& outputs);
-  const std::vector<PostProcessorResult>& GetNextTokenResults() const { return results_; }
+  const std::vector<PostProcessorResult>& GetNextResults() const { return results_; }
   void Finalize();
   void Reset();
 
@@ -25,8 +25,8 @@ class TokenPostProcessorInternal {
 class TokenPostProcessor : public PostProcessor, public LeakChecked<TokenPostProcessor> {
  public:
   explicit TokenPostProcessor(const Generator& generator);
-  void ProcessNextTokens();
-  const std::vector<PostProcessorResult>& GetNextTokenResults() const { return internal_.GetNextTokenResults(); }
+  void ProcessNext();
+  const std::vector<PostProcessorResult>& GetNextResults() const { return internal_.GetNextResults(); }
   void Finalize() override;
   void Reset() override;
 

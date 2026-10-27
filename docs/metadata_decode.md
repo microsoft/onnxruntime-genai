@@ -10,7 +10,7 @@ optional timing views from the generator and delegates to its private
 values rather than a generator and owns a tokenizer, an ordinary tokenizer stream,
 `MetadataCoreState`, grouping/timing state, and the current results. Configuration
 comes from the generator's model and its `genai_config.json`. Callers do not pass a
-model or create token metadata records. The public token-processing API is unchanged.
+model or create token metadata records.
 
 ## Processing Loop
 
@@ -24,8 +24,8 @@ or separate model ownership is required. The generator must outlive the processo
 auto postprocessor = OgaTokenPostProcessor::Create(*generator);
 while (!generator->IsDone()) {
   generator->GenerateNextToken();
-  postprocessor->ProcessNextTokens();
-  for (const auto* result : postprocessor->GetNextTokenResults()) {
+  postprocessor->ProcessNext();
+  for (const auto* result : postprocessor->GetNextResults()) {
     ProcessText(result->GetText());
     if (const auto* timestamps = result->GetTimestamps()) {
       for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
@@ -36,7 +36,7 @@ while (!generator->IsDone()) {
   }
 }
 postprocessor->Finalize();
-for (const auto* result : postprocessor->GetNextTokenResults()) {
+for (const auto* result : postprocessor->GetNextResults()) {
   if (const auto* timestamps = result->GetTimestamps()) {
     for (size_t index = 0; index < timestamps->GetWordCount(); ++index)
       ProcessWord(timestamps->GetWord(index));
@@ -46,12 +46,12 @@ for (const auto* result : postprocessor->GetNextTokenResults()) {
 }
 ```
 
-`ProcessNextTokens()` consumes all emissions from the current generation step in
+`ProcessNext()` consumes all emissions from the current generation step in
 order. A step can emit zero tokens or multiple sequential tokens. Call it once
 after each generation step, before advancing the generator again. There is no
 generation-step counter or duplicate-processing detection.
 
-`GetNextTokenResults()` only reads the latest results. Repeated reads do not
+`GetNextResults()` only reads the latest results. Repeated reads do not
 decode, flush, or otherwise change state. Results are per-call events, not
 cumulative history; retain any history the application needs. Incremental text
 and completed words/segments are alternative transcript representations: do not
@@ -70,7 +70,7 @@ enabled; the internal stream handles the supplied tokens in order, including emp
 decoded fragments. The language bindings forward processing to this same native path.
 
 ```text
-TokenPostProcessor.ProcessNextTokens()
+TokenPostProcessor.ProcessNext()
   -> Generator.GetTokenOutputs(): view existing output without advancing generation
       -> transducer: GetStepTokens() and optional GetStepTokenIntervals()
           -> validate token/interval counts
@@ -89,8 +89,8 @@ TokenPostProcessor.ProcessNextTokens()
           -> MetadataCoreState.ProcessDecoded(token, lexical facts, result)
   -> return to application
 
-TokenPostProcessor.GetNextTokenResults()
-  -> TokenPostProcessorInternal.GetNextTokenResults(): read only
+TokenPostProcessor.GetNextResults()
+  -> TokenPostProcessorInternal.GetNextResults(): read only
   -> GetText() / nullable GetTimestamps()
 ```
 
@@ -106,7 +106,7 @@ not a heap-allocated PImpl. Token IDs and optional timing are separate collectio
 `GetAcousticFrameIntervals()` returns null when timing is absent. The spans borrow their
 producer's storage and must remain valid for `Process()`. Native timing uses
 `AcousticFrameInterval` and `std::optional`, not the public C interval layout or an
-integer presence flag. Public C declarations and result handles are unchanged.
+integer presence flag. Public result handles are unchanged.
 
 ### Batch and Offline Input
 
@@ -179,7 +179,7 @@ flowchart TD
   enabled --> group["TokenWordGroupingState::Finalize()<br/>Append() pending delimiter; CompleteWord()"]
   group --> words["MetadataCoreState::ProcessCompletedWords()<br/>Same alignment/publication path as above"]
   words --> segment["MetadataCoreState::CompleteSegment()<br/>Flush any remaining segment with AddRecord()"]
-  segment -.->|Caller reads| results["GetNextTokenResults()"]
+  segment -.->|Caller reads| results["GetNextResults()"]
 ```
 
 ## Configuration
@@ -210,7 +210,10 @@ origins and interval semantics. Diarization is not implemented by this processor
 
 C exposes opaque `OgaTokenPostProcessor`, `OgaTokenPostProcessorResult`,
 `OgaTokenPostProcessorTimestamp`, and
-`OgaTokenPostProcessorTimestampRecord` handles, with typed getters for text,
+`OgaTokenPostProcessorTimestampRecord` handles. Processing uses
+`OgaTokenPostProcessorProcessNext()`; results are read through
+`OgaTokenPostProcessorGetResultCount()` and `OgaTokenPostProcessorGetResult()`,
+with typed getters for text,
 timestamp presence, word/segment counts, records, frame bounds, and second bounds.
 Result and record layouts are private. An out-of-range C result or record lookup
 returns null; the C++ record accessor throws `std::out_of_range`.
@@ -224,15 +227,15 @@ must be externally serialized. Independent processors have independent state.
 is no intermediate metadata output or conversion to a second result model. The
 internal stream owns one immutable configuration; metadata state reads that same object.
 
-Python uses `TokenPostProcessor(generator)`, `process_next_tokens()`,
-`get_next_token_results()`, `finalize()`, and `reset()`. Borrowed
+Python uses `TokenPostProcessor(generator)`, `process_next()`,
+`get_next_results()`, `finalize()`, and `reset()`. Borrowed
 `TokenPostProcessorResult` objects expose `get_text()` and nullable
 `get_timestamps()`. Timestamp objects expose `get_words()` and `get_segments()`;
 records expose `get_text()`, `get_start_frame()`, `get_stop_frame()`,
 `get_start_time()`, and `get_stop_time()`.
 
-C# uses `TokenPostProcessor(generator)`, `ProcessNextTokens()`,
-`GetNextTokenResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
+C# uses `TokenPostProcessor(generator)`, `ProcessNext()`,
+`GetNextResults()`, `FinalizeProcessing()`, and `Reset()`. Borrowed
 `TokenPostProcessorResult` objects expose `GetText()` and nullable `GetTimestamps()`.
 Timestamp objects expose `GetWords()` and `GetSegments()`; records expose
 `GetText()`, `GetStartFrame()`, `GetStopFrame()`, `GetStartTime()`, and `GetStopTime()`.

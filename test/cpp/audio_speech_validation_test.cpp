@@ -220,10 +220,10 @@ TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
   ASSERT_FALSE(generator.IsDone());
   generator.GenerateNextToken();
   Generators::TokenPostProcessor postprocessor{generator};
-  postprocessor.ProcessNextTokens();
-  auto results = postprocessor.GetNextTokenResults();
+  postprocessor.ProcessNext();
+  auto results = postprocessor.GetNextResults();
   postprocessor.Finalize();
-  const auto& final_results = postprocessor.GetNextTokenResults();
+  const auto& final_results = postprocessor.GetNextResults();
   results.insert(results.end(), final_results.begin(), final_results.end());
   for (const auto& result : results) {
     for (const auto& word : result.timestamps->words) {
@@ -298,7 +298,7 @@ TEST(TokenPostProcessorInternalTests, OfflineBatchMatchesIncrementalProcessing) 
     Generators::PostProcessorResult transcript;
     transcript.timestamps.emplace();
     const auto collect = [&] {
-      for (const auto& result : stream.GetNextTokenResults()) {
+      for (const auto& result : stream.GetNextResults()) {
         transcript.text += result.text;
         EXPECT_TRUE(result.timestamps.has_value());
         if (!result.timestamps) continue;
@@ -351,7 +351,7 @@ TEST(TokenPostProcessorInternalTests, OptionalTimingAndCountValidation) {
   Generators::TokenPostProcessorInternal plain{tokenizer, {}};
   plain.Process(untimed);
   std::string decoded;
-  for (const auto& result : plain.GetNextTokenResults()) {
+  for (const auto& result : plain.GetNextResults()) {
     EXPECT_FALSE(result.timestamps.has_value());
     decoded += result.text;
   }
@@ -367,7 +367,7 @@ TEST(TokenPostProcessorInternalTests, OptionalTimingAndCountValidation) {
   const std::vector<Generators::AcousticFrameInterval> intervals(tokens.size(), {4, 5});
   timed.Process(Generators::TokenOutputs{tokens, std::span<const Generators::AcousticFrameInterval>{intervals}});
   decoded.clear();
-  for (const auto& result : timed.GetNextTokenResults()) decoded += result.text;
+  for (const auto& result : timed.GetNextResults()) decoded += result.text;
   EXPECT_EQ(decoded, text);
 }
 
@@ -433,18 +433,18 @@ TEST_F(MetadataCoreStateTests, PostProcessorBaseOwnsTokenProcessor) {
   const int initial_count = Generators::TokenPostProcessor::Count();
   {
     auto processor = std::make_unique<Generators::TokenPostProcessor>(*generator);
-    processor->ProcessNextTokens();
-    ASSERT_EQ(processor->GetNextTokenResults().size(), tokens.size());
+    processor->ProcessNext();
+    ASSERT_EQ(processor->GetNextResults().size(), tokens.size());
     auto& token_processor = *processor;
     std::unique_ptr<Generators::PostProcessor> base = std::move(processor);
     EXPECT_NE(base, nullptr);
     EXPECT_EQ(Generators::TokenPostProcessor::Count(), initial_count + 1);
     base->Finalize();
-    ASSERT_EQ(token_processor.GetNextTokenResults().size(), 1U);
+    ASSERT_EQ(token_processor.GetNextResults().size(), 1U);
     base->Reset();
-    EXPECT_TRUE(token_processor.GetNextTokenResults().empty());
-    token_processor.ProcessNextTokens();
-    EXPECT_EQ(token_processor.GetNextTokenResults().size(), tokens.size());
+    EXPECT_TRUE(token_processor.GetNextResults().empty());
+    token_processor.ProcessNext();
+    EXPECT_EQ(token_processor.GetNextResults().size(), tokens.size());
   }
   EXPECT_EQ(Generators::TokenPostProcessor::Count(), initial_count);
 }
@@ -473,8 +473,8 @@ TEST_F(MetadataCoreStateTests, ChunkStartSampleSurvivesGeneratorInputHandoff) {
 
 TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions) {
   Generators::TokenPostProcessor processor{*generator};
-  processor.ProcessNextTokens();
-  const auto& results = processor.GetNextTokenResults();
+  processor.ProcessNext();
+  const auto& results = processor.GetNextResults();
   ASSERT_EQ(results.size(), tokens.size());
   std::string text;
   std::string words;
@@ -483,9 +483,9 @@ TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions)
     for (const auto& word : result.timestamps->words) words += word.text;
   }
   EXPECT_EQ(text, "Hello world.");
-  EXPECT_EQ(&processor.GetNextTokenResults(), &results);
+  EXPECT_EQ(&processor.GetNextResults(), &results);
   processor.Finalize();
-  for (const auto& result : processor.GetNextTokenResults()) {
+  for (const auto& result : processor.GetNextResults()) {
     for (const auto& word : result.timestamps->words) {
       words += word.text;
       EXPECT_EQ(word.start_frame, 4);
@@ -494,45 +494,45 @@ TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions)
   }
   EXPECT_EQ(words, text);
   processor.Finalize();
-  EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->words.empty());
+  EXPECT_TRUE(processor.GetNextResults()[0].timestamps->words.empty());
   source->SetStep({}, 99);
-  processor.ProcessNextTokens();
-  EXPECT_TRUE(processor.GetNextTokenResults().empty());
+  processor.ProcessNext();
+  EXPECT_TRUE(processor.GetNextResults().empty());
 }
 
 TEST_F(MetadataCoreStateTests, InvalidIntervalsDoNotAdvanceDecoding) {
   Generators::TokenPostProcessor processor{*generator};
   source->last_token_intervals_.clear();
-  EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
+  EXPECT_THROW(processor.ProcessNext(), std::runtime_error);
   source->SetStep(tokens, 4);
   source->last_token_intervals_[0] = {5, 5};
-  EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
+  EXPECT_THROW(processor.ProcessNext(), std::runtime_error);
   source->last_token_intervals_[0] = {-1, 5};
-  EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
+  EXPECT_THROW(processor.ProcessNext(), std::runtime_error);
   source->last_token_intervals_.pop_back();
-  EXPECT_THROW(processor.ProcessNextTokens(), std::runtime_error);
+  EXPECT_THROW(processor.ProcessNext(), std::runtime_error);
   source->SetStep(tokens, 4);
-  processor.ProcessNextTokens();
+  processor.ProcessNext();
   std::string text;
-  for (const auto& result : processor.GetNextTokenResults()) text += result.text;
+  for (const auto& result : processor.GetNextResults()) text += result.text;
   EXPECT_EQ(text, "Hello world.");
 }
 
 TEST_F(MetadataCoreStateTests, GeneratorOutputSelectionUsesModelConfig) {
   source->SetTimestampsEnabled(false);
   Generators::TokenPostProcessor timed_processor{*generator};
-  EXPECT_NO_THROW(timed_processor.ProcessNextTokens());
-  ASSERT_EQ(timed_processor.GetNextTokenResults().size(), tokens.size());
-  for (const auto& result : timed_processor.GetNextTokenResults())
+  EXPECT_NO_THROW(timed_processor.ProcessNext());
+  ASSERT_EQ(timed_processor.GetNextResults().size(), tokens.size());
+  for (const auto& result : timed_processor.GetNextResults())
     EXPECT_TRUE(result.timestamps.has_value());
 
   model->config_->model.timestamp_level = Generators::Config::TimestampLevel::Off;
   source->SetTimestampsEnabled(true);
   source->last_token_intervals_.clear();
   Generators::TokenPostProcessor plain_processor{*generator};
-  EXPECT_NO_THROW(plain_processor.ProcessNextTokens());
+  EXPECT_NO_THROW(plain_processor.ProcessNext());
   std::string text;
-  for (const auto& result : plain_processor.GetNextTokenResults()) {
+  for (const auto& result : plain_processor.GetNextResults()) {
     EXPECT_FALSE(result.timestamps.has_value());
     text += result.text;
   }
@@ -544,15 +544,15 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
   const auto repeated = tokenizer->Encode(" Hello");
   source->SetStep(repeated, 2);
   for (auto& token_interval : source->last_token_intervals_) token_interval.stop = 7;
-  processor.ProcessNextTokens();
+  processor.ProcessNext();
   source->SetStep(repeated, 20);
   for (auto& token_interval : source->last_token_intervals_) token_interval.stop = 23;
-  processor.ProcessNextTokens();
+  processor.ProcessNext();
   std::vector<Generators::TimestampRecord> words;
-  for (const auto& result : processor.GetNextTokenResults())
+  for (const auto& result : processor.GetNextResults())
     words.insert(words.end(), result.timestamps->words.begin(), result.timestamps->words.end());
   processor.Finalize();
-  for (const auto& result : processor.GetNextTokenResults())
+  for (const auto& result : processor.GetNextResults())
     words.insert(words.end(), result.timestamps->words.begin(), result.timestamps->words.end());
   ASSERT_EQ(words.size(), 2U);
   EXPECT_EQ(words[0].text, " Hello");
@@ -571,14 +571,14 @@ TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
     Generators::TokenPostProcessor processor{*generator};
     std::vector<Generators::TimestampRecord> segments;
     const auto collect = [&] {
-      for (const auto& result : processor.GetNextTokenResults())
+      for (const auto& result : processor.GetNextResults())
         segments.insert(segments.end(), result.timestamps->segments.begin(), result.timestamps->segments.end());
     };
     source->SetStep(tokenizer->Encode(" first"), 2);
-    processor.ProcessNextTokens();
+    processor.ProcessNext();
     collect();
     source->SetStep(tokenizer->Encode(" second"), threshold < 1.0 ? 2 : 20);
-    processor.ProcessNextTokens();
+    processor.ProcessNext();
     collect();
     processor.Finalize();
     collect();
@@ -586,7 +586,7 @@ TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
     EXPECT_EQ(segments[0].text, " first");
     EXPECT_EQ(segments[1].text, " second");
     processor.Finalize();
-    EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->segments.empty());
+    EXPECT_TRUE(processor.GetNextResults()[0].timestamps->segments.empty());
   }
 }
 
@@ -596,11 +596,11 @@ TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
     model->config_->model.timestamp_level = level;
     source->SetTimestampsEnabled(level != Level::Off);
     Generators::TokenPostProcessor processor{*generator};
-    processor.ProcessNextTokens();
+    processor.ProcessNext();
     size_t words = 0;
     size_t segments = 0;
     const auto collect = [&] {
-      for (const auto& result : processor.GetNextTokenResults()) {
+      for (const auto& result : processor.GetNextResults()) {
         EXPECT_EQ(result.timestamps.has_value(), level != Level::Off);
         words += result.timestamps ? result.timestamps->words.size() : 0;
         segments += result.timestamps ? result.timestamps->segments.size() : 0;
@@ -616,24 +616,24 @@ TEST_F(MetadataCoreStateTests, TimestampLevelsControlOnlyPublishedRecords) {
 
 TEST_F(MetadataCoreStateTests, ResetClearsPendingStateAndResultsAreReadOnly) {
   Generators::TokenPostProcessor processor{*generator};
-  processor.ProcessNextTokens();
-  const auto owned = processor.GetNextTokenResults();
+  processor.ProcessNext();
+  const auto owned = processor.GetNextResults();
   source->SetStep({}, 99);
-  EXPECT_EQ(processor.GetNextTokenResults().size(), tokens.size());
-  EXPECT_EQ(processor.GetNextTokenResults()[0].text, owned[0].text);
+  EXPECT_EQ(processor.GetNextResults().size(), tokens.size());
+  EXPECT_EQ(processor.GetNextResults()[0].text, owned[0].text);
   processor.Reset();
-  EXPECT_TRUE(processor.GetNextTokenResults().empty());
+  EXPECT_TRUE(processor.GetNextResults().empty());
   processor.Finalize();
-  EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->words.empty());
-  EXPECT_TRUE(processor.GetNextTokenResults()[0].timestamps->segments.empty());
+  EXPECT_TRUE(processor.GetNextResults()[0].timestamps->words.empty());
+  EXPECT_TRUE(processor.GetNextResults()[0].timestamps->segments.empty());
   source->SetStep(tokens, 8);
-  processor.ProcessNextTokens();
+  processor.ProcessNext();
   std::string text;
-  for (const auto& result : processor.GetNextTokenResults()) text += result.text;
+  for (const auto& result : processor.GetNextResults()) text += result.text;
   EXPECT_EQ(text, "Hello world.");
   processor.Finalize();
-  ASSERT_FALSE(processor.GetNextTokenResults()[0].timestamps->words.empty());
-  EXPECT_EQ(processor.GetNextTokenResults()[0].timestamps->words.back().start_frame, 8);
+  ASSERT_FALSE(processor.GetNextResults()[0].timestamps->words.empty());
+  EXPECT_EQ(processor.GetNextResults()[0].timestamps->words.back().start_frame, 8);
   EXPECT_EQ(owned.size(), tokens.size());
 }
 

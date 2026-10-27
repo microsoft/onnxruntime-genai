@@ -62,12 +62,12 @@ flowchart TB
 
   subgraph timed[With timestamps: word, segment, or all]
     setup[Processor copies model configuration] --> stream
-    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNextTokens]
+    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNext]
     stream --> internal[Internal TokenPostProcessorInternal.Process]
     internal --> ortx[Extensions: vocabulary facts + ordinary cached decode]
     ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
     align --> events[Per-call word / segment events with frame and second bounds]
-    events --> read[GetNextTokenResults: read only]
+    events --> read[GetNextResults: read only]
     stream --> final[Finalize: flush trailing word / segment]
     final --> trailing[Trailing word / segment events]
   end
@@ -117,9 +117,9 @@ hop length, and subsampling factor. Native token input uses an optional
 ## Decoding
 
 Configure timestamp level and segment rules before creating the generator and
-`TokenPostProcessor`. After each generation step, call `ProcessNextTokens()`
-(C++/C#) or `process_next_tokens()` (Python), then read `GetNextTokenResults()` or
-`get_next_token_results()`. All sequential emissions are processed in order,
+`TokenPostProcessor`. After each generation step, call `ProcessNext()`
+(C++/C#) or `process_next()` (Python), then read `GetNextResults()` or
+`get_next_results()`. All sequential emissions are processed in order,
 including steps that emit zero or multiple tokens. Reading results repeatedly
 does not change them. The private generator getter is not exposed to applications.
 Enabled timestamps require present, valid acoustic timing. Intervals are half-open

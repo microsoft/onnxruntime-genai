@@ -626,42 +626,42 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             parameters.SetSearchOption("max_length", 10);
             using var generator = new Generator(model, parameters);
             using var processor = new TokenPostProcessor(generator);
-            Assert.Empty(processor.GetNextTokenResults());
+            Assert.Empty(processor.GetNextResults());
             processor.FinalizeProcessing();
-            Assert.Null(Assert.Single(processor.GetNextTokenResults()).GetTimestamps());
+            Assert.Null(Assert.Single(processor.GetNextResults()).GetTimestamps());
             processor.Reset();
             generator.AppendTokens(new int[] { 0, 0, 0, 52 });
             generator.GenerateNextToken();
             using var plain = tokenizer.CreateStream();
             var tokenId = generator.GetNextTokens()[0];
-            processor.ProcessNextTokens();
-            var result = Assert.Single(processor.GetNextTokenResults());
+            processor.ProcessNext();
+            var result = Assert.Single(processor.GetNextResults());
             var expectedText = plain.Decode(tokenId);
             var copiedText = result.GetText();
             Assert.Equal(expectedText, result.GetText());
             Assert.Null(result.GetTimestamps());
-            Assert.Equal(expectedText, Assert.Single(processor.GetNextTokenResults()).GetText());
+            Assert.Equal(expectedText, Assert.Single(processor.GetNextResults()).GetText());
             generator.GenerateNextToken();
-            Assert.Equal(expectedText, Assert.Single(processor.GetNextTokenResults()).GetText());
-            processor.ProcessNextTokens();
+            Assert.Equal(expectedText, Assert.Single(processor.GetNextResults()).GetText());
+            processor.ProcessNext();
             Assert.Throws<InvalidOperationException>(() => result.GetText());
             Assert.Throws<InvalidOperationException>(() => result.GetTimestamps());
-            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextTokenResults()).GetText());
-            var beforeFinalize = Assert.Single(processor.GetNextTokenResults());
+            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextResults()).GetText());
+            var beforeFinalize = Assert.Single(processor.GetNextResults());
             processor.FinalizeProcessing();
             Assert.Throws<InvalidOperationException>(() => beforeFinalize.GetText());
             processor.FinalizeProcessing();
-            Assert.Equal("", Assert.Single(processor.GetNextTokenResults()).GetText());
-            var beforeReset = Assert.Single(processor.GetNextTokenResults());
+            Assert.Equal("", Assert.Single(processor.GetNextResults()).GetText());
+            var beforeReset = Assert.Single(processor.GetNextResults());
             processor.Reset();
-            Assert.Empty(processor.GetNextTokenResults());
+            Assert.Empty(processor.GetNextResults());
             Assert.Throws<InvalidOperationException>(() => beforeReset.GetText());
             generator.Dispose();
-            Assert.Throws<ObjectDisposedException>(() => processor.ProcessNextTokens());
+            Assert.Throws<ObjectDisposedException>(() => processor.ProcessNext());
             processor.Dispose();
             Assert.Equal(expectedText, copiedText);
             Assert.Throws<ObjectDisposedException>(() => result.GetText());
-            Assert.Throws<ObjectDisposedException>(() => processor.GetNextTokenResults());
+            Assert.Throws<ObjectDisposedException>(() => processor.GetNextResults());
         }
 
         [Theory]
@@ -690,8 +690,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             using var processor = new TokenPostProcessor(generator);
             generator.AppendTokens(new int[] { 0, 0, 0, 52 });
             generator.GenerateNextToken();
-            processor.ProcessNextTokens();
-            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextTokenResults()).GetText());
+            processor.ProcessNext();
+            Assert.Equal(plain.Decode(generator.GetNextTokens()[0]), Assert.Single(processor.GetNextResults()).GetText());
         }
 
         [Fact]

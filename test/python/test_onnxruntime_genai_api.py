@@ -87,9 +87,9 @@ def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_
     params.set_search_options(max_length=10)
     generator = og.Generator(model, params)
     processor = og.TokenPostProcessor(generator)
-    assert processor.get_next_token_results() == []
+    assert processor.get_next_results() == []
     processor.finalize()
-    initial = processor.get_next_token_results()[0]
+    initial = processor.get_next_results()[0]
     assert initial.get_text() == ""
     assert initial.get_timestamps() is None
     processor.reset()
@@ -102,34 +102,34 @@ def test_token_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_
         for previous, expected_text in retained:
             assert previous.get_text() == expected_text
         expected = plain.decode(int(generator.get_next_tokens()[0]))
-        processor.process_next_tokens()
+        processor.process_next()
         for previous, _ in retained:
             with pytest.raises(RuntimeError, match="expired"):
                 previous.get_text()
             with pytest.raises(RuntimeError, match="expired"):
                 previous.get_timestamps()
         retained.clear()
-        results = processor.get_next_token_results()
+        results = processor.get_next_results()
         assert len(results) == 1
         result = results[0]
         assert isinstance(result, og.TokenPostProcessorResult)
         assert result.get_text() == expected
         assert result.get_timestamps() is None
-        assert processor.get_next_token_results()[0].get_text() == expected
+        assert processor.get_next_results()[0].get_text() == expected
         retained.append((result, expected))
     del generator
     processor.finalize()
     with pytest.raises(RuntimeError, match="expired"):
         result.get_text()
     processor.finalize()
-    final_result = processor.get_next_token_results()[0]
+    final_result = processor.get_next_results()[0]
     assert final_result.get_text() == ""
     processor.reset()
-    assert processor.get_next_token_results() == []
+    assert processor.get_next_results() == []
     with pytest.raises(RuntimeError, match="expired"):
         final_result.get_text()
     processor.finalize()
-    before_destruction = processor.get_next_token_results()[0]
+    before_destruction = processor.get_next_results()[0]
     copied_text = before_destruction.get_text()
     del processor
     with pytest.raises(RuntimeError, match="expired"):
@@ -160,8 +160,8 @@ def test_token_postprocessor_uses_generators_model(test_data_path):
     processor = og.TokenPostProcessor(generator)
     generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
     generator.generate_next_token()
-    processor.process_next_tokens()
-    assert processor.get_next_token_results()[0].get_text() == plain.decode(int(generator.get_next_tokens()[0]))
+    processor.process_next()
+    assert processor.get_next_results()[0].get_text() == plain.decode(int(generator.get_next_tokens()[0]))
 
 
 def test_token_postprocessor_rejects_null_generator():

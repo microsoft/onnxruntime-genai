@@ -1199,10 +1199,10 @@ void OGA_API_CALL OgaDestroyTokenPostProcessor(OgaTokenPostProcessor* processor)
   delete static_cast<Generators::TokenPostProcessor*>(processor);
 }
 
-OgaResult* OGA_API_CALL OgaTokenPostProcessorProcessNextTokens(OgaTokenPostProcessor* processor) {
+OgaResult* OGA_API_CALL OgaTokenPostProcessorProcessNext(OgaTokenPostProcessor* processor) {
   OGA_TRY
   if (!processor) throw std::invalid_argument("Postprocessor must not be null");
-  processor->ProcessNextTokens();
+  processor->ProcessNext();
   return nullptr;
   OGA_CATCH
 }
@@ -1224,12 +1224,12 @@ OgaResult* OGA_API_CALL OgaTokenPostProcessorReset(OgaTokenPostProcessor* proces
 }
 
 size_t OGA_API_CALL OgaTokenPostProcessorGetResultCount(const OgaTokenPostProcessor* processor) {
-  return processor ? processor->GetNextTokenResults().size() : 0;
+  return processor ? processor->GetNextResults().size() : 0;
 }
 
 const OgaTokenPostProcessorResult* OGA_API_CALL OgaTokenPostProcessorGetResult(const OgaTokenPostProcessor* processor, size_t index) {
-  if (!processor || index >= processor->GetNextTokenResults().size()) return nullptr;
-  return static_cast<const OgaTokenPostProcessorResult*>(&processor->GetNextTokenResults()[index]);
+  if (!processor || index >= processor->GetNextResults().size()) return nullptr;
+  return static_cast<const OgaTokenPostProcessorResult*>(&processor->GetNextResults()[index]);
 }
 
 const char* OGA_API_CALL OgaTokenPostProcessorResultGetText(const OgaTokenPostProcessorResult* result) { return result ? result->text.c_str() : nullptr; }

@@ -211,15 +211,15 @@ TEST(CAPITests, TokenPostProcessorOpaqueResults) {
   auto plain = OgaTokenizerStream::Create(*tokenizer);
   model.reset();
   auto processor = OgaTokenPostProcessor::Create(*generator);
-  EXPECT_TRUE(processor->GetNextTokenResults().empty());
+  EXPECT_TRUE(processor->GetNextResults().empty());
   const std::array<int32_t, 4> prompt{0, 0, 0, 52};
   generator->AppendTokens(prompt.data(), prompt.size());
   generator->GenerateNextToken();
-  processor->ProcessNextTokens();
-  const auto results = processor->GetNextTokenResults();
+  processor->ProcessNext();
+  const auto results = processor->GetNextResults();
   ASSERT_EQ(results.size(), 1U);
   const auto* result = results[0];
-  EXPECT_EQ(processor->GetNextTokenResults()[0], result);
+  EXPECT_EQ(processor->GetNextResults()[0], result);
   const std::string expected = plain->Decode(generator->GetNextTokens()[0]);
   EXPECT_EQ(result->GetText(), expected);
   EXPECT_EQ(result->GetTimestamps(), nullptr);
@@ -233,10 +233,10 @@ TEST(CAPITests, TokenPostProcessorOpaqueResults) {
   EXPECT_EQ(result->GetText(), expected);
   processor->Finalize();
   processor->Finalize();
-  ASSERT_EQ(processor->GetNextTokenResults().size(), 1U);
-  EXPECT_STREQ(processor->GetNextTokenResults()[0]->GetText(), "");
+  ASSERT_EQ(processor->GetNextResults().size(), 1U);
+  EXPECT_STREQ(processor->GetNextResults()[0]->GetText(), "");
   processor->Reset();
-  EXPECT_TRUE(processor->GetNextTokenResults().empty());
+  EXPECT_TRUE(processor->GetNextResults().empty());
   processor.reset();
   generator.reset();
 }
@@ -248,7 +248,7 @@ TEST(CAPITests, TokenPostProcessorRejectsInvalidCreation) {
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
   EXPECT_THROW(OgaCheckResult(OgaCreateTokenPostProcessor(generator.get(), nullptr)), std::runtime_error);
-  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorProcessNextTokens(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorProcessNext(nullptr)), std::runtime_error);
   EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorFinalize(nullptr)), std::runtime_error);
   EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorReset(nullptr)), std::runtime_error);
 }

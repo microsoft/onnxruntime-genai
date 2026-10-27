@@ -337,9 +337,9 @@ struct PyTokenPostProcessor {
   explicit PyTokenPostProcessor(std::unique_ptr<OgaTokenPostProcessor> processor)
       : processor_{std::move(processor)} {}
 
-  void ProcessNextTokens() {
+  void ProcessNext() {
     result_lifetime_ = std::make_shared<bool>(true);
-    processor_->ProcessNextTokens();
+    processor_->ProcessNext();
   }
 
   void Finalize() {
@@ -352,9 +352,9 @@ struct PyTokenPostProcessor {
     processor_->Reset();
   }
 
-  std::vector<PyTokenPostProcessorResult> GetNextTokenResults() const {
+  std::vector<PyTokenPostProcessorResult> GetNextResults() const {
     std::vector<PyTokenPostProcessorResult> results;
-    for (const auto* result : processor_->GetNextTokenResults()) results.push_back({result, result_lifetime_});
+    for (const auto* result : processor_->GetNextResults()) results.push_back({result, result_lifetime_});
     return results;
   }
 
@@ -580,8 +580,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
              return std::make_unique<PyTokenPostProcessor>(generator.CreatePostProcessor());
            }),
            pybind11::keep_alive<1, 2>())
-      .def("process_next_tokens", &PyTokenPostProcessor::ProcessNextTokens)
-      .def("get_next_token_results", &PyTokenPostProcessor::GetNextTokenResults)
+      .def("process_next", &PyTokenPostProcessor::ProcessNext)
+      .def("get_next_results", &PyTokenPostProcessor::GetNextResults)
       .def("finalize", &PyTokenPostProcessor::Finalize)
       .def("reset", &PyTokenPostProcessor::Reset);
 

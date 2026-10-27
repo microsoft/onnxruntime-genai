@@ -23,10 +23,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
-        public void ProcessNextTokens()
+        public void ProcessNext()
         {
             PrepareMutation();
-            Result.VerifySuccess(NativeMethods.OgaTokenPostProcessorProcessNextTokens(Handle));
+            Result.VerifySuccess(NativeMethods.OgaTokenPostProcessorProcessNext(Handle));
             GC.KeepAlive(_generator);
         }
 
@@ -44,7 +44,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             GC.KeepAlive(_generator);
         }
 
-        public TokenPostProcessorResult[] GetNextTokenResults()
+        public TokenPostProcessorResult[] GetNextResults()
         {
             int count = checked((int)NativeMethods.OgaTokenPostProcessorGetResultCount(Handle).ToUInt64());
             var results = new TokenPostProcessorResult[count];
