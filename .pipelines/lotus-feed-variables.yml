@@ -1,9 +1,9 @@
 # =============================================================================
 # lotus-feed-variables.yml — Single source of truth for the internal Lotus feed.
 #
-# Included at pipeline scope so every stage/job/step resolves packages ONLY from
-# the aiinfra org-scoped Lotus feed — no public feeds (nuget.org / pypi.org /
-# crates.io) are contacted during a packaging build (goal 4 / Phase 2).
+# Included at pipeline scope for packages resolved from the aiinfra org-scoped
+# Lotus feed. C# managed restores and mobile workloads use ORT-Nightly instead;
+# no public feeds (nuget.org / pypi.org / crates.io) are contacted directly.
 #
 # The Lotus feed is ORG-SCOPED (note: no project segment in the URL) and requires
 # authentication. Auth is provided by the pipeline's own build identity via:
