@@ -41,6 +41,23 @@ tolerance level and not run-to-run reproducible. `fold.force_reject` (default of
 stream is the no-MTP greedy stream. A v12b package is built from an existing v12b package with `build_package_engine_v12b.py`
 (hard links, the plane library of this build, optional unreachable stop id).
 
+### DFlash2 S=8 packages (rc4): `SpeculativePrefixCommit` contract
+
+The `qwen38_flash_graph` fold model of the DFlash2 packages commits each verified cycle with one
+`com.microsoft::SpeculativePrefixCommit` node (ORT PR #33474; 3 <= `head_rows` <= 8). The runtime wires it as follows:
+
+| Graph I/O | Binding |
+|---|---|
+| in `next_tokens`, `input_ids`, `validation.aggregate` | regular row inputs / target outputs |
+| in `fold.ctl` (16 int64 per slot), `fold.ctx_commit` (2 per slot), `fold.ctx_a` (`2 * head_rows` per slot, slot stride 16), `fold.ptrs` | persistent device control block (`ctl_`, `ctx_commit_`, `ctx_a_`) and `{result ring address, ring size}` |
+| out `fold.tail_done` (`head_c`, int32 `[batch]`) | allocated by the engine |
+| out `fold.ctl_out` (`updated_ctl`), `fold.ctx_commit_out` (`updated_ctx_commit`) | **required**; bound in place over the same `ctl_` / `ctx_commit_` buffers as `fold.ctl` / `fold.ctx_commit` (the op is alias safe) so the state update is never lost |
+
+`fold.ctx_b`, the rotary caches and the `head.capture.*` / `fold.sel` outputs of the rc3 node are gone; rc3 packages (10-input /
+7-output node) are not loadable by this runtime. The same bindings apply to the target decode graphs (single slot, batched
+`B = 2..max_batch`) and the unified prefill graphs (muted slot: the op rewrites the unchanged state in place). A package is
+upgraded from rc3 with `scripts/qwen_flash_next/derive_rc4_from_rc3.py` of the packaging repo (no re-quantization).
+
 ### v12c memory-reduced quantized package (`pkg_v12b_engine_int8kv_fp8w_fp4moe`)
 
 `build_package_engine_v12b.py` also builds the **v12c** quantized package from a v12b package, reducing peak GPU memory by

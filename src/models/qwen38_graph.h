@@ -351,6 +351,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   static constexpr int kBanks = Qwen38DecodeLedger::kBanks;
   static constexpr int kMaxBanks = 5;
   static constexpr int kMaxVerifyRows = 8;
+  static constexpr int kFoldCtlWords = 16;       // int64 words of ctl_ per slot
+  static constexpr int kFoldCtxCommitWords = 2;  // int64 words of ctx_commit_ per slot
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
@@ -418,7 +420,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     size_t status_count{};
     Direction dirs[kMaxBanks];
   } head_r2_;
-  std::map<std::string, std::unique_ptr<DevTensor>> fold_tensors_;  // fold.* inputs (the device control block)
+  std::map<std::string, std::unique_ptr<DevTensor>> fold_tensors_;  // fold.* inputs (device control block); the state outputs bind to the same tensors
   PlaneBuffer fold_ptrs_;
 
   // fast prefill (dense session + hand-off + batched head KV prefill, or unified target/head_r2 prefill); null when not configured
