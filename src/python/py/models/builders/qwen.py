@@ -1005,6 +1005,7 @@ class Qwen35MoEModel(MTPModel):
             return None
         # A sharded checkpoint lists its tensors in the index, including shards in subdirectories.
         index_path = os.path.join(model_dir, "model.safetensors.index.json")
+        weight_map = None
         if os.path.isfile(index_path):
             with open(index_path, encoding="utf-8") as index_file:
                 weight_map = json.load(index_file).get("weight_map")
@@ -1013,7 +1014,7 @@ class Qwen35MoEModel(MTPModel):
         # The MTP weight loader reads every root shard, including ones the index does not list.
         shards = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
         if not shards:
-            return None
+            return False if isinstance(weight_map, dict) else None
         from safetensors import safe_open  # noqa: PLC0415
 
         for shard in shards:
