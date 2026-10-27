@@ -458,10 +458,10 @@ OgaResult* OGA_API_CALL OgaConfigSetModelFileDescriptors(
     sources->names.push_back(name);
   }
   config->external_file_sources_ = std::move(sources);
+  return nullptr;
 #else
   throw std::runtime_error("External initializer file descriptors require Linux.");
 #endif
-  return nullptr;
   OGA_CATCH
 }
 
