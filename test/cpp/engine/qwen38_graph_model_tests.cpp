@@ -490,6 +490,15 @@ TEST(Qwen38DecodeLedgerTest, DeviceLengthMustMatchTheHost) {
   EXPECT_THROW(ledger.CheckDeviceLength(3), std::runtime_error);
 }
 
+TEST(Qwen38FoldIoTest, StateOutputsBindOverTheMatchingInputs) {
+  EXPECT_STREQ(Qwen38FoldStateInput("fold.ctl_out"), "fold.ctl");
+  EXPECT_STREQ(Qwen38FoldStateInput("fold.ctx_commit_out"), "fold.ctx_commit");
+  EXPECT_EQ(Qwen38FoldStateInput("fold.tail_done"), nullptr);
+  EXPECT_EQ(Qwen38FoldStateInput("fold.ctl"), nullptr);
+  EXPECT_EQ(Qwen38FoldStateInput("fold.ctx_b"), nullptr);
+  EXPECT_EQ(Qwen38FoldStateInput("next_tokens"), nullptr);
+}
+
 TEST(Qwen38CycleRecordTest, AcceptedCyclesCommitTwoTokens) {
   Qwen38CycleRecord record;
   EXPECT_EQ(record.TokenCount(), 1u);
