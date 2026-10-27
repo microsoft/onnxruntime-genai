@@ -35,7 +35,10 @@ def main() -> int:
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("config must contain a non-empty JSON array of scenarios")
 
-    uses_cuda = any(scenario.get("execution_provider", "cuda") == "cuda" for scenario in scenarios)
+    providers = {scenario.get("execution_provider", "cuda") for scenario in scenarios}
+    if len(providers) > 1:
+        raise ValueError("config must not mix execution providers; run CUDA and WebGPU scenarios in separate configs")
+    uses_cuda = "cuda" in providers
     gpu_ids = [gpu.strip() for gpu in (args.cuda_visible_devices or "").split(",") if gpu.strip()]
     if uses_cuda and not gpu_ids:
         raise ValueError("--cuda_visible_devices must contain at least one GPU ID")

@@ -192,6 +192,13 @@ EngineResources::EngineResources(const ScenarioConfig& config) {
   nlohmann::json model_config;
   config_file >> model_config;
   model_config.merge_patch(config.model_config);
+  const auto engine_overlay = config.model_config.value("engine", nlohmann::json::object());
+  // Overlay() receives sorted JSON keys, so static_batching takes precedence if both are present.
+  if (engine_overlay.contains("static_batching")) {
+    model_config["engine"].erase("dynamic_batching");
+  } else if (engine_overlay.contains("dynamic_batching")) {
+    model_config["engine"].erase("static_batching");
+  }
   const auto context_length = model_config.at("model").at("context_length").get<int64_t>();
   const auto search = model_config.value("search", nlohmann::json::object());
   const auto configured_max_length = search.value("max_length", int64_t{0});

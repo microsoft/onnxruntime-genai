@@ -32,7 +32,11 @@ class RunnerTests(unittest.TestCase):
             config.write_text(
                 json.dumps(
                     [
-                        {"scenario": "decode_baseline", "execution_provider": provider, "model_path": "original"}
+                        {
+                            "scenario": "decode_baseline",
+                            "model_path": "original",
+                            **({"execution_provider": provider} if provider is not None else {}),
+                        }
                         for provider in providers
                     ]
                 )
@@ -74,6 +78,19 @@ class RunnerTests(unittest.TestCase):
     def test_cuda_requires_device_ids(self):
         with self.assertRaisesRegex(ValueError, "at least one GPU ID"):
             self.invoke(["cuda"])
+
+    def test_mixed_providers_are_rejected_before_reserving_devices_or_launching_workers(self):
+        for providers in (["cuda", "webgpu"], ["webgpu", "cuda"], [None, "webgpu"]):
+            for extra in ([], ["--cuda_visible_devices", "2"], ["--cuda_visible_devices", "2,3"]):
+                with (
+                    self.subTest(providers=providers, extra=extra),
+                    patch.object(runner, "Queue") as queue,
+                    patch.object(runner, "ThreadPoolExecutor") as executor,
+                ):
+                    with self.assertRaisesRegex(ValueError, "must not mix execution providers"):
+                        self.invoke(providers, extra)
+                    queue.assert_not_called()
+                    executor.assert_not_called()
 
     def test_webgpu_stays_serial_when_cuda_ids_are_supplied(self):
         status, _, peak, _ = self.invoke(["webgpu", "webgpu"], ["--cuda_visible_devices", "2,3"])

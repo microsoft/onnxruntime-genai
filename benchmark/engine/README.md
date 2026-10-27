@@ -72,6 +72,12 @@ packages. The executable locates its staged libraries via `@loader_path`; provid
 plugin path in the scenario config or via the runner override below. Custom `--build_dir` values
 change the executable's parent directory accordingly.
 
+With `--cmake_generator Xcode`, CMake adds a configuration subdirectory to each
+target's output directory. For the default Release build directory, the GenAI dylib
+is built in `build/macOS/Release/Release/`, and the executable, staged dylibs, and
+`versions.json` are in `build/macOS/Release/benchmark/engine/Release/`. Use that
+configuration-specific executable path when running the benchmark.
+
 ### Prefix-cache and scheduler microbenchmark
 
 The model-free prefix-cache benchmark and CPU scheduler benchmark are built into
@@ -132,6 +138,11 @@ The runner requires `--executable`, `--config`, and `--out`. CUDA scenarios addi
 `CUDA_VISIBLE_DEVICES`. The runner saves a log alongside every result, prints child errors on
 failure, and treats missing/failed result files as failures. `--verbose` prints successful child
 output as well.
+
+Each config must use a single execution provider; mixing CUDA and WebGPU scenarios is rejected
+before any benchmark process starts. Run providers in separate benchmark invocations to avoid
+concurrent use of the same GPU contaminating timing and memory measurements. Scenarios that omit
+`execution_provider` default to CUDA.
 
 ### WebGPU decode/prefill smoke
 
@@ -230,6 +241,10 @@ Each config is a list of scenario entries:
 | `generation_tokens` | Tokens generated per request. |
 | `warmup_runs`, `measured_runs` | Defaults: 5 warmups, 20 measured runs. Smoke config uses 1 and 3. |
 | `model_config` | Optional GenAI config overlay applied before model creation; effective overrides are recorded in results. Useful for cache capacity, scheduler budgets, and speculation. |
+
+Batching-mode overlays replace the previous mode, matching GenAI: selecting dynamic batching
+removes static batching and vice versa. If an overlay contains both modes, static batching wins.
+The benchmark uses the resulting mode to decide whether to seed individual requests.
 
 `long_prefill` and `mixed_workload` truncate a RULER prompt that would leave no room for generation
 within the model-configured session limit, reporting both requested and actual token counts.

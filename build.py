@@ -825,9 +825,13 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
+    genai_lib_dir = args.build_dir
     engine_benchmark_dir = args.build_dir / "benchmark" / "engine"
+    if util.is_mac() and args.cmake_generator == "Xcode":
+        genai_lib_dir = genai_lib_dir / args.config
+        engine_benchmark_dir = engine_benchmark_dir / args.config
     if args.build_engine_benchmark and (util.is_linux() or util.is_mac()) and engine_benchmark_dir.is_dir():
-        util.setup_engine_benchmark_dependencies(args.build_dir, engine_benchmark_dir, ort_home=args.ort_home)
+        util.setup_engine_benchmark_dependencies(genai_lib_dir, engine_benchmark_dir, ort_home=args.ort_home)
 
 
 def install_core(args: argparse.Namespace, env: dict[str, str]):
