@@ -220,6 +220,11 @@ void Gemma3OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra_
   OrtValue* pixel_values = FindExtraInput(extra_inputs, model_.config_->model.vision.inputs.pixel_values);
   if (!pixel_values || !model_.ov_vision_session_) return;  // text-only prompt
 
+  // Validate markers before spending work on vision inference.
+  if (OrtValue* token_type_ids = FindExtraInput(extra_inputs, Config::Defaults::TokenTypeIdsName)) {
+    token_type_ids_ = ReadTokenTypeIds(*token_type_ids);
+  }
+
   // Ensure pixel_values are float32 for the vision graph.
   std::unique_ptr<OrtValue> pixel_values_fp32;
   const OrtValue* pixel_input = pixel_values;
@@ -239,11 +244,6 @@ void Gemma3OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra_
     Cast(*outputs[0], image_features_, *model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   } else {
     image_features_ = std::move(outputs[0]);
-  }
-
-  // Cache token_type_ids (int32) so Merge can locate the image rows after the text embedding runs.
-  if (OrtValue* token_type_ids = FindExtraInput(extra_inputs, Config::Defaults::TokenTypeIdsName)) {
-    token_type_ids_ = ReadTokenTypeIds(*token_type_ids);
   }
 }
 
@@ -527,16 +527,12 @@ void Qwen3_5OpenVINOVisionMerger::RunVision(const std::vector<ExtraInput>& extra
   if (grid_count == 0 || grid_count % 3 != 0) {
     throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw must contain one or more triplets");
   }
-  std::vector<int64_t> grid_values(grid_count);
-  if (grid_info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-    const int64_t* values = grid_thw->GetTensorData<int64_t>();
-    std::copy_n(values, grid_count, grid_values.begin());
-  } else if (grid_info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-    const int32_t* values = grid_thw->GetTensorData<int32_t>();
-    std::transform(values, values + grid_count, grid_values.begin(), [](int32_t value) { return value; });
-  } else {
-    throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw must contain int32 or int64 values");
+  if (grid_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+    throw std::runtime_error("Qwen3.5 OpenVINO vision: image_grid_thw must contain int64 values");
   }
+  std::vector<int64_t> grid_values(grid_count);
+  const int64_t* values = grid_thw->GetTensorData<int64_t>();
+  std::copy_n(values, grid_count, grid_values.begin());
   const auto slices = PlanQwenImageSlices(grid_values, total_patches, spatial_merge_size_);
 
   // Ensure pixel_values are float32 for the vision graph.

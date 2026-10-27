@@ -11,6 +11,7 @@ This file can be used in two ways:
 """
 
 import argparse
+import gc
 import importlib.util
 import json
 import logging
@@ -723,7 +724,7 @@ def _qwen35_position_table():
     return np.stack((row * row, col * col, row * col, row % 3 - col % 5), axis=-1).astype(np.float32)
 
 
-def _write_qwen35_partitioned_math_fixture(test_data_path, model_path):
+def _write_qwen35_partitioned_math_fixture(test_data_path, model_path, *, embedding_dtype=np.int32):
     onnx = pytest.importorskip("onnx")
     source = Path(test_data_path) / "qwen3-5"
     if not source.exists():
@@ -750,6 +751,11 @@ def _write_qwen35_partitioned_math_fixture(test_data_path, model_path):
         model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
         onnx.checker.check_model(model, full_check=True)
         onnx.save(model, model_path / f"{name}.onnx")
+        if name == "embedding":
+            saved = onnx.load(model_path / f"{name}.onnx")
+            assert saved.graph.input[0].type.tensor_type.elem_type == onnx.helper.np_dtype_to_tensor_dtype(
+                np.dtype(embedding_dtype)
+            )
 
     save(
         "patch_embed",
@@ -815,7 +821,7 @@ def _write_qwen35_partitioned_math_fixture(test_data_path, model_path):
     )
     save(
         "embedding",
-        [value("input_ids", tp.INT32, ["B", "S"])],
+        [value("input_ids", tp.INT32 if embedding_dtype == np.int32 else tp.INT64, ["B", "S"])],
         [value("inputs_embeds", tp.FLOAT, ["B", "S", 224])],
         [
             helper.make_node("Cast", ["input_ids"], ["float_ids"], to=tp.FLOAT),
@@ -1002,10 +1008,11 @@ def _assert_qwen35_embeddings(actual, expected, ids, grids, image_token_id):
     assert offset == len(features)
 
 
+@pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
 @pytest.mark.parametrize("case", ["non_square", "unequal_packed", "unequal_padded", "temporal"])
-def test_qwen3_5_openvino_partitioned_host_math(test_data_path, tmp_path, case):
+def test_qwen3_5_openvino_partitioned_host_math(test_data_path, tmp_path, case, embedding_dtype):
     model_path = tmp_path / "qwen35-math"
-    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path)
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path, embedding_dtype=embedding_dtype)
     grids = [[2, 2, 4]] if case == "temporal" else [[1, 4, 6]]
     if case.startswith("unequal"):
         grids.append([1, 2, 4])
@@ -1026,11 +1033,12 @@ def test_qwen3_5_openvino_partitioned_host_math(test_data_path, tmp_path, case):
     )
 
 
+@pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
 @pytest.mark.parametrize("case", ["single", "unequal"])
-def test_qwen3_5_openvino_partitioned_processor_math(test_data_path, tmp_path, case):
+def test_qwen3_5_openvino_partitioned_processor_math(test_data_path, tmp_path, case, embedding_dtype):
     image_module = pytest.importorskip("PIL.Image")
     model_path = tmp_path / "qwen35-math"
-    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path)
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path, embedding_dtype=embedding_dtype)
     paths = []
     sizes = [(96, 64)] if case == "single" else [(96, 64), (64, 32)]
     for i, (width, height) in enumerate(sizes):
@@ -1068,9 +1076,10 @@ def test_qwen3_5_openvino_partitioned_processor_math(test_data_path, tmp_path, c
     )
 
 
-def test_qwen3_5_openvino_partitioned_decode_embeddings(test_data_path, tmp_path):
+@pytest.mark.parametrize("embedding_dtype", [np.int32, np.int64])
+def test_qwen3_5_openvino_partitioned_decode_embeddings(test_data_path, tmp_path, embedding_dtype):
     model_path = tmp_path / "qwen35-math"
-    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path)
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path, embedding_dtype=embedding_dtype)
     grids = [[1, 4, 6], [1, 2, 4]]
     inputs, patches = _qwen35_controlled_inputs(config, grids)
     model = og.Model(os.fspath(model_path))
@@ -1099,6 +1108,47 @@ def test_qwen3_5_openvino_partitioned_decode_embeddings(test_data_path, tmp_path
         )
         generator.generate_next_token()
         assert generator.get_next_tokens() == [2]
+
+
+@pytest.mark.parametrize("grid_dtype", [np.int32, np.uint8, np.float32, np.float64, np.int64])
+def test_qwen3_5_openvino_partitioned_grid_dtype_before_vision(test_data_path, tmp_path, grid_dtype):
+    model_path = tmp_path / "qwen35-math"
+    config = _write_qwen35_partitioned_math_fixture(test_data_path, model_path)
+    for entry in config["model"]["vision"]["pipeline"]:
+        for name, stage in entry.items():
+            stage.setdefault("session_options", {})["enable_profiling"] = os.fspath(model_path / f"profile_{name}")
+    (model_path / "genai_config.json").write_text(json.dumps(config), encoding="utf-8")
+    grids = [[1, 4, 6]]
+    inputs, patches = _qwen35_controlled_inputs(config, grids)
+    inputs["image_grid_thw"] = np.array(grids, dtype=grid_dtype)
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=30)
+    generator = og.Generator(model, params)
+    if grid_dtype == np.int64:
+        generator.set_inputs(inputs)
+        generator.get_logits()
+        expected = _qwen35_reference_embeddings(inputs["input_ids"], patches, grids, config["model"]["image_token_id"])
+        _assert_qwen35_embeddings(
+            generator.get_output("inputs_embeds").copy(),
+            expected,
+            inputs["input_ids"],
+            grids,
+            config["model"]["image_token_id"],
+        )
+    else:
+        with pytest.raises(RuntimeError):
+            generator.set_inputs(inputs)
+    del generator, params, model
+    gc.collect()
+    for name in ("patch_embed", "pos", "merger"):
+        profiles = list(model_path.glob(f"profile_{name}_*.json"))
+        assert len(profiles) == 1
+        events = json.loads(profiles[0].read_text(encoding="utf-8"))
+        runs = sum(event.get("name") == "model_run" for event in events)
+        expected_runs = int(grid_dtype == np.int64)
+        print(f"Qwen {name} model_run count={runs}, expected={expected_runs}")
+        assert runs == expected_runs
 
 
 def test_qwen3_5_openvino_partitioned_fixture_routing(test_data_path, tmp_path):
