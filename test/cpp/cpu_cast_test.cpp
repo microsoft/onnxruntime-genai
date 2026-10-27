@@ -36,8 +36,8 @@ float FloatFromBits(uint32_t bits) {
 }
 
 // IEEE-754 binary16 to binary32. CpuInterface::Cast must match this for zeros and
-// normal numbers on every backend (scalar and F16C). Inf and NaN differ between
-// the scalar fast path and the hardware path; Float16ToFloat32SpecialValues covers those.
+// normal numbers on every backend (scalar and F16C). Float16ToFloat32SpecialValues
+// covers infinities and NaNs.
 float Float16ToFloat32Reference(uint16_t value) {
   const uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16;
   const uint32_t exponent = (value & 0x7C00u) >> 10;
@@ -110,29 +110,24 @@ void ExpectBFloat16ToFloat32(size_t count, size_t source_pad) {
   }
 }
 
-// The two fp16 paths agree on every encoding except Inf and NaN.
-// F16C follows vcvtph2ps: ±Inf stays ±Inf, and a NaN becomes a quiet NaN with the
-// sign kept and the 10-bit payload shifted into the top of the fp32 significand.
-// FastFloat16ToFloat32 treats the all-ones exponent as a normal number, so ±Inf
-// becomes ±65536 and a NaN becomes a large finite value.
+// Both paths preserve infinities and quiet NaNs, retaining sign and payload.
 struct Float16Special {
   uint16_t encoded;
-  uint32_t f16c_bits;
-  uint32_t scalar_bits;
+  uint32_t expected_bits;
 };
 
 constexpr Float16Special kFloat16Specials[] = {
-    {0x7C00, 0x7F800000u, 0x47800000u},  // +Inf -> +Inf, or 65536
-    {0xFC00, 0xFF800000u, 0xC7800000u},  // -Inf -> -Inf, or -65536
-    {0x7C01, 0x7FC02000u, 0x47802000u},  // signaling NaN
-    {0x7E00, 0x7FC00000u, 0x47C00000u},  // quiet NaN
-    {0x7FFF, 0x7FFFE000u, 0x47FFE000u},  // NaN, full payload
-    {0xFC01, 0xFFC02000u, 0xC7802000u},  // negative signaling NaN
-    {0xFE00, 0xFFC00000u, 0xC7C00000u},  // negative quiet NaN
-    {0xFFFF, 0xFFFFE000u, 0xC7FFE000u},  // negative NaN, full payload
+    {0x7C00, 0x7F800000u},  // +Inf
+    {0xFC00, 0xFF800000u},  // -Inf
+    {0x7C01, 0x7FC02000u},  // signaling NaN
+    {0x7E00, 0x7FC00000u},  // quiet NaN
+    {0x7FFF, 0x7FFFE000u},  // NaN, full payload
+    {0xFC01, 0xFFC02000u},  // negative signaling NaN
+    {0xFE00, 0xFFC00000u},  // negative quiet NaN
+    {0xFFFF, 0xFFFFE000u},  // negative NaN, full payload
 };
 
-void ExpectFloat16SpecialValues(size_t count, size_t source_pad, size_t dest_pad, bool f16c_path) {
+void ExpectFloat16SpecialValues(size_t count, size_t source_pad, size_t dest_pad) {
   std::vector<uint16_t> source(count + source_pad);
   std::vector<float> dest(count + dest_pad, 42.0f);
   for (size_t i = 0; i < count; ++i)
@@ -144,11 +139,9 @@ void ExpectFloat16SpecialValues(size_t count, size_t source_pad, size_t dest_pad
 
   for (size_t i = 0; i < count; ++i) {
     const Float16Special& spec = kFloat16Specials[i % std::size(kFloat16Specials)];
-    const uint32_t expected = f16c_path ? spec.f16c_bits : spec.scalar_bits;
     const uint32_t actual = FloatBits(dest[dest_pad + i]);
-    EXPECT_EQ(actual, expected) << "index " << i << " fp16 0x" << std::hex << spec.encoded
-                                << (f16c_path ? " f16c" : " scalar");
-    if (actual != expected)
+    EXPECT_EQ(actual, spec.expected_bits) << "index " << i << " fp16 0x" << std::hex << spec.encoded;
+    if (actual != spec.expected_bits)
       return;
   }
 }
@@ -168,7 +161,7 @@ TEST(CpuCastTest, Float16ToFloat32) {
 TEST(CpuCastTest, Float16ToFloat32SpecialValues) {
   for (const Float16Special& spec : kFloat16Specials) {
     const uint32_t scalar = FloatBits(Generators::FastFloat16ToFloat32(spec.encoded));
-    EXPECT_EQ(scalar, spec.scalar_bits) << "fp16 0x" << std::hex << spec.encoded;
+    EXPECT_EQ(scalar, spec.expected_bits) << "fp16 0x" << std::hex << spec.encoded;
   }
 
   uint16_t positive_inf = 0x7C00;
@@ -176,18 +169,12 @@ TEST(CpuCastTest, Float16ToFloat32SpecialValues) {
   ASSERT_TRUE(Cpu().Cast(&positive_inf, &converted,
                          Ort::TypeToTensorType<Ort::Float16_t>,
                          Ort::TypeToTensorType<float>, 1));
-  const uint32_t inf_bits = FloatBits(converted);
-  bool f16c_path = false;
-  if (inf_bits == 0x7F800000u) {
-    f16c_path = true;
-  } else {
-    ASSERT_EQ(inf_bits, 0x47800000u) << "fp16 +Inf must be IEEE Inf or the scalar 65536";
-  }
+  ASSERT_EQ(FloatBits(converted), 0x7F800000u);
 
   // Lengths cover the 8-wide F16C body, its tail, and an unaligned source and destination.
   for (size_t count : {size_t{1}, size_t{3}, size_t{7}, size_t{8}, size_t{9}, size_t{17}})
-    ExpectFloat16SpecialValues(count, 0, 0, f16c_path);
-  ExpectFloat16SpecialValues(9, 1, 1, f16c_path);
+    ExpectFloat16SpecialValues(count, 0, 0);
+  ExpectFloat16SpecialValues(9, 1, 1);
 }
 
 TEST(CpuCastTest, BFloat16ToFloat32) {
@@ -209,6 +196,47 @@ TEST(CpuCastTest, Float32ToFloat16) {
                          Ort::TypeToTensorType<Ort::Float16_t>, std::size(values)));
   for (size_t i = 0; i < std::size(values); ++i)
     EXPECT_EQ(dest[i], expected[i]) << "value " << values[i];
+}
+
+TEST(CpuCastTest, Float32ToFloat16SpecialValues) {
+  const uint32_t source_bits[] = {
+      0x7F800000u,
+      0xFF800000u,
+      0x7FC00000u,
+      0xFFC00000u,
+      0x7F800001u,
+      0xFF800001u,
+      0x00000000u,
+      0x80000000u,
+      0x3F800000u,
+      0xBF800000u,
+  };
+  const uint16_t expected[] = {
+      0x7C00,
+      0xFC00,
+      0x7E00,
+      0xFE00,
+      0x7E00,
+      0xFE00,
+      0x0000,
+      0x8000,
+      0x3C00,
+      0xBC00,
+  };
+  static_assert(std::size(source_bits) == std::size(expected));
+  std::vector<float> source;
+  for (const auto bits : source_bits) source.push_back(FloatFromBits(bits));
+  for (size_t count : {size_t{0}, size_t{1}, size_t{2}, std::size(source_bits)}) {
+    std::vector<uint16_t> dest(count + 2, 0x1234);
+    ASSERT_TRUE(Cpu().Cast(source.data(), dest.data() + 1, Ort::TypeToTensorType<float>,
+                           Ort::TypeToTensorType<Ort::Float16_t>, count));
+    EXPECT_EQ(dest.front(), 0x1234);
+    EXPECT_EQ(dest.back(), 0x1234);
+    for (size_t i = 0; i < count; ++i) {
+      EXPECT_EQ(dest[i + 1], expected[i]);
+      EXPECT_EQ(Generators::FastFloat32ToFloat16(source[i]), expected[i]);
+    }
+  }
 }
 
 TEST(CpuCastTest, Float32ToBFloat16Truncates) {

@@ -135,7 +135,15 @@ def test_multimodal_prefill_chunking_falls_back_for_batched_prompts(test_data_pa
         np.testing.assert_array_equal(actual, expected)
 
 
-def _write_gemma3_partitioned_fixture(test_data_path, model_path, marker_dtype, *, embedding_dtype=np.int32):
+def _write_gemma3_partitioned_fixture(
+    test_data_path,
+    model_path,
+    marker_dtype,
+    *,
+    embedding_dtype=np.int32,
+    vision_input_dtype=np.float32,
+    vision_output_dtype=np.float32,
+):
     onnx = pytest.importorskip("onnx")
     source = Path(test_data_path) / "multimodal-decoder-no-input-ids"
     if not source.exists():
@@ -162,16 +170,29 @@ def _write_gemma3_partitioned_fixture(test_data_path, model_path, marker_dtype, 
                 np.dtype(embedding_dtype)
             )
 
+    vision_input_type = helper.np_dtype_to_tensor_dtype(np.dtype(vision_input_dtype))
+    vision_output_type = helper.np_dtype_to_tensor_dtype(np.dtype(vision_output_dtype))
+    pixels = "float_pixels" if vision_input_type != tp.FLOAT else "pixel_values"
+    features = "float_features" if vision_output_type != tp.FLOAT else "image_features"
     save(
         "vision",
-        [value("pixel_values", tp.FLOAT, ["R", 4])],
-        [value("image_features", tp.FLOAT, ["R", 4])],
+        [value("pixel_values", vision_input_type, ["R", 4])],
+        [value("image_features", vision_output_type, ["R", 4])],
         [
-            helper.make_node("Mul", ["pixel_values", "scale"], ["scaled_pixels"]),
-            helper.make_node("Add", ["scaled_pixels", "bias"], ["image_features"]),
+            *([helper.make_node("Cast", ["pixel_values"], [pixels], to=tp.FLOAT)] if pixels != "pixel_values" else []),
+            helper.make_node("Mul", [pixels, "scale"], ["scaled_pixels"]),
+            helper.make_node("Add", ["scaled_pixels", "bias"], [features]),
+            *(
+                [helper.make_node("Cast", [features], ["image_features"], to=vision_output_type)]
+                if features != "image_features"
+                else []
+            ),
         ],
         {"scale": np.array(2, dtype=np.float32), "bias": np.array(0.5, dtype=np.float32)},
     )
+    vision = onnx.load(model_path / "vision.onnx")
+    assert vision.graph.input[0].type.tensor_type.elem_type == vision_input_type
+    assert vision.graph.output[0].type.tensor_type.elem_type == vision_output_type
     save(
         "embedding",
         [value("input_ids", tp.INT32 if embedding_dtype == np.int32 else tp.INT64, ["B", "S"])],
@@ -361,6 +382,39 @@ def test_gemma3_partitioned_text_only_and_decode(test_data_path, tmp_path, marke
     generator.set_inputs(inputs)
     expected = prompt[:, :, None].astype(np.float64) + 0.1 * np.arange(4)
     _assert_gemma3_partitioned_generation(generator, expected, np.zeros(prompt.shape, dtype=marker_dtype))
+
+
+@pytest.mark.parametrize("source_dtype", [np.float32, np.float16])
+@pytest.mark.parametrize("vision_input_dtype", [np.float32, np.float16])
+@pytest.mark.parametrize("vision_output_dtype", [np.float32, np.float16])
+def test_gemma3_partitioned_vision_dtype(
+    test_data_path, tmp_path, source_dtype, vision_input_dtype, vision_output_dtype
+):
+    model_path = tmp_path / "gemma3-partitioned"
+    _write_gemma3_partitioned_fixture(
+        test_data_path,
+        model_path,
+        np.int32,
+        vision_input_dtype=vision_input_dtype,
+        vision_output_dtype=vision_output_dtype,
+    )
+    _enable_gemma3_vision_profile(model_path)
+    prompt = np.array([[2, 3, 4, 5, 6]], dtype=np.int32)
+    markers = np.array([[0, 1, 1, 0, 0]], dtype=np.int32)
+    inputs = og.NamedTensors()
+    inputs["input_ids"] = og.Tensor(prompt)
+    inputs["token_type_ids"] = og.Tensor(markers)
+    inputs["pixel_values"] = og.Tensor(np.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=source_dtype))
+    inputs["num_image_tokens"] = og.Tensor(np.array([2], dtype=np.int64))
+    model = og.Model(os.fspath(model_path))
+    params = og.GeneratorParams(model)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    expected = prompt[..., None].astype(np.float64) + 0.1 * np.arange(4)
+    expected[0, 1:3] = [[2.5, 4.5, 6.5, 8.5], [10.5, 12.5, 14.5, 16.5]]
+    _assert_gemma3_partitioned_generation(generator, expected, markers)
+    del generator, params, model
+    _assert_gemma3_vision_runs(model_path, 1)
 
 
 @pytest.mark.parametrize(

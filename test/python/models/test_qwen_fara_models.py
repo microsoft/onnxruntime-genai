@@ -724,7 +724,35 @@ def _qwen35_position_table():
     return np.stack((row * row, col * col, row * col, row % 3 - col % 5), axis=-1).astype(np.float32)
 
 
-def _write_qwen35_partitioned_math_fixture(test_data_path, model_path, *, embedding_dtype=np.int32):
+_QWEN35_HALF_BOUNDARIES = {
+    "fp32": (),
+    "patch_input": ("patch_input",),
+    "patch_output": ("patch_output",),
+    "pos_output": ("pos_output",),
+    "merger_hidden": ("merger_hidden",),
+    "merger_mask": ("merger_mask",),
+    "merger_rope": ("merger_rope",),
+    "merger_output": ("merger_output",),
+    "all_half": (
+        "patch_input",
+        "patch_output",
+        "pos_output",
+        "merger_hidden",
+        "merger_mask",
+        "merger_rope",
+        "merger_output",
+    ),
+    "mixed": ("patch_output", "merger_hidden", "merger_rope"),
+}
+
+
+def _write_qwen35_partitioned_math_fixture(
+    test_data_path,
+    model_path,
+    *,
+    embedding_dtype=np.int32,
+    half_boundaries=(),
+):
     onnx = pytest.importorskip("onnx")
     source = Path(test_data_path) / "qwen3-5"
     if not source.exists():
@@ -740,6 +768,10 @@ def _write_qwen35_partitioned_math_fixture(test_data_path, model_path, *, embedd
         shutil.copyfile(source / name, model_path / name)
     helper = onnx.helper
     tp = onnx.TensorProto
+    assert set(half_boundaries) <= set(_QWEN35_HALF_BOUNDARIES["all_half"])
+
+    def boundary_type(name):
+        return tp.FLOAT16 if name in half_boundaries else tp.FLOAT
 
     def value(name, dtype, shape):
         return helper.make_tensor_value_info(name, dtype, shape)
@@ -751,49 +783,87 @@ def _write_qwen35_partitioned_math_fixture(test_data_path, model_path, *, embedd
         model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
         onnx.checker.check_model(model, full_check=True)
         onnx.save(model, model_path / f"{name}.onnx")
+        saved = onnx.load(model_path / f"{name}.onnx")
+        for expected, actual in zip([*inputs, *outputs], [*saved.graph.input, *saved.graph.output], strict=True):
+            assert actual.type.tensor_type.elem_type == expected.type.tensor_type.elem_type
         if name == "embedding":
-            saved = onnx.load(model_path / f"{name}.onnx")
             assert saved.graph.input[0].type.tensor_type.elem_type == onnx.helper.np_dtype_to_tensor_dtype(
                 np.dtype(embedding_dtype)
             )
 
+    pixels = "float_pixels" if "patch_input" in half_boundaries else "pixel_values"
+    patch_output = "float_hidden" if "patch_output" in half_boundaries else "hidden_states"
     save(
         "patch_embed",
-        [value("pixel_values", tp.FLOAT, ["N", 1536])],
-        [value("hidden_states", tp.FLOAT, ["N", 4])],
+        [value("pixel_values", boundary_type("patch_input"), ["N", 1536])],
+        [value("hidden_states", boundary_type("patch_output"), ["N", 4])],
         [
-            helper.make_node("Gather", ["pixel_values", "columns"], ["selected"], axis=1),
-            helper.make_node("Add", ["selected", "bias"], ["hidden_states"]),
+            *([helper.make_node("Cast", ["pixel_values"], [pixels], to=tp.FLOAT)] if pixels != "pixel_values" else []),
+            helper.make_node("Gather", [pixels, "columns"], ["selected"], axis=1),
+            helper.make_node("Add", ["selected", "bias"], [patch_output]),
+            *(
+                [helper.make_node("Cast", [patch_output], ["hidden_states"], to=tp.FLOAT16)]
+                if patch_output != "hidden_states"
+                else []
+            ),
         ],
         {
             "columns": np.arange(4, dtype=np.int64),
             "bias": np.array([0.125, 0.25, 0.375, 0.5], dtype=np.float32),
         },
     )
+    pos_output = "float_positions" if "pos_output" in half_boundaries else "position_embeddings"
     save(
         "pos",
         [value("position_indices", tp.INT64, [4, "N"])],
-        [value("position_embeddings", tp.FLOAT, [4, "N", 4])],
-        [helper.make_node("Gather", ["table", "position_indices"], ["position_embeddings"], axis=0)],
+        [value("position_embeddings", boundary_type("pos_output"), [4, "N", 4])],
+        [
+            helper.make_node("Gather", ["table", "position_indices"], [pos_output], axis=0),
+            *(
+                [helper.make_node("Cast", [pos_output], ["position_embeddings"], to=tp.FLOAT16)]
+                if pos_output != "position_embeddings"
+                else []
+            ),
+        ],
         {"table": _qwen35_position_table().reshape(2304, 4)},
     )
     # Preserve every host-produced value in the final features, including the mask's infinity categories.
+    merger_inputs = {
+        name: f"float_{name}" if boundary in half_boundaries else name
+        for name, boundary in (
+            ("hidden_states", "merger_hidden"),
+            ("vision_attention_mask", "merger_mask"),
+            ("rotary_pos_emb", "merger_rope"),
+        )
+    }
+    merger_output = "float_features" if "merger_output" in half_boundaries else "image_features"
     save(
         "merger",
         [
-            value("hidden_states", tp.FLOAT, ["N", 4]),
-            value("vision_attention_mask", tp.FLOAT, [1, "N", "N"]),
-            value("rotary_pos_emb", tp.FLOAT, ["N", 4]),
+            value("hidden_states", boundary_type("merger_hidden"), ["N", 4]),
+            value("vision_attention_mask", boundary_type("merger_mask"), [1, "N", "N"]),
+            value("rotary_pos_emb", boundary_type("merger_rope"), ["N", 4]),
         ],
-        [value("image_features", tp.FLOAT, ["image_tokens", 224])],
+        [value("image_features", boundary_type("merger_output"), ["image_tokens", 224])],
         [
+            *[
+                helper.make_node("Cast", [name], [internal], to=tp.FLOAT)
+                for name, internal in merger_inputs.items()
+                if name != internal
+            ],
             helper.make_node(
-                "IsInf", ["vision_attention_mask"], ["negative_inf"], detect_negative=1, detect_positive=0
+                "IsInf",
+                [merger_inputs["vision_attention_mask"]],
+                ["negative_inf"],
+                detect_negative=1,
+                detect_positive=0,
             ),
-            helper.make_node("Where", ["negative_inf", "zero", "vision_attention_mask"], ["finite_mask"]),
+            helper.make_node(
+                "Where", ["negative_inf", "zero", merger_inputs["vision_attention_mask"]], ["finite_mask"]
+            ),
             helper.make_node("Cast", ["negative_inf"], ["mask_indicator"], to=tp.FLOAT),
             *[
-                helper.make_node("Reshape", [name, "flat_shape"], [f"{name}_flat"])
+                helper.make_node("Reshape", [merger_inputs.get(name, name), "flat_shape"], [f"{name}_flat"])
                 for name in ("hidden_states", "rotary_pos_emb", "finite_mask", "mask_indicator")
             ],
             helper.make_node(
@@ -802,14 +872,19 @@ def _write_qwen35_partitioned_math_fixture(test_data_path, model_path, *, embedd
                 ["payload"],
                 axis=0,
             ),
-            helper.make_node("Shape", ["hidden_states"], ["hidden_shape"]),
+            helper.make_node("Shape", [merger_inputs["hidden_states"]], ["hidden_shape"]),
             helper.make_node("Gather", ["hidden_shape", "first"], ["patch_count"], axis=0),
             helper.make_node("Mul", ["patch_count", "capacity_per_patch"], ["capacity"]),
             helper.make_node("Shape", ["payload"], ["payload_size"]),
             helper.make_node("Sub", ["capacity", "payload_size"], ["padding_size"]),
             helper.make_node("Concat", ["first", "padding_size"], ["pads"], axis=0),
             helper.make_node("Pad", ["payload", "pads", "zero"], ["padded"]),
-            helper.make_node("Reshape", ["padded", "feature_shape"], ["image_features"]),
+            helper.make_node("Reshape", ["padded", "feature_shape"], [merger_output]),
+            *(
+                [helper.make_node("Cast", [merger_output], ["image_features"], to=tp.FLOAT16)]
+                if merger_output != "image_features"
+                else []
+            ),
         ],
         {
             "zero": np.array(0, dtype=np.float32),
@@ -908,7 +983,7 @@ def _write_qwen35_partitioned_math_fixture(test_data_path, model_path, *, embedd
     return config
 
 
-def _qwen35_reference_features(patches, grid):
+def _qwen35_reference_features(patches, grid, *, half_boundaries=()):
     t, h, w = map(int, grid)
     assert h % 2 == w % 2 == 0
     n = t * h * w
@@ -919,6 +994,8 @@ def _qwen35_reference_features(patches, grid):
     high_y, high_x = np.minimum(low_y + 1, 47), np.minimum(low_x + 1, 47)
     dy, dx = (y - low_y)[:, None, None], (x - low_x)[None, :, None]
     table = _qwen35_position_table().astype(np.float64)
+    if "pos_output" in half_boundaries:
+        table = table.astype(np.float16).astype(np.float64)
     positions = (
         table[low_y[:, None], low_x[None, :]] * (1 - dy) * (1 - dx)
         + table[low_y[:, None], high_x[None, :]] * (1 - dy) * dx
@@ -926,23 +1003,41 @@ def _qwen35_reference_features(patches, grid):
         + table[high_y[:, None], high_x[None, :]] * dy * dx
     )
     np.testing.assert_array_equal(positions[0, 0], [0, 0, 0, 0])
-    np.testing.assert_array_equal(positions[-1, -1], [2209, 2209, 2209, 0])
+    endpoint = 2208 if "pos_output" in half_boundaries else 2209
+    np.testing.assert_array_equal(positions[-1, -1], [endpoint, endpoint, endpoint, 0])
 
     def block_order(array):
         return array.reshape(t, h // 2, 2, w // 2, 2, -1).transpose(0, 1, 3, 2, 4, 5).reshape(n, -1)
 
     positions = block_order(np.broadcast_to(positions, (t, h, w, 4)))
-    hidden = patches[:, :4].astype(np.float64) + np.array([0.125, 0.25, 0.375, 0.5]) + positions
+    selected = patches[:, :4]
+    if "patch_input" in half_boundaries:
+        selected = selected.astype(np.float16)
+    patch_hidden = selected.astype(np.float32) + np.array([0.125, 0.25, 0.375, 0.5], dtype=np.float32)
+    if "patch_output" in half_boundaries:
+        patch_hidden = patch_hidden.astype(np.float16)
+    hidden = (
+        patch_hidden.astype(np.float64) + positions
+        if half_boundaries
+        else patches[:, :4].astype(np.float64) + np.array([0.125, 0.25, 0.375, 0.5]) + positions
+    )
+    if "merger_hidden" in half_boundaries:
+        hidden = hidden.astype(np.float32).astype(np.float16).astype(np.float64)
     rows, cols = np.indices((h, w))
     rotary = np.stack((rows, rows * 0.01, cols, cols * 0.01), axis=-1)
     rotary = block_order(np.broadcast_to(rotary, (t, h, w, 4)))
     np.testing.assert_allclose(
         rotary[:4], [[0, 0, 0, 0], [0, 0, 1, 0.01], [1, 0.01, 0, 0], [1, 0.01, 1, 0.01]], rtol=0, atol=1e-12
     )
+    if "merger_rope" in half_boundaries:
+        rotary = rotary.astype(np.float32).astype(np.float16).astype(np.float64)
     frames = np.repeat(np.arange(t), h * w)
     cross_frame = frames[:, None] != frames[None, :]
     payload = np.concatenate((hidden.ravel(), rotary.ravel(), np.zeros(n * n), cross_frame.ravel()))
-    return np.pad(payload, (0, n * 56 - payload.size)).reshape(n // 4, 224).astype(np.float32)
+    features = np.pad(payload, (0, n * 56 - payload.size)).reshape(n // 4, 224)
+    if "merger_output" in half_boundaries:
+        features = features.astype(np.float32).astype(np.float16)
+    return features.astype(np.float32)
 
 
 def _qwen35_controlled_inputs(config, grids, *, padded=False):
@@ -1135,6 +1230,60 @@ def test_qwen3_5_openvino_partitioned_decode_embeddings(test_data_path, tmp_path
         )
         generator.generate_next_token()
         assert generator.get_next_tokens() == [2]
+
+
+@pytest.mark.parametrize("source_dtype", [np.float32, np.float16])
+@pytest.mark.parametrize("profile", _QWEN35_HALF_BOUNDARIES)
+def test_qwen3_5_openvino_partitioned_vision_dtype(test_data_path, tmp_path, source_dtype, profile):
+    half_boundaries = _QWEN35_HALF_BOUNDARIES[profile]
+    grid_cases = [[[1, 4, 6], [1, 2, 4]]]
+    if profile == "all_half":
+        grid_cases.append([[2, 2, 4]])
+    for case_index, grids in enumerate(grid_cases):
+        model_path = tmp_path / f"qwen35-dtype-{case_index}"
+        config = _write_qwen35_partitioned_math_fixture(
+            test_data_path,
+            model_path,
+            half_boundaries=half_boundaries,
+        )
+        inputs, patches = _qwen35_controlled_inputs(config, grids)
+        # Dyadic pixels avoid midpoint ties in the existing CPU half-cast implementation.
+        patches = [
+            (i + 1 / 256 + np.arange(len(patch))[:, None] / 32 + np.arange(1536)[None, :] / 128).astype(source_dtype)
+            for i, patch in enumerate(patches)
+        ]
+        inputs["pixel_values"] = np.concatenate(patches)
+        model = og.Model(os.fspath(model_path))
+        params = og.GeneratorParams(model)
+        params.set_search_options(max_length=inputs["input_ids"].as_numpy().shape[1] + 4, do_sample=False)
+        generator = og.Generator(model, params)
+        generator.set_inputs(inputs)
+        generator.get_logits()
+        expected = _qwen35_text_embeddings(inputs["input_ids"].as_numpy())
+        image_token_id = config["model"]["image_token_id"]
+        expected[inputs["input_ids"].as_numpy() == image_token_id] = np.concatenate(
+            [
+                _qwen35_reference_features(p, grid, half_boundaries=half_boundaries)
+                for p, grid in zip(patches, grids, strict=True)
+            ]
+        )
+        actual = generator.get_output("inputs_embeds").copy()
+        assert actual.dtype == np.float32
+        assert actual.shape == (1, 15 if case_index == 0 else 8, 224)
+        _assert_qwen35_embeddings(actual, expected, inputs["input_ids"], grids, image_token_id)
+        generator.generate_next_token()
+        assert generator.get_next_tokens() == [2]
+        for _ in range(2):
+            generator.get_logits()
+            np.testing.assert_allclose(
+                generator.get_output("inputs_embeds"),
+                _qwen35_text_embeddings(np.array([[2]], dtype=np.int32)),
+                rtol=1e-5,
+                atol=1e-4,
+            )
+            generator.generate_next_token()
+            assert generator.get_next_tokens() == [2]
+        del generator, params, model
 
 
 @pytest.mark.parametrize("grid_dtype", [np.int32, np.uint8, np.float32, np.float64, np.int64])

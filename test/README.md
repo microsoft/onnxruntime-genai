@@ -44,6 +44,14 @@ preserves its complete inputs in the features so elementwise embedding compariso
 observe each host calculation. Non-square, unequal packed/padded and temporal grids,
 real image preprocessing, and image prefill followed by text decoding are covered.
 Embedding input IDs are tested with both int32 and int64 graph declarations.
+Vision dtype cases cross float32/float16 pixel sources with individually typed
+patch and merger feeds and stage outputs, including mixed-type pipelines.
+Host math stays float32; numerical expectations account for rounding at each
+float16 boundary. Prefill and two text decode steps cover unequal images, with
+an additional temporal-mask control for all-float16 boundaries. Diagnostic graphs
+cast boundary inputs to float32 internally, so these do not test learned float16 kernels.
+The CPU cast suite checks infinity/NaN preservation in both scalar directions,
+including the negative infinities used by temporal attention masks.
 OpenVINO-partitioned Qwen image grids accept the configured input name when the
 canonical `image_grid_thw` key is absent. When both are supplied, the canonical
 tensor takes priority for both vision and position inputs, regardless of insertion order.
@@ -72,6 +80,8 @@ only image rows, while a diagnostic decoder exposes all received embeddings and
 token-type markers in its raw logits. Image/text-only prefill and two successive
 decode forwards cover int32/int64 embedding IDs, all int32/int64 source/decoder
 marker combinations, and a configured decoder input name.
+Vision input/output dtype cases independently cross float32 and float16 with both
+pixel source types, checking injected rows, markers and successive decode steps.
 Native `TokenTypeIdsLifecycleTest` cases cover int32/int64 decoder metadata and
 batch sizes one/two. Unchanged sequence lengths reuse the bound marker tensor,
 but every update still applies staged markers once or clears the buffer to text
