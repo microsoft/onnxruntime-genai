@@ -15,12 +15,29 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public void TokenPostProcessorOutputsUseOpaquePointers()
         {
             var nativeMethods = typeof(TokenPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
-            foreach (var name in new[] { "OgaTokenPostProcessorGetResult", "OgaTokenPostProcessorResultGetTimestamps",
-                "OgaTokenPostProcessorTimestampGetWord", "OgaTokenPostProcessorTimestampGetSegment" })
-            {
-                var method = nativeMethods.GetMethod(name, BindingFlags.Public | BindingFlags.Static)!;
-                Assert.Equal(typeof(IntPtr), method.ReturnType);
-            }
+            var method = nativeMethods.GetMethod("OgaTokenPostProcessorGetResultData", BindingFlags.Public | BindingFlags.Static)!;
+            Assert.Equal(typeof(IntPtr), method.ReturnType);
+            var parameters = method.GetParameters();
+            Assert.Equal(4, parameters.Length);
+            Assert.Equal(typeof(IntPtr).MakeByRefType(), parameters[2].ParameterType);
+            Assert.Equal(typeof(IntPtr).MakeByRefType(), parameters[3].ParameterType);
+            Assert.All(parameters.Skip(2), parameter => Assert.True(parameter.IsOut));
+        }
+
+        [Fact]
+        public void TimestampIndexedReadUsesTypedOutputs()
+        {
+            var nativeMethods = typeof(TokenPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
+            var method = nativeMethods.GetMethod("OgaTokenPostProcessorGetTimestampRecordData", BindingFlags.Public | BindingFlags.Static)!;
+            Assert.Equal(typeof(IntPtr), method.ReturnType);
+            var parameters = method.GetParameters();
+            Assert.Equal(8, parameters.Length);
+            Assert.Equal(typeof(IntPtr).MakeByRefType(), parameters[3].ParameterType);
+            Assert.Equal(typeof(long).MakeByRefType(), parameters[4].ParameterType);
+            Assert.Equal(typeof(long).MakeByRefType(), parameters[5].ParameterType);
+            Assert.Equal(typeof(double).MakeByRefType(), parameters[6].ParameterType);
+            Assert.Equal(typeof(double).MakeByRefType(), parameters[7].ParameterType);
+            Assert.All(parameters.Skip(3), parameter => Assert.True(parameter.IsOut));
         }
 
         [Fact]

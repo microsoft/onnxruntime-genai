@@ -620,6 +620,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [Fact(DisplayName = "TestTokenPostProcessorResults")]
         public void TestTokenPostProcessorResults()
         {
+            Assert.Equal(typeof(ValueTuple<long, long>), typeof(TokenPostProcessorTimestampRecord)
+                .GetMethod(nameof(TokenPostProcessorTimestampRecord.GetFrameInterval))!.ReturnType);
+            Assert.Equal(typeof(ValueTuple<double, double>), typeof(TokenPostProcessorTimestampRecord)
+                .GetMethod(nameof(TokenPostProcessorTimestampRecord.GetTimeInterval))!.ReturnType);
             using var model = new Model(_tinyRandomGpt2ModelPath);
             using var tokenizer = new Tokenizer(model);
             using var parameters = new GeneratorParams(model);

@@ -49,6 +49,7 @@ configuration determines whether acoustic timing is produced. `TokenPostProcesso
 forwards borrowed token and optional timing views to its internal `TokenPostProcessorInternal`, which
 owns decoding and timestamp processing. Ordinary tokenizer decoding is unchanged.
 `timestamp_level` controls timestamp generation:
+
 ```mermaid
 flowchart TB
   audio[Audio chunks] --> processor[StreamingProcessor]
@@ -112,7 +113,9 @@ At setup, the generator-facing adapter calculates `seconds_per_frame` and the
 rounded gap threshold once from the existing model configuration. The internal
 timestamp code receives those derived values, not another copy of sample rate,
 hop length, and subsampling factor. Native token input uses an optional
-`AcousticFrameInterval`; public C output handles and layouts are unchanged.
+`std::pair<int64_t, int64_t>` with start and exclusive stop frame bounds;
+timestamp records also store second bounds in `std::pair<double, double>`.
+Public C output handles and layouts are unchanged.
 
 ## Decoding
 
@@ -136,12 +139,28 @@ concatenating all emitted words or all emitted segments reproduces the decoded t
 In every binding, read and copy needed text and scalar values into the application's
 transcript before the next processor mutation. Result wrappers do not retain old native output.
 
-C/C++ expose opaque result and timestamp-record handles with typed accessors.
+C exposes opaque processor and timestamp-container handles, not individual result
+or record handles. Use `OgaTokenPostProcessorGetResultCount()` and
+`OgaTokenPostProcessorGetResultData()` to read an outer result's decoded text and
+optional timestamp-container pointer together. Both outputs are borrowed; the
+timestamp pointer is null when timestamps are disabled. Invalid arguments or an
+out-of-range result index return an error without changing the outputs.
 C# and Python expose the same borrowed timestamp output through nullable
 `GetTimestamps()` and `get_timestamps()`. Read records using `GetWords()` / `GetSegments()`
 or `get_words()` / `get_segments()`, then the record's text/frame/time accessors.
-The returned objects are opaque wrappers, not dictionaries or copied metadata objects.
-They are per-call event lists,
+The language-level record values contain a borrowed text pointer and copied numeric bounds.
+`GetFrameInterval()` and `GetTimeInterval()` return the whole interval as a
+`std::pair` in C++ or a named `(Start, Stop)` value tuple in C#. Python exposes
+`get_frame_interval()` and `get_time_interval()` as two-element tuples. These
+interval values are independent copies; accessing them from a record requires the
+record to remain valid.
+The C API uses `OgaTokenPostProcessorGetTimestampRecordCount()` to check for word or
+segment records, then `OgaTokenPostProcessorGetTimestampRecordData()` to read the text,
+frame interval, and time interval together at an index. The latter returns an error
+for null arguments, an invalid selector, or an out-of-range index without modifying
+any output. No native vector, record, or string-content copy is needed. Record-handle
+and individual boundary C helpers are not exposed.
+The timestamp lists contain per-call events,
 not cumulative history. Each list is
 empty when that call completes no records, and it may contain multiple records when one decoded
 token spans multiple word or segment boundaries. Callers retain any history they need.
