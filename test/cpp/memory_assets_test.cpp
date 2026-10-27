@@ -115,6 +115,14 @@ class FileSourceAssetsTest : public MemoryAssetsTest {
 };
 #endif
 
+#if !defined(__linux__)
+TEST_F(MemoryAssetsTest, FileSourcesAreUnsupportedOutsideLinux) {
+  auto config = CreateConfig();
+  ExpectError(OgaConfigSetModelFileDescriptors(config.get(), nullptr, nullptr, 0),
+              "External initializer file descriptors require Linux.");
+}
+#endif
+
 TEST_F(MemoryAssetsTest, ConfigOwnsParsedValues) {
   auto json = config_json_;
   auto config = OgaConfig::CreateFromBuffer(json);
