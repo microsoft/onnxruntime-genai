@@ -132,12 +132,21 @@ float FastFloat16ToFloat32(const uint16_t x) {
   const uint32_t e = (x & 0x7C00) >> 10;  // exponent
   const uint32_t m = (x & 0x03FF) << 13;  // mantissa
 
+  if (e == 31)
+    return bit_cast<float>((x & 0x8000u) << 16 | 0x7F800000u | m | (m ? 0x00400000u : 0));
+
   const uint32_t v = bit_cast<uint32_t>((float)m) >> 23;                                                                                                       // log2 bit hack to count leading zeros in denormalized format
   return bit_cast<float>((x & 0x8000) << 16 | (e != 0) * ((e + 112) << 23 | m) | ((e == 0) & (m != 0)) * ((v - 37) << 23 | ((m << (150 - v)) & 0x007FE000)));  // sign : normalized : denormalized
 }
 
 uint16_t FastFloat32ToFloat16(float v) {
-  const uint32_t b = bit_cast<uint32_t>(v) + 0x00001000;  // round-to-nearest-even: add last bit after truncated mantissa
+  const uint32_t bits = bit_cast<uint32_t>(v);
+  if ((bits & 0x7F800000u) == 0x7F800000u) {
+    const uint32_t mantissa = bits & 0x007FFFFFu;
+    return static_cast<uint16_t>((bits & 0x80000000u) >> 16 | 0x7C00u |
+                                 (mantissa ? (mantissa >> 13) | 0x0200u : 0));
+  }
+  const uint32_t b = bits + 0x00001000;  // round-to-nearest-even: add last bit after truncated mantissa
 
   const uint32_t e = (b & 0x7F800000) >> 23;                                                                                                                                                                  // exponent
   const uint32_t m = b & 0x007FFFFF;                                                                                                                                                                          // mantissa; in line below: 0x007FF000 = 0x00800000-0x00001000 = decimal indicator flag - initial rounding
