@@ -13,7 +13,7 @@
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
 #include "models/preprocessing/genai_tokenizer.h"
-#include "models/preprocessing/asr_post_processor.h"
+#include "models/postprocessing/asr_post_processor.h"
 #include "models/preprocessing/nemotron_streaming_processor.h"
 #include "models/whisper.h"
 

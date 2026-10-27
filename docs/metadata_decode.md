@@ -1,5 +1,10 @@
 # ASR Post-Processing
 
+Native postprocessors and their timestamp/word-grouping helpers live in
+[`src/models/postprocessing/`](../src/models/postprocessing/), separate from
+input preprocessing in
+[`src/models/preprocessing/`](../src/models/preprocessing/).
+
 `PostProcessor` is the native base class for generator-facing postprocessors. It
 holds the borrowed generator reference shared by output-specific wrappers and
 declares virtual `ProcessNext()`, `Finalize()`, and `Reset()` methods.

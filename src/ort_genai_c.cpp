@@ -20,7 +20,7 @@
 #include "engine/engine.h"
 #include "stop_string_matcher.h"
 #include "models/preprocessing/genai_tokenizer.h"
-#include "models/preprocessing/asr_post_processor.h"
+#include "models/postprocessing/asr_post_processor.h"
 #include "models/preprocessing/multi_modal_processor.h"
 #include "models/preprocessing/processor.h"
 #include "models/preprocessing/streaming_processor.h"

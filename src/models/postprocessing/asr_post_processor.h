@@ -1,6 +1,6 @@
 #pragma once
 
-#include "genai_tokenizer.h"
+#include "models/preprocessing/genai_tokenizer.h"
 #include "metadata_core_state.h"
 #include "post_processor.h"
 
