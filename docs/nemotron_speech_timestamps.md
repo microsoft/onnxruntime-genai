@@ -115,7 +115,8 @@ timestamp code receives those derived values, not another copy of sample rate,
 hop length, and subsampling factor. Native token input uses an optional
 `std::pair<int64_t, int64_t>` with start and exclusive stop frame bounds;
 timestamp records also store second bounds in `std::pair<double, double>`.
-Public C output handles and layouts are unchanged.
+C retains opaque processor and timestamp-container handles; individual result and
+record handles are replaced by the count and grouped indexed-read helpers described below.
 
 ## Decoding
 
