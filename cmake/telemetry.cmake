@@ -206,9 +206,14 @@ if(NOT TARGET mat)
   message(FATAL_ERROR "Telemetry: the 1DS SDK 'mat' target was not created by FetchContent.")
 endif()
 
-# Vendored 1DS dependencies emit unavoidable narrowing warnings under the Apple warning policy.
-# Suppress them only for third-party targets so GenAI sources retain the warning.
 if(APPLE)
+  # Objective-C class names are process-global, even with hidden symbol visibility.
+  # Keep GenAI's private SDK delegate distinct from ONNX Runtime's bundled copy.
+  target_compile_definitions(mat PRIVATE
+    MATStreamingSessionDelegate=ORTGenAIMATStreamingSessionDelegate)
+
+  # Vendored 1DS dependencies emit unavoidable narrowing warnings under the Apple warning policy.
+  # Suppress them only for third-party targets so GenAI sources retain the warning.
   foreach(_ortgenai_apple_telemetry_target sqlite3_bundled zlib_bundled mat)
     if(TARGET ${_ortgenai_apple_telemetry_target})
       target_compile_options(${_ortgenai_apple_telemetry_target} PRIVATE -Wno-shorten-64-to-32)
