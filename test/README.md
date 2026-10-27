@@ -43,6 +43,9 @@ frame masks, image-feature concatenation and host injection. A diagnostic merger
 preserves its complete inputs in the features so elementwise embedding comparisons
 observe each host calculation. Non-square, unequal packed/padded and temporal grids,
 real image preprocessing, and image prefill followed by text decoding are covered.
+Embedding input IDs are tested with both int32 and int64 graph declarations.
+Profiled dtype cases require non-int64 `image_grid_thw` to be rejected before any
+vision stage executes; an int64 control verifies all three stages execute normally.
 ONNX and Pillow are required to execute all cases; the existing Qwen3.5 tokenizer
 and processor assets supply the fixture metadata.
 
@@ -60,12 +63,16 @@ Run the CPU runtime regression from `test/python`:
 python -m pytest -q --test_models ../models models/test_decoder_state_input_ids.py -k gemma3_partitioned
 ```
 
-Eight cases generate tiny ONNX vision, text-embedding and decoder graphs in pytest
+The cases generate tiny ONNX vision, text-embedding and decoder graphs in pytest
 temporary directories. Direct tensor inputs check that the host merger replaces
 only image rows, while a diagnostic decoder exposes all received embeddings and
 token-type markers in its raw logits. Image/text-only prefill and two successive
-decode forwards cover int32/int64 markers and a configured decoder input name.
+decode forwards cover int32/int64 embedding IDs, all int32/int64 source/decoder
+marker combinations, and a configured decoder input name.
 Image cases also check full-prefill fallback when chunking is requested.
+Session profiles verify invalid marker dtypes and out-of-int32-range values are
+rejected before vision executes, while valid markers execute vision once.
+Missing/empty image markers retain their existing downstream error after vision.
 Partitioned Gemma3 requires a single vision graph; nonempty `vision.pipeline`
 configurations are rejected during model loading.
 ONNX and the existing `multimodal-decoder-no-input-ids` tokenizer assets are required.
