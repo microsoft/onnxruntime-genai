@@ -551,12 +551,15 @@ void Qwen38GraphEngine::BuildTarget() {
             const DevTensor& src_t = *src_bank.tensors.at(state_name);
             const DevTensor& dst_t = *dst_bank.tensors.at(state_name);
             const size_t st_off = static_cast<size_t>(s) * bank_slot_bytes_.at(state_name);
+            const uint64_t su_channels = static_cast<uint64_t>(su_tensor->shape.at(2));
+            const uint64_t dim1 = static_cast<uint64_t>(src_t.shape.at(1));
+            const uint64_t dim2 = static_cast<uint64_t>(src_t.shape.at(2));
             Qwen38StateReplayDesc d{};
             d.source_state = src_t.ptr + st_off;
             d.destination_state = dst_t.ptr + st_off;
             d.value = su_tensor->ptr + su_off;
-            d.channel_count = static_cast<uint64_t>(src_t.shape.at(1));
-            d.state_width = static_cast<uint64_t>(src_t.shape.at(2));
+            d.channel_count = (dim1 == su_channels) ? dim1 : dim2;
+            d.state_width = (dim1 == su_channels) ? dim2 : dim1;
             d.capacity = static_cast<uint32_t>(state_update_capacity_);
             d.kept_count = 1;
             d.element_size = static_cast<uint32_t>(Ort::SizeOf(src_t.type));
@@ -2307,9 +2310,11 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     const char* adaptive_env = std::getenv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
     const bool adaptive_ctx = (adaptive_env != nullptr && std::string(adaptive_env) == "1");
     const int64_t diff_tokens = static_cast<int64_t>(config_->model.qwen38_graph.kv_capacity) - 33032LL;
-    const int64_t delta_kv_bytes = diff_tokens * (diff_tokens > 0 ? 38912LL : 16384LL);
+    const int64_t bytes_per_token =
+        (diff_tokens > 0 && configured_expert_bytes > 0 && configured_expert_bytes <= 11000000000ULL) ? 38912LL : 16384LL;
+    const int64_t delta_kv_bytes = diff_tokens * bytes_per_token;
     if (adaptive_ctx && delta_kv_bytes != 0) {
-      if (has_explicit_expert_bytes && delta_kv_bytes > 0) {
+      if (has_explicit_expert_bytes) {
         const int64_t adj_expert = std::max<int64_t>(
             1000000000LL, static_cast<int64_t>(configured_expert_bytes) - delta_kv_bytes);
         session_options_->AddConfigEntry("session.moe.offload.device_expert_bytes",

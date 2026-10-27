@@ -99,7 +99,10 @@ class Prompts:
             raise ValueError(kind)
         pool = self._pool(kind)
         if len(pool) <= n:
-            raise SystemExit(f"the {kind} pool has {len(pool)} tokens; {n + 1} are needed")
+            if not pool:
+                raise SystemExit(f"the {kind} pool is empty; {n + 1} tokens are needed")
+            reps = (n + 1 + len(pool) - 1) // len(pool)
+            pool = pool * reps
         start = (seed * 7919) % (len(pool) - n)
         return pool[start : start + n]
 

@@ -74,7 +74,8 @@ def main():
 
     result = {"args": {k: str(v) for k, v in vars(args).items()}, "contexts": {}}
     for n in [int(x) for x in args.contexts.split(",")]:
-        seeds = ([] if args.no_warmup else [1000 + n]) + [i * 7 + n for i in range(args.reps)]
+        skip_warmup = args.no_warmup or (os.environ.get("QWEN38_SKIP_LONG_WARMUP") == "1" and n >= 32768)
+        seeds = ([] if skip_warmup else [1000 + n]) + [i * 7 + n for i in range(args.reps)]
         runs = []
         for index, seed in enumerate(seeds):
             prompt = prompts.make(args.kind, n, seed)
@@ -93,25 +94,22 @@ def main():
             head_calls = after["draft_forward_passes"] - before["draft_forward_passes"]
             before_hist = before.get("acceptance_length_histogram", [])
             after_hist = after.get("acceptance_length_histogram", [])
-            hist_len = min(8, len(after_hist), len(before_hist))
+            drafts_per_round = int(round(proposed / rounds)) if (rounds and proposed) else 3
+            max_bins = max(4, drafts_per_round + 1)
+            hist_len = min(max_bins, len(after_hist), len(before_hist))
             accept_hist = [after_hist[i] - before_hist[i] for i in range(hist_len)]
-            while len(accept_hist) < 4:
+            while len(accept_hist) < max_bins:
                 accept_hist.append(0)
-            ge1 = sum(accept_hist[1:])
-            ge2 = sum(accept_hist[2:])
-            ge3 = accept_hist[3]
-            pos_accept_rates = [
-                ge1 / rounds if rounds else 0.0,
-                ge2 / rounds if rounds else 0.0,
-                ge3 / rounds if rounds else 0.0,
-            ]
-            cond_accept_rates = [
-                ge1 / rounds if rounds else 0.0,
-                ge2 / ge1 if ge1 else 0.0,
-                ge3 / ge2 if ge2 else 0.0,
-            ]
+            pos_accept_rates = []
+            cond_accept_rates = []
+            prev_ge = rounds
+            for k_pos in range(1, max_bins):
+                ge_k = sum(accept_hist[k_pos:])
+                pos_accept_rates.append(ge_k / rounds if rounds else 0.0)
+                cond_accept_rates.append(ge_k / prev_ge if prev_ge else 0.0)
+                prev_ge = ge_k
             record = {
-                "label": ("warmup" if index == 0 and not args.no_warmup else f"run{index if not args.no_warmup else index + 1}"),
+                "label": ("warmup" if index == 0 and not skip_warmup else f"run{index if not skip_warmup else index + 1}"),
                 "seed": seed,
                 "tokens": count,
                 "finish_reason": str(turn.finish_reason),
