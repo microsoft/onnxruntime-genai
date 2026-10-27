@@ -50,6 +50,12 @@ Host math stays float32; numerical expectations account for rounding at each
 float16 boundary. Prefill and two text decode steps cover unequal images, with
 an additional temporal-mask control for all-float16 boundaries. Diagnostic graphs
 cast boundary inputs to float32 internally, so these do not test learned float16 kernels.
+Image injection requires float32 embedding output and matching decoder input;
+float16 embeddings remain usable for text-only input but are rejected for images.
+Qwen position-stage outputs support float32 and float16, not bfloat16 or integer
+outputs. Generator contract cases verify these rejections with session profiles:
+half image embeddings fail after vision/embedding execution but before decoder
+prefill, while unsupported position outputs fail before the merger runs.
 The CPU cast suite checks infinity/NaN preservation in both scalar directions,
 including the negative infinities used by temporal attention masks.
 OpenVINO-partitioned Qwen image grids accept the configured input name when the
@@ -82,6 +88,9 @@ decode forwards cover int32/int64 embedding IDs, all int32/int64 source/decoder
 marker combinations, and a configured decoder input name.
 Vision input/output dtype cases independently cross float32 and float16 with both
 pixel source types, checking injected rows, markers and successive decode steps.
+Image injection requires float32 embedding output and matching decoder input.
+Profiled contract cases preserve text-only float16 embeddings while rejecting
+image injection after vision/embedding execution and before decoder prefill.
 Native `TokenTypeIdsLifecycleTest` cases cover int32/int64 decoder metadata and
 batch sizes one/two. Unchanged sequence lengths reuse the bound marker tensor,
 but every update still applies staged markers once or clears the buffer to text
