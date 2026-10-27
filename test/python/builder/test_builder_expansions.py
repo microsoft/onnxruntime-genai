@@ -11,7 +11,7 @@ from models.builders.expansions.standard import Standard
 from models.builders.expansions.webgpu import WebGPU
 from models.builders.qwen import Qwen3VLTextModel
 from models.builders.qwen3_5 import Qwen35MoETextModel, Qwen35MTPModel, Qwen35TextModel
-from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel, Qwen38Engram
+from models.builders.qwen3_8 import Qwen4ExpMTPTextModel, Qwen4ExpTextModel, Qwen4ExpVisionModel
 from models.builders.qwen3_8.graph import Qwen4ExpGraphModel
 
 
@@ -135,7 +135,6 @@ def test_qwen_overrides_are_defined_directly_in_builders(model_class, methods):
                 "make_linear_attention_qkv_z_proj",
                 "make_qwen_sparse_attention",
                 "make_hyper_connection_mix",
-                "make_ple_embedding",
                 "make_ple_gate",
             ],
         ),
@@ -261,10 +260,10 @@ def test_qwen38_engram_dispatches_to_dense_or_paged_builder(monkeypatch, paged):
         calls.append(("paged", self, layer_id, weights, root_input))
         return "paged_output"
 
-    monkeypatch.setattr(Qwen38Engram, "make_ple", dense)
+    monkeypatch.setattr(Qwen4ExpTextModel, "make_non_paged_ple", dense)
     monkeypatch.setattr(Qwen4ExpTextModel, "make_paged_ple", packed)
     kind = "paged" if paged else "dense"
     assert model.make_ple(2, ple, "hidden_states") == f"{kind}_output"
     assert calls == [(kind, model, 2, ple, "hidden_states")]
-    assert Qwen38Engram.__module__ == "models.builders.qwen3_8.model"
+    assert "make_non_paged_ple" in Qwen4ExpTextModel.__dict__
     assert "make_paged_ple" in Qwen4ExpTextModel.__dict__

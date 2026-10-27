@@ -4,7 +4,7 @@
 from .embedding import Qwen4ExpEmbeddingModel
 from .engram import Qwen4ExpEngramModel
 from .graph import Qwen4ExpGraphModel
-from .model import Qwen4ExpModel, Qwen38Engram
+from .model import Qwen4ExpModel
 from .mtp import Qwen4ExpMTPTextModel
 from .text import Qwen4ExpTextModel
 from .vision import Qwen4ExpVisionModel
@@ -17,5 +17,4 @@ __all__ = [
     "Qwen4ExpModel",
     "Qwen4ExpTextModel",
     "Qwen4ExpVisionModel",
-    "Qwen38Engram",
 ]

@@ -6,7 +6,6 @@ import json
 import os
 
 import onnx_ir as ir
-import torch
 from builder_config import serialize_genai_config
 from huggingface_hub import hf_hub_download, snapshot_download
 
@@ -18,187 +17,6 @@ from .text import Qwen4ExpTextModel
 from .vision import Qwen4ExpVisionModel
 
 
-class Qwen38Engram:
-    """Non-paged Qwen3.8 Engram graph construction."""
-
-    def make_ple(self, layer_id, ple, root_input):
-        basename = f"/model/layers.{layer_id}/ple"
-        ngram_op_type = "NGramHashMapping"
-        ngram_name = f"{basename}/{ngram_op_type}"
-        ngram_ids = f"{ngram_name}/output_0"
-        embedding = ple.ple_embedding
-        token_shape = ["batch_size", "sequence_length"]
-        flatten_dims = [0, 0, self.ple_attrs["embed_dim"]]
-        if not self.ple_attrs["external"]:
-            eos_token_id = self.get_engram_pad_id(embedding.eos_token_id)
-            multipliers = f"model.layers.{layer_id}.ple.layer_multipliers"
-            vocab_sizes = f"model.layers.{layer_id}.ple.head_vocab_sizes"
-            offsets = f"model.layers.{layer_id}.ple.head_offsets"
-            eos = f"model.layers.{layer_id}.ple.eos_token_id"
-            self.make_initializer(embedding.layer_multipliers, multipliers)
-            self.make_initializer(embedding.ngram_heads_vocab_sizes, vocab_sizes)
-            self.make_initializer(embedding.ngram_heads_offsets, offsets)
-            self.make_initializer(torch.tensor(eos_token_id, dtype=torch.int64), eos)
-            ngram_inputs = [self.input_names["input_ids"], multipliers, vocab_sizes]
-            ngram_inputs.extend(
-                [self.input_names["past.ple_tokens"][layer_id], offsets, eos]
-            )
-            ngram_outputs = [
-                ngram_ids,
-                self.output_names["present.ple_tokens"][layer_id],
-            ]
-            self.make_node(
-                ngram_op_type,
-                inputs=ngram_inputs,
-                outputs=ngram_outputs,
-                name=ngram_name,
-                domain="com.microsoft",
-                max_ngram_size=self.ple_attrs["ngram_size"],
-                n_head_per_ngram=self.ple_attrs["heads_per_ngram"],
-                pad_id=eos_token_id,
-                reset_on_eos=1,
-            )
-            ngram_heads = (self.ple_attrs["ngram_size"] - 1) * self.ple_attrs[
-                "heads_per_ngram"
-            ]
-            self.make_value(
-                ngram_ids,
-                ir.DataType.INT64,
-                ["batch_size", "sequence_length", ngram_heads],
-            )
-        if self.ple_attrs["external"]:
-            engram_embeddings = self.input_names["engram_embeddings"]
-            self.make_node(
-                "Identity",
-                inputs=[self.input_names["past.ple_tokens"][layer_id]],
-                outputs=[self.output_names["present.ple_tokens"][layer_id]],
-                name=f"{basename}/token_state/Identity",
-            )
-        else:
-            engram_embeddings = self.make_ple_embedding(
-                basename, embedding, ngram_ids, ngram_heads, token_shape, flatten_dims
-            )
-        grouped_dims = [
-            0,
-            0,
-            self.hyper_connection_attrs["num_branches"],
-            self.hidden_size,
-        ]
-        gate_inputs, grouped_shape, key_scale, query_scale, conv_scale = (
-            self.make_ple_projections(
-                layer_id, ple, root_input, engram_embeddings, token_shape, grouped_dims
-            )
-        )
-        gate_name = f"{basename}/EngramGate"
-        gated_value = f"{gate_name}/output_0"
-        gated_value_normed = f"{gate_name}/output_1"
-        gate_shape = grouped_shape
-        self.make_ple_gate(
-            gate_name,
-            gated_value,
-            gated_value_normed,
-            gate_inputs,
-            key_scale,
-            query_scale,
-            conv_scale,
-            gate_shape,
-        )
-        self.make_shape(f"{gate_name}/token_shape", self.input_names["input_ids"], [2])
-        self.make_gather(
-            f"{gate_name}/sequence_length",
-            [f"{gate_name}/token_shape/output_0", "/model/constants/INT64/[1]"],
-            ir.DataType.INT64,
-            [1],
-            axis=0,
-        )
-        self.make_node(
-            "Neg",
-            [f"{gate_name}/sequence_length/output_0"],
-            [f"{gate_name}/start"],
-            name=f"{gate_name}/start/Neg",
-        )
-        self.make_value(f"{gate_name}/start", ir.DataType.INT64, [1])
-        mask_name = f"{gate_name}/padding/Slice"
-        self.make_slice(
-            mask_name,
-            [
-                self.input_names["attention_mask"],
-                f"{gate_name}/start",
-                "/model/constants/INT64/[9223372036854775807]",
-                "/model/constants/INT64/[1]",
-            ],
-            ir.DataType.INT64,
-            ["batch_size", "sequence_length"],
-        )
-        self.make_cast(
-            f"{gate_name}/padding/Cast",
-            f"{mask_name}/output_0",
-            ir.DataType.BOOL,
-            token_shape,
-        )
-        self.make_unsqueeze(
-            f"{gate_name}/padding/Unsqueeze",
-            [f"{gate_name}/padding/Cast/output_0", "/model/constants/INT64/[2, 3]"],
-            ir.DataType.BOOL,
-            [*token_shape, 1, 1],
-        )
-        for name, value in (("value", gated_value), ("normed", gated_value_normed)):
-            self.make_where(
-                f"{gate_name}/padding/{name}",
-                [
-                    f"{gate_name}/padding/Unsqueeze/output_0",
-                    value,
-                    f"/model/constants/{self.io_dtype}/0",
-                ],
-                self.io_dtype,
-                grouped_shape,
-            )
-        gated_value = f"{gate_name}/padding/value/output_0"
-        gated_value_normed = f"{gate_name}/padding/normed/output_0"
-        ple_shape, gated_value_flat, gated_value_normed_flat, conv_weight = (
-            self.make_ple_conv_inputs(
-                layer_id,
-                ple,
-                gate_name,
-                gated_value,
-                gated_value_normed,
-                token_shape,
-                flatten_dims,
-            )
-        )
-        conv_op_type = "CausalConvWithState"
-        conv_name = f"{basename}/{conv_op_type}"
-        conv_output = f"{conv_name}/output_0"
-        self.make_node(
-            "CausalConvWithState",
-            inputs=[
-                f"{gated_value_normed_flat}/output_0",
-                conv_weight,
-                "",
-                self.input_names["past.ple_conv"][layer_id],
-            ],
-            outputs=[conv_output, self.output_names["present.ple_conv"][layer_id]],
-            name=conv_name,
-            domain="com.microsoft",
-            ndim=1,
-            dilation=self.ple_attrs["conv_dilation"],
-            channels_last=1,
-            activation="silu",
-            state_window=getattr(self, "context_length_attrs", {}).get(
-                "state_window", 0
-            ),
-        )
-        self.make_value(conv_output, self.io_dtype, ple_shape)
-        add_name = f"{basename}/Add"
-        self.make_add(
-            add_name,
-            [f"{gated_value_flat}/output_0", conv_output],
-            self.io_dtype,
-            ple_shape,
-        )
-        return f"{add_name}/output_0"
-
-
 class Qwen4ExpModel(MTPModel):
     """Composite builder that emits Qwen4-Exp vision, embedding, and text graphs."""
 
@@ -208,7 +26,6 @@ class Qwen4ExpModel(MTPModel):
         self.extra_options = copy.deepcopy(extra_options)
         self.text_only = self.extra_options.get("text_only", False)
         decoder_options = self.make_mtp_init(config, self.extra_options)
-        decoder_options["external_engram"] = True
         self.decoder = Qwen4ExpTextModel(copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
         self.decoder.model_type = "qwen4_exp_text" if self.text_only else "qwen3_5"
         self.mtp = None
@@ -283,7 +100,6 @@ class Qwen4ExpModel(MTPModel):
         mtp_options["filename"] = "mtp.onnx"
         mtp_options.pop("include_hidden_states", None)
         mtp_options.pop("exclude_lm_head", None)
-        mtp_options.pop("external_engram", None)
         self.mtp = Qwen4ExpMTPTextModel(
             copy.deepcopy(config),
             self.mtp_attrs["io_dtype"],
@@ -325,6 +141,7 @@ class Qwen4ExpModel(MTPModel):
             self.config.text_config,
             self.decoder.io_dtype,
             scale_dtype=ir.DataType.FLOAT,
+            use_paged_attention=self.decoder.use_paged_attention,
         )
         engram_model.save_model(output_dir)
         self.decoder.save_model(output_dir)
@@ -421,7 +238,7 @@ class Qwen4ExpModel(MTPModel):
         }
         if self.decoder.ep == "cuda":
             engram_session_options["session.layer_assignment_settings"] = (
-                f"cpu(={Qwen4ExpTextModel.CPU_EMBEDDING_ANNOTATION})"
+                f"cpu(={Qwen4ExpEngramModel.CPU_EMBEDDING_ANNOTATION})"
             )
         model_config["engram"] = {
             "filename": "engram.onnx",

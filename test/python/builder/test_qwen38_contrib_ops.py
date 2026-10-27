@@ -233,10 +233,10 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
         ir.DataType.FLOAT16,
         "cuda",
         None,
-        {"external_engram": True, "state_update_capacity": 7, "text_only": True},
+        {"state_update_capacity": 7, "text_only": True},
     )
     assert not external_model.use_cpu_embedding_gather
-    assert "engram_present_tokens" not in external_model.input_names
+    assert external_model.input_names["engram_present_tokens"] == external_model.output_names["present.ple_tokens"]
     assert "present_ple_tokens" not in external_model.input_names.values()
     assert external_model.output_names["present.ple_tokens"] == {
         1: "present.1.ple_tokens",
@@ -352,13 +352,16 @@ def test_paged_qwen38_resolves_compact_capacity_for_ple_and_indexer(linear_layer
     assert indexer["outputs"][6] == model.output_names["state_update.indexer"][1]
 
     ple_model.make_ple(1, ple, "hidden_states")
-    ngram = next(kwargs for op, kwargs in emitted_nodes(ple_model) if op == "VarlenNGramHashMapping")
     conv = next(kwargs for op, kwargs in emitted_nodes(ple_model) if op == "VarlenCausalConvWithState")
-    assert ngram["state_update_capacity"] == conv["state_update_capacity"] == 7
-    assert ngram["outputs"][3] == model.output_names["state_update.ple_tokens"][1]
+    assert conv["state_update_capacity"] == 7
+    assert any(
+        kwargs.get("outputs") == [model.output_names["state_update.ple_tokens"][1]]
+        for _, kwargs in emitted_nodes(ple_model)
+    )
     assert conv["outputs"][2] == model.output_names["state_update.ple_conv_value"][1]
     update_shape = next(
-        kwargs["shape"] for method, args, kwargs in ple_model.calls
+        kwargs["shape"]
+        for method, args, kwargs in ple_model.calls
         if method == "make_value" and args[0] == "state_update.1.ple_conv_value"
     )
     assert update_shape == model.output_shapes["state_update.ple_conv_value"]
@@ -810,8 +813,14 @@ def test_mtp_residual_linear_shared_preserves_hyper_connection_shape():
     record_calls(
         model,
         [
-            "make_initializer", "make_node", "make_value", "make_reshape", "make_matmul",
-            "make_unsqueeze", "make_add", "make_layernorm_subgraph",
+            "make_initializer",
+            "make_node",
+            "make_value",
+            "make_reshape",
+            "make_matmul",
+            "make_unsqueeze",
+            "make_add",
+            "make_layernorm_subgraph",
         ],
     )
     model.make_hidden_state_shape = MethodType(
@@ -822,15 +831,14 @@ def test_mtp_residual_linear_shared_preserves_hyper_connection_shape():
     output = model.make_mtp_input_projection()
 
     norm_weight = next(
-        call for call in model.calls
+        call
+        for call in model.calls
         if call[0] == "make_initializer" and call[1][1] == "model.mtp.pre_fc_norm_embedding.weight"
     )
     torch.testing.assert_close(norm_weight[1][0], torch.full((8,), 2.0))
     norm = next(call for call in model.calls if call[0] == "make_layernorm_subgraph")
     assert norm[2]["op_type"] == "SimplifiedLayerNormalization"
-    assert norm[2]["inputs"] == [
-        "/model/mtp/embed_tokens/Gather/output_0", "model.mtp.pre_fc_norm_embedding.weight"
-    ]
+    assert norm[2]["inputs"] == ["/model/mtp/embed_tokens/Gather/output_0", "model.mtp.pre_fc_norm_embedding.weight"]
     hidden_projection = next(
         call for call in model.calls if call[0] == "make_matmul" and call[1][1].endswith("fc_hidden/MatMul")
     )
@@ -1015,9 +1023,7 @@ def test_qwen_hyper_connection_expansions_use_provider_normalization(ep):
     model.hyper_connection_attrs = {"num_branches": 4}
     model.hidden_size = 8
     model.layernorm_attrs = {"epsilon": 1e-6}
-    model.values = {
-        "/norm/Reshape/output_0": SimpleNamespace(shape=ir.Shape(["batch_size", "sequence_length", 4, 8]))
-    }
+    model.values = {"/norm/Reshape/output_0": SimpleNamespace(shape=ir.Shape(["batch_size", "sequence_length", 4, 8]))}
     model.ep = ep
     model.extra_options = {}
     model.make_ep_expansions_init()
@@ -1268,7 +1274,7 @@ def test_qwen_attention_gate_uses_resolved_attention_output():
     assert gate[1][1][0] == "/model/layers.3/attn/DynamicSparseAttention/output_0"
 
 
-def make_ple_model(paged, fp8_embedding=False):
+def make_ple_model(paged):
     model = object.__new__(Qwen4ExpTextModel)
     model.filename = "model.onnx"
     model.use_paged_attention = paged
@@ -1281,13 +1287,14 @@ def make_ple_model(paged, fp8_embedding=False):
         "heads_per_ngram": 2,
         "conv_kernel_size": 4,
         "conv_dilation": 3,
-        "external": False,
+        "token_pad_id": 1,
     }
     model.layernorm_attrs = {"epsilon": 1e-5}
     model.values = {}
     model.input_names = {
         "input_ids": "input_ids",
         "attention_mask": "attention_mask",
+        "engram_embeddings": "engram_embeddings",
         "past.ple_tokens": {1: "past.1.ple_tokens"},
         "past.ple_conv": {1: "past.1.ple_conv"},
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
@@ -1311,22 +1318,13 @@ def make_ple_model(paged, fp8_embedding=False):
             "make_cast",
             "make_slice",
             "make_where",
+            "make_concat",
+            "make_sub",
+            "make_mul",
         ],
-    )
-    table = SimpleNamespace(weight=torch.zeros((32, 2), dtype=torch.float16))
-    if fp8_embedding:
-        table.weight = torch.zeros((32, 2), dtype=torch.float8_e4m3fn)
-        table.weight_scale = torch.ones(1)
-    embedding = SimpleNamespace(
-        layer_multipliers=torch.arange(3, dtype=torch.int64),
-        ngram_heads_vocab_sizes=torch.full((4,), 7, dtype=torch.int64),
-        ngram_heads_offsets=torch.arange(4, dtype=torch.int64),
-        eos_token_id=1,
-        ngram_embedding=table,
     )
     norm = SimpleNamespace(weight=torch.zeros(16))
     ple = SimpleNamespace(
-        ple_embedding=embedding,
         key_proj=SimpleNamespace(),
         value_proj=SimpleNamespace(),
         norm_key=norm,
@@ -1345,33 +1343,8 @@ def test_dense_ple_emits_verified_contrib_schemas():
     assert not getattr(model, "external_data_files", {})
 
     nodes = emitted_nodes(model)
-    ngram = next(kwargs for op_type, kwargs in nodes if op_type == "NGramHashMapping")
-    assert ngram["inputs"] == [
-        "input_ids",
-        "model.layers.1.ple.layer_multipliers",
-        "model.layers.1.ple.head_vocab_sizes",
-        "past.1.ple_tokens",
-        "model.layers.1.ple.head_offsets",
-        "model.layers.1.ple.eos_token_id",
-    ]
-    assert ngram["max_ngram_size"] == 3
-    assert ngram["n_head_per_ngram"] == 2
-    assert ngram["pad_id"] == 1
-
-    gather = next(kwargs for op_type, kwargs in nodes if op_type == "GatherBlockQuantized")
-    assert gather["inputs"] == [
-        "model.ple.ngram_embedding.weight",
-        "/model/layers.1/ple/NGramHashMapping/output_0",
-        "model.ple.ngram_embedding.weight_scale",
-    ]
-    assert gather["domain"] == "com.microsoft"
-    assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
-    assert not any(op_type == "GatherND" for op_type, _ in nodes)
-
-    embedding_initializers = {args[1]: args[0] for method, args, _ in model.calls if method == "make_initializer"}
-    assert embedding_initializers["model.ple.ngram_embedding.weight"].dtype == torch.float8_e4m3fn
-    assert embedding_initializers["model.ple.ngram_embedding.weight_scale"].shape == (1, 1)
-
+    assert not any(op in {"NGramHashMapping", "VarlenNGramHashMapping", "GatherBlockQuantized"} for op, _ in nodes)
+    assert not any(method == "make_initializer" and "ngram_embedding" in args[1] for method, args, _ in model.calls)
     gate = next(kwargs for op_type, kwargs in nodes if op_type == "EngramGate")
     assert len(gate["inputs"]) == 6
     assert gate["outputs"] == [
@@ -1391,30 +1364,14 @@ def test_dense_ple_emits_verified_contrib_schemas():
     assert conv["channels_last"] == 1
 
 
-def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
-    model, ple = make_ple_model(paged=True, fp8_embedding=True)
+def test_paged_ple_consumes_standalone_embeddings():
+    model, ple = make_ple_model(paged=True)
 
     model.make_ple(1, ple, "hidden_states")
 
     nodes = emitted_nodes(model)
-    ngram = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenNGramHashMapping")
-    assert ngram["inputs"][3] == "cumulative_sequence_lengths"
-    assert ngram["inputs"][4:] == [
-        "past.1.ple_tokens",
-        "model.layers.1.ple.head_offsets",
-        "model.layers.1.ple.eos_token_id",
-    ]
-    gather = next(kwargs for op_type, kwargs in nodes if op_type == "GatherBlockQuantized")
-    assert gather["domain"] == "com.microsoft"
-    assert gather["quantize_axis"] == 1
-    assert gather["block_size"] == 0
-    assert gather["inputs"][:3] == [
-        "model.ple.ngram_embedding.weight",
-        "/model/layers.1/ple/VarlenNGramHashMapping/output_0",
-        "model.ple.ngram_embedding.weight_scale",
-    ]
-    assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
-    assert not getattr(model, "external_data_files", {})
+    assert not any(op in {"NGramHashMapping", "VarlenNGramHashMapping", "GatherBlockQuantized"} for op, _ in nodes)
+    assert not any(method == "make_initializer" and "ngram_embedding" in args[1] for method, args, _ in model.calls)
     conv = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenCausalConvWithState")
     assert conv["inputs"] == [
         "/model/layers.1/ple/EngramGate/FlattenNormed/output_0",
@@ -1431,12 +1388,8 @@ def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
     assert not any(op_type == "CausalConvWithState" for op_type, _ in nodes)
 
 
-@pytest.mark.parametrize("external_engram", [False, True])
-def test_paged_ple_appends_compact_token_and_conv_updates(external_engram):
+def test_paged_ple_appends_compact_token_and_conv_updates():
     model, ple = make_ple_model(paged=True)
-    model.ple_attrs["external"] = external_engram
-    if external_engram:
-        model.input_names["engram_embeddings"] = "engram_embeddings"
     model.context_length_attrs = {"state_update_capacity": 7}
     model.input_names.update(
         {
@@ -1455,26 +1408,20 @@ def test_paged_ple_appends_compact_token_and_conv_updates(external_engram):
     model.make_ple(1, ple, "hidden_states")
 
     nodes = emitted_nodes(model)
-    ngram = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenNGramHashMapping")
-    assert ngram["inputs"][9] == "state_update_capture_count"
-    assert ngram["outputs"][3] == "state_update.1.ple_tokens"
-    assert ngram["state_update_capacity"] == 7
+    assert not any(op in {"NGramHashMapping", "VarlenNGramHashMapping", "GatherBlockQuantized"} for op, _ in nodes)
+    updates = next(kwargs for op, kwargs in nodes if op == "Where" and kwargs["name"].endswith("token_state/Output"))
+    assert updates["outputs"] == ["state_update.1.ple_tokens"]
     conv = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenCausalConvWithState")
     assert conv["inputs"][5:] == ["state_update_capture_count", "state_update_active"]
     assert conv["outputs"][2] == "state_update.1.ple_conv_value"
     assert conv["state_update_capacity"] == 7
-    if external_engram:
-        assert not any(op_type == "GatherBlockQuantized" for op_type, _ in nodes)
-        assert not any(op_type == "Identity" for op_type, _ in nodes)
-        assert ngram["outputs"][1] == "present.1.ple_tokens"
-        projections = [
-            args
-            for method, args, _ in model.calls
-            if method == "make_matmul" and args[1].endswith(("/key_proj/MatMul", "/value_proj/MatMul"))
-        ]
-        assert len(projections) == 2
-        assert all(args[2] == "engram_embeddings" for args in projections)
-        assert not any(method == "make_initializer" and "ngram_embedding" in args[1] for method, args, _ in model.calls)
+    projections = [
+        args
+        for method, args, _ in model.calls
+        if method == "make_matmul" and args[1].endswith(("/key_proj/MatMul", "/value_proj/MatMul"))
+    ]
+    assert len(projections) == 2
+    assert all(args[2] == "engram_embeddings" for args in projections)
 
 
 def test_paged_ple_emits_packed_engram_gate_shapes():
@@ -1500,34 +1447,6 @@ def test_paged_ple_emits_packed_engram_gate_shapes():
     value_shapes = {args[0]: args[2] for method, args, _ in model.calls if method == "make_value" and len(args) >= 3}
     assert value_shapes["/model/layers.1/ple/EngramGate/output_0"] == [1, "num_tokens", 2, 8]
     assert value_shapes["/model/layers.1/ple/EngramGate/output_1"] == [1, "num_tokens", 2, 8]
-
-
-@pytest.mark.parametrize("paged", [False, True])
-def test_ple_reuses_model_level_embedding_initializers(paged):
-    model, ple = make_ple_model(paged=paged, fp8_embedding=True)
-
-    model.make_ple(1, ple, "hidden_states")
-    model.values.update(
-        {
-            "model.ple.ngram_embedding.weight": object(),
-            "model.ple.ngram_embedding.weight_scale": object(),
-        }
-    )
-    model.input_names["past.ple_tokens"][2] = "past.2.ple_tokens"
-    model.input_names["past.ple_conv"][2] = "past.2.ple_conv"
-    model.output_names["present.ple_tokens"][2] = "present.2.ple_tokens"
-    model.output_names["present.ple_conv"][2] = "present.2.ple_conv"
-    model.make_ple(2, ple, "hidden_states")
-
-    shared_initializers = [
-        call[1][1]
-        for call in model.calls
-        if call[0] == "make_initializer" and call[1][1].startswith("model.ple.ngram_embedding")
-    ]
-    assert shared_initializers == [
-        "model.ple.ngram_embedding.weight",
-        "model.ple.ngram_embedding.weight_scale",
-    ]
 
 
 @pytest.mark.parametrize("ple_layer_id", [1, 4])
@@ -1602,7 +1521,8 @@ def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path, ple_layer_id
 @pytest.mark.parametrize("text_only", [False, True])
 @pytest.mark.parametrize("include_mtp", [False, True])
 @pytest.mark.parametrize("native_fp8", [False, True])
-def test_qwen4_exp_models_have_independent_engram_data(tmp_path, monkeypatch, text_only, include_mtp, native_fp8):
+@pytest.mark.parametrize("paged", [False, True])
+def test_qwen4_exp_only_standalone_model_stores_engram_table(tmp_path, monkeypatch, text_only, include_mtp, native_fp8, paged):
     embedding = SimpleNamespace(
         layer_multipliers=torch.tensor([0, 1, 2], dtype=torch.int64),
         ngram_heads_vocab_sizes=torch.tensor([7, 7, 7, 7], dtype=torch.int64),
@@ -1618,21 +1538,11 @@ def test_qwen4_exp_models_have_independent_engram_data(tmp_path, monkeypatch, te
             weight_scale=torch.tensor([0.25], dtype=torch.bfloat16),
         )
     table_name = "model.ple.ngram_embedding.weight"
-    table = Qwen4ExpEngramModel(ple, text_config, ir.DataType.FLOAT16).graph.initializers[table_name].const_value
 
     def component(filename):
         builder = Model.__new__(Model)
-        builder.model = ir.Model(
-            ir.Graph(
-                inputs=(),
-                outputs=(),
-                nodes=(),
-                initializers=[ir.Value(name=table_name, const_value=table)],
-                opset_imports={"": 22},
-            ),
-            ir_version=10,
-            producer_name="onnxruntime-genai",
-        )
+        builder.make_graph("decoder_without_engram_lookup")
+        builder.make_initializer(torch.ones(8), "decoder.weight")
         builder.filename = filename
         builder.cache_dir = str(tmp_path / "cache")
         builder.quant_type = None
@@ -1646,6 +1556,7 @@ def test_qwen4_exp_models_have_independent_engram_data(tmp_path, monkeypatch, te
     wrapper.config = SimpleNamespace(text_config=text_config, vision_config=SimpleNamespace(out_hidden_size=8))
     wrapper.decoder = component("model.onnx")
     wrapper.decoder.io_dtype = ir.DataType.FLOAT16
+    wrapper.decoder.use_paged_attention = paged
     wrapper.decoder.ple_attrs = {"layer_ids": {1}}
     wrapper.decoder.hidden_size = 8
     language_model = SimpleNamespace(
@@ -1677,18 +1588,17 @@ def test_qwen4_exp_models_have_independent_engram_data(tmp_path, monkeypatch, te
     assert (tmp_path / "engram.onnx.data").is_file()
     filenames = ("engram.onnx", "model.onnx") + (("mtp.onnx",) if include_mtp else ())
     exported = [onnx.load(tmp_path / filename, load_external_data=False) for filename in filenames]
-    tables = [next(value for value in model.graph.initializer if value.name == table_name) for model in exported]
-    assert all(
-        next(entry.value for entry in value.external_data if entry.key == "location") == filename + ".data"
-        for value, filename in zip(tables, filenames, strict=True)
-    )
+    assert any(node.op_type == ("VarlenNGramHashMapping" if paged else "NGramHashMapping")
+               for node in exported[0].graph.node)
+    tables = [value for value in exported[0].graph.initializer if value.name == table_name]
+    assert len(tables) == 1
+    assert next(entry.value for entry in tables[0].external_data if entry.key == "location") == "engram.onnx.data"
+    assert all(not any(value.name == table_name for value in model.graph.initializer) for model in exported[1:])
     assert {path.name for path in tmp_path.glob("*.data")} == {filename + ".data" for filename in filenames}
     loaded = [onnx.load(tmp_path / filename, load_external_data=True) for filename in filenames]
     table_values = [
-        onnx.numpy_helper.to_array(next(value for value in model.graph.initializer if value.name == table_name))
-        for model in loaded
+        onnx.numpy_helper.to_array(next(value for value in loaded[0].graph.initializer if value.name == table_name))
     ]
-    assert all((value == table_values[0]).all() for value in table_values[1:])
     if native_fp8:
         assert all(value.data_type == onnx.TensorProto.FLOAT8E4M3FN for value in tables)
         expected_bytes = embedding.ngram_embedding.weight.view(torch.uint8).numpy()
@@ -1759,7 +1669,7 @@ def test_text_only_config_connects_external_engram(
     assert mtp_calls == ([tmp_path] if include_mtp else [])
 
 
-def test_qwen38_config_assigns_embedding_annotation_to_cpu():
+def test_qwen38_decoder_config_needs_no_embedding_provider_assignment():
     model = object.__new__(Qwen4ExpTextModel)
     model.ep = "cuda"
     model.ple_attrs = {"token_pad_id": 248044, "external": False}
@@ -1770,9 +1680,7 @@ def test_qwen38_config_assigns_embedding_annotation_to_cpu():
     model.update_genai_config(genai_config)
 
     assert genai_config["model"]["decoder"]["inputs"]["past_sequence_length"] == "past_sequence_length"
-    assert genai_config["model"]["decoder"]["session_options"]["session.layer_assignment_settings"] == (
-        "cpu(=cpu_embedding)"
-    )
+    assert "session.layer_assignment_settings" not in genai_config["model"]["decoder"]["session_options"]
 
 
 def test_qwen38_external_engram_keeps_decoder_cuda_only():

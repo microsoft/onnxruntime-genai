@@ -14,16 +14,158 @@ from ..qwen3_5 import Qwen35MoETextModel
 class Qwen4ExpTextModel(Qwen35MoETextModel):
     """Qwen4-Exp decoder builder using external token/vision embeddings."""
 
-    CPU_EMBEDDING_ANNOTATION = "cpu_embedding"
-    prepare_engram_embedding = EngramWeights.prepare_engram_embedding
     get_engram_pad_id = EngramWeights.get_engram_pad_id
 
     def make_ple(self, layer_id, ple, root_input):
         if self.use_paged_attention:
             return self.make_paged_ple(layer_id, ple, root_input)
-        from .model import Qwen38Engram  # noqa: PLC0415
+        return self.make_non_paged_ple(layer_id, ple, root_input)
 
-        return Qwen38Engram.make_ple(self, layer_id, ple, root_input)
+    def make_ple_token_state(self, layer_id):
+        basename = f"/model/layers.{layer_id}/ple/token_state"
+        past = self.input_names["past.ple_tokens"][layer_id]
+        if not self.use_paged_attention:
+            self.make_node(
+                "Identity",
+                [past],
+                [self.output_names["present.ple_tokens"][layer_id]],
+                name=f"{basename}/Identity",
+            )
+        capacity = (
+            getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0) if self.use_paged_attention else 0
+        )
+        if not capacity:
+            return
+        history = self.ple_attrs["ngram_size"] - 1
+        pad = self.ple_attrs["token_pad_id"]
+        dtype = ir.DataType.INT64
+        # Snapshot the accepted token prefixes without duplicating hashing or lookup in the decoder.
+        self.make_shape(f"{basename}/Shape", past, [2])
+        self.make_gather(
+            f"{basename}/Batch", [f"{basename}/Shape/output_0", "/model/constants/INT64/0"], dtype, [], axis=0
+        )
+        self.make_node(
+            "Range",
+            ["/model/constants/INT64/0", f"{basename}/Batch/output_0", "/model/constants/INT64/1"],
+            [f"{basename}/rows"],
+            name=f"{basename}/Range",
+        )
+        self.make_value(f"{basename}/rows", dtype, ["batch_size"])
+        self.make_cast(f"{basename}/Cu", self.input_names["cumulative_sequence_lengths"], dtype, ["batch_size + 1"])
+        self.make_gather(
+            f"{basename}/Start", [f"{basename}/Cu/output_0", f"{basename}/rows"], dtype, ["batch_size"], axis=0
+        )
+        self.make_add(f"{basename}/Next", [f"{basename}/rows", "/model/constants/INT64/1"], dtype, ["batch_size"])
+        self.make_gather(
+            f"{basename}/End", [f"{basename}/Cu/output_0", f"{basename}/Next/output_0"], dtype, ["batch_size"], axis=0
+        )
+        self.make_sub(
+            f"{basename}/Length", [f"{basename}/End/output_0", f"{basename}/Start/output_0"], dtype, ["batch_size"]
+        )
+        offsets = [[t + 1 - history + j for j in range(history)] for t in range(capacity)]
+        offset_name = f"model.layers.{layer_id}.ple.token_offsets"
+        self.make_initializer(torch.tensor(offsets, dtype=torch.int64).unsqueeze(0), offset_name)
+        self.make_unsqueeze(
+            f"{basename}/Starts",
+            [f"{basename}/Start/output_0", "/model/constants/INT64/[1, 2]"],
+            dtype,
+            ["batch_size", 1, 1],
+        )
+        self.make_add(
+            f"{basename}/Indices",
+            [f"{basename}/Starts/output_0", offset_name],
+            dtype,
+            ["batch_size", capacity, history],
+        )
+        self.make_node(
+            "Max",
+            [f"{basename}/Indices/output_0", "/model/constants/INT64/0"],
+            [f"{basename}/safe_indices"],
+            name=f"{basename}/Max",
+        )
+        self.make_value(f"{basename}/safe_indices", dtype, ["batch_size", capacity, history])
+        # Append pad rows so unused capture slots never gather past the token buffer.
+        token_pad = f"model.layers.{layer_id}.ple.capture_padding"
+        self.make_initializer(torch.full((capacity,), pad, dtype=torch.int64), token_pad)
+        self.make_concat(
+            f"{basename}/Tokens", [self.input_names["input_ids"], token_pad], dtype, ["num_tokens + capacity"], axis=0
+        )
+        self.make_gather(
+            f"{basename}/Current",
+            [f"{basename}/Tokens/output_0", f"{basename}/safe_indices"],
+            dtype,
+            ["batch_size", capacity, history],
+            axis=0,
+        )
+        self.make_reshape(f"{basename}/History", [past, "/model/constants/INT64/[-1]"], dtype, ["batch_size * history"])
+        self.make_mul(
+            f"{basename}/HistoryBase", [f"{basename}/rows", f"/model/constants/INT64/{history}"], dtype, ["batch_size"]
+        )
+        self.make_unsqueeze(
+            f"{basename}/HistoryRows",
+            [f"{basename}/HistoryBase/output_0", "/model/constants/INT64/[1, 2]"],
+            dtype,
+            ["batch_size", 1, 1],
+        )
+        past_offsets = f"model.layers.{layer_id}.ple.history_offsets"
+        self.make_initializer(
+            torch.tensor(
+                [[min(t + 1 + j, history - 1) for j in range(history)] for t in range(capacity)], dtype=torch.int64
+            ).unsqueeze(0),
+            past_offsets,
+        )
+        self.make_add(
+            f"{basename}/HistoryIndices",
+            [f"{basename}/HistoryRows/output_0", past_offsets],
+            dtype,
+            ["batch_size", capacity, history],
+        )
+        self.make_gather(
+            f"{basename}/Past",
+            [f"{basename}/History/output_0", f"{basename}/HistoryIndices/output_0"],
+            dtype,
+            ["batch_size", capacity, history],
+            axis=0,
+        )
+        self.make_node(
+            "Less", [offset_name, "/model/constants/INT64/0"], [f"{basename}/from_history"], name=f"{basename}/Less"
+        )
+        self.make_value(f"{basename}/from_history", ir.DataType.BOOL, [1, capacity, history])
+        self.make_where(
+            f"{basename}/Snapshot",
+            [f"{basename}/from_history", f"{basename}/Past/output_0", f"{basename}/Current/output_0"],
+            dtype,
+            ["batch_size", capacity, history],
+        )
+        self.make_cast(f"{basename}/Capture", self.input_names["state_update.capture_count"], dtype, ["batch_size"])
+        self.make_node(
+            "Min",
+            [f"{basename}/Capture/output_0", f"{basename}/Length/output_0"],
+            [f"{basename}/limit"],
+            name=f"{basename}/Min",
+        )
+        self.make_value(f"{basename}/limit", dtype, ["batch_size"])
+        self.make_unsqueeze(
+            f"{basename}/Limits", [f"{basename}/limit", "/model/constants/INT64/[1, 2]"], dtype, ["batch_size", 1, 1]
+        )
+        captured_positions = f"model.layers.{layer_id}.ple.capture_positions"
+        self.make_initializer(torch.arange(capacity, dtype=torch.int64).reshape(1, capacity, 1), captured_positions)
+        self.make_node(
+            "Less",
+            [captured_positions, f"{basename}/Limits/output_0"],
+            [f"{basename}/active"],
+            name=f"{basename}/Active",
+        )
+        self.make_value(f"{basename}/active", ir.DataType.BOOL, ["batch_size", capacity, 1])
+        self.make_node(
+            "Where",
+            inputs=[f"{basename}/active", f"{basename}/Snapshot/output_0", f"/model/constants/INT64/{pad}"],
+            outputs=[self.output_names["state_update.ple_tokens"][layer_id]],
+            name=f"{basename}/Output",
+        )
+        self.make_value(
+            self.output_names["state_update.ple_tokens"][layer_id], dtype, ["batch_size", capacity, history]
+        )
 
     def resolve_model_loader(self):
         """Load Qwen4-Exp weights independently of the Qwen3.5 multimodal runtime alias."""
@@ -72,7 +214,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             "ngram_size": config.ngram_size,
             "token_pad_id": self.get_engram_pad_id(config.eos_token_id),
             "heads_per_ngram": config.heads_per_ngram,
-            "external": extra_options.get("external_engram", False),
         }
         self.rope_attrs["cast"]["use_fp32"] = False
         self.attention_attrs["output_gate_type"] = config.output_gate_type or config.hidden_act
@@ -89,7 +230,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                 "Qwen3.8 sparse attention does not support quantized KV caches; use kv_cache_quant_scheme=none."
             )
         self.make_sparse_rotary_init(not text_only)
-        if self.ple_attrs["external"]:
+        if self.ple_attrs["layer_ids"]:
             self.input_names["engram_embeddings"] = "engram_embeddings"
             self.input_types["engram_embeddings"] = self.io_dtype
             self.input_shapes["engram_embeddings"] = self.make_hidden_state_shape(last_dim=self.ple_attrs["embed_dim"])
@@ -104,9 +245,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             for layer_id, layer_type in enumerate(self.layer_types)
             if layer_type == "indexed_attention"
         }
-        self.input_names["past_key_values.key"] = self.make_cache_names(
-            ["indexed_attention"], "past_key_values.key"
-        )
+        self.input_names["past_key_values.key"] = self.make_cache_names(["indexed_attention"], "past_key_values.key")
         self.input_names["past_key_values.value"] = self.make_cache_names(
             ["indexed_attention"], "past_key_values.value"
         )
@@ -121,7 +260,9 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                 self.context_length + self.sparse_indexer_attrs["compress_ratio"] - 1
             ) // self.sparse_indexer_attrs["compress_ratio"]
             indexer_state_shape = [
-                "batch_size", self.sparse_indexer_attrs["state_capacity"], self.sparse_indexer_attrs["head_dim"]
+                "batch_size",
+                self.sparse_indexer_attrs["state_capacity"],
+                self.sparse_indexer_attrs["head_dim"],
             ]
             indexer_buffer_shape = [
                 "batch_size",
@@ -154,10 +295,14 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             self.input_shapes["attention_metadata"] = [5]
         else:
             self.input_shapes["past.indexer"] = [
-                "batch_size", "past_sequence_length", self.sparse_indexer_attrs["head_dim"]
+                "batch_size",
+                "past_sequence_length",
+                self.sparse_indexer_attrs["head_dim"],
             ]
             self.output_shapes["present.indexer"] = [
-                "batch_size", "total_sequence_length", self.sparse_indexer_attrs["head_dim"]
+                "batch_size",
+                "total_sequence_length",
+                self.sparse_indexer_attrs["head_dim"],
             ]
         if self.sparse_indexer_attrs["fixed_cache"]:
             self.input_names["past_sequence_length"] = "past_sequence_length"
@@ -187,13 +332,19 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         self.output_names["present.ple_tokens"] = present_ple_tokens
         self.output_types["present.ple_tokens"] = ir.DataType.INT64
         self.output_shapes["present.ple_tokens"] = ["batch_size", self.ple_attrs["ngram_size"] - 1]
+        if self.use_paged_attention and self.ple_attrs["layer_ids"]:
+            # Engine supplies the standalone component's history using this existing runtime binding.
+            self.input_names["engram_present_tokens"] = present_ple_tokens
+            self.input_types["engram_present_tokens"] = ir.DataType.INT64
+            self.input_shapes["engram_present_tokens"] = self.output_shapes["present.ple_tokens"]
         self.output_names["present.ple_conv"] = present_ple_conv
         self.output_types["present.ple_conv"] = self.io_dtype
         self.output_shapes["present.ple_conv"] = self.input_shapes["past.ple_conv"]
 
         state_update_capacity = (
             int(extra_options.get("state_update_capacity", self.context_length_attrs["state_update_capacity"]))
-            if self.use_paged_attention else 0
+            if self.use_paged_attention
+            else 0
         )
         if state_update_capacity and (self.ple_attrs["layer_ids"] or qsa_layers):
             self.context_length_attrs["state_update_capacity"] = state_update_capacity
@@ -266,9 +417,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             decoder["outputs"]["state_update_indexer_row_names"] = "state_update.%d.indexer_row"
         decoder["ple_token_pad_id"] = self.ple_attrs["token_pad_id"]
         decoder["indexer_compress_ratio"] = self.sparse_indexer_attrs["compress_ratio"]
-        if self.ep != "cpu" and not self.ple_attrs["external"]:
-            session_options = decoder["session_options"]
-            session_options["session.layer_assignment_settings"] = f"cpu(={self.CPU_EMBEDDING_ANNOTATION})"
 
     def make_decoder_state_groups(self, inputs, outputs):
         state_groups = super().make_decoder_state_groups(inputs, outputs)
@@ -390,45 +538,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
 
     def get_final_hyper_connection_mixer(self):
         return self.weights.model.language_model.hyper_connection_mixer
-
-    def make_ple_embedding(self, basename, embedding, ngram_ids, ngram_heads, token_shape, flatten_dims):
-        table_name = "model.ple.ngram_embedding.weight"
-        table = embedding.ngram_embedding
-        if table_name not in self.values:
-            quantized_weight, weight_scale = self.prepare_engram_embedding(table)
-            self.make_initializer(quantized_weight, table_name)
-            self.make_initializer(
-                weight_scale.reshape(1, 1), "model.ple.ngram_embedding.weight_scale", to=ir.DataType.FLOAT
-            )
-        gather_name = f"{basename}/ngram_embedding/GatherBlockQuantized"
-        head_dim = self.ple_attrs["embed_dim"] // ngram_heads
-        gather_shape = [*token_shape, ngram_heads, head_dim]
-        self.make_node(
-            "GatherBlockQuantized",
-            inputs=[table_name, ngram_ids, "model.ple.ngram_embedding.weight_scale"],
-            outputs=[f"{gather_name}/output_0"],
-            name=gather_name,
-            domain="com.microsoft",
-            metadata_props={"layer_ann": self.CPU_EMBEDDING_ANNOTATION},
-            gather_axis=0,
-            quantize_axis=1,
-            block_size=0,
-        )
-        self.make_value(f"{gather_name}/output_0", ir.DataType.FLOAT, gather_shape)
-        gather_output = f"{gather_name}/output_0"
-        if self.io_dtype != ir.DataType.FLOAT:
-            cast_name = f"{basename}/ngram_embedding/Cast"
-            self.make_cast(cast_name, gather_output, self.io_dtype, gather_shape)
-            gather_output = f"{cast_name}/output_0"
-        flatten_name = f"{basename}/ngram_embedding/Reshape"
-        self.make_reshape(
-            flatten_name,
-            [gather_output, f"/model/constants/INT64/{flatten_dims}"],
-            self.io_dtype,
-            [*token_shape, self.ple_attrs["embed_dim"]],
-        )
-        engram_embeddings = f"{flatten_name}/output_0"
-        return engram_embeddings
 
     def make_ple_projections(self, layer_id, ple, root_input, engram_embeddings, token_shape, grouped_dims):
         basename = f"/model/layers.{layer_id}/ple"
@@ -1283,52 +1392,11 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
 
     def make_paged_ple(self, layer_id, ple, root_input):
         basename = f"/model/layers.{layer_id}/ple"
-        ngram_op_type = "VarlenNGramHashMapping"
-        ngram_name = f"{basename}/{ngram_op_type}"
-        ngram_ids = f"{ngram_name}/output_0"
-        embedding = ple.ple_embedding
         token_shape = ["num_tokens"]
         state_update_capacity = getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
         flatten_dims = [-1, self.ple_attrs["embed_dim"]]
-        eos_token_id = self.get_engram_pad_id(embedding.eos_token_id)
-        multipliers = f"model.layers.{layer_id}.ple.layer_multipliers"
-        vocab_sizes = f"model.layers.{layer_id}.ple.head_vocab_sizes"
-        offsets = f"model.layers.{layer_id}.ple.head_offsets"
-        eos = f"model.layers.{layer_id}.ple.eos_token_id"
-        self.make_initializer(embedding.layer_multipliers, multipliers)
-        self.make_initializer(embedding.ngram_heads_vocab_sizes, vocab_sizes)
-        self.make_initializer(embedding.ngram_heads_offsets, offsets)
-        self.make_initializer(torch.tensor(eos_token_id, dtype=torch.int64), eos)
-        ngram_inputs = [self.input_names["input_ids"], multipliers, vocab_sizes]
-        ngram_inputs.append(self.input_names["cumulative_sequence_lengths"])
-        ngram_inputs.extend([self.input_names["past.ple_tokens"][layer_id], offsets, eos])
-        if state_update_capacity:
-            ngram_inputs.extend(["", "", self.input_names["state_update.capture_count"]])
-        ngram_outputs = [ngram_ids, self.output_names["present.ple_tokens"][layer_id]]
-        if state_update_capacity:
-            ngram_outputs.extend(["", self.output_names["state_update.ple_tokens"][layer_id]])
-        self.make_node(
-            ngram_op_type,
-            inputs=ngram_inputs,
-            outputs=ngram_outputs,
-            name=ngram_name,
-            domain="com.microsoft",
-            max_ngram_size=self.ple_attrs["ngram_size"],
-            n_head_per_ngram=self.ple_attrs["heads_per_ngram"],
-            pad_id=eos_token_id,
-            reset_on_eos=1,
-            **{"state_update_capacity": state_update_capacity} if state_update_capacity else {},
-        )
-        ngram_heads = (self.ple_attrs["ngram_size"] - 1) * self.ple_attrs["heads_per_ngram"]
-        self.make_value(ngram_ids, ir.DataType.INT64, ["num_tokens", ngram_heads])
-        if self.ple_attrs["external"]:
-            self.make_value(ngram_outputs[1], ir.DataType.INT64, ["batch_size", self.ple_attrs["ngram_size"] - 1])
-        if self.ple_attrs["external"]:
-            engram_embeddings = self.input_names["engram_embeddings"]
-        else:
-            engram_embeddings = self.make_ple_embedding(
-                basename, embedding, ngram_ids, ngram_heads, token_shape, flatten_dims
-            )
+        engram_embeddings = self.input_names["engram_embeddings"]
+        self.make_ple_token_state(layer_id)
         grouped_dims = [-1, self.hyper_connection_attrs["num_branches"], self.hidden_size]
         gate_inputs, grouped_shape, key_scale, query_scale, conv_scale = self.make_ple_projections(
             layer_id, ple, root_input, engram_embeddings, token_shape, grouped_dims
@@ -1382,4 +1450,124 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         )
         add_name = f"{basename}/Add"
         self.make_add(add_name, [f"{gated_value_flat}/output_0", conv_output], self.io_dtype, ple_shape)
+        return f"{add_name}/output_0"
+
+    def make_non_paged_ple(self, layer_id, ple, root_input):
+        basename = f"/model/layers.{layer_id}/ple"
+        token_shape = ["batch_size", "sequence_length"]
+        flatten_dims = [0, 0, self.ple_attrs["embed_dim"]]
+        engram_embeddings = self.input_names["engram_embeddings"]
+        self.make_ple_token_state(layer_id)
+        grouped_dims = [
+            0,
+            0,
+            self.hyper_connection_attrs["num_branches"],
+            self.hidden_size,
+        ]
+        gate_inputs, grouped_shape, key_scale, query_scale, conv_scale = self.make_ple_projections(
+            layer_id, ple, root_input, engram_embeddings, token_shape, grouped_dims
+        )
+        gate_name = f"{basename}/EngramGate"
+        gated_value = f"{gate_name}/output_0"
+        gated_value_normed = f"{gate_name}/output_1"
+        gate_shape = grouped_shape
+        self.make_ple_gate(
+            gate_name,
+            gated_value,
+            gated_value_normed,
+            gate_inputs,
+            key_scale,
+            query_scale,
+            conv_scale,
+            gate_shape,
+        )
+        self.make_shape(f"{gate_name}/token_shape", self.input_names["input_ids"], [2])
+        self.make_gather(
+            f"{gate_name}/sequence_length",
+            [f"{gate_name}/token_shape/output_0", "/model/constants/INT64/[1]"],
+            ir.DataType.INT64,
+            [1],
+            axis=0,
+        )
+        self.make_node(
+            "Neg",
+            [f"{gate_name}/sequence_length/output_0"],
+            [f"{gate_name}/start"],
+            name=f"{gate_name}/start/Neg",
+        )
+        self.make_value(f"{gate_name}/start", ir.DataType.INT64, [1])
+        mask_name = f"{gate_name}/padding/Slice"
+        self.make_slice(
+            mask_name,
+            [
+                self.input_names["attention_mask"],
+                f"{gate_name}/start",
+                "/model/constants/INT64/[9223372036854775807]",
+                "/model/constants/INT64/[1]",
+            ],
+            ir.DataType.INT64,
+            ["batch_size", "sequence_length"],
+        )
+        self.make_cast(
+            f"{gate_name}/padding/Cast",
+            f"{mask_name}/output_0",
+            ir.DataType.BOOL,
+            token_shape,
+        )
+        self.make_unsqueeze(
+            f"{gate_name}/padding/Unsqueeze",
+            [f"{gate_name}/padding/Cast/output_0", "/model/constants/INT64/[2, 3]"],
+            ir.DataType.BOOL,
+            [*token_shape, 1, 1],
+        )
+        for name, value in (("value", gated_value), ("normed", gated_value_normed)):
+            self.make_where(
+                f"{gate_name}/padding/{name}",
+                [
+                    f"{gate_name}/padding/Unsqueeze/output_0",
+                    value,
+                    f"/model/constants/{self.io_dtype}/0",
+                ],
+                self.io_dtype,
+                grouped_shape,
+            )
+        gated_value = f"{gate_name}/padding/value/output_0"
+        gated_value_normed = f"{gate_name}/padding/normed/output_0"
+        ple_shape, gated_value_flat, gated_value_normed_flat, conv_weight = self.make_ple_conv_inputs(
+            layer_id,
+            ple,
+            gate_name,
+            gated_value,
+            gated_value_normed,
+            token_shape,
+            flatten_dims,
+        )
+        conv_op_type = "CausalConvWithState"
+        conv_name = f"{basename}/{conv_op_type}"
+        conv_output = f"{conv_name}/output_0"
+        self.make_node(
+            "CausalConvWithState",
+            inputs=[
+                f"{gated_value_normed_flat}/output_0",
+                conv_weight,
+                "",
+                self.input_names["past.ple_conv"][layer_id],
+            ],
+            outputs=[conv_output, self.output_names["present.ple_conv"][layer_id]],
+            name=conv_name,
+            domain="com.microsoft",
+            ndim=1,
+            dilation=self.ple_attrs["conv_dilation"],
+            channels_last=1,
+            activation="silu",
+            state_window=getattr(self, "context_length_attrs", {}).get("state_window", 0),
+        )
+        self.make_value(conv_output, self.io_dtype, ple_shape)
+        add_name = f"{basename}/Add"
+        self.make_add(
+            add_name,
+            [f"{gated_value_flat}/output_0", conv_output],
+            self.io_dtype,
+            ple_shape,
+        )
         return f"{add_name}/output_0"
