@@ -89,8 +89,13 @@ typedef struct OgaTurnUsage OgaTurnUsage;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 typedef struct OgaTokenPostProcessor OgaTokenPostProcessor;
 typedef struct OgaTokenPostProcessorResult OgaTokenPostProcessorResult;
-typedef struct OgaTokenPostProcessorTimestamp OgaTokenPostProcessorTimestamp;
+typedef struct OgaTokenPostProcessorTimestampResult OgaTokenPostProcessorTimestampResult;
 typedef struct OgaTokenPostProcessorTimestampRecord OgaTokenPostProcessorTimestampRecord;
+
+typedef enum OgaTimestampRecordKind {
+  OgaTimestampRecordKind_Words,
+  OgaTimestampRecordKind_Segments
+} OgaTimestampRecordKind;
 
 /** Configuration and tokenizer come from the generator's model.
  * The generator must outlive the processor. Results are borrowed until its next mutation. */
@@ -102,11 +107,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenPostProcessorReset(OgaTokenPostProces
 OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorGetResultCount(const OgaTokenPostProcessor* processor);
 OGA_EXPORT const OgaTokenPostProcessorResult* OGA_API_CALL OgaTokenPostProcessorGetResult(const OgaTokenPostProcessor* processor, size_t index);
 OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorResultGetText(const OgaTokenPostProcessorResult* result);
-OGA_EXPORT const OgaTokenPostProcessorTimestamp* OGA_API_CALL OgaTokenPostProcessorResultGetTimestamps(const OgaTokenPostProcessorResult* result);
-OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampGetWordCount(const OgaTokenPostProcessorTimestamp* timestamps);
-OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampGetSegmentCount(const OgaTokenPostProcessorTimestamp* timestamps);
-OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampGetWord(const OgaTokenPostProcessorTimestamp* timestamps, size_t index);
-OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampGetSegment(const OgaTokenPostProcessorTimestamp* timestamps, size_t index);
+OGA_EXPORT const OgaTokenPostProcessorTimestampResult* OGA_API_CALL OgaTokenPostProcessorResultGetTimestampResult(const OgaTokenPostProcessorResult* result);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampResultGetWordCount(const OgaTokenPostProcessorTimestampResult* timestamps);
+OGA_EXPORT size_t OGA_API_CALL OgaTokenPostProcessorTimestampResultGetSegmentCount(const OgaTokenPostProcessorTimestampResult* timestamps);
+OGA_EXPORT const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampResultGetTimestampRecord(const OgaTokenPostProcessorTimestampResult* timestamps, OgaTimestampRecordKind kind, size_t index);
 OGA_EXPORT const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetText(const OgaTokenPostProcessorTimestampRecord* record);
 OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record);
 OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record);

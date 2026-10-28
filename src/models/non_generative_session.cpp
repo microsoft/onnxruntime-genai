@@ -11,7 +11,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <iomanip>
 #include <list>
 #include <limits>
@@ -1248,39 +1247,11 @@ size_t FloatVectorBytes(const std::vector<float>& value) {
   return value.size() * sizeof(float);
 }
 
-std::string ReadPackageTextFile(const fs::path& path,
-                                std::string_view name) {
-  auto stream = path.open(std::ios::binary);
-  if (!stream)
-    throw std::runtime_error("cannot open " + std::string(name));
-  std::ostringstream buffer;
-  buffer << stream.rdbuf();
-  if (stream.bad())
-    throw std::runtime_error("cannot read " + std::string(name));
-  return buffer.str();
-}
-
-Generators::Config WithPackageTokenizerData(
-    const Generators::Config& configured) {
-  Generators::Config config = configured;
-  if (!config.tokenizer_memory_data_) {
-    config.tokenizer_memory_data_ =
-        std::make_shared<const Generators::TokenizerMemoryData>(
-            Generators::TokenizerMemoryData{
-                ReadPackageTextFile(
-                    config.config_path / "tokenizer_config.json",
-                    "tokenizer_config.json"),
-                ReadPackageTextFile(config.config_path / "tokenizer.json",
-                                    "tokenizer.json")});
-  }
-  return config;
-}
-
 struct NativeRankingSession {
   NativeRankingSession(
       const Generators::Config& configured,
       std::shared_ptr<const Generators::ComponentPackage> configured_package)
-      : config(WithPackageTokenizerData(configured)), package(std::move(configured_package)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(config), encoder(Component(package->Has("encoder") ? "encoder" : "backbone")) {
+      : config(configured), package(std::move(configured_package)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(config), encoder(Component(package->Has("encoder") ? "encoder" : "backbone")) {
     if (package->Has("clm_heads")) {
       combined = std::make_unique<Generators::ComponentSession>(
           config, *package, "clm_heads");
@@ -1921,7 +1892,7 @@ struct NativeDecisionSession {
   NativeDecisionSession(
       const Generators::Config& configured,
       std::shared_ptr<const Generators::ComponentPackage> configured_package)
-      : config(WithPackageTokenizerData(configured)), package(std::move(configured_package)), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(config), backbone(Component("backbone")) {
+      : config(configured), package(std::move(configured_package)), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(config), backbone(Component("backbone")) {
     const auto pointer_name =
         package->Has("pointer_head") ? "pointer_head" : "kev_head";
     pointer = std::make_unique<Generators::ComponentSession>(

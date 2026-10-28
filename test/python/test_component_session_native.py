@@ -46,8 +46,6 @@ def _cpu_config(package: Path) -> og.Config:
 
 
 def test_combined_clm_high_level_session(tmp_path):
-    tmp_path = tmp_path / "模型"
-    tmp_path.mkdir()
     fixture = Path(__file__).parents[1] / "models/multimodal-decoder-no-input-ids"
     shutil.copy(fixture / "tokenizer.json", tmp_path / "tokenizer.json")
     shutil.copy(fixture / "tokenizer_config.json", tmp_path / "tokenizer_config.json")
@@ -72,7 +70,7 @@ def test_combined_clm_high_level_session(tmp_path):
         opset_imports=[helper.make_opsetid("", 18)],
     )
     backbone.ir_version = 13
-    onnx.save(backbone, tmp_path / "编码器.onnx")
+    onnx.save(backbone, tmp_path / "backbone.onnx")
 
     state = helper.make_tensor_value_info("state_hidden_states", TensorProto.FLOAT, [None, 4])
     action = helper.make_tensor_value_info("action_hidden_states", TensorProto.FLOAT, [None, 4])
@@ -96,20 +94,27 @@ def test_combined_clm_high_level_session(tmp_path):
         opset_imports=[helper.make_opsetid("", 18)],
     )
     heads.ir_version = 13
-    onnx.save(heads, tmp_path / "排序头.onnx")
+    onnx.save(heads, tmp_path / "clm_heads.onnx")
     (tmp_path / "component_manifest.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "model_type": "clm-v0.1-8b",
+                "description": "模型 🚀",
                 "components": {
-                    "backbone": {"filename": "编码器.onnx"},
-                    "clm_heads": {"filename": "排序头.onnx"},
+                    "backbone": {"filename": "backbone.onnx"},
+                    "clm_heads": {"filename": "clm_heads.onnx"},
                 },
             }
         )
     )
-    _write_component_genai_config(tmp_path, "编码器.onnx", 1)
+    _write_component_genai_config(tmp_path, "backbone.onnx", 1)
+    (tmp_path / "external_initializers").mkdir()
+    config_json = json.loads((tmp_path / "genai_config.json").read_text())
+    config_json["model"]["decoder"]["session_options"][
+        "session.model_external_initializers_file_folder_path"
+    ] = "external_initializers"
+    (tmp_path / "genai_config.json").write_text(json.dumps(config_json))
     session = og.NonGenerativeSession(_cpu_config(tmp_path))
     ranked = session.run(
         {
@@ -189,35 +194,6 @@ def test_combined_clm_high_level_session(tmp_path):
             }
         )
 
-    ascii_path = tmp_path.parent / "ascii-model"
-    ascii_path.mkdir()
-    shutil.copy(tmp_path / "tokenizer.json", ascii_path / "tokenizer.json")
-    shutil.copy(
-        tmp_path / "tokenizer_config.json",
-        ascii_path / "tokenizer_config.json",
-    )
-    shutil.copy(tmp_path / "编码器.onnx", ascii_path / "backbone.onnx")
-    shutil.copy(tmp_path / "排序头.onnx", ascii_path / "clm_heads.onnx")
-    (ascii_path / "component_manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "model_type": "clm-v0.1-8b",
-                "components": {
-                    "backbone": {"filename": "backbone.onnx"},
-                    "clm_heads": {"filename": "clm_heads.onnx"},
-                },
-            }
-        )
-    )
-    _write_component_genai_config(ascii_path, "backbone.onnx", 1)
-    (ascii_path / "external_initializers").mkdir()
-    ascii_config = json.loads((ascii_path / "genai_config.json").read_text())
-    ascii_config["model"]["decoder"]["session_options"][
-        "session.model_external_initializers_file_folder_path"
-    ] = "external_initializers"
-    (ascii_path / "genai_config.json").write_text(json.dumps(ascii_config))
-    og.NonGenerativeSession(_cpu_config(ascii_path))
 
 
 def test_flat_kev_high_level_session(tmp_path):

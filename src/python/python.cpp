@@ -334,7 +334,7 @@ struct PyPostProcessorOutput {
 };
 
 using PyTokenPostProcessorResult = PyPostProcessorOutput<OgaTokenPostProcessorResult>;
-using PyTokenPostProcessorTimestamp = PyPostProcessorOutput<OgaTokenPostProcessorTimestamp>;
+using PyTokenPostProcessorTimestampResult = PyPostProcessorOutput<OgaTokenPostProcessorTimestampResult>;
 using PyTokenPostProcessorTimestampRecord = PyPostProcessorOutput<OgaTokenPostProcessorTimestampRecord>;
 
 struct PyTokenPostProcessor {
@@ -358,7 +358,10 @@ struct PyTokenPostProcessor {
 
   std::vector<PyTokenPostProcessorResult> GetNextTokenResults() const {
     std::vector<PyTokenPostProcessorResult> results;
-    for (const auto* result : processor_->GetNextTokenResults()) results.push_back({result, result_lifetime_});
+    const auto native_results = processor_->GetNextTokenResults();
+    results.reserve(native_results.size());
+    for (const auto* result : native_results)
+      results.push_back({result, result_lifetime_});
     return results;
   }
 
@@ -549,34 +552,36 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
   pybind11::class_<PyTokenPostProcessorTimestampRecord>(m, "TokenPostProcessorTimestampRecord")
-      .def("get_text", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
-      .def("get_start_frame", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStartFrame(); })
-      .def("get_stop_frame", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStopFrame(); })
-      .def("get_start_time", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStartTime(); })
-      .def("get_stop_time", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStopTime(); });
+      .def_property_readonly("text", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
+      .def_property_readonly("frame_interval", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetFrameInterval(); })
+      .def_property_readonly("time_interval", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetTimestampInterval(); });
 
-  pybind11::class_<PyTokenPostProcessorTimestamp>(m, "TokenPostProcessorTimestamp")
-      .def("get_words", [](const PyTokenPostProcessorTimestamp& result) {
+  pybind11::class_<PyTokenPostProcessorTimestampResult>(m, "TokenPostProcessorTimestampResult")
+      .def_property_readonly("words", [](const PyTokenPostProcessorTimestampResult& result) {
         std::vector<PyTokenPostProcessorTimestampRecord> records;
         const auto& timestamps = result.Get();
-        for (size_t index = 0; index < timestamps.GetWordCount(); ++index)
-          records.push_back({&timestamps.GetWord(index), result.lifetime});
+        const auto count = timestamps.GetWordCount();
+        records.reserve(count);
+        for (size_t index = 0; index < count; ++index)
+          records.push_back({timestamps.GetTimestampRecord(OgaTimestampRecordKind_Words, index), result.lifetime});
         return records;
       })
-      .def("get_segments", [](const PyTokenPostProcessorTimestamp& result) {
+      .def_property_readonly("segments", [](const PyTokenPostProcessorTimestampResult& result) {
         std::vector<PyTokenPostProcessorTimestampRecord> records;
         const auto& timestamps = result.Get();
-        for (size_t index = 0; index < timestamps.GetSegmentCount(); ++index)
-          records.push_back({&timestamps.GetSegment(index), result.lifetime});
+        const auto count = timestamps.GetSegmentCount();
+        records.reserve(count);
+        for (size_t index = 0; index < count; ++index)
+          records.push_back({timestamps.GetTimestampRecord(OgaTimestampRecordKind_Segments, index), result.lifetime});
         return records;
       });
 
   pybind11::class_<PyTokenPostProcessorResult>(m, "TokenPostProcessorResult")
-      .def("get_text", [](const PyTokenPostProcessorResult& result) { return result.Get().GetText(); })
-      .def("get_timestamps", [](const PyTokenPostProcessorResult& result) -> std::optional<PyTokenPostProcessorTimestamp> {
-        const auto* timestamps = result.Get().GetTimestamps();
+      .def_property_readonly("text", [](const PyTokenPostProcessorResult& result) { return result.Get().GetText(); })
+      .def_property_readonly("timestamp_result", [](const PyTokenPostProcessorResult& result) -> std::optional<PyTokenPostProcessorTimestampResult> {
+        const auto* timestamps = result.Get().GetTimestampResult();
         if (!timestamps) return std::nullopt;
-        return PyTokenPostProcessorTimestamp{timestamps, result.lifetime};
+        return PyTokenPostProcessorTimestampResult{timestamps, result.lifetime};
       });
 
   pybind11::class_<PyTokenPostProcessor>(m, "TokenPostProcessor")
