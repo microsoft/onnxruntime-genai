@@ -386,15 +386,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaCreateASRPostProcessor(IntPtr generator, out IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern void OgaDestroyASRPostProcessor(IntPtr processor);
+        public static extern void OgaDestroyPostProcessor(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaASRPostProcessorAsPostProcessor(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaPostProcessorProcessNext(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaASRPostProcessorFinalize(IntPtr processor);
+        public static extern IntPtr OgaPostProcessorFinalize(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaASRPostProcessorReset(IntPtr processor);
+        public static extern IntPtr OgaPostProcessorReset(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern UIntPtr OgaASRPostProcessorGetResultCount(IntPtr processor);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

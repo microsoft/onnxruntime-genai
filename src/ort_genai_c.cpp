@@ -1253,8 +1253,8 @@ OgaResult* OGA_API_CALL OgaCreateASRPostProcessor(const OgaGenerator* generator,
   OGA_CATCH
 }
 
-void OGA_API_CALL OgaDestroyASRPostProcessor(OgaASRPostProcessor* processor) {
-  delete static_cast<Generators::ASRPostProcessor*>(processor);
+void OGA_API_CALL OgaDestroyPostProcessor(OgaPostProcessor* processor) {
+  delete static_cast<Generators::PostProcessor*>(processor);
 }
 
 OgaPostProcessor* OGA_API_CALL OgaASRPostProcessorAsPostProcessor(OgaASRPostProcessor* processor) {
@@ -1269,7 +1269,7 @@ OgaResult* OGA_API_CALL OgaPostProcessorProcessNext(OgaPostProcessor* processor)
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaASRPostProcessorFinalize(OgaASRPostProcessor* processor) {
+OgaResult* OGA_API_CALL OgaPostProcessorFinalize(OgaPostProcessor* processor) {
   OGA_TRY
   if (!processor) throw std::invalid_argument("Postprocessor must not be null");
   processor->Finalize();
@@ -1277,7 +1277,7 @@ OgaResult* OGA_API_CALL OgaASRPostProcessorFinalize(OgaASRPostProcessor* process
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaASRPostProcessorReset(OgaASRPostProcessor* processor) {
+OgaResult* OGA_API_CALL OgaPostProcessorReset(OgaPostProcessor* processor) {
   OGA_TRY
   if (!processor) throw std::invalid_argument("Postprocessor must not be null");
   processor->Reset();

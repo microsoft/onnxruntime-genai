@@ -242,12 +242,15 @@ returns null. `OgaASRPostProcessorTimestampResultGetTimestampRecord()` selects
 words or segments through `OgaTimestampRecordKind`; it also returns null for an
 unknown kind. Word and segment counts have separate field accessors.
 
-Call `OgaASRPostProcessorAsPostProcessor()` to obtain a borrowed `OgaPostProcessor`
-base handle, then use `OgaPostProcessorProcessNext()` to dispatch processing
-through the native virtual method. The base handle does not transfer ownership
-and is valid until the ASR processor is destroyed; do not free it separately.
-C++ `OgaASRPostProcessor::ProcessNext()` and the managed bindings perform this
-conversion automatically. Results remain ASR-specific.
+Creation stays subclass-specific through `OgaCreateASRPostProcessor()`.
+Call `OgaASRPostProcessorAsPostProcessor()` to obtain an `OgaPostProcessor` base
+view, then use `OgaPostProcessorProcessNext()`, `OgaPostProcessorFinalize()`, and
+`OgaPostProcessorReset()` to dispatch through the native virtual methods.
+`OgaDestroyPostProcessor()` destroys the concrete processor through its virtual
+destructor. Conversion does not transfer or duplicate ownership: destroy the
+underlying processor exactly once, and do not use either handle afterward.
+C++ and managed wrappers perform this conversion and destruction automatically;
+do not manually destroy a processor owned by a wrapper. Results remain ASR-specific.
 
 Each C getter reads one field or returns one opaque child handle. Adding a native
 record field does not change existing getter signatures; expose a new field through

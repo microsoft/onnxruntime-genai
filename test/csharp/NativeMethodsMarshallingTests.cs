@@ -16,12 +16,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             var nativeMethods = typeof(ASRPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
             foreach (var name in new[] { "OgaASRPostProcessorAsPostProcessor", "OgaPostProcessorProcessNext",
+                "OgaPostProcessorFinalize", "OgaPostProcessorReset",
                 "OgaASRPostProcessorGetResult", "OgaASRPostProcessorResultGetTimestampResult",
                 "OgaASRPostProcessorTimestampResultGetTimestampRecord" })
             {
                 var method = nativeMethods.GetMethod(name, BindingFlags.Public | BindingFlags.Static)!;
                 Assert.Equal(typeof(IntPtr), method.ReturnType);
             }
+            var destroy = nativeMethods.GetMethod("OgaDestroyPostProcessor", BindingFlags.Public | BindingFlags.Static)!;
+            Assert.Equal(typeof(void), destroy.ReturnType);
+            Assert.Equal(typeof(IntPtr), Assert.Single(destroy.GetParameters()).ParameterType);
         }
 
         [Fact]

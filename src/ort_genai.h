@@ -721,6 +721,9 @@ struct OgaASRPostProcessorResult : OgaAbstract {
 
 struct OgaPostProcessor : OgaAbstract {
   void ProcessNext() { OgaCheckResult(OgaPostProcessorProcessNext(this)); }
+  void Finalize() { OgaCheckResult(OgaPostProcessorFinalize(this)); }
+  void Reset() { OgaCheckResult(OgaPostProcessorReset(this)); }
+  static void operator delete(void* processor) { OgaDestroyPostProcessor(reinterpret_cast<OgaPostProcessor*>(processor)); }
 };
 
 struct OgaASRPostProcessor : OgaAbstract {
@@ -730,8 +733,8 @@ struct OgaASRPostProcessor : OgaAbstract {
     return std::unique_ptr<OgaASRPostProcessor>(processor);
   }
   void ProcessNext() { OgaCheckResult(OgaPostProcessorProcessNext(OgaASRPostProcessorAsPostProcessor(this))); }
-  void Finalize() { OgaCheckResult(OgaASRPostProcessorFinalize(this)); }
-  void Reset() { OgaCheckResult(OgaASRPostProcessorReset(this)); }
+  void Finalize() { OgaCheckResult(OgaPostProcessorFinalize(OgaASRPostProcessorAsPostProcessor(this))); }
+  void Reset() { OgaCheckResult(OgaPostProcessorReset(OgaASRPostProcessorAsPostProcessor(this))); }
   std::vector<const OgaASRPostProcessorResult*> GetNextResults() const {
     std::vector<const OgaASRPostProcessorResult*> results;
     const size_t count = OgaASRPostProcessorGetResultCount(this);
@@ -741,7 +744,9 @@ struct OgaASRPostProcessor : OgaAbstract {
     }
     return results;
   }
-  static void operator delete(void* processor) { OgaDestroyASRPostProcessor(reinterpret_cast<OgaASRPostProcessor*>(processor)); }
+  static void operator delete(void* processor) {
+    OgaDestroyPostProcessor(OgaASRPostProcessorAsPostProcessor(reinterpret_cast<OgaASRPostProcessor*>(processor)));
+  }
 };
 
 struct OgaMtpGenerator : OgaAbstract {

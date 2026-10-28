@@ -250,6 +250,27 @@ TEST(CAPITests, ASRPostProcessorOpaqueResults) {
   generator.reset();
 }
 
+TEST(CAPITests, ASRPostProcessorBaseLifecycle) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto processor = OgaASRPostProcessor::Create(*generator);
+  const auto* asr = processor.get();
+  std::unique_ptr<OgaPostProcessor> base{OgaASRPostProcessorAsPostProcessor(processor.release())};
+  const std::array<int32_t, 4> prompt{0, 0, 0, 52};
+  generator->AppendTokens(prompt.data(), prompt.size());
+  generator->GenerateNextToken();
+  base->ProcessNext();
+  ASSERT_EQ(asr->GetNextResults().size(), 1U);
+  base->Finalize();
+  ASSERT_EQ(asr->GetNextResults().size(), 1U);
+  EXPECT_STREQ(asr->GetNextResults()[0]->GetText(), "");
+  base->Reset();
+  EXPECT_TRUE(asr->GetNextResults().empty());
+  base.reset();
+}
+
 TEST(CAPITests, ASRPostProcessorRejectsInvalidCreation) {
   OgaASRPostProcessor* processor = nullptr;
   EXPECT_THROW(OgaCheckResult(OgaCreateASRPostProcessor(nullptr, &processor)), std::runtime_error);
@@ -259,8 +280,9 @@ TEST(CAPITests, ASRPostProcessorRejectsInvalidCreation) {
   EXPECT_THROW(OgaCheckResult(OgaCreateASRPostProcessor(generator.get(), nullptr)), std::runtime_error);
   EXPECT_EQ(OgaASRPostProcessorAsPostProcessor(nullptr), nullptr);
   EXPECT_THROW(OgaCheckResult(OgaPostProcessorProcessNext(nullptr)), std::runtime_error);
-  EXPECT_THROW(OgaCheckResult(OgaASRPostProcessorFinalize(nullptr)), std::runtime_error);
-  EXPECT_THROW(OgaCheckResult(OgaASRPostProcessorReset(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorFinalize(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorReset(nullptr)), std::runtime_error);
+  EXPECT_NO_THROW(OgaDestroyPostProcessor(nullptr));
 }
 
 TEST(CAPITests, EncodeBatchEmptyInputThrows) {

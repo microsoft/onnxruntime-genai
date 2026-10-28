@@ -101,14 +101,16 @@ typedef enum OgaTimestampRecordKind {
 /** Configuration and tokenizer come from the generator's model.
  * The generator must outlive the processor. Results are borrowed until its next mutation. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateASRPostProcessor(const OgaGenerator* generator, OgaASRPostProcessor** out);
-OGA_EXPORT void OGA_API_CALL OgaDestroyASRPostProcessor(OgaASRPostProcessor* processor);
-/** Returns a borrowed base handle valid until the ASR processor is destroyed.
- * Returns null for a null processor. Do not free the returned handle. */
+/** Returns a base view of the same processor without transferring or duplicating ownership.
+ * Returns null for a null processor. Both handles become invalid when the processor is destroyed. */
 OGA_EXPORT OgaPostProcessor* OGA_API_CALL OgaASRPostProcessorAsPostProcessor(OgaASRPostProcessor* processor);
+/** Destroys the concrete processor through its virtual destructor. Accepts null.
+ * Destroy each processor exactly once; subtype and base handles refer to the same object. */
+OGA_EXPORT void OGA_API_CALL OgaDestroyPostProcessor(OgaPostProcessor* processor);
 /** Processes the generator's current output using the concrete processor implementation. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaPostProcessorProcessNext(OgaPostProcessor* processor);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaASRPostProcessorFinalize(OgaASRPostProcessor* processor);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaASRPostProcessorReset(OgaASRPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaPostProcessorFinalize(OgaPostProcessor* processor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaPostProcessorReset(OgaPostProcessor* processor);
 OGA_EXPORT size_t OGA_API_CALL OgaASRPostProcessorGetResultCount(const OgaASRPostProcessor* processor);
 OGA_EXPORT const OgaASRPostProcessorResult* OGA_API_CALL OgaASRPostProcessorGetResult(const OgaASRPostProcessor* processor, size_t index);
 OGA_EXPORT const char* OGA_API_CALL OgaASRPostProcessorResultGetText(const OgaASRPostProcessorResult* result);

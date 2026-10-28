@@ -23,25 +23,26 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        private IntPtr BaseHandle => NativeMethods.OgaASRPostProcessorAsPostProcessor(Handle);
+
         public void ProcessNext()
         {
             PrepareMutation();
-            Result.VerifySuccess(NativeMethods.OgaPostProcessorProcessNext(
-                NativeMethods.OgaASRPostProcessorAsPostProcessor(Handle)));
+            Result.VerifySuccess(NativeMethods.OgaPostProcessorProcessNext(BaseHandle));
             GC.KeepAlive(_generator);
         }
 
         public void FinalizeProcessing()
         {
             PrepareMutation();
-            Result.VerifySuccess(NativeMethods.OgaASRPostProcessorFinalize(Handle));
+            Result.VerifySuccess(NativeMethods.OgaPostProcessorFinalize(BaseHandle));
             GC.KeepAlive(_generator);
         }
 
         public void Reset()
         {
             PrepareMutation();
-            Result.VerifySuccess(NativeMethods.OgaASRPostProcessorReset(Handle));
+            Result.VerifySuccess(NativeMethods.OgaPostProcessorReset(BaseHandle));
             GC.KeepAlive(_generator);
         }
 
@@ -77,7 +78,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public void Dispose()
         {
             if (_handle == IntPtr.Zero) return;
-            NativeMethods.OgaDestroyASRPostProcessor(_handle);
+            NativeMethods.OgaDestroyPostProcessor(BaseHandle);
             _handle = IntPtr.Zero;
             GC.SuppressFinalize(this);
         }
