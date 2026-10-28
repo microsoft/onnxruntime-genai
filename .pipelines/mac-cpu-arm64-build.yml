@@ -23,6 +23,7 @@ pr:
       - BUILD.md
 
 variables:
+  skipNugetSecurityAnalysis: true
   ORT_BUILD_VERSION: '1.26.0'
   ORT_RUNTIME_VERSION: '1.31.0'
   ORT_BUILD_SOURCE: 'https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json'
