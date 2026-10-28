@@ -2233,10 +2233,8 @@ struct OGA_CPP_ONLY OgaNonGenerativeSession {
                                std::unique_ptr<NativeDecisionSession>>;
 
   OgaNonGenerativeSession(std::string path,
-                          std::vector<std::string> configured_providers)
-      : package_path(std::move(path)),
-        providers(std::move(configured_providers)) {
-    const fs::path package(package_path);
+                          std::vector<std::string> configured_providers) {
+    const fs::path package(path);
     const bool decision =
         Generators::PackageHasComponent(package, "pointer_head") ||
         Generators::PackageHasComponent(package, "kev_head");
@@ -2247,13 +2245,13 @@ struct OGA_CPP_ONLY OgaNonGenerativeSession {
       throw std::invalid_argument(
           "package must declare exactly one ranking or decision workflow");
     if (ranking)
-      runtime = std::make_unique<NativeRankingSession>(package_path, providers);
+      runtime = std::make_unique<NativeRankingSession>(
+          std::move(path), std::move(configured_providers));
     else
-      runtime = std::make_unique<NativeDecisionSession>(package_path, providers);
+      runtime = std::make_unique<NativeDecisionSession>(
+          std::move(path), std::move(configured_providers));
   }
 
-  std::string package_path;
-  std::vector<std::string> providers;
   Runtime runtime;
 };
 
