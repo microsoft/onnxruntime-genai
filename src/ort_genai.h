@@ -103,21 +103,13 @@ inline void OgaCheckResult(OgaResult* result) {
   }
 }
 
-namespace OgaDetail {
-
-inline std::string TakeString(const char* value) {
-  std::unique_ptr<const char, decltype(&OgaDestroyString)> owned(
-      value, OgaDestroyString);
-  return value ? std::string(value) : std::string{};
-}
-
-}  // namespace OgaDetail
-
 inline std::string NonGenerativeSession::Run(std::string_view request_json) {
   const char* response{};
   OgaCheckResult(OgaNonGenerativeSessionRunJson(
       handle_, request_json.data(), request_json.size(), &response));
-  return OgaDetail::TakeString(response);
+  std::unique_ptr<const char, decltype(&OgaDestroyString)> owned(
+      response, OgaDestroyString);
+  return response ? std::string(response) : std::string{};
 }
 struct OgaSpeculativeStats : OgaAbstract {
   uint64_t GetCount(const char* name) const {
