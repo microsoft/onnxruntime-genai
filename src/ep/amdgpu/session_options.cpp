@@ -182,6 +182,9 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   session_options.AddConfigEntry("ep.directml.enable_graph_capture", enable_graph_capture ? "1" : "0");
   session_options.AddConfigEntry("ep.migraphx.hip_graph_enable", enable_graph_capture ? "1" : "0");
 
+  // Keep prefill and decode programs loaded together to avoid a reload on every request.
+  session_options.AddConfigEntry("ep.migraphx.coresident_programs", "1");
+
   // Drop any cached device allocator + init session so this model rebuilds its own; otherwise the
   // dummy-allocator session reuses a prior model's allocator over an already-freed allocation.
   auto& amdgpu_allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::AMDGPU)];
