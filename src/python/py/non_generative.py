@@ -5,10 +5,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from onnxruntime_genai.onnxruntime_genai import (
+    Config,
     _NonGenerativeSession,
 )
 
@@ -16,12 +16,8 @@ from onnxruntime_genai.onnxruntime_genai import (
 class RankingSession:
     """CLM session with a bounded, session-local projected-action cache."""
 
-    def __init__(
-        self,
-        package_path: str | Path,
-        providers: list[str] | None = None,
-    ):
-        self._native = _NonGenerativeSession(str(package_path), providers or [])
+    def __init__(self, config: Config):
+        self._native = _NonGenerativeSession(config)
 
     def rank(self, request: dict[str, Any]) -> dict[str, Any]:
         return json.loads(self._native.run(json.dumps(request)))
@@ -32,12 +28,8 @@ class RankingSession:
 class DecisionSession:
     """KEV session with bounded token/row and model-state prefix caches."""
 
-    def __init__(
-        self,
-        package_path: str | Path,
-        providers: list[str] | None = None,
-    ):
-        self._native = _NonGenerativeSession(str(package_path), providers or [])
+    def __init__(self, config: Config):
+        self._native = _NonGenerativeSession(config)
 
     def decide(self, request: dict[str, Any]) -> dict[str, Any]:
         return json.loads(self._native.run(json.dumps(request)))

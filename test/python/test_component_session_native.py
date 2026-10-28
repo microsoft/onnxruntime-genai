@@ -37,6 +37,13 @@ def _write_component_genai_config(root: Path, filename: str, threads: int) -> No
     )
 
 
+def _cpu_config(package: Path) -> og.Config:
+    config = og.Config(str(package))
+    config.clear_providers()
+    config.append_provider("cpu")
+    return config
+
+
 def test_combined_clm_high_level_session(tmp_path):
     tmp_path = tmp_path / "模型"
     tmp_path.mkdir()
@@ -102,7 +109,7 @@ def test_combined_clm_high_level_session(tmp_path):
         )
     )
     _write_component_genai_config(tmp_path, "backbone.onnx", 1)
-    session = og.RankingSession(tmp_path, providers=["cpu"])
+    session = og.RankingSession(_cpu_config(tmp_path))
     ranked = session.rank(
         {
             "state": "1",
@@ -211,7 +218,7 @@ def test_flat_kev_high_level_session(tmp_path):
         )
     )
     _write_component_genai_config(tmp_path, "backbone.onnx", 1)
-    session = og.DecisionSession(tmp_path, providers=["cpu"])
+    session = og.DecisionSession(_cpu_config(tmp_path))
     answer = session.decide(
         {
             "state": "1",
@@ -361,11 +368,11 @@ def test_stateful_kev_repeated_and_isolated_requests(tmp_path):
             "two": {"type": "choice", "criteria": {"x": "xray", "y": "yankee"}},
         },
     }
-    session = og.DecisionSession(package, providers=["cpu"])
+    session = og.DecisionSession(_cpu_config(package))
     result = session.decide(request)
     assert session.decide(request) == result
 
-    isolated_session = og.DecisionSession(package, providers=["cpu"])
+    isolated_session = og.DecisionSession(_cpu_config(package))
     isolated = isolated_session.decide({"state": request["state"], "questions": {"two": request["questions"]["two"]}})
     assert isolated["answers"]["two"] == result["answers"]["two"]
 
@@ -376,7 +383,7 @@ def test_kev_enforces_configured_context_length(tmp_path):
     config["model"]["context_length"] = 16
     (package / "genai_config.json").write_text(json.dumps(config))
 
-    session = og.DecisionSession(package, providers=["cpu"])
+    session = og.DecisionSession(_cpu_config(package))
     with pytest.raises(
         RuntimeError, match="exceeds configured context length 16"
     ):
@@ -451,7 +458,7 @@ def test_malformed_clm_hidden_shape_returns_runtime_error(tmp_path):
     )
 
     _write_component_genai_config(tmp_path, "backbone.onnx", 1)
-    session = og.RankingSession(tmp_path, providers=["cpu"])
+    session = og.RankingSession(_cpu_config(tmp_path))
     with pytest.raises(RuntimeError, match="encoder hidden states must have rank 3"):
         session.rank(
             {
@@ -526,7 +533,7 @@ def test_malformed_kev_probability_shape_returns_runtime_error(tmp_path):
     )
 
     _write_component_genai_config(tmp_path, "backbone.onnx", 1)
-    session = og.DecisionSession(tmp_path, providers=["cpu"])
+    session = og.DecisionSession(_cpu_config(tmp_path))
     with pytest.raises(RuntimeError, match="KEV probability matrix must have rank 2"):
         session.decide(
             {

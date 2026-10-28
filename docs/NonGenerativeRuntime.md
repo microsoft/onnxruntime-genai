@@ -10,10 +10,13 @@ caches.
 import json
 import onnxruntime_genai as og
 
-ranking = og.RankingSession("/models/clm-v0.1-8b-fp32", providers=["cuda"])
+ranking_config = og.Config("/models/clm-v0.1-8b-fp32")
+ranking_config.clear_providers()
+ranking_config.append_provider("cuda")
+ranking = og.RankingSession(ranking_config)
 ranked = ranking.rank(json.load(open("free-form-rank-request.json")))
 
-decision = og.DecisionSession("/models/kev-4b-fp32")
+decision = og.DecisionSession(og.Config("/models/kev-4b-fp32"))
 answers = decision.decide(json.load(open("request.json")))
 ```
 

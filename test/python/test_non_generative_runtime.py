@@ -18,10 +18,21 @@ def test_component_runtime_primitives_are_not_public():
     assert not hasattr(og.onnxruntime_genai, "_DirectoryTokenizer")
 
 
-class _NativeSession:
-    def __init__(self, path, providers):
+class _Config:
+    def __init__(self, path):
         self.path = path
-        self.providers = providers
+        self.providers = []
+
+    def clear_providers(self):
+        self.providers.clear()
+
+    def append_provider(self, provider):
+        self.providers.append(provider)
+
+
+class _NativeSession:
+    def __init__(self, config):
+        self.config = config
         self.requests = []
 
     def run(self, request):
@@ -37,6 +48,7 @@ def runtime():
     previous_package = sys.modules.get("onnxruntime_genai")
     previous_native = sys.modules.get("onnxruntime_genai.onnxruntime_genai")
     native = types.ModuleType("onnxruntime_genai.onnxruntime_genai")
+    native.Config = _Config
     native._NonGenerativeSession = _NativeSession
     package = types.ModuleType("onnxruntime_genai")
     package.__path__ = []
@@ -66,10 +78,13 @@ def test_python_session_is_thin_native_dict_adapter(runtime, session_name, metho
         "state": {"weather": "rain"},
         "questions": {"q": {"type": "noul", "instructions": "Take umbrella?"}},
     }
-    session = getattr(runtime, session_name)("/models/package", providers=["cuda"])
+    config = runtime.Config("/models/package")
+    config.append_provider("cuda")
+    session = getattr(runtime, session_name)(config)
     assert getattr(session, method_name)(request) == {"answer": {"type": "noul", "noul": 0.75}}
-    assert session._native.path == "/models/package"
-    assert session._native.providers == ["cuda"]
+    assert session._native.config is config
+    assert config.path == "/models/package"
+    assert config.providers == ["cuda"]
     assert session._native.requests == [request]
 
 
@@ -85,10 +100,16 @@ def test_exported_packages_cpu_cuda_parity(provider):
     if not root_value:
         pytest.skip("set ORT_GENAI_NON_GENERATIVE_TEST_ROOT to exported packages")
     root = Path(root_value)
-    kwargs = {"providers": [provider]} if provider else {}
+    def config(package):
+        value = og.Config(str(package))
+        if provider:
+            value.clear_providers()
+            value.append_provider(provider)
+        return value
+
     clm_request = json.loads((root / "clm-request.json").read_text())
     kev_request = json.loads((root / "kev-request.json").read_text())
-    assert og.RankingSession(root / "clm-v0.1-8b-fp32", **kwargs).rank(clm_request)
-    decision = og.DecisionSession(root / "kev-4b-fp32", **kwargs)
+    assert og.RankingSession(config(root / "clm-v0.1-8b-fp32")).rank(clm_request)
+    decision = og.DecisionSession(config(root / "kev-4b-fp32"))
     first = decision.decide(kev_request)
     assert decision.decide(kev_request) == first

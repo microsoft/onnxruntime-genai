@@ -20,9 +20,8 @@ int ToNumpyType(ONNXTensorElementDataType type);
 pybind11::dtype ToNumpyDtype(ONNXTensorElementDataType type);
 
 struct PyNonGenerativeSession {
-  PyNonGenerativeSession(const std::string& path,
-                         const std::vector<std::string>& providers)
-      : session(CreateSession(path, providers)) {}
+  explicit PyNonGenerativeSession(const OgaConfig& config)
+      : session(config) {}
   std::string Run(const std::string& request) {
     std::string result;
     {
@@ -30,16 +29,6 @@ struct PyNonGenerativeSession {
       result = session.Run(request);
     }
     return result;
-  }
-  static NonGenerativeSession CreateSession(
-      const std::string& path, const std::vector<std::string>& providers) {
-    auto config = OgaConfig::Create(path.c_str());
-    if (!providers.empty()) {
-      config->ClearProviders();
-      for (const auto& provider : providers)
-        config->AppendProvider(provider.c_str());
-    }
-    return NonGenerativeSession(*config);
   }
   NonGenerativeSession session;
 };
@@ -600,12 +589,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       });
   m.add_object("_cleanup", cleanup);
 
-  pybind11::class_<PyNonGenerativeSession>(m, "_NonGenerativeSession")
-      .def(pybind11::init<const std::string&, const std::vector<std::string>&>(),
-           pybind11::arg("package_path"),
-           pybind11::arg("providers") = std::vector<std::string>{})
-      .def("run", &PyNonGenerativeSession::Run);
-
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
@@ -794,6 +777,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("clear_decoder_provider_options_hardware_device_type", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceType)
       .def("clear_decoder_provider_options_hardware_device_id", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceId)
       .def("clear_decoder_provider_options_hardware_vendor_id", &OgaConfig::ClearDecoderProviderOptionsHardwareVendorId);
+
+  pybind11::class_<PyNonGenerativeSession>(m, "_NonGenerativeSession")
+      .def(pybind11::init<const OgaConfig&>(), pybind11::arg("config"))
+      .def("run", &PyNonGenerativeSession::Run);
 
   pybind11::class_<OgaModel>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))
