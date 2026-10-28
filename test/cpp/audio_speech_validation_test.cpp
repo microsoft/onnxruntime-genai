@@ -572,40 +572,41 @@ TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
   std::string segments;
   const auto check_records = [&] {
     size_t result_index = 0;
-    for (const auto& result : processor->GetNextTokenResults()) {
+    for (const auto* result : processor->GetNextTokenResults()) {
       const auto* native_result = OgaTokenPostProcessorGetResult(processor.get(), result_index);
-      EXPECT_EQ(result.Text.data(), OgaTokenPostProcessorResultGetText(native_result));
-      ASSERT_TRUE(result.TimestampResult.has_value());
-      const auto& timestamp_result = *result.TimestampResult;
-      const auto* timestamps = OgaTokenPostProcessorResultGetTimestampResult(native_result);
+      ASSERT_NE(result, nullptr);
+      EXPECT_EQ(result, native_result);
+      EXPECT_EQ(result->GetText(), OgaTokenPostProcessorResultGetText(native_result));
+      const auto* timestamps = result->GetTimestampResult();
       ASSERT_NE(timestamps, nullptr);
+      EXPECT_EQ(timestamps, OgaTokenPostProcessorResultGetTimestampResult(native_result));
       ++result_index;
-      EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetTimestampRecord(timestamps, static_cast<OgaTimestampRecordKind>(99), 0), nullptr);
-      for (bool use_segments : {false, true}) {
-        const auto& records = use_segments ? timestamp_result.Segments : timestamp_result.Words;
-        const auto kind = use_segments ? OgaTimestampRecordKind_Segments : OgaTimestampRecordKind_Words;
-        const auto count = records.size();
+      EXPECT_EQ(timestamps->GetTimestampRecord(static_cast<OgaTimestampRecordKind>(99), 0), nullptr);
+      for (auto kind : {OgaTimestampRecordKind_Words, OgaTimestampRecordKind_Segments}) {
+        const bool use_segments = kind == OgaTimestampRecordKind_Segments;
+        const auto count = use_segments ? timestamps->GetSegmentCount() : timestamps->GetWordCount();
         EXPECT_EQ(count, use_segments ? OgaTokenPostProcessorTimestampResultGetSegmentCount(timestamps)
                                       : OgaTokenPostProcessorTimestampResultGetWordCount(timestamps));
         for (size_t index = 0; index < count; ++index) {
-          const auto& record = records[index];
+          const auto* record = timestamps->GetTimestampRecord(kind, index);
           const auto* native_record = OgaTokenPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, index);
-          ASSERT_NE(native_record, nullptr);
+          ASSERT_NE(record, nullptr);
+          EXPECT_EQ(record, native_record);
           ++record_count;
-          const auto frames = record.FrameInterval;
+          const auto frames = record->GetFrameInterval();
           EXPECT_EQ(frames.first, 4);
           EXPECT_EQ(frames.second, 5);
-          const auto times = record.TimeInterval;
+          const auto times = record->GetTimeInterval();
           EXPECT_DOUBLE_EQ(times.first, 0.4);
           EXPECT_DOUBLE_EQ(times.second, 0.5);
-          (use_segments ? segments : words).append(record.Text);
-          EXPECT_EQ(record.Text.data(), OgaTokenPostProcessorTimestampRecordGetText(native_record));
+          (use_segments ? segments : words).append(record->GetText());
+          EXPECT_EQ(record->GetText(), OgaTokenPostProcessorTimestampRecordGetText(native_record));
           EXPECT_EQ(frames.first, OgaTokenPostProcessorTimestampRecordGetStartFrame(native_record));
           EXPECT_EQ(frames.second, OgaTokenPostProcessorTimestampRecordGetStopFrame(native_record));
           EXPECT_DOUBLE_EQ(times.first, OgaTokenPostProcessorTimestampRecordGetStartTime(native_record));
           EXPECT_DOUBLE_EQ(times.second, OgaTokenPostProcessorTimestampRecordGetStopTime(native_record));
         }
-        EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, count), nullptr);
+        EXPECT_EQ(timestamps->GetTimestampRecord(kind, count), nullptr);
       }
     }
   };

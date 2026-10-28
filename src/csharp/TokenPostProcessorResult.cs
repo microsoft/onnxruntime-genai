@@ -45,18 +45,17 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         private IntPtr Handle => _owner.GetResultHandle(_handle, _lifetime);
 
-        public IReadOnlyList<TokenPostProcessorTimestampRecord> Words => GetRecords(false);
-        public IReadOnlyList<TokenPostProcessorTimestampRecord> Segments => GetRecords(true);
+        public IReadOnlyList<TokenPostProcessorTimestampRecord> Words => GetRecords(NativeMethods.TimestampRecordKind.Words);
+        public IReadOnlyList<TokenPostProcessorTimestampRecord> Segments => GetRecords(NativeMethods.TimestampRecordKind.Segments);
 
-        private TokenPostProcessorTimestampRecord[] GetRecords(bool segments)
+        private TokenPostProcessorTimestampRecord[] GetRecords(NativeMethods.TimestampRecordKind kind)
         {
             var handle = Handle;
-            int count = checked((int)(segments ? NativeMethods.OgaTokenPostProcessorTimestampResultGetSegmentCount(handle)
+            int count = checked((int)(kind == NativeMethods.TimestampRecordKind.Segments ? NativeMethods.OgaTokenPostProcessorTimestampResultGetSegmentCount(handle)
                 : NativeMethods.OgaTokenPostProcessorTimestampResultGetWordCount(handle)).ToUInt64());
             var records = new TokenPostProcessorTimestampRecord[count];
             for (int index = 0; index < count; ++index)
             {
-                var kind = segments ? NativeMethods.TimestampRecordKind.Segments : NativeMethods.TimestampRecordKind.Words;
                 var record = NativeMethods.OgaTokenPostProcessorTimestampResultGetTimestampRecord(handle, kind, (UIntPtr)index);
                 records[index] = new TokenPostProcessorTimestampRecord(_owner, _lifetime, record);
             }

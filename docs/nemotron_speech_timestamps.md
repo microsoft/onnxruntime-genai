@@ -129,7 +129,7 @@ Enabled timestamps require present, valid acoustic timing. Intervals are half-op
 `[start, stop)` and may span multiple frames. A processor always uses its
 generator's model and requires `batch_size=1` and `num_beams=1`.
 
-`Text` (C++/C#) or `text` (Python) contains the ordinary incremental
+`GetText()` (C++), `Text` (C#), or `text` (Python) returns the ordinary incremental
 decoded fragment for partial display. Applications that need only stable output can
 instead append completed word or segment event text as it arrives.
 
@@ -142,17 +142,20 @@ transcript before the next processor mutation. Result wrappers do not retain old
 C exposes opaque result, `OgaTokenPostProcessorTimestampResult`, and timestamp-record
 handles with typed accessors. `OgaTokenPostProcessorResultGetTimestampResult()`
 returns the container; `OgaTokenPostProcessorTimestampResultGetTimestampRecord()`
-selects a word or segment by `OgaTimestampRecordKind` and index. C++ exposes value
-views with direct `Text`, `TimestampResult`, `Words`, `Segments`, `FrameInterval`,
-and `TimeInterval` fields. Text is a borrowed `std::string_view`; numeric pairs and
-record descriptors are copied, not native string contents.
+selects a word or segment by `OgaTimestampRecordKind` and index. C++ exposes the
+same opaque handles through method-only wrappers. Use `GetText()` and
+`GetTimestampResult()` on a result, `GetWordCount()` / `GetSegmentCount()` and
+`GetTimestampRecord(kind, index)` on its timestamp container, and `GetText()`,
+`GetFrameInterval()`, and `GetTimeInterval()` on a record. Text and handles remain
+borrowed; interval getters return `std::pair` values without exposing native layouts.
 C# and Python expose borrowed timestamp output through nullable read-only
 `TimestampResult` and `timestamp_result` properties. Read records through `Words` / `Segments`
 or `words` / `segments`, then read `Text`, `FrameInterval`, and `TimeInterval`
 (C#) or `text`, `frame_interval`, and `time_interval` (Python). Interval values
 are `(start, stop)` tuples, with named `Start` / `Stop` elements in C#.
-Managed and Python properties delegate to the per-field C accessors; no combined-data
-function signature must grow when a record gains a new field.
+C# properties delegate to the per-field C accessors through P/Invoke. Python
+properties call the C++ wrapper getters, which use those same C accessors; no
+combined-data function signature must grow when a record gains a new field.
 Managed and Python objects are opaque wrappers, not dictionaries or native payload snapshots.
 They are per-call event lists,
 not cumulative history. Each list is
