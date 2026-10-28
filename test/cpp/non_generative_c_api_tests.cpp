@@ -108,23 +108,6 @@ TEST(NonGenerativeCApiTest, RequestBuildersCloneInputs) {
   OgaDestroyStructuredRequest(request);
 }
 
-TEST(NonGenerativeCApiTest, ComponentInputsOwnSuppliedStorage) {
-  OgaComponentInputs* inputs{};
-  Check(OgaCreateComponentInputs(&inputs));
-  {
-    std::string name = "input";
-    std::string bytes = "original bytes";
-    std::vector<int64_t> shape{static_cast<int64_t>(bytes.size())};
-    Check(OgaComponentInputsAdd(inputs, name.c_str(), bytes.data(), bytes.size(),
-                                shape.data(), shape.size(), OgaElementType_uint8));
-    name.assign("overwritten");
-    bytes.assign(bytes.size(), 'x');
-    shape[0] = 0;
-  }
-  // Destruction after all caller storage is gone is also exercised under ASAN.
-  OgaDestroyComponentInputs(inputs);
-}
-
 TEST(NonGenerativeCApiTest, PrefixStatusCopyValidatesOutputsFirst) {
   ExpectOutError(OgaDecisionSessionCopyPrefixReuseStatus(
       nullptr, nullptr, 0, nullptr));
@@ -191,25 +174,10 @@ TEST(NonGenerativeCApiTest, ErrorsUseOgaResultConvention) {
             std::string::npos);
   OgaDestroyResult(result);
   OgaDestroyStructuredValue(integer);
-
-  OgaComponentSession* session{};
-  result = OgaCreateComponentSession(
-      "path-that-does-not-exist", "encoder", nullptr, 0, &session);
-  ASSERT_NE(result, nullptr);
-  EXPECT_FALSE(std::string(OgaResultGetError(result)).empty());
-  OgaDestroyResult(result);
-  EXPECT_EQ(session, nullptr);
-  OgaDestroyComponentSession(session);
 }
 
 TEST(NonGenerativeCApiTest, NullCreationOutputsFailBeforeAllocating) {
   for (int iteration = 0; iteration < 16; ++iteration) {
-    ExpectOutError(OgaCreateComponentSession("unused", "encoder", nullptr, 0, nullptr));
-    ExpectOutError(OgaCreateComponentInputs(nullptr));
-    ExpectOutError(OgaComponentSessionRun(nullptr, nullptr, nullptr, 0, nullptr));
-    ExpectOutError(OgaCreateDirectoryTokenizer("unused", nullptr));
-    ExpectOutError(OgaDirectoryTokenizerEncode(nullptr, "text", nullptr));
-
     ExpectOutError(OgaCreateStructuredValueNull(nullptr));
     ExpectOutError(OgaCreateStructuredValueBool(true, nullptr));
     ExpectOutError(OgaCreateStructuredValueInt64(1, nullptr));

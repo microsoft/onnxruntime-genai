@@ -13,6 +13,12 @@ import onnxruntime_genai as og
 import pytest
 
 
+def test_component_runtime_primitives_are_not_public():
+    assert not hasattr(og, "ComponentSession")
+    assert not hasattr(og.onnxruntime_genai, "ComponentSession")
+    assert not hasattr(og.onnxruntime_genai, "_DirectoryTokenizer")
+
+
 class _NativeSession:
     def __init__(
         self,
@@ -87,7 +93,6 @@ def runtime():
     previous_package = sys.modules.get("onnxruntime_genai")
     previous_native = sys.modules.get("onnxruntime_genai.onnxruntime_genai")
     native = types.ModuleType("onnxruntime_genai.onnxruntime_genai")
-    native.ComponentSession = object
     native._RankingSession = _NativeSession
     native._DecisionSession = _NativeSession
     package = types.ModuleType("onnxruntime_genai")

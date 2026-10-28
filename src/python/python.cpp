@@ -19,82 +19,6 @@ ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type);
 int ToNumpyType(ONNXTensorElementDataType type);
 pybind11::dtype ToNumpyDtype(ONNXTensorElementDataType type);
 
-struct PyComponentSession {
-  PyComponentSession(const std::string& package, const std::string& component,
-                     const std::vector<std::string>& providers)
-      : session_(package, component, providers) {}
-
-  pybind11::dict InputInfo() const {
-    pybind11::dict result;
-    for (const auto& tensor : session_.Inputs()) {
-      pybind11::dict info;
-      info["shape"] = tensor.shape;
-      info["symbols"] = tensor.symbolic_dimensions;
-      info["dtype"] = pybind11::str(ToNumpyDtype(
-          static_cast<ONNXTensorElementDataType>(tensor.type)));
-      info["onnx_type"] = static_cast<int>(tensor.type);
-      result[pybind11::str(tensor.name)] = std::move(info);
-    }
-    return result;
-  }
-
-  pybind11::dict Run(const pybind11::dict& feeds,
-                     std::optional<std::vector<std::string>> requested) {
-    std::vector<pybind11::array> arrays;
-    std::vector<OgaComponentInput> inputs;
-    arrays.reserve(feeds.size());
-    for (auto item : feeds) {
-      std::string name = pybind11::cast<std::string>(item.first);
-      pybind11::array array = pybind11::array::ensure(
-          item.second, pybind11::array::c_style);
-      if (!array)
-        throw std::runtime_error("component inputs must be contiguous numpy arrays");
-      arrays.push_back(array);
-      std::vector<int64_t> shape(array.ndim());
-      for (pybind11::ssize_t i = 0; i < array.ndim(); ++i) shape[i] = array.shape(i);
-      auto type = ToTensorType(array.dtype());
-      for (const auto& input : session_.Inputs()) {
-        if (input.name == name &&
-            static_cast<ONNXTensorElementDataType>(input.type) ==
-                ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
-          if (!array.dtype().is(pybind11::dtype::of<uint16_t>()))
-            throw std::runtime_error("BF16 component inputs must use uint16 NumPy storage");
-          type = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
-          break;
-        }
-      }
-      inputs.push_back({std::move(name), array.data(), static_cast<size_t>(array.nbytes()),
-                        std::move(shape), static_cast<OgaElementType>(type)});
-    }
-    std::vector<OgaComponentTensor> native_outputs;
-    {
-      pybind11::gil_scoped_release release;
-      native_outputs = session_.Run(inputs, requested.value_or(std::vector<std::string>{}));
-    }
-    pybind11::dict result;
-    for (const auto& output : native_outputs) {
-      pybind11::array array(ToNumpyDtype(
-                                static_cast<ONNXTensorElementDataType>(output.type)),
-                            output.shape);
-      if (!output.data.empty())
-        std::memcpy(array.mutable_data(), output.data.data(), output.data.size());
-      result[pybind11::str(output.name)] = std::move(array);
-    }
-    return result;
-  }
-
-  NamedComponentSession session_;
-};
-
-struct PyDirectoryTokenizer {
-  explicit PyDirectoryTokenizer(const std::string& path) : tokenizer_{path} {}
-  std::vector<int32_t> Encode(const std::string& value) const {
-    return tokenizer_.Encode(value);
-  }
-  int32_t PadTokenId() const { return tokenizer_.PadTokenId(); }
-  DirectoryTokenizer tokenizer_;
-};
-
 OgaStructuredValue ToStructuredValue(pybind11::handle value) {
   if (value.is_none()) return {};
   if (pybind11::isinstance<pybind11::bool_>(value))
@@ -882,22 +806,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         OgaShutdown();
       });
   m.add_object("_cleanup", cleanup);
-
-  pybind11::class_<PyComponentSession>(m, "ComponentSession",
-                                       "Uncached named-component ONNX Runtime session.")
-      .def(pybind11::init<const std::string&, const std::string&, const std::vector<std::string>&>(),
-           pybind11::arg("package_path"), pybind11::arg("component"),
-           pybind11::arg("providers") = std::vector<std::string>{})
-      .def_property_readonly("input_info", &PyComponentSession::InputInfo)
-      .def_property_readonly("input_names", [](const PyComponentSession& s) { return s.session_.InputNames(); })
-      .def_property_readonly("output_names", [](const PyComponentSession& s) { return s.session_.OutputNames(); })
-      .def("run", &PyComponentSession::Run, pybind11::arg("feeds"),
-           pybind11::arg("outputs") = std::nullopt);
-
-  pybind11::class_<PyDirectoryTokenizer>(m, "_DirectoryTokenizer")
-      .def(pybind11::init<const std::string&>())
-      .def("encode", &PyDirectoryTokenizer::Encode)
-      .def_property_readonly("pad_token_id", &PyDirectoryTokenizer::PadTokenId);
 
   pybind11::class_<PyRankingSession>(m, "_RankingSession")
       .def(pybind11::init<const std::string&, const std::vector<std::string>&,

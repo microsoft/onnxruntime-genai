@@ -28,8 +28,6 @@ constexpr size_t kDefaultKevCacheEntries = 512;
 constexpr size_t kDefaultKevCacheBytes = 16 * 1024 * 1024;
 constexpr size_t kDefaultKevPrefixCacheEntries = 32;
 constexpr size_t kDefaultKevPrefixCacheBytes = 512 * 1024 * 1024;
-constexpr size_t kMinCudaKevPrefixTokens = 128;
-
 bool UsesCuda(const std::vector<std::string>& providers) {
   return std::find(providers.begin(), providers.end(), "cuda") != providers.end() ||
          std::find(providers.begin(), providers.end(), "CUDAExecutionProvider") !=
@@ -270,32 +268,46 @@ size_t ElementSize(OgaElementType type) {
   }
 }
 
-const OgaComponentTensor& FindTensor(const std::vector<OgaComponentTensor>& tensors,
-                                     const std::string& name) {
-  const auto found = std::find_if(tensors.begin(), tensors.end(),
-                                  [&](const auto& tensor) { return tensor.name == name; });
-  if (found == tensors.end()) throw std::runtime_error("component did not return output: " + name);
-  return *found;
+const Generators::Tensor& FindTensor(
+    const Generators::NamedTensors& tensors, const std::string& name) {
+  const auto found = tensors.find(name);
+  if (found == tensors.end() || !found->second)
+    throw std::runtime_error("component did not return output: " + name);
+  return *found->second;
 }
 
 template <typename T>
-std::vector<T> CopyTensor(const OgaComponentTensor& tensor, OgaElementType expected) {
-  if (tensor.type != expected || tensor.data.size() % sizeof(T))
+std::vector<T> CopyTensor(const Generators::Tensor& tensor,
+                          ONNXTensorElementDataType expected) {
+  if (tensor.GetType() != expected)
     throw std::runtime_error("component output has unexpected element type");
-  std::vector<T> result(tensor.data.size() / sizeof(T));
-  if (!tensor.data.empty())
-    std::memcpy(result.data(), tensor.data.data(), tensor.data.size());
+  std::vector<T> result(tensor.GetElementCount());
+  if (result.empty()) return result;
+  const auto& value = *tensor.ort_tensor_;
+  if (value.GetTensorMemoryInfo().GetDeviceType() ==
+      OrtMemoryInfoDeviceType_CPU) {
+    std::memcpy(result.data(), value.GetTensorRawData(),
+                result.size() * sizeof(T));
+  } else {
+    auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+    auto memory = device->WrapMemory(std::span<T>(
+        const_cast<OrtValue&>(value).GetTensorMutableData<T>(),
+        result.size()));
+    const auto host = memory.CopyDeviceToCpu();
+    std::copy(host.begin(), host.end(), result.begin());
+  }
   return result;
 }
 
-std::vector<float> FloatTensor(const OgaComponentTensor& tensor) {
-  if (tensor.type == OgaElementType_float32)
-    return CopyTensor<float>(tensor, OgaElementType_float32);
+std::vector<float> FloatTensor(const Generators::Tensor& tensor) {
+  if (tensor.GetType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+    return CopyTensor<float>(tensor, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   auto bits = CopyTensor<uint16_t>(
-      tensor, tensor.type == OgaElementType_float16 ? OgaElementType_float16
-                                                    : OgaElementType_bfloat16);
+      tensor, tensor.GetType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16
+                  ? ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16
+                  : ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
   std::vector<float> result(bits.size());
-  if (tensor.type == OgaElementType_bfloat16) {
+  if (tensor.GetType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
     for (size_t i = 0; i < bits.size(); ++i) {
       uint32_t expanded = static_cast<uint32_t>(bits[i]) << 16;
       std::memcpy(&result[i], &expanded, sizeof(float));
@@ -303,7 +315,7 @@ std::vector<float> FloatTensor(const OgaComponentTensor& tensor) {
     return result;
   }
 
-  if (tensor.type != OgaElementType_float16)
+  if (tensor.GetType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)
     throw std::runtime_error("component output must be float32, float16, or bfloat16");
   for (size_t i = 0; i < bits.size(); ++i) {
     const uint32_t sign = static_cast<uint32_t>(bits[i] & 0x8000) << 16;
@@ -331,9 +343,10 @@ std::vector<float> FloatTensor(const OgaComponentTensor& tensor) {
   return result;
 }
 
-size_t TensorElementCount(const OgaComponentTensor& tensor, std::string_view name) {
+size_t TensorElementCount(const Generators::Tensor& tensor,
+                          std::string_view name) {
   size_t count = 1;
-  for (const auto dimension : tensor.shape) {
+  for (const auto dimension : tensor.GetShape()) {
     if (dimension < 0)
       throw std::runtime_error(std::string(name) + " has a negative output dimension");
     const auto value = static_cast<size_t>(dimension);
@@ -344,16 +357,17 @@ size_t TensorElementCount(const OgaComponentTensor& tensor, std::string_view nam
   return count;
 }
 
-void RequireShape(const OgaComponentTensor& tensor,
+void RequireShape(const Generators::Tensor& tensor,
                   std::initializer_list<size_t> dimensions,
                   std::string_view name) {
-  if (tensor.shape.size() != dimensions.size())
+  const auto shape = tensor.GetShape();
+  if (shape.size() != dimensions.size())
     throw std::runtime_error(std::string(name) + " must have rank " +
                              std::to_string(dimensions.size()));
   size_t index = 0;
   for (const auto expected : dimensions) {
-    if (tensor.shape[index] < 0 ||
-        static_cast<size_t>(tensor.shape[index]) != expected)
+    if (shape[index] < 0 ||
+        static_cast<size_t>(shape[index]) != expected)
       throw std::runtime_error(std::string(name) + " dimension " +
                                std::to_string(index) + " must be " +
                                std::to_string(expected));
@@ -365,17 +379,18 @@ void RequireShape(const OgaComponentTensor& tensor,
     throw std::runtime_error(std::string(name) + " has an invalid element count");
 }
 
-size_t RequireHiddenShape(const OgaComponentTensor& tensor, size_t rows,
+size_t RequireHiddenShape(const Generators::Tensor& tensor, size_t rows,
                           size_t width, std::string_view name) {
-  if (tensor.shape.size() != 3)
+  const auto shape = tensor.GetShape();
+  if (shape.size() != 3)
     throw std::runtime_error(std::string(name) + " must have rank 3");
-  if (tensor.shape[0] < 0 || static_cast<size_t>(tensor.shape[0]) != rows)
+  if (shape[0] < 0 || static_cast<size_t>(shape[0]) != rows)
     throw std::runtime_error(std::string(name) + " row count does not match the token batch");
-  if (tensor.shape[1] < 0 || static_cast<size_t>(tensor.shape[1]) != width)
+  if (shape[1] < 0 || static_cast<size_t>(shape[1]) != width)
     throw std::runtime_error(std::string(name) + " sequence width does not match the token batch");
-  if (tensor.shape[2] <= 0)
+  if (shape[2] <= 0)
     throw std::runtime_error(std::string(name) + " hidden dimension must be positive");
-  const auto hidden_size = static_cast<size_t>(tensor.shape[2]);
+  const auto hidden_size = static_cast<size_t>(shape[2]);
   if (rows && width > std::numeric_limits<size_t>::max() / rows)
     throw std::runtime_error(std::string(name) + " element count overflows size_t");
   const auto tokens = rows * width;
@@ -386,7 +401,7 @@ size_t RequireHiddenShape(const OgaComponentTensor& tensor, size_t rows,
   return hidden_size;
 }
 
-void RequireFloatCount(const OgaComponentTensor& tensor,
+void RequireFloatCount(const Generators::Tensor& tensor,
                        const std::vector<float>& values,
                        std::string_view name) {
   if (values.size() != TensorElementCount(tensor, name))
@@ -396,21 +411,31 @@ void RequireFloatCount(const OgaComponentTensor& tensor,
 
 struct FeedStorage {
   std::vector<std::vector<std::byte>> bytes;
-  std::vector<OgaComponentInput> inputs;
+  Generators::NamedTensors inputs;
   template <typename T>
   void Add(std::string name, const std::vector<T>& value, std::vector<int64_t> shape,
            OgaElementType type) {
     bytes.emplace_back(value.size() * sizeof(T));
     if (!value.empty()) std::memcpy(bytes.back().data(), value.data(), bytes.back().size());
-    inputs.push_back({std::move(name), bytes.back().data(), bytes.back().size(),
-                      std::move(shape), type});
+    auto memory = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto tensor = OrtValue::CreateTensor(
+        *memory, bytes.back().data(), bytes.back().size(), shape,
+        static_cast<ONNXTensorElementDataType>(type));
+    inputs.emplace(std::move(name),
+                   std::make_shared<Generators::Tensor>(std::move(tensor)));
   }
-  void AddZeros(std::string name, std::vector<int64_t> shape, OgaElementType type) {
+  void AddZeros(std::string name, std::vector<int64_t> shape,
+                ONNXTensorElementDataType type) {
     const auto count = std::accumulate(shape.begin(), shape.end(), size_t{1},
                                        [](size_t left, int64_t right) { return left * static_cast<size_t>(right); });
-    const auto size = count * ElementSize(type);
+    const auto size = count * Ort::SizeOf(type);
     bytes.emplace_back(std::max<size_t>(size, 1), std::byte{});
-    inputs.push_back({std::move(name), bytes.back().data(), size, std::move(shape), type});
+    auto memory = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto tensor = OrtValue::CreateTensor(
+        *memory, bytes.back().data(), size, shape,
+        type);
+    inputs.emplace(std::move(name),
+                   std::make_shared<Generators::Tensor>(std::move(tensor)));
   }
 };
 
@@ -424,9 +449,9 @@ void AddPositionIds(FeedStorage& feeds, const Generators::ComponentSession& sess
                     size_t width) {
   const auto found = std::find_if(
       session.Inputs().begin(), session.Inputs().end(),
-      [](const OgaComponentInfo& info) { return info.name == "position_ids"; });
+      [](const Generators::ComponentInfo& info) { return info.name == "position_ids"; });
   if (found == session.Inputs().end()) return;
-  if (found->type != OgaElementType_int64)
+  if (found->type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
     throw std::runtime_error("position_ids must use int64 elements");
   if (positions.size() != rows * width)
     throw std::runtime_error("position_ids data size does not match the token batch");
@@ -465,7 +490,7 @@ void AddPositionIds(FeedStorage& feeds, const Generators::ComponentSession& sess
       "[axes, batch, sequence] with a fixed axis count");
 }
 
-TokenBatch Tokenize(DirectoryTokenizer& tokenizer, const std::vector<std::string>& texts) {
+TokenBatch Tokenize(Generators::PackageTokenizer& tokenizer, const std::vector<std::string>& texts) {
   if (texts.empty()) throw std::invalid_argument("questions must be non-empty");
   std::vector<std::vector<int32_t>> rows;
   size_t width = 0;
@@ -724,7 +749,7 @@ struct NativeRankingSession {
   std::string identity;
   mutable std::mutex operation_mutex;
   SessionLruCache<std::vector<float>> cache;
-  DirectoryTokenizer tokenizer;
+  Generators::PackageTokenizer tokenizer;
   Generators::ComponentSession encoder;
   std::unique_ptr<Generators::ComponentSession> combined, state, action, scorer, fused;
   OgaModelResult Run(const OgaStructuredRequest& request);
@@ -749,13 +774,14 @@ struct NativeRankingSession {
 };
 
 std::pair<std::vector<float>, size_t> EncodeAndPool(
-    DirectoryTokenizer& tokenizer, Generators::ComponentSession& encoder,
+    Generators::PackageTokenizer& tokenizer, Generators::ComponentSession& encoder,
     const std::vector<std::string>& texts) {
   if (texts.empty()) return {{}, 0};
   auto batch = Tokenize(tokenizer, texts);
   auto feeds = BackboneFeeds(encoder, batch);
   const auto hidden_name = HiddenOutputName(encoder);
-  auto hidden_tensor = FindTensor(encoder.Run(feeds.inputs, {hidden_name}), hidden_name);
+  const auto hidden_tensors = encoder.Run(feeds.inputs, {hidden_name});
+  const auto& hidden_tensor = FindTensor(hidden_tensors, hidden_name);
   const auto hidden_size =
       RequireHiddenShape(hidden_tensor, batch.rows, batch.width, "encoder hidden states");
   const auto hidden = FloatTensor(hidden_tensor);
@@ -879,7 +905,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     auto feeds = BackboneFeeds(*fused, batch);
     const auto selector_info = std::find_if(
         fused->Inputs().begin(), fused->Inputs().end(),
-        [](const OgaComponentInfo& value) {
+        [](const Generators::ComponentInfo& value) {
           return value.name == "last_token_selector";
         });
     if (selector_info == fused->Inputs().end())
@@ -899,14 +925,14 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     const std::vector<int64_t> selector_shape{
         static_cast<int64_t>(batch.rows),
         static_cast<int64_t>(batch.width), 1};
-    if (selector_info->type == OgaElementType_float16) {
+    if (selector_info->type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
       std::vector<uint16_t> selector(
           batch.rows * batch.width, uint16_t{});
       for (const auto index : selected_indices)
         selector[index] = uint16_t{0x3c00};
       feeds.Add("last_token_selector", selector, selector_shape,
                 OgaElementType_float16);
-    } else if (selector_info->type == OgaElementType_float32) {
+    } else if (selector_info->type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       std::vector<float> selector(batch.rows * batch.width, 0.0f);
       for (const auto index : selected_indices) selector[index] = 1.0f;
       feeds.Add("last_token_selector", selector, selector_shape,
@@ -1034,9 +1060,10 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
     const auto& state_tensor = FindTensor(projected, "state_embedding");
     const auto& action_tensor = FindTensor(projected, "action_embedding");
     const auto& scale_tensor = FindTensor(projected, "effective_logit_scale");
-    if (action_tensor.shape.size() != 2 || action_tensor.shape[1] <= 0)
+    const auto action_shape = action_tensor.GetShape();
+    if (action_shape.size() != 2 || action_shape[1] <= 0)
       throw std::runtime_error("action embedding must be a rank-2 tensor with a positive projection dimension");
-    const auto projection_size = static_cast<size_t>(action_tensor.shape[1]);
+    const auto projection_size = static_cast<size_t>(action_shape[1]);
     RequireShape(action_tensor, {missing_indices.size(), projection_size},
                  "action embedding");
     RequireShape(state_tensor, {question_count, projection_size},
@@ -1097,10 +1124,11 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       feeds.Add("embeddings", values, {static_cast<int64_t>(rows), static_cast<int64_t>(columns)}, OgaElementType_float32);
       const auto tensors = session.Run(feeds.inputs, {"projections"});
       const auto& tensor = FindTensor(tensors, "projections");
-      if (tensor.shape.size() != 2 || tensor.shape[1] <= 0)
+      const auto tensor_shape = tensor.GetShape();
+      if (tensor_shape.size() != 2 || tensor_shape[1] <= 0)
         throw std::runtime_error(std::string(name) +
                                  " must be rank 2 with a positive projection dimension");
-      const auto projection_size = static_cast<size_t>(tensor.shape[1]);
+      const auto projection_size = static_cast<size_t>(tensor_shape[1]);
       RequireShape(tensor, {rows, projection_size}, name);
       auto result = FloatTensor(tensor);
       RequireFloatCount(tensor, result, name);
@@ -1217,7 +1245,7 @@ size_t KevTokenBytes(const CachedKevTokens& value) {
 }
 
 struct KevStateBinding {
-  const OgaComponentInfo* input{};
+  const Generators::ComponentInfo* input{};
   std::string output;
   size_t batch_axis{};
   std::optional<size_t> growing_axis;
@@ -1225,14 +1253,16 @@ struct KevStateBinding {
 
 struct CachedKevPrefix {
   size_t length{};
-  std::vector<OgaComponentTensor> states;
+  std::vector<std::shared_ptr<Generators::Tensor>> states;
 };
 
 size_t KevPrefixBytes(const CachedKevPrefix& value) {
   size_t bytes = sizeof(value.length);
-  for (const auto& state : value.states)
-    bytes += state.name.size() + state.data.size() +
-             state.shape.size() * sizeof(int64_t);
+  for (const auto& state : value.states) {
+    if (!state) continue;
+    bytes += state->GetElementCount() * Ort::SizeOf(state->GetType()) +
+             state->GetShape().size() * sizeof(int64_t);
+  }
   return bytes;
 }
 
@@ -1308,47 +1338,42 @@ std::vector<KevStateBinding> DiscoverKevStateBindings(
 }
 
 void ValidatePrefixState(const KevStateBinding& binding,
-                         const OgaComponentTensor& state) {
+                         const Generators::Tensor& state) {
   const auto& input = *binding.input;
-  if (state.type != input.type)
-    throw std::runtime_error("state dtype mismatch between " + input.name +
-                             " and " + state.name);
-  if (state.shape.size() != input.shape.size() || state.shape.empty())
-    throw std::runtime_error("state rank mismatch between " + input.name +
-                             " and " + state.name);
-  if (binding.batch_axis >= state.shape.size() ||
-      state.shape[binding.batch_axis] != 1)
-    throw std::runtime_error("prefix state output must have batch dimension 1: " +
-                             state.name);
-  for (size_t i = 0; i < state.shape.size(); ++i) {
+  const auto shape = state.GetShape();
+  if (state.GetType() != input.type)
+    throw std::runtime_error("state dtype mismatch for " + input.name);
+  if (shape.size() != input.shape.size() || shape.empty())
+    throw std::runtime_error("state rank mismatch for " + input.name);
+  if (binding.batch_axis >= shape.size() ||
+      shape[binding.batch_axis] != 1)
+    throw std::runtime_error(
+        "prefix state output must have batch dimension 1: " + binding.output);
+  for (size_t i = 0; i < shape.size(); ++i) {
     if (i == binding.batch_axis) continue;
-    if (state.shape[i] < 0)
+    if (shape[i] < 0)
       throw std::runtime_error("prefix state output has a negative dimension: " +
-                               state.name);
+                               binding.output);
     if (input.shape[i] >= 0 &&
         (!binding.growing_axis || i != *binding.growing_axis) &&
-        input.shape[i] != state.shape[i])
+        input.shape[i] != shape[i])
       throw std::runtime_error("state dimension mismatch between " + input.name +
-                               " and " + state.name);
+                               " and " + binding.output);
   }
-  const auto expected = TensorElementCount(state, state.name) * ElementSize(state.type);
-  if (expected != state.data.size())
-    throw std::runtime_error("state byte count does not match shape: " + state.name);
+  if (TensorElementCount(state, binding.output) != state.GetElementCount())
+    throw std::runtime_error("state element count does not match shape: " +
+                             binding.output);
 }
 
 void AddRepeatedState(FeedStorage& feeds, const KevStateBinding& binding,
-                      const OgaComponentTensor& state, size_t batch) {
-  ValidatePrefixState(binding, state);
-  auto shape = state.shape;
-  shape[binding.batch_axis] = static_cast<int64_t>(batch);
-  if (batch && state.data.size() > std::numeric_limits<size_t>::max() / batch)
-    throw std::runtime_error("repeated state byte count overflows size_t");
-  feeds.bytes.emplace_back(state.data.size() * batch);
-  for (size_t i = 0; i < batch; ++i)
-    std::memcpy(feeds.bytes.back().data() + i * state.data.size(),
-                state.data.data(), state.data.size());
-  feeds.inputs.push_back({binding.input->name, feeds.bytes.back().data(),
-                          feeds.bytes.back().size(), std::move(shape), state.type});
+                      const std::shared_ptr<Generators::Tensor>& state,
+                      size_t batch) {
+  if (!state) throw std::runtime_error("cached state tensor is null");
+  ValidatePrefixState(binding, *state);
+  if (batch != 1)
+    throw std::runtime_error(
+        "cached state reuse currently requires branch batch size one");
+  feeds.inputs.emplace(binding.input->name, state);
 }
 
 struct NativeDecisionSession {
@@ -1373,7 +1398,7 @@ struct NativeDecisionSession {
   mutable std::mutex operation_mutex;
   SessionLruCache<CachedKevTokens> cache;
   SessionLruCache<CachedKevPrefix> prefix_cache;
-  DirectoryTokenizer tokenizer;
+  Generators::PackageTokenizer tokenizer;
   Generators::ComponentSession backbone;
   std::unique_ptr<Generators::ComponentSession> pointer;
   std::vector<KevStateBinding> state_bindings;
@@ -1506,9 +1531,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
   // state tensors costs more than recomputing a short prefix.
   const bool use_prefix_reuse =
       prefix_reuse_enabled && !state_bindings.empty() &&
-      ((!UsesCuda(providers) && rows.size() == 1) ||
-       (UsesCuda(providers) &&
-        state_value.tokens.size() >= kMinCudaKevPrefixTokens));
+      !UsesCuda(providers) && rows.size() == 1;
   if (!use_prefix_reuse) {
     ++fallback_runs;
     for (size_t i = 0; i < rows.size(); ++i) {
@@ -1536,7 +1559,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     std::fill_n(batch.mask.begin() + row * batch.width, rows[row].size(), 1);
   }
   const auto hidden_name = HiddenOutputName(backbone);
-  OgaComponentTensor hidden_tensor;
+  std::shared_ptr<Generators::Tensor> hidden_tensor;
   if (use_prefix_reuse) {
     std::string prefix_key = identity + "|kev-model-prefix|" +
                              std::to_string(state_value.tokens.size()) + ":";
@@ -1559,8 +1582,8 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
       prefix.length = state_value.tokens.size();
       prefix.states.reserve(state_bindings.size());
       for (const auto& binding : state_bindings) {
-        const auto& state = FindTensor(tensors, binding.output);
-        ValidatePrefixState(binding, state);
+        const auto state = tensors.at(binding.output);
+        ValidatePrefixState(binding, *state);
         prefix.states.push_back(state);
       }
       prefix_cache.Put(prefix_key, prefix);
@@ -1597,18 +1620,20 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     AddPositionIds(branch_feeds, backbone, positions, batch.rows, batch.width);
     for (size_t i = 0; i < state_bindings.size(); ++i)
       AddRepeatedState(branch_feeds, state_bindings[i], prefix.states[i], batch.rows);
-    hidden_tensor =
-        FindTensor(backbone.Run(branch_feeds.inputs, {hidden_name}), hidden_name);
+    auto hidden_outputs =
+        backbone.Run(branch_feeds.inputs, {hidden_name});
+    hidden_tensor = hidden_outputs.at(hidden_name);
     ++branch_runs;
   } else {
     auto feeds = BackboneFeeds(backbone, batch);
-    hidden_tensor = FindTensor(backbone.Run(feeds.inputs, {hidden_name}), hidden_name);
+    auto hidden_outputs = backbone.Run(feeds.inputs, {hidden_name});
+    hidden_tensor = hidden_outputs.at(hidden_name);
   }
   const auto hidden_size =
-      RequireHiddenShape(hidden_tensor, batch.rows, batch.width,
+      RequireHiddenShape(*hidden_tensor, batch.rows, batch.width,
                          "backbone hidden states");
-  const auto hidden = FloatTensor(hidden_tensor);
-  RequireFloatCount(hidden_tensor, hidden, "backbone hidden states");
+  const auto hidden = FloatTensor(*hidden_tensor);
+  RequireFloatCount(*hidden_tensor, hidden, "backbone hidden states");
   std::vector<int64_t> owners;
   for (size_t i = 0; i < option_indices.size(); ++i)
     owners.insert(owners.end(), option_indices[i].size(), static_cast<int64_t>(i));
@@ -1633,7 +1658,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
   if (flat) {
     const auto hidden_input = std::find_if(
         pointer->Inputs().begin(), pointer->Inputs().end(),
-        [](const OgaComponentInfo& info) { return info.name == "hidden_states"; });
+        [](const Generators::ComponentInfo& info) { return info.name == "hidden_states"; });
     if (hidden_input == pointer->Inputs().end() ||
         (hidden_input->shape.size() != 2 && hidden_input->shape.size() != 3))
       throw std::runtime_error(

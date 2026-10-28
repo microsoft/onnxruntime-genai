@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from onnxruntime_genai.onnxruntime_genai import (
-    ComponentSession,
     _DecisionSession,
     _RankingSession,
 )
@@ -110,4 +109,4 @@ class DecisionSession:
     __call__ = decide
 
 
-__all__ = ["ComponentSession", "DecisionSession", "RankingSession"]
+__all__ = ["DecisionSession", "RankingSession"]

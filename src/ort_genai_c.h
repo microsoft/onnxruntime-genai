@@ -231,62 +231,6 @@ OGA_EXPORT void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled);
  */
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
 
-// Opaque, uncached execution API for independently exported ONNX components.
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateComponentSession(
-    const char* package_path, const char* component, const char* const* providers,
-    size_t provider_count, OgaComponentSession** out);
-OGA_EXPORT void OGA_API_CALL OgaDestroyComponentSession(OgaComponentSession* session);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputCount(
-    const OgaComponentSession* session, size_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetOutputCount(
-    const OgaComponentSession* session, size_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputName(
-    const OgaComponentSession* session, size_t index, const char** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetOutputName(
-    const OgaComponentSession* session, size_t index, const char** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputType(
-    const OgaComponentSession* session, size_t index, OgaElementType* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputShapeRank(
-    const OgaComponentSession* session, size_t index, size_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputShapeDimension(
-    const OgaComponentSession* session, size_t index, size_t dimension, int64_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionGetInputSymbolicDimension(
-    const OgaComponentSession* session, size_t index, size_t dimension, const char** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateComponentInputs(OgaComponentInputs** out);
-// Copies name, data, and shape. The caller may release or mutate all supplied
-// buffers immediately after this function returns.
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentInputsAdd(
-    OgaComponentInputs* inputs, const char* name, const void* data, size_t byte_count,
-    const int64_t* shape, size_t shape_rank, OgaElementType type);
-OGA_EXPORT void OGA_API_CALL OgaDestroyComponentInputs(OgaComponentInputs* inputs);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentSessionRun(
-    OgaComponentSession* session, const OgaComponentInputs* inputs,
-    const char* const* output_names, size_t output_count, OgaComponentTensors** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetCount(
-    const OgaComponentTensors* tensors, size_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetName(
-    const OgaComponentTensors* tensors, size_t index, const char** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetType(
-    const OgaComponentTensors* tensors, size_t index, OgaElementType* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetShapeRank(
-    const OgaComponentTensors* tensors, size_t index, size_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetShapeDimension(
-    const OgaComponentTensors* tensors, size_t index, size_t dimension, int64_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaComponentTensorsGetData(
-    const OgaComponentTensors* tensors, size_t index, const void** data, size_t* byte_count);
-OGA_EXPORT void OGA_API_CALL OgaDestroyComponentTensors(OgaComponentTensors* tensors);
-
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateDirectoryTokenizer(
-    const char* package_path, OgaDirectoryTokenizer** out);
-OGA_EXPORT void OGA_API_CALL OgaDestroyDirectoryTokenizer(OgaDirectoryTokenizer* tokenizer);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDirectoryTokenizerEncode(
-    const OgaDirectoryTokenizer* tokenizer, const char* text, OgaTokenIds** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDirectoryTokenizerGetPadTokenId(
-    const OgaDirectoryTokenizer* tokenizer, int32_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenIdsGetData(
-    const OgaTokenIds* token_ids, const int32_t** data, size_t* count);
-OGA_EXPORT void OGA_API_CALL OgaDestroyTokenIds(OgaTokenIds* token_ids);
-
 // Structured values and request builders clone values passed to append/set functions.
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredValueNull(OgaStructuredValueHandle** out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStructuredValueBool(bool value, OgaStructuredValueHandle** out);

@@ -25,24 +25,6 @@ ranking.clear_cache()
 ranking.set_cache_capacity(0, 0)
 ```
 
-`ComponentSession(package_path, component)` is the lower-level named graph
-primitive. Its `input_names`, `output_names`, and `input_info` properties expose
-the graph contract; `run({name: numpy_array}, outputs)` returns a name-to-array
-dictionary. A session serializes calls to `run`, while distinct sessions may run
-concurrently.
-
-The same primitive is public C++ API:
-
-```cpp
-#include "ort_genai.h"
-
-ComponentSession session{"/models/package", "custom_encoder", {"cuda"}};
-std::vector<float> values(8);
-OgaComponentInput input{"input", values.data(), values.size() * sizeof(float),
-                        {2, 4}, OgaElementType_float32};
-auto outputs = session.Run({input}, {"output"});
-```
-
 `RankingSession` and `DecisionSession` are public typed C++ package entry points.
 They own the tokenizer and component sessions and perform the same rendering,
 tokenization, pooling, scoring, and answer shaping as Python:
@@ -72,19 +54,14 @@ booleans, integers, doubles, strings, ordered arrays, and ordered objects.
 `OgaAnswer` exposes typed `noul`, `choice`, `score`, `confidence`,
 `probabilities`, and `legend` fields. `OgaModelResult::model` identifies CLM or
 KEV.
-`DirectoryTokenizer(package_path)` is the public movable C++ tokenizer primitive
-for these packages; `Encode(text)` performs no-special-token tokenization and
-`PadTokenId()` exposes the configured pad id. These C++ classes are inline RAII
-wrappers; the shared-library boundary contains no STL types.
+Internally these workflows reuse the existing `Config`, `Tokenizer`, `Tensor`,
+and `NamedTensors` infrastructure. Named component execution and package pad
+token resolution are private implementation details rather than additional
+public handle families.
 
 The C ABI in `ort_genai_c.h` exposes opaque handles for the same
 functionality:
 
-* `OgaComponentSession`, `OgaComponentInputs`, and `OgaComponentTensors` cover
-  named graph execution and tensor name/type/shape/data access.
-  `OgaComponentInputsAdd` copies the input name, shape, and bytes, so callers
-  may immediately release or mutate every supplied buffer.
-* `OgaDirectoryTokenizer` and `OgaTokenIds` cover directory tokenization.
 * `OgaStructuredValueHandle`, request, and question builders preserve ordered
   recursive values while cloning values supplied by callers.
 * `OgaRankingSessionHandle` and `OgaDecisionSessionHandle` run typed requests;
@@ -140,11 +117,8 @@ state I/O raises rather than silently falling back. Setting
 `prefix_reuse_enabled=False` selects the full-row parity/debug path. CPU
 GroupQueryAttention currently supports cached context only for batch one, so
 multi-question CPU requests use the full-row path; single-question CPU
-requests use prefix reuse. CUDA
-sessions also use that path automatically for state prefixes shorter than 128
-tokens, where recomputation is cheaper than transferring and repeating the
-cached component state. CPU sessions and longer CUDA prefixes continue to use
-prefix reuse.
+requests use prefix reuse. CUDA currently uses the full-row path until
+device-native state repetition is qualified.
 
 `cache_stats` describes token/branch caching. `prefix_cache_stats` describes
 model-state hits, misses, eviction/occupancy, prefix executions, batched branch
