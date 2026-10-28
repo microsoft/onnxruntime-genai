@@ -1148,6 +1148,8 @@ def flatten_drafter_options(
     )
     if drafter_type == "mtp":
         flattened["mtp_quant_config"] = quant_config
+        # Lets the model builder tell an explicit MTP request from the config-driven default.
+        flattened["_mtp_requested"] = True
     else:
         flattened[f"{drafter_type}_path"] = options["path"]
         if "num_draft_tokens" in options:

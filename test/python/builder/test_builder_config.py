@@ -1302,6 +1302,14 @@ def test_structured_mtp_inherits_target_io_dtype(precision, provider, legacy_opt
     assert effective.extra_options["mtp_quant_config"].io_dtype == expected_io_dtype
 
 
+def test_structured_mtp_selection_survives_normalization():
+    explicit = normalize_builder_config("int4", "cuda", drafter_options={"drafter_type": "mtp"})
+    implicit = normalize_builder_config("int4", "cuda", target_options={})
+
+    assert explicit.extra_options["_mtp_requested"] is True
+    assert "_mtp_requested" not in implicit.extra_options
+
+
 def test_structured_mtp_rejects_io_dtype_that_differs_from_the_target():
     with pytest.raises(ValueError, match="MTP io_dtype must match the target io_dtype 'fp16'"):
         normalize_builder_config(
