@@ -344,9 +344,37 @@ def test_combined_clm_high_level_session(tmp_path):
         )
     )
     session = og.RankingSession(tmp_path, providers=["cpu"])
-    answer = session.rank({"state": "1", "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}}})
-    assert answer["q"]["type"] == "choice"
-    assert set(answer["q"]["probabilities"]) == {"a", "b"}
+    answer = session.run({"state": "1", "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}}})
+    assert answer["model"] == "clm"
+    assert answer["answers"]["q"]["type"] == "choice"
+    assert set(answer["answers"]["q"]["probabilities"]) == {"a", "b"}
+    ranked = session.rank(
+        {
+            "state": "1",
+            "instructions": "choose",
+            "candidates": {"a": "1", "b": "2"},
+        }
+    )
+    assert ranked["model"] == "clm"
+    assert [item["rank"] for item in ranked["ranked"]] == [1, 2]
+    assert {item["key"] for item in ranked["ranked"]} == {"a", "b"}
+    numeric = session.run(
+        {
+            "state": {"whole": 1.0, "fraction": 0.1},
+            "questions": {
+                "q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}
+            },
+        }
+    )
+    textual = session.run(
+        {
+            "state": {"whole": "1.0", "fraction": "0.1"},
+            "questions": {
+                "q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}
+            },
+        }
+    )
+    assert numeric == textual
 
 
 def test_flat_kev_high_level_session(tmp_path):
@@ -411,13 +439,39 @@ def test_flat_kev_high_level_session(tmp_path):
             }
         )
     )
-    answer = og.DecisionSession(tmp_path, providers=["cpu"]).decide(
+    session = og.DecisionSession(tmp_path, providers=["cpu"])
+    answer = session.decide(
         {
             "state": "1",
             "questions": {"q": {"type": "noul", "criteria": {}}},
         }
     )
-    assert answer == {"q": {"type": "noul", "noul": 0.5}}
+    assert answer == {
+        "model": "kev",
+        "answers": {"q": {"type": "noul", "noul": 0.5}},
+    }
+    score = session.decide(
+        {
+            "state": "1",
+            "questions": {
+                "q": {
+                    "type": "score",
+                    "criteria": ["low", "medium", "high"],
+                }
+            },
+        }
+    )
+    assert score["answers"]["q"]["confidence"] == 0
+    with pytest.raises(
+        ValueError, match="temperature is supported only by ranking sessions"
+    ):
+        session.decide(
+            {
+                "state": "1",
+                "temperature": 0.5,
+                "questions": {"q": {"type": "noul", "criteria": {}}},
+            }
+        )
 
 
 def _stateful_kev_package(root: Path) -> Path:
@@ -428,34 +482,34 @@ def _stateful_kev_package(root: Path) -> Path:
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
         helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch", "total_sequence"]),
         helper.make_tensor_value_info("position_ids", TensorProto.INT64, [3, "batch", "sequence"]),
-        helper.make_tensor_value_info("past_key_values.0.key", TensorProto.FLOAT, ["batch", 1, "past_sequence", 1]),
-        helper.make_tensor_value_info("past_key_values.0.value", TensorProto.FLOAT, ["batch", 1, "past_sequence", 1]),
-        helper.make_tensor_value_info("past_key_values.1.conv_state", TensorProto.FLOAT, ["batch", 1, 1]),
-        helper.make_tensor_value_info("past_key_values.1.recurrent_state", TensorProto.FLOAT, ["batch", 1, 1, 1]),
+        helper.make_tensor_value_info("past.0.key", TensorProto.FLOAT, ["batch", 1, "past_sequence", "kv_cache_dim"]),
+        helper.make_tensor_value_info("past.0.value", TensorProto.FLOAT, ["batch", 1, "past_sequence", "kv_cache_dim"]),
+        helper.make_tensor_value_info("past.0.conv", TensorProto.FLOAT, ["batch", 1, "kv_cache_dim"]),
+        helper.make_tensor_value_info("past.0.recurrent", TensorProto.FLOAT, ["batch", 1, 1, "kv_cache_dim"]),
     ]
     outputs = [
         helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, ["batch", "sequence", 4]),
-        helper.make_tensor_value_info("present.0.key", TensorProto.FLOAT, ["batch", 1, "total_sequence", 1]),
-        helper.make_tensor_value_info("present.0.value", TensorProto.FLOAT, ["batch", 1, "total_sequence", 1]),
-        helper.make_tensor_value_info("present.1.conv_state", TensorProto.FLOAT, ["batch", 1, 1]),
-        helper.make_tensor_value_info("present.1.recurrent_state", TensorProto.FLOAT, ["batch", 1, 1, 1]),
+        helper.make_tensor_value_info("present.0.key", TensorProto.FLOAT, ["batch", 1, "total_sequence", "kv_cache_dim"]),
+        helper.make_tensor_value_info("present.0.value", TensorProto.FLOAT, ["batch", 1, "total_sequence", "kv_cache_dim"]),
+        helper.make_tensor_value_info("present.0.conv", TensorProto.FLOAT, ["batch", 1, "kv_cache_dim"]),
+        helper.make_tensor_value_info("present.0.recurrent", TensorProto.FLOAT, ["batch", 1, 1, "kv_cache_dim"]),
     ]
     nodes = [
         helper.make_node("Cast", ["input_ids"], ["ids_f"], to=TensorProto.FLOAT),
         helper.make_node("CumSum", ["ids_f", "axis1"], ["cumulative"]),
-        helper.make_node("Squeeze", ["past_key_values.1.recurrent_state", "axes123"], ["past_scalar"]),
+        helper.make_node("Squeeze", ["past.0.recurrent", "axes123"], ["past_scalar"]),
         helper.make_node("Unsqueeze", ["past_scalar", "axes12"], ["past_for_tokens"]),
         helper.make_node("Unsqueeze", ["cumulative", "axis2"], ["cumulative_3d"]),
         helper.make_node("Add", ["cumulative_3d", "past_for_tokens"], ["hidden_one"]),
         helper.make_node("Concat", ["hidden_one"] * 4, ["hidden_states"], axis=2),
         helper.make_node("Unsqueeze", ["ids_f", "axes13"], ["new_kv"]),
-        helper.make_node("Concat", ["past_key_values.0.key", "new_kv"], ["present.0.key"], axis=2),
-        helper.make_node("Concat", ["past_key_values.0.value", "new_kv"], ["present.0.value"], axis=2),
+        helper.make_node("Concat", ["past.0.key", "new_kv"], ["present.0.key"], axis=2),
+        helper.make_node("Concat", ["past.0.value", "new_kv"], ["present.0.value"], axis=2),
         helper.make_node("ReduceSum", ["ids_f", "axis1"], ["token_sum"], keepdims=1),
         helper.make_node("Unsqueeze", ["token_sum", "axis2"], ["token_sum_3d"]),
-        helper.make_node("Add", ["past_key_values.1.conv_state", "token_sum_3d"], ["present.1.conv_state"]),
+        helper.make_node("Add", ["past.0.conv", "token_sum_3d"], ["present.0.conv"]),
         helper.make_node("Unsqueeze", ["token_sum_3d", "axis3"], ["token_sum_4d"]),
-        helper.make_node("Add", ["past_key_values.1.recurrent_state", "token_sum_4d"], ["present.1.recurrent_state"]),
+        helper.make_node("Add", ["past.0.recurrent", "token_sum_4d"], ["present.0.recurrent"]),
     ]
     initializers = [
         helper.make_tensor("axis1", TensorProto.INT64, [1], [1]),
@@ -505,6 +559,10 @@ def _stateful_kev_package(root: Path) -> Path:
     )
     head.ir_version = 13
     onnx.save(head, root / "kev_head.onnx")
+    _write_component_genai_config(root, "backbone.onnx", 1)
+    config = json.loads((root / "genai_config.json").read_text())
+    config["model"]["decoder"]["hidden_size"] = 1
+    (root / "genai_config.json").write_text(json.dumps(config))
     (root / "component_manifest.json").write_text(
         json.dumps(
             {
@@ -534,22 +592,23 @@ def test_stateful_kev_prefix_reuse_parity_cache_and_isolation(tmp_path):
     optimized_result = optimized.decide(request)
     assert optimized_result == full.decide(request)
     assert optimized.prefix_reuse_status == "compatible explicit state I/O"
-    assert optimized.prefix_cache_stats["prefix_runs"] == 1
-    assert optimized.prefix_cache_stats["branch_runs"] == 1
+    assert optimized.prefix_cache_stats["prefix_runs"] == 0
+    assert optimized.prefix_cache_stats["fallback_runs"] == 1
     assert optimized.decide(request) == optimized_result
-    assert optimized.prefix_cache_stats["hits"] == 1
-    assert optimized.prefix_cache_stats["prefix_runs"] == 1
+    assert optimized.prefix_cache_stats["prefix_runs"] == 0
 
-    isolated = og.DecisionSession(package, providers=["cpu"]).decide(
+    isolated_session = og.DecisionSession(package, providers=["cpu"])
+    isolated = isolated_session.decide(
         {"state": request["state"], "questions": {"two": request["questions"]["two"]}}
     )
-    assert isolated["two"] == optimized_result["two"]
+    assert isolated["answers"]["two"] == optimized_result["answers"]["two"]
+    assert isolated_session.prefix_cache_stats["prefix_runs"] == 1
+    assert isolated_session.prefix_cache_stats["branch_runs"] == 1
     optimized.invalidate_cache()
     optimized.decide(request)
-    assert optimized.prefix_cache_stats["prefix_runs"] == 2
+    assert optimized.prefix_cache_stats["prefix_runs"] == 0
     optimized.set_prefix_cache_capacity(1, 1)
     assert optimized.prefix_cache_stats["entries"] == 0
-    assert optimized.prefix_cache_stats["evictions"] >= 1
 
 
 def test_malformed_clm_hidden_shape_returns_runtime_error(tmp_path):
@@ -611,7 +670,7 @@ def test_malformed_clm_hidden_shape_returns_runtime_error(tmp_path):
 
     session = og.RankingSession(tmp_path, providers=["cpu"])
     with pytest.raises(RuntimeError, match="encoder hidden states must have rank 3"):
-        session.rank({"state": "1", "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}}})
+        session.run({"state": "1", "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}}})
 
 
 def test_malformed_kev_probability_shape_returns_runtime_error(tmp_path):

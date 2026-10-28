@@ -238,7 +238,6 @@ class OGA_CPP_ONLY RankingSession {
   }
   RankingSession(const RankingSession&) = delete;
   RankingSession& operator=(const RankingSession&) = delete;
-  NamedComponentSession Component(const std::string& name) const;
   OgaModelResult Run(const OgaStructuredRequest& request);
   OgaRankingResult Rank(const OgaFreeFormRankRequest& request);
   void SetCacheCapacity(size_t entry_capacity, size_t byte_capacity);
@@ -265,8 +264,6 @@ class OGA_CPP_ONLY DecisionSession {
   }
   DecisionSession(const DecisionSession&) = delete;
   DecisionSession& operator=(const DecisionSession&) = delete;
-  NamedComponentSession Component(const std::string& name) const;
-  OgaModelResult Run(const OgaStructuredRequest& request);
   OgaModelResult Decide(const OgaStructuredRequest& request);
   void SetCacheCapacity(size_t entry_capacity, size_t byte_capacity);
   OgaNonGenerativeCacheStats CacheStats() const;
@@ -335,7 +332,8 @@ inline StructuredValueHandle MakeValue(const OgaStructuredValue& source) {
       break;
     case 4:
       OgaCheckResult(OgaCreateStructuredValueString(
-          std::get<std::string>(source.value).c_str(), &raw));
+          std::get<std::string>(source.value).data(),
+          std::get<std::string>(source.value).size(), &raw));
       break;
     case 5: {
       OgaCheckResult(OgaCreateStructuredValueArray(&raw));
@@ -352,7 +350,8 @@ inline StructuredValueHandle MakeValue(const OgaStructuredValue& source) {
       for (const auto& [key, item] : std::get<OgaStructuredValue::Object>(source.value)) {
         auto child = MakeValue(item);
         OgaCheckResult(
-            OgaStructuredValueObjectAppend(result.get(), key.c_str(), child.get()));
+            OgaStructuredValueObjectAppend(result.get(), key.data(), key.size(),
+                                           child.get()));
       }
       return result;
     }
@@ -385,8 +384,9 @@ inline OgaStructuredValue ReadValue(const OgaStructuredValueHandle* source) {
     }
     case OgaStructuredValueType_String: {
       const char* value{};
-      OgaCheckResult(OgaStructuredValueGetString(source, &value));
-      return value;
+      size_t length{};
+      OgaCheckResult(OgaStructuredValueGetString(source, &value, &length));
+      return std::string(value, length);
     }
     case OgaStructuredValueType_Array: {
       size_t count{};
@@ -407,9 +407,11 @@ inline OgaStructuredValue ReadValue(const OgaStructuredValueHandle* source) {
       result.reserve(count);
       for (size_t i = 0; i < count; ++i) {
         const char* key{};
+        size_t key_length{};
         const OgaStructuredValueHandle* child{};
-        OgaCheckResult(OgaStructuredValueGetObjectItem(source, i, &key, &child));
-        result.emplace_back(key, ReadValue(child));
+        OgaCheckResult(OgaStructuredValueGetObjectItem(
+            source, i, &key, &key_length, &child));
+        result.emplace_back(std::string(key, key_length), ReadValue(child));
       }
       return result;
     }
@@ -665,11 +667,6 @@ inline RankingSession::RankingSession(
   OgaCheckResult(OgaCreateRankingSession(
       package_path.c_str(), provider_ptrs.data(), provider_ptrs.size(), &handle_));
 }
-inline NamedComponentSession RankingSession::Component(const std::string& name) const {
-  OgaComponentSession* result{};
-  OgaCheckResult(OgaRankingSessionCreateComponent(handle_, name.c_str(), &result));
-  return NamedComponentSession(result);
-}
 inline OgaModelResult RankingSession::Run(const OgaStructuredRequest& request) {
   auto native_request = OgaDetail::MakeRequest(request);
   OgaModelResultHandle* raw{};
@@ -690,7 +687,7 @@ inline void RankingSession::SetCacheCapacity(size_t entries, size_t bytes) {
   OgaCheckResult(OgaRankingSessionSetCacheCapacity(handle_, entries, bytes));
 }
 inline OgaNonGenerativeCacheStats RankingSession::CacheStats() const {
-  OgaNonGenerativeCacheStats result{};
+  OgaNonGenerativeCacheStats result{sizeof(OgaNonGenerativeCacheStats)};
   OgaCheckResult(OgaRankingSessionGetCacheStats(handle_, &result));
   return result;
 }
@@ -707,18 +704,6 @@ inline DecisionSession::DecisionSession(
   OgaCheckResult(OgaCreateDecisionSession(
       package_path.c_str(), provider_ptrs.data(), provider_ptrs.size(), &handle_));
 }
-inline NamedComponentSession DecisionSession::Component(const std::string& name) const {
-  OgaComponentSession* result{};
-  OgaCheckResult(OgaDecisionSessionCreateComponent(handle_, name.c_str(), &result));
-  return NamedComponentSession(result);
-}
-inline OgaModelResult DecisionSession::Run(const OgaStructuredRequest& request) {
-  auto native_request = OgaDetail::MakeRequest(request);
-  OgaModelResultHandle* raw{};
-  OgaCheckResult(OgaDecisionSessionRun(handle_, native_request.get(), &raw));
-  OgaDetail::ModelResultHandle result(raw, OgaDestroyModelResult);
-  return OgaDetail::ReadModelResult(result.get());
-}
 inline OgaModelResult DecisionSession::Decide(const OgaStructuredRequest& request) {
   auto native_request = OgaDetail::MakeRequest(request);
   OgaModelResultHandle* raw{};
@@ -730,7 +715,7 @@ inline void DecisionSession::SetCacheCapacity(size_t entries, size_t bytes) {
   OgaCheckResult(OgaDecisionSessionSetCacheCapacity(handle_, entries, bytes));
 }
 inline OgaNonGenerativeCacheStats DecisionSession::CacheStats() const {
-  OgaNonGenerativeCacheStats result{};
+  OgaNonGenerativeCacheStats result{sizeof(OgaNonGenerativeCacheStats)};
   OgaCheckResult(OgaDecisionSessionGetCacheStats(handle_, &result));
   return result;
 }
@@ -758,12 +743,12 @@ inline void DecisionSession::SetPrefixCacheCapacity(size_t entries, size_t bytes
   OgaCheckResult(OgaDecisionSessionSetPrefixCacheCapacity(handle_, entries, bytes));
 }
 inline OgaNonGenerativeCacheStats DecisionSession::PrefixCacheStats() const {
-  OgaNonGenerativeCacheStats result{};
+  OgaNonGenerativeCacheStats result{sizeof(OgaNonGenerativeCacheStats)};
   OgaCheckResult(OgaDecisionSessionGetPrefixCacheStats(handle_, &result));
   return result;
 }
 inline OgaKevPrefixReuseStats DecisionSession::PrefixReuseStats() const {
-  OgaKevPrefixReuseStats result{};
+  OgaKevPrefixReuseStats result{sizeof(OgaKevPrefixReuseStats)};
   OgaCheckResult(OgaDecisionSessionGetPrefixReuseStats(handle_, &result));
   return result;
 }

@@ -39,6 +39,9 @@ class _NativeSession:
         self.requests.append(request)
         return {"answer": {"type": "noul", "noul": 0.75}}
 
+    def rank(self, request):
+        return self.run(request)
+
     def cache_stats(self):
         return {
             "hits": 2,

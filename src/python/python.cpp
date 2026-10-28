@@ -5,9 +5,6 @@
 #include <pybind11/numpy.h>
 #define OGA_USE_SPAN 1
 #include "../models/onnxruntime_api.h"
-#include "../generator/generators.h"
-#include "../config.h"
-#include "../models/preprocessing/genai_tokenizer.h"
 #include "../ort_genai.h"
 #include <cstring>
 #include <filesystem>
@@ -146,6 +143,49 @@ OgaStructuredRequest ToStructuredRequest(const pybind11::dict& value) {
   return request;
 }
 
+OgaFreeFormRankRequest ToFreeFormRankRequest(const pybind11::dict& value) {
+  OgaFreeFormRankRequest request;
+  if (value.contains("state")) request.state = ToStructuredValue(value["state"]);
+  if (value.contains("instructions"))
+    request.instructions = ToStructuredValue(value["instructions"]);
+  if (value.contains("temperature"))
+    request.temperature = pybind11::cast<float>(value["temperature"]);
+  if (!value.contains("candidates") ||
+      !pybind11::isinstance<pybind11::dict>(value["candidates"]))
+    throw std::invalid_argument("candidates must be a non-empty object");
+  for (auto item :
+       pybind11::reinterpret_borrow<pybind11::dict>(value["candidates"]))
+    request.candidates.emplace_back(
+        pybind11::cast<std::string>(item.first),
+        ToStructuredValue(item.second));
+  if (request.candidates.empty())
+    throw std::invalid_argument("candidates must be a non-empty object");
+  return request;
+}
+
+pybind11::object StructuredValueToPython(const OgaStructuredValue& value) {
+  return std::visit(
+      [](const auto& item) -> pybind11::object {
+        using T = std::decay_t<decltype(item)>;
+        if constexpr (std::is_same_v<T, std::monostate>)
+          return pybind11::none();
+        else if constexpr (std::is_same_v<T, OgaStructuredValue::Array>) {
+          pybind11::list result;
+          for (const auto& child : item)
+            result.append(StructuredValueToPython(child));
+          return std::move(result);
+        } else if constexpr (std::is_same_v<T, OgaStructuredValue::Object>) {
+          pybind11::dict result;
+          for (const auto& [key, child] : item)
+            result[pybind11::str(key)] = StructuredValueToPython(child);
+          return std::move(result);
+        } else {
+          return pybind11::cast(item);
+        }
+      },
+      value.value);
+}
+
 pybind11::dict AnswerToPython(const OgaAnswer& answer) {
   pybind11::dict result;
   result["type"] = answer.type;
@@ -170,8 +210,27 @@ pybind11::dict AnswerToPython(const OgaAnswer& answer) {
 
 pybind11::dict ResultToPython(const OgaModelResult& value) {
   pybind11::dict result;
+  result["model"] = value.model;
+  pybind11::dict answers;
   for (const auto& [id, answer] : value.answers)
-    result[pybind11::str(id)] = AnswerToPython(answer);
+    answers[pybind11::str(id)] = AnswerToPython(answer);
+  result["answers"] = std::move(answers);
+  return result;
+}
+
+pybind11::dict RankingResultToPython(const OgaRankingResult& value) {
+  pybind11::dict result;
+  result["model"] = value.model;
+  pybind11::list ranked;
+  for (const auto& item : value.ranked) {
+    pybind11::dict entry;
+    entry["rank"] = item.rank;
+    entry["key"] = item.key;
+    entry["value"] = StructuredValueToPython(item.value);
+    entry["probability"] = item.probability;
+    ranked.append(std::move(entry));
+  }
+  result["ranked"] = std::move(ranked);
   return result;
 }
 
@@ -189,6 +248,15 @@ struct PyRankingSession {
       result = session.Run(native_request);
     }
     return ResultToPython(result);
+  }
+  pybind11::dict Rank(const pybind11::dict& request) {
+    auto native_request = ToFreeFormRankRequest(request);
+    OgaRankingResult result;
+    {
+      pybind11::gil_scoped_release release;
+      result = session.Rank(native_request);
+    }
+    return RankingResultToPython(result);
   }
   pybind11::dict CacheStats() const {
     const auto stats = session.CacheStats();
@@ -217,6 +285,9 @@ struct PyDecisionSession {
                                    prefix_cache_capacity_bytes);
   }
   pybind11::dict Run(const pybind11::dict& request) {
+    if (request.contains("temperature"))
+      throw std::invalid_argument(
+          "temperature is supported only by ranking sessions");
     auto native_request = ToStructuredRequest(request);
     OgaModelResult result;
     {
@@ -835,6 +906,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            pybind11::arg("providers") = std::vector<std::string>{},
            pybind11::arg("cache_capacity") = size_t{256},
            pybind11::arg("cache_capacity_bytes") = size_t{64 * 1024 * 1024})
+      .def("rank", &PyRankingSession::Rank)
       .def("run", &PyRankingSession::Run)
       .def("cache_stats", &PyRankingSession::CacheStats)
       .def("clear_cache", [](PyRankingSession& self) { self.session.ClearCache(); })

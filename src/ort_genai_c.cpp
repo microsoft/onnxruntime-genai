@@ -205,6 +205,10 @@ static_assert(sizeof(OgaErrorCode) == sizeof(uint32_t));
 
 }  // namespace
 
+OgaResult* Generators::CreateResultFromError(const char* error) {
+  return ReturnUnique<OgaResult>(std::make_unique<Generators::Result>(error));
+}
+
 extern "C" {
 
 void OGA_API_CALL OgaShutdown() {
@@ -222,10 +226,6 @@ void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled) {
 
 const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
   return result->what_.c_str();
-}
-
-OgaResult* OgaCreateResultFromError(const char* error) {
-  return ReturnUnique<OgaResult>(std::make_unique<Generators::Result>(error));
 }
 
 OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value) {

@@ -2,9 +2,10 @@
 // Licensed under the MIT License.
 #include "../ort_genai.h"
 #include "../ort_genai_c_internal.h"
+#include "component_session.h"
 
 #include <algorithm>
-#include <chrono>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -44,41 +45,6 @@ std::string PackageIdentity(const std::string& package_path,
   std::ostringstream result;
   result << canonical.generic_string();
   for (const auto& provider : providers) result << "|provider=" << provider;
-  static constexpr std::string_view files[] = {
-      "component_manifest.json", "tokenizer.json", "tokenizer_config.json",
-      "encoder/model.onnx", "backbone/model.onnx", "state_head/model.onnx",
-      "action_head/model.onnx", "scorer/model.onnx", "clm_heads/model.onnx",
-      "fused_state_ranking/model.onnx",
-      "fused_state_ranking/model.onnx.data",
-      "fused_state_ranking.experimental.onnx",
-      "pointer_head/model.onnx", "kev_head/model.onnx",
-      "encoder/model.onnx.data", "backbone/model.onnx.data",
-      "state_head/model.onnx.data", "action_head/model.onnx.data",
-      "scorer/model.onnx.data", "clm_heads/model.onnx.data",
-      "pointer_head/model.onnx.data", "kev_head/model.onnx.data"};
-  for (const auto file : files) {
-    const auto path = canonical / file;
-    if (!stdfs::exists(path, error) || error) {
-      error.clear();
-      continue;
-    }
-    const auto size = stdfs::file_size(path, error);
-    if (error) {
-      error.clear();
-      continue;
-    }
-    const auto modified = stdfs::last_write_time(path, error);
-    if (error) {
-      error.clear();
-      continue;
-    }
-    const auto modified_milliseconds =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            modified.time_since_epoch())
-            .count();
-    result << '|' << file << ':' << size << ':'
-           << static_cast<long long>(modified_milliseconds);
-  }
   return result.str();
 }
 
@@ -114,7 +80,12 @@ class SessionLruCache {
       index_.erase(found);
     }
     entries_.push_front({std::move(key), std::move(value), bytes});
-    index_[entries_.front().key] = entries_.begin();
+    try {
+      index_.emplace(entries_.front().key, entries_.begin());
+    } catch (...) {
+      entries_.pop_front();
+      throw;
+    }
     byte_size_ += bytes;
     Evict();
   }
@@ -135,7 +106,7 @@ class SessionLruCache {
 
   OgaNonGenerativeCacheStats Stats() const {
     std::lock_guard lock(mutex_);
-    return {hits_, misses_, evictions_, entries_.size(), byte_size_,
+    return {sizeof(OgaNonGenerativeCacheStats), hits_, misses_, evictions_, entries_.size(), byte_size_,
             entry_capacity_, byte_capacity_};
   }
 
@@ -193,14 +164,18 @@ std::string Scalar(const OgaStructuredValue& value, bool kev) {
     return *boolean ? (kev ? "True" : "true") : (kev ? "False" : "false");
   if (const auto* integer = Get<int64_t>(value)) return std::to_string(*integer);
   if (const auto* number = Get<double>(value)) {
-    std::ostringstream stream;
-    stream.imbue(std::locale::classic());
-    stream << std::setprecision(std::numeric_limits<double>::max_digits10)
-           << *number;
-    if (!stream)
+    if (!std::isfinite(*number))
       throw std::invalid_argument(
           "structured floating-point value cannot be rendered");
-    return stream.str();
+    char buffer[64];
+    const auto [end, error] =
+        std::to_chars(std::begin(buffer), std::end(buffer), *number);
+    if (error != std::errc{})
+      throw std::invalid_argument(
+          "structured floating-point value cannot be rendered");
+    std::string result(buffer, end);
+    if (result.find_first_of(".eE") == std::string::npos) result += ".0";
+    return result;
   }
   throw std::invalid_argument("structured value is not scalar");
 }
@@ -444,7 +419,7 @@ struct TokenBatch {
   size_t rows{}, width{};
 };
 
-void AddPositionIds(FeedStorage& feeds, const NamedComponentSession& session,
+void AddPositionIds(FeedStorage& feeds, const Generators::ComponentSession& session,
                     const std::vector<int64_t>& positions, size_t rows,
                     size_t width) {
   const auto found = std::find_if(
@@ -533,7 +508,7 @@ TokenBatch BucketClmBatch(TokenBatch batch) {
   return padded;
 }
 
-FeedStorage BackboneFeeds(const NamedComponentSession& session, const TokenBatch& batch) {
+FeedStorage BackboneFeeds(const Generators::ComponentSession& session, const TokenBatch& batch) {
   FeedStorage feeds;
   feeds.bytes.reserve(session.Inputs().size());
   feeds.inputs.reserve(session.Inputs().size());
@@ -554,7 +529,9 @@ FeedStorage BackboneFeeds(const NamedComponentSession& session, const TokenBatch
     AddPositionIds(feeds, session, positions, batch.rows, batch.width);
   }
   for (const auto& info : session.Inputs()) {
-    if (info.name.rfind("past_key_values.", 0) != 0) continue;
+    if (info.name.rfind("past_key_values.", 0) != 0 &&
+        info.name.rfind("past.", 0) != 0)
+      continue;
     auto dimensions = info.shape;
     for (size_t i = 0; i < dimensions.size(); ++i) {
       if (dimensions[i] >= 0) continue;
@@ -572,7 +549,7 @@ FeedStorage BackboneFeeds(const NamedComponentSession& session, const TokenBatch
   return feeds;
 }
 
-std::string HiddenOutputName(const NamedComponentSession& session) {
+std::string HiddenOutputName(const Generators::ComponentSession& session) {
   return std::find(session.OutputNames().begin(), session.OutputNames().end(),
                    "token_hidden_states") != session.OutputNames().end()
              ? "token_hidden_states"
@@ -666,14 +643,31 @@ OgaAnswer Answer(const OgaQuestion& question, const Candidates& candidates,
   }
   const auto selected = std::distance(probabilities.begin(),
                                       std::max_element(probabilities.begin(), probabilities.end()));
+  const auto total =
+      std::accumulate(probabilities.begin(), probabilities.end(), 0.0);
+  std::vector<double> normalized(probabilities.size());
+  if (total == 0) {
+    std::fill(normalized.begin(), normalized.end(),
+              1.0 / probabilities.size());
+  } else {
+    std::transform(probabilities.begin(), probabilities.end(),
+                   normalized.begin(),
+                   [total](float value) { return value / total; });
+  }
   double confidence;
   if (kev && question.type == "choice") {
-    confidence = probabilities.size() == 1 ? 1 : (probabilities[selected] - 1.0 / probabilities.size()) / (1.0 - 1.0 / probabilities.size());
+    confidence = probabilities.size() == 1 ? 1 : (normalized[selected] - 1.0 / probabilities.size()) / (1.0 - 1.0 / probabilities.size());
   } else if (kev) {
     double distance = 0;
     for (size_t i = 0; i < probabilities.size(); ++i)
-      distance += probabilities[i] * std::abs(static_cast<double>(i) - selected);
-    confidence = probabilities.size() == 1 ? 1 : std::max(0.0, 1.0 - distance / (probabilities.size() - 1));
+      distance += normalized[i] * std::abs(static_cast<double>(i) - selected);
+    const auto count = probabilities.size();
+    const auto midpoint = static_cast<double>(count - 1) / 2.0;
+    double denominator = 0;
+    for (size_t i = 0; i < count; ++i)
+      denominator += std::abs(static_cast<double>(i) - midpoint);
+    denominator /= count;
+    confidence = count == 1 ? 1 : std::max(0.0, 1.0 - distance / denominator);
   } else {
     const auto others = std::accumulate(probabilities.begin(), probabilities.end(), 0.0) -
                         probabilities[selected];
@@ -696,18 +690,6 @@ OgaAnswer Answer(const OgaQuestion& question, const Candidates& candidates,
   return result;
 }
 
-template <class Package>
-NamedComponentSession TryComponent(const Package& package, const std::string& preferred,
-                                   const std::string& fallback) {
-  try {
-    return package.Component(preferred);
-  } catch (const std::exception& error) {
-    if (std::string_view(error.what()).find("component not declared:") == std::string_view::npos)
-      throw;
-    return package.Component(fallback);
-  }
-}
-
 }  // namespace
 
 namespace {
@@ -718,27 +700,24 @@ size_t FloatVectorBytes(const std::vector<float>& value) {
 
 struct NativeRankingSession {
   NativeRankingSession(std::string path, std::vector<std::string> configured_providers)
-      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(package_path), encoder(TryComponent(*this, "encoder", "backbone")) {
-    try {
-      combined = std::make_unique<NamedComponentSession>(Component("clm_heads"));
-    } catch (const std::exception& error) {
-      if (std::string_view(error.what()).find("component not declared:") == std::string_view::npos)
-        throw;
-      state = std::make_unique<NamedComponentSession>(Component("state_head"));
-      action = std::make_unique<NamedComponentSession>(Component("action_head"));
-      scorer = std::make_unique<NamedComponentSession>(Component("scorer"));
+      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(package_path), encoder(Component(Generators::PackageHasComponent(package_path, "encoder") ? "encoder" : "backbone")) {
+    if (Generators::PackageHasComponent(package_path, "clm_heads")) {
+      combined = std::make_unique<Generators::ComponentSession>(
+          package_path, "clm_heads", providers);
+    } else {
+      state = std::make_unique<Generators::ComponentSession>(
+          package_path, "state_head", providers);
+      action = std::make_unique<Generators::ComponentSession>(
+          package_path, "action_head", providers);
+      scorer = std::make_unique<Generators::ComponentSession>(
+          package_path, "scorer", providers);
     }
-    try {
-      fused = std::make_unique<NamedComponentSession>(
-          Component("fused_state_ranking"));
-    } catch (const std::exception& error) {
-      if (std::string_view(error.what()).find("component not declared:") ==
-          std::string_view::npos)
-        throw;
-    }
+    if (Generators::PackageHasComponent(package_path, "fused_state_ranking"))
+      fused = std::make_unique<Generators::ComponentSession>(
+          package_path, "fused_state_ranking", providers);
   }
-  NamedComponentSession Component(const std::string& name) const {
-    return NamedComponentSession(package_path, name, providers);
+  Generators::ComponentSession Component(const std::string& name) const {
+    return Generators::ComponentSession(package_path, name, providers);
   }
   std::string package_path;
   std::vector<std::string> providers;
@@ -746,8 +725,8 @@ struct NativeRankingSession {
   mutable std::mutex operation_mutex;
   SessionLruCache<std::vector<float>> cache;
   DirectoryTokenizer tokenizer;
-  NamedComponentSession encoder;
-  std::unique_ptr<NamedComponentSession> combined, state, action, scorer, fused;
+  Generators::ComponentSession encoder;
+  std::unique_ptr<Generators::ComponentSession> combined, state, action, scorer, fused;
   OgaModelResult Run(const OgaStructuredRequest& request);
   OgaRankingResult Rank(const OgaFreeFormRankRequest& request);
   void SetCacheCapacity(size_t entries, size_t bytes) {
@@ -770,7 +749,7 @@ struct NativeRankingSession {
 };
 
 std::pair<std::vector<float>, size_t> EncodeAndPool(
-    DirectoryTokenizer& tokenizer, NamedComponentSession& encoder,
+    DirectoryTokenizer& tokenizer, Generators::ComponentSession& encoder,
     const std::vector<std::string>& texts) {
   if (texts.empty()) return {{}, 0};
   auto batch = Tokenize(tokenizer, texts);
@@ -1110,7 +1089,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
           probabilities[i] = static_cast<float>(std::exp(logits[i] - maximum) / sum);
     }
   } else {
-    auto project = [](NamedComponentSession& session, std::vector<float> values,
+    auto project = [](Generators::ComponentSession& session, std::vector<float> values,
                       size_t rows, size_t columns, std::string_view name) {
       FeedStorage feeds;
       feeds.bytes.reserve(1);
@@ -1240,7 +1219,8 @@ size_t KevTokenBytes(const CachedKevTokens& value) {
 struct KevStateBinding {
   const OgaComponentInfo* input{};
   std::string output;
-  bool growing{};
+  size_t batch_axis{};
+  std::optional<size_t> growing_axis;
 };
 
 struct CachedKevPrefix {
@@ -1258,17 +1238,19 @@ size_t KevPrefixBytes(const CachedKevPrefix& value) {
 
 std::string StateSuffix(std::string_view name) {
   static constexpr std::string_view prefixes[] = {
-      "past_key_values.", "present_key_values.", "present."};
+      "past_key_values.", "present_key_values.", "past.", "present."};
   for (const auto prefix : prefixes)
     if (name.rfind(prefix, 0) == 0) return std::string(name.substr(prefix.size()));
   return {};
 }
 
 std::vector<KevStateBinding> DiscoverKevStateBindings(
-    const NamedComponentSession& backbone, std::string& reason) {
+    const Generators::ComponentSession& backbone, std::string& reason) {
   std::vector<KevStateBinding> result;
   for (const auto& input : backbone.Inputs()) {
-    if (input.name.rfind("past_key_values.", 0) != 0) continue;
+    if (input.name.rfind("past_key_values.", 0) != 0 &&
+        input.name.rfind("past.", 0) != 0)
+      continue;
     const auto suffix = StateSuffix(input.name);
     std::vector<std::string> matches;
     for (const auto& output : backbone.OutputNames())
@@ -1278,9 +1260,39 @@ std::vector<KevStateBinding> DiscoverKevStateBindings(
                                : "ambiguous present outputs for " + input.name;
       return {};
     }
+    if (input.shape.empty() || input.symbolic_dimensions.size() != input.shape.size()) {
+      reason = "state input lacks complete shape metadata: " + input.name;
+      return {};
+    }
+    std::vector<size_t> batch_axes;
+    std::vector<size_t> growing_axes;
+    for (size_t axis = 0; axis < input.symbolic_dimensions.size(); ++axis) {
+      const auto& symbol = input.symbolic_dimensions[axis];
+      if (symbol.find("batch") != std::string::npos)
+        batch_axes.push_back(axis);
+      if (symbol.find("past") != std::string::npos ||
+          symbol.find("sequence") != std::string::npos)
+        growing_axes.push_back(axis);
+    }
+    if (batch_axes.size() != 1) {
+      reason = "state input must declare exactly one batch axis: " + input.name;
+      return {};
+    }
     const auto tail = suffix.substr(suffix.rfind('.') + 1);
     const bool growing = tail == "key" || tail == "value";
-    result.push_back({&input, std::move(matches.front()), growing});
+    if (growing && growing_axes.size() != 1) {
+      reason = "growing state input must declare exactly one sequence axis: " +
+               input.name;
+      return {};
+    }
+    if (!growing && !growing_axes.empty()) {
+      reason = "fixed state input unexpectedly declares a sequence axis: " +
+               input.name;
+      return {};
+    }
+    result.push_back(
+        {&input, std::move(matches.front()), batch_axes.front(),
+         growing ? std::optional<size_t>(growing_axes.front()) : std::nullopt});
   }
   if (result.empty()) {
     reason = "backbone has no explicit past_key_values inputs";
@@ -1304,15 +1316,17 @@ void ValidatePrefixState(const KevStateBinding& binding,
   if (state.shape.size() != input.shape.size() || state.shape.empty())
     throw std::runtime_error("state rank mismatch between " + input.name +
                              " and " + state.name);
-  if (state.shape[0] != 1)
+  if (binding.batch_axis >= state.shape.size() ||
+      state.shape[binding.batch_axis] != 1)
     throw std::runtime_error("prefix state output must have batch dimension 1: " +
                              state.name);
-  for (size_t i = 1; i < state.shape.size(); ++i) {
+  for (size_t i = 0; i < state.shape.size(); ++i) {
+    if (i == binding.batch_axis) continue;
     if (state.shape[i] < 0)
       throw std::runtime_error("prefix state output has a negative dimension: " +
                                state.name);
     if (input.shape[i] >= 0 &&
-        (!binding.growing || i != 2) &&
+        (!binding.growing_axis || i != *binding.growing_axis) &&
         input.shape[i] != state.shape[i])
       throw std::runtime_error("state dimension mismatch between " + input.name +
                                " and " + state.name);
@@ -1326,7 +1340,7 @@ void AddRepeatedState(FeedStorage& feeds, const KevStateBinding& binding,
                       const OgaComponentTensor& state, size_t batch) {
   ValidatePrefixState(binding, state);
   auto shape = state.shape;
-  shape[0] = static_cast<int64_t>(batch);
+  shape[binding.batch_axis] = static_cast<int64_t>(batch);
   if (batch && state.data.size() > std::numeric_limits<size_t>::max() / batch)
     throw std::runtime_error("repeated state byte count overflows size_t");
   feeds.bytes.emplace_back(state.data.size() * batch);
@@ -1340,19 +1354,18 @@ void AddRepeatedState(FeedStorage& feeds, const KevStateBinding& binding,
 struct NativeDecisionSession {
   NativeDecisionSession(std::string path, std::vector<std::string> configured_providers)
       : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(package_path), backbone(Component("backbone")) {
-    try {
-      pointer = std::make_unique<NamedComponentSession>(Component("pointer_head"));
-    } catch (const std::exception& error) {
-      if (std::string_view(error.what()).find("component not declared:") == std::string_view::npos)
-        throw;
-      pointer = std::make_unique<NamedComponentSession>(Component("kev_head"));
-      flat = true;
-    }
+    const auto pointer_name =
+        Generators::PackageHasComponent(package_path, "pointer_head")
+            ? "pointer_head"
+            : "kev_head";
+    pointer = std::make_unique<Generators::ComponentSession>(
+        package_path, pointer_name, providers);
+    flat = pointer_name == std::string_view("kev_head");
     state_bindings = DiscoverKevStateBindings(backbone, compatibility_status);
     prefix_status = compatibility_status;
   }
-  NamedComponentSession Component(const std::string& name) const {
-    return NamedComponentSession(package_path, name, providers);
+  Generators::ComponentSession Component(const std::string& name) const {
+    return Generators::ComponentSession(package_path, name, providers);
   }
   std::string package_path;
   std::vector<std::string> providers;
@@ -1361,8 +1374,8 @@ struct NativeDecisionSession {
   SessionLruCache<CachedKevTokens> cache;
   SessionLruCache<CachedKevPrefix> prefix_cache;
   DirectoryTokenizer tokenizer;
-  NamedComponentSession backbone;
-  std::unique_ptr<NamedComponentSession> pointer;
+  Generators::ComponentSession backbone;
+  std::unique_ptr<Generators::ComponentSession> pointer;
   std::vector<KevStateBinding> state_bindings;
   std::string compatibility_status;
   std::string prefix_status;
@@ -1371,7 +1384,6 @@ struct NativeDecisionSession {
   uint64_t branch_runs{};
   uint64_t fallback_runs{};
   bool flat{};
-  OgaModelResult Run(const OgaStructuredRequest& request) { return Decide(request); }
   OgaModelResult Decide(const OgaStructuredRequest& request);
   void SetCacheCapacity(size_t entries, size_t bytes) {
     std::lock_guard lock(operation_mutex);
@@ -1387,7 +1399,8 @@ struct NativeDecisionSession {
   }
   OgaKevPrefixReuseStats PrefixReuseStats() const {
     std::lock_guard lock(operation_mutex);
-    return {prefix_runs, branch_runs, fallback_runs};
+    return {sizeof(OgaKevPrefixReuseStats), prefix_runs, branch_runs,
+            fallback_runs};
   }
   void SetPrefixReuseEnabled(bool enabled) {
     std::lock_guard lock(operation_mutex);
@@ -1422,6 +1435,9 @@ struct NativeDecisionSession {
 OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request) {
   std::lock_guard operation_lock(operation_mutex);
   if (request.questions.empty()) throw std::invalid_argument("questions must be non-empty");
+  if (request.temperature != 1.0f)
+    throw std::invalid_argument(
+        "temperature is supported only by ranking sessions");
   auto encode = [&](std::string text) {
     static const std::regex delimiter(R"(<\|([A-Za-z0-9_]+)\|>)");
     text = std::regex_replace(text, delimiter, "<¦$1¦>");
@@ -1490,8 +1506,9 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
   // state tensors costs more than recomputing a short prefix.
   const bool use_prefix_reuse =
       prefix_reuse_enabled && !state_bindings.empty() &&
-      (!UsesCuda(providers) ||
-       state_value.tokens.size() >= kMinCudaKevPrefixTokens);
+      ((!UsesCuda(providers) && rows.size() == 1) ||
+       (UsesCuda(providers) &&
+        state_value.tokens.size() >= kMinCudaKevPrefixTokens));
   if (!use_prefix_reuse) {
     ++fallback_runs;
     for (size_t i = 0; i < rows.size(); ++i) {
@@ -1832,11 +1849,11 @@ OgaResult* OGA_API_CALL OgaCreateStructuredValueDouble(
 }
 
 OgaResult* OGA_API_CALL OgaCreateStructuredValueString(
-    const char* value, OgaStructuredValueHandle** out) {
+    const char* value, size_t length, OgaStructuredValueHandle** out) {
   OGA_CAPI_TRY
   auto& output = CapiRequired(out, "out");
   auto result = std::make_unique<OgaStructuredValue>(
-      std::string(CapiRequired(value, "value")));
+      std::string(CapiRequired(value, "value"), length));
   output = reinterpret_cast<OgaStructuredValueHandle*>(result.release());
   return nullptr;
   OGA_CAPI_CATCH
@@ -1858,12 +1875,13 @@ OgaResult* OGA_API_CALL OgaStructuredValueArrayAppend(
 }
 
 OgaResult* OGA_API_CALL OgaStructuredValueObjectAppend(
-    OgaStructuredValueHandle* object, const char* key,
+    OgaStructuredValueHandle* object, const char* key, size_t key_length,
     const OgaStructuredValueHandle* value) {
   OGA_CAPI_TRY
   auto* values = std::get_if<OgaStructuredValue::Object>(&Value(object).value);
   if (!values) throw std::invalid_argument("value is not an object");
-  values->emplace_back(CapiRequired(key, "key"), Value(value));
+  values->emplace_back(
+      std::string(CapiRequired(key, "key"), key_length), Value(value));
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -1895,11 +1913,12 @@ OGA_GET_STRUCTURED_SCALAR(OgaStructuredValueGetDouble, double, double)
 #undef OGA_GET_STRUCTURED_SCALAR
 
 OgaResult* OGA_API_CALL OgaStructuredValueGetString(
-    const OgaStructuredValueHandle* value, const char** out) {
+    const OgaStructuredValueHandle* value, const char** out, size_t* length) {
   OGA_CAPI_TRY
   const auto* item = std::get_if<std::string>(&Value(value).value);
   if (!item) throw std::invalid_argument("structured value is not a string");
   CapiRequired(out, "out") = item->c_str();
+  CapiRequired(length, "length") = item->size();
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -1931,12 +1950,14 @@ OgaResult* OGA_API_CALL OgaStructuredValueGetArrayItem(
 
 OgaResult* OGA_API_CALL OgaStructuredValueGetObjectItem(
     const OgaStructuredValueHandle* value, size_t index, const char** key,
+    size_t* key_length,
     const OgaStructuredValueHandle** out) {
   OGA_CAPI_TRY
   const auto* object = std::get_if<OgaStructuredValue::Object>(&Value(value).value);
   if (!object) throw std::invalid_argument("structured value is not an object");
   const auto& item = object->at(index);
   CapiRequired(key, "key") = item.first.c_str();
+  CapiRequired(key_length, "key_length") = item.first.size();
   CapiRequired(out, "out") =
       reinterpret_cast<const OgaStructuredValueHandle*>(&item.second);
   return nullptr;
@@ -2068,19 +2089,6 @@ void OGA_API_CALL OgaDestroyRankingSession(OgaRankingSessionHandle* session) {
   delete session;
 }
 
-OgaResult* OGA_API_CALL OgaRankingSessionCreateComponent(
-    const OgaRankingSessionHandle* session, const char* name,
-    OgaComponentSession** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  const auto& value = CapiRequired(session, "session");
-  std::vector<const char*> providers;
-  for (const auto& provider : value.providers) providers.push_back(provider.c_str());
-  return OgaCreateComponentSession(value.package_path.c_str(), name, providers.data(),
-                                   providers.size(), &output);
-  OGA_CAPI_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaRankingSessionRun(
     OgaRankingSessionHandle* session, const OgaStructuredRequestHandle* request,
     OgaModelResultHandle** out) {
@@ -2117,7 +2125,12 @@ OgaResult* OGA_API_CALL OgaRankingSessionGetCacheStats(
     const OgaRankingSessionHandle* session, OgaNonGenerativeCacheStats* out) {
   OGA_CAPI_TRY
   auto& output = CapiRequired(out, "out");
-  output = CapiRequired(session, "session").value.CacheStats();
+  const auto capacity = output.struct_size;
+  if (capacity < sizeof(output.struct_size))
+    throw std::invalid_argument("cache stats struct_size is too small");
+  const auto stats = CapiRequired(session, "session").value.CacheStats();
+  std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
+  output.struct_size = sizeof(stats);
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -2153,19 +2166,6 @@ void OGA_API_CALL OgaDestroyDecisionSession(OgaDecisionSessionHandle* session) {
   delete session;
 }
 
-OgaResult* OGA_API_CALL OgaDecisionSessionCreateComponent(
-    const OgaDecisionSessionHandle* session, const char* name,
-    OgaComponentSession** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  const auto& value = CapiRequired(session, "session");
-  std::vector<const char*> providers;
-  for (const auto& provider : value.providers) providers.push_back(provider.c_str());
-  return OgaCreateComponentSession(value.package_path.c_str(), name, providers.data(),
-                                   providers.size(), &output);
-  OGA_CAPI_CATCH
-}
-
 #define OGA_DECISION_RUN(name, method)                                              \
   OgaResult* OGA_API_CALL name(                                                     \
       OgaDecisionSessionHandle* session, const OgaStructuredRequestHandle* request, \
@@ -2179,7 +2179,6 @@ OgaResult* OGA_API_CALL OgaDecisionSessionCreateComponent(
     OGA_CAPI_CATCH                                                                  \
   }
 
-OGA_DECISION_RUN(OgaDecisionSessionRun, Run)
 OGA_DECISION_RUN(OgaDecisionSessionDecide, Decide)
 #undef OGA_DECISION_RUN
 
@@ -2195,7 +2194,12 @@ OgaResult* OGA_API_CALL OgaDecisionSessionGetCacheStats(
     const OgaDecisionSessionHandle* session, OgaNonGenerativeCacheStats* out) {
   OGA_CAPI_TRY
   auto& output = CapiRequired(out, "out");
-  output = CapiRequired(session, "session").value.CacheStats();
+  const auto capacity = output.struct_size;
+  if (capacity < sizeof(output.struct_size))
+    throw std::invalid_argument("cache stats struct_size is too small");
+  const auto stats = CapiRequired(session, "session").value.CacheStats();
+  std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
+  output.struct_size = sizeof(stats);
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -2227,20 +2231,6 @@ OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseEnabled(
   OGA_CAPI_TRY
   CapiRequired(out, "out") =
       CapiRequired(session, "session").value.PrefixReuseEnabled();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseStatus(
-    const OgaDecisionSessionHandle* session, const char** out) {
-  OGA_CAPI_TRY
-  const auto& value = CapiRequired(session, "session").value;
-  std::lock_guard lock(value.operation_mutex);
-  // compatibility_status is immutable after construction and the disabled
-  // literal has static storage, so this legacy borrowed pointer is stable.
-  CapiRequired(out, "out") = value.prefix_reuse_enabled
-                                 ? value.compatibility_status.c_str()
-                                 : "disabled by policy";
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -2277,8 +2267,14 @@ OgaResult* OGA_API_CALL OgaDecisionSessionSetPrefixCacheCapacity(
 OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixCacheStats(
     const OgaDecisionSessionHandle* session, OgaNonGenerativeCacheStats* out) {
   OGA_CAPI_TRY
-  CapiRequired(out, "out") =
+  auto& output = CapiRequired(out, "out");
+  const auto capacity = output.struct_size;
+  if (capacity < sizeof(output.struct_size))
+    throw std::invalid_argument("cache stats struct_size is too small");
+  const auto stats =
       CapiRequired(session, "session").value.PrefixCacheStats();
+  std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
+  output.struct_size = sizeof(stats);
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -2286,8 +2282,14 @@ OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixCacheStats(
 OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseStats(
     const OgaDecisionSessionHandle* session, OgaKevPrefixReuseStats* out) {
   OGA_CAPI_TRY
-  CapiRequired(out, "out") =
+  auto& output = CapiRequired(out, "out");
+  const auto capacity = output.struct_size;
+  if (capacity < sizeof(output.struct_size))
+    throw std::invalid_argument("prefix reuse stats struct_size is too small");
+  const auto stats =
       CapiRequired(session, "session").value.PrefixReuseStats();
+  std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
+  output.struct_size = sizeof(stats);
   return nullptr;
   OGA_CAPI_CATCH
 }

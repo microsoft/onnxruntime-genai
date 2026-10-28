@@ -141,14 +141,6 @@ bool IsCudaProvider(std::string_view provider) {
   return provider == "cuda" || provider == "CUDAExecutionProvider";
 }
 
-bool KevCudaGraphEnabled() {
-  const char* value = std::getenv("ORT_GENAI_KEV_CUDA_GRAPH");
-  if (!value || !*value || std::string_view(value) == "0") return false;
-  if (std::string_view(value) == "1") return true;
-  throw std::invalid_argument(
-      "ORT_GENAI_KEV_CUDA_GRAPH must be 0 or 1");
-}
-
 std::unique_ptr<OrtSession> CreateComponentSession(
     const fs::path& model_path, const std::vector<std::string>& providers,
     bool capture, const Config* component_config,
@@ -164,20 +156,51 @@ std::unique_ptr<OrtSession> CreateComponentSession(
     if (configured_session_options.inter_op_num_threads)
       options->SetInterOpNumThreads(
           *configured_session_options.inter_op_num_threads);
+    if (configured_session_options.enable_cpu_mem_arena) {
+      if (*configured_session_options.enable_cpu_mem_arena)
+        options->EnableCpuMemArena();
+      else
+        options->DisableCpuMemArena();
+    }
+    if (configured_session_options.enable_mem_pattern) {
+      if (*configured_session_options.enable_mem_pattern)
+        options->EnableMemPattern();
+      else
+        options->DisableMemPattern();
+    }
+    if (configured_session_options.log_id)
+      options->SetLogId(configured_session_options.log_id->c_str());
+    if (configured_session_options.log_severity_level)
+      options->SetLogSeverityLevel(
+          *configured_session_options.log_severity_level);
+    if (configured_session_options.log_verbosity_level)
+      options->SetLogVerbosityLevel(
+          *configured_session_options.log_verbosity_level);
+    if (configured_session_options.enable_profiling)
+      options->EnableProfiling(
+          configured_session_options.enable_profiling->c_str());
+    if (configured_session_options.graph_optimization_level)
+      options->SetGraphOptimizationLevel(
+          *configured_session_options.graph_optimization_level);
     for (const auto& [name, value] :
          configured_session_options.config_entries)
       options->AddConfigEntry(name.c_str(), value.c_str());
   }
-  configured_session_options.providers.clear();
-  configured_session_options.provider_options.clear();
-  for (const auto& provider : providers) {
-    if (provider.empty())
-      throw std::runtime_error("provider name must not be empty");
-    SetProviderOption(config, provider, {}, {});
-    if (capture && IsCudaProvider(provider))
-      SetProviderOption(config, provider, "enable_cuda_graph", "1");
+  if (!providers.empty()) {
+    configured_session_options.providers.clear();
+    for (const auto& provider : providers) {
+      if (provider.empty())
+        throw std::runtime_error("provider name must not be empty");
+      SetProviderOption(config, provider, {}, {});
+      if (capture && IsCudaProvider(provider))
+        SetProviderOption(config, provider, "enable_cuda_graph", "1");
+    }
+  } else if (capture) {
+    for (const auto& provider : configured_session_options.providers)
+      if (IsCudaProvider(provider))
+        SetProviderOption(config, provider, "enable_cuda_graph", "1");
   }
-  if (!providers.empty())
+  if (!configured_session_options.providers.empty())
     SetProviderSessionOptions(
         *options, config.model.decoder.session_options.providers,
         config.model.decoder.session_options.provider_options, true, config);
@@ -256,6 +279,11 @@ struct ComponentCudaGraphState {
   bool disabled{};
 };
 
+bool PackageHasComponent(const fs::path& package_path,
+                         std::string_view component) {
+  return LoadComponents(package_path).count(std::string(component)) != 0;
+}
+
 ComponentSession::ComponentSession(const fs::path& package_path, std::string component,
                                    const std::vector<std::string>& providers) {
   auto components = LoadComponents(package_path);
@@ -266,8 +294,23 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
           (package_path / "genai_config.json").c_str()))
     component_config =
         std::make_unique<Config>(package_path, std::string_view{});
-  session_ = CreateComponentSession(found->second, providers, false,
-                                    component_config.get());
+  std::map<std::string, int64_t> dimension_overrides;
+  if (component_config && component_config->model.decoder.hidden_size > 0)
+    dimension_overrides.emplace(
+        "kv_cache_dim", component_config->model.decoder.hidden_size);
+  try {
+    session_ = CreateComponentSession(found->second, providers, false,
+                                      component_config.get(),
+                                      dimension_overrides);
+  } catch (const std::exception& error) {
+    if (std::string_view(error.what()).find("LinearAttentionGate") !=
+        std::string_view::npos)
+      throw std::runtime_error(
+          "this KEV backbone requires ONNX Runtime 1.30 or newer with "
+          "com.microsoft::LinearAttentionGate support: " +
+          std::string(error.what()));
+    throw;
+  }
   input_names_ = session_->GetInputNames();
   output_names_ = session_->GetOutputNames();
   for (size_t i = 0; i < input_names_.size(); ++i) {
@@ -280,24 +323,6 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
     for (const char* symbol : tensor.GetSymbolicDimensions())
       info.symbolic_dimensions.emplace_back(symbol ? symbol : "");
     inputs_.push_back(std::move(info));
-  }
-  const bool kev_capture = component == "backbone" && KevCudaGraphEnabled();
-  const bool clm_capture = component == "fused_state_ranking";
-  if ((kev_capture || clm_capture) &&
-      std::any_of(providers.begin(), providers.end(), IsCudaProvider)) {
-    Config config;
-    for (const auto& provider : providers)
-      SetProviderOption(config, provider, {}, {});
-    cuda_graph_ = std::make_unique<ComponentCudaGraphState>();
-    cuda_graph_->model_path = found->second;
-    cuda_graph_->providers = providers;
-    cuda_graph_->config = std::move(component_config);
-    cuda_graph_->device = GetDeviceInterface(DeviceType::CUDA);
-    EnsureDeviceOrtInit(*cuda_graph_->device, config);
-    cuda_graph_->device_memory = cuda_graph_->device->GetMemoryInfo();
-    cuda_graph_->eager_options = OrtRunOptions::Create();
-    cuda_graph_->eager_options->AddConfigEntry("gpu_graph_id", "-1");
-    cuda_graph_->multi_shape = clm_capture;
   }
 }
 
@@ -352,18 +377,15 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
               symbol);
       }
     }
-    session_.reset();
     try {
-      session_ = CreateComponentSession(
+      auto specialized_session = CreateComponentSession(
           cuda_graph_->model_path, cuda_graph_->providers, true,
           cuda_graph_->config.get(),
           cuda_graph_->multi_shape ? std::map<std::string, int64_t>{}
                                    : overrides);
+      session_ = std::move(specialized_session);
       cuda_graph_->specialized = true;
     } catch (...) {
-      session_ = CreateComponentSession(
-          cuda_graph_->model_path, cuda_graph_->providers, false,
-          cuda_graph_->config.get());
       cuda_graph_->disabled = true;
       throw;
     }

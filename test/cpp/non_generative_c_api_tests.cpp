@@ -37,18 +37,19 @@ TEST(NonGenerativeCApiTest, StructuredValueLifecycleAndAccessors) {
   Check(OgaCreateStructuredValueArray(&array));
   Check(OgaCreateStructuredValueInt64(42, &integer));
   Check(OgaStructuredValueArrayAppend(array, integer));
-  Check(OgaStructuredValueObjectAppend(object, "items", array));
+  Check(OgaStructuredValueObjectAppend(object, "items", 5, array));
 
   OgaStructuredValueType type{};
   size_t count{};
   const char* key{};
+  size_t key_length{};
   const OgaStructuredValueHandle* child{};
   Check(OgaStructuredValueGetType(object, &type));
   EXPECT_EQ(type, OgaStructuredValueType_Object);
   Check(OgaStructuredValueGetCount(object, &count));
   EXPECT_EQ(count, 1u);
-  Check(OgaStructuredValueGetObjectItem(object, 0, &key, &child));
-  EXPECT_STREQ(key, "items");
+  Check(OgaStructuredValueGetObjectItem(object, 0, &key, &key_length, &child));
+  EXPECT_EQ(std::string_view(key, key_length), "items");
   Check(OgaStructuredValueGetType(child, &type));
   EXPECT_EQ(type, OgaStructuredValueType_Array);
   Check(OgaStructuredValueGetArrayItem(child, 0, &child));
@@ -61,13 +62,40 @@ TEST(NonGenerativeCApiTest, StructuredValueLifecycleAndAccessors) {
   OgaDestroyStructuredValue(object);
 }
 
+TEST(NonGenerativeCApiTest, StructuredStringsPreserveEmbeddedNulls) {
+  constexpr char text[] = {'l', 'e', 'f', 't', '\0', 'r', 'i', 'g', 'h', 't'};
+  constexpr char key[] = {'k', '\0', 'y'};
+  OgaStructuredValueHandle *object{}, *value{};
+  Check(OgaCreateStructuredValueObject(&object));
+  Check(OgaCreateStructuredValueString(text, sizeof(text), &value));
+  Check(OgaStructuredValueObjectAppend(object, key, sizeof(key), value));
+
+  const char* returned_key{};
+  size_t returned_key_length{};
+  const OgaStructuredValueHandle* returned_value{};
+  Check(OgaStructuredValueGetObjectItem(
+      object, 0, &returned_key, &returned_key_length, &returned_value));
+  EXPECT_EQ(std::string_view(returned_key, returned_key_length),
+            std::string_view(key, sizeof(key)));
+
+  const char* returned_text{};
+  size_t returned_text_length{};
+  Check(OgaStructuredValueGetString(
+      returned_value, &returned_text, &returned_text_length));
+  EXPECT_EQ(std::string_view(returned_text, returned_text_length),
+            std::string_view(text, sizeof(text)));
+
+  OgaDestroyStructuredValue(value);
+  OgaDestroyStructuredValue(object);
+}
+
 TEST(NonGenerativeCApiTest, RequestBuildersCloneInputs) {
   OgaStructuredValueHandle* null_value{};
   OgaStructuredValueHandle* text{};
   OgaQuestionHandle* question{};
   OgaStructuredRequestHandle* request{};
   Check(OgaCreateStructuredValueNull(&null_value));
-  Check(OgaCreateStructuredValueString("Choose", &text));
+  Check(OgaCreateStructuredValueString("Choose", 6, &text));
   Check(OgaCreateQuestion("choice", text, null_value, &question));
   Check(OgaCreateStructuredRequest(&request));
   Check(OgaStructuredRequestSetState(request, null_value));
@@ -116,8 +144,8 @@ TEST(NonGenerativeCApiTest, FreeFormRankingAndAccessorsRunWhenConfigured) {
   Check(OgaCreateRankingSession(package.string().c_str(), nullptr, 0, &session));
   Check(OgaCreateFreeFormRankRequest(&request));
   Check(OgaCreateStructuredValueNull(&state));
-  Check(OgaCreateStructuredValueString("Choose", &instructions));
-  Check(OgaCreateStructuredValueString("same", &candidate));
+  Check(OgaCreateStructuredValueString("Choose", 6, &instructions));
+  Check(OgaCreateStructuredValueString("same", 4, &candidate));
   Check(OgaFreeFormRankRequestSetState(request, state));
   Check(OgaFreeFormRankRequestSetInstructions(request, instructions));
   Check(OgaFreeFormRankRequestAddCandidate(request, "first", candidate));
@@ -136,8 +164,9 @@ TEST(NonGenerativeCApiTest, FreeFormRankingAndAccessorsRunWhenConfigured) {
   EXPECT_STREQ(key, "first");
   Check(OgaRankingResultGetValue(result, 0, &value));
   const char* text{};
-  Check(OgaStructuredValueGetString(value, &text));
-  EXPECT_STREQ(text, "same");
+  size_t text_length{};
+  Check(OgaStructuredValueGetString(value, &text, &text_length));
+  EXPECT_EQ(std::string_view(text, text_length), "same");
   Check(OgaRankingResultGetProbability(result, 0, &probability));
   EXPECT_NEAR(probability, 0.5, 1e-6);
   Check(OgaRankingResultGetKey(result, 1, &key));
@@ -185,7 +214,7 @@ TEST(NonGenerativeCApiTest, NullCreationOutputsFailBeforeAllocating) {
     ExpectOutError(OgaCreateStructuredValueBool(true, nullptr));
     ExpectOutError(OgaCreateStructuredValueInt64(1, nullptr));
     ExpectOutError(OgaCreateStructuredValueDouble(1.0, nullptr));
-    ExpectOutError(OgaCreateStructuredValueString("value", nullptr));
+    ExpectOutError(OgaCreateStructuredValueString("value", 5, nullptr));
     ExpectOutError(OgaCreateStructuredValueArray(nullptr));
     ExpectOutError(OgaCreateStructuredValueObject(nullptr));
     ExpectOutError(OgaCreateQuestion(nullptr, nullptr, nullptr, nullptr));
@@ -193,13 +222,10 @@ TEST(NonGenerativeCApiTest, NullCreationOutputsFailBeforeAllocating) {
     ExpectOutError(OgaCreateFreeFormRankRequest(nullptr));
 
     ExpectOutError(OgaCreateRankingSession("unused", nullptr, 0, nullptr));
-    ExpectOutError(OgaRankingSessionCreateComponent(nullptr, "encoder", nullptr));
     ExpectOutError(OgaRankingSessionRun(nullptr, nullptr, nullptr));
     ExpectOutError(OgaRankingSessionRank(nullptr, nullptr, nullptr));
     ExpectOutError(OgaRankingSessionGetCacheStats(nullptr, nullptr));
     ExpectOutError(OgaCreateDecisionSession("unused", nullptr, 0, nullptr));
-    ExpectOutError(OgaDecisionSessionCreateComponent(nullptr, "backbone", nullptr));
-    ExpectOutError(OgaDecisionSessionRun(nullptr, nullptr, nullptr));
     ExpectOutError(OgaDecisionSessionDecide(nullptr, nullptr, nullptr));
     ExpectOutError(OgaDecisionSessionGetCacheStats(nullptr, nullptr));
   }

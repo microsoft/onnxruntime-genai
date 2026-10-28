@@ -10,7 +10,8 @@ import json
 import onnxruntime_genai as og
 
 ranking = og.RankingSession("/models/clm-v0.1-8b-fp32", providers=["cuda"])
-answers = ranking.rank(json.load(open("request.json")))
+ranked = ranking.rank(json.load(open("free-form-rank-request.json")))
+answers = ranking.run(json.load(open("structured-question-request.json")))
 
 decision = og.DecisionSession("/models/kev-4b-fp32")
 answers = decision.decide(json.load(open("request.json")))
@@ -70,14 +71,13 @@ OgaModelResult decisions = decision.Decide(request);
 booleans, integers, doubles, strings, ordered arrays, and ordered objects.
 `OgaAnswer` exposes typed `noul`, `choice`, `score`, `confidence`,
 `probabilities`, and `legend` fields. `OgaModelResult::model` identifies CLM or
-KEV. `Component(name)` remains available and creates a provider-configured
-named component.
+KEV.
 `DirectoryTokenizer(package_path)` is the public movable C++ tokenizer primitive
 for these packages; `Encode(text)` performs no-special-token tokenization and
 `PadTokenId()` exposes the configured pad id. These C++ classes are inline RAII
 wrappers; the shared-library boundary contains no STL types.
 
-The stable C ABI in `ort_genai_c.h` exposes opaque handles for the same
+The C ABI in `ort_genai_c.h` exposes opaque handles for the same
 functionality:
 
 * `OgaComponentSession`, `OgaComponentInputs`, and `OgaComponentTensors` cover
@@ -92,11 +92,13 @@ functionality:
   fields without transferring borrowed string/value storage.
 * Session cache controls set entry/byte capacity, return hit/miss/eviction and
   occupancy statistics, clear entries, or invalidate entries while refreshing
-  package identity.
+  package identity. Statistics structures begin with `struct_size`; callers
+  initialize it to their compiled structure size so newer libraries never
+  overwrite an older caller's buffer.
 
 ## Managed bindings
 
-This change establishes the stable C ABI used by managed bindings. C#, Java,
+This change establishes the C ABI used by managed bindings. C#, Java,
 and JavaScript wrappers are intentionally delivered by the dependent managed
 bindings change rather than this native-runtime change.
 
@@ -107,11 +109,10 @@ still executing the scorer with the request temperature. Action and state keys
 include the canonical package identity, head layout, `float32` projection
 dtype, and length-prefixed rendered text. Combined-head compatibility packages
 continue to cache actions only because their state and action projections are
-produced by one component invocation. Package identity includes the canonical
-package path, provider list, and size/mtime fingerprints for the fixed known
-manifest, tokenizer, backbone, head, scorer, and external-data filenames
-supported by the runtime; arbitrary manifest-declared filenames are not
-fingerprinted. State and action projections share the same bounded LRU. The
+produced by one component invocation. Package identity is session-local and
+includes the canonical package path and provider list. Cache invalidation
+clears all entries explicitly; in-place model reload is not supported. State
+and action projections share the same bounded LRU. The
 default is 256 entries and 64 MiB. KEV caches escaped/rendered tokenized state
 prefixes and question branches
 (including branch-local option readout indices), not probabilities. Its token
@@ -129,14 +130,17 @@ Full-attention key/value tensors may grow along their past-sequence dimension;
 convolution and recurrent tensors retain fixed shapes. FP16, FP32, and BF16
 state storage is copied byte-for-byte without conversion.
 
-An input named `past_key_values.<layer>.<type>` must have exactly one
+An input named `past_key_values.<layer>.<type>` or `past.<layer>.<type>` must have exactly one
 corresponding `present.<layer>.<type>` (or `present_key_values.*`) output with
 matching dtype, rank, batch dimension, and fixed dimensions. A `position_ids`
 input is also required. Graphs without that complete contract use the original
 full-row path; `prefix_reuse_status` reports the explicit reason and
 `fallback_runs` is incremented. A malformed graph that advertises compatible
 state I/O raises rather than silently falling back. Setting
-`prefix_reuse_enabled=False` selects the full-row parity/debug path. CUDA
+`prefix_reuse_enabled=False` selects the full-row parity/debug path. CPU
+GroupQueryAttention currently supports cached context only for batch one, so
+multi-question CPU requests use the full-row path; single-question CPU
+requests use prefix reuse. CUDA
 sessions also use that path automatically for state prefixes shorter than 128
 tokens, where recomputation is cheaper than transferring and repeating the
 cached component state. CPU sessions and longer CUDA prefixes continue to use
@@ -165,31 +169,22 @@ Mobius ORT GenAI export emits these defaults automatically for packages with a
 providers. Exporters may edit the generated standard session options for
 hardware-specific tuning.
 
-### Optional KEV CUDA graph capture
+### Runtime requirements
 
-Set `ORT_GENAI_KEV_CUDA_GRAPH=1` before constructing a CUDA
-`DecisionSession` to specialize and capture the KEV backbone for the first
-observed input shape. The runtime fixes the backbone's symbolic dimensions,
-which allows ORT to constant-fold host-side shape operations and place every
-remaining backbone node on CUDA. Inputs and outputs use stable device buffers
-and I/O binding, and subsequent requests with the same tensor shape replay the
-captured graph.
-
-Capture is opt-in because specialization adds work to the first result and is
-appropriate only for shape-stable workloads. If a later request has a different
-backbone signature, the captured graph and its buffers are released, the
-generic session is restored, and graph capture stays disabled for that session.
-The pointer head is intentionally excluded because its scalar/index inputs have
-CPU memory requirements that are not safe to capture. The default value is
-`0`; any value other than `0` or `1` is rejected.
+CLM requires the standard operators available in the repository's default ORT
+package. KEV exports containing `com.microsoft::LinearAttentionGate` require
+ONNX Runtime 1.30 or newer. Use an ORT package with that operator enabled when
+building or loading KEV; older packages fail model loading with a missing
+operator diagnostic. Native ORT GenAI CUDA qualification, device-resident
+cross-component tensors, and explicit workflow-controlled CUDA graph capture
+remain follow-up work and are not claimed by this first API.
 
 Creation, mutation, execution, and accessor functions return `OgaResult*`
 (`nullptr` on success). Destroy functions accept `nullptr`. Strings, tensor
 buffers, and borrowed structured values returned by accessors remain valid
 until their owning handle is mutated or destroyed.
-The legacy prefix-reuse status pointer is immutable for the session lifetime;
-new code should use `OgaDecisionSessionCopyPrefixReuseStatus`, which supports a
-size query followed by a caller-owned buffer copy.
+`OgaDecisionSessionCopyPrefixReuseStatus` supports a size query followed by a
+caller-owned buffer copy.
 
 ## Directory schema
 

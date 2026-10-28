@@ -27,6 +27,10 @@ class RankingSession:
         self._native = _RankingSession(str(package_path), providers or [], cache_capacity, cache_capacity_bytes)
 
     def rank(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self._native.rank(request)
+
+    def run(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Run structured CLM questions."""
         return self._native.run(request)
 
     @property

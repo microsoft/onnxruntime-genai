@@ -4,11 +4,13 @@
 
 #include "ort_genai_c.h"
 
-extern "C" OgaResult* OgaCreateResultFromError(const char* error);
+namespace Generators {
+OgaResult* CreateResultFromError(const char* error);
+}
 
 #define OGA_CAPI_TRY try {
-#define OGA_CAPI_CATCH                         \
-  }                                            \
-  catch (const std::exception& e) {            \
-    return OgaCreateResultFromError(e.what()); \
+#define OGA_CAPI_CATCH                                  \
+  }                                                     \
+  catch (const std::exception& e) {                     \
+    return Generators::CreateResultFromError(e.what()); \
   }

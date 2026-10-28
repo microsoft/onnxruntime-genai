@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -16,12 +17,15 @@ namespace Generators {
 
 struct ComponentCudaGraphState;
 
+bool PackageHasComponent(const fs::path& package_path,
+                         std::string_view component);
+
 struct ComponentSession {
   ComponentSession(const fs::path& package_path, std::string component,
                    const std::vector<std::string>& providers);
   ~ComponentSession();
   std::vector<OgaComponentTensor> Run(const std::vector<OgaComponentInput>& inputs,
-                                      const std::vector<std::string>& outputs);
+                                      const std::vector<std::string>& outputs = {});
   const std::vector<std::string>& InputNames() const { return input_names_; }
   const std::vector<std::string>& OutputNames() const { return output_names_; }
   const std::vector<OgaComponentInfo>& Inputs() const { return inputs_; }
