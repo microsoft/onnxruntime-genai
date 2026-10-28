@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <memory>
 #include <stdexcept>
@@ -166,15 +167,17 @@ class FileSourceAssetsTest : public MemoryAssetsTest {
   }
 
   void SetFiles(OgaConfig& config, const ScopedAssetDirectory& assets,
-                const std::array<const char*, 2>& names) const {
-    std::array<std::unique_ptr<ScopedModelFile>, 2> files;
-    std::array<OgaFileHandle, 2> handles;
-    for (size_t i = 0; i < names.size(); ++i) {
-      files[i] = std::make_unique<ScopedModelFile>(assets.path / names[i]);
-      ASSERT_TRUE(files[i]->IsValid());
-      handles[i] = files[i]->Get();
+                std::initializer_list<const char*> names) const {
+    std::vector<std::unique_ptr<ScopedModelFile>> files;
+    std::vector<OgaFileHandle> handles;
+    files.reserve(names.size());
+    handles.reserve(names.size());
+    for (const char* name : names) {
+      files.push_back(std::make_unique<ScopedModelFile>(assets.path / name));
+      ASSERT_TRUE(files.back()->IsValid());
+      handles.push_back(files.back()->Get());
     }
-    OgaCheckResult(OgaConfigSetModelFileHandles(&config, names.data(), handles.data(), names.size()));
+    OgaCheckResult(OgaConfigSetModelFileHandles(&config, names.begin(), handles.data(), names.size()));
   }
 };
 
@@ -775,10 +778,55 @@ TEST_F(FileSourceAssetsTest, FileSourcesSurviveUnlinkAndConfigDestruction) {
   }
 }
 
+TEST_F(FileSourceAssetsTest, AdaptersSurviveUnlinkAndConfigReleaseWithoutPathFallback) {
+  const std::filesystem::path source{MODEL_PATH "engine/dummy-decoder"};
+  const auto json = ReadAsset(source / "genai_config.json");
+  const auto adapter_bytes = ReadAsset(source / "external-data/logits-bias.onnx_adapter");
+  ScopedAssetDirectory assets;
+  assets.Write("decoder.onnx", ReadAsset(source / "external-data/decoder-with-adapter.onnx"));
+  assets.Write("adapter-weights.data", ReadAsset(source / "external-data/adapter-weights.data"));
+  assets.Write("logits-bias.onnx_adapter", adapter_bytes);
+  assets.Write("unregistered.onnx_adapter", adapter_bytes);
+  auto config = OgaConfig::CreateFromBuffer(json);
+  config->ClearProviders();
+  config->Overlay(R"({"model":{"type":"llama"}})");
+  SetFiles(*config, assets, {"decoder.onnx", "adapter-weights.data", "logits-bias.onnx_adapter"});
+  for (const char* name : {"decoder.onnx", "adapter-weights.data", "logits-bias.onnx_adapter"}) {
+    ASSERT_TRUE(std::filesystem::remove(assets.path / name));
+  }
+  auto model = OgaModel::Create(*config);
+  config.reset();
+  auto adapters = OgaAdapters::Create(*model);
+  const auto unregistered = (assets.path / "unregistered.onnx_adapter").string();
+  ExpectError(OgaLoadAdapter(adapters.get(), unregistered.c_str(), "unregistered"),
+              "Missing model file source: unregistered.onnx_adapter");
+  adapters->LoadAdapter("logits-bias.onnx_adapter", "bias");
+  for (bool active : {false, true}) {
+    SCOPED_TRACE(active);
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("batch_size", 2);
+    params->SetSearchOption("max_length", 3);
+    auto generator = OgaGenerator::Create(*model, *params);
+    if (active) {
+      generator->SetActiveAdapter(*adapters, "bias");
+      ExpectError(OgaUnloadAdapter(adapters.get(), "bias"), "Adapter still in use");
+    }
+    const std::array<int32_t, 4> input{0, 2, 0, 3};
+    generator->AppendTokens(input.data(), input.size());
+    generator->GenerateNextToken();
+    for (size_t batch = 0; batch < 2; ++batch) {
+      ASSERT_EQ(generator->GetSequenceCount(batch), 3u);
+      EXPECT_EQ(generator->GetSequenceData(batch)[2], active ? 7 : 0);
+    }
+  }
+  adapters->UnloadAdapter("bias");
+}
+
 enum class LoadingMode { kPath,
                          kLegacyModelData,
                          kMemoryAssets,
-                         kFileSources };
+                         kFileSources,
+                         kFileSourceOverrides };
 
 void CheckPipelineLoadingModes(std::initializer_list<LoadingMode> modes) {
   const std::filesystem::path source{MODEL_PATH "engine/dummy-decoder"};
@@ -787,10 +835,11 @@ void CheckPipelineLoadingModes(std::initializer_list<LoadingMode> modes) {
   const auto weights = ReadAsset(source / "external-data/weights.data");
 
   for (const auto mode : modes) {
-    const bool file_sources = mode == LoadingMode::kFileSources;
+    const bool graph_override = mode == LoadingMode::kFileSourceOverrides;
+    const bool file_sources = mode == LoadingMode::kFileSources || graph_override;
     const bool memory = mode == LoadingMode::kMemoryAssets || file_sources;
     const bool legacy = mode == LoadingMode::kLegacyModelData;
-    SCOPED_TRACE(file_sources ? "file-sources" : memory ? "memory-backed"
+    SCOPED_TRACE(graph_override ? "file-source-override" : file_sources ? "file-sources" : memory ? "memory-backed"
                                              : legacy   ? "legacy-model-data"
                                                         : "path-based");
     ScopedAssetDirectory assets;
@@ -810,7 +859,7 @@ void CheckPipelineLoadingModes(std::initializer_list<LoadingMode> modes) {
         R"("outputs":["logits","present.0.key","present.0.value"]}}]}}})";
     config->Overlay(overlay.c_str());
     auto registered_graph = graph;
-    if ((memory && !file_sources) || legacy) {
+    if ((memory && !file_sources) || legacy || graph_override) {
       config->AddModelData(filename, registered_graph.data(), registered_graph.size());
     }
     if (memory && !file_sources) {
@@ -834,7 +883,8 @@ void CheckPipelineLoadingModes(std::initializer_list<LoadingMode> modes) {
     if (memory) {
       ASSERT_TRUE(std::filesystem::remove(assets.path / filename));
       ASSERT_TRUE(std::filesystem::remove(assets.path / "weights.data"));
-    } else if (legacy) {
+    }
+    if (legacy || graph_override) {
       registered_graph.assign(registered_graph.size(), '\0');
     }
 
@@ -862,6 +912,10 @@ TEST_F(MemoryAssetsTest, PipelineSessionResetPreservesLoadingMode) {
 
 TEST_F(FileSourceAssetsTest, PipelineSessionResetPreservesFileSources) {
   CheckPipelineLoadingModes({LoadingMode::kFileSources});
+}
+
+TEST_F(FileSourceAssetsTest, PipelineSessionResetPreservesFileSourceOverrides) {
+  CheckPipelineLoadingModes({LoadingMode::kFileSourceOverrides});
 }
 
 }  // namespace
