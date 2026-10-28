@@ -546,10 +546,27 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyTokenPostProcessorTimestampRecord>(m, "TokenPostProcessorTimestampRecord")
       .def("get_text", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
-      .def("get_start_frame", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStartFrame(); })
-      .def("get_stop_frame", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStopFrame(); })
-      .def("get_start_time", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStartTime(); })
-      .def("get_stop_time", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetStopTime(); });
+      .def("has_timestamp", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().HasTimestamp(); })
+      .def("get_speaker_label", [](const PyTokenPostProcessorTimestampRecord& record) -> std::optional<std::string> {
+        const auto* label = record.Get().GetSpeakerLabel();
+        return label ? std::optional<std::string>{label} : std::nullopt;
+      })
+      .def("get_start_frame", [](const PyTokenPostProcessorTimestampRecord& record) -> std::optional<int64_t> {
+        const auto& value = record.Get();
+        return value.HasTimestamp() ? std::optional<int64_t>{value.GetStartFrame()} : std::nullopt;
+      })
+      .def("get_stop_frame", [](const PyTokenPostProcessorTimestampRecord& record) -> std::optional<int64_t> {
+        const auto& value = record.Get();
+        return value.HasTimestamp() ? std::optional<int64_t>{value.GetStopFrame()} : std::nullopt;
+      })
+      .def("get_start_time", [](const PyTokenPostProcessorTimestampRecord& record) -> std::optional<double> {
+        const auto& value = record.Get();
+        return value.HasTimestamp() ? std::optional<double>{value.GetStartTime()} : std::nullopt;
+      })
+      .def("get_stop_time", [](const PyTokenPostProcessorTimestampRecord& record) -> std::optional<double> {
+        const auto& value = record.Get();
+        return value.HasTimestamp() ? std::optional<double>{value.GetStopTime()} : std::nullopt;
+      });
 
   pybind11::class_<PyTokenPostProcessorTimestamp>(m, "TokenPostProcessorTimestamp")
       .def("get_words", [](const PyTokenPostProcessorTimestamp& result) {

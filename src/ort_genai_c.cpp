@@ -1303,10 +1303,14 @@ const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTi
   return timestamps && index < timestamps->segments.size() ? static_cast<const OgaTokenPostProcessorTimestampRecord*>(&timestamps->segments[index]) : nullptr;
 }
 const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetText(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->text.c_str() : nullptr; }
-int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->start_frame : 0; }
-int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->stop_frame : 0; }
-double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->start_time : 0; }
-double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->stop_time : 0; }
+bool OGA_API_CALL OgaTokenPostProcessorTimestampRecordHasTimestamp(const OgaTokenPostProcessorTimestampRecord* record) { return record && record->start_frame.has_value(); }
+const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetSpeakerLabel(const OgaTokenPostProcessorTimestampRecord* record) {
+  return record && record->speaker_label ? record->speaker_label->c_str() : nullptr;
+}
+int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->start_frame.value_or(0) : 0; }
+int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->stop_frame.value_or(0) : 0; }
+double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->start_time.value_or(0) : 0; }
+double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->stop_time.value_or(0) : 0; }
 
 OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor* p, OgaTokenizerStream** out) {
   OGA_TRY

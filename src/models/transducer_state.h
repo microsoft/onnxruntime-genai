@@ -33,6 +33,7 @@ struct TransducerState : State {
   std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
   std::span<const AcousticFrameInterval> GetStepTokenIntervals() const { return last_token_intervals_; }
   bool TimestampsEnabled() const { return timestamps_enabled_; }
+  virtual std::span<const TokenSpeakerEvidence> GetStepSpeakerEvidence() const { return {}; }
   std::span<const int32_t> GetAllTokens() const { return all_tokens_; }
   size_t TokenCount() const { return all_tokens_.size(); }
 

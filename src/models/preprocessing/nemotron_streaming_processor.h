@@ -37,6 +37,7 @@ struct NemotronStreamingProcessor : StreamingProcessor {
 
   // Log-mel feature extraction
   nemo_mel::NemoStreamingMelExtractor mel_extractor_;
+  std::unique_ptr<nemo_mel::NemoStreamingMelExtractor> diarization_mel_extractor_;
 
   // Mel pre-encode cache: ring buffer of last pre_encode_cache_size frames.
   std::vector<float> mel_pre_encode_cache_;
@@ -49,6 +50,7 @@ struct NemotronStreamingProcessor : StreamingProcessor {
   int64_t consumed_samples_{0};
 
   std::unique_ptr<OrtValue> BuildMelTensor(const float* audio_chunk, size_t chunk_samples);
+  std::unique_ptr<NamedTensors> ProcessDiarization(bool final);
 };
 
 }  // namespace Generators

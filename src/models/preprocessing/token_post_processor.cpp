@@ -16,6 +16,7 @@ MetadataCoreConfig GetPostProcessorConfig(const Generator& generator) {
   MetadataCoreConfig config;
   config.timestamps.level = source.timestamp_level;
   config.timestamps.segment_separators = source.segment_separators;
+  config.diarization = source.diarization.Enabled();
   if (source.timestamp_level != Config::TimestampLevel::Off) {
     config.seconds_per_frame = static_cast<double>(source.hop_length) * source.subsampling_factor / source.sample_rate;
     config.timestamps.segment_gap_threshold_frames = GetSegmentGapThresholdFrames(source);
@@ -49,16 +50,20 @@ void TokenPostProcessorInternal::Process(const TokenOutputs& outputs) {
   results_.clear();
   const auto tokens = outputs.GetTokens();
   const auto* timestamps = outputs.GetAcousticFrameIntervals();
+  const auto* speaker_evidence = outputs.GetSpeakerEvidence();
   if (timestamps && timestamps->size() != tokens.size())
     throw std::runtime_error("Token timing count does not match emitted tokens");
+  if (speaker_evidence && speaker_evidence->size() != tokens.size())
+    throw std::runtime_error("Token speaker evidence count does not match emitted tokens");
   for (size_t index = 0; index < tokens.size(); ++index) {
     TokenMetadataInput token{tokens[index], std::nullopt};
     if (timestamps) {
       token.token_acoustic_frame_interval = (*timestamps)[index];
     }
+    if (speaker_evidence) token.speaker_evidence = (*speaker_evidence)[index];
     metadata_state_->ValidateInput(token);
     OrtxWordPieceInfo piece{};
-    if (metadata_state_->TimestampsEnabled()) piece = tokenizer_->GetWordPieceInfo(token.token_id);
+    if (metadata_state_->AlignmentEnabled()) piece = tokenizer_->GetWordPieceInfo(token.token_id);
     const auto& text = stream_->Decode(token.token_id);
     auto& result = results_.emplace_back();
     result.text = text;

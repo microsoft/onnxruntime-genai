@@ -167,7 +167,6 @@ struct Config {
     Off,      // Do not collect or return timestamp metadata.
     Word,     // Return completed word records.
     Segment,  // Return completed segment records while constructing words internally.
-    All,      // Return completed word and segment records; character records are out of scope.
   };
 
   struct Model {
@@ -217,7 +216,7 @@ struct Config {
     int blank_id{};
     int max_symbols_per_step{};
 
-    // Controls timestamp output: off, completed words, completed segments, or words and segments.
+    // Controls public timestamp output, independently of internal diarization alignment.
     TimestampLevel timestamp_level{TimestampLevel::Off};
     // Punctuation strings that complete a segment. An empty list disables punctuation segmentation.
     std::vector<std::string> segment_separators{".", "?", "!"};
@@ -396,6 +395,24 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
     } vad;
+
+    struct Diarization {
+      std::string filename;
+      // Declare the export's preprocessing and encoder geometry; defaults match Nemotron-3.
+      int sample_rate{16000};
+      int num_mels{128};
+      int fft_size{512};
+      int win_length{400};
+      int hop_length{160};
+      int subsampling_factor{8};
+      float preemph{0.97f};
+      float log_eps{5.96046448e-8f};
+      int right_context{4};  // Additional encoder frames; default 4 = 320 ms with the default geometry.
+      int64_t SamplesPerEncoderFrame() const { return static_cast<int64_t>(hop_length) * subsampling_factor; }
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+      bool Enabled() const { return !filename.empty(); }
+    } diarization;
 
     struct Moonshine {
       std::string frontend_filename;

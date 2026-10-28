@@ -695,6 +695,8 @@ struct OgaGenerator : OgaAbstract {
 
 struct OgaTokenPostProcessorTimestampRecord : OgaAbstract {
   const char* GetText() const { return OgaTokenPostProcessorTimestampRecordGetText(this); }
+  bool HasTimestamp() const { return OgaTokenPostProcessorTimestampRecordHasTimestamp(this); }
+  const char* GetSpeakerLabel() const { return OgaTokenPostProcessorTimestampRecordGetSpeakerLabel(this); }
   int64_t GetStartFrame() const { return OgaTokenPostProcessorTimestampRecordGetStartFrame(this); }
   int64_t GetStopFrame() const { return OgaTokenPostProcessorTimestampRecordGetStopFrame(this); }
   double GetStartTime() const { return OgaTokenPostProcessorTimestampRecordGetStartTime(this); }
