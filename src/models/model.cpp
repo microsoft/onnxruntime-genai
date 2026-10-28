@@ -942,10 +942,10 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       if (Ort::api_version < 28) {
         throw std::runtime_error("ORT does not support experimental initializer file sources.");
       }
-      using RegisterFiles = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, const char* const*, const int*, size_t) noexcept;
+      using RegisterFiles = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, const char* const*, const OgaFileHandle*, size_t) noexcept;
       const auto register_files = reinterpret_cast<RegisterFiles>(
           Ort::api->GetExperimentalFunction(
-              "OrtApi_SessionOptionsSetExternalInitializerFileDescriptors_SinceV32"));
+              "OrtApi_SessionOptionsSetExternalInitializerFileHandles_SinceV32"));
       if (!register_files) {
         throw std::runtime_error("ORT lacks the required initializer file-source API.");
       }
@@ -955,7 +955,7 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       for (const auto& name : sources.names) {
         names.push_back(name.c_str());
       }
-      Ort::ThrowOnError(register_files(options.get(), names.data(), sources.descriptors.data(), names.size()));
+      Ort::ThrowOnError(register_files(options.get(), names.data(), sources.handles.data(), names.size()));
       if (graph != config_->model_data_spans_.end() && !graph->second.empty()) {
         return OrtSession::Create(ort_env, graph->second.data(), graph->second.size(), options.get());
       }

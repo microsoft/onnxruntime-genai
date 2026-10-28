@@ -78,15 +78,15 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
       throw std::runtime_error("Memory asset bundle is missing tokenizer data.");
     }
     std::string_view module_json;
-#if defined(__linux__)
     if (config.external_file_sources_ &&
         std::find(config.external_file_sources_->names.begin(),
                   config.external_file_sources_->names.end(),
                   "tokenizer_module.json") != config.external_file_sources_->names.end()) {
-      memory_module_ = config.ReadFileSource("tokenizer_module.json");
-      module_json = memory_module_;
+      memory_data_ = std::make_shared<const TokenizerMemoryData>(TokenizerMemoryData{
+          memory_data_->config_json, memory_data_->tokenizer_json,
+          config.ReadFileSource("tokenizer_module.json")});
+      module_json = memory_data_->module_json;
     }
-#endif
     memory_blob_.emplace(std::string_view{memory_data_->config_json},
                          std::string_view{memory_data_->tokenizer_json},
                          module_json);

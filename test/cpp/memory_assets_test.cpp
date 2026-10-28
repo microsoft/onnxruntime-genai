@@ -12,7 +12,15 @@
 #include <string_view>
 #include <vector>
 
-#if defined(__linux__)
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -23,6 +31,51 @@
 #include "test_utils.h"
 
 namespace {
+
+class ScopedModelFile {
+ public:
+  explicit ScopedModelFile(const std::filesystem::path& path, bool writable = false) {
+#ifdef _WIN32
+    handle_ = CreateFileW(path.c_str(), GENERIC_READ | (writable ? GENERIC_WRITE : 0),
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+#else
+    handle_ = open(path.c_str(), (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC);
+#endif
+  }
+  ScopedModelFile(const ScopedModelFile&) = delete;
+  ScopedModelFile& operator=(const ScopedModelFile&) = delete;
+  ~ScopedModelFile() { Close(); }
+
+  OgaFileHandle Get() const { return handle_; }
+  bool IsValid() const {
+#ifdef _WIN32
+    return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
+#else
+    return handle_ >= 0;
+#endif
+  }
+  void Close() {
+    if (IsValid()) {
+#ifdef _WIN32
+      EXPECT_TRUE(CloseHandle(handle_));
+      handle_ = nullptr;
+#else
+      EXPECT_EQ(close(handle_), 0);
+      handle_ = -1;
+#endif
+    }
+  }
+
+ private:
+  OgaFileHandle handle_;
+};
+
+#ifdef _WIN32
+constexpr OgaFileHandle kInvalidFileHandle = nullptr;
+#else
+constexpr OgaFileHandle kInvalidFileHandle = -1;
+#endif
 
 constexpr std::string_view kSharedInitializers =
     R"("shared_initializers":[{"name":"transformer.wte.weight",)"
@@ -97,13 +150,12 @@ class MemoryAssetsTest : public ::testing::Test {
   const std::string tokenizer_json_{ReadAsset(model_dir_ / "tokenizer.json")};
 };
 
-#if defined(__linux__)
 class FileSourceAssetsTest : public MemoryAssetsTest {
  protected:
   void SetUp() override {
     auto config = CreateConfig();
     std::unique_ptr<OgaResult> result{
-        OgaConfigSetModelFileDescriptors(config.get(), nullptr, nullptr, 0)};
+        OgaConfigSetModelFileHandles(config.get(), nullptr, nullptr, 0)};
     if (result &&
         std::string_view{result->GetError()} == "ORT lacks the required initializer file-source API.") {
       GTEST_SKIP() << "The selected ORT runtime does not include initializer file sources.";
@@ -113,15 +165,6 @@ class FileSourceAssetsTest : public MemoryAssetsTest {
     }
   }
 };
-#endif
-
-#if !defined(__linux__)
-TEST_F(MemoryAssetsTest, FileSourcesAreUnsupportedOutsideLinux) {
-  auto config = CreateConfig();
-  ExpectError(OgaConfigSetModelFileDescriptors(config.get(), nullptr, nullptr, 0),
-              "External initializer file descriptors require Linux.");
-}
-#endif
 
 TEST_F(MemoryAssetsTest, ConfigOwnsParsedValues) {
   auto json = config_json_;
@@ -451,25 +494,26 @@ TEST_F(MemoryAssetsTest, EncoderDecoderGeneratesFromRegisteredBuffers) {
   }
 }
 
-#if defined(__linux__)
 TEST_F(FileSourceAssetsTest, FileSourcesProvideBothEncoderAndDecoderGraphs) {
   const std::filesystem::path source{MODEL_PATH "marian-cache/dynamic"};
   const auto json = ReadAsset(source / "genai_config.json");
   const std::array<const char*, 4> names{
       "encoder.onnx", "decoder.onnx", "encoder-weights.data", "decoder-weights.data"};
-  std::array<int, 4> descriptors{};
+  std::array<OgaFileHandle, 4> handles{};
+  std::array<std::unique_ptr<ScopedModelFile>, 4> files;
   ScopedAssetDirectory assets;
   for (size_t i = 0; i < names.size(); ++i) {
     assets.Write(names[i], ReadAsset(source / "external-data" / names[i]));
-    descriptors[i] = open((assets.path / names[i]).c_str(), O_RDONLY | O_CLOEXEC);
-    ASSERT_GE(descriptors[i], 0);
+    files[i] = std::make_unique<ScopedModelFile>(assets.path / names[i]);
+    ASSERT_TRUE(files[i]->IsValid());
+    handles[i] = files[i]->Get();
   }
   auto config = OgaConfig::CreateFromBuffer(json);
   config->ClearProviders();
-  auto* result = OgaConfigSetModelFileDescriptors(
-      config.get(), names.data(), descriptors.data(), names.size());
+  auto* result = OgaConfigSetModelFileHandles(
+      config.get(), names.data(), handles.data(), names.size());
   for (size_t i = 0; i < names.size(); ++i) {
-    EXPECT_EQ(close(descriptors[i]), 0);
+    files[i]->Close();
     ASSERT_TRUE(std::filesystem::remove(assets.path / names[i]));
   }
   OgaCheckResult(result);
@@ -494,24 +538,28 @@ TEST_F(FileSourceAssetsTest, FileSourcesProvideBothEncoderAndDecoderGraphs) {
 TEST_F(FileSourceAssetsTest, FileSourceFailuresDoNotReplaceValidRegistrations) {
   ScopedAssetDirectory assets;
   assets.Write("weights.data", weights_);
-  const int readonly = open((assets.path / "weights.data").c_str(), O_RDONLY | O_CLOEXEC);
-  const int writable = open((assets.path / "weights.data").c_str(), O_RDWR | O_CLOEXEC);
-  ASSERT_GE(readonly, 0);
-  ASSERT_GE(writable, 0);
+  ScopedModelFile readonly(assets.path / "weights.data");
+  ASSERT_TRUE(readonly.IsValid());
   auto config = CreateConfig();
   config->AddModelData("past.onnx", graph_.data(), graph_.size());
   const char* name = "weights.data";
-  auto* result = OgaConfigSetModelFileDescriptors(config.get(), &name, &readonly, 1);
-  ASSERT_EQ(close(readonly), 0);
+  const auto handle = readonly.Get();
+  auto* result = OgaConfigSetModelFileHandles(config.get(), &name, &handle, 1);
+  readonly.Close();
   OgaCheckResult(result);
-  ExpectError(OgaConfigSetModelFileDescriptors(config.get(), &name, &writable, 1),
+#ifndef _WIN32
+  ScopedModelFile writable(assets.path / "weights.data", true);
+  ASSERT_TRUE(writable.IsValid());
+  const auto writable_handle = writable.Get();
+  ExpectError(OgaConfigSetModelFileHandles(config.get(), &name, &writable_handle, 1),
               "read-only regular");
-  ASSERT_EQ(close(writable), 0);
-  const int invalid = -1;
-  ExpectError(OgaConfigSetModelFileDescriptors(config.get(), &name, &invalid, 1),
+  writable.Close();
+#endif
+  const auto invalid = kInvalidFileHandle;
+  ExpectError(OgaConfigSetModelFileHandles(config.get(), &name, &invalid, 1),
               "duplicate");
   for (const char* bad_name : {"../weights.data", "/weights.data", ".", "sub/weights.data"}) {
-    ExpectError(OgaConfigSetModelFileDescriptors(config.get(), &bad_name, &invalid, 1),
+    ExpectError(OgaConfigSetModelFileHandles(config.get(), &bad_name, &invalid, 1),
                 "flat relative");
   }
   ASSERT_TRUE(std::filesystem::remove(assets.path / "weights.data"));
@@ -525,14 +573,14 @@ TEST_F(FileSourceAssetsTest, FileSourcesOwnTokenizerModuleAfterConfigRelease) {
   assets.Write("tokenizer_module.json",
                R"({"added_tokens":[{"id":60000,"content":"<|module_only_added_token|>",)"
                R"("single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}]})");
-  const int descriptor =
-      open((assets.path / "tokenizer_module.json").c_str(), O_RDONLY | O_CLOEXEC);
-  ASSERT_GE(descriptor, 0);
+  ScopedModelFile file(assets.path / "tokenizer_module.json");
+  ASSERT_TRUE(file.IsValid());
+  const auto handle = file.Get();
   auto config = CreateConfig();
   config->SetTokenizerData(tokenizer_config_, tokenizer_json_);
   const char* name = "tokenizer_module.json";
-  auto* result = OgaConfigSetModelFileDescriptors(config.get(), &name, &descriptor, 1);
-  ASSERT_EQ(close(descriptor), 0);
+  auto* result = OgaConfigSetModelFileHandles(config.get(), &name, &handle, 1);
+  file.Close();
   OgaCheckResult(result);
   ASSERT_TRUE(std::filesystem::remove(assets.path / name));
   auto tokenizer = OgaTokenizer::Create(*config);
@@ -547,14 +595,14 @@ TEST_F(FileSourceAssetsTest, FileSourcesOwnTokenizerModuleAfterConfigRelease) {
 TEST_F(FileSourceAssetsTest, FileSourcesRejectMetadataThatCouldBeInterpretedAsAPath) {
   ScopedAssetDirectory assets;
   assets.Write("tokenizer_module.json", "tokenizer.json");
-  const int descriptor =
-      open((assets.path / "tokenizer_module.json").c_str(), O_RDONLY | O_CLOEXEC);
-  ASSERT_GE(descriptor, 0);
+  ScopedModelFile file(assets.path / "tokenizer_module.json");
+  ASSERT_TRUE(file.IsValid());
+  const auto handle = file.Get();
   auto config = CreateConfig();
   config->SetTokenizerData(tokenizer_config_, tokenizer_json_);
   const char* name = "tokenizer_module.json";
-  auto* result = OgaConfigSetModelFileDescriptors(config.get(), &name, &descriptor, 1);
-  ASSERT_EQ(close(descriptor), 0);
+  auto* result = OgaConfigSetModelFileHandles(config.get(), &name, &handle, 1);
+  file.Close();
   OgaCheckResult(result);
   ASSERT_TRUE(std::filesystem::remove(assets.path / name));
   OgaTokenizer* tokenizer = nullptr;
@@ -563,18 +611,35 @@ TEST_F(FileSourceAssetsTest, FileSourcesRejectMetadataThatCouldBeInterpretedAsAP
   EXPECT_EQ(tokenizer, nullptr);
 }
 
+TEST_F(FileSourceAssetsTest, FileSourcesRejectOversizedMetadataBeforeMapping) {
+  ScopedAssetDirectory assets;
+  assets.Write("tokenizer_module.json", std::string(16 * 1024 * 1024 + 1, ' '));
+  ScopedModelFile file(assets.path / "tokenizer_module.json");
+  ASSERT_TRUE(file.IsValid());
+  const auto handle = file.Get();
+  auto config = CreateConfig();
+  config->SetTokenizerData(tokenizer_config_, tokenizer_json_);
+  const char* name = "tokenizer_module.json";
+  OgaCheckResult(OgaConfigSetModelFileHandles(config.get(), &name, &handle, 1));
+  file.Close();
+  OgaTokenizer* tokenizer = nullptr;
+  ExpectError(OgaCreateTokenizerFromConfig(config.get(), &tokenizer), "source length");
+  EXPECT_EQ(tokenizer, nullptr);
+}
+
 TEST_F(FileSourceAssetsTest, FileSourcesRejectMissingAndTruncatedWeights) {
   auto config = CreateConfig();
   config->AddModelData("past.onnx", graph_.data(), graph_.size());
-  config->SetModelFileDescriptors(nullptr, nullptr, 0);
+  config->SetModelFileHandles(nullptr, nullptr, 0);
   EXPECT_THROW(OgaModel::Create(*config), std::runtime_error);
   ScopedAssetDirectory assets;
   assets.Write("weights.data", std::string_view{weights_}.substr(0, weights_.size() - 1));
-  const int descriptor = open((assets.path / "weights.data").c_str(), O_RDONLY | O_CLOEXEC);
-  ASSERT_GE(descriptor, 0);
+  ScopedModelFile file(assets.path / "weights.data");
+  ASSERT_TRUE(file.IsValid());
+  const auto handle = file.Get();
   const char* name = "weights.data";
-  auto* result = OgaConfigSetModelFileDescriptors(config.get(), &name, &descriptor, 1);
-  ASSERT_EQ(close(descriptor), 0);
+  auto* result = OgaConfigSetModelFileHandles(config.get(), &name, &handle, 1);
+  file.Close();
   OgaCheckResult(result);
   ASSERT_TRUE(std::filesystem::remove(assets.path / "weights.data"));
   EXPECT_THROW(OgaModel::Create(*config), std::runtime_error);
@@ -583,16 +648,17 @@ TEST_F(FileSourceAssetsTest, FileSourcesRejectMissingAndTruncatedWeights) {
 TEST_F(FileSourceAssetsTest, FileSourcesSurviveUnlinkAndConfigDestruction) {
   ScopedAssetDirectory assets;
   assets.Write("weights.data", weights_);
-  const int descriptor = open((assets.path / "weights.data").c_str(), O_RDONLY | O_CLOEXEC);
-  ASSERT_GE(descriptor, 0);
+  ScopedModelFile file(assets.path / "weights.data");
+  ASSERT_TRUE(file.IsValid());
+  const auto handle = file.Get();
   auto config = CreateConfig();
   config->Overlay(R"({"model":{"decoder":{"session_options":{"graph_optimization_level":"ORT_DISABLE_ALL"}}}})");
   auto registered_graph = graph_;
   config->AddModelData("past.onnx", registered_graph.data(), registered_graph.size());
   const char* name = "weights.data";
-  OgaResult* result = OgaConfigSetModelFileDescriptors(
-      config.get(), &name, &descriptor, 1);
-  ASSERT_EQ(close(descriptor), 0);
+  OgaResult* result = OgaConfigSetModelFileHandles(
+      config.get(), &name, &handle, 1);
+  file.Close();
   OgaCheckResult(result);
   ASSERT_TRUE(std::filesystem::remove(assets.path / "weights.data"));
   auto model = OgaModel::Create(*config);
@@ -612,7 +678,6 @@ TEST_F(FileSourceAssetsTest, FileSourcesSurviveUnlinkAndConfigDestruction) {
     EXPECT_EQ(generator->GetSequenceData(0)[5], 204);
   }
 }
-#endif
 
 enum class LoadingMode { kPath,
                          kLegacyModelData,
@@ -655,20 +720,19 @@ void CheckPipelineLoadingModes(std::initializer_list<LoadingMode> modes) {
     if (memory && !file_sources) {
       config->AddExternalInitializerData("weights.data", weights.data(), weights.size());
     }
-#if defined(__linux__)
     if (file_sources) {
       const std::array<const char*, 2> names{filename.c_str(), "weights.data"};
-      const std::array<int, 2> descriptors{
-          open((assets.path / filename).c_str(), O_RDONLY | O_CLOEXEC),
-          open((assets.path / "weights.data").c_str(), O_RDONLY | O_CLOEXEC)};
-      auto* result = OgaConfigSetModelFileDescriptors(
-          config.get(), names.data(), descriptors.data(), names.size());
-      for (int descriptor : descriptors) {
-        EXPECT_EQ(close(descriptor), 0);
-      }
+      ScopedModelFile graph_file(assets.path / filename);
+      ScopedModelFile weights_file(assets.path / "weights.data");
+      ASSERT_TRUE(graph_file.IsValid());
+      ASSERT_TRUE(weights_file.IsValid());
+      const std::array<OgaFileHandle, 2> handles{graph_file.Get(), weights_file.Get()};
+      auto* result = OgaConfigSetModelFileHandles(
+          config.get(), names.data(), handles.data(), names.size());
+      graph_file.Close();
+      weights_file.Close();
       OgaCheckResult(result);
     }
-#endif
     auto model = OgaModel::Create(*config);
     config.reset();
     if (memory) {
@@ -700,10 +764,8 @@ TEST_F(MemoryAssetsTest, PipelineSessionResetPreservesLoadingMode) {
       {LoadingMode::kPath, LoadingMode::kLegacyModelData, LoadingMode::kMemoryAssets});
 }
 
-#if defined(__linux__)
 TEST_F(FileSourceAssetsTest, PipelineSessionResetPreservesFileSources) {
   CheckPipelineLoadingModes({LoadingMode::kFileSources});
 }
-#endif
 
 }  // namespace

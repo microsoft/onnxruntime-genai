@@ -28,11 +28,17 @@ For the Marian variant, run the same script twice with `--model-dir test/models/
 
 ---
 
-### Linux CPU/WebGPU file-source loading
+### Cross-platform native file-source loading
 
-`OgaConfigSetModelFileDescriptors` (`OgaConfig::SetModelFileDescriptors` in C++)
+`OgaConfigSetModelFileHandles` (`OgaConfig::SetModelFileHandles` in C++)
 registers a complete flat model directory as named, pre-opened, read-only files
 on a JSON-backed config. Supply tokenizer JSON through `OgaConfigSetTokenizerData`.
+Windows, Linux, Android, macOS and iOS use the same loading contract. `OgaFileHandle`
+is a native Windows `HANDLE` (`void*`), not a CRT descriptor, or a POSIX `int`
+descriptor. Windows handles must permit reading and are duplicated with only read
+rights; POSIX descriptors must already be read-only. Original handles can be closed
+after successful registration. File handles are not interchangeable between processes:
+the host must first transfer/duplicate them into the process calling this API.
 GenAI resolves graph names and ORT resolves external-weight names; the host does
 not need to parse ONNX tensors. CPU/WebGPU provider selection is unchanged.
 
@@ -46,17 +52,22 @@ are outside this contract.
 
 Build against an ORT SDK that exposes `GetExperimentalFunction` (API version 28
 or newer), and use a runtime with the experimental
-`OrtApi_SessionOptionsSetExternalInitializerFileDescriptors_SinceV32` entry.
+`OrtApi_SessionOptionsSetExternalInitializerFileHandles_SinceV32` entry.
 Older SDKs can still build the library, but descriptor registration fails explicitly.
 An unavailable API, missing file or invalid range is an explicit error, not
 filesystem or CPU fallback. ORT maps initializer ranges rather than entire weight
-files; small or unaligned tensors may be copied. Windows file loading is unchanged.
+files; small or unaligned tensors may be copied. Full ONNX loading with external
+initializers is required, including on mobile; minimal ORT builds do not advertise
+the entry. Execution-provider selection is unchanged. GPU providers use ordinary
+initializer upload from CPU-backed mappings, not Windows/D3D12 accelerated file
+loading. Ordinary path-based loading remains unchanged.
 Driver initialization must still occur before sandbox lockdown when required.
 
-`FileSourceAssetsTest.*` covers closed/unlinked descriptors, graph and weight
+`FileSourceAssetsTest.*` runs the same native-handle contract tests on desktop
+platforms and covers closed/unlinked files, graph and weight
 sources for both encoder/decoder sessions, failed registration, truncation,
 config-independent ownership, tokenizer-module tokens after config release,
-metadata that could be mistaken for a path, and pipeline session recreation. It explicitly skips
+oversized metadata, metadata that could be mistaken for a path, and pipeline session recreation. It explicitly skips
 when the selected ORT lacks the API; those skips are not file-source validation.
 
 ## 1. Prerequisites

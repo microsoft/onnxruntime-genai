@@ -254,8 +254,8 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaConfigAddExternalInitializerData(this, filename.c_str(), data, length));
   }
 
-  void SetModelFileDescriptors(const char* const* names, const int* descriptors, size_t count) {
-    OgaCheckResult(OgaConfigSetModelFileDescriptors(this, names, descriptors, count));
+  void SetModelFileHandles(const char* const* names, const OgaFileHandle* handles, size_t count) {
+    OgaCheckResult(OgaConfigSetModelFileHandles(this, names, handles, count));
   }
 
   void SetTokenizerData(std::string_view config_json, std::string_view tokenizer_json) {
