@@ -10,7 +10,6 @@
 #include <functional>
 #include <fstream>
 #include <mutex>
-#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -94,24 +93,33 @@ State::State(const GeneratorParams& params, const Model& model, DeviceInterface*
       p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
-  // Generate a random id for graph capture of the default (1-token) decode shape.
+  // Reserve the default (1-token) decode capture identity.
   if (params_->use_graph_capture) {
     GraphIdForLength(1, 0);
   }
 }
 
-const std::string& State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
-  const int graph_key = graph_capture_length * 2 + graph_capture_variant;
-  auto it = graph_ids_.find(graph_key);
-  if (it != graph_ids_.end()) {
-    return it->second.text;
+int State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
+  // Activation is additive: each successful SetActiveAdapter appends one name.
+  // Replaying an older adapter set would bypass the new inputs and kernel selection.
+  const auto known_ids = graph_ids_.size();
+  const int id = graph_ids_.Id({static_cast<size_t>(graph_capture_length), static_cast<size_t>(graph_capture_variant),
+                                adapter_names_.size()});
+  if (g_log.enabled && g_log.graph_capture) {
+    if (graph_ids_.size() != known_ids) {
+      Log("graph_capture") << "State graph id=" << id << " length=" << graph_capture_length
+                           << " variant=" << graph_capture_variant << " adapters=" << adapter_names_.size() << std::endl;
+    } else if (id < 0 && !graph_capture_fallback_logged_) {
+      Log("graph_capture") << "State graph capture fallback: "
+                           << (graph_ids_.size() >= GraphAnnotationIds::kMaxCapturedShapes
+                                   ? "capture budget exhausted"
+                                   : "annotation IDs exhausted")
+                           << "; running new keys without capture (" << graph_ids_.size() << "/"
+                           << GraphAnnotationIds::kMaxCapturedShapes << " keys assigned)" << std::endl;
+      graph_capture_fallback_logged_ = true;
+    }
   }
-  // Distinct random annotation id per captured length (ORT captures one graph per id).
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<> dis(1, INT_MAX);
-  const int id_value = dis(gen);
-  return graph_ids_.emplace(graph_key, GraphId{id_value, std::to_string(id_value)}).first->second.text;
+  return id;
 }
 
 void State::DumpInputs() {
@@ -143,7 +151,8 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
     if (graph_capture_this_run) {
-      run_options_->AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
+      run_options_->AddConfigEntry("gpu_graph_id",
+                                   std::to_string(GraphIdForLength(graph_capture_length, graph_capture_variant)).c_str());
     } else {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
@@ -278,13 +287,8 @@ State::~State() {
   // would call std::terminate.
 #if ORT_API_VERSION >= 27
   if (graph_capture_session_) {
-    // Speculative decoding (MTP) may capture more than one input length, each with its
-    // own annotation id, so release every id that was handed out.
-    for (const auto& length_and_id : graph_ids_) {
-      const int id_value = length_and_id.second.value;
-      if (id_value <= 0) {
-        continue;
-      }
+    // Include captures from earlier adapter sets, as well as all input lengths.
+    graph_ids_.ForEachAssignedId([&](int id_value) {
       try {
         graph_capture_session_->ReleaseCapturedGraph(id_value);
       } catch (...) {
@@ -294,7 +298,7 @@ State::~State() {
                          << ") failed: unknown exception" << std::endl;
         }
       }
-    }
+    });
   }
 #endif
 
@@ -540,6 +544,10 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 }
 
 void Model::AddSharedInitializers() {
+  if (config_->memory_assets_only_ && !config_->model.decoder.shared_initializers.empty()) {
+    throw std::runtime_error("Memory-only loading does not support shared initializer descriptors.");
+  }
+
   for (const auto& initializer : config_->model.decoder.shared_initializers) {
     if (initializer.name.empty() || initializer.data_file.empty() || initializer.length.empty() ||
         initializer.shape.empty() || initializer.data_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
@@ -723,6 +731,9 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
   // within one of these to prevent loading arbitrary libraries from disk.
   std::vector<std::filesystem::path> allowed_dirs;
   if (!custom_ops_libraries.empty()) {
+    if (config_->memory_assets_only_) {
+      throw std::runtime_error("Memory-only loading does not support custom-ops library paths.");
+    }
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
 
@@ -914,10 +925,39 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   return session_options_.get();
 }
 
-std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename,
+                                                 OrtSessionOptions* session_options, bool is_session_recreation) {
   std::unique_ptr<OrtSession> session;
-  if (auto model_data_it = config_->model_data_spans_.find(model_filename);
-      model_data_it != config_->model_data_spans_.end()) {
+  if (config_->memory_assets_only_) {
+    auto graph = config_->model_data_spans_.find(model_filename);
+    if (graph == config_->model_data_spans_.end() || graph->second.empty()) {
+      throw std::runtime_error("Memory asset bundle is missing graph: " + model_filename);
+    }
+    if (config_->external_data_spans_.empty()) {
+      throw std::runtime_error("Memory asset bundle is missing external initializer buffers.");
+    }
+    auto options = session_options->Clone();
+    std::vector<fs::path> paths;
+    std::vector<char*> buffers;
+    std::vector<size_t> lengths;
+    paths.reserve(config_->external_data_spans_.size());
+    for (const auto& [name, data] : config_->external_data_spans_) {
+      paths.emplace_back(name);
+      // ORT's C API takes char*, but direct-buffer mode does not modify inputs.
+      buffers.push_back(const_cast<char*>(reinterpret_cast<const char*>(data.data())));
+      lengths.push_back(data.size());
+    }
+    std::vector<const ORTCHAR_T*> names;
+    for (const auto& path : paths) {
+      names.push_back(path.c_str());
+    }
+    Ort::ThrowOnError(Ort::api->AddExternalInitializersFromFilesInMemory(
+        options.get(), names.data(), buffers.data(), lengths.data(), names.size()));
+    options->AddConfigEntry("session.use_external_initializer_file_buffers_directly", "1");
+    session = OrtSession::Create(ort_env, graph->second.data(),
+                                 graph->second.size(), options.get());
+  } else if (auto model_data_it = config_->model_data_spans_.find(model_filename);
+             !is_session_recreation && model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);

@@ -8,14 +8,21 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace Generators {
 
 struct RuntimeSettings;
 
+struct TokenizerMemoryData {
+  std::string config_json;
+  std::string tokenizer_json;
+};
+
 struct Config {
   Config() = default;
-  Config(const fs::path& path, std::string_view json_overlay);
+  Config(const fs::path& path, std::string_view json_overlay,
+         std::optional<std::string_view> memory_json = std::nullopt);
 
   struct Defaults {
     // Decoder names
@@ -156,6 +163,13 @@ struct Config {
 
   using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry
 
+  enum class TimestampLevel {
+    Off,      // Do not collect or return timestamp metadata.
+    Word,     // Return completed word records.
+    Segment,  // Return completed segment records while constructing words internally.
+    All,      // Return completed word and segment records; character records are out of scope.
+  };
+
   struct Model {
     std::string type;
 
@@ -202,6 +216,13 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+
+    // Controls timestamp output: off, completed words, completed segments, or words and segments.
+    TimestampLevel timestamp_level{TimestampLevel::Off};
+    // Punctuation strings that complete a segment. An empty list disables punctuation segmentation.
+    std::vector<std::string> segment_separators{".", "?", "!"};
+    // Optional minimum inter-word gap in seconds that starts a new segment.
+    std::optional<double> segment_gap_threshold_seconds;
 
     // Parakeet TDT (Token-and-Duration Transducer) parameters
     int left_context_samples{};
@@ -731,6 +752,8 @@ struct Config {
         std::string q_row_map{"q_row_map"};
         std::string qkv_row_map{"qkv_row_map"};
         std::string block_row_index{"block_row_index"};
+        // Optional (LiLiCorr): packed aux_hidden_states row of each request's last context row.
+        std::string anchor_row_index;
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
@@ -862,6 +885,9 @@ struct Config {
 
   std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;     // Mapping of nominal input/output names to graph input/output names
   std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
+  bool memory_assets_only_{};
+  std::unordered_map<std::string, std::span<const std::byte>> external_data_spans_;
+  std::shared_ptr<const TokenizerMemoryData> tokenizer_memory_data_;
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
@@ -888,6 +914,10 @@ struct RuntimeProfileDeviceFacts {
 void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
+void ValidateTimestampConfiguration(const Config::Model& model);
+std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model);
+std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
+                                                int hop_length, int subsampling_factor);
 
 // Logs a warning when the drafter's exported geometry is narrower than
 // speculative.max_draft_tokens. The engine clamps to the smallest bound at dispatch rather than

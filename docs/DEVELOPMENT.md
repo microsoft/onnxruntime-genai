@@ -6,6 +6,26 @@ For end-user install instructions (pip / NuGet), see the [README](../README.md) 
 
 For the current continuous-batching architecture and transactional paged KV-cache flow, see [Paged Attention Engine](paged_attention_engine.md). The performance and design history behind the batching implementation is documented separately in [Engine Batching Design](paged_attention_batching.md).
 
+### Memory-backed CPU model loading
+
+The native C/C++ API can load flat CPU text and translation models without opening their model assets by path. Create a config with `OgaCreateConfigFromBuffer` (`OgaConfig::CreateFromBuffer` in C++), register each graph with the existing `OgaConfigAddModelData`, register external weight files with `OgaConfigAddExternalInitializerData`, and supply tokenizer config/vocabulary JSON with `OgaConfigSetTokenizerData`. Then use the normal model, tokenizer and generator APIs. Path-based loading is unchanged.
+
+Config JSON is parsed immediately and tokenizer JSON is copied into shared immutable storage. Graph and external-initializer buffers are borrowed: keep them immutable and alive until every dependent model/session is destroyed, including sessions recreated by decoder-pipeline resets during generation. Pipeline initialization and recreation use the same asset-aware session loader. ORT can borrow eligible initializer slices directly; this does not guarantee zero copies for every tensor.
+
+The existing graph-only `OgaConfigAddModelData` path retains its original lifetime contract: without the memory-backed config API, graph buffers generally need only survive model creation, and pipeline recreation continues loading files. Memory-backed configs instead retain their registered asset source throughout recreation.
+
+These APIs consume the supplied JSON, not a directory snapshot: tokenizer-module and chat-template sidecar files are not discovered. Applications must supply complete supported metadata in the JSON inputs.
+
+This initial contract requires external initializer data and covers main-graph initializers with flat relative asset names. Model packages, subgraph initializers, other execution providers, processors and adapters are not supported. File-backed `shared_initializers` descriptors and custom-ops library paths are rejected, including when added through config overlays. All graph and external-data references must be supplied by the caller; enforce filesystem denial separately when using this API as a sandbox boundary.
+
+`MemoryAssetsTest.*` covers registration errors, owned tokenizer-data lifetime, path/memory parity for configuration-only added tokens, shared-initializer and custom-ops rejection, unchanged path-based metadata validation and deterministic CPU generation using external-weight variants of existing test models. Pipeline coverage runs generation after repeated session resets in file, legacy graph-buffer and memory-asset modes. The legacy graph buffer is invalidated after creation; memory-asset source files are removed after initialization.
+
+Encoder–decoder coverage uses the existing synthetic Marian cache model with separate external-data buffers for both graphs. It checks path/memory generation parity after removing the staged files before memory-backed model creation, repeated generation after releasing the config, and rejection when either session's weight buffer is missing.
+
+Regenerate the tiny GPT-2 variant with `python test/models/hf-internal-testing/tiny-random-gpt2-fp32/export_external_data.py` in an environment containing `onnx`. Generate the pipeline fixture from the existing dummy decoder with the same script plus `--model-dir test/models/engine/dummy-decoder --filename decoder.onnx`.
+
+For the Marian variant, run the same script twice with `--model-dir test/models/marian-cache/dynamic --float-initializers-only`: once with `--filename encoder.onnx --weights-filename encoder-weights.data`, then with `--filename decoder.onnx --weights-filename decoder-weights.data`. Integer shape/axis constants remain inline for ORT shape inference.
+
 ---
 
 ## 1. Prerequisites

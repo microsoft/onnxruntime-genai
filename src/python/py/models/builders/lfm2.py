@@ -127,7 +127,6 @@ class LFM2Model(Model):
             channels=self.hidden_size,
         )
         if state_per_row:
-            self.make_value(conv_op_state, self.io_dtype, shape=["batch_size", self.hidden_size, self.conv_L_cache - 1])
             self.make_causal_conv_state_at_last_real_token(
                 f"{basename}/present_conv_state",
                 root_input=root_input,
