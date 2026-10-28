@@ -2,15 +2,12 @@
 // Licensed under the MIT License.
 #include "component_session.h"
 
-#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <cstring>
-#include <limits>
 #include <map>
 #include <numeric>
-#include <optional>
 #include <set>
 #include <sstream>
 #include <variant>
@@ -20,7 +17,6 @@
 #include "../json.h"
 #include "io/quantized_kv_cache.h"
 #include "model.h"
-#include "preprocessing/genai_tokenizer.h"
 #include "session_options.h"
 
 namespace Generators {
@@ -292,95 +288,3 @@ NamedTensors ComponentSession::Run(
 }
 
 }  // namespace Generators
-
-namespace {
-
-struct TokenValue : JSON::Element {
-  std::string content;
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "content" &&
-        std::holds_alternative<std::string_view>(value))
-      content = std::string(JSON::Get<std::string_view>(value));
-  }
-};
-
-struct IgnoredTokenizerMetadata : JSON::Element {
-  void OnValue(std::string_view, JSON::Value) override {}
-  Element& OnObject(std::string_view) override { return *this; }
-  Element& OnArray(std::string_view) override { return *this; }
-};
-
-struct TokenizerMetadata : JSON::Element {
-  std::optional<int32_t> pad_token_id;
-  std::string pad_token;
-  TokenValue pad_token_object;
-  IgnoredTokenizerMetadata ignored;
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "pad_token_id" && std::holds_alternative<double>(value)) {
-      const auto number = JSON::Get<double>(value);
-      if (number < std::numeric_limits<int32_t>::min() ||
-          number > std::numeric_limits<int32_t>::max() ||
-          number != std::trunc(number))
-        throw std::runtime_error("tokenizer_config.json pad_token_id must be an integer");
-      pad_token_id = static_cast<int32_t>(number);
-    } else if (name == "pad_token" &&
-               std::holds_alternative<std::string_view>(value)) {
-      pad_token = std::string(JSON::Get<std::string_view>(value));
-    }
-  }
-  Element& OnObject(std::string_view name) override {
-    if (name.empty()) return *this;
-    if (name == "pad_token") return pad_token_object;
-    return ignored;
-  }
-  Element& OnArray(std::string_view name) override {
-    if (name.empty()) return *this;
-    return ignored;
-  }
-};
-
-int32_t ResolvePadTokenId(
-    const fs::path& path, const Generators::Tokenizer& tokenizer) {
-  const auto config_path = path / "tokenizer_config.json";
-  std::ifstream stream(config_path.c_str(), std::ios::binary);
-  if (!stream)
-    throw std::runtime_error("cannot open tokenizer_config.json");
-  std::stringstream buffer;
-  buffer << stream.rdbuf();
-  TokenizerMetadata metadata;
-  try {
-    JSON::Parse(metadata, buffer.str());
-  } catch (...) {
-    JSON::TranslateException("tokenizer_config.json");
-  }
-  if (metadata.pad_token_id) return *metadata.pad_token_id;
-  const auto& pad_token = metadata.pad_token.empty()
-                              ? metadata.pad_token_object.content
-                              : metadata.pad_token;
-  if (pad_token.empty()) return tokenizer.GetPadTokenId();
-  const auto ids = tokenizer.Encode(pad_token.c_str());
-  if (ids.size() != 1)
-    throw std::runtime_error(
-        "tokenizer_config.json pad_token must encode to exactly one token");
-  return ids.front();
-}
-
-}  // namespace
-
-Generators::PackageTokenizer::PackageTokenizer(const Config& config)
-    : config_(config),
-      tokenizer_(config_),
-      pad_token_id_(ResolvePadTokenId(config_.config_path, tokenizer_)),
-      context_length_(
-          config_.model.context_length > 0
-              ? std::min<size_t>(
-                    8192, static_cast<size_t>(config_.model.context_length))
-              : 8192) {}
-
-std::vector<int32_t> Generators::PackageTokenizer::Encode(
-    const std::string& text) const {
-  if (text.find('\0') != std::string::npos)
-    throw std::invalid_argument(
-        "structured text must not contain embedded NUL characters");
-  return tokenizer_.Encode(text.c_str());
-}

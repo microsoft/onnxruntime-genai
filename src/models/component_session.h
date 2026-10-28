@@ -10,8 +10,8 @@
 #include <vector>
 
 #include "../filesystem.h"
+#include "../generator/generators.h"
 #include "onnxruntime_api.h"
-#include "preprocessing/genai_tokenizer.h"
 
 namespace Generators {
 
@@ -44,20 +44,6 @@ struct ComponentSession {
   std::vector<ComponentInfo> inputs_;
   bool uses_cuda_{};
   std::mutex mutex_;
-};
-
-class PackageTokenizer {
- public:
-  explicit PackageTokenizer(const Config& config);
-  std::vector<int32_t> Encode(const std::string& text) const;
-  int32_t PadTokenId() const { return pad_token_id_; }
-  size_t ContextLength() const { return context_length_; }
-
- private:
-  Config config_;
-  Tokenizer tokenizer_;
-  int32_t pad_token_id_{};
-  size_t context_length_{8192};
 };
 
 }  // namespace Generators

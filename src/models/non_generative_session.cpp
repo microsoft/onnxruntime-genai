@@ -4,6 +4,7 @@
 #include "../json.h"
 #include "component_session.h"
 #include "non_generative_session.h"
+#include "preprocessing/genai_tokenizer.h"
 
 #include <algorithm>
 #include <charconv>
@@ -888,12 +889,22 @@ void AddPositionIds(FeedStorage& feeds, const Generators::ComponentSession& sess
       "[axes, batch, sequence] with a fixed axis count");
 }
 
-TokenBatch Tokenize(Generators::PackageTokenizer& tokenizer, const std::vector<std::string>& texts) {
+std::vector<int32_t> EncodeText(
+    const Generators::Tokenizer& tokenizer, const std::string& text) {
+  if (text.find('\0') != std::string::npos)
+    throw std::invalid_argument(
+        "structured text must not contain embedded NUL characters");
+  return tokenizer.Encode(text.c_str());
+}
+
+TokenBatch Tokenize(const Generators::Config& config,
+                    const Generators::Tokenizer& tokenizer,
+                    const std::vector<std::string>& texts) {
   if (texts.empty()) throw std::invalid_argument("questions must be non-empty");
   std::vector<std::vector<int32_t>> rows;
   size_t width = 0;
   for (const auto& text : texts) {
-    auto row = tokenizer.Encode(text.empty() ? " " : text);
+    auto row = EncodeText(tokenizer, text.empty() ? " " : text);
     if (row.size() > 2048) row.resize(2048);
     if (row.empty()) throw std::invalid_argument("tokenization produced an empty row");
     width = std::max(width, row.size());
@@ -902,7 +913,7 @@ TokenBatch Tokenize(Generators::PackageTokenizer& tokenizer, const std::vector<s
   TokenBatch result;
   result.rows = rows.size();
   result.width = width;
-  result.ids.assign(result.rows * width, tokenizer.PadTokenId());
+  result.ids.assign(result.rows * width, config.model.pad_token_id);
   result.mask.assign(result.ids.size(), 0);
   for (size_t row = 0; row < rows.size(); ++row)
     for (size_t column = 0; column < rows[row].size(); ++column) {
@@ -1266,7 +1277,7 @@ struct NativeRankingSession {
   std::string identity;
   mutable std::mutex operation_mutex;
   SessionLruCache<std::vector<float>> cache;
-  Generators::PackageTokenizer tokenizer;
+  Generators::Tokenizer tokenizer;
   Generators::ComponentSession encoder;
   std::unique_ptr<Generators::ComponentSession> combined, state, action, scorer, fused;
   OgaModelResult Run(const OgaStructuredRequest& request);
@@ -1274,10 +1285,11 @@ struct NativeRankingSession {
 };
 
 std::pair<std::vector<float>, size_t> EncodeAndPool(
-    Generators::PackageTokenizer& tokenizer, Generators::ComponentSession& encoder,
+    const Generators::Config& config, const Generators::Tokenizer& tokenizer,
+    Generators::ComponentSession& encoder,
     const std::vector<std::string>& texts) {
   if (texts.empty()) return {{}, 0};
-  auto batch = Tokenize(tokenizer, texts);
+  auto batch = Tokenize(config, tokenizer, texts);
   auto feeds = BackboneFeeds(encoder, batch);
   const auto hidden_name = HiddenOutputName(encoder);
   const auto hidden_tensors = encoder.Run(feeds.inputs, {hidden_name});
@@ -1401,7 +1413,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       std::copy(cached[row].begin(), cached[row].end(),
                 action_projection.begin() + row * projection_size);
     }
-    auto batch = BucketClmBatch(Tokenize(tokenizer, texts));
+    auto batch = BucketClmBatch(Tokenize(config, tokenizer, texts));
     auto feeds = BackboneFeeds(*fused, batch);
     const auto selector_info = std::find_if(
         fused->Inputs().begin(), fused->Inputs().end(),
@@ -1480,13 +1492,14 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
   std::vector<float> pooled;
   size_t hidden_size{};
   if (!fully_cached && !fused_scored) {
-    std::tie(pooled, hidden_size) = EncodeAndPool(tokenizer, encoder, texts);
+    std::tie(pooled, hidden_size) =
+        EncodeAndPool(config, tokenizer, encoder, texts);
     if (!hidden_size || pooled.size() != texts.size() * hidden_size)
       throw std::runtime_error(
           "CLM pooled encoder output has invalid dimensions");
     if (!missing_texts.empty()) {
       auto [missing_pooled, missing_hidden_size] =
-          EncodeAndPool(tokenizer, encoder, missing_texts);
+          EncodeAndPool(config, tokenizer, encoder, missing_texts);
       if (missing_hidden_size != hidden_size)
         throw std::runtime_error(
             "CLM state/action encoder layouts do not match");
@@ -1898,7 +1911,7 @@ struct NativeDecisionSession {
   mutable std::mutex operation_mutex;
   SessionLruCache<CachedKevTokens> cache;
   SessionLruCache<CachedKevPrefix> prefix_cache;
-  Generators::PackageTokenizer tokenizer;
+  Generators::Tokenizer tokenizer;
   Generators::ComponentSession backbone;
   std::unique_ptr<Generators::ComponentSession> pointer;
   std::vector<KevStateBinding> state_bindings;
@@ -1915,10 +1928,10 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
   auto encode = [&](std::string text) {
     static const std::regex delimiter(R"(<\|([A-Za-z0-9_]+)\|>)");
     text = std::regex_replace(text, delimiter, "<¦$1¦>");
-    const auto tokens = tokenizer.Encode(text);
+    const auto tokens = EncodeText(tokenizer, text);
     return std::vector<int64_t>(tokens.begin(), tokens.end());
   };
-  const auto max_context = tokenizer.ContextLength();
+  const auto max_context = static_cast<size_t>(config.model.context_length);
   if (max_context < 2)
     throw std::runtime_error("KEV context length must be at least 2");
   const auto rendered_state = RenderKev(request.state);
@@ -2007,7 +2020,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     throw std::runtime_error("KEV token batch width must be positive");
   if (batch.rows > std::numeric_limits<size_t>::max() / batch.width)
     throw std::runtime_error("KEV token batch element count overflows size_t");
-  batch.ids.assign(batch.rows * batch.width, tokenizer.PadTokenId());
+  batch.ids.assign(batch.rows * batch.width, config.model.pad_token_id);
   batch.mask.assign(batch.ids.size(), 0);
   for (size_t row = 0; row < rows.size(); ++row) {
     std::copy(rows[row].begin(), rows[row].end(), batch.ids.begin() + row * batch.width);

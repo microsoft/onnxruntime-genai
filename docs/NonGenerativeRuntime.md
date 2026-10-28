@@ -130,7 +130,9 @@ be released with `OgaDestroyString`.
 A package contains `tokenizer.json`, `tokenizer_config.json`, and component
 subdirectories containing `model.onnx` (and optional external data). CLM uses
 `encoder`, `state_head`, `action_head`, and `scorer`; KEV uses `backbone` and
-`pointer_head`.
+`pointer_head`. The required `genai_config.json` is the source of truth for
+`pad_token_id`, `context_length`, tokenizer construction, and component
+session configuration.
 
 Builders should also emit `component_manifest.json`:
 

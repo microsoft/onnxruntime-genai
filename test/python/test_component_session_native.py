@@ -248,10 +248,6 @@ def _stateful_kev_package(root: Path) -> Path:
     fixture = Path(__file__).parents[1] / "models/multimodal-decoder-no-input-ids"
     shutil.copy(fixture / "tokenizer.json", root / "tokenizer.json")
     shutil.copy(fixture / "tokenizer_config.json", root / "tokenizer_config.json")
-    tokenizer_config = json.loads((root / "tokenizer_config.json").read_text())
-    tokenizer_config.pop("pad_token_id", None)
-    tokenizer_config.pop("pad_token", None)
-    (root / "tokenizer_config.json").write_text(json.dumps(tokenizer_config))
     inputs = [
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
         helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch", "total_sequence"]),
