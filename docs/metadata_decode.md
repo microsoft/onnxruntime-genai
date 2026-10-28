@@ -30,11 +30,11 @@ while (!generator->IsDone()) {
     if (const auto* timestamps = result->GetTimestampResult()) {
       for (size_t index = 0; index < timestamps->GetWordCount(); ++index) {
         const auto* word = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Words, index);
-        ProcessWord(word->GetText(), word->GetFrameInterval(), word->GetTimeInterval());
+        ProcessWord(word->GetText(), word->GetFrameInterval(), word->GetTimestampInterval());
       }
       for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index) {
         const auto* segment = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Segments, index);
-        ProcessSegment(segment->GetText(), segment->GetFrameInterval(), segment->GetTimeInterval());
+        ProcessSegment(segment->GetText(), segment->GetFrameInterval(), segment->GetTimestampInterval());
       }
     }
   }
@@ -44,11 +44,11 @@ for (const auto* result : postprocessor->GetNextTokenResults()) {
   if (const auto* timestamps = result->GetTimestampResult()) {
     for (size_t index = 0; index < timestamps->GetWordCount(); ++index) {
       const auto* word = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Words, index);
-      ProcessWord(word->GetText(), word->GetFrameInterval(), word->GetTimeInterval());
+      ProcessWord(word->GetText(), word->GetFrameInterval(), word->GetTimestampInterval());
     }
     for (size_t index = 0; index < timestamps->GetSegmentCount(); ++index) {
       const auto* segment = timestamps->GetTimestampRecord(OgaTimestampRecordKind_Segments, index);
-      ProcessSegment(segment->GetText(), segment->GetFrameInterval(), segment->GetTimeInterval());
+      ProcessSegment(segment->GetText(), segment->GetFrameInterval(), segment->GetTimestampInterval());
     }
   }
 }
@@ -265,7 +265,7 @@ returns borrowed `const OgaTokenPostProcessorResult*` pointers, not copied paylo
 `GetText()` returns borrowed native text; `GetTimestampResult()` returns a nullable
 `const OgaTokenPostProcessorTimestampResult*`. The container exposes `GetWordCount()`,
 `GetSegmentCount()`, and `GetTimestampRecord(kind, index)`. Records expose `GetText()`,
-`GetFrameInterval()`, and `GetTimeInterval()`; interval getters return `std::pair`
+`GetFrameInterval()`, and `GetTimestampInterval()`; interval getters return `std::pair`
 values through the per-field C accessors. No public payload fields or separate C++
 value-model types are exposed. Native C++ callers must respect the borrowed lifetime
 themselves and copy text needed beyond the next processor mutation.

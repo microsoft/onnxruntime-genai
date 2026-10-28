@@ -146,7 +146,7 @@ selects a word or segment by `OgaTimestampRecordKind` and index. C++ exposes the
 same opaque handles through method-only wrappers. Use `GetText()` and
 `GetTimestampResult()` on a result, `GetWordCount()` / `GetSegmentCount()` and
 `GetTimestampRecord(kind, index)` on its timestamp container, and `GetText()`,
-`GetFrameInterval()`, and `GetTimeInterval()` on a record. Text and handles remain
+`GetFrameInterval()`, and `GetTimestampInterval()` on a record. Text and handles remain
 borrowed; interval getters return `std::pair` values without exposing native layouts.
 C# and Python expose borrowed timestamp output through nullable read-only
 `TimestampResult` and `timestamp_result` properties. Read records through `Words` / `Segments`

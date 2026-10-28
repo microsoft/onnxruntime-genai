@@ -596,7 +596,7 @@ TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
           const auto frames = record->GetFrameInterval();
           EXPECT_EQ(frames.first, 4);
           EXPECT_EQ(frames.second, 5);
-          const auto times = record->GetTimeInterval();
+          const auto times = record->GetTimestampInterval();
           EXPECT_DOUBLE_EQ(times.first, 0.4);
           EXPECT_DOUBLE_EQ(times.second, 0.5);
           (use_segments ? segments : words).append(record->GetText());

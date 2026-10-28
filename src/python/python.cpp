@@ -550,7 +550,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyTokenPostProcessorTimestampRecord>(m, "TokenPostProcessorTimestampRecord")
       .def_property_readonly("text", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
       .def_property_readonly("frame_interval", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetFrameInterval(); })
-      .def_property_readonly("time_interval", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetTimeInterval(); });
+      .def_property_readonly("time_interval", [](const PyTokenPostProcessorTimestampRecord& record) { return record.Get().GetTimestampInterval(); });
 
   pybind11::class_<PyTokenPostProcessorTimestampResult>(m, "TokenPostProcessorTimestampResult")
       .def_property_readonly("words", [](const PyTokenPostProcessorTimestampResult& result) {
