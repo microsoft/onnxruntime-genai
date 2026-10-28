@@ -55,7 +55,9 @@ The C ABI in `ort_genai_c.h` exposes opaque handles for the same
 functionality:
 
 * `OgaStructuredValueHandle`, request, and question builders preserve ordered
-  recursive values while cloning values supplied by callers.
+  recursive request values while cloning values supplied by callers. These
+  handles are input-only; results use workflow-specific typed accessors rather
+  than a public polymorphic value/type API.
 * `OgaRankingSessionHandle` and `OgaDecisionSessionHandle` run typed requests;
   model-result and ranking-result accessors expose all answer and ranked-item
   fields without transferring borrowed string/value storage.
@@ -135,8 +137,8 @@ remain follow-up work and are not claimed by this first API.
 
 Creation, mutation, execution, and accessor functions return `OgaResult*`
 (`nullptr` on success). Destroy functions accept `nullptr`. Strings, tensor
-buffers, and borrowed structured values returned by accessors remain valid
-until their owning handle is mutated or destroyed.
+buffers, and typed result fields returned by accessors remain valid until their
+owning handle is mutated or destroyed.
 
 ## Directory schema
 

@@ -1236,7 +1236,6 @@ OgaRankingResult NativeRankingSession::Rank(const OgaFreeFormRankRequest& reques
   for (size_t rank = 0; rank < order.size(); ++rank) {
     const auto index = order[rank];
     result.ranked.push_back({rank + 1, request.candidates[index].first,
-                             request.candidates[index].second,
                              answer.probabilities[index].second});
   }
   return result;
@@ -1873,84 +1872,6 @@ OgaResult* OGA_API_CALL OgaStructuredValueObjectAppend(
   OGA_CAPI_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaStructuredValueGetType(
-    const OgaStructuredValueHandle* value, OgaStructuredValueType* out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") =
-      static_cast<OgaStructuredValueType>(Value(value).value.index());
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-#define OGA_GET_STRUCTURED_SCALAR(name, type, alternative)                     \
-  OgaResult* OGA_API_CALL name(const OgaStructuredValueHandle* value,          \
-                               type* out) {                                    \
-    OGA_CAPI_TRY                                                               \
-    const auto* item = std::get_if<alternative>(&Value(value).value);          \
-    if (!item) throw std::invalid_argument("structured value has wrong type"); \
-    CapiRequired(out, "out") = *item;                                          \
-    return nullptr;                                                            \
-    OGA_CAPI_CATCH                                                             \
-  }
-
-OGA_GET_STRUCTURED_SCALAR(OgaStructuredValueGetBool, bool, bool)
-OGA_GET_STRUCTURED_SCALAR(OgaStructuredValueGetInt64, int64_t, int64_t)
-OGA_GET_STRUCTURED_SCALAR(OgaStructuredValueGetDouble, double, double)
-
-#undef OGA_GET_STRUCTURED_SCALAR
-
-OgaResult* OGA_API_CALL OgaStructuredValueGetString(
-    const OgaStructuredValueHandle* value, const char** out, size_t* length) {
-  OGA_CAPI_TRY
-  const auto* item = std::get_if<std::string>(&Value(value).value);
-  if (!item) throw std::invalid_argument("structured value is not a string");
-  CapiRequired(out, "out") = item->c_str();
-  CapiRequired(length, "length") = item->size();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStructuredValueGetCount(
-    const OgaStructuredValueHandle* value, size_t* out) {
-  OGA_CAPI_TRY
-  if (const auto* array = std::get_if<OgaStructuredValue::Array>(&Value(value).value))
-    CapiRequired(out, "out") = array->size();
-  else if (const auto* object = std::get_if<OgaStructuredValue::Object>(&Value(value).value))
-    CapiRequired(out, "out") = object->size();
-  else
-    throw std::invalid_argument("structured value is not an array or object");
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStructuredValueGetArrayItem(
-    const OgaStructuredValueHandle* value, size_t index,
-    const OgaStructuredValueHandle** out) {
-  OGA_CAPI_TRY
-  const auto* array = std::get_if<OgaStructuredValue::Array>(&Value(value).value);
-  if (!array) throw std::invalid_argument("structured value is not an array");
-  CapiRequired(out, "out") =
-      reinterpret_cast<const OgaStructuredValueHandle*>(&array->at(index));
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStructuredValueGetObjectItem(
-    const OgaStructuredValueHandle* value, size_t index, const char** key,
-    size_t* key_length,
-    const OgaStructuredValueHandle** out) {
-  OGA_CAPI_TRY
-  const auto* object = std::get_if<OgaStructuredValue::Object>(&Value(value).value);
-  if (!object) throw std::invalid_argument("structured value is not an object");
-  const auto& item = object->at(index);
-  CapiRequired(key, "key") = item.first.c_str();
-  CapiRequired(key_length, "key_length") = item.first.size();
-  CapiRequired(out, "out") =
-      reinterpret_cast<const OgaStructuredValueHandle*>(&item.second);
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
 void OGA_API_CALL OgaDestroyStructuredValue(OgaStructuredValueHandle* value) {
   delete reinterpret_cast<OgaStructuredValue*>(value);
 }
@@ -2266,16 +2187,6 @@ OgaResult* OGA_API_CALL OgaRankingResultGetKey(
     const OgaRankingResultHandle* result, size_t index, const char** out) {
   OGA_CAPI_TRY
   CapiRequired(out, "out") = RankingResult(result).ranked.at(index).key.c_str();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRankingResultGetValue(
-    const OgaRankingResultHandle* result, size_t index,
-    const OgaStructuredValueHandle** out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") = reinterpret_cast<const OgaStructuredValueHandle*>(
-      &RankingResult(result).ranked.at(index).value);
   return nullptr;
   OGA_CAPI_CATCH
 }

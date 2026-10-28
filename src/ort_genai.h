@@ -125,7 +125,6 @@ struct OgaFreeFormRankRequest {
 struct OgaRankedItem {
   size_t rank{};
   std::string key;
-  OgaStructuredValue value;
   double probability{};
 };
 
@@ -267,64 +266,6 @@ inline StructuredValueHandle MakeValue(const OgaStructuredValue& source) {
   return StructuredValueHandle(raw, OgaDestroyStructuredValue);
 }
 
-inline OgaStructuredValue ReadValue(const OgaStructuredValueHandle* source) {
-  OgaStructuredValueType type{};
-  OgaCheckResult(OgaStructuredValueGetType(source, &type));
-  switch (type) {
-    case OgaStructuredValueType_Null:
-      return {};
-    case OgaStructuredValueType_Bool: {
-      bool value{};
-      OgaCheckResult(OgaStructuredValueGetBool(source, &value));
-      return value;
-    }
-    case OgaStructuredValueType_Int64: {
-      int64_t value{};
-      OgaCheckResult(OgaStructuredValueGetInt64(source, &value));
-      return value;
-    }
-    case OgaStructuredValueType_Double: {
-      double value{};
-      OgaCheckResult(OgaStructuredValueGetDouble(source, &value));
-      return value;
-    }
-    case OgaStructuredValueType_String: {
-      const char* value{};
-      size_t length{};
-      OgaCheckResult(OgaStructuredValueGetString(source, &value, &length));
-      return std::string(value, length);
-    }
-    case OgaStructuredValueType_Array: {
-      size_t count{};
-      OgaCheckResult(OgaStructuredValueGetCount(source, &count));
-      OgaStructuredValue::Array result;
-      result.reserve(count);
-      for (size_t i = 0; i < count; ++i) {
-        const OgaStructuredValueHandle* child{};
-        OgaCheckResult(OgaStructuredValueGetArrayItem(source, i, &child));
-        result.push_back(ReadValue(child));
-      }
-      return result;
-    }
-    case OgaStructuredValueType_Object: {
-      size_t count{};
-      OgaCheckResult(OgaStructuredValueGetCount(source, &count));
-      OgaStructuredValue::Object result;
-      result.reserve(count);
-      for (size_t i = 0; i < count; ++i) {
-        const char* key{};
-        size_t key_length{};
-        const OgaStructuredValueHandle* child{};
-        OgaCheckResult(OgaStructuredValueGetObjectItem(
-            source, i, &key, &key_length, &child));
-        result.emplace_back(std::string(key, key_length), ReadValue(child));
-      }
-      return result;
-    }
-  }
-  throw std::runtime_error("unsupported structured value type");
-}
-
 inline StructuredRequestHandle MakeRequest(const OgaStructuredRequest& source) {
   OgaStructuredRequestHandle* raw{};
   OgaCheckResult(OgaCreateStructuredRequest(&raw));
@@ -422,13 +363,10 @@ inline OgaRankingResult ReadRankingResult(const OgaRankingResultHandle* source) 
   for (size_t i = 0; i < count; ++i) {
     OgaRankedItem item;
     const char* key{};
-    const OgaStructuredValueHandle* value{};
     OgaCheckResult(OgaRankingResultGetRank(source, i, &item.rank));
     OgaCheckResult(OgaRankingResultGetKey(source, i, &key));
-    OgaCheckResult(OgaRankingResultGetValue(source, i, &value));
     OgaCheckResult(OgaRankingResultGetProbability(source, i, &item.probability));
     item.key = key;
-    item.value = ReadValue(value);
     result.ranked.push_back(std::move(item));
   }
   return result;

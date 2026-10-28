@@ -29,7 +29,7 @@ void ExpectOutError(OgaResult* result) {
 
 }  // namespace
 
-TEST(NonGenerativeCApiTest, StructuredValueLifecycleAndAccessors) {
+TEST(NonGenerativeCApiTest, StructuredValueBuildersOwnNestedValues) {
   OgaStructuredValueHandle* object{};
   OgaStructuredValueHandle* array{};
   OgaStructuredValueHandle* integer{};
@@ -39,51 +39,18 @@ TEST(NonGenerativeCApiTest, StructuredValueLifecycleAndAccessors) {
   Check(OgaStructuredValueArrayAppend(array, integer));
   Check(OgaStructuredValueObjectAppend(object, "items", 5, array));
 
-  OgaStructuredValueType type{};
-  size_t count{};
-  const char* key{};
-  size_t key_length{};
-  const OgaStructuredValueHandle* child{};
-  Check(OgaStructuredValueGetType(object, &type));
-  EXPECT_EQ(type, OgaStructuredValueType_Object);
-  Check(OgaStructuredValueGetCount(object, &count));
-  EXPECT_EQ(count, 1u);
-  Check(OgaStructuredValueGetObjectItem(object, 0, &key, &key_length, &child));
-  EXPECT_EQ(std::string_view(key, key_length), "items");
-  Check(OgaStructuredValueGetType(child, &type));
-  EXPECT_EQ(type, OgaStructuredValueType_Array);
-  Check(OgaStructuredValueGetArrayItem(child, 0, &child));
-  int64_t value{};
-  Check(OgaStructuredValueGetInt64(child, &value));
-  EXPECT_EQ(value, 42);
-
   OgaDestroyStructuredValue(integer);
   OgaDestroyStructuredValue(array);
   OgaDestroyStructuredValue(object);
 }
 
-TEST(NonGenerativeCApiTest, StructuredStringsPreserveEmbeddedNulls) {
+TEST(NonGenerativeCApiTest, StructuredBuildersAcceptLengthDelimitedStrings) {
   constexpr char text[] = {'l', 'e', 'f', 't', '\0', 'r', 'i', 'g', 'h', 't'};
   constexpr char key[] = {'k', '\0', 'y'};
   OgaStructuredValueHandle *object{}, *value{};
   Check(OgaCreateStructuredValueObject(&object));
   Check(OgaCreateStructuredValueString(text, sizeof(text), &value));
   Check(OgaStructuredValueObjectAppend(object, key, sizeof(key), value));
-
-  const char* returned_key{};
-  size_t returned_key_length{};
-  const OgaStructuredValueHandle* returned_value{};
-  Check(OgaStructuredValueGetObjectItem(
-      object, 0, &returned_key, &returned_key_length, &returned_value));
-  EXPECT_EQ(std::string_view(returned_key, returned_key_length),
-            std::string_view(key, sizeof(key)));
-
-  const char* returned_text{};
-  size_t returned_text_length{};
-  Check(OgaStructuredValueGetString(
-      returned_value, &returned_text, &returned_text_length));
-  EXPECT_EQ(std::string_view(returned_text, returned_text_length),
-            std::string_view(text, sizeof(text)));
 
   OgaDestroyStructuredValue(value);
   OgaDestroyStructuredValue(object);
@@ -133,18 +100,12 @@ TEST(NonGenerativeCApiTest, FreeFormRankingAndAccessorsRunWhenConfigured) {
   size_t count{}, rank{};
   const char* key{};
   double probability{};
-  const OgaStructuredValueHandle* value{};
   Check(OgaRankingResultGetCount(result, &count));
   ASSERT_EQ(count, 2u);
   Check(OgaRankingResultGetRank(result, 0, &rank));
   EXPECT_EQ(rank, 1u);
   Check(OgaRankingResultGetKey(result, 0, &key));
   EXPECT_STREQ(key, "first");
-  Check(OgaRankingResultGetValue(result, 0, &value));
-  const char* text{};
-  size_t text_length{};
-  Check(OgaStructuredValueGetString(value, &text, &text_length));
-  EXPECT_EQ(std::string_view(text, text_length), "same");
   Check(OgaRankingResultGetProbability(result, 0, &probability));
   EXPECT_NEAR(probability, 0.5, 1e-6);
   Check(OgaRankingResultGetKey(result, 1, &key));

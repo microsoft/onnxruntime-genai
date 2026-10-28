@@ -122,16 +122,6 @@ typedef struct OgaDecisionSessionHandle OgaDecisionSessionHandle;
 typedef struct OgaModelResultHandle OgaModelResultHandle;
 typedef struct OgaRankingResultHandle OgaRankingResultHandle;
 
-typedef enum OgaStructuredValueType {
-  OgaStructuredValueType_Null,
-  OgaStructuredValueType_Bool,
-  OgaStructuredValueType_Int64,
-  OgaStructuredValueType_Double,
-  OgaStructuredValueType_String,
-  OgaStructuredValueType_Array,
-  OgaStructuredValueType_Object,
-} OgaStructuredValueType;
-
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
  */
@@ -227,24 +217,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueArrayAppend(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueObjectAppend(
     OgaStructuredValueHandle* object, const char* key, size_t key_length,
     const OgaStructuredValueHandle* value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetType(
-    const OgaStructuredValueHandle* value, OgaStructuredValueType* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetBool(
-    const OgaStructuredValueHandle* value, bool* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetInt64(
-    const OgaStructuredValueHandle* value, int64_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetDouble(
-    const OgaStructuredValueHandle* value, double* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetString(
-    const OgaStructuredValueHandle* value, const char** out, size_t* length);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetCount(
-    const OgaStructuredValueHandle* value, size_t* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetArrayItem(
-    const OgaStructuredValueHandle* value, size_t index, const OgaStructuredValueHandle** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStructuredValueGetObjectItem(
-    const OgaStructuredValueHandle* value, size_t index, const char** key,
-    size_t* key_length,
-    const OgaStructuredValueHandle** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyStructuredValue(OgaStructuredValueHandle* value);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateQuestion(
@@ -324,8 +296,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingResultGetRank(
     const OgaRankingResultHandle* result, size_t index, size_t* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingResultGetKey(
     const OgaRankingResultHandle* result, size_t index, const char** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingResultGetValue(
-    const OgaRankingResultHandle* result, size_t index, const OgaStructuredValueHandle** out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingResultGetProbability(
     const OgaRankingResultHandle* result, size_t index, double* out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyRankingResult(OgaRankingResultHandle* result);

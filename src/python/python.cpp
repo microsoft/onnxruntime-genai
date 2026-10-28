@@ -87,29 +87,6 @@ OgaFreeFormRankRequest ToFreeFormRankRequest(const pybind11::dict& value) {
   return request;
 }
 
-pybind11::object StructuredValueToPython(const OgaStructuredValue& value) {
-  return std::visit(
-      [](const auto& item) -> pybind11::object {
-        using T = std::decay_t<decltype(item)>;
-        if constexpr (std::is_same_v<T, std::monostate>)
-          return pybind11::none();
-        else if constexpr (std::is_same_v<T, OgaStructuredValue::Array>) {
-          pybind11::list result;
-          for (const auto& child : item)
-            result.append(StructuredValueToPython(child));
-          return std::move(result);
-        } else if constexpr (std::is_same_v<T, OgaStructuredValue::Object>) {
-          pybind11::dict result;
-          for (const auto& [key, child] : item)
-            result[pybind11::str(key)] = StructuredValueToPython(child);
-          return std::move(result);
-        } else {
-          return pybind11::cast(item);
-        }
-      },
-      value.value);
-}
-
 pybind11::dict AnswerToPython(const OgaAnswer& answer) {
   pybind11::dict result;
   result["type"] = answer.type;
@@ -150,7 +127,6 @@ pybind11::dict RankingResultToPython(const OgaRankingResult& value) {
     pybind11::dict entry;
     entry["rank"] = item.rank;
     entry["key"] = item.key;
-    entry["value"] = StructuredValueToPython(item.value);
     entry["probability"] = item.probability;
     ranked.append(std::move(entry));
   }
