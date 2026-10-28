@@ -112,13 +112,16 @@ LANG_TO_ID = {
 
 
 def load_config(model_path):
-    """Read sample_rate and chunk_samples from genai_config.json."""
+    """Read streaming and timestamp settings from genai_config.json."""
     config_path = os.path.join(model_path, "genai_config.json")
     with open(config_path) as f:
         config = json.load(f)
-    sample_rate = config["model"]["sample_rate"]
-    chunk_samples = config["model"]["chunk_samples"]
-    return sample_rate, chunk_samples
+    model_config = config["model"]
+    return (
+        model_config["sample_rate"],
+        model_config["chunk_samples"],
+        model_config.get("timestamp_level", "off"),
+    )
 
 
 def load_audio(audio_path, sample_rate):
@@ -135,24 +138,48 @@ def load_audio(audio_path, sample_rate):
     return audio
 
 
-def decode_tokens(generator, tokenizer_stream):
+def format_timestamp_records(result, use_segments):
+    timestamps = result.get_timestamps()
+    if timestamps is None:
+        return ""
+    records = timestamps.get_segments() if use_segments else timestamps.get_words()
+    formatted = []
+    for record in records:
+        text = record.get_text() if use_segments else record.get_text().strip()
+        separator = " " if use_segments and not text[:1].isspace() else ""
+        suffix = "" if use_segments else " "
+        formatted.append(f"[{record.get_start_time():.2f} - {record.get_stop_time():.2f}]{separator}{text}{suffix}")
+    return "".join(formatted)
+
+
+def decode_tokens(generator, postprocessor, timestamp_level, all_word_transcript):
     """Decode all available tokens from the generator, returning the text."""
     text = ""
+    timestamps_enabled = timestamp_level != "off"
     while not generator.is_done():
         generator.generate_next_token()
-        tokens = generator.get_next_tokens()
-        if len(tokens) > 0:
-            token_text = tokenizer_stream.decode(tokens[0])
-            if token_text:
+        postprocessor.process_next_tokens()
+        for result in postprocessor.get_next_token_results():
+            if not timestamps_enabled:
+                token_text = result.get_text()
                 print(token_text, end="", flush=True)
                 text += token_text
+            else:
+                timestamped_text = format_timestamp_records(
+                    result, timestamp_level in ("segment", "all")
+                )
+                if timestamp_level == "all":
+                    all_word_transcript.append(format_timestamp_records(result, False))
+                print(timestamped_text, end="", flush=True)
+                text += timestamped_text
     return text
 
 
 def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None, language=None,
                         ep_path="", use_winml=False):
     """Stream audio through Generator + StreamingProcessor API."""
-    sample_rate, chunk_samples = load_config(model_path)
+    sample_rate, chunk_samples, timestamp_level = load_config(model_path)
+    timestamps_enabled = timestamp_level != "off"
     audio = load_audio(audio_path, sample_rate)
     duration = len(audio) / sample_rate
 
@@ -183,10 +210,9 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     if vad_status == "true":
         print(f"  VAD threshold: {processor.get_option('vad_threshold')}")
 
-    tokenizer = og.Tokenizer(model)
-    tokenizer_stream = tokenizer.create_stream()
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
+    postprocessor = og.TokenPostProcessor(generator)
     # Per-generator language selection
     if selected_lang is not None:
         generator.set_runtime_option("lang_id", str(int(selected_lang[0])))
@@ -194,6 +220,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     print("-" * 60)
     stream_start = time.perf_counter()
     full_transcript = ""
+    all_word_transcript = []
     vad_enabled = vad_status == "true"
     chunks_total = 0
     chunks_processed = 0
@@ -206,7 +233,9 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
         if inputs is not None:
             chunks_processed += 1
             generator.set_inputs(inputs)
-            full_transcript += decode_tokens(generator, tokenizer_stream)
+            full_transcript += decode_tokens(
+                generator, postprocessor, timestamp_level, all_word_transcript
+            )
         else:
             chunks_skipped += 1
 
@@ -214,12 +243,25 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     inputs = processor.flush()
     if inputs is not None:
         generator.set_inputs(inputs)
-        full_transcript += decode_tokens(generator, tokenizer_stream)
+        full_transcript += decode_tokens(
+            generator, postprocessor, timestamp_level, all_word_transcript
+        )
+
+    postprocessor.finalize()
+    if timestamps_enabled:
+        for result in postprocessor.get_next_token_results():
+            full_transcript += format_timestamp_records(
+                result, timestamp_level in ("segment", "all")
+            )
+            if timestamp_level == "all":
+                all_word_transcript.append(format_timestamp_records(result, False))
 
     total_wall = time.perf_counter() - stream_start
 
     print(f"\n{'=' * 60}")
     print(f"  {full_transcript.strip()}")
+    if timestamp_level == "all":
+        print(f"  Word timestamps: {''.join(all_word_transcript)}")
     print(f"{'=' * 60}")
     print(f"  Audio: {duration:.2f}s | Wall: {total_wall:.2f}s | RTF: {duration / total_wall:.2f}x")
     if vad_enabled:

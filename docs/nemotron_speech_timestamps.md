@@ -49,6 +49,7 @@ configuration determines whether acoustic timing is produced. `TokenPostProcesso
 forwards borrowed token and optional timing views to its internal `TokenPostProcessorInternal`, which
 owns decoding and timestamp processing. Ordinary tokenizer decoding is unchanged.
 `timestamp_level` controls timestamp generation:
+
 ```mermaid
 flowchart TB
   audio[Audio chunks] --> processor[StreamingProcessor]
@@ -153,6 +154,58 @@ finalization emits no duplicate events. `Reset()` / `reset()` clears all process
 state together; it does not reset the generator. The generator must outlive its
 processor. See [Token post-processing](metadata_decode.md) for the full lifecycle.
 
+The Nemotron examples demonstrate the complete flow:
+
+- `examples/c/src/model_asr.cpp`
+- `examples/csharp/ModelASR/Program.cs`
+- `examples/python/model-asr.py`
+
+For segment-only output in the C# ModelASR sample, configure `model.timestamp_level` as `segment`.
+The sample builds output only from completed segment events, including the trailing segment emitted
+by finalization. It prints each segment as `[StartTime - StopTime] SegmentText`; it does not
+concatenate token fragments.
+
+The general Nemotron examples render word mode as `[StartTime - StopTime]WordText` followed by one
+space, with no space after the interval. Segment mode renders
+`[StartTime - StopTime] SegmentText`. All mode reports both views separately: the segment-timestamp
+transcript followed by the per-word timestamp transcript.
+
+### Building the examples
+
+These examples require officially released GenAI headers, language bindings, and native libraries
+containing the processor APIs. The initial implementation landed in
+[PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591), but the examples remain pending
+the planned postprocessor refactor and a new GenAI package release. Existing packages such as
+GenAI `0.17.0` do not provide the required APIs. Once a containing release is available:
+
+- For Python, install the official wheel containing the processor APIs. Call `process_next_tokens()`
+  after generation and `finalize()` at the end, then read typed objects from
+  `get_next_token_results()`: use nullable `result.get_timestamps()`, then
+  `get_words()` or `get_segments()`, and each record's `get_text()`,
+  `get_start_time()`, and `get_stop_time()` accessors. Append the needed values to
+  application-owned transcript storage before the next processing call; the
+  returned objects are borrowed, not independent snapshots.
+- For C++, build the `model_asr` target with `MODEL_ASR=ON` and set `OGA_INCLUDE_DIR` and `OGA_LIB_DIR`
+  to the headers and native library from the corresponding official release archive.
+- For C#, update both the CPU and CUDA NuGet references to the containing release and use the normal
+  package-based build. See the [ASR sample](../examples/csharp/ModelASR/README.md), including its
+  segment-timestamp configuration instructions.
+
+The C# package references remain at the common `0.17.0` baseline and must be updated to a release
+containing these APIs before using package-based builds. Selecting `timestamp_level: "off"` does not
+remove the timestamp API references from the C++ or C# example source.
+
+With a feature-enabled Python package installed, run the example regressions from the repository root:
+
+```bash
+python -m pytest test/python/test_onnxruntime_genai_api.py --test_models test/models -k asr_example
+```
+
+The real-speech cases use `test/models/nemotron-speech-streaming` and `test/audios/jfk.flac`. Set
+`NEMOTRON_STREAMING_MODEL_PATH` to use a model outside the test fixtures. They exercise every timestamp
+level, trailing finalization, and VAD-skipped silence; they skip when the model or audio is absent.
+The VAD case requires a model with a configured VAD component. These tests run inference on CPU.
+
 ## Interval semantics
 
 Frame and time intervals are half-open: `[start, stop)`. Each RNNT token initially covers one
@@ -162,6 +215,7 @@ by VAD. Time values are seconds rounded to two decimal places.
 Punctuation remains attached to its word. Segments complete on configured suffixes, configured
 frame gaps, or finalization.
 
-When `timestamp_level` is `off`, use ordinary `GetNextTokens()` and tokenizer stream `Decode()`.
+When `timestamp_level` is `off`, the examples use the processor's ordinary text results.
+Applications needing only text may also use `GetNextTokens()` and tokenizer stream `Decode()`.
 The streaming processor does not create timestamp origin metadata, the transducer does not append
 token intervals, and the tokenizer stream does not buffer intervals or build timestamp events.
