@@ -131,41 +131,42 @@ jobs:
   # genai_version is inherited from the enclosing stage (computed once by the
   # 'version' stage), so no per-job version computation is needed here.
 
-  # --- Feed isolation: NuGet restore → ORT-Nightly --------------------------
+  # --- Feed isolation: NuGet restore → Lotus --------------------------------
   # Packaging uses an authenticated, isolated feed for library dependencies and
   # mobile workloads. GitHub Actions tests use the root source mapping instead;
   # this job does not restore the test project or provision its dependencies.
   - task: NuGetAuthenticate@1
-    displayName: 'Authenticate NuGet to ORT-Nightly feed'
+    displayName: 'Authenticate NuGet to Lotus feed'
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
       # The NuGet SDK resolver runs while evaluating the project, before
       # dotnet restore applies --source or --configfile. Put an isolated config
-      # beside the project so MSBuild.Sdk.Extras is also resolved from ORT-Nightly.
+      # beside the project so MSBuild.Sdk.Extras is also resolved from Lotus.
       $nugetConfig = Join-Path $PWD 'NuGet.config'
+      $lotusFeed = [System.Security.SecurityElement]::Escape('$(lotusNuGetFeed)')
       @"
       <?xml version="1.0" encoding="utf-8"?>
       <configuration>
         <packageSources>
           <clear />
-          <add key="ORT-Nightly" value="https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json" />
+          <add key="Lotus" value="$lotusFeed" />
         </packageSources>
         <packageSourceMapping>
           <clear />
-          <packageSource key="ORT-Nightly">
+          <packageSource key="Lotus">
             <package pattern="*" />
           </packageSource>
         </packageSourceMapping>
       </configuration>
       "@ | Set-Content -Path $nugetConfig -Encoding UTF8
-    displayName: 'Create ORT-Nightly NuGet config'
+    displayName: 'Create Lotus NuGet config'
     workingDirectory: '$(Build.Repository.LocalPath)/src/csharp'
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
       dotnet --info
-      # Feed isolation: install the mobile workload packs from the ORT-Nightly feed
+      # Feed isolation: install the mobile workload packs from the Lotus feed
       # (which upstreams nuget.org). --skip-manifest-update uses the manifests
       # baked into the SDK so no public SDK feed is contacted.
 
@@ -182,7 +183,7 @@ jobs:
       $ErrorActionPreference = 'Stop'
       # The NuGet SDK resolver runs while evaluating the project, before
       # dotnet restore applies --source or --configfile. Put an isolated config
-      # beside the project so MSBuild.Sdk.Extras is also resolved from ORT-Nightly.
+      # beside the project so MSBuild.Sdk.Extras is also resolved from Lotus.
       $nugetConfig = Join-Path $PWD 'NuGet.config'
 
       try {

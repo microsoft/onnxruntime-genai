@@ -23,7 +23,7 @@ CI native-package downloads retain their explicit feeds: Windows downloads skip
 managed dependencies, and Linux/macOS bootstrap projects live outside the
 repository so the managed source mapping does not change those downloads.
 Feed-isolated packaging uses a separate generated configuration that maps all
-packages to its authenticated ORT-Nightly source and does not restore test-only
+packages to its authenticated Lotus source and does not restore test-only
 dependencies.
 
 ## Download a Model
