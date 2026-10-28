@@ -15,14 +15,6 @@ answers = ranking.run(json.load(open("structured-question-request.json")))
 
 decision = og.DecisionSession("/models/kev-4b-fp32")
 answers = decision.decide(json.load(open("request.json")))
-print(decision.prefix_reuse_status, decision.prefix_cache_stats)
-# Force the reference full-row path for parity/debugging.
-decision.prefix_reuse_enabled = False
-
-print(ranking.cache_stats)
-ranking.clear_cache()
-# Zero entries or zero bytes disables the cache.
-ranking.set_cache_capacity(0, 0)
 ```
 
 `RankingSession` and `DecisionSession` are public typed C++ package entry points.
@@ -67,11 +59,6 @@ functionality:
 * `OgaRankingSessionHandle` and `OgaDecisionSessionHandle` run typed requests;
   model-result and ranking-result accessors expose all answer and ranked-item
   fields without transferring borrowed string/value storage.
-* Session cache controls set entry/byte capacity, return hit/miss/eviction and
-  occupancy statistics, clear entries, or invalidate entries while refreshing
-  package identity. Statistics structures begin with `struct_size`; callers
-  initialize it to their compiled structure size so newer libraries never
-  overwrite an older caller's buffer.
 
 ## Managed bindings
 
@@ -87,20 +74,19 @@ include the canonical package identity, head layout, `float32` projection
 dtype, and length-prefixed rendered text. Combined-head compatibility packages
 continue to cache actions only because their state and action projections are
 produced by one component invocation. Package identity is session-local and
-includes the canonical package path and provider list. Cache invalidation
-clears all entries explicitly; in-place model reload is not supported. State
+includes the canonical package path and provider list; in-place model reload is not supported. State
 and action projections share the same bounded LRU. The
 default is 256 entries and 64 MiB. KEV caches escaped/rendered tokenized state
 prefixes and question branches
 (including branch-local option readout indices), not probabilities. Its token
 cache default is 512 entries and 16 MiB. Compatible stateful backbones also use
 a separate 32-entry, 512 MiB byte-bounded prefix-state LRU. Both caches use thread-safe LRU
-eviction; either capacity set to zero disables caching. Caches are isolated per
-session and provider configuration.
+eviction and are isolated per session and provider configuration. Cache policy
+and diagnostics are internal implementation details rather than public API.
 
-KEV prefix reuse is enabled by default. The runtime executes the tokenized
-state once with batch 1, caches every `present.*` tensor, deep-copies each state
-along the batch dimension, and executes only the question branches. Attention
+KEV prefix reuse is an internal optimization. The runtime executes the tokenized
+state once with batch 1, retains every `present.*` tensor, and executes only the
+single-question branch against those owned tensors. Attention
 masks cover the cached prefix plus the current branch, position IDs continue at
 the prefix length, and pointer indices are local to branch hidden states.
 Full-attention key/value tensors may grow along their past-sequence dimension;
@@ -111,21 +97,15 @@ An input named `past_key_values.<layer>.<type>` or `past.<layer>.<type>` must ha
 corresponding `present.<layer>.<type>` (or `present_key_values.*`) output with
 matching dtype, rank, batch dimension, and fixed dimensions. A `position_ids`
 input is also required. Graphs without that complete contract use the original
-full-row path; `prefix_reuse_status` reports the explicit reason and
-`fallback_runs` is incremented. A malformed graph that advertises compatible
-state I/O raises rather than silently falling back. Setting
-`prefix_reuse_enabled=False` selects the full-row parity/debug path. CPU
+full-row path. A malformed graph that advertises compatible state I/O raises
+rather than silently falling back. CPU
 GroupQueryAttention currently supports cached context only for batch one, so
 multi-question CPU requests use the full-row path; single-question CPU
 requests use prefix reuse. CUDA currently uses the full-row path until
 device-native state repetition is qualified.
 
-`cache_stats` describes token/branch caching. `prefix_cache_stats` describes
-model-state hits, misses, eviction/occupancy, prefix executions, batched branch
-executions, and full-row fallbacks. `set_prefix_cache_capacity()` and the
-matching C/C++ APIs configure it. Clearing or invalidating a session clears
-both caches. Cached tensors are immutable values and every branch feed owns a
-deep copy, while session execution and cache mutation are serialized.
+Cached tensors are immutable values, while session execution and cache
+mutation are serialized.
 
 ### KEV component thread pools
 
@@ -157,8 +137,6 @@ Creation, mutation, execution, and accessor functions return `OgaResult*`
 (`nullptr` on success). Destroy functions accept `nullptr`. Strings, tensor
 buffers, and borrowed structured values returned by accessors remain valid
 until their owning handle is mutated or destroyed.
-`OgaDecisionSessionCopyPrefixReuseStatus` supports a size query followed by a
-caller-owned buffer copy.
 
 ## Directory schema
 

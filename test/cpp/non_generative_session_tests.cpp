@@ -47,21 +47,6 @@ TEST(NonGenerativeSessionTest, RealPackagesRunWhenConfigured) {
   ASSERT_TRUE(kev.answers.front().second.noul.has_value());
   EXPECT_EQ(clm.answers.front().second.noul, repeated_clm.answers.front().second.noul);
   EXPECT_EQ(kev.answers.front().second.noul, repeated_kev.answers.front().second.noul);
-  EXPECT_GE(ranking.CacheStats().hits, 3u);
-  EXPECT_GT(decision.CacheStats().hits, 0u);
-
-  RankingSession isolated((root / "clm-v0.1-8b-fp32").string(), providers);
-  EXPECT_EQ(isolated.CacheStats().hits, 0u);
-  ranking.ClearCache();
-  EXPECT_EQ(ranking.CacheStats().entries, 0u);
-  decision.InvalidateCache();
-  EXPECT_EQ(decision.CacheStats().entries, 0u);
-
-  ranking.SetCacheCapacity(1, 1024 * 1024);
-  ranking.Run(request);
-  EXPECT_LE(ranking.CacheStats().entries, 1u);
-  EXPECT_GT(ranking.CacheStats().evictions, 0u);
-
   request.state = std::string(100000, 'x');
   EXPECT_THROW(decision.Decide(request), std::runtime_error);
 }

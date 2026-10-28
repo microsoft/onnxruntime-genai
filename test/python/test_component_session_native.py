@@ -356,7 +356,7 @@ def _stateful_kev_package(root: Path) -> Path:
     return root
 
 
-def test_stateful_kev_prefix_reuse_parity_cache_and_isolation(tmp_path):
+def test_stateful_kev_repeated_and_isolated_requests(tmp_path):
     package = _stateful_kev_package(tmp_path)
     request = {
         "state": {"shared": "prefix"},
@@ -365,26 +365,13 @@ def test_stateful_kev_prefix_reuse_parity_cache_and_isolation(tmp_path):
             "two": {"type": "choice", "criteria": {"x": "xray", "y": "yankee"}},
         },
     }
-    optimized = og.DecisionSession(package, providers=["cpu"], prefix_reuse=True)
-    full = og.DecisionSession(package, providers=["cpu"], prefix_reuse=False)
-    optimized_result = optimized.decide(request)
-    assert optimized_result == full.decide(request)
-    assert optimized.prefix_reuse_status == "compatible explicit state I/O"
-    assert optimized.prefix_cache_stats["prefix_runs"] == 0
-    assert optimized.prefix_cache_stats["fallback_runs"] == 1
-    assert optimized.decide(request) == optimized_result
-    assert optimized.prefix_cache_stats["prefix_runs"] == 0
+    session = og.DecisionSession(package, providers=["cpu"])
+    result = session.decide(request)
+    assert session.decide(request) == result
 
     isolated_session = og.DecisionSession(package, providers=["cpu"])
     isolated = isolated_session.decide({"state": request["state"], "questions": {"two": request["questions"]["two"]}})
-    assert isolated["answers"]["two"] == optimized_result["answers"]["two"]
-    assert isolated_session.prefix_cache_stats["prefix_runs"] == 1
-    assert isolated_session.prefix_cache_stats["branch_runs"] == 1
-    optimized.invalidate_cache()
-    optimized.decide(request)
-    assert optimized.prefix_cache_stats["prefix_runs"] == 0
-    optimized.set_prefix_cache_capacity(1, 1)
-    assert optimized.prefix_cache_stats["entries"] == 0
+    assert isolated["answers"]["two"] == result["answers"]["two"]
 
 
 def test_kev_enforces_configured_context_length(tmp_path):

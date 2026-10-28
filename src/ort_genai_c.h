@@ -122,24 +122,6 @@ typedef struct OgaDecisionSessionHandle OgaDecisionSessionHandle;
 typedef struct OgaModelResultHandle OgaModelResultHandle;
 typedef struct OgaRankingResultHandle OgaRankingResultHandle;
 
-typedef struct OgaNonGenerativeCacheStats {
-  size_t struct_size;
-  uint64_t hits;
-  uint64_t misses;
-  uint64_t evictions;
-  size_t entries;
-  size_t bytes;
-  size_t entry_capacity;
-  size_t byte_capacity;
-} OgaNonGenerativeCacheStats;
-
-typedef struct OgaKevPrefixReuseStats {
-  size_t struct_size;
-  uint64_t prefix_runs;
-  uint64_t branch_runs;
-  uint64_t fallback_runs;
-} OgaKevPrefixReuseStats;
-
 typedef enum OgaStructuredValueType {
   OgaStructuredValueType_Null,
   OgaStructuredValueType_Bool,
@@ -298,14 +280,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionRun(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionRank(
     OgaRankingSessionHandle* session, const OgaFreeFormRankRequestHandle* request,
     OgaRankingResultHandle** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionSetCacheCapacity(
-    OgaRankingSessionHandle* session, size_t entry_capacity, size_t byte_capacity);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionGetCacheStats(
-    const OgaRankingSessionHandle* session, OgaNonGenerativeCacheStats* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionClearCache(
-    OgaRankingSessionHandle* session);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionInvalidateCache(
-    OgaRankingSessionHandle* session);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateDecisionSession(
     const char* package_path, const char* const* providers, size_t provider_count,
     OgaDecisionSessionHandle** out);
@@ -313,29 +287,6 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyDecisionSession(OgaDecisionSessionHandle*
 OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionDecide(
     OgaDecisionSessionHandle* session, const OgaStructuredRequestHandle* request,
     OgaModelResultHandle** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionSetCacheCapacity(
-    OgaDecisionSessionHandle* session, size_t entry_capacity, size_t byte_capacity);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionGetCacheStats(
-    const OgaDecisionSessionHandle* session, OgaNonGenerativeCacheStats* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionClearCache(
-    OgaDecisionSessionHandle* session);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionInvalidateCache(
-    OgaDecisionSessionHandle* session);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionSetPrefixReuseEnabled(
-    OgaDecisionSessionHandle* session, bool enabled);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseEnabled(
-    const OgaDecisionSessionHandle* session, bool* out);
-// Copies the status, including its trailing NUL, into buffer. Pass a null
-// buffer and zero capacity to query the required size.
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionCopyPrefixReuseStatus(
-    const OgaDecisionSessionHandle* session, char* buffer, size_t buffer_capacity,
-    size_t* required_size);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionSetPrefixCacheCapacity(
-    OgaDecisionSessionHandle* session, size_t entry_capacity, size_t byte_capacity);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixCacheStats(
-    const OgaDecisionSessionHandle* session, OgaNonGenerativeCacheStats* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseStats(
-    const OgaDecisionSessionHandle* session, OgaKevPrefixReuseStats* out);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaModelResultGetModel(
     const OgaModelResultHandle* result, const char** out);

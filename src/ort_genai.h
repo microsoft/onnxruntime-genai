@@ -134,8 +134,7 @@ struct OgaRankingResult {
   std::vector<OgaRankedItem> ranked;
 };
 
-// Typed package entry points. Component() remains available for callers that
-// need direct access to a named ONNX graph.
+// Typed package entry points for ranking and decision inference.
 class OGA_CPP_ONLY RankingSession {
  public:
   RankingSession(std::string package_path, std::vector<std::string> providers = {});
@@ -153,10 +152,6 @@ class OGA_CPP_ONLY RankingSession {
   RankingSession& operator=(const RankingSession&) = delete;
   OgaModelResult Run(const OgaStructuredRequest& request);
   OgaRankingResult Rank(const OgaFreeFormRankRequest& request);
-  void SetCacheCapacity(size_t entry_capacity, size_t byte_capacity);
-  OgaNonGenerativeCacheStats CacheStats() const;
-  void ClearCache();
-  void InvalidateCache();
 
  private:
   OgaRankingSessionHandle* handle_{};
@@ -178,16 +173,6 @@ class OGA_CPP_ONLY DecisionSession {
   DecisionSession(const DecisionSession&) = delete;
   DecisionSession& operator=(const DecisionSession&) = delete;
   OgaModelResult Decide(const OgaStructuredRequest& request);
-  void SetCacheCapacity(size_t entry_capacity, size_t byte_capacity);
-  OgaNonGenerativeCacheStats CacheStats() const;
-  void SetPrefixReuseEnabled(bool enabled);
-  bool PrefixReuseEnabled() const;
-  std::string PrefixReuseStatus() const;
-  void SetPrefixCacheCapacity(size_t entry_capacity, size_t byte_capacity);
-  OgaNonGenerativeCacheStats PrefixCacheStats() const;
-  OgaKevPrefixReuseStats PrefixReuseStats() const;
-  void ClearCache();
-  void InvalidateCache();
 
  private:
   OgaDecisionSessionHandle* handle_{};
@@ -473,21 +458,6 @@ inline OgaRankingResult RankingSession::Rank(
   return OgaDetail::ReadRankingResult(result.get());
 }
 
-inline void RankingSession::SetCacheCapacity(size_t entries, size_t bytes) {
-  OgaCheckResult(OgaRankingSessionSetCacheCapacity(handle_, entries, bytes));
-}
-inline OgaNonGenerativeCacheStats RankingSession::CacheStats() const {
-  OgaNonGenerativeCacheStats result{sizeof(OgaNonGenerativeCacheStats)};
-  OgaCheckResult(OgaRankingSessionGetCacheStats(handle_, &result));
-  return result;
-}
-inline void RankingSession::ClearCache() {
-  OgaCheckResult(OgaRankingSessionClearCache(handle_));
-}
-inline void RankingSession::InvalidateCache() {
-  OgaCheckResult(OgaRankingSessionInvalidateCache(handle_));
-}
-
 inline DecisionSession::DecisionSession(
     std::string package_path, std::vector<std::string> providers) {
   const auto provider_ptrs = OgaDetail::StringPointers(providers);
@@ -501,54 +471,6 @@ inline OgaModelResult DecisionSession::Decide(const OgaStructuredRequest& reques
   OgaDetail::ModelResultHandle result(raw, OgaDestroyModelResult);
   return OgaDetail::ReadModelResult(result.get());
 }
-inline void DecisionSession::SetCacheCapacity(size_t entries, size_t bytes) {
-  OgaCheckResult(OgaDecisionSessionSetCacheCapacity(handle_, entries, bytes));
-}
-inline OgaNonGenerativeCacheStats DecisionSession::CacheStats() const {
-  OgaNonGenerativeCacheStats result{sizeof(OgaNonGenerativeCacheStats)};
-  OgaCheckResult(OgaDecisionSessionGetCacheStats(handle_, &result));
-  return result;
-}
-inline void DecisionSession::SetPrefixReuseEnabled(bool enabled) {
-  OgaCheckResult(OgaDecisionSessionSetPrefixReuseEnabled(handle_, enabled));
-}
-inline bool DecisionSession::PrefixReuseEnabled() const {
-  bool result{};
-  OgaCheckResult(OgaDecisionSessionGetPrefixReuseEnabled(handle_, &result));
-  return result;
-}
-inline std::string DecisionSession::PrefixReuseStatus() const {
-  size_t required{};
-  OgaCheckResult(OgaDecisionSessionCopyPrefixReuseStatus(
-      handle_, nullptr, 0, &required));
-  std::string result(required, '\0');
-  if (required) {
-    OgaCheckResult(OgaDecisionSessionCopyPrefixReuseStatus(
-        handle_, result.data(), required, &required));
-    result.resize(required - 1);
-  }
-  return result;
-}
-inline void DecisionSession::SetPrefixCacheCapacity(size_t entries, size_t bytes) {
-  OgaCheckResult(OgaDecisionSessionSetPrefixCacheCapacity(handle_, entries, bytes));
-}
-inline OgaNonGenerativeCacheStats DecisionSession::PrefixCacheStats() const {
-  OgaNonGenerativeCacheStats result{sizeof(OgaNonGenerativeCacheStats)};
-  OgaCheckResult(OgaDecisionSessionGetPrefixCacheStats(handle_, &result));
-  return result;
-}
-inline OgaKevPrefixReuseStats DecisionSession::PrefixReuseStats() const {
-  OgaKevPrefixReuseStats result{sizeof(OgaKevPrefixReuseStats)};
-  OgaCheckResult(OgaDecisionSessionGetPrefixReuseStats(handle_, &result));
-  return result;
-}
-inline void DecisionSession::ClearCache() {
-  OgaCheckResult(OgaDecisionSessionClearCache(handle_));
-}
-inline void DecisionSession::InvalidateCache() {
-  OgaCheckResult(OgaDecisionSessionInvalidateCache(handle_));
-}
-
 struct OgaSpeculativeStats : OgaAbstract {
   uint64_t GetCount(const char* name) const {
     uint64_t value;

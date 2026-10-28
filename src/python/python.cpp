@@ -159,11 +159,9 @@ pybind11::dict RankingResultToPython(const OgaRankingResult& value) {
 }
 
 struct PyRankingSession {
-  PyRankingSession(const std::string& path, const std::vector<std::string>& providers,
-                   size_t cache_capacity, size_t cache_capacity_bytes)
-      : session(path, providers) {
-    session.SetCacheCapacity(cache_capacity, cache_capacity_bytes);
-  }
+  PyRankingSession(const std::string& path,
+                   const std::vector<std::string>& providers)
+      : session(path, providers) {}
   pybind11::dict Run(const pybind11::dict& request) {
     auto native_request = ToStructuredRequest(request);
     OgaModelResult result;
@@ -182,32 +180,13 @@ struct PyRankingSession {
     }
     return RankingResultToPython(result);
   }
-  pybind11::dict CacheStats() const {
-    const auto stats = session.CacheStats();
-    pybind11::dict result;
-    result["hits"] = stats.hits;
-    result["misses"] = stats.misses;
-    result["evictions"] = stats.evictions;
-    result["entries"] = stats.entries;
-    result["bytes"] = stats.bytes;
-    result["capacity"] = stats.entry_capacity;
-    result["capacity_bytes"] = stats.byte_capacity;
-    return result;
-  }
   RankingSession session;
 };
 
 struct PyDecisionSession {
-  PyDecisionSession(const std::string& path, const std::vector<std::string>& providers,
-                    size_t cache_capacity, size_t cache_capacity_bytes,
-                    bool prefix_reuse, size_t prefix_cache_capacity,
-                    size_t prefix_cache_capacity_bytes)
-      : session(path, providers) {
-    session.SetCacheCapacity(cache_capacity, cache_capacity_bytes);
-    session.SetPrefixReuseEnabled(prefix_reuse);
-    session.SetPrefixCacheCapacity(prefix_cache_capacity,
-                                   prefix_cache_capacity_bytes);
-  }
+  PyDecisionSession(const std::string& path,
+                    const std::vector<std::string>& providers)
+      : session(path, providers) {}
   pybind11::dict Run(const pybind11::dict& request) {
     if (request.contains("temperature"))
       throw std::invalid_argument(
@@ -219,34 +198,6 @@ struct PyDecisionSession {
       result = session.Decide(native_request);
     }
     return ResultToPython(result);
-  }
-  pybind11::dict CacheStats() const {
-    const auto stats = session.CacheStats();
-    pybind11::dict result;
-    result["hits"] = stats.hits;
-    result["misses"] = stats.misses;
-    result["evictions"] = stats.evictions;
-    result["entries"] = stats.entries;
-    result["bytes"] = stats.bytes;
-    result["capacity"] = stats.entry_capacity;
-    result["capacity_bytes"] = stats.byte_capacity;
-    return result;
-  }
-  pybind11::dict PrefixCacheStats() const {
-    const auto cache = session.PrefixCacheStats();
-    const auto reuse = session.PrefixReuseStats();
-    pybind11::dict result;
-    result["hits"] = cache.hits;
-    result["misses"] = cache.misses;
-    result["evictions"] = cache.evictions;
-    result["entries"] = cache.entries;
-    result["bytes"] = cache.bytes;
-    result["capacity"] = cache.entry_capacity;
-    result["capacity_bytes"] = cache.byte_capacity;
-    result["prefix_runs"] = reuse.prefix_runs;
-    result["branch_runs"] = reuse.branch_runs;
-    result["fallback_runs"] = reuse.fallback_runs;
-    return result;
   }
   DecisionSession session;
 };
@@ -808,59 +759,17 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.add_object("_cleanup", cleanup);
 
   pybind11::class_<PyRankingSession>(m, "_RankingSession")
-      .def(pybind11::init<const std::string&, const std::vector<std::string>&,
-                          size_t, size_t>(),
+      .def(pybind11::init<const std::string&, const std::vector<std::string>&>(),
            pybind11::arg("package_path"),
-           pybind11::arg("providers") = std::vector<std::string>{},
-           pybind11::arg("cache_capacity") = size_t{256},
-           pybind11::arg("cache_capacity_bytes") = size_t{64 * 1024 * 1024})
+           pybind11::arg("providers") = std::vector<std::string>{})
       .def("rank", &PyRankingSession::Rank)
-      .def("run", &PyRankingSession::Run)
-      .def("cache_stats", &PyRankingSession::CacheStats)
-      .def("clear_cache", [](PyRankingSession& self) { self.session.ClearCache(); })
-      .def("invalidate_cache", [](PyRankingSession& self) { self.session.InvalidateCache(); })
-      .def("set_cache_capacity",
-           [](PyRankingSession& self, size_t entries, size_t bytes) {
-             self.session.SetCacheCapacity(entries, bytes);
-           });
+      .def("run", &PyRankingSession::Run);
 
   pybind11::class_<PyDecisionSession>(m, "_DecisionSession")
-      .def(pybind11::init<const std::string&, const std::vector<std::string>&,
-                          size_t, size_t, bool, size_t, size_t>(),
+      .def(pybind11::init<const std::string&, const std::vector<std::string>&>(),
            pybind11::arg("package_path"),
-           pybind11::arg("providers") = std::vector<std::string>{},
-           pybind11::arg("cache_capacity") = size_t{512},
-           pybind11::arg("cache_capacity_bytes") = size_t{16 * 1024 * 1024},
-           pybind11::arg("prefix_reuse") = true,
-           pybind11::arg("prefix_cache_capacity") = size_t{32},
-           pybind11::arg("prefix_cache_capacity_bytes") =
-               size_t{512 * 1024 * 1024})
-      .def("run", &PyDecisionSession::Run)
-      .def("cache_stats", &PyDecisionSession::CacheStats)
-      .def("prefix_cache_stats", &PyDecisionSession::PrefixCacheStats)
-      .def_property(
-          "prefix_reuse_enabled",
-          [](const PyDecisionSession& self) {
-            return self.session.PrefixReuseEnabled();
-          },
-          [](PyDecisionSession& self, bool enabled) {
-            self.session.SetPrefixReuseEnabled(enabled);
-          })
-      .def_property_readonly(
-          "prefix_reuse_status",
-          [](const PyDecisionSession& self) {
-            return self.session.PrefixReuseStatus();
-          })
-      .def("clear_cache", [](PyDecisionSession& self) { self.session.ClearCache(); })
-      .def("invalidate_cache", [](PyDecisionSession& self) { self.session.InvalidateCache(); })
-      .def("set_cache_capacity",
-           [](PyDecisionSession& self, size_t entries, size_t bytes) {
-             self.session.SetCacheCapacity(entries, bytes);
-           })
-      .def("set_prefix_cache_capacity",
-           [](PyDecisionSession& self, size_t entries, size_t bytes) {
-             self.session.SetPrefixCacheCapacity(entries, bytes);
-           });
+           pybind11::arg("providers") = std::vector<std::string>{})
+      .def("run", &PyDecisionSession::Run);
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())

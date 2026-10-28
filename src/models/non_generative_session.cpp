@@ -59,13 +59,9 @@ class SessionLruCache {
   bool Get(const std::string& key, Value& value) {
     std::lock_guard lock(mutex_);
     const auto found = index_.find(key);
-    if (found == index_.end()) {
-      ++misses_;
-      return false;
-    }
+    if (found == index_.end()) return false;
     entries_.splice(entries_.begin(), entries_, found->second);
     value = found->second->value;
-    ++hits_;
     return true;
   }
 
@@ -94,26 +90,6 @@ class SessionLruCache {
     Evict();
   }
 
-  void SetCapacity(size_t entries, size_t bytes) {
-    std::lock_guard lock(mutex_);
-    entry_capacity_ = entries;
-    byte_capacity_ = bytes;
-    Evict();
-  }
-
-  void Clear() {
-    std::lock_guard lock(mutex_);
-    entries_.clear();
-    index_.clear();
-    byte_size_ = 0;
-  }
-
-  OgaNonGenerativeCacheStats Stats() const {
-    std::lock_guard lock(mutex_);
-    return {sizeof(OgaNonGenerativeCacheStats), hits_, misses_, evictions_, entries_.size(), byte_size_,
-            entry_capacity_, byte_capacity_};
-  }
-
  private:
   struct Entry {
     std::string key;
@@ -127,18 +103,14 @@ class SessionLruCache {
       byte_size_ -= entries_.back().bytes;
       index_.erase(entries_.back().key);
       entries_.pop_back();
-      ++evictions_;
     }
   }
-  mutable std::mutex mutex_;
+  std::mutex mutex_;
   std::list<Entry> entries_;
   std::unordered_map<std::string, typename std::list<Entry>::iterator> index_;
   size_t entry_capacity_{};
   size_t byte_capacity_{};
   size_t byte_size_{};
-  uint64_t hits_{};
-  uint64_t misses_{};
-  uint64_t evictions_{};
   SizeFunction size_;
 };
 
@@ -806,23 +778,6 @@ struct NativeRankingSession {
   std::unique_ptr<Generators::ComponentSession> combined, state, action, scorer, fused;
   OgaModelResult Run(const OgaStructuredRequest& request);
   OgaRankingResult Rank(const OgaFreeFormRankRequest& request);
-  void SetCacheCapacity(size_t entries, size_t bytes) {
-    std::lock_guard lock(operation_mutex);
-    cache.SetCapacity(entries, bytes);
-  }
-  OgaNonGenerativeCacheStats CacheStats() const {
-    std::lock_guard lock(operation_mutex);
-    return cache.Stats();
-  }
-  void ClearCache() {
-    std::lock_guard lock(operation_mutex);
-    cache.Clear();
-  }
-  void InvalidateCache() {
-    std::lock_guard lock(operation_mutex);
-    identity = PackageIdentity(package_path, providers);
-    cache.Clear();
-  }
 };
 
 std::pair<std::vector<float>, size_t> EncodeAndPool(
@@ -1438,8 +1393,9 @@ struct NativeDecisionSession {
     pointer = std::make_unique<Generators::ComponentSession>(
         package_path, pointer_name, providers);
     flat = pointer_name == std::string_view("kev_head");
-    state_bindings = DiscoverKevStateBindings(backbone, compatibility_status);
-    prefix_status = compatibility_status;
+    std::string compatibility_reason;
+    state_bindings =
+        DiscoverKevStateBindings(backbone, compatibility_reason);
   }
   Generators::ComponentSession Component(const std::string& name) const {
     return Generators::ComponentSession(fs::path(package_path), name,
@@ -1455,59 +1411,8 @@ struct NativeDecisionSession {
   Generators::ComponentSession backbone;
   std::unique_ptr<Generators::ComponentSession> pointer;
   std::vector<KevStateBinding> state_bindings;
-  std::string compatibility_status;
-  std::string prefix_status;
-  bool prefix_reuse_enabled{true};
-  uint64_t prefix_runs{};
-  uint64_t branch_runs{};
-  uint64_t fallback_runs{};
   bool flat{};
   OgaModelResult Decide(const OgaStructuredRequest& request);
-  void SetCacheCapacity(size_t entries, size_t bytes) {
-    std::lock_guard lock(operation_mutex);
-    cache.SetCapacity(entries, bytes);
-  }
-  OgaNonGenerativeCacheStats CacheStats() const {
-    std::lock_guard lock(operation_mutex);
-    return cache.Stats();
-  }
-  OgaNonGenerativeCacheStats PrefixCacheStats() const {
-    std::lock_guard lock(operation_mutex);
-    return prefix_cache.Stats();
-  }
-  OgaKevPrefixReuseStats PrefixReuseStats() const {
-    std::lock_guard lock(operation_mutex);
-    return {sizeof(OgaKevPrefixReuseStats), prefix_runs, branch_runs,
-            fallback_runs};
-  }
-  void SetPrefixReuseEnabled(bool enabled) {
-    std::lock_guard lock(operation_mutex);
-    prefix_reuse_enabled = enabled;
-    prefix_status = enabled ? compatibility_status : "disabled by policy";
-  }
-  bool PrefixReuseEnabled() const {
-    std::lock_guard lock(operation_mutex);
-    return prefix_reuse_enabled;
-  }
-  std::string PrefixReuseStatus() const {
-    std::lock_guard lock(operation_mutex);
-    return prefix_status;
-  }
-  void SetPrefixCacheCapacity(size_t entries, size_t bytes) {
-    std::lock_guard lock(operation_mutex);
-    prefix_cache.SetCapacity(entries, bytes);
-  }
-  void ClearCache() {
-    std::lock_guard lock(operation_mutex);
-    cache.Clear();
-    prefix_cache.Clear();
-  }
-  void InvalidateCache() {
-    std::lock_guard lock(operation_mutex);
-    identity = PackageIdentity(package_path, providers);
-    cache.Clear();
-    prefix_cache.Clear();
-  }
 };
 
 OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request) {
@@ -1591,10 +1496,8 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
   // Component outputs are currently host-owned, so copying and repeating CUDA
   // state tensors costs more than recomputing a short prefix.
   const bool use_prefix_reuse =
-      prefix_reuse_enabled && !state_bindings.empty() &&
-      !backbone.UsesCuda() && rows.size() == 1;
+      !state_bindings.empty() && !backbone.UsesCuda() && rows.size() == 1;
   if (!use_prefix_reuse) {
-    ++fallback_runs;
     for (size_t i = 0; i < rows.size(); ++i) {
       auto& row = rows[i];
       row.insert(row.begin(), state_value.tokens.begin(), state_value.tokens.end());
@@ -1648,7 +1551,6 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
         prefix.states.push_back(state);
       }
       prefix_cache.Put(prefix_key, prefix);
-      ++prefix_runs;
     }
     if (prefix.length != state_value.tokens.size() ||
         prefix.states.size() != state_bindings.size())
@@ -1684,7 +1586,6 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     auto hidden_outputs =
         backbone.Run(branch_feeds.inputs, {hidden_name});
     hidden_tensor = hidden_outputs.at(hidden_name);
-    ++branch_runs;
   } else {
     auto feeds = BackboneFeeds(backbone, batch);
     auto hidden_outputs = backbone.Run(feeds.inputs, {hidden_name});
@@ -2199,42 +2100,6 @@ OgaResult* OGA_API_CALL OgaRankingSessionRank(
   OGA_CAPI_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaRankingSessionSetCacheCapacity(
-    OgaRankingSessionHandle* session, size_t entry_capacity, size_t byte_capacity) {
-  OGA_CAPI_TRY
-  CapiRequired(session, "session").value.SetCacheCapacity(entry_capacity, byte_capacity);
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRankingSessionGetCacheStats(
-    const OgaRankingSessionHandle* session, OgaNonGenerativeCacheStats* out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  const auto capacity = output.struct_size;
-  if (capacity < sizeof(output.struct_size))
-    throw std::invalid_argument("cache stats struct_size is too small");
-  const auto stats = CapiRequired(session, "session").value.CacheStats();
-  std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
-  output.struct_size = capacity;
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRankingSessionClearCache(OgaRankingSessionHandle* session) {
-  OGA_CAPI_TRY
-  CapiRequired(session, "session").value.ClearCache();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRankingSessionInvalidateCache(OgaRankingSessionHandle* session) {
-  OGA_CAPI_TRY
-  CapiRequired(session, "session").value.InvalidateCache();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaCreateDecisionSession(
     const char* package_path, const char* const* providers, size_t provider_count,
     OgaDecisionSessionHandle** out) {
@@ -2267,118 +2132,6 @@ void OGA_API_CALL OgaDestroyDecisionSession(OgaDecisionSessionHandle* session) {
 
 OGA_DECISION_RUN(OgaDecisionSessionDecide, Decide)
 #undef OGA_DECISION_RUN
-
-OgaResult* OGA_API_CALL OgaDecisionSessionSetCacheCapacity(
-    OgaDecisionSessionHandle* session, size_t entry_capacity, size_t byte_capacity) {
-  OGA_CAPI_TRY
-  CapiRequired(session, "session").value.SetCacheCapacity(entry_capacity, byte_capacity);
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionGetCacheStats(
-    const OgaDecisionSessionHandle* session, OgaNonGenerativeCacheStats* out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  const auto capacity = output.struct_size;
-  if (capacity < sizeof(output.struct_size))
-    throw std::invalid_argument("cache stats struct_size is too small");
-  const auto stats = CapiRequired(session, "session").value.CacheStats();
-  std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
-  output.struct_size = capacity;
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionClearCache(OgaDecisionSessionHandle* session) {
-  OGA_CAPI_TRY
-  CapiRequired(session, "session").value.ClearCache();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionInvalidateCache(OgaDecisionSessionHandle* session) {
-  OGA_CAPI_TRY
-  CapiRequired(session, "session").value.InvalidateCache();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionSetPrefixReuseEnabled(
-    OgaDecisionSessionHandle* session, bool enabled) {
-  OGA_CAPI_TRY
-  CapiRequired(session, "session").value.SetPrefixReuseEnabled(enabled);
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseEnabled(
-    const OgaDecisionSessionHandle* session, bool* out) {
-  OGA_CAPI_TRY
-  CapiRequired(out, "out") =
-      CapiRequired(session, "session").value.PrefixReuseEnabled();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionCopyPrefixReuseStatus(
-    const OgaDecisionSessionHandle* session, char* buffer, size_t buffer_capacity,
-    size_t* required_size) {
-  OGA_CAPI_TRY
-  auto& required_output = CapiRequired(required_size, "out");
-  const std::string status =
-      CapiRequired(session, "session").value.PrefixReuseStatus();
-  const size_t required = status.size() + 1;
-  required_output = required;
-  if (!buffer) {
-    if (buffer_capacity != 0)
-      throw std::invalid_argument("buffer must not be null when buffer_capacity is non-zero");
-    return nullptr;
-  }
-  if (buffer_capacity < required)
-    throw std::invalid_argument("buffer_capacity is too small");
-  std::memcpy(buffer, status.c_str(), required);
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionSetPrefixCacheCapacity(
-    OgaDecisionSessionHandle* session, size_t entry_capacity, size_t byte_capacity) {
-  OGA_CAPI_TRY
-  CapiRequired(session, "session").value.SetPrefixCacheCapacity(entry_capacity, byte_capacity);
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixCacheStats(
-    const OgaDecisionSessionHandle* session, OgaNonGenerativeCacheStats* out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  const auto capacity = output.struct_size;
-  if (capacity < sizeof(output.struct_size))
-    throw std::invalid_argument("cache stats struct_size is too small");
-  const auto stats =
-      CapiRequired(session, "session").value.PrefixCacheStats();
-  std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
-  output.struct_size = capacity;
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseStats(
-    const OgaDecisionSessionHandle* session, OgaKevPrefixReuseStats* out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  const auto capacity = output.struct_size;
-  if (capacity < sizeof(output.struct_size))
-    throw std::invalid_argument("prefix reuse stats struct_size is too small");
-  const auto stats =
-      CapiRequired(session, "session").value.PrefixReuseStats();
-  std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
-  output.struct_size = capacity;
-  return nullptr;
-  OGA_CAPI_CATCH
-}
 
 OgaResult* OGA_API_CALL OgaModelResultGetModel(
     const OgaModelResultHandle* result, const char** out) {

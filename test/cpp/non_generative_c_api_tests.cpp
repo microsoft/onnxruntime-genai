@@ -108,11 +108,6 @@ TEST(NonGenerativeCApiTest, RequestBuildersCloneInputs) {
   OgaDestroyStructuredRequest(request);
 }
 
-TEST(NonGenerativeCApiTest, PrefixStatusCopyValidatesOutputsFirst) {
-  ExpectOutError(OgaDecisionSessionCopyPrefixReuseStatus(
-      nullptr, nullptr, 0, nullptr));
-}
-
 TEST(NonGenerativeCApiTest, FreeFormRankingAndAccessorsRunWhenConfigured) {
   const char* root_value = std::getenv("ORT_GENAI_NON_GENERATIVE_TEST_ROOT");
   if (!root_value || !*root_value)
@@ -192,9 +187,7 @@ TEST(NonGenerativeCApiTest, NullCreationOutputsFailBeforeAllocating) {
     ExpectOutError(OgaCreateRankingSession("unused", nullptr, 0, nullptr));
     ExpectOutError(OgaRankingSessionRun(nullptr, nullptr, nullptr));
     ExpectOutError(OgaRankingSessionRank(nullptr, nullptr, nullptr));
-    ExpectOutError(OgaRankingSessionGetCacheStats(nullptr, nullptr));
     ExpectOutError(OgaCreateDecisionSession("unused", nullptr, 0, nullptr));
     ExpectOutError(OgaDecisionSessionDecide(nullptr, nullptr, nullptr));
-    ExpectOutError(OgaDecisionSessionGetCacheStats(nullptr, nullptr));
   }
 }
