@@ -88,7 +88,8 @@ std::unordered_map<std::string, fs::path> LoadComponents(fs::path root) {
       throw std::runtime_error("component_manifest.json components must be non-empty");
     for (const auto& [name, entry] : manifest.components.values) {
       if (entry.filename.empty()) throw std::runtime_error("component \"" + name + "\" requires filename");
-      const std::filesystem::path relative(entry.filename);
+      const fs::path relative_utf8(entry.filename);
+      const std::filesystem::path relative(relative_utf8.c_str());
       if (relative.is_absolute() || std::find(relative.begin(), relative.end(), "..") != relative.end())
         throw std::runtime_error("component \"" + name + "\" filename must be package-relative without traversal");
       fs::path resolved = root / fs::path(entry.filename);
@@ -146,48 +147,11 @@ Config ResolveComponentConfig(const Config& component_config) {
 }
 
 std::unique_ptr<OrtSession> CreateComponentSession(
-    const fs::path& model_path, const Config& config,
-    bool has_component_config) {
+    const fs::path& model_path, const Config& config) {
   auto options = OrtSessionOptions::Create();
   const auto& configured_session_options =
       config.model.decoder.session_options;
-  if (has_component_config) {
-    if (configured_session_options.intra_op_num_threads)
-      options->SetIntraOpNumThreads(
-          *configured_session_options.intra_op_num_threads);
-    if (configured_session_options.inter_op_num_threads)
-      options->SetInterOpNumThreads(
-          *configured_session_options.inter_op_num_threads);
-    if (configured_session_options.enable_cpu_mem_arena) {
-      if (*configured_session_options.enable_cpu_mem_arena)
-        options->EnableCpuMemArena();
-      else
-        options->DisableCpuMemArena();
-    }
-    if (configured_session_options.enable_mem_pattern) {
-      if (*configured_session_options.enable_mem_pattern)
-        options->EnableMemPattern();
-      else
-        options->DisableMemPattern();
-    }
-    if (configured_session_options.log_id)
-      options->SetLogId(configured_session_options.log_id->c_str());
-    if (configured_session_options.log_severity_level)
-      options->SetLogSeverityLevel(
-          *configured_session_options.log_severity_level);
-    if (configured_session_options.log_verbosity_level)
-      options->SetLogVerbosityLevel(
-          *configured_session_options.log_verbosity_level);
-    if (configured_session_options.enable_profiling)
-      options->EnableProfiling(
-          fs::path(*configured_session_options.enable_profiling).c_str());
-    if (configured_session_options.graph_optimization_level)
-      options->SetGraphOptimizationLevel(
-          *configured_session_options.graph_optimization_level);
-    for (const auto& [name, value] :
-         configured_session_options.config_entries)
-      options->AddConfigEntry(name.c_str(), value.c_str());
-  }
+  ApplySessionOptionsFromConfig(config, configured_session_options, *options);
   if (!configured_session_options.providers.empty())
     SetProviderSessionOptions(
         *options, config.model.decoder.session_options.providers,
@@ -197,16 +161,24 @@ std::unique_ptr<OrtSession> CreateComponentSession(
 
 }  // namespace
 
-bool PackageHasComponent(const fs::path& package_path,
-                         std::string_view component) {
-  return LoadComponents(package_path).count(std::string(component)) != 0;
+ComponentPackage::ComponentPackage(const fs::path& package_path)
+    : components_(LoadComponents(package_path)) {}
+
+bool ComponentPackage::Has(std::string_view component) const {
+  return components_.count(std::string(component)) != 0;
 }
 
-ComponentSession::ComponentSession(const Config& config, std::string component) {
-  const auto& package_path = config.config_path;
-  auto components = LoadComponents(package_path);
-  auto found = components.find(component);
-  if (found == components.end()) throw std::runtime_error("component not declared: " + component);
+const fs::path& ComponentPackage::Path(std::string_view component) const {
+  const auto found = components_.find(std::string(component));
+  if (found == components_.end())
+    throw std::runtime_error("component not declared: " +
+                             std::string(component));
+  return found->second;
+}
+
+ComponentSession::ComponentSession(
+    const Config& config, const ComponentPackage& package,
+    std::string component) {
   auto effective_config = ResolveComponentConfig(config);
   uses_cuda_ = std::find(
                    effective_config.model.decoder.session_options.providers.begin(),
@@ -214,8 +186,7 @@ ComponentSession::ComponentSession(const Config& config, std::string component) 
                    "cuda") !=
                effective_config.model.decoder.session_options.providers.end();
   try {
-    session_ = CreateComponentSession(
-        found->second, effective_config, true);
+    session_ = CreateComponentSession(package.Path(component), effective_config);
   } catch (const std::exception& error) {
     if (std::string_view(error.what()).find("LinearAttentionGate") !=
         std::string_view::npos)

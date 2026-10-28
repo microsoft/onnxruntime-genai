@@ -21,6 +21,7 @@
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace {
 
@@ -174,6 +175,8 @@ class StructuredJsonParser {
   }
 
  private:
+  static constexpr size_t kMaxNestingDepth = 64;
+
   void SkipWhitespace() {
     while (position_ < source_.size() &&
            (source_[position_] == ' ' || source_[position_] == '\t' ||
@@ -294,6 +297,17 @@ class StructuredJsonParser {
     }
   }
 
+  static double ParseDouble(std::string_view token) {
+    std::istringstream stream{std::string(token)};
+    stream.imbue(std::locale::classic());
+    double value{};
+    stream >> value;
+    if (!stream || stream.peek() != std::char_traits<char>::eof() ||
+        !std::isfinite(value))
+      throw std::invalid_argument("invalid JSON floating-point number");
+    return value;
+  }
+
   OgaStructuredValue ParseNumber() {
     const size_t start = position_;
     if (source_[position_] == '-') ++position_;
@@ -342,15 +356,10 @@ class StructuredJsonParser {
         throw std::invalid_argument("JSON integer is outside int64 range");
       return integer;
     }
-    std::string owned(token);
-    char* end{};
-    const double number = std::strtod(owned.c_str(), &end);
-    if (end != owned.c_str() + owned.size() || !std::isfinite(number))
-      throw std::invalid_argument("invalid JSON floating-point number");
-    return number;
+    return ParseDouble(token);
   }
 
-  OgaStructuredValue ParseArray() {
+  OgaStructuredValue ParseArray(size_t depth) {
     Expect('[');
     OgaStructuredValue::Array result;
     SkipWhitespace();
@@ -359,7 +368,7 @@ class StructuredJsonParser {
       return result;
     }
     while (true) {
-      result.push_back(ParseValue());
+      result.push_back(ParseValue(depth));
       SkipWhitespace();
       const char delimiter = Take();
       if (delimiter == ']') return result;
@@ -368,9 +377,10 @@ class StructuredJsonParser {
     }
   }
 
-  OgaStructuredValue ParseObject() {
+  OgaStructuredValue ParseObject(size_t depth) {
     Expect('{');
     OgaStructuredValue::Object result;
+    std::unordered_set<std::string> keys;
     SkipWhitespace();
     if (position_ < source_.size() && source_[position_] == '}') {
       ++position_;
@@ -381,9 +391,8 @@ class StructuredJsonParser {
       auto key = ParseString();
       SkipWhitespace();
       Expect(':');
-      auto value = ParseValue();
-      if (std::any_of(result.begin(), result.end(),
-                      [&](const auto& item) { return item.first == key; }))
+      auto value = ParseValue(depth);
+      if (!keys.emplace(key).second)
         throw std::invalid_argument("duplicate JSON object key: " + key);
       result.emplace_back(std::move(key), std::move(value));
       SkipWhitespace();
@@ -394,8 +403,10 @@ class StructuredJsonParser {
     }
   }
 
-  OgaStructuredValue ParseValue() {
+  OgaStructuredValue ParseValue(size_t depth = 0) {
     SkipWhitespace();
+    if (depth > kMaxNestingDepth)
+      throw std::invalid_argument("JSON nesting depth exceeds 64");
     if (position_ >= source_.size())
       throw std::invalid_argument("missing JSON value");
     switch (source_[position_]) {
@@ -411,9 +422,9 @@ class StructuredJsonParser {
       case '"':
         return ParseString();
       case '[':
-        return ParseArray();
+        return ParseArray(depth + 1);
       case '{':
-        return ParseObject();
+        return ParseObject(depth + 1);
       default:
         return ParseNumber();
     }
@@ -437,10 +448,11 @@ bool Empty(const OgaStructuredValue& value) {
 }
 
 bool SameDouble(std::string_view text, double expected) {
-  std::string owned(text);
-  char* end{};
-  const auto parsed = std::strtod(owned.c_str(), &end);
-  if (end != owned.c_str() + owned.size()) return false;
+  std::istringstream stream{std::string(text)};
+  stream.imbue(std::locale::classic());
+  double parsed{};
+  stream >> parsed;
+  if (!stream || stream.peek() != std::char_traits<char>::eof()) return false;
   uint64_t parsed_bits{};
   uint64_t expected_bits{};
   std::memcpy(&parsed_bits, &parsed, sizeof(parsed_bits));
@@ -454,9 +466,10 @@ std::string FormatPythonFloat(double value) {
         "structured floating-point value cannot be rendered");
   if (value == 0) return std::signbit(value) ? "-0.0" : "0.0";
 
-  const auto exponent = static_cast<int>(
-      std::floor(std::log10(std::abs(value))));
-  const bool scientific = exponent < -4 || exponent >= 16;
+  const auto magnitude = std::abs(value);
+  const bool scientific = magnitude < 1e-4 || magnitude >= 1e16;
+  const auto exponent =
+      static_cast<int>(std::floor(std::log10(magnitude)));
   for (int significant = 1;
        significant <= std::numeric_limits<double>::max_digits10;
        ++significant) {
@@ -879,9 +892,14 @@ TokenBatch Tokenize(const Generators::Config& config,
   if (texts.empty()) throw std::invalid_argument("questions must be non-empty");
   std::vector<std::vector<int32_t>> rows;
   size_t width = 0;
+  const auto max_context =
+      static_cast<size_t>(config.model.context_length);
   for (const auto& text : texts) {
     auto row = EncodeText(tokenizer, text.empty() ? " " : text);
-    if (row.size() > 2048) row.resize(2048);
+    if (row.size() > max_context)
+      throw std::invalid_argument(
+          "CLM input exceeds configured context length " +
+          std::to_string(max_context) + ": " + std::to_string(row.size()));
     if (row.empty()) throw std::invalid_argument("tokenization produced an empty row");
     width = std::max(width, row.size());
     rows.push_back(std::move(row));
@@ -899,11 +917,13 @@ TokenBatch Tokenize(const Generators::Config& config,
   return result;
 }
 
-TokenBatch BucketClmBatch(TokenBatch batch) {
+TokenBatch BucketClmBatch(TokenBatch batch, size_t max_context) {
   static constexpr size_t buckets[] = {96, 120, 144, 168, 256, 512, 1024, 2048};
   const auto found = std::lower_bound(
       std::begin(buckets), std::end(buckets), batch.width);
-  if (found == std::end(buckets) || *found == batch.width) return batch;
+  if (found == std::end(buckets) || *found == batch.width ||
+      *found > max_context)
+    return batch;
   TokenBatch padded;
   padded.rows = batch.rows;
   padded.width = *found;
@@ -1228,27 +1248,30 @@ size_t FloatVectorBytes(const std::vector<float>& value) {
 }
 
 struct NativeRankingSession {
-  explicit NativeRankingSession(const Generators::Config& configured)
-      : config(configured), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(config), encoder(Component(Generators::PackageHasComponent(config.config_path, "encoder") ? "encoder" : "backbone")) {
-    if (Generators::PackageHasComponent(config.config_path, "clm_heads")) {
+  NativeRankingSession(
+      const Generators::Config& configured,
+      std::shared_ptr<const Generators::ComponentPackage> configured_package)
+      : config(configured), package(std::move(configured_package)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(config), encoder(Component(package->Has("encoder") ? "encoder" : "backbone")) {
+    if (package->Has("clm_heads")) {
       combined = std::make_unique<Generators::ComponentSession>(
-          config, "clm_heads");
+          config, *package, "clm_heads");
     } else {
       state = std::make_unique<Generators::ComponentSession>(
-          config, "state_head");
+          config, *package, "state_head");
       action = std::make_unique<Generators::ComponentSession>(
-          config, "action_head");
+          config, *package, "action_head");
       scorer = std::make_unique<Generators::ComponentSession>(
-          config, "scorer");
+          config, *package, "scorer");
     }
-    if (Generators::PackageHasComponent(config.config_path, "fused_state_ranking"))
+    if (package->Has("fused_state_ranking"))
       fused = std::make_unique<Generators::ComponentSession>(
-          config, "fused_state_ranking");
+          config, *package, "fused_state_ranking");
   }
   Generators::ComponentSession Component(const std::string& name) const {
-    return Generators::ComponentSession(config, name);
+    return Generators::ComponentSession(config, *package, name);
   }
   Generators::Config config;
+  std::shared_ptr<const Generators::ComponentPackage> package;
   mutable std::mutex operation_mutex;
   SessionLruCache<std::vector<float>> cache;
   Generators::Tokenizer tokenizer;
@@ -1387,7 +1410,9 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       std::copy(cached[row].begin(), cached[row].end(),
                 action_projection.begin() + row * projection_size);
     }
-    auto batch = BucketClmBatch(Tokenize(config, tokenizer, texts));
+    auto batch = BucketClmBatch(
+        Tokenize(config, tokenizer, texts),
+        static_cast<size_t>(config.model.context_length));
     auto feeds = BackboneFeeds(*fused, batch);
     const auto selector_info = std::find_if(
         fused->Inputs().begin(), fused->Inputs().end(),
@@ -1580,7 +1605,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       std::copy(cached[row].begin(), cached[row].end(),
                 action_projection.begin() + row * projection_size);
     }
-    std::vector<float> logits(candidate_count);
+    std::vector<double> logits(candidate_count);
     for (size_t i = 0; i < candidate_count; ++i) {
       double dot = 0;
       for (size_t j = 0; j < projection_size; ++j)
@@ -1588,11 +1613,12 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
             static_cast<double>(
                 state_projection[owners[i] * projection_size + j]) *
             static_cast<double>(action_projection[i * projection_size + j]);
-      logits[i] = static_cast<float>(scale.at(0) * dot / request.temperature);
+      logits[i] = static_cast<double>(scale.at(0)) * dot /
+                  static_cast<double>(request.temperature);
     }
     probabilities.resize(candidate_count);
     for (size_t owner = 0; owner < question_count; ++owner) {
-      float maximum = -std::numeric_limits<float>::infinity();
+      double maximum = -std::numeric_limits<double>::infinity();
       for (size_t i = 0; i < logits.size(); ++i)
         if (owners[i] == static_cast<int64_t>(owner)) maximum = std::max(maximum, logits[i]);
       double sum = 0;
@@ -1863,23 +1889,24 @@ void AddRepeatedState(FeedStorage& feeds, const KevStateBinding& binding,
 }
 
 struct NativeDecisionSession {
-  explicit NativeDecisionSession(const Generators::Config& configured)
-      : config(configured), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(config), backbone(Component("backbone")) {
+  NativeDecisionSession(
+      const Generators::Config& configured,
+      std::shared_ptr<const Generators::ComponentPackage> configured_package)
+      : config(configured), package(std::move(configured_package)), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(config), backbone(Component("backbone")) {
     const auto pointer_name =
-        Generators::PackageHasComponent(config.config_path, "pointer_head")
-            ? "pointer_head"
-            : "kev_head";
+        package->Has("pointer_head") ? "pointer_head" : "kev_head";
     pointer = std::make_unique<Generators::ComponentSession>(
-        config, pointer_name);
+        config, *package, pointer_name);
     flat = pointer_name == std::string_view("kev_head");
     std::string compatibility_reason;
     state_bindings =
         DiscoverKevStateBindings(backbone, compatibility_reason);
   }
   Generators::ComponentSession Component(const std::string& name) const {
-    return Generators::ComponentSession(config, name);
+    return Generators::ComponentSession(config, *package, name);
   }
   Generators::Config config;
+  std::shared_ptr<const Generators::ComponentPackage> package;
   mutable std::mutex operation_mutex;
   SessionLruCache<CachedKevTokens> cache;
   SessionLruCache<CachedKevPrefix> prefix_cache;
@@ -2191,20 +2218,21 @@ struct OgaNonGenerativeSession {
                                std::unique_ptr<NativeDecisionSession>>;
 
   explicit OgaNonGenerativeSession(const Generators::Config& config) {
-    const auto& package = config.config_path;
+    auto package = std::make_shared<Generators::ComponentPackage>(
+        config.config_path);
     const bool decision =
-        Generators::PackageHasComponent(package, "pointer_head") ||
-        Generators::PackageHasComponent(package, "kev_head");
+        package->Has("pointer_head") || package->Has("kev_head");
     const bool ranking =
-        Generators::PackageHasComponent(package, "clm_heads") ||
-        Generators::PackageHasComponent(package, "state_head");
+        package->Has("clm_heads") || package->Has("state_head");
     if (decision == ranking)
       throw std::invalid_argument(
           "package must declare exactly one ranking or decision workflow");
     if (ranking)
-      runtime = std::make_unique<NativeRankingSession>(config);
+      runtime =
+          std::make_unique<NativeRankingSession>(config, std::move(package));
     else
-      runtime = std::make_unique<NativeDecisionSession>(config);
+      runtime =
+          std::make_unique<NativeDecisionSession>(config, std::move(package));
   }
 
   Runtime runtime;

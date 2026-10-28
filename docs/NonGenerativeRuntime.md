@@ -1,10 +1,9 @@
 # Non-generative component runtime
 
-`RankingSession` (CLM) and `DecisionSession` (KEV) are semantic Python facades
-over one native non-generative session. They execute exported directory
-packages without constructing a `Generator`. Each runtime object owns an ORT
-session for each named component and bounded, session-local non-generative
-caches.
+`NonGenerativeSession` is the shared Python and C++ entry point for CLM ranking
+and KEV decision packages. The package selects the workflow. Each runtime object
+owns an ORT session for each named component and bounded, session-local caches
+without constructing a `Generator`.
 
 ```python
 import json
@@ -13,11 +12,11 @@ import onnxruntime_genai as og
 ranking_config = og.Config("/models/clm-v0.1-8b-fp32")
 ranking_config.clear_providers()
 ranking_config.append_provider("cuda")
-ranking = og.RankingSession(ranking_config)
-ranked = ranking.rank(json.load(open("free-form-rank-request.json")))
+ranking = og.NonGenerativeSession(ranking_config)
+ranked = ranking.run(json.load(open("free-form-rank-request.json")))
 
-decision = og.DecisionSession(og.Config("/models/kev-4b-fp32"))
-answers = decision.decide(json.load(open("request.json")))
+decision = og.NonGenerativeSession(og.Config("/models/kev-4b-fp32"))
+answers = decision.run(json.load(open("request.json")))
 ```
 
 `NonGenerativeSession` is the single public C++ package entry point. It
@@ -50,6 +49,36 @@ public handle families.
 The C ABI exposes one opaque session plus create, destroy, and `RunJson`.
 Returned JSON strings use the existing
 `OgaDestroyString` ownership convention.
+
+## JSON request and result contracts
+
+CLM supports free ranking. A request is a JSON object with:
+
+- `candidates` (required): a non-empty object mapping unique candidate keys to
+  arbitrary JSON values.
+- `state` (optional): arbitrary JSON rendered as shared context.
+- `instructions` (optional): arbitrary JSON rendered after the state.
+- `temperature` (optional): a number in `(0, 100]`; the default is `1.0`.
+
+The result has `"model": "clm"` and a `ranked` array. Each item contains
+`rank` (one-based), the original candidate `key`, and `probability`. Items are
+ordered by descending probability, with candidate input order breaking ties.
+Overlong rendered inputs, empty candidates, invalid temperatures, duplicate
+JSON keys, and malformed JSON return an error.
+
+KEV accepts a JSON object with:
+
+- `questions` (required): a non-empty object mapping question IDs to objects.
+- Each question requires string `type` (`noul`, `choice`, or `score`) and may
+  include arbitrary JSON `instructions` and `criteria`.
+- `state` (optional): arbitrary shared JSON context.
+- `temperature` may be omitted or equal `1.0`; other values are rejected.
+
+The result has `"model": "kev"` and an `answers` object in question input
+order. Each answer contains its `type` and the corresponding typed value,
+confidence, probabilities, or legend when applicable. Unknown question types,
+invalid criteria, overlong rows, duplicate JSON keys, and malformed JSON
+return an error.
 
 ## Managed bindings
 
@@ -175,8 +204,8 @@ accept both exported schemas:
 
 CLM applies reference structured rendering, no-special-token tokenization,
 right padding, padding-aware last-token pooling, encoder L2 normalization,
-state/action projection, calibrated scoring, request temperature, and typed
-`noul`/`choice`/`score` answers. KEV escapes forged delimiters, constructs one
+state/action projection, calibrated scoring, and request temperature to return
+free-ranking probabilities. KEV escapes forged delimiters, constructs one
 causal row per question, records option-end and decide readouts, right-pads
 rows, runs its pointer head, and returns the reference four-decimal typed
 answers.

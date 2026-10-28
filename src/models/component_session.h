@@ -17,8 +17,15 @@ namespace Generators {
 
 struct Config;
 
-bool PackageHasComponent(const fs::path& package_path,
-                         std::string_view component);
+class ComponentPackage {
+ public:
+  explicit ComponentPackage(const fs::path& package_path);
+  bool Has(std::string_view component) const;
+  const fs::path& Path(std::string_view component) const;
+
+ private:
+  std::unordered_map<std::string, fs::path> components_;
+};
 
 struct ComponentInfo {
   std::string name;
@@ -28,7 +35,8 @@ struct ComponentInfo {
 };
 
 struct ComponentSession {
-  ComponentSession(const Config& config, std::string component);
+  ComponentSession(const Config& config, const ComponentPackage& package,
+                   std::string component);
   ~ComponentSession();
   NamedTensors Run(const NamedTensors& inputs,
                    const std::vector<std::string>& outputs = {});

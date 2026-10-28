@@ -22,4 +22,4 @@ except ImportError as e:
     else:
         raise e
 
-from .non_generative import DecisionSession, RankingSession
+from .non_generative import NonGenerativeSession

@@ -651,12 +651,10 @@ static DeviceInterface* AppendSessionProviders(Model& model,
   return session_device ? session_device : GetDeviceInterface(DeviceType::CPU);
 }
 
-DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
-                                                       OrtSessionOptions& session_options,
-                                                       bool is_primary_session_options,
-                                                       bool disable_graph_capture,
-                                                       bool cloned_from_parent,
-                                                       bool append_providers) {
+void ApplySessionOptionsFromConfig(
+    const Config& config,
+    const Config::SessionOptions& config_session_options,
+    OrtSessionOptions& session_options, bool cloned_from_parent) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -710,7 +708,7 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
    */
   for (auto& config_entry : config_session_options.config_entries) {
     if (!config_entry.second.empty() && IsPathValuedSessionOption(config_entry.first)) {
-      const std::string resolved = config_->ResolvePath(config_entry.second).string();
+      const std::string resolved = config.ResolvePath(config_entry.second).string();
       session_options.AddConfigEntry(config_entry.first.c_str(), resolved.c_str());
     } else {
       session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
@@ -731,7 +729,7 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
   // within one of these to prevent loading arbitrary libraries from disk.
   std::vector<std::filesystem::path> allowed_dirs;
   if (!custom_ops_libraries.empty()) {
-    if (config_->memory_assets_only_) {
+    if (config.memory_assets_only_) {
       throw std::runtime_error("Memory-only loading does not support custom-ops library paths.");
     }
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
@@ -739,7 +737,8 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
 
     // 1. GenAI model folder
     std::error_code ec;
-    auto model_dir = std::filesystem::canonical(std::filesystem::path(config_->config_path.string()), ec);
+    auto model_dir = std::filesystem::canonical(
+        std::filesystem::path(config.config_path.string()), ec);
     if (!ec) allowed_dirs.push_back(model_dir);
 
     // 2. EP library directories
@@ -861,7 +860,15 @@ DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOpti
   if (config_session_options.graph_optimization_level.has_value()) {
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
+}
 
+DeviceInterface* Model::CreateSessionOptionsFromConfig(
+    const Config::SessionOptions& config_session_options,
+    OrtSessionOptions& session_options, bool is_primary_session_options,
+    bool disable_graph_capture, bool cloned_from_parent,
+    bool append_providers) {
+  ApplySessionOptionsFromConfig(*config_, config_session_options,
+                                session_options, cloned_from_parent);
   if (!append_providers) {
     return nullptr;
   }

@@ -36,11 +36,24 @@ class _NativeSession:
         self.requests = []
 
     def run(self, request):
-        self.requests.append(json.loads(request))
-        return json.dumps({"answer": {"type": "noul", "noul": 0.75}})
-
-    def rank(self, request):
-        return self.run(request)
+        value = json.loads(request)
+        self.requests.append(value)
+        if "candidates" in value:
+            return json.dumps(
+                {
+                    "model": "clm",
+                    "ranked": [
+                        {"rank": 1, "key": "yes", "probability": 0.75},
+                        {"rank": 2, "key": "no", "probability": 0.25},
+                    ],
+                }
+            )
+        return json.dumps(
+            {
+                "model": "kev",
+                "answers": {"q": {"type": "noul", "noul": 0.75}},
+            }
+        )
 
 
 @pytest.fixture
@@ -69,23 +82,32 @@ def runtime():
         sys.modules["onnxruntime_genai.onnxruntime_genai"] = previous_native
 
 
-@pytest.mark.parametrize(
-    ("session_name", "method_name"),
-    (("RankingSession", "rank"), ("DecisionSession", "decide")),
-)
-def test_python_session_is_thin_native_dict_adapter(runtime, session_name, method_name):
-    request = {
+def test_python_session_is_thin_native_dict_adapter(runtime):
+    ranking_request = {
+        "state": {"weather": "rain"},
+        "instructions": "Choose",
+        "candidates": {"yes": "Take umbrella", "no": "Leave umbrella"},
+    }
+    decision_request = {
         "state": {"weather": "rain"},
         "questions": {"q": {"type": "noul", "instructions": "Take umbrella?"}},
     }
     config = runtime.Config("/models/package")
     config.append_provider("cuda")
-    session = getattr(runtime, session_name)(config)
-    assert getattr(session, method_name)(request) == {"answer": {"type": "noul", "noul": 0.75}}
+    session = runtime.NonGenerativeSession(config)
+    assert session.run(ranking_request)["ranked"][0] == {
+        "rank": 1,
+        "key": "yes",
+        "probability": 0.75,
+    }
+    assert session.run(decision_request)["answers"]["q"] == {
+        "type": "noul",
+        "noul": 0.75,
+    }
     assert session._native.config is config
     assert config.path == "/models/package"
     assert config.providers == ["cuda"]
-    assert session._native.requests == [request]
+    assert session._native.requests == [ranking_request, decision_request]
 
 
 @pytest.mark.skipif(
@@ -107,9 +129,17 @@ def test_exported_packages_cpu_cuda_parity(provider):
             value.append_provider(provider)
         return value
 
-    clm_request = json.loads((root / "clm-request.json").read_text())
+    clm_fixture = json.loads((root / "clm-request.json").read_text())
+    clm_request = {
+        "state": clm_fixture["context"],
+        "instructions": clm_fixture["question"],
+        "temperature": clm_fixture["temperature"],
+        "candidates": {
+            str(index): value for index, value in enumerate(clm_fixture["answers"])
+        },
+    }
     kev_request = json.loads((root / "kev-request.json").read_text())
-    assert og.RankingSession(config(root / "clm-v0.1-8b-fp32")).rank(clm_request)
-    decision = og.DecisionSession(config(root / "kev-4b-fp32"))
-    first = decision.decide(kev_request)
-    assert decision.decide(kev_request) == first
+    assert og.NonGenerativeSession(config(root / "clm-v0.1-8b-fp32")).run(clm_request)
+    decision = og.NonGenerativeSession(config(root / "kev-4b-fp32"))
+    first = decision.run(kev_request)
+    assert decision.run(kev_request) == first

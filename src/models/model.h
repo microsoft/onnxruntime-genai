@@ -24,6 +24,10 @@ class ThreadPool;
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
 void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config);
+void ApplySessionOptionsFromConfig(
+    const Config& config,
+    const Config::SessionOptions& config_session_options,
+    OrtSessionOptions& session_options, bool cloned_from_parent = false);
 
 // True when a session running on `session_device` may be handed a tensor whose memory lives on
 // `buffer_device`. ORT moves tensor data between host memory and the devices the session has an EP

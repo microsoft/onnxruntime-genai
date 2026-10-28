@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import json
+import math
 import shutil
 from pathlib import Path
 
@@ -71,7 +72,7 @@ def test_combined_clm_high_level_session(tmp_path):
         opset_imports=[helper.make_opsetid("", 18)],
     )
     backbone.ir_version = 13
-    onnx.save(backbone, tmp_path / "backbone.onnx")
+    onnx.save(backbone, tmp_path / "编码器.onnx")
 
     state = helper.make_tensor_value_info("state_hidden_states", TensorProto.FLOAT, [None, 4])
     action = helper.make_tensor_value_info("action_hidden_states", TensorProto.FLOAT, [None, 4])
@@ -95,22 +96,28 @@ def test_combined_clm_high_level_session(tmp_path):
         opset_imports=[helper.make_opsetid("", 18)],
     )
     heads.ir_version = 13
-    onnx.save(heads, tmp_path / "clm_heads.onnx")
+    onnx.save(heads, tmp_path / "排序头.onnx")
     (tmp_path / "component_manifest.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "model_type": "clm-v0.1-8b",
                 "components": {
-                    "backbone": {"filename": "backbone.onnx"},
-                    "clm_heads": {"filename": "clm_heads.onnx"},
+                    "backbone": {"filename": "编码器.onnx"},
+                    "clm_heads": {"filename": "排序头.onnx"},
                 },
             }
         )
     )
-    _write_component_genai_config(tmp_path, "backbone.onnx", 1)
-    session = og.RankingSession(_cpu_config(tmp_path))
-    ranked = session.rank(
+    _write_component_genai_config(tmp_path, "编码器.onnx", 1)
+    (tmp_path / "external_initializers").mkdir()
+    config_json = json.loads((tmp_path / "genai_config.json").read_text())
+    config_json["model"]["decoder"]["session_options"][
+        "session.model_external_initializers_file_folder_path"
+    ] = "external_initializers"
+    (tmp_path / "genai_config.json").write_text(json.dumps(config_json))
+    session = og.NonGenerativeSession(_cpu_config(tmp_path))
+    ranked = session.run(
         {
             "state": "1",
             "instructions": "choose",
@@ -120,7 +127,7 @@ def test_combined_clm_high_level_session(tmp_path):
     assert ranked["model"] == "clm"
     assert [item["rank"] for item in ranked["ranked"]] == [1, 2]
     assert {item["key"] for item in ranked["ranked"]} == {"a", "b"}
-    numeric = session.rank(
+    numeric = session.run(
         {
             "state": {
                 "whole": 1.0,
@@ -132,7 +139,7 @@ def test_combined_clm_high_level_session(tmp_path):
             "candidates": {"a": "1", "b": "2"},
         }
     )
-    textual = session.rank(
+    textual = session.run(
         {
             "state": {
                 "whole": "1.0",
@@ -145,12 +152,45 @@ def test_combined_clm_high_level_session(tmp_path):
         }
     )
     assert numeric == textual
+    cold = session.run(
+        {
+            "state": "1",
+            "instructions": "choose",
+            "temperature": 1e-45,
+            "candidates": {"a": "1", "b": "2"},
+        }
+    )
+    assert all(math.isfinite(item["probability"]) for item in cold["ranked"])
+    assert sum(item["probability"] for item in cold["ranked"]) == pytest.approx(1)
     with pytest.raises(RuntimeError, match="embedded NUL"):
-        session.rank(
+        session.run(
             {
                 "state": "left\0right",
                 "instructions": "choose",
                 "candidates": {"a": "1", "b": "2"},
+            }
+        )
+    with pytest.raises(RuntimeError, match="duplicate JSON object key"):
+        session._native.run(
+            '{"candidates":{"first":"one","first":"two"}}'
+        )
+    deeply_nested = "[" * 65 + "0" + "]" * 65
+    with pytest.raises(RuntimeError, match="nesting depth"):
+        session._native.run(
+            '{"state":'
+            + deeply_nested
+            + ',"candidates":{"first":"one"}}'
+        )
+
+    config_json["model"]["context_length"] = 16
+    (tmp_path / "genai_config.json").write_text(json.dumps(config_json))
+    bounded = og.NonGenerativeSession(_cpu_config(tmp_path))
+    with pytest.raises(RuntimeError, match="configured context length 16"):
+        bounded.run(
+            {
+                "state": "context " * 64,
+                "instructions": "choose",
+                "candidates": {"a": "1"},
             }
         )
 
@@ -218,8 +258,8 @@ def test_flat_kev_high_level_session(tmp_path):
         )
     )
     _write_component_genai_config(tmp_path, "backbone.onnx", 1)
-    session = og.DecisionSession(_cpu_config(tmp_path))
-    answer = session.decide(
+    session = og.NonGenerativeSession(_cpu_config(tmp_path))
+    answer = session.run(
         {
             "state": "1",
             "questions": {"q": {"type": "noul", "criteria": {}}},
@@ -229,7 +269,7 @@ def test_flat_kev_high_level_session(tmp_path):
         "model": "kev",
         "answers": {"q": {"type": "noul", "noul": 0.5}},
     }
-    score = session.decide(
+    score = session.run(
         {
             "state": "1",
             "questions": {
@@ -242,7 +282,7 @@ def test_flat_kev_high_level_session(tmp_path):
     )
     assert score["answers"]["q"]["confidence"] == 0
     with pytest.raises(RuntimeError, match="temperature is supported only by ranking sessions"):
-        session.decide(
+        session.run(
             {
                 "state": "1",
                 "temperature": 0.5,
@@ -368,12 +408,12 @@ def test_stateful_kev_repeated_and_isolated_requests(tmp_path):
             "two": {"type": "choice", "criteria": {"x": "xray", "y": "yankee"}},
         },
     }
-    session = og.DecisionSession(_cpu_config(package))
-    result = session.decide(request)
-    assert session.decide(request) == result
+    session = og.NonGenerativeSession(_cpu_config(package))
+    result = session.run(request)
+    assert session.run(request) == result
 
-    isolated_session = og.DecisionSession(_cpu_config(package))
-    isolated = isolated_session.decide({"state": request["state"], "questions": {"two": request["questions"]["two"]}})
+    isolated_session = og.NonGenerativeSession(_cpu_config(package))
+    isolated = isolated_session.run({"state": request["state"], "questions": {"two": request["questions"]["two"]}})
     assert isolated["answers"]["two"] == result["answers"]["two"]
 
 
@@ -383,11 +423,11 @@ def test_kev_enforces_configured_context_length(tmp_path):
     config["model"]["context_length"] = 16
     (package / "genai_config.json").write_text(json.dumps(config))
 
-    session = og.DecisionSession(_cpu_config(package))
+    session = og.NonGenerativeSession(_cpu_config(package))
     with pytest.raises(
         RuntimeError, match="exceeds configured context length 16"
     ):
-        session.decide(
+        session.run(
             {
                 "state": "state " * 64,
                 "questions": {
@@ -458,9 +498,9 @@ def test_malformed_clm_hidden_shape_returns_runtime_error(tmp_path):
     )
 
     _write_component_genai_config(tmp_path, "backbone.onnx", 1)
-    session = og.RankingSession(_cpu_config(tmp_path))
+    session = og.NonGenerativeSession(_cpu_config(tmp_path))
     with pytest.raises(RuntimeError, match="encoder hidden states must have rank 3"):
-        session.rank(
+        session.run(
             {
                 "state": "1",
                 "instructions": "choose",
@@ -533,9 +573,9 @@ def test_malformed_kev_probability_shape_returns_runtime_error(tmp_path):
     )
 
     _write_component_genai_config(tmp_path, "backbone.onnx", 1)
-    session = og.DecisionSession(_cpu_config(tmp_path))
+    session = og.NonGenerativeSession(_cpu_config(tmp_path))
     with pytest.raises(RuntimeError, match="KEV probability matrix must have rank 2"):
-        session.decide(
+        session.run(
             {
                 "state": "1",
                 "questions": {"q": {"type": "noul", "criteria": {}}},
