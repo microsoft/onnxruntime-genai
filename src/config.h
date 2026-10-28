@@ -19,7 +19,6 @@ struct RuntimeSettings;
 struct TokenizerMemoryData {
   std::string config_json;
   std::string tokenizer_json;
-  std::string module_json{};
 };
 
 struct MappedModelFile {

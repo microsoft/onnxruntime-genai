@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 namespace Generators {
 
@@ -82,10 +83,12 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
         std::find(config.external_file_sources_->names.begin(),
                   config.external_file_sources_->names.end(),
                   "tokenizer_module.json") != config.external_file_sources_->names.end()) {
-      memory_data_ = std::make_shared<const TokenizerMemoryData>(TokenizerMemoryData{
-          memory_data_->config_json, memory_data_->tokenizer_json,
-          config.ReadFileSource("tokenizer_module.json")});
-      module_json = memory_data_->module_json;
+      const auto owner = std::make_shared<const std::pair<
+          std::shared_ptr<const TokenizerMemoryData>, std::string>>(
+          memory_data_, config.ReadFileSource("tokenizer_module.json"));
+      module_json = owner->second;
+      // Retain both payloads without changing the legacy tokenizer JSON representation.
+      memory_data_ = std::shared_ptr<const TokenizerMemoryData>(owner, owner->first.get());
     }
     memory_blob_.emplace(std::string_view{memory_data_->config_json},
                          std::string_view{memory_data_->tokenizer_json},
