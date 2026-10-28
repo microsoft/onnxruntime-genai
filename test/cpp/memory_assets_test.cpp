@@ -301,15 +301,21 @@ TEST_F(MemoryAssetsTest, RejectsMemoryAssetsOnPathBasedConfig) {
 
 TEST_F(MemoryAssetsTest, RejectsMissingAndInvalidTokenizerData) {
   auto config = CreateConfig();
-  EXPECT_THROW(OgaTokenizer::Create(*config), std::runtime_error);
+  {
+    SCOPED_TRACE("Missing tokenizer data");
+    EXPECT_THROW(OgaTokenizer::Create(*config), std::runtime_error);
+  }
   ExpectError(OgaConfigSetTokenizerData(config.get(), nullptr, 0,
                                         tokenizer_json_.data(), tokenizer_json_.size()),
               "tokenizer JSON");
   ExpectError(OgaConfigSetTokenizerData(config.get(), tokenizer_config_.data(),
                                         tokenizer_config_.size(), nullptr, 0),
               "tokenizer JSON");
-  config->SetTokenizerData(tokenizer_config_, "{");
-  EXPECT_THROW(OgaTokenizer::Create(*config), std::runtime_error);
+  {
+    SCOPED_TRACE("Malformed tokenizer vocabulary JSON");
+    config->SetTokenizerData(tokenizer_config_, "{");
+    EXPECT_THROW(OgaTokenizer::Create(*config), std::runtime_error);
+  }
 }
 
 TEST_F(MemoryAssetsTest, TokenizerCopiesJsonAndOutlivesConfig) {
