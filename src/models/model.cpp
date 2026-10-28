@@ -938,6 +938,7 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
   if (config_->memory_assets_only_) {
     auto graph = config_->model_data_spans_.find(model_filename);
     if (config_->external_file_sources_) {
+#if ORT_API_VERSION >= 28
       if (Ort::api_version < 28) {
         throw std::runtime_error("ORT does not support experimental initializer file sources.");
       }
@@ -960,6 +961,9 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       }
       auto mapping = sources.Map(model_filename);
       return OrtSession::Create(ort_env, mapping->data, mapping->size, options.get());
+#else
+      throw std::runtime_error("ORT lacks the required initializer file-source API.");
+#endif
     }
     if (graph == config_->model_data_spans_.end() || graph->second.empty()) {
       throw std::runtime_error("Memory asset bundle is missing graph: " + model_filename);

@@ -420,7 +420,7 @@ OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
 OgaResult* OGA_API_CALL OgaConfigSetModelFileDescriptors(
     OgaConfig* config, const char* const* names, const int* descriptors, size_t count) {
   OGA_TRY
-#if defined(__linux__)
+#if defined(__linux__) && ORT_API_VERSION >= 28
   if (!config || !config->memory_assets_only_ || !config->external_data_spans_.empty() ||
       (count != 0 && (!names || !descriptors))) {
     throw std::invalid_argument("Expected initializer file sources and a memory-only config without weight buffers.");
@@ -459,6 +459,8 @@ OgaResult* OGA_API_CALL OgaConfigSetModelFileDescriptors(
   }
   config->external_file_sources_ = std::move(sources);
   return nullptr;
+#elif defined(__linux__)
+  throw std::runtime_error("ORT lacks the required initializer file-source API.");
 #else
   throw std::runtime_error("External initializer file descriptors require Linux.");
 #endif
