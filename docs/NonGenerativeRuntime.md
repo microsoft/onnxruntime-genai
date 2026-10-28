@@ -11,7 +11,6 @@ import onnxruntime_genai as og
 
 ranking = og.RankingSession("/models/clm-v0.1-8b-fp32", providers=["cuda"])
 ranked = ranking.rank(json.load(open("free-form-rank-request.json")))
-answers = ranking.run(json.load(open("structured-question-request.json")))
 
 decision = og.DecisionSession("/models/kev-4b-fp32")
 answers = decision.decide(json.load(open("request.json")))
@@ -37,7 +36,7 @@ token resolution are private implementation details rather than additional
 public handle families.
 
 The C ABI exposes only opaque ranking/decision session handles plus
-`RunJson`, `RankJson`, and `DecideJson`. Returned JSON strings use the existing
+`RankJson` and `DecideJson`. Returned JSON strings use the existing
 `OgaDestroyString` ownership convention.
 
 ## Managed bindings

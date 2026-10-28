@@ -23,14 +23,6 @@ struct PyRankingSession {
   PyRankingSession(const std::string& path,
                    const std::vector<std::string>& providers)
       : session(path, providers) {}
-  std::string Run(const std::string& request) {
-    std::string result;
-    {
-      pybind11::gil_scoped_release release;
-      result = session.Run(request);
-    }
-    return result;
-  }
   std::string Rank(const std::string& request) {
     std::string result;
     {
@@ -617,8 +609,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init<const std::string&, const std::vector<std::string>&>(),
            pybind11::arg("package_path"),
            pybind11::arg("providers") = std::vector<std::string>{})
-      .def("rank", &PyRankingSession::Rank)
-      .def("run", &PyRankingSession::Run);
+      .def("rank", &PyRankingSession::Rank);
 
   pybind11::class_<PyDecisionSession>(m, "_DecisionSession")
       .def(pybind11::init<const std::string&, const std::vector<std::string>&>(),

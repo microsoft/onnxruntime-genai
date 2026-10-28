@@ -102,10 +102,6 @@ def test_combined_clm_high_level_session(tmp_path):
         )
     )
     session = og.RankingSession(tmp_path, providers=["cpu"])
-    answer = session.run({"state": "1", "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}}})
-    assert answer["model"] == "clm"
-    assert answer["answers"]["q"]["type"] == "choice"
-    assert set(answer["answers"]["q"]["probabilities"]) == {"a", "b"}
     ranked = session.rank(
         {
             "state": "1",
@@ -116,7 +112,7 @@ def test_combined_clm_high_level_session(tmp_path):
     assert ranked["model"] == "clm"
     assert [item["rank"] for item in ranked["ranked"]] == [1, 2]
     assert {item["key"] for item in ranked["ranked"]} == {"a", "b"}
-    numeric = session.run(
+    numeric = session.rank(
         {
             "state": {
                 "whole": 1.0,
@@ -124,10 +120,11 @@ def test_combined_clm_high_level_session(tmp_path):
                 "fixed_boundary": 0.0001,
                 "large_fixed": 100000.0,
             },
-            "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}},
+            "instructions": "choose",
+            "candidates": {"a": "1", "b": "2"},
         }
     )
-    textual = session.run(
+    textual = session.rank(
         {
             "state": {
                 "whole": "1.0",
@@ -135,7 +132,8 @@ def test_combined_clm_high_level_session(tmp_path):
                 "fixed_boundary": "0.0001",
                 "large_fixed": "100000.0",
             },
-            "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}},
+            "instructions": "choose",
+            "candidates": {"a": "1", "b": "2"},
         }
     )
     assert numeric == textual
@@ -456,7 +454,13 @@ def test_malformed_clm_hidden_shape_returns_runtime_error(tmp_path):
 
     session = og.RankingSession(tmp_path, providers=["cpu"])
     with pytest.raises(RuntimeError, match="encoder hidden states must have rank 3"):
-        session.run({"state": "1", "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}}})
+        session.rank(
+            {
+                "state": "1",
+                "instructions": "choose",
+                "candidates": {"a": "1", "b": "2"},
+            }
+        )
 
 
 def test_malformed_kev_probability_shape_returns_runtime_error(tmp_path):

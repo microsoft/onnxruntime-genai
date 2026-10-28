@@ -84,7 +84,6 @@ class OGA_CPP_ONLY RankingSession {
   }
   RankingSession(const RankingSession&) = delete;
   RankingSession& operator=(const RankingSession&) = delete;
-  std::string Run(std::string_view request_json);
   std::string Rank(std::string_view request_json);
 
  private:
@@ -147,12 +146,6 @@ inline RankingSession::RankingSession(
   const auto provider_ptrs = OgaDetail::StringPointers(providers);
   OgaCheckResult(OgaCreateRankingSession(
       package_path.c_str(), provider_ptrs.data(), provider_ptrs.size(), &handle_));
-}
-inline std::string RankingSession::Run(std::string_view request_json) {
-  const char* response{};
-  OgaCheckResult(OgaRankingSessionRunJson(
-      handle_, request_json.data(), request_json.size(), &response));
-  return OgaDetail::TakeString(response);
 }
 inline std::string RankingSession::Rank(std::string_view request_json) {
   const char* response{};

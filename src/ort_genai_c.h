@@ -201,9 +201,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRankingSession(
     const char* package_path, const char* const* providers, size_t provider_count,
     OgaRankingSessionHandle** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyRankingSession(OgaRankingSessionHandle* session);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionRunJson(
-    OgaRankingSessionHandle* session, const char* request, size_t request_length,
-    const char** response);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionRankJson(
     OgaRankingSessionHandle* session, const char* request, size_t request_length,
     const char** response);

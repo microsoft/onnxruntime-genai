@@ -27,10 +27,6 @@ class RankingSession:
     def rank(self, request: dict[str, Any]) -> dict[str, Any]:
         return json.loads(self._native.rank(json.dumps(request)))
 
-    def run(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Run structured CLM questions."""
-        return json.loads(self._native.run(json.dumps(request)))
-
     __call__ = rank
 
 

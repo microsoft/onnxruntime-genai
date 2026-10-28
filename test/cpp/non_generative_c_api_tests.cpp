@@ -39,7 +39,7 @@ TEST(NonGenerativeCApiTest, JsonWorkflowReportsContractErrors) {
 
   const char* response{};
   ExpectError(
-      OgaRankingSessionRunJson(nullptr, "{}", 2, &response),
+      OgaRankingSessionRankJson(nullptr, "{}", 2, &response),
       "session must not be null");
   EXPECT_EQ(response, nullptr);
 }

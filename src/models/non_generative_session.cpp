@@ -612,7 +612,7 @@ float OptionalTemperature(const OgaStructuredValue& object) {
   throw std::invalid_argument("temperature must be numeric");
 }
 
-OgaStructuredRequest ParseStructuredRequest(std::string_view source) {
+OgaStructuredRequest ParseDecisionRequestJson(std::string_view source) {
   auto root = StructuredJsonParser(source).Parse();
   if (!Get<OgaStructuredValue::Object>(root))
     throw std::invalid_argument("request must be a JSON object");
@@ -644,7 +644,7 @@ OgaStructuredRequest ParseStructuredRequest(std::string_view source) {
   return request;
 }
 
-OgaFreeFormRankRequest ParseFreeFormRankRequest(std::string_view source) {
+OgaFreeFormRankRequest ParseRankingRequestJson(std::string_view source) {
   auto root = StructuredJsonParser(source).Parse();
   if (!Get<OgaStructuredValue::Object>(root))
     throw std::invalid_argument("request must be a JSON object");
@@ -664,30 +664,6 @@ OgaFreeFormRankRequest ParseFreeFormRankRequest(std::string_view source) {
     request.candidates.emplace_back(key, value);
   }
   return request;
-}
-
-size_t ElementSize(OgaElementType type) {
-  switch (type) {
-    case OgaElementType_bool:
-    case OgaElementType_int8:
-    case OgaElementType_uint8:
-      return 1;
-    case OgaElementType_float16:
-    case OgaElementType_bfloat16:
-    case OgaElementType_int16:
-    case OgaElementType_uint16:
-      return 2;
-    case OgaElementType_float32:
-    case OgaElementType_int32:
-    case OgaElementType_uint32:
-      return 4;
-    case OgaElementType_float64:
-    case OgaElementType_int64:
-    case OgaElementType_uint64:
-      return 8;
-    default:
-      throw std::invalid_argument("unsupported component tensor element type");
-  }
 }
 
 const Generators::Tensor& FindTensor(
@@ -2287,23 +2263,11 @@ void OGA_API_CALL OgaDestroyRankingSession(OgaRankingSessionHandle* session) {
   delete session;
 }
 
-OgaResult* OGA_API_CALL OgaRankingSessionRunJson(
-    OgaRankingSessionHandle* session, const char* request,
-    size_t request_length, const char** response) {
-  OGA_CAPI_TRY
-  auto result = SerializeJson(CapiRequired(session, "session").value.Run(ParseStructuredRequest(std::string_view(CapiRequired(request, "request"), request_length))));
-  auto output = std::make_unique<char[]>(result.size() + 1);
-  std::memcpy(output.get(), result.c_str(), result.size() + 1);
-  CapiRequired(response, "response") = output.release();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaRankingSessionRankJson(
     OgaRankingSessionHandle* session, const char* request,
     size_t request_length, const char** response) {
   OGA_CAPI_TRY
-  auto result = SerializeJson(CapiRequired(session, "session").value.Rank(ParseFreeFormRankRequest(std::string_view(CapiRequired(request, "request"), request_length))));
+  auto result = SerializeJson(CapiRequired(session, "session").value.Rank(ParseRankingRequestJson(std::string_view(CapiRequired(request, "request"), request_length))));
   auto output = std::make_unique<char[]>(result.size() + 1);
   std::memcpy(output.get(), result.c_str(), result.size() + 1);
   CapiRequired(response, "response") = output.release();
@@ -2332,7 +2296,7 @@ OgaResult* OGA_API_CALL OgaDecisionSessionDecideJson(
     OgaDecisionSessionHandle* session, const char* request,
     size_t request_length, const char** response) {
   OGA_CAPI_TRY
-  auto result = SerializeJson(CapiRequired(session, "session").value.Decide(ParseStructuredRequest(std::string_view(CapiRequired(request, "request"), request_length))));
+  auto result = SerializeJson(CapiRequired(session, "session").value.Decide(ParseDecisionRequestJson(std::string_view(CapiRequired(request, "request"), request_length))));
   auto output = std::make_unique<char[]>(result.size() + 1);
   std::memcpy(output.get(), result.c_str(), result.size() + 1);
   CapiRequired(response, "response") = output.release();
