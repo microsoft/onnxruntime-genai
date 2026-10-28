@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <map>
+
 namespace Generators {
 
 struct Model;
