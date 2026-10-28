@@ -130,6 +130,7 @@ class HeadComponent:
     inputs: tuple[ComponentBinding, ...]
     outputs: tuple[ComponentBinding, ...]
 
+
 @dataclass(frozen=True)
 class ComponentOptions:
     """Describe either generic ONNX heads or one pinned model-specific artifact.
@@ -143,6 +144,7 @@ class ComponentOptions:
     model_source: str | None = None
     artifact_revision: str | None = None
     base_revision: str | None = None
+
 
 @dataclass
 class EffectiveBuilderConfig:

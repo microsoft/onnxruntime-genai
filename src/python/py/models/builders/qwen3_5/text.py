@@ -154,7 +154,6 @@ class Qwen35TextModel(Model):
     def get_attn_module(self, layer_id, layer):
         return layer.linear_attn if self.layer_types[layer_id] == "linear_attention" else layer.self_attn
 
-
     def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
         """Split Qwen3.5's doubled, per-head Q projection into Q and gate."""
         super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
@@ -212,6 +211,7 @@ class Qwen35TextModel(Model):
 
         self.attention_attrs["q_path"] = f"{rs_q_name}/output_0"
         self.attention_attrs["gate_path"] = f"{rs_g_name}/output_0"
+
     def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
         """Apply Qwen3.5's attention output gate before the shared output projection."""
         q_size = self.num_attn_heads * self.head_size
@@ -256,6 +256,7 @@ class Qwen35TextModel(Model):
             scale=1.0,
         )
         return f"{name}/output_0"
+
     def make_gated_delta_net_gates_expansion(self, layer_id, attention, conv_out_3d, b_name, a_name):
         """Expand Qwen gate arithmetic and Q/K normalization around LinearAttention."""
         basename = f"/model/layers.{layer_id}/linear_attn"
@@ -310,6 +311,7 @@ class Qwen35TextModel(Model):
             f"{gate_name}/output_0",
             f"{gate_name}/output_1",
         )
+
     def make_qwen_gated_delta_net(self, layer_id, linear_attn, root_input):
         """Build the Qwen linear-attention layer for dense or packed token layouts.
 
@@ -378,6 +380,7 @@ class Qwen35TextModel(Model):
             a_name,
         )
         self.make_linear_attention_output_proj(layer_id, linear_attn, linear_output, z_name)
+
     def make_conv_state_update_kwargs(self, layer_id):
         """Compact convolution-capture bindings for this layer, or nothing when capture is disabled."""
         capacity = self.context_length_attrs["state_update_capacity"]
@@ -390,6 +393,7 @@ class Qwen35TextModel(Model):
             "state_update_value": self.output_names["state_update.conv_value"][layer_id],
             "state_update_value_shape": self.output_shapes["state_update.conv_value"],
         }
+
     def make_recurrent_state_update_kwargs(self, layer_id):
         """Compact recurrent-capture bindings for this layer, or nothing when capture is disabled."""
         capacity = self.context_length_attrs["state_update_capacity"]
@@ -402,6 +406,7 @@ class Qwen35TextModel(Model):
             "state_update_capsule": self.output_names["state_update.recurrent_capsule"][layer_id],
             "state_update_capsule_shape": self.output_shapes["state_update.recurrent_capsule"],
         }
+
     def make_gated_delta_net_layer(self, layer_id, linear_attn, conv_output, b_name, a_name):
         """Run GatedDeltaNet directly from the packed convolution QKV output."""
         if not self.use_paged_attention and self.ep not in {"cuda", "webgpu"}:
@@ -466,6 +471,7 @@ class Qwen35TextModel(Model):
             [*token_shape, value_dim],
         )
         return f"{reshape_name}/output_0"
+
     def make_linear_attention_input_proj(self, layer_id, attention, root_input):
         """Build linear projections, conv weight initializer, and QKV transpose.
 
@@ -494,11 +500,13 @@ class Qwen35TextModel(Model):
         self.make_initializer(attention.conv1d.weight, conv_weight_name, to=self.io_dtype)
 
         return z_name, b_name, a_name, conv_input, conv_weight_name
+
     def make_linear_attention_qkv_z_proj(self, layer_id, attention, root_input):
         basename = f"/model/layers.{layer_id}/linear_attn"
         qkv_name = self.make_matmul(attention.in_proj_qkv, f"{basename}/qkv_proj/MatMul", root_input)
         z_name = self.make_matmul(attention.in_proj_z, f"{basename}/z_proj/MatMul", root_input)
         return f"{qkv_name}/output_0", f"{z_name}/output_0"
+
     def make_linear_attention_a_b_proj(self, layer_id, attention, root_input):
         basename = f"/model/layers.{layer_id}/linear_attn"
         # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
@@ -513,12 +521,14 @@ class Qwen35TextModel(Model):
         self.exclude_node_from_quantization(a_name)
         a_name = self.make_matmul(attention.in_proj_a, a_name, root_input)
         return f"{b_name}/output_0", f"{a_name}/output_0"
+
     def require_dense_linear_attention_gate(self, projection, name):
         if hasattr(projection, "qweight") or getattr(projection, "quant_type", "none") != "none":
             raise ValueError(
                 f"Linear-attention gate '{name}' must remain dense, but the checkpoint supplies "
                 "pre-quantized weights that its loader did not dequantize."
             )
+
     def make_linear_attention_output_proj(self, layer_id, attention, attn_output_3d, z_name):
         """Build gated RMSNorm and output projection.
 
@@ -596,7 +606,6 @@ class Qwen35TextModel(Model):
         return state_groups
 
 
-
 class Qwen35MoETextModel(Qwen35TextModel):
     """Qwen3.5 MoE hybrid model builder.
 
@@ -628,6 +637,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
+
     def make_moe_router(self, layer_id, moe, root_input):
         basename = f"/model/layers.{layer_id}/moe"
         router_basename = f"{basename}/router/MatMul"
@@ -642,6 +652,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
             dtype=self.io_dtype,
             shape=self.make_moe_router_shape(),
         )
+
     def make_moe_subgraph(self, layer_id, moe, root_input):
         basename = f"/model/layers.{layer_id}/moe"
         op_type = self.moe_attrs["op_type"]
@@ -678,6 +689,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
         )
         self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
         return f"{combine_name}/output_0"
+
     def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
         basename = f"/model/layers.{layer_id}/shared_expert"
 

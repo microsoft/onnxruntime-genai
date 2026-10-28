@@ -141,14 +141,6 @@ def test_check_extra_options_normalizes_max_draft_tokens_to_an_int(monkeypatch):
     assert options["max_draft_tokens"] == 6
 
 
-
-
-
-
-
-
-
-
 @pytest.mark.parametrize("value", [0, -1, 17])
 def test_check_extra_options_rejects_out_of_range_max_draft_tokens(monkeypatch, value):
     # Validation happens here rather than in make_genai_config so a bad width fails before the

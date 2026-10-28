@@ -827,7 +827,6 @@ class Model:
         if self.use_paged_attention:
             self.make_paged_attention_init()
 
-
         elif self.is_gqa_supported():
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
@@ -997,7 +996,6 @@ class Model:
                 raise ValueError(
                     f"Scales file layer_ids must be in [0, {self.num_layers}), got {layer_ids}."
                 )
-
 
             # `make_cache_names` keys the cache names by model layer id, so the layers that
             # actually carry a KV cache are the keys.
@@ -6585,7 +6583,6 @@ class Model:
             # speculative verification. Rows are usually selected earlier, in the last decoder layer;
             # gather here only when the final norm's output must keep every row.
             root_input, seq_dim = self.make_paged_lm_head(basename, root_input)
-
 
         elif self.prune_lm_head:
             # Select one hidden state per row before the LM head. This avoids the expensive MatMul

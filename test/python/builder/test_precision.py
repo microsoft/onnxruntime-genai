@@ -595,10 +595,6 @@ def test_structured_unquantized_moe_completes_cli_option_parsing(monkeypatch):
     assert "moe_quant_type" not in options
 
 
-
-
-
-
 def test_target_gate_up_fusion_help_omits_removed_option(monkeypatch):
     help_text = []
 

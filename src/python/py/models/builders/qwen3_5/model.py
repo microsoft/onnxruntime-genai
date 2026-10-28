@@ -681,7 +681,6 @@ class Qwen35MoEModel(MTPModel):
         print("Added 'dspark' section to genai_config.json")
 
 
-
 class Qwen35Model(Qwen35MoEModel):
     """Composite dense Qwen3.5/Qwen3.8 builder with an optional MTP graph."""
 

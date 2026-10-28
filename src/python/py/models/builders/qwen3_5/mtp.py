@@ -114,13 +114,13 @@ class Qwen35MTPModel(Qwen35MoETextModel):
 
         fc_name = self.make_matmul(self.mtp_weights.fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
         return f"{fc_name}/output_0"
+
     def make_mtp_embedding(self, basename):
         return self.make_embedding_lookup(
             self.mtp_weights.embedding.weight,
             f"{basename}/embed_tokens",
             self.mtp_weights.lm_head,
         )
-
 
 
 class Qwen35DenseMTPModel(Qwen35MTPModel):

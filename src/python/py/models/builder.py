@@ -225,7 +225,6 @@ def check_extra_options(
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
 
-
     if "state_window" in extra_options:
         try:
             state_window = int(extra_options["state_window"])

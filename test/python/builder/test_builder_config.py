@@ -189,10 +189,6 @@ def test_structured_weight_packing_options_are_preserved(section, field, compone
     assert result["quant_config"]["format" if section == "runtime" else section][field] == 0
 
 
-
-
-
-
 @pytest.mark.parametrize("drafter_type", ["none", "mtp", "dflash2", "dspark"])
 @pytest.mark.parametrize("field", ["optimizations", "unknown_option"])
 def test_drafter_unknown_fields_are_rejected(drafter_type, field):
@@ -1058,10 +1054,6 @@ def test_structured_target_overrides_legacy_alias():
             target_options={"quant_config": {"weights": {"block_size": 128}}},
         )
     assert effective.target_options["quant_config"]["weights"]["block_size"] == 128
-
-
-
-
 
 
 @pytest.mark.parametrize(
