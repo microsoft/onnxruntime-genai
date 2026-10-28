@@ -139,19 +139,10 @@ std::unordered_map<std::string, fs::path> LoadComponents(fs::path root) {
   return result;
 }
 
-Config ResolveComponentConfig(const Config* component_config,
-                              const std::vector<std::string>& providers) {
-  Config config = component_config ? *component_config : Config{};
+Config ResolveComponentConfig(const Config& component_config) {
+  Config config = component_config;
   auto& configured_session_options =
       config.model.decoder.session_options;
-  if (!providers.empty()) {
-    configured_session_options.providers.clear();
-    for (const auto& provider : providers) {
-      if (provider.empty())
-        throw std::runtime_error("provider name must not be empty");
-      SetProviderOption(config, provider, {}, {});
-    }
-  }
   const auto effective_providers = configured_session_options.providers;
   for (const auto& provider : effective_providers)
     if (provider == "cuda")
@@ -216,18 +207,12 @@ bool PackageHasComponent(const fs::path& package_path,
   return LoadComponents(package_path).count(std::string(component)) != 0;
 }
 
-ComponentSession::ComponentSession(const fs::path& package_path, std::string component,
-                                   const std::vector<std::string>& providers) {
+ComponentSession::ComponentSession(const Config& config, std::string component) {
+  const auto& package_path = config.config_path;
   auto components = LoadComponents(package_path);
   auto found = components.find(component);
   if (found == components.end()) throw std::runtime_error("component not declared: " + component);
-  std::unique_ptr<Config> component_config;
-  if (std::filesystem::is_regular_file(
-          (package_path / "genai_config.json").c_str()))
-    component_config =
-        std::make_unique<Config>(package_path, std::string_view{});
-  auto effective_config =
-      ResolveComponentConfig(component_config.get(), providers);
+  auto effective_config = ResolveComponentConfig(config);
   uses_cuda_ = std::find(
                    effective_config.model.decoder.session_options.providers.begin(),
                    effective_config.model.decoder.session_options.providers.end(),
@@ -235,7 +220,7 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
                effective_config.model.decoder.session_options.providers.end();
   try {
     session_ = CreateComponentSession(
-        found->second, effective_config, component_config != nullptr);
+        found->second, effective_config, true);
   } catch (const std::exception& error) {
     if (std::string_view(error.what()).find("LinearAttentionGate") !=
         std::string_view::npos)
@@ -355,14 +340,6 @@ struct TokenizerMetadata : JSON::Element {
   }
 };
 
-Generators::Config PackageTokenizerConfig(const fs::path& path) {
-  if ((path / "genai_config.json").exists())
-    return Generators::Config(path, std::string_view{});
-  Generators::Config config;
-  config.config_path = path;
-  return config;
-}
-
 int32_t ResolvePadTokenId(
     const fs::path& path, const Generators::Tokenizer& tokenizer) {
   const auto config_path = path / "tokenizer_config.json";
@@ -391,10 +368,10 @@ int32_t ResolvePadTokenId(
 
 }  // namespace
 
-Generators::PackageTokenizer::PackageTokenizer(const fs::path& package_path)
-    : config_(PackageTokenizerConfig(package_path)),
+Generators::PackageTokenizer::PackageTokenizer(const Config& config)
+    : config_(config),
       tokenizer_(config_),
-      pad_token_id_(ResolvePadTokenId(package_path, tokenizer_)),
+      pad_token_id_(ResolvePadTokenId(config_.config_path, tokenizer_)),
       context_length_(
           config_.model.context_length > 0
               ? std::min<size_t>(

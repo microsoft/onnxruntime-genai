@@ -16,13 +16,19 @@ TEST(NonGenerativeSessionTest, RealPackagesRunWhenConfigured) {
       R"({"state":{"weather":"heavy rain"},"instructions":"Choose","candidates":{"no":"Do not take an umbrella","yes":"Take an umbrella"}})";
   const std::string decision_request =
       R"({"state":{"weather":"heavy rain"},"questions":{"umbrella":{"type":"noul","instructions":"Should I take an umbrella?","criteria":{}}}})";
-  std::vector<std::string> providers;
+  auto ranking_config =
+      OgaConfig::Create((root / "clm-v0.1-8b-fp32").string().c_str());
+  auto decision_config =
+      OgaConfig::Create((root / "kev-4b-fp32").string().c_str());
   if (const char* provider = std::getenv("ORT_GENAI_NON_GENERATIVE_PROVIDER");
       provider && *provider) {
-    providers.emplace_back(provider);
+    ranking_config->ClearProviders();
+    ranking_config->AppendProvider(provider);
+    decision_config->ClearProviders();
+    decision_config->AppendProvider(provider);
   }
-  NonGenerativeSession ranking((root / "clm-v0.1-8b-fp32").string(), providers);
-  NonGenerativeSession decision((root / "kev-4b-fp32").string(), providers);
+  NonGenerativeSession ranking(*ranking_config);
+  NonGenerativeSession decision(*decision_config);
   const auto clm = ranking.Run(ranking_request);
   const auto kev = decision.Run(decision_request);
   const auto repeated_clm = ranking.Run(ranking_request);

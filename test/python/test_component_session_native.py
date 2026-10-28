@@ -101,6 +101,7 @@ def test_combined_clm_high_level_session(tmp_path):
             }
         )
     )
+    _write_component_genai_config(tmp_path, "backbone.onnx", 1)
     session = og.RankingSession(tmp_path, providers=["cpu"])
     ranked = session.rank(
         {
@@ -209,6 +210,7 @@ def test_flat_kev_high_level_session(tmp_path):
             }
         )
     )
+    _write_component_genai_config(tmp_path, "backbone.onnx", 1)
     session = og.DecisionSession(tmp_path, providers=["cpu"])
     answer = session.decide(
         {
@@ -452,6 +454,7 @@ def test_malformed_clm_hidden_shape_returns_runtime_error(tmp_path):
         )
     )
 
+    _write_component_genai_config(tmp_path, "backbone.onnx", 1)
     session = og.RankingSession(tmp_path, providers=["cpu"])
     with pytest.raises(RuntimeError, match="encoder hidden states must have rank 3"):
         session.rank(
@@ -526,6 +529,7 @@ def test_malformed_kev_probability_shape_returns_runtime_error(tmp_path):
         )
     )
 
+    _write_component_genai_config(tmp_path, "backbone.onnx", 1)
     session = og.DecisionSession(tmp_path, providers=["cpu"])
     with pytest.raises(RuntimeError, match="KEV probability matrix must have rank 2"):
         session.decide(

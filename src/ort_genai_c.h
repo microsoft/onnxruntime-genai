@@ -196,9 +196,14 @@ OGA_EXPORT void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled);
  */
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
 
+/**
+ * \brief Create a ranking or decision session from an existing configuration.
+ *
+ * The session copies the effective configuration. The caller may destroy or
+ * reuse \p config after this function returns.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateNonGenerativeSession(
-    const char* package_path, const char* const* providers, size_t provider_count,
-    OgaNonGenerativeSession** out);
+    const OgaConfig* config, OgaNonGenerativeSession** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyNonGenerativeSession(OgaNonGenerativeSession* session);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaNonGenerativeSessionRunJson(
     OgaNonGenerativeSession* session, const char* request, size_t request_length,

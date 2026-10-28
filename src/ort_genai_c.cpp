@@ -29,6 +29,7 @@
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
 #include "models/model_package.h"
+#include "models/non_generative_session.h"
 #include "telemetry/model_telemetry.h"
 #include "telemetry/telemetry.h"
 #include "dll_load_error.h"
@@ -371,6 +372,22 @@ OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out
   OGA_TRY
   auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path);
   *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateNonGenerativeSession(
+    const OgaConfig* config, OgaNonGenerativeSession** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("out must not be null");
+  }
+  *out = nullptr;
+  if (!config) {
+    throw std::invalid_argument("config must not be null");
+  }
+  *out = CreateNonGenerativeSession(
+      static_cast<const Generators::Config&>(*config));
   return nullptr;
   OGA_CATCH
 }

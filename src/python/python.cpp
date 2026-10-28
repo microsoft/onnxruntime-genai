@@ -22,7 +22,7 @@ pybind11::dtype ToNumpyDtype(ONNXTensorElementDataType type);
 struct PyNonGenerativeSession {
   PyNonGenerativeSession(const std::string& path,
                          const std::vector<std::string>& providers)
-      : session(path, providers) {}
+      : session(CreateSession(path, providers)) {}
   std::string Run(const std::string& request) {
     std::string result;
     {
@@ -30,6 +30,16 @@ struct PyNonGenerativeSession {
       result = session.Run(request);
     }
     return result;
+  }
+  static NonGenerativeSession CreateSession(
+      const std::string& path, const std::vector<std::string>& providers) {
+    auto config = OgaConfig::Create(path.c_str());
+    if (!providers.empty()) {
+      config->ClearProviders();
+      for (const auto& provider : providers)
+        config->AppendProvider(provider.c_str());
+    }
+    return NonGenerativeSession(*config);
   }
   NonGenerativeSession session;
 };

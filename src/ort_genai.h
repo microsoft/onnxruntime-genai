@@ -71,7 +71,7 @@ struct OgaAbstract {
 // Typed package entry points for ranking and decision inference.
 class OGA_CPP_ONLY NonGenerativeSession {
  public:
-  NonGenerativeSession(std::string package_path, std::vector<std::string> providers = {});
+  explicit NonGenerativeSession(const OgaConfig& config);
   ~NonGenerativeSession() { OgaDestroyNonGenerativeSession(handle_); }
   NonGenerativeSession(NonGenerativeSession&& other) noexcept
       : handle_(std::exchange(other.handle_, nullptr)) {}
@@ -105,13 +105,6 @@ inline void OgaCheckResult(OgaResult* result) {
 
 namespace OgaDetail {
 
-inline std::vector<const char*> StringPointers(const std::vector<std::string>& values) {
-  std::vector<const char*> result;
-  result.reserve(values.size());
-  for (const auto& value : values) result.push_back(value.c_str());
-  return result;
-}
-
 inline std::string TakeString(const char* value) {
   std::unique_ptr<const char, decltype(&OgaDestroyString)> owned(
       value, OgaDestroyString);
@@ -120,12 +113,6 @@ inline std::string TakeString(const char* value) {
 
 }  // namespace OgaDetail
 
-inline NonGenerativeSession::NonGenerativeSession(
-    std::string package_path, std::vector<std::string> providers) {
-  const auto provider_ptrs = OgaDetail::StringPointers(providers);
-  OgaCheckResult(OgaCreateNonGenerativeSession(
-      package_path.c_str(), provider_ptrs.data(), provider_ptrs.size(), &handle_));
-}
 inline std::string NonGenerativeSession::Run(std::string_view request_json) {
   const char* response{};
   OgaCheckResult(OgaNonGenerativeSessionRunJson(
@@ -347,6 +334,10 @@ struct OgaConfig : OgaAbstract {
 
   static void operator delete(void* p) { OgaDestroyConfig(reinterpret_cast<OgaConfig*>(p)); }
 };
+
+inline NonGenerativeSession::NonGenerativeSession(const OgaConfig& config) {
+  OgaCheckResult(OgaCreateNonGenerativeSession(&config, &handle_));
+}
 
 struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path) {

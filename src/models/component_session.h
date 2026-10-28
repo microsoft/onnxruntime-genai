@@ -15,6 +15,8 @@
 
 namespace Generators {
 
+struct Config;
+
 bool PackageHasComponent(const fs::path& package_path,
                          std::string_view component);
 
@@ -26,8 +28,7 @@ struct ComponentInfo {
 };
 
 struct ComponentSession {
-  ComponentSession(const fs::path& package_path, std::string component,
-                   const std::vector<std::string>& providers);
+  ComponentSession(const Config& config, std::string component);
   ~ComponentSession();
   NamedTensors Run(const NamedTensors& inputs,
                    const std::vector<std::string>& outputs = {});
@@ -47,7 +48,7 @@ struct ComponentSession {
 
 class PackageTokenizer {
  public:
-  explicit PackageTokenizer(const fs::path& package_path);
+  explicit PackageTokenizer(const Config& config);
   std::vector<int32_t> Encode(const std::string& text) const;
   int32_t PadTokenId() const { return pad_token_id_; }
   size_t ContextLength() const { return context_length_; }

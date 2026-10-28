@@ -4,6 +4,7 @@
 #include "../ort_genai_c_internal.h"
 #include "../json.h"
 #include "component_session.h"
+#include "non_generative_session.h"
 
 #include <algorithm>
 #include <charconv>
@@ -1241,29 +1242,28 @@ size_t FloatVectorBytes(const std::vector<float>& value) {
 }
 
 struct NativeRankingSession {
-  NativeRankingSession(std::string path, std::vector<std::string> configured_providers)
-      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(fs::path(package_path)), encoder(Component(Generators::PackageHasComponent(fs::path(package_path), "encoder") ? "encoder" : "backbone")) {
-    if (Generators::PackageHasComponent(fs::path(package_path), "clm_heads")) {
+  explicit NativeRankingSession(const Generators::Config& configured)
+      : config(configured), package_path(config.config_path.string()), identity(PackageIdentity(package_path, config.model.decoder.session_options.providers)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(config), encoder(Component(Generators::PackageHasComponent(config.config_path, "encoder") ? "encoder" : "backbone")) {
+    if (Generators::PackageHasComponent(config.config_path, "clm_heads")) {
       combined = std::make_unique<Generators::ComponentSession>(
-          package_path, "clm_heads", providers);
+          config, "clm_heads");
     } else {
       state = std::make_unique<Generators::ComponentSession>(
-          package_path, "state_head", providers);
+          config, "state_head");
       action = std::make_unique<Generators::ComponentSession>(
-          package_path, "action_head", providers);
+          config, "action_head");
       scorer = std::make_unique<Generators::ComponentSession>(
-          package_path, "scorer", providers);
+          config, "scorer");
     }
-    if (Generators::PackageHasComponent(fs::path(package_path), "fused_state_ranking"))
+    if (Generators::PackageHasComponent(config.config_path, "fused_state_ranking"))
       fused = std::make_unique<Generators::ComponentSession>(
-          package_path, "fused_state_ranking", providers);
+          config, "fused_state_ranking");
   }
   Generators::ComponentSession Component(const std::string& name) const {
-    return Generators::ComponentSession(fs::path(package_path), name,
-                                        providers);
+    return Generators::ComponentSession(config, name);
   }
+  Generators::Config config;
   std::string package_path;
-  std::vector<std::string> providers;
   std::string identity;
   mutable std::mutex operation_mutex;
   SessionLruCache<std::vector<float>> cache;
@@ -1877,25 +1877,24 @@ void AddRepeatedState(FeedStorage& feeds, const KevStateBinding& binding,
 }
 
 struct NativeDecisionSession {
-  NativeDecisionSession(std::string path, std::vector<std::string> configured_providers)
-      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(fs::path(package_path)), backbone(Component("backbone")) {
+  explicit NativeDecisionSession(const Generators::Config& configured)
+      : config(configured), package_path(config.config_path.string()), identity(PackageIdentity(package_path, config.model.decoder.session_options.providers)), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(config), backbone(Component("backbone")) {
     const auto pointer_name =
-        Generators::PackageHasComponent(fs::path(package_path), "pointer_head")
+        Generators::PackageHasComponent(config.config_path, "pointer_head")
             ? "pointer_head"
             : "kev_head";
     pointer = std::make_unique<Generators::ComponentSession>(
-        package_path, pointer_name, providers);
+        config, pointer_name);
     flat = pointer_name == std::string_view("kev_head");
     std::string compatibility_reason;
     state_bindings =
         DiscoverKevStateBindings(backbone, compatibility_reason);
   }
   Generators::ComponentSession Component(const std::string& name) const {
-    return Generators::ComponentSession(fs::path(package_path), name,
-                                        providers);
+    return Generators::ComponentSession(config, name);
   }
+  Generators::Config config;
   std::string package_path;
-  std::vector<std::string> providers;
   std::string identity;
   mutable std::mutex operation_mutex;
   SessionLruCache<CachedKevTokens> cache;
@@ -2216,25 +2215,14 @@ const char* CapiRequired(const char* value, const char* name) {
   return value;
 }
 
-std::vector<std::string> CapiStrings(const char* const* values, size_t count,
-                                     const char* name) {
-  if (count && !values) throw std::invalid_argument(std::string(name) + " must not be null");
-  std::vector<std::string> result;
-  result.reserve(count);
-  for (size_t i = 0; i < count; ++i)
-    result.emplace_back(CapiRequired(values[i], name));
-  return result;
-}
-
 }  // namespace
 
 struct OGA_CPP_ONLY OgaNonGenerativeSession {
   using Runtime = std::variant<std::unique_ptr<NativeRankingSession>,
                                std::unique_ptr<NativeDecisionSession>>;
 
-  OgaNonGenerativeSession(std::string path,
-                          std::vector<std::string> configured_providers) {
-    const fs::path package(path);
+  explicit OgaNonGenerativeSession(const Generators::Config& config) {
+    const auto& package = config.config_path;
     const bool decision =
         Generators::PackageHasComponent(package, "pointer_head") ||
         Generators::PackageHasComponent(package, "kev_head");
@@ -2245,30 +2233,15 @@ struct OGA_CPP_ONLY OgaNonGenerativeSession {
       throw std::invalid_argument(
           "package must declare exactly one ranking or decision workflow");
     if (ranking)
-      runtime = std::make_unique<NativeRankingSession>(
-          std::move(path), std::move(configured_providers));
+      runtime = std::make_unique<NativeRankingSession>(config);
     else
-      runtime = std::make_unique<NativeDecisionSession>(
-          std::move(path), std::move(configured_providers));
+      runtime = std::make_unique<NativeDecisionSession>(config);
   }
 
   Runtime runtime;
 };
 
 extern "C" {
-
-OgaResult* OGA_API_CALL OgaCreateNonGenerativeSession(
-    const char* package_path, const char* const* providers, size_t provider_count,
-    OgaNonGenerativeSession** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto provider_values = CapiStrings(providers, provider_count, "providers");
-  auto result = std::make_unique<OgaNonGenerativeSession>(
-      CapiRequired(package_path, "package_path"), std::move(provider_values));
-  output = result.release();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
 
 void OGA_API_CALL OgaDestroyNonGenerativeSession(OgaNonGenerativeSession* session) {
   delete session;
@@ -2298,3 +2271,8 @@ OgaResult* OGA_API_CALL OgaNonGenerativeSessionRunJson(
 }
 
 }  // extern "C"
+
+OgaNonGenerativeSession* CreateNonGenerativeSession(
+    const Generators::Config& config) {
+  return new OgaNonGenerativeSession(config);
+}

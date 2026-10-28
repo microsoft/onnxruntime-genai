@@ -21,14 +21,23 @@ answers = decision.decide(json.load(open("request.json")))
 discovers the workflow from the package and accepts/returns UTF-8 JSON:
 
 ```cpp
-NonGenerativeSession ranking{"/models/clm-v0.1-8b-fp32", {"cuda"}};
+auto ranking_config = OgaConfig::Create("/models/clm-v0.1-8b-fp32");
+ranking_config->ClearProviders();
+ranking_config->AppendProvider("cuda");
+NonGenerativeSession ranking{*ranking_config};
 auto ranked = ranking.Run(
     R"({"state":{"weather":"rain"},"instructions":"Choose","candidates":{"picnic":"Outside","museum":"Inside"}})");
 
-NonGenerativeSession decision{"/models/kev-4b-fp32"};
+auto decision_config = OgaConfig::Create("/models/kev-4b-fp32");
+NonGenerativeSession decision{*decision_config};
 auto decisions = decision.Run(
     R"({"state":{"weather":"rain"},"questions":{"umbrella":{"type":"noul","instructions":"Take an umbrella?"}}})");
 ```
+
+Session creation reuses `OgaConfig`, including provider selection, provider
+options, hardware-device filters, and overlays. The session copies the
+effective configuration during construction, so the caller may destroy or
+reuse its `OgaConfig` afterward. Packages must contain `genai_config.json`.
 
 Internally these workflows reuse the existing `Config`, `Tokenizer`, `Tensor`,
 and `NamedTensors` infrastructure. Named component execution and package pad
