@@ -111,7 +111,7 @@ struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaTokenPostProcessor : Generators::TokenPostProcessor, OgaAbstract {};
 struct OgaTokenPostProcessorResult : Generators::PostProcessorResult, OgaAbstract {};
-struct OgaTokenPostProcessorTimestamp : Generators::TimestampResult, OgaAbstract {};
+struct OgaTokenPostProcessorTimestampResult : Generators::TimestampResult, OgaAbstract {};
 struct OgaTokenPostProcessorTimestampRecord : Generators::TimestampRecord, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaEngineCapabilities : Generators::EngineCapabilities, OgaAbstract {};
@@ -1290,23 +1290,28 @@ const OgaTokenPostProcessorResult* OGA_API_CALL OgaTokenPostProcessorGetResult(c
 }
 
 const char* OGA_API_CALL OgaTokenPostProcessorResultGetText(const OgaTokenPostProcessorResult* result) { return result ? result->text.c_str() : nullptr; }
-const OgaTokenPostProcessorTimestamp* OGA_API_CALL OgaTokenPostProcessorResultGetTimestamps(const OgaTokenPostProcessorResult* result) {
+const OgaTokenPostProcessorTimestampResult* OGA_API_CALL OgaTokenPostProcessorResultGetTimestampResult(const OgaTokenPostProcessorResult* result) {
   if (!result || !result->timestamps) return nullptr;
-  return static_cast<const OgaTokenPostProcessorTimestamp*>(&*result->timestamps);
+  return static_cast<const OgaTokenPostProcessorTimestampResult*>(&*result->timestamps);
 }
-size_t OGA_API_CALL OgaTokenPostProcessorTimestampGetWordCount(const OgaTokenPostProcessorTimestamp* timestamps) { return timestamps ? timestamps->words.size() : 0; }
-size_t OGA_API_CALL OgaTokenPostProcessorTimestampGetSegmentCount(const OgaTokenPostProcessorTimestamp* timestamps) { return timestamps ? timestamps->segments.size() : 0; }
-const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampGetWord(const OgaTokenPostProcessorTimestamp* timestamps, size_t index) {
-  return timestamps && index < timestamps->words.size() ? static_cast<const OgaTokenPostProcessorTimestampRecord*>(&timestamps->words[index]) : nullptr;
-}
-const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampGetSegment(const OgaTokenPostProcessorTimestamp* timestamps, size_t index) {
-  return timestamps && index < timestamps->segments.size() ? static_cast<const OgaTokenPostProcessorTimestampRecord*>(&timestamps->segments[index]) : nullptr;
+size_t OGA_API_CALL OgaTokenPostProcessorTimestampResultGetWordCount(const OgaTokenPostProcessorTimestampResult* timestamps) { return timestamps ? timestamps->words.size() : 0; }
+size_t OGA_API_CALL OgaTokenPostProcessorTimestampResultGetSegmentCount(const OgaTokenPostProcessorTimestampResult* timestamps) { return timestamps ? timestamps->segments.size() : 0; }
+const OgaTokenPostProcessorTimestampRecord* OGA_API_CALL OgaTokenPostProcessorTimestampResultGetTimestampRecord(const OgaTokenPostProcessorTimestampResult* timestamps, OgaTimestampRecordKind kind, size_t index) {
+  if (!timestamps) return nullptr;
+  switch (kind) {
+    case OgaTimestampRecordKind_Words:
+      return index < timestamps->words.size() ? static_cast<const OgaTokenPostProcessorTimestampRecord*>(&timestamps->words[index]) : nullptr;
+    case OgaTimestampRecordKind_Segments:
+      return index < timestamps->segments.size() ? static_cast<const OgaTokenPostProcessorTimestampRecord*>(&timestamps->segments[index]) : nullptr;
+    default:
+      return nullptr;
+  }
 }
 const char* OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetText(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->text.c_str() : nullptr; }
-int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->start_frame : 0; }
-int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->stop_frame : 0; }
-double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->start_time : 0; }
-double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->stop_time : 0; }
+int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartFrame(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->frame_interval.first : 0; }
+int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->frame_interval.second : 0; }
+double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->time_interval.first : 0; }
+double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record) { return record ? record->time_interval.second : 0; }
 
 OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor* p, OgaTokenizerStream** out) {
   OGA_TRY
