@@ -11,6 +11,7 @@
 #include "cuda_topk.h"
 #include "models/io/kv_cache.h"
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <charconv>
 #include <cstddef>
@@ -36,7 +37,24 @@ Ort::Allocator* ort_allocator_{};
 const char* device_label = "cuda";
 
 cuda_stream_holder g_stream;
-cudaStream_t GetStream() { return g_stream.get(); }
+
+// Device the NvTensorRtRtx interface is bound to, or -1 while unbound.
+std::atomic<int> g_bound_device_id{-1};
+
+void UseBoundDevice() noexcept {
+  const int device_id = g_bound_device_id.load(std::memory_order_acquire);
+  if (device_id < 0)
+    return;
+  int current_device_id{};
+  // Errors are left to the CUDA call that follows, as callers include noexcept paths.
+  if (::cudaGetDevice(&current_device_id) != cudaSuccess || current_device_id != device_id)
+    (void)::cudaSetDevice(device_id);
+}
+
+cudaStream_t GetStream() {
+  UseBoundDevice();
+  return g_stream.get();
+}
 
 namespace {
 
@@ -87,6 +105,7 @@ class PinnedHostPool {
       }
     }
     void* p{};
+    UseBoundDevice();
     CUDA_CHECK(::cudaHostAlloc(&p, capacity, 0));
     return static_cast<uint8_t*>(p);
   }
@@ -207,6 +226,7 @@ class PinnedHostPool {
       }
     }
     cudaEvent_t event{};
+    UseBoundDevice();
     return ::cudaEventCreateWithFlags(&event, cudaEventDisableTiming) == cudaSuccess ? event : nullptr;
   }
 
@@ -262,6 +282,7 @@ struct GpuMemory final : DeviceBuffer {
     if (PinnedHostPool::Pooled(size_in_bytes_)) {
       p_cpu_ = PinnedHostPool::Instance().Acquire(size_in_bytes_, cpu_capacity_);
     } else {
+      UseBoundDevice();
       CUDA_CHECK(::cudaHostAlloc(&p_cpu_, size_in_bytes_, 0));
     }
   }
@@ -298,6 +319,7 @@ struct GpuMemory final : DeviceBuffer {
 
   void CopyFromCpu(const void* source, size_t size_in_bytes) override {
     assert(size_in_bytes == size_in_bytes_);
+    UseBoundDevice();
     CUDA_CHECK(::cudaMemcpy(p_device_, source, size_in_bytes, ::cudaMemcpyHostToDevice));
   }
 
@@ -1002,6 +1024,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
+    UseBoundDevice();
     CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
   }
 
@@ -1114,12 +1137,12 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
     }
     CUDA_CHECK(cudaSetDevice(device_id));
     if (device_id != stream_device_id_) {
-      g_stream.Reset();
-      g_stream.Create();
+      g_stream.Recreate();
       stream_device_id_ = device_id;
     }
     device_id_ = device_id;
     stream_bound_ = true;
+    g_bound_device_id.store(device_id, std::memory_order_release);
   }
 
   // Handing the stream to an EP binds the interface to the stream's device: it can no longer be recreated
@@ -1129,6 +1152,7 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
     if (!stream_bound_) {
       device_id_ = stream_device_id_;
       stream_bound_ = true;
+      g_bound_device_id.store(device_id_, std::memory_order_release);
     }
     return GetStream();
   }

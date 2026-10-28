@@ -7,6 +7,8 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -488,6 +490,60 @@ void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const cha
 TEST(ModelTests, OutOfPlaceKvCachePhi3NvTensorRtRtx) {
   for (auto model_path : c_phi3_nvtrt_model_paths)
     Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(model_path.first, model_path.second);
+}
+
+// A new thread starts on CUDA device 0, so when the EP device is another one (e.g. device 0 is not supported
+// by the EP), a generator created and run on it must still allocate and launch on the model's device. The
+// first generation warms the allocator, so the worker's allocations are not hidden by it switching devices.
+void Test_WorkerThreadGeneration_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
+  std::string resolved_path = g_custom_model_path.empty() ? model_path : g_custom_model_path;
+
+  if (!std::filesystem::exists(resolved_path)) {
+    GTEST_SKIP() << "NvTensorRT model not available at: " << resolved_path;
+  }
+
+  const std::vector<int32_t> input_ids{
+      32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889,
+      32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
+
+  auto config = OgaConfig::Create(resolved_path.c_str());
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+  auto model = OgaModel::Create(*config);
+
+  const auto generate = [&model, &input_ids] {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 25);
+    params->SetSearchOptionBool("do_sample", false);
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->AppendTokens(input_ids);
+    while (!generator->IsDone()) {
+      generator->GenerateNextToken();
+    }
+    auto sequence = generator->GetSequence(0);
+    return std::vector<int32_t>(sequence.begin(), sequence.end());
+  };
+
+  const auto expected_output = generate();
+
+  std::vector<int32_t> worker_output;
+  std::string worker_error;
+  std::thread worker{[&] {
+    try {
+      worker_output = generate();
+    } catch (const std::exception& e) {
+      worker_error = e.what();
+    }
+  }};
+  worker.join();
+
+  ASSERT_TRUE(worker_error.empty()) << "Generation on a worker thread failed: " << worker_error;
+  EXPECT_EQ(worker_output, expected_output) << model_label;
+}
+
+TEST(ModelTests, WorkerThreadGenerationPhi3NvTensorRtRtx) {
+  for (auto model_path : c_phi3_nvtrt_model_paths)
+    Test_WorkerThreadGeneration_Phi3_NvTensorRtRtx(model_path.first, model_path.second);
 }
 
 #if TEST_PHI2 && (USE_CUDA || USE_DML)
