@@ -44,8 +44,10 @@ speech/vision processor JSON and adapters can also come from the file sources.
 Files must remain immutable. Nested names, packages and external tensor attributes
 are outside this contract.
 
-This requires ORT's experimental
+Build against an ORT SDK that exposes `GetExperimentalFunction` (API version 28
+or newer), and use a runtime with the experimental
 `OrtApi_SessionOptionsSetExternalInitializerFileDescriptors_SinceV32` entry.
+Older SDKs can still build the library, but descriptor registration fails explicitly.
 An unavailable API, missing file or invalid range is an explicit error, not
 filesystem or CPU fallback. ORT maps initializer ranges rather than entire weight
 files; small or unaligned tensors may be copied. Windows file loading is unchanged.
