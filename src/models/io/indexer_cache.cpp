@@ -87,6 +87,10 @@ IndexerCache::IndexerCache(State& state) : state_{state} {
     throw std::runtime_error("IndexerCache: head dimension must be static");
   const int64_t fixed_sequence_length = shape_[1] > 0 ? shape_[1] : 0;
   share_buffer_ = ShouldUseSharedPastPresentKeyValueCache(state_);
+  if (share_buffer_ && fixed_sequence_length == 0 &&
+      (inputs.past_sequence_length.empty() || !model_.session_info_.HasInput(inputs.past_sequence_length))) {
+    share_buffer_ = false;
+  }
   if (fixed_sequence_length > 0) {
     if (state_.params_->search.num_beams != 1)
       throw std::runtime_error("IndexerCache: beam search is not supported with a fixed cache shape");
