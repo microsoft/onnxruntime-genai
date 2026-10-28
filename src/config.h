@@ -4,12 +4,14 @@
 // Portions of this file consist of AI generated content.
 #pragma once
 #include "filesystem.h"
+#include "ort_genai_c.h"
 #include "provider_options.h"
 
 #include <array>
 #include <functional>
 #include <map>
 #include <memory>
+#include <limits>
 #include <optional>
 
 namespace Generators {
@@ -19,6 +21,7 @@ struct RuntimeSettings;
 struct TokenizerMemoryData {
   std::string config_json;
   std::string tokenizer_json;
+  std::string module_json{};
 };
 
 struct MappedModelFile {
@@ -35,9 +38,10 @@ struct ExternalInitializerFileSources {
   ExternalInitializerFileSources(const ExternalInitializerFileSources&) = delete;
   ExternalInitializerFileSources& operator=(const ExternalInitializerFileSources&) = delete;
   ~ExternalInitializerFileSources();
-  std::unique_ptr<MappedModelFile> Map(const std::string& name) const;
+  std::unique_ptr<MappedModelFile> Map(
+      const std::string& name, size_t maximum_size = std::numeric_limits<size_t>::max()) const;
   std::vector<std::string> names;
-  std::vector<int> descriptors;
+  std::vector<OgaFileHandle> handles;
 };
 
 struct Config {
