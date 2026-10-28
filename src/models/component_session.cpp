@@ -16,8 +16,10 @@
 #include <variant>
 
 #include "../config.h"
+#include "../config_utils.h"
 #include "../json.h"
 #include "../ort_genai_c_internal.h"
+#include "io/quantized_kv_cache.h"
 #include "model.h"
 #include "preprocessing/genai_tokenizer.h"
 #include "session_options.h"
@@ -137,15 +139,33 @@ std::unordered_map<std::string, fs::path> LoadComponents(fs::path root) {
   return result;
 }
 
-std::unique_ptr<OrtSession> CreateComponentSession(
-    const fs::path& model_path, const std::vector<std::string>& providers,
-    const Config* component_config,
-    const std::map<std::string, int64_t>& dimension_overrides = {}) {
-  auto options = OrtSessionOptions::Create();
+Config ResolveComponentConfig(const Config* component_config,
+                              const std::vector<std::string>& providers) {
   Config config = component_config ? *component_config : Config{};
   auto& configured_session_options =
       config.model.decoder.session_options;
-  if (component_config) {
+  if (!providers.empty()) {
+    configured_session_options.providers.clear();
+    for (const auto& provider : providers) {
+      if (provider.empty())
+        throw std::runtime_error("provider name must not be empty");
+      SetProviderOption(config, provider, {}, {});
+    }
+  }
+  const auto effective_providers = configured_session_options.providers;
+  for (const auto& provider : effective_providers)
+    if (provider == "cuda")
+      SetProviderOption(config, provider, "enable_cuda_graph", "0");
+  return config;
+}
+
+std::unique_ptr<OrtSession> CreateComponentSession(
+    const fs::path& model_path, const Config& config,
+    bool has_component_config) {
+  auto options = OrtSessionOptions::Create();
+  const auto& configured_session_options =
+      config.model.decoder.session_options;
+  if (has_component_config) {
     if (configured_session_options.intra_op_num_threads)
       options->SetIntraOpNumThreads(
           *configured_session_options.intra_op_num_threads);
@@ -174,7 +194,7 @@ std::unique_ptr<OrtSession> CreateComponentSession(
           *configured_session_options.log_verbosity_level);
     if (configured_session_options.enable_profiling)
       options->EnableProfiling(
-          configured_session_options.enable_profiling->c_str());
+          fs::path(*configured_session_options.enable_profiling).c_str());
     if (configured_session_options.graph_optimization_level)
       options->SetGraphOptimizationLevel(
           *configured_session_options.graph_optimization_level);
@@ -182,20 +202,10 @@ std::unique_ptr<OrtSession> CreateComponentSession(
          configured_session_options.config_entries)
       options->AddConfigEntry(name.c_str(), value.c_str());
   }
-  if (!providers.empty()) {
-    configured_session_options.providers.clear();
-    for (const auto& provider : providers) {
-      if (provider.empty())
-        throw std::runtime_error("provider name must not be empty");
-      SetProviderOption(config, provider, {}, {});
-    }
-  }
   if (!configured_session_options.providers.empty())
     SetProviderSessionOptions(
         *options, config.model.decoder.session_options.providers,
         config.model.decoder.session_options.provider_options, true, config);
-  for (const auto& [name, value] : dimension_overrides)
-    options->AddFreeDimensionOverrideByName(name.c_str(), value);
   return OrtSession::Create(GetOrtEnv(), model_path.c_str(), options.get());
 }
 
@@ -216,14 +226,16 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
           (package_path / "genai_config.json").c_str()))
     component_config =
         std::make_unique<Config>(package_path, std::string_view{});
-  std::map<std::string, int64_t> dimension_overrides;
-  if (component_config && component_config->model.decoder.hidden_size > 0)
-    dimension_overrides.emplace(
-        "kv_cache_dim", component_config->model.decoder.hidden_size);
+  auto effective_config =
+      ResolveComponentConfig(component_config.get(), providers);
+  uses_cuda_ = std::find(
+                   effective_config.model.decoder.session_options.providers.begin(),
+                   effective_config.model.decoder.session_options.providers.end(),
+                   "cuda") !=
+               effective_config.model.decoder.session_options.providers.end();
   try {
-    session_ = CreateComponentSession(found->second, providers,
-                                      component_config.get(),
-                                      dimension_overrides);
+    session_ = CreateComponentSession(
+        found->second, effective_config, component_config != nullptr);
   } catch (const std::exception& error) {
     if (std::string_view(error.what()).find("LinearAttentionGate") !=
         std::string_view::npos)
@@ -244,6 +256,23 @@ ComponentSession::ComponentSession(const fs::path& package_path, std::string com
     info.type = tensor.GetElementType();
     for (const char* symbol : tensor.GetSymbolicDimensions())
       info.symbolic_dimensions.emplace_back(symbol ? symbol : "");
+    for (size_t dimension = 0;
+         dimension < info.symbolic_dimensions.size(); ++dimension) {
+      if (info.symbolic_dimensions[dimension] != "kv_cache_dim") continue;
+      const auto head_size = effective_config.model.decoder.head_size;
+      if (head_size <= 0)
+        throw std::runtime_error(
+            "model.decoder.head_size must resolve kv_cache_dim");
+      int quantization_bits{};
+      for (const auto& provider :
+           effective_config.model.decoder.session_options.providers)
+        quantization_bits = std::max(
+            quantization_bits,
+            GetKvCacheQuantizationBits(
+                effective_config.model.decoder.session_options, provider));
+      info.shape[dimension] = ComputeQuantizedKvCacheHeadSize(
+          head_size, quantization_bits, info.type);
+    }
     inputs_.push_back(std::move(info));
   }
 }
@@ -327,6 +356,8 @@ struct TokenizerMetadata : JSON::Element {
 };
 
 Generators::Config PackageTokenizerConfig(const fs::path& path) {
+  if ((path / "genai_config.json").exists())
+    return Generators::Config(path, std::string_view{});
   Generators::Config config;
   config.config_path = path;
   return config;
@@ -363,9 +394,17 @@ int32_t ResolvePadTokenId(
 Generators::PackageTokenizer::PackageTokenizer(const fs::path& package_path)
     : config_(PackageTokenizerConfig(package_path)),
       tokenizer_(config_),
-      pad_token_id_(ResolvePadTokenId(package_path, tokenizer_)) {}
+      pad_token_id_(ResolvePadTokenId(package_path, tokenizer_)),
+      context_length_(
+          config_.model.context_length > 0
+              ? std::min<size_t>(
+                    8192, static_cast<size_t>(config_.model.context_length))
+              : 8192) {}
 
 std::vector<int32_t> Generators::PackageTokenizer::Encode(
     const std::string& text) const {
+  if (text.find('\0') != std::string::npos)
+    throw std::invalid_argument(
+        "structured text must not contain embedded NUL characters");
   return tokenizer_.Encode(text.c_str());
 }

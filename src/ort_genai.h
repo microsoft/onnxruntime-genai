@@ -221,6 +221,13 @@ using RankRequestHandle =
 using ModelResultHandle = Handle<OgaModelResultHandle, OgaDestroyModelResult>;
 using RankingResultHandle = Handle<OgaRankingResultHandle, OgaDestroyRankingResult>;
 
+inline void RejectEmbeddedNull(std::string_view value,
+                               std::string_view field) {
+  if (value.find('\0') != std::string_view::npos)
+    throw std::invalid_argument(std::string(field) +
+                                " must not contain embedded NUL characters");
+}
+
 inline std::vector<const char*> StringPointers(const std::vector<std::string>& values) {
   std::vector<const char*> result;
   result.reserve(values.size());
@@ -261,6 +268,7 @@ inline StructuredValueHandle MakeValue(const OgaStructuredValue& source) {
       OgaCheckResult(OgaCreateStructuredValueObject(&raw));
       StructuredValueHandle result(raw, OgaDestroyStructuredValue);
       for (const auto& [key, item] : std::get<OgaStructuredValue::Object>(source.value)) {
+        RejectEmbeddedNull(key, "structured object key");
         auto child = MakeValue(item);
         OgaCheckResult(
             OgaStructuredValueObjectAppend(result.get(), key.data(), key.size(),
@@ -340,6 +348,8 @@ inline StructuredRequestHandle MakeRequest(const OgaStructuredRequest& source) {
   OgaCheckResult(OgaStructuredRequestSetState(result.get(), state.get()));
   OgaCheckResult(OgaStructuredRequestSetTemperature(result.get(), source.temperature));
   for (const auto& [id, question] : source.questions) {
+    RejectEmbeddedNull(id, "question id");
+    RejectEmbeddedNull(question.type, "question type");
     auto instructions = MakeValue(question.instructions);
     auto criteria = MakeValue(question.criteria);
     OgaQuestionHandle* question_raw{};
@@ -363,6 +373,7 @@ inline RankRequestHandle MakeRequest(const OgaFreeFormRankRequest& source) {
       OgaFreeFormRankRequestSetInstructions(result.get(), instructions.get()));
   OgaCheckResult(OgaFreeFormRankRequestSetTemperature(result.get(), source.temperature));
   for (const auto& [key, value] : source.candidates) {
+    RejectEmbeddedNull(key, "candidate key");
     auto native_value = MakeValue(value);
     OgaCheckResult(OgaFreeFormRankRequestAddCandidate(
         result.get(), key.c_str(), native_value.get()));

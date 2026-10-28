@@ -20,9 +20,10 @@ def _write_component_genai_config(root: Path, filename: str, threads: int) -> No
                     "pad_token_id": 0,
                     "eos_token_id": 0,
                     "vocab_size": 1,
-                    "context_length": 8,
+                    "context_length": 8192,
                     "decoder": {
                         "filename": filename,
+                        "head_size": 1,
                         "session_options": {
                             "intra_op_num_threads": threads,
                             "inter_op_num_threads": 1,
@@ -37,6 +38,8 @@ def _write_component_genai_config(root: Path, filename: str, threads: int) -> No
 
 
 def test_combined_clm_high_level_session(tmp_path):
+    tmp_path = tmp_path / "模型"
+    tmp_path.mkdir()
     fixture = Path(__file__).parents[1] / "models/multimodal-decoder-no-input-ids"
     shutil.copy(fixture / "tokenizer.json", tmp_path / "tokenizer.json")
     shutil.copy(fixture / "tokenizer_config.json", tmp_path / "tokenizer_config.json")
@@ -115,17 +118,35 @@ def test_combined_clm_high_level_session(tmp_path):
     assert {item["key"] for item in ranked["ranked"]} == {"a", "b"}
     numeric = session.run(
         {
-            "state": {"whole": 1.0, "fraction": 0.1},
+            "state": {
+                "whole": 1.0,
+                "fraction": 0.1,
+                "fixed_boundary": 0.0001,
+                "large_fixed": 100000.0,
+            },
             "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}},
         }
     )
     textual = session.run(
         {
-            "state": {"whole": "1.0", "fraction": "0.1"},
+            "state": {
+                "whole": "1.0",
+                "fraction": "0.1",
+                "fixed_boundary": "0.0001",
+                "large_fixed": "100000.0",
+            },
             "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}},
         }
     )
     assert numeric == textual
+    with pytest.raises(RuntimeError, match="embedded NUL"):
+        session.rank(
+            {
+                "state": "left\0right",
+                "instructions": "choose",
+                "candidates": {"a": "1", "b": "2"},
+            }
+        )
 
 
 def test_flat_kev_high_level_session(tmp_path):
@@ -227,6 +248,10 @@ def _stateful_kev_package(root: Path) -> Path:
     fixture = Path(__file__).parents[1] / "models/multimodal-decoder-no-input-ids"
     shutil.copy(fixture / "tokenizer.json", root / "tokenizer.json")
     shutil.copy(fixture / "tokenizer_config.json", root / "tokenizer_config.json")
+    tokenizer_config = json.loads((root / "tokenizer_config.json").read_text())
+    tokenizer_config.pop("pad_token_id", None)
+    tokenizer_config.pop("pad_token", None)
+    (root / "tokenizer_config.json").write_text(json.dumps(tokenizer_config))
     inputs = [
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
         helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch", "total_sequence"]),
@@ -360,6 +385,29 @@ def test_stateful_kev_prefix_reuse_parity_cache_and_isolation(tmp_path):
     assert optimized.prefix_cache_stats["prefix_runs"] == 0
     optimized.set_prefix_cache_capacity(1, 1)
     assert optimized.prefix_cache_stats["entries"] == 0
+
+
+def test_kev_enforces_configured_context_length(tmp_path):
+    package = _stateful_kev_package(tmp_path)
+    config = json.loads((package / "genai_config.json").read_text())
+    config["model"]["context_length"] = 16
+    (package / "genai_config.json").write_text(json.dumps(config))
+
+    session = og.DecisionSession(package, providers=["cpu"])
+    with pytest.raises(
+        RuntimeError, match="exceeds configured context length 16"
+    ):
+        session.decide(
+            {
+                "state": "state " * 64,
+                "questions": {
+                    "q": {
+                        "type": "choice",
+                        "criteria": {"a": "alpha", "b": "beta"},
+                    }
+                },
+            }
+        )
 
 
 def test_malformed_clm_hidden_shape_returns_runtime_error(tmp_path):

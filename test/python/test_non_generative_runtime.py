@@ -176,8 +176,12 @@ def test_exported_packages_cpu_cuda_parity(provider):
     assert optimized.decide(kev_request) == full_result
     cached_seconds = time.perf_counter() - start
     stats = optimized.prefix_cache_stats
-    assert stats["prefix_runs"] == 1
-    assert stats["hits"] == 1
+    if provider == "cuda" or len(kev_request["questions"]) != 1:
+        assert stats["prefix_runs"] == 0
+        assert stats["fallback_runs"] >= 2
+    else:
+        assert stats["prefix_runs"] == 1
+        assert stats["hits"] == 1
     print(
         {
             "provider": provider or "cpu",

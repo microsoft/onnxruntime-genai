@@ -5,8 +5,8 @@
 #include "component_session.h"
 
 #include <algorithm>
-#include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
@@ -28,20 +28,22 @@ constexpr size_t kDefaultKevCacheEntries = 512;
 constexpr size_t kDefaultKevCacheBytes = 16 * 1024 * 1024;
 constexpr size_t kDefaultKevPrefixCacheEntries = 32;
 constexpr size_t kDefaultKevPrefixCacheBytes = 512 * 1024 * 1024;
-bool UsesCuda(const std::vector<std::string>& providers) {
-  return std::find(providers.begin(), providers.end(), "cuda") != providers.end() ||
-         std::find(providers.begin(), providers.end(), "CUDAExecutionProvider") !=
-             providers.end();
-}
-
 std::string PackageIdentity(const std::string& package_path,
                             const std::vector<std::string>& providers) {
   namespace stdfs = std::filesystem;
   std::error_code error;
-  auto canonical = stdfs::weakly_canonical(stdfs::path(package_path), error);
-  if (error) canonical = stdfs::absolute(stdfs::path(package_path), error);
+#ifdef _WIN32
+  const fs::path utf8_source(package_path);
+  const stdfs::path source(utf8_source.c_str());
+#else
+  const stdfs::path source(package_path);
+#endif
+  auto canonical = stdfs::weakly_canonical(source, error);
+  if (error) canonical = stdfs::absolute(source, error);
   std::ostringstream result;
-  result << canonical.generic_string();
+  const auto canonical_utf8 = canonical.generic_u8string();
+  result.write(reinterpret_cast<const char*>(canonical_utf8.data()),
+               static_cast<std::streamsize>(canonical_utf8.size()));
   for (const auto& provider : providers) result << "|provider=" << provider;
   return result.str();
 }
@@ -70,7 +72,11 @@ class SessionLruCache {
   void Put(std::string key, Value value) {
     std::lock_guard lock(mutex_);
     if (!entry_capacity_ || !byte_capacity_) return;
-    const auto bytes = key.size() + size_(value);
+    const auto value_bytes = size_(value);
+    if (key.size() >
+        ((std::numeric_limits<size_t>::max)() - value_bytes) / 2)
+      throw std::overflow_error("cache entry byte count overflows size_t");
+    const auto bytes = 2 * key.size() + value_bytes;
     if (bytes > byte_capacity_) return;
     if (const auto found = index_.find(key); found != index_.end()) {
       byte_size_ -= found->second->bytes;
@@ -155,26 +161,71 @@ bool Empty(const OgaStructuredValue& value) {
   return false;
 }
 
+bool SameDouble(std::string_view text, double expected) {
+  std::string owned(text);
+  char* end{};
+  const auto parsed = std::strtod(owned.c_str(), &end);
+  if (end != owned.c_str() + owned.size()) return false;
+  uint64_t parsed_bits{};
+  uint64_t expected_bits{};
+  std::memcpy(&parsed_bits, &parsed, sizeof(parsed_bits));
+  std::memcpy(&expected_bits, &expected, sizeof(expected_bits));
+  return parsed_bits == expected_bits;
+}
+
+std::string FormatPythonFloat(double value) {
+  if (!std::isfinite(value))
+    throw std::invalid_argument(
+        "structured floating-point value cannot be rendered");
+  if (value == 0) return std::signbit(value) ? "-0.0" : "0.0";
+
+  const auto exponent = static_cast<int>(
+      std::floor(std::log10(std::abs(value))));
+  const bool scientific = exponent < -4 || exponent >= 16;
+  for (int significant = 1;
+       significant <= std::numeric_limits<double>::max_digits10;
+       ++significant) {
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    if (scientific) {
+      stream << std::scientific << std::setprecision(significant - 1)
+             << value;
+    } else {
+      stream << std::fixed
+             << std::setprecision(std::max(0, significant - 1 - exponent))
+             << value;
+    }
+    auto result = stream.str();
+    const auto exponent_position = result.find('e');
+    auto mantissa_end =
+        exponent_position == std::string::npos ? result.size()
+                                               : exponent_position;
+    if (const auto dot = result.find('.');
+        dot != std::string::npos && dot < mantissa_end) {
+      while (mantissa_end > dot + 1 && result[mantissa_end - 1] == '0') {
+        result.erase(mantissa_end - 1, 1);
+        --mantissa_end;
+      }
+      if (!scientific && mantissa_end == dot + 1)
+        result.insert(mantissa_end, "0");
+      else if (scientific && mantissa_end == dot + 1)
+        result.erase(dot, 1);
+    } else if (!scientific) {
+      result.insert(mantissa_end, ".0");
+    }
+    if (SameDouble(result, value)) return result;
+  }
+  throw std::invalid_argument(
+      "structured floating-point value cannot be rendered");
+}
+
 std::string Scalar(const OgaStructuredValue& value, bool kev) {
   if (std::holds_alternative<std::monostate>(value.value)) return {};
   if (const auto* text = Get<std::string>(value)) return *text;
   if (const auto* boolean = Get<bool>(value))
     return *boolean ? (kev ? "True" : "true") : (kev ? "False" : "false");
   if (const auto* integer = Get<int64_t>(value)) return std::to_string(*integer);
-  if (const auto* number = Get<double>(value)) {
-    if (!std::isfinite(*number))
-      throw std::invalid_argument(
-          "structured floating-point value cannot be rendered");
-    char buffer[64];
-    const auto [end, error] =
-        std::to_chars(std::begin(buffer), std::end(buffer), *number);
-    if (error != std::errc{})
-      throw std::invalid_argument(
-          "structured floating-point value cannot be rendered");
-    std::string result(buffer, end);
-    if (result.find_first_of(".eE") == std::string::npos) result += ".0";
-    return result;
-  }
+  if (const auto* number = Get<double>(value)) return FormatPythonFloat(*number);
   throw std::invalid_argument("structured value is not scalar");
 }
 
@@ -725,8 +776,8 @@ size_t FloatVectorBytes(const std::vector<float>& value) {
 
 struct NativeRankingSession {
   NativeRankingSession(std::string path, std::vector<std::string> configured_providers)
-      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(package_path), encoder(Component(Generators::PackageHasComponent(package_path, "encoder") ? "encoder" : "backbone")) {
-    if (Generators::PackageHasComponent(package_path, "clm_heads")) {
+      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(fs::path(package_path)), encoder(Component(Generators::PackageHasComponent(fs::path(package_path), "encoder") ? "encoder" : "backbone")) {
+    if (Generators::PackageHasComponent(fs::path(package_path), "clm_heads")) {
       combined = std::make_unique<Generators::ComponentSession>(
           package_path, "clm_heads", providers);
     } else {
@@ -737,12 +788,13 @@ struct NativeRankingSession {
       scorer = std::make_unique<Generators::ComponentSession>(
           package_path, "scorer", providers);
     }
-    if (Generators::PackageHasComponent(package_path, "fused_state_ranking"))
+    if (Generators::PackageHasComponent(fs::path(package_path), "fused_state_ranking"))
       fused = std::make_unique<Generators::ComponentSession>(
           package_path, "fused_state_ranking", providers);
   }
   Generators::ComponentSession Component(const std::string& name) const {
-    return Generators::ComponentSession(package_path, name, providers);
+    return Generators::ComponentSession(fs::path(package_path), name,
+                                        providers);
   }
   std::string package_path;
   std::vector<std::string> providers;
@@ -1378,9 +1430,9 @@ void AddRepeatedState(FeedStorage& feeds, const KevStateBinding& binding,
 
 struct NativeDecisionSession {
   NativeDecisionSession(std::string path, std::vector<std::string> configured_providers)
-      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(package_path), backbone(Component("backbone")) {
+      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(fs::path(package_path)), backbone(Component("backbone")) {
     const auto pointer_name =
-        Generators::PackageHasComponent(package_path, "pointer_head")
+        Generators::PackageHasComponent(fs::path(package_path), "pointer_head")
             ? "pointer_head"
             : "kev_head";
     pointer = std::make_unique<Generators::ComponentSession>(
@@ -1390,7 +1442,8 @@ struct NativeDecisionSession {
     prefix_status = compatibility_status;
   }
   Generators::ComponentSession Component(const std::string& name) const {
-    return Generators::ComponentSession(package_path, name, providers);
+    return Generators::ComponentSession(fs::path(package_path), name,
+                                        providers);
   }
   std::string package_path;
   std::vector<std::string> providers;
@@ -1469,13 +1522,17 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     const auto tokens = tokenizer.Encode(text);
     return std::vector<int64_t>(tokens.begin(), tokens.end());
   };
+  const auto max_context = tokenizer.ContextLength();
+  if (max_context < 2)
+    throw std::runtime_error("KEV context length must be at least 2");
   const auto rendered_state = RenderKev(request.state);
   const auto state_key = identity + "|kev-prefix|" + rendered_state;
   CachedKevTokens state_value;
   if (!cache.Get(state_key, state_value)) {
     state_value.tokens = {kStateToken};
     auto state_tokens = encode(rendered_state);
-    if (state_tokens.size() > 8191) state_tokens.resize(8191);
+    if (state_tokens.size() > max_context - 1)
+      state_tokens.resize(max_context - 1);
     state_value.tokens.insert(state_value.tokens.end(), state_tokens.begin(),
                               state_tokens.end());
     cache.Put(state_key, state_value);
@@ -1494,10 +1551,12 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     const auto row_key = row_key_builder.str();
     CachedKevTokens row_value;
     if (cache.Get(row_key, row_value)) {
-      if (row_value.tokens.size() > 8192 ||
-          state_value.tokens.size() > 8192 - row_value.tokens.size())
+      if (row_value.tokens.size() > max_context ||
+          state_value.tokens.size() >
+              max_context - row_value.tokens.size())
         throw std::invalid_argument(
-            "state+question row exceeds 8192 tokens: " +
+            "state+question row exceeds configured context length " +
+            std::to_string(max_context) + ": " +
             std::to_string(state_value.tokens.size() +
                            row_value.tokens.size()));
       rows.push_back(std::move(row_value.tokens));
@@ -1516,12 +1575,14 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
       indices.push_back(static_cast<int64_t>(row.size() - 1));
     }
     row.push_back(kDecideToken);
-    if (row.size() > 8192)
-      throw std::invalid_argument("state+question row exceeds 8192 tokens: " +
-                                  std::to_string(row.size()));
-    if (state_value.tokens.size() > 8192 - row.size())
+    if (row.size() > max_context)
       throw std::invalid_argument(
-          "state+question row exceeds 8192 tokens: " +
+          "state+question row exceeds configured context length " +
+          std::to_string(max_context) + ": " + std::to_string(row.size()));
+    if (state_value.tokens.size() > max_context - row.size())
+      throw std::invalid_argument(
+          "state+question row exceeds configured context length " +
+          std::to_string(max_context) + ": " +
           std::to_string(state_value.tokens.size() + row.size()));
     cache.Put(row_key, {row, indices});
     rows.push_back(std::move(row));
@@ -1531,7 +1592,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
   // state tensors costs more than recomputing a short prefix.
   const bool use_prefix_reuse =
       prefix_reuse_enabled && !state_bindings.empty() &&
-      !UsesCuda(providers) && rows.size() == 1;
+      !backbone.UsesCuda() && rows.size() == 1;
   if (!use_prefix_reuse) {
     ++fallback_runs;
     for (size_t i = 0; i < rows.size(); ++i) {
@@ -2155,7 +2216,7 @@ OgaResult* OGA_API_CALL OgaRankingSessionGetCacheStats(
     throw std::invalid_argument("cache stats struct_size is too small");
   const auto stats = CapiRequired(session, "session").value.CacheStats();
   std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
-  output.struct_size = sizeof(stats);
+  output.struct_size = capacity;
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -2224,7 +2285,7 @@ OgaResult* OGA_API_CALL OgaDecisionSessionGetCacheStats(
     throw std::invalid_argument("cache stats struct_size is too small");
   const auto stats = CapiRequired(session, "session").value.CacheStats();
   std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
-  output.struct_size = sizeof(stats);
+  output.struct_size = capacity;
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -2299,7 +2360,7 @@ OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixCacheStats(
   const auto stats =
       CapiRequired(session, "session").value.PrefixCacheStats();
   std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
-  output.struct_size = sizeof(stats);
+  output.struct_size = capacity;
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -2314,7 +2375,7 @@ OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseStats(
   const auto stats =
       CapiRequired(session, "session").value.PrefixReuseStats();
   std::memcpy(&output, &stats, std::min(capacity, sizeof(stats)));
-  output.struct_size = sizeof(stats);
+  output.struct_size = capacity;
   return nullptr;
   OGA_CAPI_CATCH
 }
