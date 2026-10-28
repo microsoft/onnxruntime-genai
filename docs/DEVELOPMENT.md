@@ -47,8 +47,11 @@ Original handles may be closed and paths unlinked after registration. Graph-buff
 overrides, such as decrypted translation graphs, are copied into model-owned
 storage during model creation. Tokenizers own their JSON and optional module data;
 speech/vision processor JSON and adapters can also come from the file sources.
-Files must remain immutable. Nested names, packages and external tensor attributes
-are outside this contract.
+File-source preprocessing currently supports Whisper and Phi-4 multimodal only;
+other model types fail explicitly instead of reopening processor paths.
+Files must remain immutable. Metadata must contain a JSON object and no embedded
+NUL bytes. Nested names, packages and external tensor attributes are outside this
+contract.
 
 Build against an ORT SDK that exposes `GetExperimentalFunction` (API version 28
 or newer), and use a runtime with the experimental
@@ -61,6 +64,12 @@ initializers is required, including on mobile; minimal ORT builds do not adverti
 the entry. Execution-provider selection is unchanged. GPU providers use ordinary
 initializer upload from CPU-backed mappings, not Windows/D3D12 accelerated file
 loading. Ordinary path-based loading remains unchanged.
+File-source graph buffers are consumed during session creation. The ORT-format
+options `session.use_ort_model_bytes_directly=1` and
+`session.use_ort_model_bytes_for_initializers=1` are rejected in this mode rather
+than retaining pointers into a released mapping. Disabled (`0`) values remain
+supported. File-backed and registered graph overrides both undergo normal
+decoder state-manifest validation.
 Driver initialization must still occur before sandbox lockdown when required.
 
 `FileSourceAssetsTest.*` runs the same native-handle contract tests on desktop
