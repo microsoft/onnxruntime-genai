@@ -518,6 +518,25 @@ TEST_F(FileSourceAssetsTest, FileSourceFailuresDoNotReplaceValidRegistrations) {
   EXPECT_NE(OgaModel::Create(*config), nullptr);
 }
 
+TEST_F(FileSourceAssetsTest, FileSourcesRejectMetadataThatCouldBeInterpretedAsAPath) {
+  ScopedAssetDirectory assets;
+  assets.Write("tokenizer_module.json", "tokenizer.json");
+  const int descriptor =
+      open((assets.path / "tokenizer_module.json").c_str(), O_RDONLY | O_CLOEXEC);
+  ASSERT_GE(descriptor, 0);
+  auto config = CreateConfig();
+  config->SetTokenizerData(tokenizer_config_, tokenizer_json_);
+  const char* name = "tokenizer_module.json";
+  auto* result = OgaConfigSetModelFileDescriptors(config.get(), &name, &descriptor, 1);
+  ASSERT_EQ(close(descriptor), 0);
+  OgaCheckResult(result);
+  ASSERT_TRUE(std::filesystem::remove(assets.path / name));
+  OgaTokenizer* tokenizer = nullptr;
+  ExpectError(OgaCreateTokenizerFromConfig(config.get(), &tokenizer),
+              "must contain a JSON object");
+  EXPECT_EQ(tokenizer, nullptr);
+}
+
 TEST_F(FileSourceAssetsTest, FileSourcesRejectMissingAndTruncatedWeights) {
   auto config = CreateConfig();
   config->AddModelData("past.onnx", graph_.data(), graph_.size());

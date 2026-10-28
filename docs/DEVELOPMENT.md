@@ -53,7 +53,8 @@ Driver initialization must still occur before sandbox lockdown when required.
 
 `FileSourceAssetsTest.*` covers closed/unlinked descriptors, graph and weight
 sources for both encoder/decoder sessions, failed registration, truncation,
-config-independent ownership and pipeline session recreation. It explicitly skips
+config-independent ownership, metadata that could be mistaken for a path, and
+pipeline session recreation. It explicitly skips
 when the selected ORT lacks the API; those skips are not file-source validation.
 
 ## 1. Prerequisites
