@@ -518,6 +518,32 @@ TEST_F(FileSourceAssetsTest, FileSourceFailuresDoNotReplaceValidRegistrations) {
   EXPECT_NE(OgaModel::Create(*config), nullptr);
 }
 
+TEST_F(FileSourceAssetsTest, FileSourcesOwnTokenizerModuleAfterConfigRelease) {
+  constexpr const char* token = "<|module_only_added_token|>";
+  constexpr int32_t token_id = 60000;
+  ScopedAssetDirectory assets;
+  assets.Write("tokenizer_module.json",
+               R"({"added_tokens":[{"id":60000,"content":"<|module_only_added_token|>",)"
+               R"("single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}]})");
+  const int descriptor =
+      open((assets.path / "tokenizer_module.json").c_str(), O_RDONLY | O_CLOEXEC);
+  ASSERT_GE(descriptor, 0);
+  auto config = CreateConfig();
+  config->SetTokenizerData(tokenizer_config_, tokenizer_json_);
+  const char* name = "tokenizer_module.json";
+  auto* result = OgaConfigSetModelFileDescriptors(config.get(), &name, &descriptor, 1);
+  ASSERT_EQ(close(descriptor), 0);
+  OgaCheckResult(result);
+  ASSERT_TRUE(std::filesystem::remove(assets.path / name));
+  auto tokenizer = OgaTokenizer::Create(*config);
+  config.reset();
+  EXPECT_EQ(tokenizer->ToTokenId(token), token_id);
+  auto sequence = OgaSequences::Create();
+  tokenizer->Encode(token, *sequence);
+  ASSERT_EQ(sequence->SequenceCount(0), 1u);
+  EXPECT_EQ(sequence->SequenceData(0)[0], token_id);
+}
+
 TEST_F(FileSourceAssetsTest, FileSourcesRejectMetadataThatCouldBeInterpretedAsAPath) {
   ScopedAssetDirectory assets;
   assets.Write("tokenizer_module.json", "tokenizer.json");
