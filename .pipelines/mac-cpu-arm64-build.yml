@@ -92,9 +92,10 @@ jobs:
 
   - bash: |
       set -e -x
-      dotnet new console
-      dotnet add package $(ORT_PACKAGE_NAME) --version $(ORT_BUILD_VERSION) --source $(ORT_BUILD_SOURCE) --package-directory .
-      dotnet add package $(ORT_PACKAGE_NAME) --version $(ORT_RUNTIME_VERSION) --source $(ORT_RUNTIME_SOURCE) --package-directory .
+      # Keep native downloads on their explicit feeds, outside the managed source mapping.
+      dotnet new console --output "$(Agent.TempDirectory)/ort-native-download" --no-restore
+      dotnet add "$(Agent.TempDirectory)/ort-native-download" package $(ORT_PACKAGE_NAME) --version $(ORT_BUILD_VERSION) --source $(ORT_BUILD_SOURCE) --package-directory "$(Build.SourcesDirectory)"
+      dotnet add "$(Agent.TempDirectory)/ort-native-download" package $(ORT_PACKAGE_NAME) --version $(ORT_RUNTIME_VERSION) --source $(ORT_RUNTIME_SOURCE) --package-directory "$(Build.SourcesDirectory)"
     displayName: 'Download build-time and runtime OnnxRuntime'
     workingDirectory: '$(Build.SourcesDirectory)'
 

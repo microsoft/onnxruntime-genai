@@ -132,9 +132,9 @@ jobs:
   # 'version' stage), so no per-job version computation is needed here.
 
   # --- Feed isolation: NuGet restore → ORT-Nightly --------------------------
-  # Authenticated restores save upstream dependencies in ORT-Nightly so the
-  # GitHub Actions SDK tests can download them without upstream-save permissions.
-  # Those tests use ORT-Nightly and are not authenticated to the Lotus feed.
+  # Packaging uses an authenticated, isolated feed for library dependencies and
+  # mobile workloads. GitHub Actions tests use the root source mapping instead;
+  # this job does not restore the test project or provision its dependencies.
   - task: NuGetAuthenticate@1
     displayName: 'Authenticate NuGet to ORT-Nightly feed'
 
@@ -151,6 +151,12 @@ jobs:
           <clear />
           <add key="ORT-Nightly" value="https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json" />
         </packageSources>
+        <packageSourceMapping>
+          <clear />
+          <packageSource key="ORT-Nightly">
+            <package pattern="*" />
+          </packageSource>
+        </packageSourceMapping>
       </configuration>
       "@ | Set-Content -Path $nugetConfig -Encoding UTF8
     displayName: 'Create ORT-Nightly NuGet config'

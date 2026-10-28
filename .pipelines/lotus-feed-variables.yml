@@ -2,9 +2,10 @@
 # lotus-feed-variables.yml — Single source of truth for the internal Lotus feed.
 #
 # Included at pipeline scope for packages resolved from the aiinfra org-scoped
-# Lotus feed. C# managed restores and mobile workloads use ORT-Nightly to save
-# upstream packages for GitHub Actions SDK tests, which are not authenticated to
-# Lotus. No public feeds (nuget.org / pypi.org / crates.io) are contacted directly.
+# Lotus feed. C# managed restores and mobile workloads use an isolated,
+# authenticated ORT-Nightly configuration instead. Packaging does not restore
+# the C# test project or contact public feeds (nuget.org / pypi.org / crates.io)
+# directly.
 #
 # The Lotus feed is ORG-SCOPED (note: no project segment in the URL) and requires
 # authentication. Auth is provided by the pipeline's own build identity via:

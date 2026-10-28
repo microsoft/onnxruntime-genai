@@ -63,7 +63,7 @@ jobs:
       - name: Download ONNX Runtime and CUDA EP plugin
         shell: pwsh
         run: |
-          nuget install $env:ORT_PACKAGE_NAME -Version $env:ORT_PACKAGE_VERSION -Source $env:ORT_NUGET_SOURCE -ExcludeVersion -NonInteractive
+          nuget install $env:ORT_PACKAGE_NAME -Version $env:ORT_PACKAGE_VERSION -Source $env:ORT_NUGET_SOURCE -ExcludeVersion -NonInteractive -DependencyVersion Ignore
           nuget install $env:ORT_EP_PACKAGE_NAME -Version $env:ORT_EP_NUGET_VERSION -Source $env:ORT_EP_NUGET_SOURCE -ExcludeVersion -NonInteractive -DependencyVersion Ignore
 
       - run: |
@@ -218,7 +218,7 @@ jobs:
         run: |
           $env:PATH = "$env:GITHUB_WORKSPACE\ort\ep;$env:GITHUB_WORKSPACE\ort\lib;${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
           cd test\csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" /p:OrtPackageVersion="$env:ORT_PACKAGE_VERSION" /p:RestoreSources="$env:ORT_NUGET_SOURCE"
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" /p:OrtPackageVersion="$env:ORT_PACKAGE_VERSION"
 
       - name: Build the C# Examples
         run: |
