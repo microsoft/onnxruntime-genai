@@ -132,6 +132,9 @@ jobs:
   # 'version' stage), so no per-job version computation is needed here.
 
   # --- Feed isolation: NuGet restore → ORT-Nightly --------------------------
+  # Authenticated restores save upstream dependencies in ORT-Nightly so the
+  # GitHub Actions SDK tests can download them without upstream-save permissions.
+  # Those tests use ORT-Nightly and are not authenticated to the Lotus feed.
   - task: NuGetAuthenticate@1
     displayName: 'Authenticate NuGet to ORT-Nightly feed'
 
