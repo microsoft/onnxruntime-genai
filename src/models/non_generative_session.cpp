@@ -2186,7 +2186,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
 
 }  // namespace
 
-struct OGA_CPP_ONLY OgaNonGenerativeSession {
+struct OgaNonGenerativeSession {
   using Runtime = std::variant<std::unique_ptr<NativeRankingSession>,
                                std::unique_ptr<NativeDecisionSession>>;
 

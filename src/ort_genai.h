@@ -24,12 +24,6 @@
 
 #include "ort_genai_c.h"
 
-#if defined(__GNUC__) && !defined(_WIN32) && defined(BUILDING_ORT_GENAI_C)
-#define OGA_CPP_ONLY __attribute__((visibility("hidden")))
-#else
-#define OGA_CPP_ONLY
-#endif
-
 // GenAI C++ API
 //
 // This is a zero cost wrapper around the C API, and provides for a set of C++ classes with automatic resource management
@@ -69,7 +63,7 @@ struct OgaAbstract {
 };
 
 // Typed package entry points for ranking and decision inference.
-class OGA_CPP_ONLY NonGenerativeSession {
+class NonGenerativeSession {
  public:
   explicit NonGenerativeSession(const OgaConfig& config);
   ~NonGenerativeSession() { OgaDestroyNonGenerativeSession(handle_); }
