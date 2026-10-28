@@ -103,6 +103,9 @@ std::string Config::ReadFileSource(const std::string& name) const {
   }
   auto mapping = external_file_sources_->Map(name, 16 * 1024 * 1024);
   std::string result(static_cast<const char*>(mapping->data), mapping->size);
+  if (result.find('\0') != std::string::npos) {
+    throw std::runtime_error("Model metadata source must not contain embedded NUL bytes: " + name);
+  }
   const auto first = result.find_first_not_of(" \t\r\n");
   const auto last = result.find_last_not_of(" \t\r\n");
   if (first == std::string::npos || result[first] != '{' || result[last] != '}') {

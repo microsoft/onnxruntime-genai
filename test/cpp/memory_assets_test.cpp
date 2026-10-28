@@ -164,6 +164,18 @@ class FileSourceAssetsTest : public MemoryAssetsTest {
       FAIL() << result->GetError();
     }
   }
+
+  void SetFiles(OgaConfig& config, const ScopedAssetDirectory& assets,
+                const std::array<const char*, 2>& names) const {
+    std::array<std::unique_ptr<ScopedModelFile>, 2> files;
+    std::array<OgaFileHandle, 2> handles;
+    for (size_t i = 0; i < names.size(); ++i) {
+      files[i] = std::make_unique<ScopedModelFile>(assets.path / names[i]);
+      ASSERT_TRUE(files[i]->IsValid());
+      handles[i] = files[i]->Get();
+    }
+    OgaCheckResult(OgaConfigSetModelFileHandles(&config, names.data(), handles.data(), names.size()));
+  }
 };
 
 TEST_F(MemoryAssetsTest, ConfigOwnsParsedValues) {
@@ -631,6 +643,84 @@ TEST_F(FileSourceAssetsTest, FileSourcesRejectOversizedMetadataBeforeMapping) {
   OgaTokenizer* tokenizer = nullptr;
   ExpectError(OgaCreateTokenizerFromConfig(config.get(), &tokenizer), "source length");
   EXPECT_EQ(tokenizer, nullptr);
+}
+
+TEST_F(FileSourceAssetsTest, FileSourcesRejectEmbeddedNulMetadata) {
+  ScopedAssetDirectory assets;
+  constexpr char metadata[] = "{processor.json\0}";
+  assets.Write("tokenizer_module.json", std::string_view{metadata, sizeof(metadata) - 1});
+  ScopedModelFile file(assets.path / "tokenizer_module.json");
+  ASSERT_TRUE(file.IsValid());
+  const auto handle = file.Get();
+  auto config = CreateConfig();
+  config->SetTokenizerData(tokenizer_config_, tokenizer_json_);
+  const char* name = "tokenizer_module.json";
+  OgaCheckResult(OgaConfigSetModelFileHandles(config.get(), &name, &handle, 1));
+  file.Close();
+  OgaTokenizer* tokenizer = nullptr;
+  ExpectError(OgaCreateTokenizerFromConfig(config.get(), &tokenizer), "embedded NUL bytes");
+  EXPECT_EQ(tokenizer, nullptr);
+}
+
+TEST_F(FileSourceAssetsTest, FileSourcesPreserveDecoderStateManifestValidation) {
+  const std::filesystem::path source{MODEL_PATH "engine/dummy-decoder"};
+  const auto json = ReadAsset(source / "genai_config.json");
+  const auto graph = ReadAsset(source / "external-data/decoder.onnx");
+  ScopedAssetDirectory assets;
+  assets.Write("decoder.onnx", graph);
+  assets.Write("weights.data", ReadAsset(source / "external-data/weights.data"));
+  for (bool override_graph : {false, true}) {
+    for (bool missing_binding : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "override=" << override_graph << ", missing=" << missing_binding);
+      auto config = OgaConfig::CreateFromBuffer(json);
+      config->ClearProviders();
+      config->Overlay(R"({"model":{"decoder":{"state_groups":[{"kind":"paged_kv","layer_ids":[0]}]}}})");
+      if (missing_binding) {
+        config->Overlay(R"({"model":{"decoder":{"outputs":{"present_key_names":"missing.%d.key"}}}})");
+      }
+      SetFiles(*config, assets, {"decoder.onnx", "weights.data"});
+      if (override_graph) {
+        config->AddModelData("decoder.onnx", graph.data(), graph.size());
+      }
+      if (missing_binding) {
+        OgaModel* model = nullptr;
+        ExpectError(OgaCreateModelFromConfig(config.get(), &model), "missing.0.key");
+        EXPECT_EQ(model, nullptr);
+      } else {
+        EXPECT_NE(OgaModel::Create(*config), nullptr);
+      }
+    }
+  }
+}
+
+TEST_F(FileSourceAssetsTest, FileSourcesRejectEnabledOrtDirectByteOptions) {
+  ScopedAssetDirectory assets;
+  assets.Write("past.onnx", graph_);
+  assets.Write("weights.data", weights_);
+  for (const char* key : {"session.use_ort_model_bytes_directly",
+                          "session.use_ort_model_bytes_for_initializers"}) {
+    for (bool override_graph : {false, true}) {
+      for (bool enabled : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << key << ", override=" << override_graph << ", enabled=" << enabled);
+        auto config = CreateConfig();
+        const auto overlay =
+            std::string{R"({"model":{"decoder":{"session_options":{")"} +
+            key + R"(":")" + (enabled ? "1" : "0") + R"("}}}})";
+        config->Overlay(overlay.c_str());
+        SetFiles(*config, assets, {"past.onnx", "weights.data"});
+        if (override_graph) {
+          config->AddModelData("past.onnx", graph_.data(), graph_.size());
+        }
+        if (enabled) {
+          OgaModel* model = nullptr;
+          ExpectError(OgaCreateModelFromConfig(config.get(), &model), key);
+          EXPECT_EQ(model, nullptr);
+        } else {
+          EXPECT_NE(OgaModel::Create(*config), nullptr);
+        }
+      }
+    }
+  }
 }
 
 TEST_F(FileSourceAssetsTest, FileSourcesRejectMissingAndTruncatedWeights) {

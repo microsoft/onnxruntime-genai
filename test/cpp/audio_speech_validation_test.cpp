@@ -5,19 +5,43 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <string>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#endif
 
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/token_post_processor.h"
 #include "models/preprocessing/nemotron_streaming_processor.h"
+#include "models/preprocessing/whisper_processor.h"
 #include "models/whisper.h"
 
 namespace {
+struct ScopedProcessorMetadata {
+  ScopedProcessorMetadata()
+      : directory{std::filesystem::temp_directory_path() /
+                  ("ortgenai_processor_metadata_" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))} {
+    if (!std::filesystem::create_directory(directory)) {
+      throw std::runtime_error("Cannot create processor metadata test directory");
+    }
+  }
+  ~ScopedProcessorMetadata() {
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    EXPECT_FALSE(error) << error.message();
+  }
+  const std::filesystem::path directory;
+};
+
 std::string GetExceptionMessage(const std::function<void()>& fn) {
   try {
     fn();
@@ -36,6 +60,61 @@ TEST(AudioSpeechValidationTests, WhisperAudioFeaturesRankValidation) {
     Generators::ValidateWhisperAudioFeaturesShape({1, 3000}, 3000);
   });
   EXPECT_NE(rank_error.find("rank 3"), std::string::npos);
+}
+
+TEST(AudioSpeechValidationTests, FileSourceProcessorRejectsEmbeddedNulBeforeExtensions) {
+  ScopedProcessorMetadata metadata;
+  const auto path = metadata.directory / "processor.json";
+  {
+    constexpr char contents[] = "{processor.json\0}";
+    std::ofstream output(path, std::ios::binary);
+    output.exceptions(std::ios::badbit | std::ios::failbit);
+    output.write(contents, sizeof(contents) - 1);
+  }
+  auto sources = std::make_shared<Generators::ExternalInitializerFileSources>();
+  sources->handles.reserve(1);
+#ifdef _WIN32
+  const auto handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+#else
+  const auto handle = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  ASSERT_GE(handle, 0);
+#endif
+  sources->handles.push_back(handle);
+  sources->names.push_back("processor.json");
+  auto model = Generators::CreateModel(
+      Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto& config = *model->config_;
+  config.external_file_sources_ = sources;
+  config.memory_assets_only_ = true;
+  config.model.speech.config_filename = "processor.json";
+  // Only metadata construction is exercised; reuse an existing float input.
+  const auto inputs = model->session_info_.GetInputNames();
+  const auto feature = std::find_if(inputs.begin(), inputs.end(), [&](const std::string& name) {
+    return model->session_info_.GetInputDataType(name) == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+  });
+  ASSERT_NE(feature, inputs.end());
+  config.model.encoder.inputs.audio_features = *feature;
+  const auto message = GetExceptionMessage([&] {
+    Generators::WhisperProcessor processor(config, model->session_info_);
+  });
+  EXPECT_NE(message.find("must not contain embedded NUL bytes"), std::string::npos) << message;
+}
+
+TEST(AudioSpeechValidationTests, FileSourcePreprocessingRejectsUnsupportedModelTypes) {
+  auto model = Generators::CreateModel(
+      Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto& config = *model->config_;
+  config.external_file_sources_ = std::make_shared<Generators::ExternalInitializerFileSources>();
+  config.memory_assets_only_ = true;
+  for (const char* type : {"phi3v", "gemma3", "lfm2_vl"}) {
+    SCOPED_TRACE(type);
+    config.model.type = type;
+    const auto message = GetExceptionMessage([&] { model->CreateMultiModalProcessor(); });
+    EXPECT_NE(message.find("File-source preprocessing is unsupported"), std::string::npos) << message;
+  }
+  config.model.type = "gpt2";
 }
 
 TEST(AudioSpeechValidationTests, NemotronMelTensorRankValidation) {

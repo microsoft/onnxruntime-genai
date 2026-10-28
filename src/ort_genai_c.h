@@ -376,6 +376,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
  * Registered graph-buffer overrides (e.g. decrypted translation graphs) are copied
  * into model-owned storage during model creation for subsequent session recreation.
  * Requires ORT's experimental file-source API; absence is an explicit error.
+ * ORT-format direct-model-byte options are unsupported in this mode. Metadata
+ * must be a JSON object without embedded NUL bytes.
  * Execution-provider selection is unchanged. Initializers use CPU-backed mappings
  * and ordinary provider upload, not a platform-specific accelerated file loader.
  */
