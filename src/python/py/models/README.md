@@ -13,6 +13,7 @@ This folder contains the model builder for quickly creating optimized and quanti
   - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
   - [Quantized PyTorch Model](#quantized-pytorch-model)
   - [GGUF Model](#gguf-model)
+  - [Qwen3.5-0.8B for MLX](#qwen35-08b-for-mlx)
   - [Extra Options](#extra-options)
     - [Number of Hidden Layers](#number-of-hidden-layers)
     - [Filename](#filename)
@@ -283,6 +284,35 @@ python -m onnxruntime_genai.models.builder -m model_name -i path_to_gguf_file -o
 # From source:
 python builder.py -m model_name -i path_to_gguf_file -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files
 ```
+
+### Qwen3.5-0.8B for MLX
+
+Export a paged Qwen3.5-0.8B decoder for the out-of-tree MLX execution provider:
+
+```bash
+# From source (run in this directory):
+python builder.py -m Qwen/Qwen3.5-0.8B -o qwen3.5-0.8b-int4-paged-mlx -p int4 -e mlx --extra_options use_paged_attention=true num_blocks=128 max_batch_size=1 exclude_mtp=true hf_token=false
+```
+
+`-e mlx` writes `MLXExecutionProvider` into `genai_config.json`. INT4 weights use
+FP16 activations by default; paged MLX exports support FP16 or BF16 I/O, not FP32.
+The graph uses `PagedAttention`, `VarlenCausalConvWithState`, and `GatedDeltaNet`,
+with FP32 V-major recurrent state. Paged exports use GatedDeltaNet regardless of
+`linear_attn_op`. `exclude_mtp=true` omits the checkpoint's optional MTP head for
+ordinary, non-speculative generation.
+
+MLX requires a positive, fixed `num_blocks` cache budget (128 blocks of the default
+256 tokens in this example). Do not combine it with `gpu_utilization_factor`.
+Keep `state_window=0` and `state_update_capacity=0`: MLX does not support compact
+speculative-state capture.
+
+Exporting does not require the MLX EP library. Inference does: register its plugin
+library as `MLXExecutionProvider` before loading the model, using an ABI-compatible
+ONNX Runtime and a source-built GenAI with the Engine API. Use Engine, not the
+classic Generator API, because this graph has packed, variable-length inputs.
+See the MLX EP's `examples/qwen35_paged_generate.py` for provider registration and
+an Engine generation example. Older GenAI tokenizer builds may also require
+`tokenizer_class` to be set to `Qwen2Tokenizer` in `tokenizer_config.json`.
 
 ### Extra Options
 
@@ -733,7 +763,7 @@ python builder.py -m model_name -o path_to_output_folder -p bf16 -e cuda -c cach
 
 #### Select the Qwen3.5/3.8 Recurrent Operator
 
-This scenario is for when you want to choose which contrib operator implements the linear-attention layers of a non-paged Qwen3.5/3.8 export. `linear_attn_op` accepts `linear_attention` (the default), which emits `CausalConvWithState` + `LinearAttention`, or `gated_delta_net`, which emits `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. `gated_delta_net` supports CUDA or WebGPU and requires `state_window=0`; CUDA supports `fp16` or `bf16` model I/O, while WebGPU supports `fp16` or `fp32`. Paged exports (`use_paged_attention=true`) always use GatedDeltaNet and ignore this option. They support CUDA with `fp16` or `bf16`, or WebGPU with `fp16` and a fixed `num_blocks` cache capacity. The default `linear_attention` path requires an ONNX Runtime kernel that implements the selected contrib operator.
+This scenario is for when you want to choose which contrib operator implements the linear-attention layers of a non-paged Qwen3.5/3.8 export. `linear_attn_op` accepts `linear_attention` (the default), which emits `CausalConvWithState` + `LinearAttention`, or `gated_delta_net`, which emits `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. `gated_delta_net` supports CUDA, WebGPU, or MLX and requires `state_window=0`; CUDA supports `fp16` or `bf16` model I/O, while WebGPU supports `fp16` or `fp32`. Paged exports (`use_paged_attention=true`) always use GatedDeltaNet and ignore this option. They support CUDA or MLX with `fp16` or `bf16`, or WebGPU with `fp16`. WebGPU and MLX require a fixed `num_blocks` cache capacity. MLX does not support compact state updates. The default `linear_attention` path requires an ONNX Runtime kernel that implements the selected contrib operator.
 
 ```bash
 # From wheel:
