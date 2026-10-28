@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include "models/io/adapters.h"
 #include "models/io/extra_outputs.h"
 
@@ -23,7 +24,8 @@ class ThreadPool;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
-void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config);
+void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config,
+                         const Config::SessionOptions& provider_session_options);
 
 // True when a session running on `session_device` may be handed a tensor whose memory lives on
 // `buffer_device`. ORT moves tensor data between host memory and the devices the session has an EP
@@ -124,6 +126,7 @@ struct SessionInfo : ModelStateMetadata {
   SessionInfo() = default;
 
   void Add(OrtSession& session);
+  void Add(OrtSession& session, std::string_view reconcile_input_name);
 
   bool HasInput(const std::string& name) const override;
   bool HasOutput(const std::string& name) const override;
@@ -141,6 +144,7 @@ struct SessionInfo : ModelStateMetadata {
 
  private:
   std::unordered_map<std::string, std::unique_ptr<OrtTypeInfo>> inputs_, outputs_;
+  std::unordered_map<std::string, std::vector<int64_t>> reconciled_input_shapes_;
 };
 
 struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {
@@ -192,7 +196,9 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   /// Returns the device a session created from these options will run on, or null when
   /// `append_providers` is false and the providers (and therefore the device) are not yet known.
   /// Do not pass that null to State: there it means "the decoder's device", not "unknown".
-  /// Non-primary options report CPU even when they append a device-backed provider.
+  /// Non-primary options also report their selected device, without setting or
+  /// comparing it with the model's primary device. CPU is returned if no provider
+  /// supplies a device interface.
   DeviceInterface* CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                                   OrtSessionOptions& session_options,
                                                   bool is_primary_session_options,

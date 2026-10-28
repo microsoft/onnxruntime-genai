@@ -3603,6 +3603,14 @@ Config::Config(const fs::path& path, std::string_view json_overlay,
     }
   }
 
+  for (auto& stage : model.vision.pipeline) {
+    if (stage.session_options.has_value()) {
+      for (const auto& provider_option : stage.session_options->provider_options) {
+        stage.session_options->providers.push_back(provider_option.name);
+      }
+    }
+  }
+
   if (model.speech.session_options.has_value()) {
     for (const auto& provider_option : model.speech.session_options->provider_options) {
       model.speech.session_options->providers.push_back(provider_option.name);

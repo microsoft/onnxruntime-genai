@@ -8,6 +8,7 @@
 #include "models/io/qwen_vl_position_inputs.h"
 #include "pixtral_vision_state.h"
 #include "qwen_vl_state.h"
+#include "models/io/vision_stage_io.h"
 #include <algorithm>
 #include <numeric>
 
@@ -48,13 +49,17 @@ int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs,
   return 0;
 }
 
-int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
+int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs,
+                                 const std::string& pixel_values_name, std::string_view model_type) {
   for (const auto& input : extra_inputs) {
-    if (input.name == Config::Defaults::PixelValuesName) {
+    if (input.name == pixel_values_name) {
       assert(input.tensor->ort_tensor_);
       const auto shape = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
       if (shape.size() >= 3) {
         return shape.front();
+      }
+      if (model_type == "gemma4" && shape.size() == 2) {
+        return 1;
       }
       break;
     }
@@ -69,9 +74,36 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
     : Model(std::move(config)) {
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
-    vision_session_options_ = OrtSessionOptions::Create();
-    vision_device_ = CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, /*disable_graph_capture=*/true);
-    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
+    const auto& vision_config = config_->model.vision;
+    if (config_->model.type == "gemma4" && !vision_config.pipeline.empty()) {
+      if (vision_config.pipeline.size() != 2) {
+        throw std::runtime_error("Gemma 4 vision.pipeline must contain exactly two ordered stages: encoder and projector");
+      }
+      const auto create_stage = [&](const Config::Model::Vision::PipelineModel& stage,
+                                    std::unique_ptr<OrtSessionOptions>& options,
+                                    DeviceInterface*& stage_device) {
+        options = OrtSessionOptions::Create();
+        static const Config::SessionOptions kDefaultSessionOptions;
+        auto settings = stage.session_options.value_or(vision_config.session_options.value_or(kDefaultSessionOptions));
+        if (stage.run_on_cpu) {
+          settings.providers.clear();
+          settings.provider_options.clear();
+        }
+        stage_device = CreateSessionOptionsFromConfig(settings, *options, /*is_primary_session_options=*/false,
+                                                      /*disable_graph_capture=*/true);
+        auto session = CreateSession(ort_env, stage.filename, options.get());
+        EnsureDeviceOrtInit(*stage_device, *config_, settings);
+        return session;
+      };
+      vision_session_ = create_stage(vision_config.pipeline[0], vision_session_options_, vision_encoder_device_);
+      vision_projector_session_ = create_stage(vision_config.pipeline[1], vision_projector_session_options_,
+                                               vision_projector_device_);
+      vision_device_ = GetDeviceInterface(DeviceType::CPU);
+    } else {
+      vision_session_options_ = OrtSessionOptions::Create();
+      vision_device_ = CreateSessionOptionsFromConfig(vision_config.session_options.has_value() ? vision_config.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, /*disable_graph_capture=*/true);
+      vision_session_ = CreateSession(ort_env, vision_config.filename, vision_session_options_.get());
+    }
   }
 
   if (speech) {
@@ -115,6 +147,13 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   }
   if (vision) {
     session_info_.Add(*vision_session_);
+    if (vision_projector_session_) {
+      if (config_->model.type == "gemma4") {
+        session_info_.Add(*vision_projector_session_, config_->model.vision.inputs.pixel_position_ids);
+      } else {
+        session_info_.Add(*vision_projector_session_);
+      }
+    }
   }
 }
 
@@ -576,7 +615,8 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
 void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   num_image_tokens_ = GetNumImageTokens(extra_inputs);
   num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
-  num_images_ = GetImageFeatureBatchSize(extra_inputs);
+  num_images_ = GetImageFeatureBatchSize(extra_inputs, model_.config_->model.vision.inputs.pixel_values,
+                                         model_.config_->model.type);
 
   if (model_.vision_session_) {
     vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
