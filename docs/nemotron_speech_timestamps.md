@@ -50,6 +50,7 @@ forwards borrowed token and optional timing views from its public `ProcessNext()
 to a private `ProcessNext(outputs)` overload and directly owns decoding and
 timestamp processing. Ordinary tokenizer decoding is unchanged.
 `timestamp_level` controls timestamp generation:
+
 ```mermaid
 flowchart TB
   audio[Audio chunks] --> processor[StreamingProcessor]
@@ -113,7 +114,9 @@ At setup, the processor constructor calculates `seconds_per_frame` and the
 rounded gap threshold once from the existing model configuration. The internal
 timestamp code receives those derived values, not another copy of sample rate,
 hop length, and subsampling factor. Native token input uses an optional
-`AcousticFrameInterval`; public C output handles and layouts are unchanged.
+`std::pair<int64_t, int64_t>`; timestamp records also contain a
+`std::pair<double, double>` for second bounds. Native interval layouts are not
+exposed by the public C output handles or field accessors.
 
 ## Decoding
 
@@ -127,9 +130,9 @@ Enabled timestamps require present, valid acoustic timing. Intervals are half-op
 `[start, stop)` and may span multiple frames. A processor always uses its
 generator's model and requires `batch_size=1` and `num_beams=1`.
 
-`GetText()` / `get_text()` returns the ordinary incremental decoded fragment for partial
-display. Applications that need only stable output can instead append completed word or segment
-event text as it arrives.
+`GetText()` (C++), `Text` (C#), or `text` (Python) returns the ordinary incremental
+decoded fragment for partial display. Applications that need only stable output can
+instead append completed word or segment event text as it arrives.
 
 Completed words retain their original leading whitespace and attached punctuation. Segment text is
 the exact concatenation of its words; no whitespace is trimmed or synthesized. After finalization,
@@ -137,11 +140,24 @@ concatenating all emitted words or all emitted segments reproduces the decoded t
 In every binding, read and copy needed text and scalar values into the application's
 transcript before the next processor mutation. Result wrappers do not retain old native output.
 
-C/C++ expose opaque result and timestamp-record handles with typed accessors.
-C# and Python expose the same borrowed timestamp output through nullable
-`GetTimestamps()` and `get_timestamps()`. Read records using `GetWords()` / `GetSegments()`
-or `get_words()` / `get_segments()`, then the record's text/frame/time accessors.
-The returned objects are opaque wrappers, not dictionaries or copied metadata objects.
+C exposes opaque result, `OgaASRPostProcessorTimestampResult`, and timestamp-record
+handles with typed accessors. `OgaASRPostProcessorResultGetTimestampResult()`
+returns the container; `OgaASRPostProcessorTimestampResultGetTimestampRecord()`
+selects a word or segment by `OgaTimestampRecordKind` and index. C++ exposes the
+same opaque handles through method-only wrappers. Use `GetText()` and
+`GetTimestampResult()` on a result, `GetWordCount()` / `GetSegmentCount()` and
+`GetTimestampRecord(kind, index)` on its timestamp container, and `GetText()`,
+`GetFrameInterval()`, and `GetTimestampInterval()` on a record. Text and handles remain
+borrowed; interval getters return `std::pair` values without exposing native layouts.
+C# and Python expose borrowed timestamp output through nullable read-only
+`TimestampResult` and `timestamp_result` properties. Read records through `Words` / `Segments`
+or `words` / `segments`, then read `Text`, `FrameInterval`, and `TimeInterval`
+(C#) or `text`, `frame_interval`, and `time_interval` (Python). Interval values
+are `(start, stop)` tuples, with named `Start` / `Stop` elements in C#.
+C# properties delegate to the per-field C accessors through P/Invoke. Python
+properties call the C++ wrapper getters, which use those same C accessors; no
+combined-data function signature must grow when a record gains a new field.
+Managed and Python objects are opaque wrappers, not dictionaries or native payload snapshots.
 They are per-call event lists,
 not cumulative history. Each list is
 empty when that call completes no records, and it may contain multiple records when one decoded

@@ -112,7 +112,7 @@ struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaPostProcessor : Generators::PostProcessor, OgaAbstract {};
 struct OgaASRPostProcessor : Generators::ASRPostProcessor, OgaAbstract {};
 struct OgaASRPostProcessorResult : Generators::ASRPostProcessorResult, OgaAbstract {};
-struct OgaASRPostProcessorTimestamp : Generators::TimestampResult, OgaAbstract {};
+struct OgaASRPostProcessorTimestampResult : Generators::TimestampResult, OgaAbstract {};
 struct OgaASRPostProcessorTimestampRecord : Generators::TimestampRecord, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaEngineCapabilities : Generators::EngineCapabilities, OgaAbstract {};
@@ -367,6 +367,63 @@ OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out
   OGA_TRY
   auto config = Generators::CreateConfig(Generators::GetOrtEnv(), config_path);
   *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateConfigFromBuffer(const char* config_json,
+                                                  size_t config_json_length,
+                                                  OgaConfig** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("Expected config JSON bytes and an output pointer.");
+  }
+  *out = nullptr;
+  if (!config_json || config_json_length == 0) {
+    throw std::invalid_argument("Expected config JSON bytes and an output pointer.");
+  }
+  auto config = std::make_unique<Generators::Config>(
+      fs::path{"."}, std::string_view{},
+      std::string_view{config_json, config_json_length});
+  *out = ReturnUnique<OgaConfig>(std::move(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigAddExternalInitializerData(
+    OgaConfig* config, const char* filename, const void* data, size_t length) {
+  OGA_TRY
+  if (!config || !config->memory_assets_only_ || !filename || !data || length == 0) {
+    throw std::invalid_argument("Expected external initializer bytes and a memory-only config.");
+  }
+  const std::string name{filename};
+  if (name.empty() || name == "." || name == ".." ||
+      name.find_first_of("/\\:") != std::string::npos) {
+    throw std::invalid_argument("External initializer name must be a flat relative asset name.");
+  }
+  if (!config->external_data_spans_
+           .emplace(name, std::span<const std::byte>{
+                              static_cast<const std::byte*>(data), length})
+           .second) {
+    throw std::invalid_argument("Duplicate external initializer asset: " + name);
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetTokenizerData(
+    OgaConfig* config, const char* config_json, size_t config_length,
+    const char* tokenizer_json, size_t tokenizer_length) {
+  OGA_TRY
+  if (!config || !config->memory_assets_only_ || !config_json || !tokenizer_json ||
+      config_length == 0 || tokenizer_length == 0) {
+    throw std::invalid_argument("Expected tokenizer JSON bytes and a memory-only config.");
+  }
+  config->tokenizer_memory_data_ =
+      std::make_shared<const Generators::TokenizerMemoryData>(
+          Generators::TokenizerMemoryData{
+              std::string{config_json, config_length},
+              std::string{tokenizer_json, tokenizer_length}});
   return nullptr;
   OGA_CATCH
 }
@@ -1238,23 +1295,28 @@ const OgaASRPostProcessorResult* OGA_API_CALL OgaASRPostProcessorGetResult(const
 }
 
 const char* OGA_API_CALL OgaASRPostProcessorResultGetText(const OgaASRPostProcessorResult* result) { return result ? result->text.c_str() : nullptr; }
-const OgaASRPostProcessorTimestamp* OGA_API_CALL OgaASRPostProcessorResultGetTimestamps(const OgaASRPostProcessorResult* result) {
+const OgaASRPostProcessorTimestampResult* OGA_API_CALL OgaASRPostProcessorResultGetTimestampResult(const OgaASRPostProcessorResult* result) {
   if (!result || !result->timestamps) return nullptr;
-  return static_cast<const OgaASRPostProcessorTimestamp*>(&*result->timestamps);
+  return static_cast<const OgaASRPostProcessorTimestampResult*>(&*result->timestamps);
 }
-size_t OGA_API_CALL OgaASRPostProcessorTimestampGetWordCount(const OgaASRPostProcessorTimestamp* timestamps) { return timestamps ? timestamps->words.size() : 0; }
-size_t OGA_API_CALL OgaASRPostProcessorTimestampGetSegmentCount(const OgaASRPostProcessorTimestamp* timestamps) { return timestamps ? timestamps->segments.size() : 0; }
-const OgaASRPostProcessorTimestampRecord* OGA_API_CALL OgaASRPostProcessorTimestampGetWord(const OgaASRPostProcessorTimestamp* timestamps, size_t index) {
-  return timestamps && index < timestamps->words.size() ? static_cast<const OgaASRPostProcessorTimestampRecord*>(&timestamps->words[index]) : nullptr;
-}
-const OgaASRPostProcessorTimestampRecord* OGA_API_CALL OgaASRPostProcessorTimestampGetSegment(const OgaASRPostProcessorTimestamp* timestamps, size_t index) {
-  return timestamps && index < timestamps->segments.size() ? static_cast<const OgaASRPostProcessorTimestampRecord*>(&timestamps->segments[index]) : nullptr;
+size_t OGA_API_CALL OgaASRPostProcessorTimestampResultGetWordCount(const OgaASRPostProcessorTimestampResult* timestamps) { return timestamps ? timestamps->words.size() : 0; }
+size_t OGA_API_CALL OgaASRPostProcessorTimestampResultGetSegmentCount(const OgaASRPostProcessorTimestampResult* timestamps) { return timestamps ? timestamps->segments.size() : 0; }
+const OgaASRPostProcessorTimestampRecord* OGA_API_CALL OgaASRPostProcessorTimestampResultGetTimestampRecord(const OgaASRPostProcessorTimestampResult* timestamps, OgaTimestampRecordKind kind, size_t index) {
+  if (!timestamps) return nullptr;
+  switch (kind) {
+    case OgaTimestampRecordKind_Words:
+      return index < timestamps->words.size() ? static_cast<const OgaASRPostProcessorTimestampRecord*>(&timestamps->words[index]) : nullptr;
+    case OgaTimestampRecordKind_Segments:
+      return index < timestamps->segments.size() ? static_cast<const OgaASRPostProcessorTimestampRecord*>(&timestamps->segments[index]) : nullptr;
+    default:
+      return nullptr;
+  }
 }
 const char* OGA_API_CALL OgaASRPostProcessorTimestampRecordGetText(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->text.c_str() : nullptr; }
-int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartFrame(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->start_frame : 0; }
-int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopFrame(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->stop_frame : 0; }
-double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartTime(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->start_time : 0; }
-double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopTime(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->stop_time : 0; }
+int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartFrame(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->frame_interval.first : 0; }
+int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopFrame(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->frame_interval.second : 0; }
+double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartTime(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->time_interval.first : 0; }
+double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopTime(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->time_interval.second : 0; }
 
 OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor* p, OgaTokenizerStream** out) {
   OGA_TRY

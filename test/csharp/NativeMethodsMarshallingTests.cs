@@ -16,12 +16,25 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             var nativeMethods = typeof(ASRPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
             foreach (var name in new[] { "OgaASRPostProcessorAsPostProcessor", "OgaPostProcessorProcessNext",
-                "OgaASRPostProcessorGetResult", "OgaASRPostProcessorResultGetTimestamps",
-                "OgaASRPostProcessorTimestampGetWord", "OgaASRPostProcessorTimestampGetSegment" })
+                "OgaASRPostProcessorGetResult", "OgaASRPostProcessorResultGetTimestampResult",
+                "OgaASRPostProcessorTimestampResultGetTimestampRecord" })
             {
                 var method = nativeMethods.GetMethod(name, BindingFlags.Public | BindingFlags.Static)!;
                 Assert.Equal(typeof(IntPtr), method.ReturnType);
             }
+        }
+
+        [Fact]
+        public void TimestampRecordLookupUsesKindSelector()
+        {
+            var nativeMethods = typeof(ASRPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
+            var method = nativeMethods.GetMethod("OgaASRPostProcessorTimestampResultGetTimestampRecord", BindingFlags.Public | BindingFlags.Static)!;
+            var parameters = method.GetParameters();
+            Assert.Equal(3, parameters.Length);
+            Assert.Equal(typeof(IntPtr), parameters[0].ParameterType);
+            Assert.True(parameters[1].ParameterType.IsEnum);
+            Assert.Equal(typeof(int), Enum.GetUnderlyingType(parameters[1].ParameterType));
+            Assert.Equal(typeof(UIntPtr), parameters[2].ParameterType);
         }
 
         [Fact]

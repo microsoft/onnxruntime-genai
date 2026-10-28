@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <utility>
 
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
@@ -16,6 +17,7 @@
 #include "models/postprocessing/asr_post_processor.h"
 #include "models/preprocessing/nemotron_streaming_processor.h"
 #include "models/whisper.h"
+#include "ort_genai.h"
 
 namespace {
 std::string GetExceptionMessage(const std::function<void()>& fn) {
@@ -227,7 +229,7 @@ TEST(AudioSpeechValidationTests, NemotronProcessorEmitsChunkStartSample) {
   results.insert(results.end(), final_results.begin(), final_results.end());
   for (const auto& result : results) {
     for (const auto& word : result.timestamps->words) {
-      EXPECT_GE(word.start_frame,
+      EXPECT_GE(word.frame_interval.first,
                 2 * static_cast<int64_t>(chunk_samples) /
                     (model->config_->model.hop_length * model->config_->model.subsampling_factor));
     }
@@ -334,14 +336,14 @@ class MetadataCoreStateTests : public testing::Test {
   std::shared_ptr<Generators::GeneratorParams> params;
   std::unique_ptr<Generators::Generator> generator;
   TestTransducerState* source{};
-  const Generators::AcousticFrameInterval interval{4, 5};
+  const std::pair<int64_t, int64_t> interval{4, 5};
 };
 
 TEST_F(MetadataCoreStateTests, BatchMatchesIncrementalProcessing) {
   const std::string text = "Hello world. Next.";
   const auto batch_tokens = tokenizer->Encode(text.c_str());
   ASSERT_GT(batch_tokens.size(), 1U);
-  std::vector<Generators::AcousticFrameInterval> intervals;
+  std::vector<std::pair<int64_t, int64_t>> intervals;
   for (size_t index = 0; index < batch_tokens.size(); ++index)
     intervals.push_back({static_cast<int64_t>(index), static_cast<int64_t>(index + 1)});
 
@@ -381,10 +383,9 @@ TEST_F(MetadataCoreStateTests, BatchMatchesIncrementalProcessing) {
     ASSERT_EQ(actual.size(), expected.size());
     for (size_t index = 0; index < actual.size(); ++index) {
       EXPECT_EQ(actual[index].text, expected[index].text);
-      EXPECT_EQ(actual[index].start_frame, expected[index].start_frame);
-      EXPECT_EQ(actual[index].stop_frame, expected[index].stop_frame);
-      EXPECT_DOUBLE_EQ(actual[index].start_time, expected[index].start_time);
-      EXPECT_DOUBLE_EQ(actual[index].stop_time, expected[index].stop_time);
+      EXPECT_EQ(actual[index].frame_interval, expected[index].frame_interval);
+      EXPECT_DOUBLE_EQ(actual[index].time_interval.first, expected[index].time_interval.first);
+      EXPECT_DOUBLE_EQ(actual[index].time_interval.second, expected[index].time_interval.second);
     }
   };
   expect_records(batch.timestamps->words, incremental.timestamps->words);
@@ -481,8 +482,7 @@ TEST_F(MetadataCoreStateTests, PostProcessorOwnsGroupingAcrossMultipleEmissions)
   for (const auto& result : processor.GetNextResults()) {
     for (const auto& word : result.timestamps->words) {
       words += word.text;
-      EXPECT_EQ(word.start_frame, 4);
-      EXPECT_EQ(word.stop_frame, 5);
+      EXPECT_EQ(word.frame_interval, interval);
     }
   }
   EXPECT_EQ(words, text);
@@ -536,10 +536,10 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
   Generators::ASRPostProcessor processor{*generator};
   const auto repeated = tokenizer->Encode(" Hello");
   source->SetStep(repeated, 2);
-  for (auto& token_interval : source->last_token_intervals_) token_interval.stop = 7;
+  for (auto& token_interval : source->last_token_intervals_) token_interval.second = 7;
   processor.ProcessNext();
   source->SetStep(repeated, 20);
-  for (auto& token_interval : source->last_token_intervals_) token_interval.stop = 23;
+  for (auto& token_interval : source->last_token_intervals_) token_interval.second = 23;
   processor.ProcessNext();
   std::vector<Generators::TimestampRecord> words;
   for (const auto& result : processor.GetNextResults())
@@ -550,12 +550,66 @@ TEST_F(MetadataCoreStateTests, RepeatedVocabularyIdsKeepPositionSpecificInterval
   ASSERT_EQ(words.size(), 2U);
   EXPECT_EQ(words[0].text, " Hello");
   EXPECT_EQ(words[1].text, words[0].text);
-  EXPECT_EQ(words[0].start_frame, 2);
-  EXPECT_EQ(words[0].stop_frame, 7);
-  EXPECT_DOUBLE_EQ(words[0].start_time, 0.2);
-  EXPECT_DOUBLE_EQ(words[0].stop_time, 0.7);
-  EXPECT_EQ(words[1].start_frame, 20);
-  EXPECT_EQ(words[1].stop_frame, 23);
+  EXPECT_EQ(words[0].frame_interval.first, 2);
+  EXPECT_EQ(words[0].frame_interval.second, 7);
+  EXPECT_DOUBLE_EQ(words[0].time_interval.first, 0.2);
+  EXPECT_DOUBLE_EQ(words[0].time_interval.second, 0.7);
+  EXPECT_EQ(words[1].frame_interval.first, 20);
+  EXPECT_EQ(words[1].frame_interval.second, 23);
+}
+
+TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
+  auto processor = OgaASRPostProcessor::Create(*reinterpret_cast<const OgaGenerator*>(generator.get()));
+  size_t record_count = 0;
+  std::string words;
+  std::string segments;
+  const auto check_records = [&] {
+    size_t result_index = 0;
+    for (const auto* result : processor->GetNextResults()) {
+      const auto* native_result = OgaASRPostProcessorGetResult(processor.get(), result_index);
+      ASSERT_NE(result, nullptr);
+      EXPECT_EQ(result, native_result);
+      EXPECT_EQ(result->GetText(), OgaASRPostProcessorResultGetText(native_result));
+      const auto* timestamps = result->GetTimestampResult();
+      ASSERT_NE(timestamps, nullptr);
+      EXPECT_EQ(timestamps, OgaASRPostProcessorResultGetTimestampResult(native_result));
+      ++result_index;
+      EXPECT_EQ(timestamps->GetTimestampRecord(static_cast<OgaTimestampRecordKind>(99), 0), nullptr);
+      for (auto kind : {OgaTimestampRecordKind_Words, OgaTimestampRecordKind_Segments}) {
+        const bool use_segments = kind == OgaTimestampRecordKind_Segments;
+        const auto count = use_segments ? timestamps->GetSegmentCount() : timestamps->GetWordCount();
+        EXPECT_EQ(count, use_segments ? OgaASRPostProcessorTimestampResultGetSegmentCount(timestamps)
+                                      : OgaASRPostProcessorTimestampResultGetWordCount(timestamps));
+        for (size_t index = 0; index < count; ++index) {
+          const auto* record = timestamps->GetTimestampRecord(kind, index);
+          const auto* native_record = OgaASRPostProcessorTimestampResultGetTimestampRecord(timestamps, kind, index);
+          ASSERT_NE(record, nullptr);
+          EXPECT_EQ(record, native_record);
+          ++record_count;
+          const auto frames = record->GetFrameInterval();
+          EXPECT_EQ(frames.first, 4);
+          EXPECT_EQ(frames.second, 5);
+          const auto times = record->GetTimestampInterval();
+          EXPECT_DOUBLE_EQ(times.first, 0.4);
+          EXPECT_DOUBLE_EQ(times.second, 0.5);
+          (use_segments ? segments : words).append(record->GetText());
+          EXPECT_EQ(record->GetText(), OgaASRPostProcessorTimestampRecordGetText(native_record));
+          EXPECT_EQ(frames.first, OgaASRPostProcessorTimestampRecordGetStartFrame(native_record));
+          EXPECT_EQ(frames.second, OgaASRPostProcessorTimestampRecordGetStopFrame(native_record));
+          EXPECT_DOUBLE_EQ(times.first, OgaASRPostProcessorTimestampRecordGetStartTime(native_record));
+          EXPECT_DOUBLE_EQ(times.second, OgaASRPostProcessorTimestampRecordGetStopTime(native_record));
+        }
+        EXPECT_EQ(timestamps->GetTimestampRecord(kind, count), nullptr);
+      }
+    }
+  };
+  processor->ProcessNext();
+  check_records();
+  processor->Finalize();
+  check_records();
+  EXPECT_GT(record_count, 0U);
+  EXPECT_EQ(words, "Hello world.");
+  EXPECT_EQ(segments, words);
 }
 
 TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
@@ -626,7 +680,7 @@ TEST_F(MetadataCoreStateTests, ResetClearsPendingStateAndResultsAreReadOnly) {
   EXPECT_EQ(text, "Hello world.");
   processor.Finalize();
   ASSERT_FALSE(processor.GetNextResults()[0].timestamps->words.empty());
-  EXPECT_EQ(processor.GetNextResults()[0].timestamps->words.back().start_frame, 8);
+  EXPECT_EQ(processor.GetNextResults()[0].timestamps->words.back().frame_interval.first, 8);
   EXPECT_EQ(owned.size(), tokens.size());
 }
 

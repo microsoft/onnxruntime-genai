@@ -330,7 +330,7 @@ struct PyPostProcessorOutput {
 };
 
 using PyASRPostProcessorResult = PyPostProcessorOutput<OgaASRPostProcessorResult>;
-using PyASRPostProcessorTimestamp = PyPostProcessorOutput<OgaASRPostProcessorTimestamp>;
+using PyASRPostProcessorTimestampResult = PyPostProcessorOutput<OgaASRPostProcessorTimestampResult>;
 using PyASRPostProcessorTimestampRecord = PyPostProcessorOutput<OgaASRPostProcessorTimestampRecord>;
 
 struct PyASRPostProcessor {
@@ -354,7 +354,10 @@ struct PyASRPostProcessor {
 
   std::vector<PyASRPostProcessorResult> GetNextResults() const {
     std::vector<PyASRPostProcessorResult> results;
-    for (const auto* result : processor_->GetNextResults()) results.push_back({result, result_lifetime_});
+    const auto native_results = processor_->GetNextResults();
+    results.reserve(native_results.size());
+    for (const auto* result : native_results)
+      results.push_back({result, result_lifetime_});
     return results;
   }
 
@@ -545,34 +548,36 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
   pybind11::class_<PyASRPostProcessorTimestampRecord>(m, "ASRPostProcessorTimestampRecord")
-      .def("get_text", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
-      .def("get_start_frame", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetStartFrame(); })
-      .def("get_stop_frame", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetStopFrame(); })
-      .def("get_start_time", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetStartTime(); })
-      .def("get_stop_time", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetStopTime(); });
+      .def_property_readonly("text", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetText(); })
+      .def_property_readonly("frame_interval", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetFrameInterval(); })
+      .def_property_readonly("time_interval", [](const PyASRPostProcessorTimestampRecord& record) { return record.Get().GetTimestampInterval(); });
 
-  pybind11::class_<PyASRPostProcessorTimestamp>(m, "ASRPostProcessorTimestamp")
-      .def("get_words", [](const PyASRPostProcessorTimestamp& result) {
+  pybind11::class_<PyASRPostProcessorTimestampResult>(m, "ASRPostProcessorTimestampResult")
+      .def_property_readonly("words", [](const PyASRPostProcessorTimestampResult& result) {
         std::vector<PyASRPostProcessorTimestampRecord> records;
         const auto& timestamps = result.Get();
-        for (size_t index = 0; index < timestamps.GetWordCount(); ++index)
-          records.push_back({&timestamps.GetWord(index), result.lifetime});
+        const auto count = timestamps.GetWordCount();
+        records.reserve(count);
+        for (size_t index = 0; index < count; ++index)
+          records.push_back({timestamps.GetTimestampRecord(OgaTimestampRecordKind_Words, index), result.lifetime});
         return records;
       })
-      .def("get_segments", [](const PyASRPostProcessorTimestamp& result) {
+      .def_property_readonly("segments", [](const PyASRPostProcessorTimestampResult& result) {
         std::vector<PyASRPostProcessorTimestampRecord> records;
         const auto& timestamps = result.Get();
-        for (size_t index = 0; index < timestamps.GetSegmentCount(); ++index)
-          records.push_back({&timestamps.GetSegment(index), result.lifetime});
+        const auto count = timestamps.GetSegmentCount();
+        records.reserve(count);
+        for (size_t index = 0; index < count; ++index)
+          records.push_back({timestamps.GetTimestampRecord(OgaTimestampRecordKind_Segments, index), result.lifetime});
         return records;
       });
 
   pybind11::class_<PyASRPostProcessorResult>(m, "ASRPostProcessorResult")
-      .def("get_text", [](const PyASRPostProcessorResult& result) { return result.Get().GetText(); })
-      .def("get_timestamps", [](const PyASRPostProcessorResult& result) -> std::optional<PyASRPostProcessorTimestamp> {
-        const auto* timestamps = result.Get().GetTimestamps();
+      .def_property_readonly("text", [](const PyASRPostProcessorResult& result) { return result.Get().GetText(); })
+      .def_property_readonly("timestamp_result", [](const PyASRPostProcessorResult& result) -> std::optional<PyASRPostProcessorTimestampResult> {
+        const auto* timestamps = result.Get().GetTimestampResult();
         if (!timestamps) return std::nullopt;
-        return PyASRPostProcessorTimestamp{timestamps, result.lifetime};
+        return PyASRPostProcessorTimestampResult{timestamps, result.lifetime};
       });
 
   pybind11::class_<PyASRPostProcessor>(m, "ASRPostProcessor")

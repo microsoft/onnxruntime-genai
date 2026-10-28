@@ -45,16 +45,14 @@ void MetadataCoreState::ValidateInput(const TokenMetadataInput& token) const {
     if (!token.token_acoustic_frame_interval)
       throw std::runtime_error("Enabled timestamps require generation timing metadata");
     const auto& token_acoustic_frame_interval = *token.token_acoustic_frame_interval;
-    if (token_acoustic_frame_interval.start < 0 || token_acoustic_frame_interval.stop <= token_acoustic_frame_interval.start)
+    if (token_acoustic_frame_interval.first < 0 || token_acoustic_frame_interval.second <= token_acoustic_frame_interval.first)
       throw std::runtime_error("Token timestamp interval must satisfy 0 <= start_frame < stop_frame");
   }
 }
 
 void MetadataCoreState::AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
-                                  AcousticFrameInterval interval) {
-  records.push_back({std::string(text), interval.start, interval.stop,
-                     RoundTimestamp(interval.start * seconds_per_frame_),
-                     RoundTimestamp(interval.stop * seconds_per_frame_)});
+                                  std::pair<int64_t, int64_t> interval) {
+  records.push_back({std::string(text), interval, {RoundTimestamp(interval.first * seconds_per_frame_), RoundTimestamp(interval.second * seconds_per_frame_)}});
 }
 
 void MetadataCoreState::CompleteSegment(TimestampResult& result) {
@@ -63,7 +61,7 @@ void MetadataCoreState::CompleteSegment(TimestampResult& result) {
   pending_segment_text_.reset();
 }
 
-void MetadataCoreState::PublishWord(std::string_view text, AcousticFrameInterval interval, TimestampResult& result) {
+void MetadataCoreState::PublishWord(std::string_view text, std::pair<int64_t, int64_t> interval, TimestampResult& result) {
   const auto level = config_.timestamps.level;
   if (level == Config::TimestampLevel::Word || level == Config::TimestampLevel::All) {
     AddRecord(result.words, text, interval);
@@ -72,7 +70,7 @@ void MetadataCoreState::PublishWord(std::string_view text, AcousticFrameInterval
   if (level == Config::TimestampLevel::Segment || level == Config::TimestampLevel::All) {
     if (pending_segment_text_ && segment_gap_threshold_frames_ &&
         (*segment_gap_threshold_frames_ == 0 ||
-         interval.start - pending_segment_interval_.stop >= *segment_gap_threshold_frames_)) {
+         interval.first - pending_segment_interval_.second >= *segment_gap_threshold_frames_)) {
       CompleteSegment(result);
     }
 
@@ -81,7 +79,7 @@ void MetadataCoreState::PublishWord(std::string_view text, AcousticFrameInterval
       pending_segment_interval_ = interval;
     } else {
       pending_segment_text_->append(text);
-      pending_segment_interval_.stop = interval.stop;
+      pending_segment_interval_.second = interval.second;
     }
 
     const bool ends_segment = std::any_of(config_.timestamps.segment_separators.begin(),
@@ -103,7 +101,7 @@ void MetadataCoreState::ProcessCompletedWords(TimestampResult& result) {
     // The first and last contributing tokens supply each word's acoustic bounds.
     const auto& first = pending_token_intervals_[word.start_token_index - first_pending_token_index_];
     const auto& last = pending_token_intervals_[word.stop_token_index - first_pending_token_index_ - 1];
-    PublishWord(word.text, {first.start, last.stop}, result);
+    PublishWord(word.text, {first.first, last.second}, result);
   }
 
   const auto first_pending = word_grouping_.FirstPendingTokenIndex();

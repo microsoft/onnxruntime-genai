@@ -9,6 +9,8 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #if __cplusplus >= 202002L
@@ -209,6 +211,12 @@ struct OgaConfig : OgaAbstract {
     return std::unique_ptr<OgaConfig>(p);
   }
 
+  static std::unique_ptr<OgaConfig> CreateFromBuffer(std::string_view config_json) {
+    OgaConfig* p;
+    OgaCheckResult(OgaCreateConfigFromBuffer(config_json.data(), config_json.size(), &p));
+    return std::unique_ptr<OgaConfig>(p);
+  }
+
   void ClearProviders() {
     OgaCheckResult(OgaConfigClearProviders(this));
   }
@@ -241,6 +249,15 @@ struct OgaConfig : OgaAbstract {
 
   void RemoveModelData(const std::string& model_filename) {
     OgaCheckResult(OgaConfigRemoveModelData(this, model_filename.c_str()));
+  }
+
+  void AddExternalInitializerData(const std::string& filename, const void* data, size_t length) {
+    OgaCheckResult(OgaConfigAddExternalInitializerData(this, filename.c_str(), data, length));
+  }
+
+  void SetTokenizerData(std::string_view config_json, std::string_view tokenizer_json) {
+    OgaCheckResult(OgaConfigSetTokenizerData(this, config_json.data(), config_json.size(),
+                                             tokenizer_json.data(), tokenizer_json.size()));
   }
 
   void SetDecoderProviderOptionsHardwareDeviceType(const char* provider, const char* hardware_device_type) {
@@ -679,30 +696,27 @@ struct OgaGenerator : OgaAbstract {
 
 struct OgaASRPostProcessorTimestampRecord : OgaAbstract {
   const char* GetText() const { return OgaASRPostProcessorTimestampRecordGetText(this); }
-  int64_t GetStartFrame() const { return OgaASRPostProcessorTimestampRecordGetStartFrame(this); }
-  int64_t GetStopFrame() const { return OgaASRPostProcessorTimestampRecordGetStopFrame(this); }
-  double GetStartTime() const { return OgaASRPostProcessorTimestampRecordGetStartTime(this); }
-  double GetStopTime() const { return OgaASRPostProcessorTimestampRecordGetStopTime(this); }
+  std::pair<int64_t, int64_t> GetFrameInterval() const {
+    return {OgaASRPostProcessorTimestampRecordGetStartFrame(this), OgaASRPostProcessorTimestampRecordGetStopFrame(this)};
+  }
+  std::pair<double, double> GetTimestampInterval() const {
+    return {OgaASRPostProcessorTimestampRecordGetStartTime(this), OgaASRPostProcessorTimestampRecordGetStopTime(this)};
+  }
 };
 
-struct OgaASRPostProcessorTimestamp : OgaAbstract {
-  size_t GetWordCount() const { return OgaASRPostProcessorTimestampGetWordCount(this); }
-  size_t GetSegmentCount() const { return OgaASRPostProcessorTimestampGetSegmentCount(this); }
-  const OgaASRPostProcessorTimestampRecord& GetWord(size_t index) const {
-    const auto* record = OgaASRPostProcessorTimestampGetWord(this, index);
-    if (!record) throw std::out_of_range("Word index out of range");
-    return *record;
-  }
-  const OgaASRPostProcessorTimestampRecord& GetSegment(size_t index) const {
-    const auto* record = OgaASRPostProcessorTimestampGetSegment(this, index);
-    if (!record) throw std::out_of_range("Segment index out of range");
-    return *record;
+struct OgaASRPostProcessorTimestampResult : OgaAbstract {
+  size_t GetWordCount() const { return OgaASRPostProcessorTimestampResultGetWordCount(this); }
+  size_t GetSegmentCount() const { return OgaASRPostProcessorTimestampResultGetSegmentCount(this); }
+  const OgaASRPostProcessorTimestampRecord* GetTimestampRecord(OgaTimestampRecordKind kind, size_t index) const {
+    return OgaASRPostProcessorTimestampResultGetTimestampRecord(this, kind, index);
   }
 };
 
 struct OgaASRPostProcessorResult : OgaAbstract {
   const char* GetText() const { return OgaASRPostProcessorResultGetText(this); }
-  const OgaASRPostProcessorTimestamp* GetTimestamps() const { return OgaASRPostProcessorResultGetTimestamps(this); }
+  const OgaASRPostProcessorTimestampResult* GetTimestampResult() const {
+    return OgaASRPostProcessorResultGetTimestampResult(this);
+  }
 };
 
 struct OgaPostProcessor : OgaAbstract {
@@ -722,7 +736,9 @@ struct OgaASRPostProcessor : OgaAbstract {
     std::vector<const OgaASRPostProcessorResult*> results;
     const size_t count = OgaASRPostProcessorGetResultCount(this);
     results.reserve(count);
-    for (size_t index = 0; index < count; ++index) results.push_back(OgaASRPostProcessorGetResult(this, index));
+    for (size_t index = 0; index < count; ++index) {
+      results.push_back(OgaASRPostProcessorGetResult(this, index));
+    }
     return results;
   }
   static void operator delete(void* processor) { OgaDestroyASRPostProcessor(reinterpret_cast<OgaASRPostProcessor*>(processor)); }

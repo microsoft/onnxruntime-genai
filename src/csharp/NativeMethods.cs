@@ -8,6 +8,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     internal static class NativeMethods
     {
+        internal enum TimestampRecordKind
+        {
+            Words = 0,
+            Segments = 1
+        }
+
         internal class NativeLib
         {
 #if __ANDROID__
@@ -396,15 +402,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaASRPostProcessorResultGetText(IntPtr result);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaASRPostProcessorResultGetTimestamps(IntPtr result);
+        public static extern IntPtr OgaASRPostProcessorResultGetTimestampResult(IntPtr result);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaASRPostProcessorTimestampGetWordCount(IntPtr timestamps);
+        public static extern UIntPtr OgaASRPostProcessorTimestampResultGetWordCount(IntPtr timestamps);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaASRPostProcessorTimestampGetSegmentCount(IntPtr timestamps);
+        public static extern UIntPtr OgaASRPostProcessorTimestampResultGetSegmentCount(IntPtr timestamps);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaASRPostProcessorTimestampGetWord(IntPtr timestamps, UIntPtr index);
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaASRPostProcessorTimestampGetSegment(IntPtr timestamps, UIntPtr index);
+        public static extern IntPtr OgaASRPostProcessorTimestampResultGetTimestampRecord(IntPtr timestamps, TimestampRecordKind kind, UIntPtr index);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaASRPostProcessorTimestampRecordGetText(IntPtr record);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

@@ -79,6 +79,8 @@ def test_requested_timestamps_reject_invalid_model_config(test_data_path, model_
 
 
 def test_asr_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
+    assert hasattr(og, "ASRPostProcessorTimestampResult")
+    assert not hasattr(og, "ASRPostProcessorTimestamp")
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
@@ -90,50 +92,52 @@ def test_asr_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_da
     assert processor.get_next_results() == []
     processor.finalize()
     initial = processor.get_next_results()[0]
-    assert initial.get_text() == ""
-    assert initial.get_timestamps() is None
+    assert initial.text == ""
+    assert initial.timestamp_result is None
     processor.reset()
     with pytest.raises(RuntimeError, match="expired"):
-        initial.get_text()
+        initial.text
     generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
     retained = []
     for _ in range(2):
         generator.generate_next_token()
         for previous, expected_text in retained:
-            assert previous.get_text() == expected_text
+            assert previous.text == expected_text
         expected = plain.decode(int(generator.get_next_tokens()[0]))
         processor.process_next()
         for previous, _ in retained:
             with pytest.raises(RuntimeError, match="expired"):
-                previous.get_text()
+                previous.text
             with pytest.raises(RuntimeError, match="expired"):
-                previous.get_timestamps()
+                previous.timestamp_result
         retained.clear()
         results = processor.get_next_results()
         assert len(results) == 1
         result = results[0]
         assert isinstance(result, og.ASRPostProcessorResult)
-        assert result.get_text() == expected
-        assert result.get_timestamps() is None
-        assert processor.get_next_results()[0].get_text() == expected
+        assert result.text == expected
+        assert result.timestamp_result is None
+        assert processor.get_next_results()[0].text == expected
+        with pytest.raises(AttributeError):
+            result.text = "cannot overwrite native text"
         retained.append((result, expected))
     del generator
     processor.finalize()
     with pytest.raises(RuntimeError, match="expired"):
-        result.get_text()
+        result.text
     processor.finalize()
     final_result = processor.get_next_results()[0]
-    assert final_result.get_text() == ""
+    assert final_result.text == ""
     processor.reset()
     assert processor.get_next_results() == []
     with pytest.raises(RuntimeError, match="expired"):
-        final_result.get_text()
+        final_result.text
     processor.finalize()
     before_destruction = processor.get_next_results()[0]
-    copied_text = before_destruction.get_text()
+    copied_text = before_destruction.text
     del processor
     with pytest.raises(RuntimeError, match="expired"):
-        before_destruction.get_text()
+        before_destruction.text
     assert copied_text == ""
 
 
@@ -161,7 +165,7 @@ def test_asr_postprocessor_uses_generators_model(test_data_path):
     generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
     generator.generate_next_token()
     processor.process_next()
-    assert processor.get_next_results()[0].get_text() == plain.decode(int(generator.get_next_tokens()[0]))
+    assert processor.get_next_results()[0].text == plain.decode(int(generator.get_next_tokens()[0]))
 
 
 def test_asr_postprocessor_rejects_null_generator():
