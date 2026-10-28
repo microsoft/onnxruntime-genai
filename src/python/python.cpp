@@ -15,24 +15,6 @@
 
 using namespace pybind11::literals;
 
-ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type);
-int ToNumpyType(ONNXTensorElementDataType type);
-pybind11::dtype ToNumpyDtype(ONNXTensorElementDataType type);
-
-struct PyNonGenerativeSession {
-  explicit PyNonGenerativeSession(const OgaConfig& config)
-      : session(config) {}
-  std::string Run(const std::string& request) {
-    std::string result;
-    {
-      pybind11::gil_scoped_release release;
-      result = session.Run(request);
-    }
-    return result;
-  }
-  NonGenerativeSession session;
-};
-
 template <typename T>
 using ContiguousArray = pybind11::array_t<
     T, pybind11::array::c_style | pybind11::array::forcecast>;
@@ -162,39 +144,6 @@ int ToNumpyType(ONNXTensorElementDataType type) {
       return pybind11::detail::npy_api::NPY_FLOAT_;
     case Ort::TypeToTensorType<double>:
       return pybind11::detail::npy_api::NPY_DOUBLE_;
-    default:
-      throw std::runtime_error("Unsupported onnx type");
-  }
-}
-
-pybind11::dtype ToNumpyDtype(ONNXTensorElementDataType type) {
-  switch (type) {
-    case Ort::TypeToTensorType<bool>:
-      return pybind11::dtype::of<bool>();
-    case Ort::TypeToTensorType<uint8_t>:
-      return pybind11::dtype::of<uint8_t>();
-    case Ort::TypeToTensorType<int8_t>:
-      return pybind11::dtype::of<int8_t>();
-    case Ort::TypeToTensorType<uint16_t>:
-      return pybind11::dtype::of<uint16_t>();
-    case Ort::TypeToTensorType<int16_t>:
-      return pybind11::dtype::of<int16_t>();
-    case Ort::TypeToTensorType<uint32_t>:
-      return pybind11::dtype::of<uint32_t>();
-    case Ort::TypeToTensorType<int32_t>:
-      return pybind11::dtype::of<int32_t>();
-    case Ort::TypeToTensorType<uint64_t>:
-      return pybind11::dtype::of<uint64_t>();
-    case Ort::TypeToTensorType<int64_t>:
-      return pybind11::dtype::of<int64_t>();
-    case Ort::TypeToTensorType<Ort::Float16_t>:
-      return pybind11::dtype("float16");
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
-      return pybind11::dtype::of<uint16_t>();
-    case Ort::TypeToTensorType<float>:
-      return pybind11::dtype::of<float>();
-    case Ort::TypeToTensorType<double>:
-      return pybind11::dtype::of<double>();
     default:
       throw std::runtime_error("Unsupported onnx type");
   }
@@ -778,9 +727,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("clear_decoder_provider_options_hardware_device_id", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceId)
       .def("clear_decoder_provider_options_hardware_vendor_id", &OgaConfig::ClearDecoderProviderOptionsHardwareVendorId);
 
-  pybind11::class_<PyNonGenerativeSession>(m, "_NonGenerativeSession")
+  pybind11::class_<NonGenerativeSession>(m, "_NonGenerativeSession")
       .def(pybind11::init<const OgaConfig&>(), pybind11::arg("config"))
-      .def("run", &PyNonGenerativeSession::Run);
+      .def("run", [](NonGenerativeSession& session,
+                     const std::string& request) {
+        pybind11::gil_scoped_release release;
+        return session.Run(request);
+      });
 
   pybind11::class_<OgaModel>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))
