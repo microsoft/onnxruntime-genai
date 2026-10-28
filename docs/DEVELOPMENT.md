@@ -23,6 +23,9 @@ This initial contract requires external initializer data and covers main-graph i
 Encoder–decoder coverage uses the existing synthetic Marian cache model with separate external-data buffers for both graphs. It checks path/memory generation parity after removing the staged files before memory-backed model creation, repeated generation after releasing the config, and rejection when either session's weight buffer is missing.
 
 Regenerate the tiny GPT-2 variant with `python test/models/hf-internal-testing/tiny-random-gpt2-fp32/export_external_data.py` in an environment containing `onnx`. Generate the pipeline fixture from the existing dummy decoder with the same script plus `--model-dir test/models/engine/dummy-decoder --filename decoder.onnx`.
+Generate its file-source adapter fixture with the same script plus
+`--model-dir test/models/engine/dummy-decoder --filename decoder.onnx --weights-filename adapter-weights.data --with-adapter`
+in an environment containing `onnx`, `numpy`, and `onnxruntime`.
 
 For the Marian variant, run the same script twice with `--model-dir test/models/marian-cache/dynamic --float-initializers-only`: once with `--filename encoder.onnx --weights-filename encoder-weights.data`, then with `--filename decoder.onnx --weights-filename decoder-weights.data`. Integer shape/axis constants remain inline for ORT shape inference.
 
