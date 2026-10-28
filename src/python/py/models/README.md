@@ -98,6 +98,16 @@ python -m onnxruntime_genai.models.builder --help
 python builder.py --help
 ```
 
+### Qwen 3.8 Flash from raw checkpoints
+
+For the specialized `qwen38_flash_graph` package, use the
+[raw-checkpoint builder](./builders/qwen3_8_flash/README.md). Invoke it through
+the same `builder.py` entry point with `--qwen38_flash_graph`. It combines
+procedural target graph construction, checkpoint-specific NVFP4 to
+INT2 conversion, fresh CUDA calibration, and the existing GenAI DFlash2 builder
+in one command. This is separate from the generic `builder.py` export path,
+which emits the standard Qwen4-Exp component graphs.
+
 ### Structured Builder Configuration
 
 Schema version 2 is an **experimental implementation** of the [shared configuration design](../../../../docs/ModelBuilderConfiguration.md). It normalizes legacy quantization syntax before applying structured overrides, rejects unsupported or conflicting drafter policies, validates runtime overlays against exported capabilities, and checks borrowed quantized-head layouts before adoption. Olive integration, target checkpoint conversion policy, and INT8 embedding export remain pending.

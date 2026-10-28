@@ -9,7 +9,7 @@
 from .base import Model
 from .chatglm import ChatGLMModel
 from .ernie import ErnieModel
-from .gemma import Gemma2Model, Gemma3Model, Gemma4MoEModel, Gemma4Model, GemmaModel
+from .gemma import Gemma2Model, Gemma3Model, Gemma4Model, Gemma4MoEModel, GemmaModel
 from .gptoss import GPTOSSModel
 from .granite import GraniteModel, GraniteMoEHybridModel
 from .hunyuan import HunyuanDenseV1Model
@@ -51,6 +51,7 @@ from .qwen3_8 import (
     Qwen4ExpTextModel,
     Qwen4ExpVisionModel,
 )
+from .qwen3_8_flash import Qwen38FlashBuilder
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
 
@@ -91,6 +92,7 @@ __all__ = [
     "Qwen4ExpModel",
     "Qwen4ExpTextModel",
     "Qwen4ExpVisionModel",
+    "Qwen38FlashBuilder",
     "Qwen25VLTextModel",
     "Qwen35DenseMTPModel",
     "Qwen35MTPModel",
