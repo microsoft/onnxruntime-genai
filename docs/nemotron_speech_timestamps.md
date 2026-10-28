@@ -46,8 +46,9 @@ thresholds are rejected while loading the configuration.
 
 Both paths start with audio processed into features, followed by generated token IDs. Model
 configuration determines whether acoustic timing is produced. `ASRPostProcessor`
-forwards borrowed token and optional timing views to its internal `ASRPostProcessorInternal`, which
-owns decoding and timestamp processing. Ordinary tokenizer decoding is unchanged.
+forwards borrowed token and optional timing views from its public `ProcessNext()`
+to a private `ProcessNext(outputs)` overload and directly owns decoding and
+timestamp processing. Ordinary tokenizer decoding is unchanged.
 `timestamp_level` controls timestamp generation:
 ```mermaid
 flowchart TB
@@ -63,7 +64,7 @@ flowchart TB
   subgraph timed[With timestamps: word, segment, or all]
     setup[Processor copies model configuration] --> stream
     timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[ASRPostProcessor.ProcessNext]
-    stream --> internal[Internal ASRPostProcessorInternal.Process]
+    stream --> internal[Private ASRPostProcessor.ProcessNext with outputs]
     internal --> ortx[Extensions: vocabulary facts + ordinary cached decode]
     ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
     align --> events[Per-call word / segment events with frame and second bounds]
@@ -104,11 +105,11 @@ completed event text for the lifetime of the returned per-call result. The gener
 pairs tokens and intervals by emission position, not by token ID.
 
 The private generator getter borrows the existing per-step transducer output;
-Nemotron continues to supply zero or one token per step. The internal stream accepts
+Nemotron continues to supply zero or one token per step. The private overload accepts
 ordered token/timing values and can process a whole offline batch or incremental
 batches with the same finalization rules. This does not add a public offline producer API.
 
-At setup, the generator-facing adapter calculates `seconds_per_frame` and the
+At setup, the processor constructor calculates `seconds_per_frame` and the
 rounded gap threshold once from the existing model configuration. The internal
 timestamp code receives those derived values, not another copy of sample rate,
 hop length, and subsampling factor. Native token input uses an optional

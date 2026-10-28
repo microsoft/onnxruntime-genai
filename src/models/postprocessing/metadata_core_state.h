@@ -51,7 +51,7 @@ struct MetadataCoreConfig {
 };
 
 class MetadataCoreState {
-  friend class ASRPostProcessorInternal;
+  friend class ASRPostProcessor;
 
  private:
   explicit MetadataCoreState(const MetadataCoreConfig& config);

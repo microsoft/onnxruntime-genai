@@ -25,27 +25,16 @@ MetadataCoreConfig GetPostProcessorConfig(const Generator& generator) {
 }  // namespace
 
 ASRPostProcessor::ASRPostProcessor(const Generator& generator)
-    : PostProcessor{generator}, internal_{generator_.model_->CreateTokenizer(), GetPostProcessorConfig(generator_)} {}
-
-void ASRPostProcessor::ProcessNext() {
-  internal_.Process(generator_.GetTokenOutputs());
-}
-
-void ASRPostProcessor::Finalize() {
-  internal_.Finalize();
-}
-
-void ASRPostProcessor::Reset() {
-  internal_.Reset();
-}
-
-ASRPostProcessorInternal::ASRPostProcessorInternal(std::shared_ptr<Tokenizer> tokenizer, MetadataCoreConfig config)
-    : tokenizer_{std::move(tokenizer)}, config_{std::move(config)} {
+    : PostProcessor{generator}, tokenizer_{generator_.model_->CreateTokenizer()}, config_{GetPostProcessorConfig(generator_)} {
   stream_ = tokenizer_->CreateStream();
   metadata_state_ = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(config_));
 }
 
-void ASRPostProcessorInternal::Process(const TokenOutputs& outputs) {
+void ASRPostProcessor::ProcessNext() {
+  ProcessNext(generator_.GetTokenOutputs());
+}
+
+void ASRPostProcessor::ProcessNext(const TokenOutputs& outputs) {
   results_.clear();
   const auto tokens = outputs.GetTokens();
   const auto* timestamps = outputs.GetAcousticFrameIntervals();
@@ -66,12 +55,12 @@ void ASRPostProcessorInternal::Process(const TokenOutputs& outputs) {
   }
 }
 
-void ASRPostProcessorInternal::Finalize() {
+void ASRPostProcessor::Finalize() {
   results_.clear();
   metadata_state_->ProcessFinalized(results_.emplace_back());
 }
 
-void ASRPostProcessorInternal::Reset() {
+void ASRPostProcessor::Reset() {
   results_.clear();
   stream_->Reset();
   metadata_state_ = std::unique_ptr<MetadataCoreState>(new MetadataCoreState(config_));

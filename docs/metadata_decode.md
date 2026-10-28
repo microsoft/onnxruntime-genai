@@ -14,8 +14,9 @@ result contract.
 
 `ASRPostProcessor(generator)` derives from that base. It retrieves token and
 optional timing views from the generator and delegates to its private
-`ASRPostProcessorInternal` member. The internal processor accepts token/timing
-values rather than a generator and owns a tokenizer, an ordinary tokenizer stream,
+`ProcessNext(const TokenOutputs& outputs)` overload. That overload processes
+the supplied views without reading the generator. The processor directly owns
+a tokenizer, an ordinary tokenizer stream,
 `MetadataCoreState`, grouping/timing state, and the current results. Configuration
 comes from the generator's model and its `genai_config.json`. Callers do not pass a
 model or create token metadata records.
@@ -80,7 +81,7 @@ configuration for a fresh sequence. It does not reset the generator.
 ## Internal Flow
 
 The following native method flow starts after generation. It shows timestamps
-enabled; the internal stream handles the supplied tokens in order, including empty
+enabled; the private overload handles the supplied tokens in order, including empty
 decoded fragments. The language bindings forward processing to this same native path.
 
 ```text
@@ -89,7 +90,7 @@ ASRPostProcessor.ProcessNext()
       -> transducer: GetStepTokens() and optional GetStepTokenIntervals()
           -> validate token/interval counts
       -> search: GetNextTokens().CopyDeviceToCpu()
-  -> ASRPostProcessorInternal.Process(outputs)
+  -> ASRPostProcessor.ProcessNext(outputs): private overload
       -> clear previous processing results
       -> TokenOutputs.GetTokens() / GetAcousticFrameIntervals()
       -> validate token/interval counts
@@ -104,7 +105,7 @@ ASRPostProcessor.ProcessNext()
   -> return to application
 
 ASRPostProcessor.GetNextResults()
-  -> ASRPostProcessorInternal.GetNextResults(): read only
+  -> read the processor's current results without mutation
   -> GetText() / nullable GetTimestamps()
 ```
 
@@ -118,16 +119,16 @@ unchanged.
 The private getter returns an internal `TokenOutputs` with inline private spans,
 not a heap-allocated PImpl. Token IDs and optional timing are separate collections;
 `GetAcousticFrameIntervals()` returns null when timing is absent. The spans borrow their
-producer's storage and must remain valid for `Process()`. Native timing uses
+producer's storage and must remain valid for `ProcessNext(outputs)`. Native timing uses
 `AcousticFrameInterval` and `std::optional`, not the public C interval layout or an
 integer presence flag. Public result handles remain opaque.
 
 ### Batch and Offline Input
 
-The internal stream accepts only token/timing values, a tokenizer, and processing
-configuration. It has no Generator, model-State, audio-chunk, or arrival-time
-dependency. It can process one token, a batch, or all tokens from an offline
-producer, followed by `Finalize()` to flush trailing records. Batch and incremental
+The private `ProcessNext(outputs)` overload consumes only the supplied token/timing
+views and the processor's tokenizer and copied configuration; it does not query
+the generator or model state. It can process one token, a batch, or all supplied
+tokens, followed by `Finalize()` to flush trailing records. Batch and incremental
 processing preserve the same text and timestamps for identical ordered inputs.
 
 This does not add a public offline factory or another producer API. The public
@@ -173,7 +174,7 @@ flowchart TD
   pending --> separator["EndsWithSeparator() for configured suffixes"]
   separator -->|Suffix completes segment| finish["CompleteSegment()<br/>AddRecord(timestamps.segments)<br/>RoundTimestamp()"]
   completed --> release["After all completed words:<br/>TokenWordGroupingState::FirstPendingTokenIndex()<br/>Release intervals before that watermark"]
-  release --> returned["Return to ASRPostProcessorInternal with result populated"]
+  release --> returned["Return to ASRPostProcessor::ProcessNext(outputs) with result populated"]
 ```
 
 The grouper buffers incomplete words, whitespace, and UTF-8 output. It may
@@ -187,8 +188,7 @@ After the last generation step, flush pending work without decoding a token:
 
 ```mermaid
 flowchart TD
-  finalize["ASRPostProcessor::Finalize()"] --> stream["ASRPostProcessorInternal::Finalize()<br/>Clear previous results; create final result"]
-  stream --> state["MetadataCoreState::ProcessFinalized()"]
+  finalize["ASRPostProcessor::Finalize()<br/>Clear previous results; create final result"] --> state["MetadataCoreState::ProcessFinalized()"]
   state --> enabled["TimestampsEnabled()"]
   enabled --> group["TokenWordGroupingState::Finalize()<br/>Append() pending delimiter; CompleteWord()"]
   group --> words["MetadataCoreState::ProcessCompletedWords()<br/>Same alignment/publication path as above"]
@@ -204,10 +204,10 @@ timestamps require a model that produces acoustic intervals, currently
 `subsampling_factor`. Being an ASR model alone is not sufficient. Missing or
 invalid intervals fail before decoding the affected token.
 
-The generator-facing setup reads these existing model fields once and derives
-`seconds_per_frame` and the rounded segment-gap frame threshold. The internal
-stream receives that optional timebase separately from word/segment output
-settings. Neither it nor `MetadataCoreState` stores another set of sample rate,
+The processor constructor reads these existing model fields once and derives
+`seconds_per_frame` and the rounded segment-gap frame threshold. Its copied
+configuration stores that optional timebase separately from word/segment output
+settings. Neither the processor nor `MetadataCoreState` stores another set of sample rate,
 hop length, and subsampling factor values. Missing or non-positive/non-finite
 timebases are rejected when timestamps are enabled.
 
@@ -244,7 +244,7 @@ must be externally serialized. Independent processors have independent state.
 
 `MetadataCoreState` populates the processor's canonical results directly. There
 is no intermediate metadata output or conversion to a second result model. The
-internal stream owns one immutable configuration; metadata state reads that same object.
+processor owns one immutable configuration; metadata state reads that same object.
 
 Python uses `ASRPostProcessor(generator)`, `process_next()`,
 `get_next_results()`, `finalize()`, and `reset()`. Borrowed
