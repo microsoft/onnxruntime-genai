@@ -1,6 +1,7 @@
 # Non-generative component runtime
 
-`RankingSession` (CLM) and `DecisionSession` (KEV) execute exported directory
+`RankingSession` (CLM) and `DecisionSession` (KEV) are semantic Python facades
+over one native non-generative session. They execute exported directory
 packages without constructing a `Generator`. Each runtime object owns an ORT
 session for each named component and bounded, session-local non-generative
 caches.
@@ -16,17 +17,16 @@ decision = og.DecisionSession("/models/kev-4b-fp32")
 answers = decision.decide(json.load(open("request.json")))
 ```
 
-`RankingSession` and `DecisionSession` are public C++ package entry points.
-They accept and return UTF-8 JSON while owning the tokenizer and component
-sessions:
+`NonGenerativeSession` is the single public C++ package entry point. It
+discovers the workflow from the package and accepts/returns UTF-8 JSON:
 
 ```cpp
-RankingSession ranking{"/models/clm-v0.1-8b-fp32", {"cuda"}};
-auto ranked = ranking.Rank(
+NonGenerativeSession ranking{"/models/clm-v0.1-8b-fp32", {"cuda"}};
+auto ranked = ranking.Run(
     R"({"state":{"weather":"rain"},"instructions":"Choose","candidates":{"picnic":"Outside","museum":"Inside"}})");
 
-DecisionSession decision{"/models/kev-4b-fp32"};
-auto decisions = decision.Decide(
+NonGenerativeSession decision{"/models/kev-4b-fp32"};
+auto decisions = decision.Run(
     R"({"state":{"weather":"rain"},"questions":{"umbrella":{"type":"noul","instructions":"Take an umbrella?"}}})");
 ```
 
@@ -35,8 +35,8 @@ and `NamedTensors` infrastructure. Named component execution and package pad
 token resolution are private implementation details rather than additional
 public handle families.
 
-The C ABI exposes only opaque ranking/decision session handles plus
-`RankJson` and `DecideJson`. Returned JSON strings use the existing
+The C ABI exposes one opaque session plus create, destroy, and `RunJson`.
+Returned JSON strings use the existing
 `OgaDestroyString` ownership convention.
 
 ## Managed bindings

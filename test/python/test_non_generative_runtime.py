@@ -37,8 +37,7 @@ def runtime():
     previous_package = sys.modules.get("onnxruntime_genai")
     previous_native = sys.modules.get("onnxruntime_genai.onnxruntime_genai")
     native = types.ModuleType("onnxruntime_genai.onnxruntime_genai")
-    native._RankingSession = _NativeSession
-    native._DecisionSession = _NativeSession
+    native._NonGenerativeSession = _NativeSession
     package = types.ModuleType("onnxruntime_genai")
     package.__path__ = []
     sys.modules["onnxruntime_genai"] = package

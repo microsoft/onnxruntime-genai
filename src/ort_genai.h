@@ -69,46 +69,25 @@ struct OgaAbstract {
 };
 
 // Typed package entry points for ranking and decision inference.
-class OGA_CPP_ONLY RankingSession {
+class OGA_CPP_ONLY NonGenerativeSession {
  public:
-  RankingSession(std::string package_path, std::vector<std::string> providers = {});
-  ~RankingSession() { OgaDestroyRankingSession(handle_); }
-  RankingSession(RankingSession&& other) noexcept
+  NonGenerativeSession(std::string package_path, std::vector<std::string> providers = {});
+  ~NonGenerativeSession() { OgaDestroyNonGenerativeSession(handle_); }
+  NonGenerativeSession(NonGenerativeSession&& other) noexcept
       : handle_(std::exchange(other.handle_, nullptr)) {}
-  RankingSession& operator=(RankingSession&& other) noexcept {
+  NonGenerativeSession& operator=(NonGenerativeSession&& other) noexcept {
     if (this != &other) {
-      OgaDestroyRankingSession(handle_);
+      OgaDestroyNonGenerativeSession(handle_);
       handle_ = std::exchange(other.handle_, nullptr);
     }
     return *this;
   }
-  RankingSession(const RankingSession&) = delete;
-  RankingSession& operator=(const RankingSession&) = delete;
-  std::string Rank(std::string_view request_json);
+  NonGenerativeSession(const NonGenerativeSession&) = delete;
+  NonGenerativeSession& operator=(const NonGenerativeSession&) = delete;
+  std::string Run(std::string_view request_json);
 
  private:
-  OgaRankingSessionHandle* handle_{};
-};
-
-class OGA_CPP_ONLY DecisionSession {
- public:
-  DecisionSession(std::string package_path, std::vector<std::string> providers = {});
-  ~DecisionSession() { OgaDestroyDecisionSession(handle_); }
-  DecisionSession(DecisionSession&& other) noexcept
-      : handle_(std::exchange(other.handle_, nullptr)) {}
-  DecisionSession& operator=(DecisionSession&& other) noexcept {
-    if (this != &other) {
-      OgaDestroyDecisionSession(handle_);
-      handle_ = std::exchange(other.handle_, nullptr);
-    }
-    return *this;
-  }
-  DecisionSession(const DecisionSession&) = delete;
-  DecisionSession& operator=(const DecisionSession&) = delete;
-  std::string Decide(std::string_view request_json);
-
- private:
-  OgaDecisionSessionHandle* handle_{};
+  OgaNonGenerativeSession* handle_{};
 };
 
 struct OgaResult : OgaAbstract {
@@ -141,28 +120,15 @@ inline std::string TakeString(const char* value) {
 
 }  // namespace OgaDetail
 
-inline RankingSession::RankingSession(
+inline NonGenerativeSession::NonGenerativeSession(
     std::string package_path, std::vector<std::string> providers) {
   const auto provider_ptrs = OgaDetail::StringPointers(providers);
-  OgaCheckResult(OgaCreateRankingSession(
+  OgaCheckResult(OgaCreateNonGenerativeSession(
       package_path.c_str(), provider_ptrs.data(), provider_ptrs.size(), &handle_));
 }
-inline std::string RankingSession::Rank(std::string_view request_json) {
+inline std::string NonGenerativeSession::Run(std::string_view request_json) {
   const char* response{};
-  OgaCheckResult(OgaRankingSessionRankJson(
-      handle_, request_json.data(), request_json.size(), &response));
-  return OgaDetail::TakeString(response);
-}
-
-inline DecisionSession::DecisionSession(
-    std::string package_path, std::vector<std::string> providers) {
-  const auto provider_ptrs = OgaDetail::StringPointers(providers);
-  OgaCheckResult(OgaCreateDecisionSession(
-      package_path.c_str(), provider_ptrs.data(), provider_ptrs.size(), &handle_));
-}
-inline std::string DecisionSession::Decide(std::string_view request_json) {
-  const char* response{};
-  OgaCheckResult(OgaDecisionSessionDecideJson(
+  OgaCheckResult(OgaNonGenerativeSessionRunJson(
       handle_, request_json.data(), request_json.size(), &response));
   return OgaDetail::TakeString(response);
 }

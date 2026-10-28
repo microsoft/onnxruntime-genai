@@ -113,8 +113,7 @@ OGA_EXPORT int64_t OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopFrame
 OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStartTime(const OgaTokenPostProcessorTimestampRecord* record);
 OGA_EXPORT double OGA_API_CALL OgaTokenPostProcessorTimestampRecordGetStopTime(const OgaTokenPostProcessorTimestampRecord* record);
 
-typedef struct OgaRankingSessionHandle OgaRankingSessionHandle;
-typedef struct OgaDecisionSessionHandle OgaDecisionSessionHandle;
+typedef struct OgaNonGenerativeSession OgaNonGenerativeSession;
 
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
@@ -197,19 +196,12 @@ OGA_EXPORT void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled);
  */
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRankingSession(
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateNonGenerativeSession(
     const char* package_path, const char* const* providers, size_t provider_count,
-    OgaRankingSessionHandle** out);
-OGA_EXPORT void OGA_API_CALL OgaDestroyRankingSession(OgaRankingSessionHandle* session);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRankingSessionRankJson(
-    OgaRankingSessionHandle* session, const char* request, size_t request_length,
-    const char** response);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateDecisionSession(
-    const char* package_path, const char* const* providers, size_t provider_count,
-    OgaDecisionSessionHandle** out);
-OGA_EXPORT void OGA_API_CALL OgaDestroyDecisionSession(OgaDecisionSessionHandle* session);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDecisionSessionDecideJson(
-    OgaDecisionSessionHandle* session, const char* request, size_t request_length,
+    OgaNonGenerativeSession** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyNonGenerativeSession(OgaNonGenerativeSession* session);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNonGenerativeSessionRunJson(
+    OgaNonGenerativeSession* session, const char* request, size_t request_length,
     const char** response);
 
 /**

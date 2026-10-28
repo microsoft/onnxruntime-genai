@@ -21,12 +21,12 @@ TEST(NonGenerativeSessionTest, RealPackagesRunWhenConfigured) {
       provider && *provider) {
     providers.emplace_back(provider);
   }
-  RankingSession ranking((root / "clm-v0.1-8b-fp32").string(), providers);
-  DecisionSession decision((root / "kev-4b-fp32").string(), providers);
-  const auto clm = ranking.Rank(ranking_request);
-  const auto kev = decision.Decide(decision_request);
-  const auto repeated_clm = ranking.Rank(ranking_request);
-  const auto repeated_kev = decision.Decide(decision_request);
+  NonGenerativeSession ranking((root / "clm-v0.1-8b-fp32").string(), providers);
+  NonGenerativeSession decision((root / "kev-4b-fp32").string(), providers);
+  const auto clm = ranking.Run(ranking_request);
+  const auto kev = decision.Run(decision_request);
+  const auto repeated_clm = ranking.Run(ranking_request);
+  const auto repeated_kev = decision.Run(decision_request);
   EXPECT_NE(clm.find(R"("ranked")"), std::string::npos);
   EXPECT_NE(kev.find(R"("umbrella")"), std::string::npos);
   EXPECT_EQ(clm, repeated_clm);
@@ -34,5 +34,5 @@ TEST(NonGenerativeSessionTest, RealPackagesRunWhenConfigured) {
   const std::string oversized =
       std::string(R"({"state":")") + std::string(100000, 'x') +
       R"(","questions":{"q":{"type":"noul","criteria":{}}}})";
-  EXPECT_THROW(decision.Decide(oversized), std::runtime_error);
+  EXPECT_THROW(decision.Run(oversized), std::runtime_error);
 }

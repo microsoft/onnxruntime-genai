@@ -9,8 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from onnxruntime_genai.onnxruntime_genai import (
-    _DecisionSession,
-    _RankingSession,
+    _NonGenerativeSession,
 )
 
 
@@ -22,10 +21,10 @@ class RankingSession:
         package_path: str | Path,
         providers: list[str] | None = None,
     ):
-        self._native = _RankingSession(str(package_path), providers or [])
+        self._native = _NonGenerativeSession(str(package_path), providers or [])
 
     def rank(self, request: dict[str, Any]) -> dict[str, Any]:
-        return json.loads(self._native.rank(json.dumps(request)))
+        return json.loads(self._native.run(json.dumps(request)))
 
     __call__ = rank
 
@@ -38,7 +37,7 @@ class DecisionSession:
         package_path: str | Path,
         providers: list[str] | None = None,
     ):
-        self._native = _DecisionSession(str(package_path), providers or [])
+        self._native = _NonGenerativeSession(str(package_path), providers or [])
 
     def decide(self, request: dict[str, Any]) -> dict[str, Any]:
         return json.loads(self._native.run(json.dumps(request)))

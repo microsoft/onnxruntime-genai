@@ -2228,75 +2228,70 @@ std::vector<std::string> CapiStrings(const char* const* values, size_t count,
 
 }  // namespace
 
-struct OGA_CPP_ONLY OgaRankingSessionHandle {
-  OgaRankingSessionHandle(std::string path, std::vector<std::string> providers)
-      : package_path(std::move(path)), providers(std::move(providers)), value(package_path, this->providers) {}
-  std::string package_path;
-  std::vector<std::string> providers;
-  NativeRankingSession value;
-};
+struct OGA_CPP_ONLY OgaNonGenerativeSession {
+  using Runtime = std::variant<std::unique_ptr<NativeRankingSession>,
+                               std::unique_ptr<NativeDecisionSession>>;
 
-struct OGA_CPP_ONLY OgaDecisionSessionHandle {
-  OgaDecisionSessionHandle(std::string path, std::vector<std::string> providers)
-      : package_path(std::move(path)), providers(std::move(providers)), value(package_path, this->providers) {}
+  OgaNonGenerativeSession(std::string path,
+                          std::vector<std::string> configured_providers)
+      : package_path(std::move(path)),
+        providers(std::move(configured_providers)) {
+    const fs::path package(package_path);
+    const bool decision =
+        Generators::PackageHasComponent(package, "pointer_head") ||
+        Generators::PackageHasComponent(package, "kev_head");
+    const bool ranking =
+        Generators::PackageHasComponent(package, "clm_heads") ||
+        Generators::PackageHasComponent(package, "state_head");
+    if (decision == ranking)
+      throw std::invalid_argument(
+          "package must declare exactly one ranking or decision workflow");
+    if (ranking)
+      runtime = std::make_unique<NativeRankingSession>(package_path, providers);
+    else
+      runtime = std::make_unique<NativeDecisionSession>(package_path, providers);
+  }
+
   std::string package_path;
   std::vector<std::string> providers;
-  NativeDecisionSession value;
+  Runtime runtime;
 };
 
 extern "C" {
 
-OgaResult* OGA_API_CALL OgaCreateRankingSession(
+OgaResult* OGA_API_CALL OgaCreateNonGenerativeSession(
     const char* package_path, const char* const* providers, size_t provider_count,
-    OgaRankingSessionHandle** out) {
+    OgaNonGenerativeSession** out) {
   OGA_CAPI_TRY
   auto& output = CapiRequired(out, "out");
   auto provider_values = CapiStrings(providers, provider_count, "providers");
-  auto result = std::make_unique<OgaRankingSessionHandle>(
+  auto result = std::make_unique<OgaNonGenerativeSession>(
       CapiRequired(package_path, "package_path"), std::move(provider_values));
   output = result.release();
   return nullptr;
   OGA_CAPI_CATCH
 }
 
-void OGA_API_CALL OgaDestroyRankingSession(OgaRankingSessionHandle* session) {
+void OGA_API_CALL OgaDestroyNonGenerativeSession(OgaNonGenerativeSession* session) {
   delete session;
 }
 
-OgaResult* OGA_API_CALL OgaRankingSessionRankJson(
-    OgaRankingSessionHandle* session, const char* request,
+OgaResult* OGA_API_CALL OgaNonGenerativeSessionRunJson(
+    OgaNonGenerativeSession* session, const char* request,
     size_t request_length, const char** response) {
   OGA_CAPI_TRY
-  auto result = SerializeJson(CapiRequired(session, "session").value.Rank(ParseRankingRequestJson(std::string_view(CapiRequired(request, "request"), request_length))));
-  auto output = std::make_unique<char[]>(result.size() + 1);
-  std::memcpy(output.get(), result.c_str(), result.size() + 1);
-  CapiRequired(response, "response") = output.release();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaCreateDecisionSession(
-    const char* package_path, const char* const* providers, size_t provider_count,
-    OgaDecisionSessionHandle** out) {
-  OGA_CAPI_TRY
-  auto& output = CapiRequired(out, "out");
-  auto provider_values = CapiStrings(providers, provider_count, "providers");
-  auto result = std::make_unique<OgaDecisionSessionHandle>(
-      CapiRequired(package_path, "package_path"), std::move(provider_values));
-  output = result.release();
-  return nullptr;
-  OGA_CAPI_CATCH
-}
-
-void OGA_API_CALL OgaDestroyDecisionSession(OgaDecisionSessionHandle* session) {
-  delete session;
-}
-
-OgaResult* OGA_API_CALL OgaDecisionSessionDecideJson(
-    OgaDecisionSessionHandle* session, const char* request,
-    size_t request_length, const char** response) {
-  OGA_CAPI_TRY
-  auto result = SerializeJson(CapiRequired(session, "session").value.Decide(ParseDecisionRequestJson(std::string_view(CapiRequired(request, "request"), request_length))));
+  auto& value = CapiRequired(session, "session");
+  const auto json = std::string_view(CapiRequired(request, "request"),
+                                     request_length);
+  std::string result;
+  if (auto* ranking =
+          std::get_if<std::unique_ptr<NativeRankingSession>>(&value.runtime)) {
+    result = SerializeJson((*ranking)->Rank(ParseRankingRequestJson(json)));
+  } else {
+    result = SerializeJson(
+        std::get<std::unique_ptr<NativeDecisionSession>>(value.runtime)
+            ->Decide(ParseDecisionRequestJson(json)));
+  }
   auto output = std::make_unique<char[]>(result.size() + 1);
   std::memcpy(output.get(), result.c_str(), result.size() + 1);
   CapiRequired(response, "response") = output.release();

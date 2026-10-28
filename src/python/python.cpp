@@ -19,34 +19,19 @@ ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type);
 int ToNumpyType(ONNXTensorElementDataType type);
 pybind11::dtype ToNumpyDtype(ONNXTensorElementDataType type);
 
-struct PyRankingSession {
-  PyRankingSession(const std::string& path,
-                   const std::vector<std::string>& providers)
-      : session(path, providers) {}
-  std::string Rank(const std::string& request) {
-    std::string result;
-    {
-      pybind11::gil_scoped_release release;
-      result = session.Rank(request);
-    }
-    return result;
-  }
-  RankingSession session;
-};
-
-struct PyDecisionSession {
-  PyDecisionSession(const std::string& path,
-                    const std::vector<std::string>& providers)
+struct PyNonGenerativeSession {
+  PyNonGenerativeSession(const std::string& path,
+                         const std::vector<std::string>& providers)
       : session(path, providers) {}
   std::string Run(const std::string& request) {
     std::string result;
     {
       pybind11::gil_scoped_release release;
-      result = session.Decide(request);
+      result = session.Run(request);
     }
     return result;
   }
-  DecisionSession session;
+  NonGenerativeSession session;
 };
 
 template <typename T>
@@ -605,17 +590,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       });
   m.add_object("_cleanup", cleanup);
 
-  pybind11::class_<PyRankingSession>(m, "_RankingSession")
+  pybind11::class_<PyNonGenerativeSession>(m, "_NonGenerativeSession")
       .def(pybind11::init<const std::string&, const std::vector<std::string>&>(),
            pybind11::arg("package_path"),
            pybind11::arg("providers") = std::vector<std::string>{})
-      .def("rank", &PyRankingSession::Rank);
-
-  pybind11::class_<PyDecisionSession>(m, "_DecisionSession")
-      .def(pybind11::init<const std::string&, const std::vector<std::string>&>(),
-           pybind11::arg("package_path"),
-           pybind11::arg("providers") = std::vector<std::string>{})
-      .def("run", &PyDecisionSession::Run);
+      .def("run", &PyNonGenerativeSession::Run);
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
