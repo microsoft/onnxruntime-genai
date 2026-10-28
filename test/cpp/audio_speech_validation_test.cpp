@@ -74,8 +74,9 @@ TEST(AudioSpeechValidationTests, FileSourceProcessorRejectsEmbeddedNulBeforeExte
   auto sources = std::make_shared<Generators::ExternalInitializerFileSources>();
   sources->handles.reserve(1);
 #ifdef _WIN32
-  const auto handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  const auto handle = CreateFileW(
+      path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   ASSERT_NE(handle, INVALID_HANDLE_VALUE);
 #else
   const auto handle = open(path.c_str(), O_RDONLY | O_CLOEXEC);
