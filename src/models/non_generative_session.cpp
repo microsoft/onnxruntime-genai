@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "../ort_genai.h"
-#include "../ort_genai_c_internal.h"
 #include "../json.h"
 #include "component_session.h"
 #include "non_generative_session.h"
@@ -2202,21 +2201,6 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
 
 }  // namespace
 
-namespace {
-
-template <class T>
-T& CapiRequired(T* value, const char* name) {
-  if (!value) throw std::invalid_argument(std::string(name) + " must not be null");
-  return *value;
-}
-
-const char* CapiRequired(const char* value, const char* name) {
-  if (!value) throw std::invalid_argument(std::string(name) + " must not be null");
-  return value;
-}
-
-}  // namespace
-
 struct OGA_CPP_ONLY OgaNonGenerativeSession {
   using Runtime = std::variant<std::unique_ptr<NativeRankingSession>,
                                std::unique_ptr<NativeDecisionSession>>;
@@ -2241,38 +2225,28 @@ struct OGA_CPP_ONLY OgaNonGenerativeSession {
   Runtime runtime;
 };
 
-extern "C" {
+namespace Generators {
 
-void OGA_API_CALL OgaDestroyNonGenerativeSession(OgaNonGenerativeSession* session) {
+OgaNonGenerativeSession* CreateNonGenerativeSession(const Config& config) {
+  return new OgaNonGenerativeSession(config);
+}
+
+void DestroyNonGenerativeSession(OgaNonGenerativeSession* session) {
   delete session;
 }
 
-OgaResult* OGA_API_CALL OgaNonGenerativeSessionRunJson(
-    OgaNonGenerativeSession* session, const char* request,
-    size_t request_length, const char** response) {
-  OGA_CAPI_TRY
-  auto& value = CapiRequired(session, "session");
-  const auto json = std::string_view(CapiRequired(request, "request"),
-                                     request_length);
+std::string RunNonGenerativeSessionJson(
+    OgaNonGenerativeSession& session, std::string_view request) {
   std::string result;
   if (auto* ranking =
-          std::get_if<std::unique_ptr<NativeRankingSession>>(&value.runtime)) {
-    result = SerializeJson((*ranking)->Rank(ParseRankingRequestJson(json)));
+          std::get_if<std::unique_ptr<NativeRankingSession>>(&session.runtime)) {
+    result = SerializeJson((*ranking)->Rank(ParseRankingRequestJson(request)));
   } else {
     result = SerializeJson(
-        std::get<std::unique_ptr<NativeDecisionSession>>(value.runtime)
-            ->Decide(ParseDecisionRequestJson(json)));
+        std::get<std::unique_ptr<NativeDecisionSession>>(session.runtime)
+            ->Decide(ParseDecisionRequestJson(request)));
   }
-  auto output = std::make_unique<char[]>(result.size() + 1);
-  std::memcpy(output.get(), result.c_str(), result.size() + 1);
-  CapiRequired(response, "response") = output.release();
-  return nullptr;
-  OGA_CAPI_CATCH
+  return result;
 }
 
-}  // extern "C"
-
-OgaNonGenerativeSession* CreateNonGenerativeSession(
-    const Generators::Config& config) {
-  return new OgaNonGenerativeSession(config);
-}
+}  // namespace Generators

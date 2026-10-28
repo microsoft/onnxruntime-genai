@@ -10,7 +10,6 @@
 #include <optional>
 #include "span.h"
 #include "ort_genai_c.h"
-#include "ort_genai_c_internal.h"
 #include "generator/generators.h"
 #include "models/model.h"
 #include "constrained_logits_processor.h"
@@ -206,10 +205,6 @@ static_assert(sizeof(OgaErrorCode) == sizeof(uint32_t));
 
 }  // namespace
 
-OgaResult* Generators::CreateResultFromError(const char* error) {
-  return ReturnUnique<OgaResult>(std::make_unique<Generators::Result>(error));
-}
-
 extern "C" {
 
 void OGA_API_CALL OgaShutdown() {
@@ -386,8 +381,36 @@ OgaResult* OGA_API_CALL OgaCreateNonGenerativeSession(
   if (!config) {
     throw std::invalid_argument("config must not be null");
   }
-  *out = CreateNonGenerativeSession(
+  *out = Generators::CreateNonGenerativeSession(
       static_cast<const Generators::Config&>(*config));
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyNonGenerativeSession(
+    OgaNonGenerativeSession* session) {
+  Generators::DestroyNonGenerativeSession(session);
+}
+
+OgaResult* OGA_API_CALL OgaNonGenerativeSessionRunJson(
+    OgaNonGenerativeSession* session, const char* request,
+    size_t request_length, const char** response) {
+  OGA_TRY
+  if (!session) {
+    throw std::invalid_argument("session must not be null");
+  }
+  if (!request) {
+    throw std::invalid_argument("request must not be null");
+  }
+  if (!response) {
+    throw std::invalid_argument("response must not be null");
+  }
+  *response = nullptr;
+  const auto result = Generators::RunNonGenerativeSessionJson(
+      *session, std::string_view(request, request_length));
+  auto output = std::make_unique<char[]>(result.size() + 1);
+  std::memcpy(output.get(), result.c_str(), result.size() + 1);
+  *response = output.release();
   return nullptr;
   OGA_CATCH
 }

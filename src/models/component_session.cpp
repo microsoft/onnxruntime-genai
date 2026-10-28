@@ -18,7 +18,6 @@
 #include "../config.h"
 #include "../config_utils.h"
 #include "../json.h"
-#include "../ort_genai_c_internal.h"
 #include "io/quantized_kv_cache.h"
 #include "model.h"
 #include "preprocessing/genai_tokenizer.h"

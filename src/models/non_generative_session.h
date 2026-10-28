@@ -5,5 +5,14 @@
 #include "../config.h"
 #include "../ort_genai_c.h"
 
-OgaNonGenerativeSession* CreateNonGenerativeSession(
-    const Generators::Config& config);
+#include <string>
+#include <string_view>
+
+namespace Generators {
+
+OgaNonGenerativeSession* CreateNonGenerativeSession(const Config& config);
+void DestroyNonGenerativeSession(OgaNonGenerativeSession* session);
+std::string RunNonGenerativeSessionJson(
+    OgaNonGenerativeSession& session, std::string_view request);
+
+}  // namespace Generators
