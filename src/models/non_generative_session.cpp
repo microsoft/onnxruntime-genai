@@ -11,7 +11,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <iomanip>
 #include <list>
 #include <limits>
@@ -93,26 +92,6 @@ constexpr size_t kDefaultKevCacheEntries = 512;
 constexpr size_t kDefaultKevCacheBytes = 16 * 1024 * 1024;
 constexpr size_t kDefaultKevPrefixCacheEntries = 32;
 constexpr size_t kDefaultKevPrefixCacheBytes = 512 * 1024 * 1024;
-std::string PackageIdentity(const std::string& package_path,
-                            const std::vector<std::string>& providers) {
-  namespace stdfs = std::filesystem;
-  std::error_code error;
-#ifdef _WIN32
-  const fs::path utf8_source(package_path);
-  const stdfs::path source(utf8_source.c_str());
-#else
-  const stdfs::path source(package_path);
-#endif
-  auto canonical = stdfs::weakly_canonical(source, error);
-  if (error) canonical = stdfs::absolute(source, error);
-  std::ostringstream result;
-  const auto canonical_utf8 = canonical.generic_u8string();
-  result.write(reinterpret_cast<const char*>(canonical_utf8.data()),
-               static_cast<std::streamsize>(canonical_utf8.size()));
-  for (const auto& provider : providers) result << "|provider=" << provider;
-  return result.str();
-}
-
 template <typename Value>
 class SessionLruCache {
  public:
@@ -122,7 +101,6 @@ class SessionLruCache {
       : entry_capacity_(entries), byte_capacity_(bytes), size_(size) {}
 
   bool Get(const std::string& key, Value& value) {
-    std::lock_guard lock(mutex_);
     const auto found = index_.find(key);
     if (found == index_.end()) return false;
     entries_.splice(entries_.begin(), entries_, found->second);
@@ -131,7 +109,6 @@ class SessionLruCache {
   }
 
   void Put(std::string key, Value value) {
-    std::lock_guard lock(mutex_);
     if (!entry_capacity_ || !byte_capacity_) return;
     const auto value_bytes = size_(value);
     if (key.size() >
@@ -170,7 +147,6 @@ class SessionLruCache {
       entries_.pop_back();
     }
   }
-  std::mutex mutex_;
   std::list<Entry> entries_;
   std::unordered_map<std::string, typename std::list<Entry>::iterator> index_;
   size_t entry_capacity_{};
@@ -1253,7 +1229,7 @@ size_t FloatVectorBytes(const std::vector<float>& value) {
 
 struct NativeRankingSession {
   explicit NativeRankingSession(const Generators::Config& configured)
-      : config(configured), package_path(config.config_path.string()), identity(PackageIdentity(package_path, config.model.decoder.session_options.providers)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(config), encoder(Component(Generators::PackageHasComponent(config.config_path, "encoder") ? "encoder" : "backbone")) {
+      : config(configured), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(config), encoder(Component(Generators::PackageHasComponent(config.config_path, "encoder") ? "encoder" : "backbone")) {
     if (Generators::PackageHasComponent(config.config_path, "clm_heads")) {
       combined = std::make_unique<Generators::ComponentSession>(
           config, "clm_heads");
@@ -1273,8 +1249,6 @@ struct NativeRankingSession {
     return Generators::ComponentSession(config, name);
   }
   Generators::Config config;
-  std::string package_path;
-  std::string identity;
   mutable std::mutex operation_mutex;
   SessionLruCache<std::vector<float>> cache;
   Generators::Tokenizer tokenizer;
@@ -1359,7 +1333,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
   if (!combined) {
     for (size_t i = 0; i < texts.size(); ++i) {
       std::ostringstream key;
-      key << identity << "|clm-state|split|float32|" << texts[i].size()
+      key << "clm-state|split|float32|" << texts[i].size()
           << ':' << texts[i];
       state_cache_keys[i] = key.str();
       if (!cache.Get(state_cache_keys[i], cached_states[i]))
@@ -1376,7 +1350,7 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
   for (size_t i = 0; i < action_texts.size(); ++i) {
     projection_source[i] = i;
     std::ostringstream key;
-    key << identity << "|clm-action|" << (combined ? "combined" : "split")
+    key << "clm-action|" << (combined ? "combined" : "split")
         << "|float32|" << action_texts[i].size() << ':' << action_texts[i];
     cache_keys[i] = key.str();
     if (!cache.Get(cache_keys[i], cached[i])) {
@@ -1890,7 +1864,7 @@ void AddRepeatedState(FeedStorage& feeds, const KevStateBinding& binding,
 
 struct NativeDecisionSession {
   explicit NativeDecisionSession(const Generators::Config& configured)
-      : config(configured), package_path(config.config_path.string()), identity(PackageIdentity(package_path, config.model.decoder.session_options.providers)), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(config), backbone(Component("backbone")) {
+      : config(configured), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(config), backbone(Component("backbone")) {
     const auto pointer_name =
         Generators::PackageHasComponent(config.config_path, "pointer_head")
             ? "pointer_head"
@@ -1906,8 +1880,6 @@ struct NativeDecisionSession {
     return Generators::ComponentSession(config, name);
   }
   Generators::Config config;
-  std::string package_path;
-  std::string identity;
   mutable std::mutex operation_mutex;
   SessionLruCache<CachedKevTokens> cache;
   SessionLruCache<CachedKevPrefix> prefix_cache;
@@ -1935,7 +1907,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
   if (max_context < 2)
     throw std::runtime_error("KEV context length must be at least 2");
   const auto rendered_state = RenderKev(request.state);
-  const auto state_key = identity + "|kev-prefix|" + rendered_state;
+  const auto state_key = "kev-prefix|" + rendered_state;
   CachedKevTokens state_value;
   if (!cache.Get(state_key, state_value)) {
     state_value.tokens = {kStateToken};
@@ -1952,7 +1924,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     candidates.push_back(KevCandidates(question));
     const auto rendered_instruction = RenderKev(question.instructions);
     std::ostringstream row_key_builder;
-    row_key_builder << identity << "|kev-row|" << rendered_state.size() << ':'
+    row_key_builder << "kev-row|" << rendered_state.size() << ':'
                     << rendered_state << '|' << question.type << '|'
                     << rendered_instruction.size() << ':' << rendered_instruction;
     for (const auto& option : candidates.back().texts)
@@ -2029,8 +2001,8 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
   const auto hidden_name = HiddenOutputName(backbone);
   std::shared_ptr<Generators::Tensor> hidden_tensor;
   if (use_prefix_reuse) {
-    std::string prefix_key = identity + "|kev-model-prefix|" +
-                             std::to_string(state_value.tokens.size()) + ":";
+    std::string prefix_key =
+        std::to_string(state_value.tokens.size()) + ":";
     prefix_key.append(
         reinterpret_cast<const char*>(state_value.tokens.data()),
         state_value.tokens.size() * sizeof(state_value.tokens.front()));

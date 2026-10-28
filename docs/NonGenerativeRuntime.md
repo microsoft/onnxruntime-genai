@@ -58,18 +58,20 @@ CLM caches projected action embeddings after the encoder and action head.
 Split-head packages also cache projected state embeddings, allowing an
 identical repeated request to skip the encoder and both projection heads while
 still executing the scorer with the request temperature. Action and state keys
-include the canonical package identity, head layout, `float32` projection
-dtype, and length-prefixed rendered text. Combined-head compatibility packages
+include the head layout, `float32` projection dtype, and length-prefixed
+rendered text. Combined-head compatibility packages
 continue to cache actions only because their state and action projections are
-produced by one component invocation. Package identity is session-local and
-includes the canonical package path and provider list; in-place model reload is not supported. State
-and action projections share the same bounded LRU. The
-default is 256 entries and 64 MiB. KEV caches escaped/rendered tokenized state
+produced by one component invocation. In-place model reload is not supported.
+State and action projections share the same bounded LRU. The
+default is 256 entries and 64 MiB. Each cache belongs to one immutable model
+session, so cache keys do not repeat package or provider identity. KEV caches
+escaped/rendered tokenized state
 prefixes and question branches
 (including branch-local option readout indices), not probabilities. Its token
 cache default is 512 entries and 16 MiB. Compatible stateful backbones also use
-a separate 32-entry, 512 MiB byte-bounded prefix-state LRU. Both caches use thread-safe LRU
-eviction and are isolated per session and provider configuration. Cache policy
+a separate 32-entry, 512 MiB byte-bounded prefix-state LRU. Both caches use LRU
+eviction and are isolated per session and provider configuration. Session
+execution serializes cache access with model execution. Cache policy
 and diagnostics are internal implementation details rather than public API.
 
 KEV prefix reuse is an internal optimization. The runtime executes the tokenized
