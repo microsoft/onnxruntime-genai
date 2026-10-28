@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -210,6 +211,12 @@ struct OgaConfig : OgaAbstract {
     return std::unique_ptr<OgaConfig>(p);
   }
 
+  static std::unique_ptr<OgaConfig> CreateFromBuffer(std::string_view config_json) {
+    OgaConfig* p;
+    OgaCheckResult(OgaCreateConfigFromBuffer(config_json.data(), config_json.size(), &p));
+    return std::unique_ptr<OgaConfig>(p);
+  }
+
   void ClearProviders() {
     OgaCheckResult(OgaConfigClearProviders(this));
   }
@@ -242,6 +249,15 @@ struct OgaConfig : OgaAbstract {
 
   void RemoveModelData(const std::string& model_filename) {
     OgaCheckResult(OgaConfigRemoveModelData(this, model_filename.c_str()));
+  }
+
+  void AddExternalInitializerData(const std::string& filename, const void* data, size_t length) {
+    OgaCheckResult(OgaConfigAddExternalInitializerData(this, filename.c_str(), data, length));
+  }
+
+  void SetTokenizerData(std::string_view config_json, std::string_view tokenizer_json) {
+    OgaCheckResult(OgaConfigSetTokenizerData(this, config_json.data(), config_json.size(),
+                                             tokenizer_json.data(), tokenizer_json.size()));
   }
 
   void SetDecoderProviderOptionsHardwareDeviceType(const char* provider, const char* hardware_device_type) {
