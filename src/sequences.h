@@ -44,13 +44,14 @@ struct Sequences {
   void RecordPromptLength(bool is_encoder_prompt) {
     if (has_generated_tokens_)
       return;
-    if (is_encoder_prompt && encoder_prompt_length_ == 0) {
+    if (is_encoder_prompt) {
       encoder_prompt_length_ = current_length_;
     } else {
       decoder_prompt_length_ = current_length_ - encoder_prompt_length_;
     }
   }
   void MarkGenerationStarted() { has_generated_tokens_ = true; }
+  bool HasGeneratedTokens() const { return has_generated_tokens_; }
 
   // After tokens are appended, this function must be called to update the state & log the tokens
   void AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t batch_beam_size);

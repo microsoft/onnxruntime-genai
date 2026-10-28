@@ -203,7 +203,13 @@ void MarianInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 
 DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   const int64_t encoder_hidden_size = model_.config_->model.encoder.hidden_size;
-  if (first_run_) {
+  if (first_run_ || !generation_started_) {
+    if (!first_run_) {
+      ClearIO();
+      encoder_input_ids_.RewindTo(0);
+      encoder_attention_mask_.RewindTo(0);
+      attention_mask_.RewindTo(0);
+    }
     // Initialize the encoder and run it once
     encoder_input_ids_.name_ = model_.config_->model.encoder.inputs.input_ids.c_str();
     encoder_input_ids_.Add();
@@ -221,15 +227,21 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     const int32_t pad_token_id = model_.config_->model.pad_token_id;
     const int32_t eos_token_id = model_.config_->model.eos_token_id[0];
 
-    auto original_cpu_span = next_tokens.CpuSpan();
-    if (batch_size == 0 || original_cpu_span.size() % batch_size != 0) {
+    auto chunk_cpu_span = next_tokens.CpuSpan();
+    if (batch_size == 0 || chunk_cpu_span.size() % batch_size != 0) {
       throw std::runtime_error(
           "MarianState::Run: prompt buffer holds " +
-          std::to_string(original_cpu_span.size()) +
+          std::to_string(chunk_cpu_span.size()) +
           " token(s), which is not a positive multiple of batch_size " +
           std::to_string(batch_size) +
           ". The buffer must be a padded [batch_size, sequence_length] block.");
     }
+    if (first_run_) {
+      encoder_prompt_tokens_.assign(chunk_cpu_span.begin(), chunk_cpu_span.end());
+    } else {
+      encoder_prompt_tokens_.insert(encoder_prompt_tokens_.end(), chunk_cpu_span.begin(), chunk_cpu_span.end());
+    }
+    std::span<const int32_t> original_cpu_span{encoder_prompt_tokens_};
     const size_t src_width = original_cpu_span.size() / batch_size;
     const size_t dst_width = src_width + 1;
 
@@ -369,6 +381,18 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
   }
   State::Run(*model_.session_decoder_);
   return logits_.Get();
+}
+
+void MarianState::RewindTo(size_t index) {
+  if (index == 0) {
+    first_run_ = true;
+    generation_started_ = false;
+    encoder_prompt_tokens_.clear();
+    ClearIO();
+    encoder_input_ids_.RewindTo(0);
+    encoder_attention_mask_.RewindTo(0);
+    attention_mask_.RewindTo(0);
+  }
 }
 
 void MarianState::UpdateRnnStates(DeviceSpan<int32_t> next_indices) {

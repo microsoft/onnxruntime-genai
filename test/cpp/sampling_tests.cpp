@@ -655,6 +655,35 @@ TEST(SamplingTests, NoRepeatNgramEncoderDecoderIgnoresPromptTokensCpu) {
   single_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
   single_generator->GenerateNextToken();
   EXPECT_EQ(single_generator->GetNextTokens()[0], 42);
+
+  // Also verify encoder-side multi-chunk prefill: appending two encoder chunks
+  // of length 3 before generation starts must accumulate the full encoder
+  // boundary (6 tokens) so neither chunk is scanned by ApplyNoRepeatNgram.
+  auto chunked_generator = OgaGenerator::Create(*dynamic_model, *single_params);
+  const std::array<int32_t, 3> enc_chunk1{5, 3, 3};
+  const std::array<int32_t, 3> enc_chunk2{4, 3, 3};
+  chunked_generator->AppendTokens(enc_chunk1.data(), enc_chunk1.size());
+  chunked_generator->AppendTokens(enc_chunk2.data(), enc_chunk2.size());
+  ASSERT_EQ(chunked_generator->TokenCount(), 6U);
+
+  // Step 1: generates first decoder token (3).
+  chunked_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
+  chunked_generator->GenerateNextToken();
+  EXPECT_EQ(chunked_generator->GetNextTokens()[0], 3);
+
+  // Step 2: decoder sequence is [3] (length 1 < ngram_size 2); token 3 must NOT
+  // be banned by the second encoder chunk's (3, 3).
+  std::ignore = chunked_generator->GetLogits();
+  chunked_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
+  chunked_generator->GenerateNextToken();
+  EXPECT_EQ(chunked_generator->GetNextTokens()[0], 3);
+
+  // Step 3: decoder sequence is now [3, 3], so repeating (3, 3) IS banned and
+  // selects fallback token 42.
+  std::ignore = chunked_generator->GetLogits();
+  chunked_generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), logits_shape));
+  chunked_generator->GenerateNextToken();
+  EXPECT_EQ(chunked_generator->GetNextTokens()[0], 42);
 }
 
 #if USE_CUDA

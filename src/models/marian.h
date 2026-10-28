@@ -73,6 +73,7 @@ struct MarianState : State {
   MarianState(const MarianState&) = delete;
   MarianState& operator=(const MarianState&) = delete;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+  void RewindTo(size_t index) override;
 
  private:
   const MarianModel& model_;
@@ -84,6 +85,7 @@ struct MarianState : State {
   DefaultPositionInputs encoder_attention_mask_;
   std::unique_ptr<OrtValue> encoder_outputs_;
   std::vector<std::unique_ptr<OrtValue>> cached_source_projections_;
+  std::vector<int32_t> encoder_prompt_tokens_;
 
   // Decoder IOs
   MarianInputIDs decoder_input_ids_{*this};
